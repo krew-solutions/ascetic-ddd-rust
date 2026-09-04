@@ -79,11 +79,17 @@ The semantics are preserved; these are the adaptations Rust requires.
 ## Testing
 
 ```bash
-cargo test    # 114 integration tests (one module per Python test module) + doctests
+cargo test    # 115 integration tests (one module per Python test module) + doctests
 ```
 
 `tests/routing_slip_serialization.rs` also checks that a payload produced by the
 Python implementation deserializes unchanged.
+
+## Documentation
+
+- [SERIALIZATION.md](SERIALIZATION.md) — serializing a routing slip across
+  services: resolvers, wire format, error handling, best practices.
+- `cargo doc --open` — API reference.
 
 ## Running the example
 

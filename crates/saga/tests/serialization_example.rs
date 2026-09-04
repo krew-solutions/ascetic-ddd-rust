@@ -10,7 +10,10 @@ use ascetic_ddd_saga::examples::serialization_example::{
 use ascetic_ddd_saga::examples::{
     FailingReserveFlightActivity, ReserveCarActivity, ReserveFlightActivity, ReserveHotelActivity,
 };
-use ascetic_ddd_saga::{ActivityType, ActivityTypeResolver};
+use ascetic_ddd_saga::{
+    ActivityType, ActivityTypeResolver, MapBasedResolver, RoutingSlip, SagaError,
+    SerializableRoutingSlip, WorkItem, WorkItemArguments, from_serializable, to_serializable,
+};
 use futures::executor::block_on;
 
 #[test]
@@ -67,5 +70,53 @@ fn compensation_rolls_completed_work_back() {
 
         assert!(!slip.is_in_progress());
         assert_eq!(slip.completed_work_logs().len(), 0);
+    });
+}
+
+/// Service-specific resolvers limit what activities each service can restore.
+///
+/// The counterpart of Go's `TestSerializationExample_MultipleResolvers` and of
+/// the "Multiple Resolvers for Different Services" section of
+/// [SERIALIZATION.md](../SERIALIZATION.md).
+#[test]
+fn multiple_resolvers_for_different_services() {
+    block_on(async {
+        // The car service knows only the car activity, the flight service only
+        // the flight one; the orchestrator knows every activity.
+        let mut car_service = MapBasedResolver::new();
+        car_service.register_type::<ReserveCarActivity>("ReserveCarActivity");
+        let mut flight_service = MapBasedResolver::new();
+        flight_service.register_type::<ReserveFlightActivity>("ReserveFlightActivity");
+        let orchestrator = make_orchestrator_resolver();
+
+        let mut slip = RoutingSlip::new([
+            WorkItem::of::<ReserveCarActivity>(WorkItemArguments::from([("vehicleType", "SUV")])),
+            WorkItem::of::<ReserveFlightActivity>(WorkItemArguments::from([(
+                "destination",
+                "LAX",
+            )])),
+        ]);
+        slip.process_next().await.unwrap();
+
+        let wire = serde_json::to_string(&to_serializable(&slip, &orchestrator).unwrap()).unwrap();
+        let serializable: SerializableRoutingSlip = serde_json::from_str(&wire).unwrap();
+
+        // The flight service cannot restore the completed car work log...
+        assert!(matches!(
+            from_serializable(&serializable, &flight_service),
+            Err(SagaError::ActivityTypeNotRegistered(name)) if name == "ReserveCarActivity",
+        ));
+        // ...and the car service cannot restore the pending flight work item.
+        assert!(matches!(
+            from_serializable(&serializable, &car_service),
+            Err(SagaError::ActivityTypeNotRegistered(name)) if name == "ReserveFlightActivity",
+        ));
+
+        // The orchestrator knows both, so the saga resumes.
+        let mut restored = from_serializable(&serializable, &orchestrator).unwrap();
+        restored.process_next().await.unwrap();
+
+        assert!(restored.is_completed());
+        assert_eq!(restored.completed_work_logs().len(), 2);
     });
 }
