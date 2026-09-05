@@ -13,9 +13,10 @@ so the application layer never names a concrete session type
 session is one backend or two is a decision of the composition root.
 
 With the scope receiving a borrow (`F: AsyncFnOnce(&Self)`) and nothing further
-required of `Self`, a composite cannot be written. The sessions its delegates
-hand out live only for the length of the delegates' scopes, so they cannot be
-packed into a `Self` that the scope can borrow:
+required of `Self`, a composite cannot be written. If it owns its delegates, the
+nested value built from the borrowed children has type `Composite<&A, &B>`, not
+`Self` (`E0308`). If it holds them by reference so that the shapes match, the
+children live only for the length of the delegates' scopes:
 
 ```text
 error[E0521]: borrowed data escapes outside of closure
@@ -42,9 +43,9 @@ The composite owns clones of the sessions its delegates hand out
 
 - The borrow states what is true of a session's lifetime: it is on loan for the
   scope, not owned by it.
-- A session can still be carried out of its scope — measured, and equally so
-  under the rejected alternative — but only by writing `.clone()`, which is
-  visible where domain code is read. There is no gate against it.
+- A session can still be carried out of its scope, but only by writing
+  `.clone()`, which is visible where domain code is read. The rejected owned
+  form allowed the same by a plain move. There is no gate against it.
 - Every implementation of `Session` must be a cheap handle; one that owns a
   resource outright has to put it behind an `Arc` first.
 - A clone must share the scope flag, or two scopes run side by side on one
@@ -70,9 +71,3 @@ impossible. Rejected because a composite was required, and because the
 combinator puts the number of backends into the application-layer signature: a
 use case names every backend it touches, and nothing generic over `Session` can
 consume the pair.
-
-**The driver's own transaction type** (`tokio_postgres::Transaction`). It
-borrows the client mutably, which forces `&mut self` through `Session` and rules
-out both an immutable session and concurrent statements inside one scope. The
-adapter issues `BEGIN` / `SAVEPOINT` as statements instead
-(`crates/session/src/pg.rs`).

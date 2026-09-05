@@ -158,7 +158,7 @@ pub struct MemorySession {
     identity_map: Arc<IdentityMap>,
     isolation: IsolationLevel,
     depth: usize,
-    /// Set while a scope opened on *this* session value is running.
+    /// Set while a scope opened on this session, or on a clone of it, is running.
     scope_open: ScopeFlag,
 }
 

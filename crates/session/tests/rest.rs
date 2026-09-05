@@ -255,3 +255,30 @@ fn a_second_scope_on_the_same_session_is_refused() {
     }))
     .unwrap();
 }
+
+/// `RestSession` is the one session whose `Clone` is written by hand, so it is
+/// the one that could give a clone a flag of its own. It must not: a clone is
+/// refused beside the original, and admitted once the original's scope ends.
+#[test]
+fn a_clone_cannot_open_a_scope_beside_the_original() {
+    let pool = RestSessionPool::new(FakeClient::default());
+
+    block_on(pool.session(async |session| {
+        let twin = session.clone();
+        session
+            .atomic(async |_child| {
+                let refused: Result<(), AppError> =
+                    twin.atomic(async |_| Ok::<_, AppError>(())).await;
+
+                assert!(matches!(
+                    refused,
+                    Err(AppError::Session(SessionError::ScopeAlreadyOpen)),
+                ));
+                Ok::<_, AppError>(())
+            })
+            .await?;
+
+        twin.atomic(async |_| Ok::<_, AppError>(())).await
+    }))
+    .unwrap();
+}

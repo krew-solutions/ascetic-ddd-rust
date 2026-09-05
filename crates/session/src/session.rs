@@ -85,7 +85,7 @@ pub trait SessionPool {
 /// flag of its own — so nesting is unaffected.
 ///
 /// ```
-/// use ascetic_ddd_session::session::ScopeFlag;
+/// use ascetic_ddd_session::ScopeFlag;
 ///
 /// #[derive(Clone)]
 /// struct MySession {
@@ -117,11 +117,6 @@ impl ScopeFlag {
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .map(|_| ScopeGuard(&self.0))
             .map_err(|_| SessionError::ScopeAlreadyOpen)
-    }
-
-    /// True while a scope opened on this session is running.
-    pub fn is_claimed(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
     }
 }
 

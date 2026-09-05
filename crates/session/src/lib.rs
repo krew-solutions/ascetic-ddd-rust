@@ -55,4 +55,4 @@ pub use crate::observer::SessionObserver;
 #[cfg(feature = "pg")]
 pub use crate::pg::{PgAccess, PgConnection, PgSession, PgSessionPool};
 pub use crate::rest::{HttpAccess, RestSession, RestSessionPool};
-pub use crate::session::{Session, SessionPool};
+pub use crate::session::{ScopeFlag, ScopeGuard, Session, SessionPool};

@@ -239,7 +239,7 @@ ASCETIC_DDD_TEST_PG_URL=postgresql://user:pass@localhost/db \
     cargo test -p ascetic-ddd-session --features pg -- --ignored
 ```
 
-27 integration tests and 4 documentation tests:
+What the integration tests cover:
 
 * 19 on the identity map — the 18 from the Python suite plus the LRU-eviction
   case the Go port adds, with two extra cases for weak-reference behaviour that
@@ -249,8 +249,9 @@ ASCETIC_DDD_TEST_PG_URL=postgresql://user:pass@localhost/db \
   the scope guard (refusal, nesting still allowed, sequential scopes allowed,
   release after failure, a clone refused beside the original, a clone of the
   handed-out session still nesting);
-* 5 on the REST session — capability access, logical scopes, failure, the
-  identity map, the scope guard;
+* 6 on the REST session — capability access, logical scopes, failure, the
+  identity map, the scope guard, and a clone refused beside the original (the
+  one hand-written `Clone` in the crate);
 * 5 on the composite — one use case driving both delegates through their
   capabilities, nesting across delegates, rollback of the transactional delegate
   only, the guard, and three delegates composed;
