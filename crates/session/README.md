@@ -135,6 +135,15 @@ Observers are synchronous and infallible on purpose: they observe, they do not
 participate. In the Go port a failing `Notify` aborts the surrounding
 transaction, which turns logging into a source of business failures.
 
+`SessionObserver` carries only what every session does — opening and closing
+scopes. What a session does besides that is transport-specific and lives with
+the transport: `pg::PgObserver` adds the statements a PostgreSQL session
+executes, `rest::RestObserver` the requests a REST session makes. Each *extends*
+`SessionObserver`, so one session is still watched by one observer, and a
+PostgreSQL user never implements a method about HTTP. An observer that only
+cares about scopes implements `SessionObserver` and adds an empty
+`impl PgObserver for … {}`.
+
 ## Testing a domain without a database
 
 The layering only pays off if the domain can actually be exercised without
@@ -244,7 +253,7 @@ What the integration tests cover:
 * 19 on the identity map — the 18 from the Python suite plus the LRU-eviction
   case the Go port adds, with two extra cases for weak-reference behaviour that
   only this port can express;
-* 15 on the session — nesting, both failure paths, observer notifications,
+* 15 on the session — nesting, both failure paths, scope notifications,
   identity-map sharing, concurrent work inside one scope, error conversion, and
   the scope guard (refusal, nesting still allowed, sequential scopes allowed,
   release after failure, a clone refused beside the original, a clone of the

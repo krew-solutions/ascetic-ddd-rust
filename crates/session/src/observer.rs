@@ -12,23 +12,30 @@
 //! spelled with values rather than with a mutable registry:
 //!
 //! ```
-//! use ascetic_ddd_session::observer::{QueryEnded, SessionObserver};
+//! use ascetic_ddd_session::observer::{ScopeEnded, SessionObserver};
 //!
 //! struct Log;
 //! struct Metrics;
 //!
 //! impl SessionObserver for Log {
-//!     fn on_query_ended(&self, event: &QueryEnded<'_>) {
-//!         println!("{:?} {}", event.elapsed, event.statement);
+//!     fn on_scope_ended(&self, event: &ScopeEnded) {
+//!         println!("{:?} at depth {} {:?}", event.kind, event.depth, event.outcome);
 //!     }
 //! }
 //!
 //! impl SessionObserver for Metrics {
-//!     fn on_query_ended(&self, _event: &QueryEnded<'_>) { /* … */ }
+//!     fn on_scope_ended(&self, _event: &ScopeEnded) { /* … */ }
 //! }
 //!
-//! let observer = (Log, Metrics);   // = CompositeSignal, но значением
+//! let observer = (Log, Metrics);   // CompositeSignal, выраженный значением
 //! ```
+//!
+//! This trait carries only what every session does: opening and closing scopes.
+//! What a session does *besides* that is transport-specific and lives with the
+//! transport — [`PgObserver`][crate::pg::PgObserver] adds the statements a
+//! PostgreSQL session executes, [`RestObserver`][crate::rest::RestObserver] the
+//! requests a REST session makes. Each extends this trait, so one session is
+//! still watched by one observer.
 //!
 //! Observers are **synchronous and infallible** on purpose. They observe; they
 //! do not participate. In the Go port a failing `Notify` aborts the surrounding
@@ -37,7 +44,6 @@
 //! task deal with it.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 /// What kind of boundary a scope opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,49 +91,6 @@ pub struct ScopeEnded {
     pub outcome: Outcome,
 }
 
-/// A statement is about to be executed.
-#[derive(Clone, Copy, Debug)]
-pub struct QueryStarted<'a> {
-    /// The statement text.
-    pub statement: &'a str,
-}
-
-/// A statement has finished executing.
-#[derive(Clone, Copy, Debug)]
-pub struct QueryEnded<'a> {
-    /// The statement text.
-    pub statement: &'a str,
-    /// How long it took.
-    pub elapsed: Duration,
-    /// Whether the driver reported an error.
-    pub failed: bool,
-}
-
-/// An outbound request is about to be made.
-#[derive(Clone, Copy, Debug)]
-pub struct RequestStarted<'a> {
-    /// HTTP method.
-    pub method: &'a str,
-    /// Target URL.
-    pub url: &'a str,
-}
-
-/// An outbound request has finished.
-///
-/// Python carries a `RequestViewModel` with a pre-formatted metrics label; the
-/// parts are given here instead, so that the observer decides how to name it.
-#[derive(Clone, Copy, Debug)]
-pub struct RequestEnded<'a> {
-    /// HTTP method.
-    pub method: &'a str,
-    /// Target URL.
-    pub url: &'a str,
-    /// How long it took.
-    pub elapsed: Duration,
-    /// Whether the call returned an error.
-    pub failed: bool,
-}
-
 /// Watches the session lifecycle.
 ///
 /// Every method defaults to doing nothing, so an implementation states only
@@ -138,18 +101,6 @@ pub trait SessionObserver: Send + Sync {
 
     /// A scope has been committed or rolled back.
     fn on_scope_ended(&self, _event: &ScopeEnded) {}
-
-    /// A statement is about to run.
-    fn on_query_started(&self, _event: &QueryStarted<'_>) {}
-
-    /// A statement has finished.
-    fn on_query_ended(&self, _event: &QueryEnded<'_>) {}
-
-    /// An outbound request is about to be made.
-    fn on_request_started(&self, _event: &RequestStarted<'_>) {}
-
-    /// An outbound request has finished.
-    fn on_request_ended(&self, _event: &RequestEnded<'_>) {}
 }
 
 /// The neutral element: observing nothing.
@@ -166,26 +117,6 @@ impl<A: SessionObserver, B: SessionObserver> SessionObserver for (A, B) {
         self.0.on_scope_ended(event);
         self.1.on_scope_ended(event);
     }
-
-    fn on_query_started(&self, event: &QueryStarted<'_>) {
-        self.0.on_query_started(event);
-        self.1.on_query_started(event);
-    }
-
-    fn on_query_ended(&self, event: &QueryEnded<'_>) {
-        self.0.on_query_ended(event);
-        self.1.on_query_ended(event);
-    }
-
-    fn on_request_started(&self, event: &RequestStarted<'_>) {
-        self.0.on_request_started(event);
-        self.1.on_request_started(event);
-    }
-
-    fn on_request_ended(&self, event: &RequestEnded<'_>) {
-        self.0.on_request_ended(event);
-        self.1.on_request_ended(event);
-    }
 }
 
 /// Shared observers are observers.
@@ -197,22 +128,6 @@ impl<O: SessionObserver + ?Sized> SessionObserver for Arc<O> {
     fn on_scope_ended(&self, event: &ScopeEnded) {
         (**self).on_scope_ended(event);
     }
-
-    fn on_query_started(&self, event: &QueryStarted<'_>) {
-        (**self).on_query_started(event);
-    }
-
-    fn on_query_ended(&self, event: &QueryEnded<'_>) {
-        (**self).on_query_ended(event);
-    }
-
-    fn on_request_started(&self, event: &RequestStarted<'_>) {
-        (**self).on_request_started(event);
-    }
-
-    fn on_request_ended(&self, event: &RequestEnded<'_>) {
-        (**self).on_request_ended(event);
-    }
 }
 
 /// N-ary composition, notified in order.
@@ -223,21 +138,5 @@ impl<O: SessionObserver> SessionObserver for Vec<O> {
 
     fn on_scope_ended(&self, event: &ScopeEnded) {
         self.iter().for_each(|o| o.on_scope_ended(event));
-    }
-
-    fn on_query_started(&self, event: &QueryStarted<'_>) {
-        self.iter().for_each(|o| o.on_query_started(event));
-    }
-
-    fn on_query_ended(&self, event: &QueryEnded<'_>) {
-        self.iter().for_each(|o| o.on_query_ended(event));
-    }
-
-    fn on_request_started(&self, event: &RequestStarted<'_>) {
-        self.iter().for_each(|o| o.on_request_started(event));
-    }
-
-    fn on_request_ended(&self, event: &RequestEnded<'_>) {
-        self.iter().for_each(|o| o.on_request_ended(event));
     }
 }

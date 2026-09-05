@@ -13,11 +13,10 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use ascetic_ddd_session::observer::{
-    QueryEnded, ScopeEnded, ScopeKind, ScopeStarted, SessionObserver,
-};
+use ascetic_ddd_session::observer::{ScopeEnded, ScopeKind, ScopeStarted, SessionObserver};
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use ascetic_ddd_session::pg::tokio_postgres::NoTls;
+use ascetic_ddd_session::pg::{PgObserver, QueryEnded};
 use ascetic_ddd_session::{PgAccess, PgSession, PgSessionPool, Session, SessionError, SessionPool};
 use futures::future::BoxFuture;
 
@@ -295,7 +294,9 @@ impl SessionObserver for Recording {
     }
 
     fn on_scope_ended(&self, _event: &ScopeEnded) {}
+}
 
+impl PgObserver for Recording {
     fn on_query_ended(&self, event: &QueryEnded<'_>) {
         self.statements
             .lock()

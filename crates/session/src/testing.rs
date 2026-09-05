@@ -30,9 +30,7 @@ use std::sync::{Arc, Mutex};
 use crate::error::SessionError;
 use crate::identity_map::IdentityMap;
 use crate::isolation::IsolationLevel;
-use crate::observer::{
-    Outcome, QueryEnded, QueryStarted, ScopeEnded, ScopeKind, ScopeStarted, SessionObserver,
-};
+use crate::observer::{Outcome, ScopeEnded, ScopeKind, ScopeStarted, SessionObserver};
 use crate::session::{ScopeFlag, Session, SessionPool};
 
 /// Everything the in-memory session has recorded.
@@ -185,14 +183,12 @@ impl MemorySession {
     }
 
     /// Records a statement, as a repository would.
+    ///
+    /// The journal is what a test asserts on, so nothing is reported to the
+    /// observer here: statements reach an observer through a real adapter, and
+    /// that path is covered where it exists — see `tests/pg.rs`.
     pub fn record(&self, statement: &str) {
-        self.observer.on_query_started(&QueryStarted { statement });
         self.journal.record(statement);
-        self.observer.on_query_ended(&QueryEnded {
-            statement,
-            elapsed: std::time::Duration::ZERO,
-            failed: false,
-        });
     }
 
     fn child(&self) -> Self {

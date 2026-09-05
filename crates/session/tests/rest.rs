@@ -4,9 +4,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ascetic_ddd_session::observer::{
-    Outcome, RequestEnded, ScopeEnded, ScopeKind, ScopeStarted, SessionObserver,
+    Outcome, ScopeEnded, ScopeKind, ScopeStarted, SessionObserver,
 };
 use ascetic_ddd_session::rest::{HttpAccess, RestSession, RestSessionPool};
+use ascetic_ddd_session::rest::{RequestEnded, RestObserver};
 use ascetic_ddd_session::{
     IdentityKey, IsolationLevel, Lookup, Session, SessionError, SessionPool,
 };
@@ -126,7 +127,9 @@ impl SessionObserver for Recording {
             .unwrap()
             .push((event.depth, event.kind, Some(event.outcome)));
     }
+}
 
+impl RestObserver for Recording {
     fn on_request_ended(&self, event: &RequestEnded<'_>) {
         self.requests
             .lock()

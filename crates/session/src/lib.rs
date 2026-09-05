@@ -53,6 +53,6 @@ pub use crate::identity_map::{DEFAULT_CACHE_SIZE, IdentityMap, Lookup};
 pub use crate::isolation::IsolationLevel;
 pub use crate::observer::SessionObserver;
 #[cfg(feature = "pg")]
-pub use crate::pg::{PgAccess, PgConnection, PgSession, PgSessionPool};
-pub use crate::rest::{HttpAccess, RestSession, RestSessionPool};
+pub use crate::pg::{PgAccess, PgConnection, PgObserver, PgSession, PgSessionPool};
+pub use crate::rest::{HttpAccess, RestObserver, RestSession, RestSessionPool};
 pub use crate::session::{ScopeFlag, ScopeGuard, Session, SessionPool};

@@ -1,10 +1,9 @@
 //! Tests for the session traits and the in-memory implementation.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ascetic_ddd_session::observer::{
-    Outcome, QueryEnded, ScopeEnded, ScopeKind, ScopeStarted, SessionObserver,
+    Outcome, ScopeEnded, ScopeKind, ScopeStarted, SessionObserver,
 };
 use ascetic_ddd_session::testing::{MemorySession, MemorySessionPool};
 use ascetic_ddd_session::{
@@ -201,7 +200,6 @@ fn independent_work_inside_one_scope_runs_concurrently() {
 #[derive(Default)]
 struct Recording {
     scopes: Mutex<Vec<(usize, ScopeKind, Option<Outcome>)>>,
-    queries: AtomicUsize,
 }
 
 impl SessionObserver for Recording {
@@ -217,10 +215,6 @@ impl SessionObserver for Recording {
             .lock()
             .unwrap()
             .push((event.depth, event.kind, Some(event.outcome)));
-    }
-
-    fn on_query_ended(&self, _event: &QueryEnded<'_>) {
-        self.queries.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -245,7 +239,6 @@ fn observer_sees_the_whole_lifecycle() {
             (0, ScopeKind::Session, Some(Outcome::Committed)),
         ],
     );
-    assert_eq!(recording.queries.load(Ordering::SeqCst), 2);
 }
 
 /// Two observers compose into one value — the composite signal, without a registry.
