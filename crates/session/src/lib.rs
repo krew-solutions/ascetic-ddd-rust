@@ -26,13 +26,15 @@
 //!
 //! # Status
 //!
-//! Ported so far: the session traits, the identity map, the observer, an
-//! in-memory session for testing and the PostgreSQL adapter (feature `pg`).
+//! Ported so far: the session traits, the identity map, the observer, the REST
+//! and composite sessions, an in-memory session for testing and the PostgreSQL
+//! adapter (feature `pg`).
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod composite;
 pub mod error;
 pub mod identity_key;
 pub mod identity_map;
@@ -40,9 +42,11 @@ pub mod isolation;
 pub mod observer;
 #[cfg(feature = "pg")]
 pub mod pg;
+pub mod rest;
 pub mod session;
 pub mod testing;
 
+pub use crate::composite::{CompositeSession, CompositeSessionPool};
 pub use crate::error::{BoxError, SessionError};
 pub use crate::identity_key::IdentityKey;
 pub use crate::identity_map::{DEFAULT_CACHE_SIZE, IdentityMap, Lookup};
@@ -50,4 +54,5 @@ pub use crate::isolation::IsolationLevel;
 pub use crate::observer::SessionObserver;
 #[cfg(feature = "pg")]
 pub use crate::pg::{PgAccess, PgConnection, PgSession, PgSessionPool};
+pub use crate::rest::{HttpAccess, RestSession, RestSessionPool};
 pub use crate::session::{Session, SessionPool};

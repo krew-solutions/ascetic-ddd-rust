@@ -50,7 +50,7 @@ others behind features, so that `ascetic_ddd::saga` keeps working as one import
 | Crate | Python package | Description |
 | --- | --- | --- |
 | [`ascetic-ddd-saga`](crates/saga) | `ascetic_ddd/saga` | Saga pattern (routing slip) for distributed transactions |
-| [`ascetic-ddd-session`](crates/session) | `ascetic_ddd/session` | Unit of Work: session scopes, savepoints, identity map, PostgreSQL adapter *(in progress)* |
+| [`ascetic-ddd-session`](crates/session) | `ascetic_ddd/session` | Unit of Work: session scopes, savepoints, identity map, REST and composite sessions, PostgreSQL adapter *(in progress)* |
 
 ## Development
 

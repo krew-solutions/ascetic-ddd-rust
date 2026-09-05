@@ -118,7 +118,7 @@ impl SessionPool for MemorySessionPool {
 
     async fn session<T, E, F>(&self, scope: F) -> Result<T, E>
     where
-        F: AsyncFnOnce(&Self::Session) -> Result<T, E>,
+        F: AsyncFnOnce(Self::Session) -> Result<T, E>,
         E: From<SessionError>,
     {
         let session = MemorySession {
@@ -135,7 +135,7 @@ impl SessionPool for MemorySessionPool {
             kind: ScopeKind::Session,
         });
 
-        let outcome = scope(&session).await;
+        let outcome = scope(session).await;
 
         self.observer.on_scope_ended(&ScopeEnded {
             depth: 0,
@@ -214,7 +214,7 @@ impl MemorySession {
 impl Session for MemorySession {
     async fn atomic<T, E, F>(&self, scope: F) -> Result<T, E>
     where
-        F: AsyncFnOnce(&Self) -> Result<T, E>,
+        F: AsyncFnOnce(Self) -> Result<T, E>,
         E: From<SessionError>,
     {
         let _guard = ScopeGuard::acquire(&self.scope_open)?;
@@ -235,7 +235,9 @@ impl Session for MemorySession {
             .on_scope_started(&ScopeStarted { depth, kind });
 
         let child = self.child();
-        let outcome = scope(&child).await;
+        // Kept because the child is moved into the scope.
+        let identity_map = Arc::clone(&child.identity_map);
+        let outcome = scope(child).await;
         let committed = outcome.is_ok();
 
         self.journal.record(match (savepoint, committed) {
@@ -256,7 +258,7 @@ impl Session for MemorySession {
 
         // The identity map lives exactly as long as the outermost transaction.
         if self.depth == 0 {
-            child.identity_map.clear();
+            identity_map.clear();
         }
 
         outcome

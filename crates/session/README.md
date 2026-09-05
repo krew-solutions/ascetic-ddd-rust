@@ -5,8 +5,8 @@ Unit of Work for a DDD application: session scopes, nested transactions
 Rust rather than transliterated.
 
 **Status: in progress.** Done: the session traits, the identity map, the
-observer, an in-memory session for testing and the PostgreSQL adapter.
-Next: the composite session, if it turns out to be needed.
+observer, the REST and composite sessions, an in-memory session for testing and
+the PostgreSQL adapter.
 
 ## Design
 
@@ -15,11 +15,17 @@ Two decisions shape the whole crate.
 ### The domain sees exactly one operation
 
 ```rust
-pub trait Session: Sync {
+pub trait Session: Sized + Sync {
     fn atomic<T, E, F>(&self, scope: F) -> impl Future<Output = Result<T, E>>
-    where F: AsyncFnOnce(&Self) -> Result<T, E>;
+    where F: AsyncFnOnce(Self) -> Result<T, E>, E: From<SessionError>;
 }
 ```
+
+The scope receives the session **by value**. A borrow would tie the nested
+session to the lifetime of the one that opened it, and a composite session would
+then be inexpressible: the sessions its delegates hand out live shorter than the
+composite itself, so they could not be packed back into a value of the same
+type.
 
 `atomic` is closed under itself: a nested scope hands the closure another
 session of the same type, which the implementation turns into a `SAVEPOINT`.
@@ -149,6 +155,22 @@ assert_eq!(journal.entries(), [
 ]);
 ```
 
+## REST and composite sessions
+
+A REST session is the same shape with no transaction behind it: it bounds an
+identity map and reports itself, and it does not pretend HTTP calls can be
+rolled back. The HTTP client is a type parameter, so the crate depends on no
+HTTP library — requests are timed by wrapping the call, which replaces
+`aiohttp.TraceConfig` and a custom `http.RoundTripper`.
+
+A composite runs two sessions as one, innermost closing first, and nests for
+three or more. Capability impls are deliberately *not* provided: a blanket impl
+would have to fix a direction and would then take the first delegate that fits,
+silently — which is exactly what Python's `__getattr__` does, and getting the
+wrong database out of a composite of two is not a failure worth inheriting. The
+application names the delegate in a newtype it owns (which the orphan rule
+requires anyway).
+
 ## PostgreSQL
 
 Behind the `pg` feature, on `tokio-postgres` and `deadpool-postgres`:
@@ -221,6 +243,11 @@ ASCETIC_DDD_TEST_PG_URL=postgresql://user:pass@localhost/db \
   identity-map sharing, concurrent work inside one scope, error conversion, and
   the scope guard (refusal, nesting still allowed, sequential scopes allowed,
   release after failure);
+* 5 on the REST session — capability access, logical scopes, failure, the
+  identity map, the scope guard;
+* 5 on the composite — one use case driving both delegates through their
+  capabilities, nesting across delegates, rollback of the transactional delegate
+  only, the guard, and three delegates composed;
 * 6 against a real PostgreSQL — durable nested commit, a savepoint rolled back
   inside a live transaction, full rollback, pipelined statements in one scope,
   the statements the observer actually sees, and two concurrent scopes refused.

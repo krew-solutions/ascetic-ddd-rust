@@ -48,9 +48,15 @@ pub enum ScopeKind {
     Transaction,
     /// A nested transaction: `SAVEPOINT`.
     Savepoint,
+    /// A scope with no transaction behind it, as in a REST session: it groups
+    /// work and bounds an identity map, but nothing is committed.
+    Logical,
 }
 
 /// How a scope ended.
+///
+/// For a [`ScopeKind::Logical`] scope the names mean simply "succeeded" and
+/// "failed": there is nothing to commit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     /// The scope succeeded and was committed (or released).
@@ -97,6 +103,31 @@ pub struct QueryEnded<'a> {
     pub failed: bool,
 }
 
+/// An outbound request is about to be made.
+#[derive(Clone, Copy, Debug)]
+pub struct RequestStarted<'a> {
+    /// HTTP method.
+    pub method: &'a str,
+    /// Target URL.
+    pub url: &'a str,
+}
+
+/// An outbound request has finished.
+///
+/// Python carries a `RequestViewModel` with a pre-formatted metrics label; the
+/// parts are given here instead, so that the observer decides how to name it.
+#[derive(Clone, Copy, Debug)]
+pub struct RequestEnded<'a> {
+    /// HTTP method.
+    pub method: &'a str,
+    /// Target URL.
+    pub url: &'a str,
+    /// How long it took.
+    pub elapsed: Duration,
+    /// Whether the call returned an error.
+    pub failed: bool,
+}
+
 /// Watches the session lifecycle.
 ///
 /// Every method defaults to doing nothing, so an implementation states only
@@ -113,6 +144,12 @@ pub trait SessionObserver: Send + Sync {
 
     /// A statement has finished.
     fn on_query_ended(&self, _event: &QueryEnded<'_>) {}
+
+    /// An outbound request is about to be made.
+    fn on_request_started(&self, _event: &RequestStarted<'_>) {}
+
+    /// An outbound request has finished.
+    fn on_request_ended(&self, _event: &RequestEnded<'_>) {}
 }
 
 /// The neutral element: observing nothing.
@@ -139,6 +176,16 @@ impl<A: SessionObserver, B: SessionObserver> SessionObserver for (A, B) {
         self.0.on_query_ended(event);
         self.1.on_query_ended(event);
     }
+
+    fn on_request_started(&self, event: &RequestStarted<'_>) {
+        self.0.on_request_started(event);
+        self.1.on_request_started(event);
+    }
+
+    fn on_request_ended(&self, event: &RequestEnded<'_>) {
+        self.0.on_request_ended(event);
+        self.1.on_request_ended(event);
+    }
 }
 
 /// Shared observers are observers.
@@ -158,6 +205,14 @@ impl<O: SessionObserver + ?Sized> SessionObserver for Arc<O> {
     fn on_query_ended(&self, event: &QueryEnded<'_>) {
         (**self).on_query_ended(event);
     }
+
+    fn on_request_started(&self, event: &RequestStarted<'_>) {
+        (**self).on_request_started(event);
+    }
+
+    fn on_request_ended(&self, event: &RequestEnded<'_>) {
+        (**self).on_request_ended(event);
+    }
 }
 
 /// N-ary composition, notified in order.
@@ -176,5 +231,13 @@ impl<O: SessionObserver> SessionObserver for Vec<O> {
 
     fn on_query_ended(&self, event: &QueryEnded<'_>) {
         self.iter().for_each(|o| o.on_query_ended(event));
+    }
+
+    fn on_request_started(&self, event: &RequestStarted<'_>) {
+        self.iter().for_each(|o| o.on_request_started(event));
+    }
+
+    fn on_request_ended(&self, event: &RequestEnded<'_>) {
+        self.iter().for_each(|o| o.on_request_ended(event));
     }
 }

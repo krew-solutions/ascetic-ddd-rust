@@ -200,7 +200,7 @@ impl PgAccess for PgSession {
 impl Session for PgSession {
     async fn atomic<T, E, F>(&self, scope: F) -> Result<T, E>
     where
-        F: AsyncFnOnce(&Self) -> Result<T, E>,
+        F: AsyncFnOnce(Self) -> Result<T, E>,
         E: From<SessionError>,
     {
         // Claimed for the whole scope and released on the way out, whether the
@@ -227,7 +227,9 @@ impl Session for PgSession {
         observer.on_scope_started(&ScopeStarted { depth, kind });
 
         let child = self.child();
-        let outcome = scope(&child).await;
+        // Kept because the child is moved into the scope.
+        let identity_map = Arc::clone(&child.identity_map);
+        let outcome = scope(child).await;
         let committed = outcome.is_ok();
 
         let close = match (&savepoint, committed) {
@@ -250,7 +252,7 @@ impl Session for PgSession {
 
         // The identity map lives exactly as long as the outermost transaction.
         if self.depth == 0 {
-            child.identity_map.clear();
+            identity_map.clear();
         }
 
         match (outcome, closed) {
@@ -309,7 +311,7 @@ impl SessionPool for PgSessionPool {
 
     async fn session<T, E, F>(&self, scope: F) -> Result<T, E>
     where
-        F: AsyncFnOnce(&Self::Session) -> Result<T, E>,
+        F: AsyncFnOnce(Self::Session) -> Result<T, E>,
         E: From<SessionError>,
     {
         let client = self
@@ -338,7 +340,7 @@ impl SessionPool for PgSessionPool {
             kind: ScopeKind::Session,
         });
 
-        let outcome = scope(&session).await;
+        let outcome = scope(session).await;
 
         self.observer.on_scope_ended(&ScopeEnded {
             depth: 0,
