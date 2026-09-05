@@ -328,3 +328,96 @@ fn session_errors_convert_into_the_application_error() {
     };
     assert!(inner.to_string().contains("cannot commit"));
 }
+
+// --------------------------- the scope guard ---------------------------
+
+/// Opening a second scope on a session that already has one open is refused:
+/// two scopes side by side on one connection would share a savepoint stack.
+#[test]
+fn a_second_scope_on_the_same_session_is_refused() {
+    let pool = MemorySessionPool::new();
+    let journal = pool.journal();
+
+    block_on(pool.session(async |session| {
+        session
+            .atomic(async |_child| {
+                // `session` here is the *outer* one, which already has a scope
+                // open — this is the dangerous case, not nesting.
+                let second: Result<(), AppError> =
+                    session.atomic(async |_| Ok::<_, AppError>(())).await;
+
+                assert!(matches!(
+                    second,
+                    Err(AppError::Session(SessionError::ScopeAlreadyOpen)),
+                ));
+                Ok::<_, AppError>(())
+            })
+            .await
+    }))
+    .unwrap();
+
+    // The refused scope left no trace: no stray SAVEPOINT.
+    assert_eq!(journal.entries(), ["BEGIN", "COMMIT"]);
+}
+
+/// Nesting still works: a nested scope runs on the session the outer scope
+/// handed out, which carries a guard of its own.
+#[test]
+fn nesting_through_the_handed_out_session_is_allowed() {
+    let pool = MemorySessionPool::new();
+    let journal = pool.journal();
+
+    block_on(pool.session(async |session| {
+        session
+            .atomic(async |child| child.atomic(async |_| Ok::<_, AppError>(())).await)
+            .await
+    }))
+    .unwrap();
+
+    assert_eq!(
+        journal.entries(),
+        ["BEGIN", "SAVEPOINT sp1", "RELEASE SAVEPOINT sp1", "COMMIT"],
+    );
+}
+
+/// The guard is released when a scope ends, so scopes opened one after another
+/// on the same session are fine.
+#[test]
+fn sequential_scopes_on_one_session_are_allowed() {
+    let pool = MemorySessionPool::new();
+    let journal = pool.journal();
+
+    block_on(pool.session(async |session| {
+        session.atomic(async |_| Ok::<_, AppError>(())).await?;
+        session.atomic(async |_| Ok::<_, AppError>(())).await
+    }))
+    .unwrap();
+
+    assert_eq!(journal.entries(), ["BEGIN", "COMMIT", "BEGIN", "COMMIT"]);
+}
+
+/// The guard is released even when the scope fails.
+#[test]
+fn the_guard_survives_a_failing_scope() {
+    let pool = MemorySessionPool::new();
+
+    block_on(pool.session(async |session| {
+        let failed: Result<(), AppError> = session
+            .atomic(async |_| Err(AppError::Domain("rejected")))
+            .await;
+        assert!(failed.is_err());
+
+        // The session is claimable again.
+        session.atomic(async |_| Ok::<_, AppError>(())).await
+    }))
+    .unwrap();
+}
+
+/// The refusal explains itself; a driver error would not.
+#[test]
+fn the_refusal_names_the_cause() {
+    let message = SessionError::ScopeAlreadyOpen.to_string();
+
+    assert!(message.contains("a scope is already open"), "{message}");
+    assert!(message.contains("nested scope"), "{message}");
+}

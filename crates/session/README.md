@@ -179,8 +179,24 @@ boundary is issued as plain statements — `BEGIN`, `SAVEPOINT spN`, `COMMIT`,
 queries go through `Client`, whose methods take `&self`.
 
 Savepoint names come from a counter shared by the session tree rather than from
-the nesting depth: two sibling scopes may be open at once, and depth alone would
-give them the same name.
+the nesting depth: two scopes may be opened at once, and depth alone would give
+them the same name.
+
+`&mut self` would let the compiler rule out two scopes living side by side on
+one connection; `&self` does not. That case is genuinely broken — the two scopes
+share a savepoint stack, and releasing the older one silently destroys the newer
+— so it is refused at run time instead:
+
+```rust
+session.atomic(async |child| {
+    child.atomic(async |_| Ok(())).await?;      // nesting: fine
+    session.atomic(async |_| Ok(())).await      // Err(SessionError::ScopeAlreadyOpen)
+}).await
+```
+
+The flag belongs to one session *value* and is released however the scope ends —
+returned, failed early or unwound — so sequential scopes on one session are
+unaffected.
 
 A failing `COMMIT` becomes `SessionError::Commit` — the caller believes the work
 is durable and it is not. A failing `ROLLBACK` does *not* replace the error that
@@ -201,8 +217,10 @@ ASCETIC_DDD_TEST_PG_URL=postgresql://user:pass@localhost/db \
 * 19 on the identity map — the 18 from the Python suite plus the LRU-eviction
   case the Go port adds, with two extra cases for weak-reference behaviour that
   only this port can express;
-* 8 on the session — nesting, both failure paths, observer notifications,
-  identity-map sharing, concurrent work inside one scope, and error conversion;
-* 5 against a real PostgreSQL — durable nested commit, a savepoint rolled back
+* 13 on the session — nesting, both failure paths, observer notifications,
+  identity-map sharing, concurrent work inside one scope, error conversion, and
+  the scope guard (refusal, nesting still allowed, sequential scopes allowed,
+  release after failure);
+* 6 against a real PostgreSQL — durable nested commit, a savepoint rolled back
   inside a live transaction, full rollback, pipelined statements in one scope,
-  and the statements the observer actually sees.
+  the statements the observer actually sees, and two concurrent scopes refused.

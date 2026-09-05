@@ -1,5 +1,7 @@
 //! The session: the transaction boundary as the domain sees it.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::error::SessionError;
 
 /// A unit of work.
@@ -54,4 +56,32 @@ pub trait SessionPool {
     where
         F: AsyncFnOnce(&Self::Session) -> Result<T, E>,
         E: From<SessionError>;
+}
+
+/// Refuses a second scope on a session that already has one open.
+///
+/// `&mut self` would let the compiler rule this out, at the price of an
+/// immutable session and of concurrency inside a scope — see the crate
+/// documentation. The flag restores the guarantee at run time, and turns a
+/// confusing driver error into [`SessionError::ScopeAlreadyOpen`].
+///
+/// The flag belongs to one session *value*: a nested scope runs on the session
+/// the outer scope handed out, which has a flag of its own.
+pub(crate) struct ScopeGuard<'a>(&'a AtomicBool);
+
+impl<'a> ScopeGuard<'a> {
+    /// Claims the session, or reports that it is already claimed.
+    pub(crate) fn acquire(flag: &'a AtomicBool) -> Result<Self, SessionError> {
+        flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map(|_| ScopeGuard(flag))
+            .map_err(|_| SessionError::ScopeAlreadyOpen)
+    }
+}
+
+impl Drop for ScopeGuard<'_> {
+    /// Releases the session however the scope ended - returned, failed early or
+    /// unwound.
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }

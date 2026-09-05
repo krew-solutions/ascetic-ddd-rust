@@ -16,7 +16,7 @@
 //! alone would give them the same name.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use deadpool_postgres::{Object, Pool};
@@ -29,7 +29,7 @@ use crate::isolation::IsolationLevel;
 use crate::observer::{
     Outcome, QueryEnded, QueryStarted, ScopeEnded, ScopeKind, ScopeStarted, SessionObserver,
 };
-use crate::session::{Session, SessionPool};
+use crate::session::{ScopeGuard, Session, SessionPool};
 
 // Re-exported so that a user of this crate does not have to match versions
 // with the driver and the pool independently.
@@ -158,6 +158,8 @@ pub struct PgSession {
     identity_map: Arc<IdentityMap>,
     isolation: IsolationLevel,
     depth: usize,
+    /// Set while a scope opened on *this* session value is running.
+    scope_open: AtomicBool,
 }
 
 impl PgSession {
@@ -184,6 +186,7 @@ impl PgSession {
             },
             isolation: self.isolation,
             depth: self.depth + 1,
+            scope_open: AtomicBool::new(false),
         }
     }
 }
@@ -200,6 +203,10 @@ impl Session for PgSession {
         F: AsyncFnOnce(&Self) -> Result<T, E>,
         E: From<SessionError>,
     {
+        // Claimed for the whole scope and released on the way out, whether the
+        // scope returns, fails early or unwinds.
+        let _guard = ScopeGuard::acquire(&self.scope_open)?;
+
         let savepoint = (self.depth > 0).then(|| self.connection.next_savepoint());
         let kind = if savepoint.is_some() {
             ScopeKind::Savepoint
@@ -323,6 +330,7 @@ impl SessionPool for PgSessionPool {
             identity_map: Arc::new(IdentityMap::with_isolation(IsolationLevel::ReadUncommitted)),
             isolation: self.isolation,
             depth: 0,
+            scope_open: AtomicBool::new(false),
         };
 
         self.observer.on_scope_started(&ScopeStarted {

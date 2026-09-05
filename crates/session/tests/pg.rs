@@ -351,3 +351,41 @@ async fn observer_sees_the_real_statements() {
         "statements are timed",
     );
 }
+
+/// Two scopes opened side by side on one session would share a savepoint stack:
+/// releasing the older one silently destroys the newer. The compiler cannot
+/// rule this out once the session is shared by `&`, so it is refused at run
+/// time — with an error that names the cause.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn concurrent_scopes_on_one_session_are_refused() {
+    with_table("ascetic_pg_guard", async |pool, repository| {
+        pool.session(async |session| {
+            let (first, second) = futures::join!(
+                session.atomic(async |scope| repository.save(scope, &Order { id: 1 }).await),
+                session.atomic(async |scope| repository.save(scope, &Order { id: 2 }).await),
+            );
+
+            // The one that got there first ran normally.
+            assert!(first.is_ok(), "first scope: {first:?}");
+            // The other was refused before it could touch the connection.
+            assert!(
+                matches!(
+                    second,
+                    Err(AppError::Session(SessionError::ScopeAlreadyOpen)),
+                ),
+                "second scope: {second:?}",
+            );
+            Ok::<_, AppError>(())
+        })
+        .await
+        .unwrap();
+
+        let count = pool
+            .session(async |session| repository.count(session).await)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "only the scope that ran wrote anything");
+    })
+    .await;
+}

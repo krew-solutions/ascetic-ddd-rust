@@ -24,7 +24,7 @@
 //! );
 //! ```
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::error::SessionError;
@@ -33,7 +33,7 @@ use crate::isolation::IsolationLevel;
 use crate::observer::{
     Outcome, QueryEnded, QueryStarted, ScopeEnded, ScopeKind, ScopeStarted, SessionObserver,
 };
-use crate::session::{Session, SessionPool};
+use crate::session::{ScopeGuard, Session, SessionPool};
 
 /// Everything the in-memory session has recorded.
 #[derive(Debug, Default)]
@@ -128,6 +128,7 @@ impl SessionPool for MemorySessionPool {
             identity_map: Arc::new(IdentityMap::with_isolation(IsolationLevel::ReadUncommitted)),
             isolation: self.isolation,
             depth: 0,
+            scope_open: AtomicBool::new(false),
         };
         self.observer.on_scope_started(&ScopeStarted {
             depth: 0,
@@ -156,6 +157,8 @@ pub struct MemorySession {
     identity_map: Arc<IdentityMap>,
     isolation: IsolationLevel,
     depth: usize,
+    /// Set while a scope opened on *this* session value is running.
+    scope_open: AtomicBool,
 }
 
 impl MemorySession {
@@ -203,6 +206,7 @@ impl MemorySession {
             },
             isolation: self.isolation,
             depth: self.depth + 1,
+            scope_open: AtomicBool::new(false),
         }
     }
 }
@@ -213,6 +217,8 @@ impl Session for MemorySession {
         F: AsyncFnOnce(&Self) -> Result<T, E>,
         E: From<SessionError>,
     {
+        let _guard = ScopeGuard::acquire(&self.scope_open)?;
+
         let savepoint = (self.depth > 0).then(|| self.journal.next_savepoint());
         let kind = if savepoint.is_some() {
             ScopeKind::Savepoint
