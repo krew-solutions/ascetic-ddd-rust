@@ -16,12 +16,13 @@ use crate::error::SessionError;
 /// scope a *new* session rather than mutating this one. That is what lets
 /// independent work inside one scope run concurrently.
 ///
-/// The scope receives the session **by value**. Handing out a borrow instead
-/// would tie the nested session to the lifetime of the one that opened it,
-/// which makes a composite session inexpressible: the sessions its delegates
-/// hand out live shorter than the composite itself, so they cannot be packed
-/// back into a value of the same type. See
-/// [`CompositeSession`][crate::composite::CompositeSession].
+/// A session is a handle, not a resource: [`Clone`] gives a second name for the
+/// same connection, identity map and scope flag, and costs a few reference
+/// counts. Requiring it is what makes a composite session expressible — it owns
+/// clones of the sessions its delegates hand out, so its own type carries no
+/// lifetime and a plain borrow can be handed to the scope. Sharing the scope
+/// flag also means a clone cannot open a scope beside the one it was cloned
+/// from. See [`CompositeSession`][crate::composite::CompositeSession].
 ///
 /// ```
 /// # use ascetic_ddd_session::{Session, SessionError};
@@ -33,7 +34,7 @@ use crate::error::SessionError;
 /// }).await
 /// # }
 /// ```
-pub trait Session: Sized + Sync {
+pub trait Session: Clone + Sync {
     /// Runs `scope` inside a transaction, committing it if the scope succeeds
     /// and rolling it back if it fails.
     ///
@@ -45,7 +46,7 @@ pub trait Session: Sized + Sync {
     /// fail on its own.
     fn atomic<T, E, F>(&self, scope: F) -> impl Future<Output = Result<T, E>>
     where
-        F: AsyncFnOnce(Self) -> Result<T, E>,
+        F: AsyncFnOnce(&Self) -> Result<T, E>,
         E: From<SessionError>;
 }
 
@@ -61,7 +62,7 @@ pub trait SessionPool {
     /// Runs `scope` with a session taken from the pool.
     fn session<T, E, F>(&self, scope: F) -> impl Future<Output = Result<T, E>>
     where
-        F: AsyncFnOnce(Self::Session) -> Result<T, E>,
+        F: AsyncFnOnce(&Self::Session) -> Result<T, E>,
         E: From<SessionError>;
 }
 

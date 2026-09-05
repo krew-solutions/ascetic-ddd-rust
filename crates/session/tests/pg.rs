@@ -83,11 +83,9 @@ where
 {
     session
         .atomic(async |session| {
-            repository.save(&session, &order).await?;
+            repository.save(session, &order).await?;
             session
-                .atomic(async |session| {
-                    repository.save(&session, &Order { id: order.id + 1 }).await
-                })
+                .atomic(async |session| repository.save(session, &Order { id: order.id + 1 }).await)
                 .await?;
             Ok(order.id)
         })
@@ -141,7 +139,7 @@ where
     };
 
     let ddl = async |sql: String| {
-        pool.session(async |session: PgSession| {
+        pool.session(async |session: &PgSession| {
             session
                 .connection()
                 .batch_execute(&sql)
@@ -169,13 +167,13 @@ where
 async fn nested_scope_commits_through_a_savepoint() {
     with_table("ascetic_pg_nested", async |pool, repository| {
         let id = pool
-            .session(async |session| place_order(repository, &session, Order { id: 1 }).await)
+            .session(async |session| place_order(repository, session, Order { id: 1 }).await)
             .await
             .unwrap();
         assert_eq!(id, 1);
 
         let count = pool
-            .session(async |session| repository.count(&session).await)
+            .session(async |session| repository.count(session).await)
             .await
             .unwrap();
         assert_eq!(count, 2, "both the outer and the nested insert are durable");
@@ -190,18 +188,18 @@ async fn failing_nested_scope_leaves_the_outer_transaction_alive() {
         pool.session(async |session| {
             session
                 .atomic(async |session| {
-                    repository.save(&session, &Order { id: 1 }).await?;
+                    repository.save(session, &Order { id: 1 }).await?;
 
                     let nested: Result<(), AppError> = session
                         .atomic(async |session| {
-                            repository.save(&session, &Order { id: 2 }).await?;
+                            repository.save(session, &Order { id: 2 }).await?;
                             Err(AppError::Domain("rejected"))
                         })
                         .await;
                     assert!(matches!(nested, Err(AppError::Domain(_))));
 
                     // The savepoint rolled back, but this transaction is alive.
-                    repository.save(&session, &Order { id: 3 }).await?;
+                    repository.save(session, &Order { id: 3 }).await?;
                     Ok::<_, AppError>(())
                 })
                 .await
@@ -238,7 +236,7 @@ async fn failing_outer_scope_rolls_everything_back() {
             .session(async |session| {
                 session
                     .atomic(async |session| {
-                        repository.save(&session, &Order { id: 1 }).await?;
+                        repository.save(session, &Order { id: 1 }).await?;
                         Err(AppError::Domain("rejected"))
                     })
                     .await
@@ -248,7 +246,7 @@ async fn failing_outer_scope_rolls_everything_back() {
         assert!(matches!(outcome, Err(AppError::Domain("rejected"))));
 
         let count = pool
-            .session(async |session| repository.count(&session).await)
+            .session(async |session| repository.count(session).await)
             .await
             .unwrap();
         assert_eq!(count, 0);
@@ -265,8 +263,8 @@ async fn independent_statements_inside_one_scope_run_concurrently() {
             session
                 .atomic(async |session| {
                     futures::try_join!(
-                        repository.save(&session, &Order { id: 1 }),
-                        repository.save(&session, &Order { id: 2 }),
+                        repository.save(session, &Order { id: 1 }),
+                        repository.save(session, &Order { id: 2 }),
                     )?;
                     Ok::<_, AppError>(())
                 })
@@ -276,7 +274,7 @@ async fn independent_statements_inside_one_scope_run_concurrently() {
         .unwrap();
 
         let count = pool
-            .session(async |session| repository.count(&session).await)
+            .session(async |session| repository.count(session).await)
             .await
             .unwrap();
         assert_eq!(count, 2);
@@ -315,7 +313,7 @@ async fn observer_sees_the_real_statements() {
     let recording = Arc::new(Recording::default());
     let pool = PgSessionPool::new(make_pool()).observed_by(Arc::clone(&recording));
 
-    pool.session(async |session: PgSession| {
+    pool.session(async |session: &PgSession| {
         session
             .atomic(async |session| {
                 session
@@ -364,8 +362,8 @@ async fn concurrent_scopes_on_one_session_are_refused() {
     with_table("ascetic_pg_guard", async |pool, repository| {
         pool.session(async |session| {
             let (first, second) = futures::join!(
-                session.atomic(async |scope| repository.save(&scope, &Order { id: 1 }).await),
-                session.atomic(async |scope| repository.save(&scope, &Order { id: 2 }).await),
+                session.atomic(async |scope| repository.save(scope, &Order { id: 1 }).await),
+                session.atomic(async |scope| repository.save(scope, &Order { id: 2 }).await),
             );
 
             // The one that got there first ran normally.
@@ -384,7 +382,7 @@ async fn concurrent_scopes_on_one_session_are_refused() {
         .unwrap();
 
         let count = pool
-            .session(async |session| repository.count(&session).await)
+            .session(async |session| repository.count(session).await)
             .await
             .unwrap();
         assert_eq!(count, 1, "only the scope that ran wrote anything");

@@ -36,10 +36,10 @@
 //! impl Session for AppSession {
 //!     async fn atomic<T, E, F>(&self, scope: F) -> Result<T, E>
 //!     where
-//!         F: AsyncFnOnce(Self) -> Result<T, E>,
+//!         F: AsyncFnOnce(&Self) -> Result<T, E>,
 //!         E: From<SessionError>,
 //!     {
-//!         self.0.atomic(async |inner| scope(AppSession(inner)).await).await
+//!         self.0.atomic(async |inner| scope(&AppSession(inner.clone())).await).await
 //!     }
 //! }
 //!
@@ -68,6 +68,7 @@ use crate::error::SessionError;
 use crate::session::{Session, SessionPool};
 
 /// Two sessions acting as one.
+#[derive(Clone)]
 pub struct CompositeSession<A, B> {
     first: A,
     second: B,
@@ -103,13 +104,16 @@ impl<A: Session, B: Session> Session for CompositeSession<A, B> {
     /// delegate is asked first.
     async fn atomic<T, E, F>(&self, scope: F) -> Result<T, E>
     where
-        F: AsyncFnOnce(Self) -> Result<T, E>,
+        F: AsyncFnOnce(&Self) -> Result<T, E>,
         E: From<SessionError>,
     {
         self.first
             .atomic(async |first| {
                 self.second
-                    .atomic(async |second| scope(CompositeSession::new(first, second)).await)
+                    .atomic(async |second| {
+                        let composite = CompositeSession::new(first.clone(), second.clone());
+                        scope(&composite).await
+                    })
                     .await
             })
             .await
@@ -144,13 +148,16 @@ impl<A: SessionPool, B: SessionPool> SessionPool for CompositeSessionPool<A, B> 
 
     async fn session<T, E, F>(&self, scope: F) -> Result<T, E>
     where
-        F: AsyncFnOnce(Self::Session) -> Result<T, E>,
+        F: AsyncFnOnce(&Self::Session) -> Result<T, E>,
         E: From<SessionError>,
     {
         self.first
             .session(async |first| {
                 self.second
-                    .session(async |second| scope(CompositeSession::new(first, second)).await)
+                    .session(async |second| {
+                        let composite = CompositeSession::new(first.clone(), second.clone());
+                        scope(&composite).await
+                    })
                     .await
             })
             .await

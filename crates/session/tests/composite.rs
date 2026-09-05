@@ -38,16 +38,17 @@ impl FakeClient {
 /// because the delegate offering each capability must be named explicitly, and
 /// because the orphan rule forbids implementing a foreign capability for a
 /// foreign composite.
+#[derive(Clone)]
 struct AppSession(CompositeSession<MemorySession, RestSession<FakeClient>>);
 
 impl Session for AppSession {
     async fn atomic<T, E, F>(&self, scope: F) -> Result<T, E>
     where
-        F: AsyncFnOnce(Self) -> Result<T, E>,
+        F: AsyncFnOnce(&Self) -> Result<T, E>,
         E: From<SessionError>,
     {
         self.0
-            .atomic(async |inner| scope(AppSession(inner)).await)
+            .atomic(async |inner| scope(&AppSession(inner.clone())).await)
             .await
     }
 }
@@ -122,8 +123,8 @@ where
 {
     session
         .atomic(async |session| {
-            orders.save(&session, &order).await?;
-            notifier.notify(&session, &order).await?;
+            orders.save(session, &order).await?;
+            notifier.notify(session, &order).await?;
             Ok(order.id)
         })
         .await
@@ -182,7 +183,7 @@ fn one_use_case_drives_both_delegates() {
     let (pool, journal, client) = pools();
 
     let id = block_on(pool.session(async |inner| {
-        let session = AppSession(inner);
+        let session = AppSession(inner.clone());
         place_order(&DbOrderRepository, &RestNotifier, &session, Order { id: 7 }).await
     }))
     .unwrap();
@@ -204,7 +205,7 @@ fn scopes_nest_across_delegates() {
     let (pool, journal, _client) = pools();
 
     block_on(pool.session(async |inner| {
-        let session = AppSession(inner);
+        let session = AppSession(inner.clone());
         session
             .atomic(async |session| {
                 session.record("INSERT INTO orders (id) VALUES (1)");
@@ -239,7 +240,7 @@ fn a_failure_rolls_the_transactional_delegate_back() {
     let (pool, journal, client) = pools();
 
     let outcome: Result<(), AppError> = block_on(pool.session(async |inner| {
-        let session = AppSession(inner);
+        let session = AppSession(inner.clone());
         session
             .atomic(async |session| {
                 session.record("INSERT INTO orders (id) VALUES (1)");
@@ -270,7 +271,7 @@ fn a_second_scope_on_the_same_composite_is_refused() {
     let (pool, _journal, _client) = pools();
 
     block_on(pool.session(async |inner| {
-        let session = AppSession(inner);
+        let session = AppSession(inner.clone());
         session
             .atomic(async |_child| {
                 let second: Result<(), AppError> =

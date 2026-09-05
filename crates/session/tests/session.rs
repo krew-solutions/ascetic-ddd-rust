@@ -55,9 +55,9 @@ where
 {
     session
         .atomic(async |session| {
-            repository.save(&session, &order).await?;
+            repository.save(session, &order).await?;
             session
-                .atomic(async |session| repository.save(&session, &order).await)
+                .atomic(async |session| repository.save(session, &order).await)
                 .await?;
             Ok(order.id)
         })
@@ -96,7 +96,7 @@ fn nested_scope_opens_a_savepoint() {
     let journal = pool.journal();
 
     let id = block_on(pool.session(async |session| {
-        place_order(&FakeOrderRepository, &session, Order { id: 7 }).await
+        place_order(&FakeOrderRepository, session, Order { id: 7 }).await
     }))
     .unwrap();
 
@@ -178,7 +178,7 @@ fn independent_work_inside_one_scope_runs_concurrently() {
             .atomic(async |session| {
                 let repository = FakeOrderRepository;
                 let (a, b) = (Order { id: 1 }, Order { id: 2 });
-                futures::try_join!(repository.save(&session, &a), repository.save(&session, &b),)?;
+                futures::try_join!(repository.save(session, &a), repository.save(session, &b),)?;
                 Ok::<_, AppError>(())
             })
             .await
@@ -230,7 +230,7 @@ fn observer_sees_the_whole_lifecycle() {
     let pool = MemorySessionPool::new().observed_by(Arc::clone(&recording));
 
     block_on(pool.session(async |session| {
-        place_order(&FakeOrderRepository, &session, Order { id: 7 }).await
+        place_order(&FakeOrderRepository, session, Order { id: 7 }).await
     }))
     .unwrap();
 

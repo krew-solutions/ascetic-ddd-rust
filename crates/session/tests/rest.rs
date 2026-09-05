@@ -93,7 +93,7 @@ fn a_scope_reaches_the_client_through_the_capability() {
 
     let customer = block_on(pool.session(async |session| {
         session
-            .atomic(async |session| RestCustomerGateway.fetch(&session, 7).await)
+            .atomic(async |session| RestCustomerGateway.fetch(session, 7).await)
             .await
     }))
     .unwrap();
@@ -147,7 +147,7 @@ fn scopes_are_reported_as_logical() {
     block_on(pool.session(async |session| {
         session
             .atomic(async |session| {
-                RestCustomerGateway.fetch(&session, 1).await?;
+                RestCustomerGateway.fetch(session, 1).await?;
                 session.atomic(async |_nested| Ok::<_, AppError>(())).await
             })
             .await
@@ -204,7 +204,7 @@ fn the_identity_map_follows_the_scope() {
     let pool =
         RestSessionPool::new(FakeClient::default()).with_isolation(IsolationLevel::Serializable);
 
-    block_on(pool.session(async |session: RestSession<FakeClient>| {
+    block_on(pool.session(async |session: &RestSession<FakeClient>| {
         // Outside a scope the map is disabled.
         session
             .identity_map()
@@ -216,7 +216,7 @@ fn the_identity_map_follows_the_scope() {
 
         session
             .atomic(async |session| {
-                let customer = RestCustomerGateway.fetch(&session, 7).await?;
+                let customer = RestCustomerGateway.fetch(session, 7).await?;
                 session.identity_map().add(CustomerKey(7), customer);
 
                 session

@@ -85,7 +85,21 @@ pub struct RestSession<C> {
     isolation: IsolationLevel,
     depth: usize,
     /// Set while a scope opened on *this* session value is running.
-    scope_open: AtomicBool,
+    scope_open: Arc<AtomicBool>,
+}
+
+// Not derived: that would demand `C: Clone`, and the client is behind an `Arc`.
+impl<C> Clone for RestSession<C> {
+    fn clone(&self) -> Self {
+        RestSession {
+            client: Arc::clone(&self.client),
+            observer: Arc::clone(&self.observer),
+            identity_map: Arc::clone(&self.identity_map),
+            isolation: self.isolation,
+            depth: self.depth,
+            scope_open: Arc::clone(&self.scope_open),
+        }
+    }
 }
 
 impl<C> RestSession<C> {
@@ -111,7 +125,7 @@ impl<C> RestSession<C> {
             },
             isolation: self.isolation,
             depth: self.depth + 1,
-            scope_open: AtomicBool::new(false),
+            scope_open: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -148,7 +162,7 @@ impl<C: Send + Sync> HttpAccess for RestSession<C> {
 impl<C: Send + Sync> Session for RestSession<C> {
     async fn atomic<T, E, F>(&self, scope: F) -> Result<T, E>
     where
-        F: AsyncFnOnce(Self) -> Result<T, E>,
+        F: AsyncFnOnce(&Self) -> Result<T, E>,
         E: From<SessionError>,
     {
         let _guard = ScopeGuard::acquire(&self.scope_open)?;
@@ -160,9 +174,7 @@ impl<C: Send + Sync> Session for RestSession<C> {
         });
 
         let child = self.child();
-        // Kept because the child is moved into the scope.
-        let identity_map = Arc::clone(&child.identity_map);
-        let outcome = scope(child).await;
+        let outcome = scope(&child).await;
 
         self.observer.on_scope_ended(&ScopeEnded {
             depth,
@@ -176,7 +188,7 @@ impl<C: Send + Sync> Session for RestSession<C> {
 
         // The identity map lives exactly as long as the outermost scope.
         if self.depth == 0 {
-            identity_map.clear();
+            child.identity_map.clear();
         }
 
         outcome
@@ -235,7 +247,7 @@ impl<C: Send + Sync> SessionPool for RestSessionPool<C> {
 
     async fn session<T, E, F>(&self, scope: F) -> Result<T, E>
     where
-        F: AsyncFnOnce(Self::Session) -> Result<T, E>,
+        F: AsyncFnOnce(&Self::Session) -> Result<T, E>,
         E: From<SessionError>,
     {
         let session = RestSession {
@@ -245,7 +257,7 @@ impl<C: Send + Sync> SessionPool for RestSessionPool<C> {
             identity_map: Arc::new(IdentityMap::with_isolation(IsolationLevel::ReadUncommitted)),
             isolation: self.isolation,
             depth: 0,
-            scope_open: AtomicBool::new(false),
+            scope_open: Arc::new(AtomicBool::new(false)),
         };
 
         self.observer.on_scope_started(&ScopeStarted {
@@ -253,7 +265,7 @@ impl<C: Send + Sync> SessionPool for RestSessionPool<C> {
             kind: ScopeKind::Session,
         });
 
-        let outcome = scope(session).await;
+        let outcome = scope(&session).await;
 
         self.observer.on_scope_ended(&ScopeEnded {
             depth: 0,

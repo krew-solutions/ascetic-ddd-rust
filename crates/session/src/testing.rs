@@ -118,7 +118,7 @@ impl SessionPool for MemorySessionPool {
 
     async fn session<T, E, F>(&self, scope: F) -> Result<T, E>
     where
-        F: AsyncFnOnce(Self::Session) -> Result<T, E>,
+        F: AsyncFnOnce(&Self::Session) -> Result<T, E>,
         E: From<SessionError>,
     {
         let session = MemorySession {
@@ -128,14 +128,14 @@ impl SessionPool for MemorySessionPool {
             identity_map: Arc::new(IdentityMap::with_isolation(IsolationLevel::ReadUncommitted)),
             isolation: self.isolation,
             depth: 0,
-            scope_open: AtomicBool::new(false),
+            scope_open: Arc::new(AtomicBool::new(false)),
         };
         self.observer.on_scope_started(&ScopeStarted {
             depth: 0,
             kind: ScopeKind::Session,
         });
 
-        let outcome = scope(session).await;
+        let outcome = scope(&session).await;
 
         self.observer.on_scope_ended(&ScopeEnded {
             depth: 0,
@@ -151,6 +151,7 @@ impl SessionPool for MemorySessionPool {
 }
 
 /// A session that records scopes and statements instead of executing them.
+#[derive(Clone)]
 pub struct MemorySession {
     journal: Arc<Journal>,
     observer: Arc<dyn SessionObserver>,
@@ -158,7 +159,7 @@ pub struct MemorySession {
     isolation: IsolationLevel,
     depth: usize,
     /// Set while a scope opened on *this* session value is running.
-    scope_open: AtomicBool,
+    scope_open: Arc<AtomicBool>,
 }
 
 impl MemorySession {
@@ -206,7 +207,7 @@ impl MemorySession {
             },
             isolation: self.isolation,
             depth: self.depth + 1,
-            scope_open: AtomicBool::new(false),
+            scope_open: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -214,7 +215,7 @@ impl MemorySession {
 impl Session for MemorySession {
     async fn atomic<T, E, F>(&self, scope: F) -> Result<T, E>
     where
-        F: AsyncFnOnce(Self) -> Result<T, E>,
+        F: AsyncFnOnce(&Self) -> Result<T, E>,
         E: From<SessionError>,
     {
         let _guard = ScopeGuard::acquire(&self.scope_open)?;
@@ -235,9 +236,7 @@ impl Session for MemorySession {
             .on_scope_started(&ScopeStarted { depth, kind });
 
         let child = self.child();
-        // Kept because the child is moved into the scope.
-        let identity_map = Arc::clone(&child.identity_map);
-        let outcome = scope(child).await;
+        let outcome = scope(&child).await;
         let committed = outcome.is_ok();
 
         self.journal.record(match (savepoint, committed) {
@@ -258,7 +257,7 @@ impl Session for MemorySession {
 
         // The identity map lives exactly as long as the outermost transaction.
         if self.depth == 0 {
-            identity_map.clear();
+            child.identity_map.clear();
         }
 
         outcome
