@@ -39,7 +39,6 @@
 //! ```
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use crate::error::SessionError;
@@ -48,7 +47,7 @@ use crate::isolation::IsolationLevel;
 use crate::observer::{
     Outcome, RequestEnded, RequestStarted, ScopeEnded, ScopeKind, ScopeStarted, SessionObserver,
 };
-use crate::session::{ScopeGuard, Session, SessionPool};
+use crate::session::{ScopeFlag, Session, SessionPool};
 
 /// The infrastructure capability: "this session speaks HTTP".
 ///
@@ -85,7 +84,7 @@ pub struct RestSession<C> {
     isolation: IsolationLevel,
     depth: usize,
     /// Set while a scope opened on *this* session value is running.
-    scope_open: Arc<AtomicBool>,
+    scope_open: ScopeFlag,
 }
 
 // Not derived: that would demand `C: Clone`, and the client is behind an `Arc`.
@@ -97,7 +96,7 @@ impl<C> Clone for RestSession<C> {
             identity_map: Arc::clone(&self.identity_map),
             isolation: self.isolation,
             depth: self.depth,
-            scope_open: Arc::clone(&self.scope_open),
+            scope_open: self.scope_open.clone(),
         }
     }
 }
@@ -125,7 +124,7 @@ impl<C> RestSession<C> {
             },
             isolation: self.isolation,
             depth: self.depth + 1,
-            scope_open: Arc::new(AtomicBool::new(false)),
+            scope_open: ScopeFlag::new(),
         }
     }
 }
@@ -165,7 +164,7 @@ impl<C: Send + Sync> Session for RestSession<C> {
         F: AsyncFnOnce(&Self) -> Result<T, E>,
         E: From<SessionError>,
     {
-        let _guard = ScopeGuard::acquire(&self.scope_open)?;
+        let _guard = self.scope_open.acquire()?;
 
         let depth = self.depth + 1;
         self.observer.on_scope_started(&ScopeStarted {
@@ -257,7 +256,7 @@ impl<C: Send + Sync> SessionPool for RestSessionPool<C> {
             identity_map: Arc::new(IdentityMap::with_isolation(IsolationLevel::ReadUncommitted)),
             isolation: self.isolation,
             depth: 0,
-            scope_open: Arc::new(AtomicBool::new(false)),
+            scope_open: ScopeFlag::new(),
         };
 
         self.observer.on_scope_started(&ScopeStarted {

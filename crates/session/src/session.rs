@@ -1,5 +1,6 @@
 //! The session: the transaction boundary as the domain sees it.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::SessionError;
@@ -66,29 +67,71 @@ pub trait SessionPool {
         E: From<SessionError>;
 }
 
-/// Refuses a second scope on a session that already has one open.
+/// Marks a session while a scope opened on it is running.
 ///
-/// `&mut self` would let the compiler rule this out, at the price of an
+/// `&mut self` would let the compiler refuse a second scope, at the price of an
 /// immutable session and of concurrency inside a scope — see the crate
-/// documentation. The flag restores the guarantee at run time, and turns a
+/// documentation. This flag restores the guarantee at run time, and turns a
 /// confusing driver error into [`SessionError::ScopeAlreadyOpen`].
 ///
-/// The flag belongs to one session *value*: a nested scope runs on the session
-/// the outer scope handed out, which has a flag of its own.
-pub(crate) struct ScopeGuard<'a>(&'a AtomicBool);
+/// A flag belongs to one session, and **clones of that session share it**: a
+/// clone is a second name for the same session, not a way past the guard. That
+/// is why the flag is a type of its own rather than a bare `AtomicBool`: an
+/// implementation that derives [`Clone`] gets the sharing by construction,
+/// where a hand-written clone could have quietly given the copy a flag of its
+/// own and let two scopes run side by side.
+///
+/// A nested scope runs on the session its parent handed out, which carries a
+/// flag of its own — so nesting is unaffected.
+///
+/// ```
+/// use ascetic_ddd_session::session::ScopeFlag;
+///
+/// #[derive(Clone)]
+/// struct MySession {
+///     scope_open: ScopeFlag,
+/// }
+///
+/// let session = MySession { scope_open: ScopeFlag::new() };
+/// let guard = session.scope_open.acquire().expect("free");
+///
+/// assert!(session.clone().scope_open.acquire().is_err());
+/// drop(guard);
+/// assert!(session.clone().scope_open.acquire().is_ok());
+/// ```
+#[derive(Clone, Debug, Default)]
+pub struct ScopeFlag(Arc<AtomicBool>);
 
-impl<'a> ScopeGuard<'a> {
+impl ScopeFlag {
+    /// Creates a flag that is not set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Claims the session, or reports that it is already claimed.
-    pub(crate) fn acquire(flag: &'a AtomicBool) -> Result<Self, SessionError> {
-        flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .map(|_| ScopeGuard(flag))
+    ///
+    /// The claim is released when the returned guard is dropped, however the
+    /// scope ended — returned, failed early or unwound.
+    pub fn acquire(&self) -> Result<ScopeGuard<'_>, SessionError> {
+        self.0
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map(|_| ScopeGuard(&self.0))
             .map_err(|_| SessionError::ScopeAlreadyOpen)
+    }
+
+    /// True while a scope opened on this session is running.
+    pub fn is_claimed(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
     }
 }
 
+/// Holds a claim on a session for the length of a scope.
+///
+/// Created by [`ScopeFlag::acquire`].
+#[derive(Debug)]
+pub struct ScopeGuard<'a>(&'a AtomicBool);
+
 impl Drop for ScopeGuard<'_> {
-    /// Releases the session however the scope ended - returned, failed early or
-    /// unwound.
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
     }

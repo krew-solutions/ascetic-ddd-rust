@@ -217,9 +217,13 @@ session.atomic(async |child| {
 }).await
 ```
 
-The flag belongs to one session *value* and is released however the scope ends —
+The flag belongs to one session and is released however the scope ends —
 returned, failed early or unwound — so sequential scopes on one session are
-unaffected.
+unaffected. Clones share it: a clone is a second name for the same session, not
+a way past the guard. That is why it is a `ScopeFlag` rather than a bare
+`AtomicBool` — an implementation that derives `Clone` gets the sharing by
+construction, where a hand-written clone could have quietly given the copy a flag
+of its own.
 
 A failing `COMMIT` becomes `SessionError::Commit` — the caller believes the work
 is durable and it is not. A failing `ROLLBACK` does *not* replace the error that
@@ -240,10 +244,11 @@ ASCETIC_DDD_TEST_PG_URL=postgresql://user:pass@localhost/db \
 * 19 on the identity map — the 18 from the Python suite plus the LRU-eviction
   case the Go port adds, with two extra cases for weak-reference behaviour that
   only this port can express;
-* 13 on the session — nesting, both failure paths, observer notifications,
+* 15 on the session — nesting, both failure paths, observer notifications,
   identity-map sharing, concurrent work inside one scope, error conversion, and
   the scope guard (refusal, nesting still allowed, sequential scopes allowed,
-  release after failure);
+  release after failure, a clone refused beside the original, a clone of the
+  handed-out session still nesting);
 * 5 on the REST session — capability access, logical scopes, failure, the
   identity map, the scope guard;
 * 5 on the composite — one use case driving both delegates through their

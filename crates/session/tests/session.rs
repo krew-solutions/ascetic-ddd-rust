@@ -421,3 +421,49 @@ fn the_refusal_names_the_cause() {
     assert!(message.contains("a scope is already open"), "{message}");
     assert!(message.contains("nested scope"), "{message}");
 }
+
+/// A clone is a second name for the same session, not a way past the guard:
+/// the scope flag is shared, so a clone cannot open a scope beside the original.
+#[test]
+fn a_clone_cannot_open_a_scope_beside_the_original() {
+    let pool = MemorySessionPool::new();
+    let journal = pool.journal();
+
+    block_on(pool.session(async |session| {
+        session
+            .atomic(async |_child| {
+                let twin = session.clone();
+                let refused: Result<(), AppError> =
+                    twin.atomic(async |_| Ok::<_, AppError>(())).await;
+
+                assert!(matches!(
+                    refused,
+                    Err(AppError::Session(SessionError::ScopeAlreadyOpen)),
+                ));
+                Ok::<_, AppError>(())
+            })
+            .await
+    }))
+    .unwrap();
+
+    assert_eq!(journal.entries(), ["BEGIN", "COMMIT"]);
+}
+
+/// …while a clone of the session a scope handed out may nest, like the original.
+#[test]
+fn a_clone_of_the_handed_out_session_may_still_nest() {
+    let pool = MemorySessionPool::new();
+    let journal = pool.journal();
+
+    block_on(pool.session(async |session| {
+        session
+            .atomic(async |child| child.clone().atomic(async |_| Ok::<_, AppError>(())).await)
+            .await
+    }))
+    .unwrap();
+
+    assert_eq!(
+        journal.entries(),
+        ["BEGIN", "SAVEPOINT sp1", "RELEASE SAVEPOINT sp1", "COMMIT"],
+    );
+}
