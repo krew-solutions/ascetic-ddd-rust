@@ -52,6 +52,11 @@ others behind features, so that `ascetic_ddd::saga` keeps working as one import
 | [`ascetic-ddd-saga`](crates/saga) | `ascetic_ddd/saga` | Saga pattern (routing slip) for distributed transactions |
 | [`ascetic-ddd-session`](crates/session) | `ascetic_ddd/session` | Unit of Work: session scopes, savepoints, identity map, REST and composite sessions, PostgreSQL adapter *(in progress)* |
 
+## Architecture decisions
+
+- [ADR-0001](docs/src/adr/0001-session-is-a-cloneable-handle.md) — a session is a
+  cloneable handle, and the scope receives a borrow.
+
 ## Development
 
 ```bash
