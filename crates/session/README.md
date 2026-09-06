@@ -173,9 +173,13 @@ rolled back. The HTTP client is a type parameter, so the crate depends on no
 HTTP library — requests are timed by wrapping the call, which replaces
 `aiohttp.TraceConfig` and a custom `http.RoundTripper`.
 
-A composite runs two sessions as one, innermost closing first, and nests for
-three or more. Capability impls are deliberately *not* provided: a blanket impl
-would have to fix a direction and would then take the first delegate that fits,
+A tuple of sessions is itself a session — two to eight of them — so a use case
+that writes to a database and calls a service is still written against one
+session. Delegates open left to right and close right to left, and are reached
+by position (`sessions.0`), which stays flat however many there are. The count
+is fixed at compile time. Capability impls are deliberately *not* provided: a
+blanket impl
+would have to fix a position and would then take the first delegate that fits,
 silently — which is exactly what Python's `__getattr__` does, and getting the
 wrong database out of a composite of two is not a failure worth inheriting. The
 application names the delegate in a newtype it owns (which the orphan rule
@@ -261,9 +265,10 @@ What the integration tests cover:
 * 6 on the REST session — capability access, logical scopes, failure, the
   identity map, the scope guard, and a clone refused beside the original (the
   one hand-written `Clone` in the crate);
-* 5 on the composite — one use case driving both delegates through their
+* 6 on the composite — one use case driving both delegates through their
   capabilities, nesting across delegates, rollback of the transactional delegate
-  only, the guard, and three delegates composed;
+  only, the guard, four delegates staying flat, and the order delegates open and
+  close in;
 * 6 against a real PostgreSQL — durable nested commit, a savepoint rolled back
   inside a live transaction, full rollback, pipelined statements in one scope,
   the statements the observer actually sees, and two concurrent scopes refused.

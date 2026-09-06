@@ -2,11 +2,10 @@
 
 use std::sync::{Arc, Mutex};
 
+use ascetic_ddd_session::observer::{ScopeEnded, ScopeStarted, SessionObserver};
 use ascetic_ddd_session::rest::{HttpAccess, RestSession, RestSessionPool};
 use ascetic_ddd_session::testing::{MemorySession, MemorySessionPool};
-use ascetic_ddd_session::{
-    CompositeSession, CompositeSessionPool, Session, SessionError, SessionPool,
-};
+use ascetic_ddd_session::{Session, SessionError, SessionPool};
 use futures::executor::block_on;
 use futures::future::BoxFuture;
 
@@ -39,7 +38,7 @@ impl FakeClient {
 /// because the orphan rule forbids implementing a foreign capability for a
 /// foreign composite.
 #[derive(Clone)]
-struct AppSession(CompositeSession<MemorySession, RestSession<FakeClient>>);
+struct AppSession((MemorySession, RestSession<FakeClient>));
 
 impl Session for AppSession {
     async fn atomic<T, E, F>(&self, scope: F) -> Result<T, E>
@@ -68,7 +67,7 @@ impl Recorder for MemorySession {
 
 impl Recorder for AppSession {
     fn record(&self, statement: &str) {
-        self.0.first().record(statement);
+        self.0.0.record(statement);
     }
 }
 
@@ -76,7 +75,7 @@ impl HttpAccess for AppSession {
     type Client = FakeClient;
 
     fn http(&self) -> &FakeClient {
-        self.0.second().http()
+        self.0.1.http()
     }
 
     async fn request<T: Send, E: Send>(
@@ -85,7 +84,7 @@ impl HttpAccess for AppSession {
         url: &str,
         call: impl Future<Output = Result<T, E>> + Send,
     ) -> Result<T, E> {
-        self.0.second().request(method, url, call).await
+        self.0.1.request(method, url, call).await
     }
 }
 
@@ -165,7 +164,7 @@ where
 // ------------------------------- tests -------------------------------
 
 fn pools() -> (
-    CompositeSessionPool<MemorySessionPool, RestSessionPool<FakeClient>>,
+    (MemorySessionPool, RestSessionPool<FakeClient>),
     Arc<ascetic_ddd_session::testing::Journal>,
     Arc<FakeClient>,
 ) {
@@ -173,7 +172,7 @@ fn pools() -> (
     let journal = db.journal();
     let rest = RestSessionPool::new(FakeClient::default());
     let client = Arc::clone(rest.client());
-    (CompositeSessionPool::new(db, rest), journal, client)
+    ((db, rest), journal, client)
 }
 
 /// Repositories written against capabilities work against the composite
@@ -288,22 +287,93 @@ fn a_second_scope_on_the_same_composite_is_refused() {
     .unwrap();
 }
 
-/// Three delegates nest: `CompositeSession<A, CompositeSession<B, C>>`.
+/// Four delegates stay flat: `(A, B, C, D)`, not `(A, (B, (C, D)))`, and each
+/// opens a scope of its own.
 #[test]
-fn three_delegates_compose() {
-    let first = MemorySessionPool::new();
-    let first_journal = first.journal();
-    let second = MemorySessionPool::new();
-    let second_journal = second.journal();
-    let third = MemorySessionPool::new();
-    let third_journal = third.journal();
+fn four_delegates_stay_flat() {
+    let pools = [
+        MemorySessionPool::new(),
+        MemorySessionPool::new(),
+        MemorySessionPool::new(),
+        MemorySessionPool::new(),
+    ];
+    let journals: Vec<_> = pools.iter().map(|pool| pool.journal()).collect();
+    let [first, second, third, fourth] = pools;
 
-    let pool = CompositeSessionPool::new(first, CompositeSessionPool::new(second, third));
+    block_on(
+        (first, second, third, fourth)
+            .session(async |session| session.atomic(async |_| Ok::<_, AppError>(())).await),
+    )
+    .unwrap();
+
+    for journal in journals {
+        assert_eq!(journal.entries(), ["BEGIN", "COMMIT"]);
+    }
+}
+
+/// Delegates open left to right and close right to left, so the outermost
+/// scope is the first delegate's — the order a nested transaction needs.
+#[test]
+fn delegates_open_and_close_in_order() {
+    let order = Arc::new(Mutex::new(Vec::new()));
+
+    #[derive(Clone)]
+    struct Trace {
+        order: Arc<Mutex<Vec<String>>>,
+        name: &'static str,
+    }
+
+    impl SessionObserver for Trace {
+        fn on_scope_started(&self, _event: &ScopeStarted) {
+            self.order
+                .lock()
+                .unwrap()
+                .push(format!("{} open", self.name));
+        }
+
+        fn on_scope_ended(&self, _event: &ScopeEnded) {
+            self.order
+                .lock()
+                .unwrap()
+                .push(format!("{} close", self.name));
+        }
+    }
+
+    let pool = (
+        MemorySessionPool::new().observed_by(Trace {
+            order: Arc::clone(&order),
+            name: "first",
+        }),
+        MemorySessionPool::new().observed_by(Trace {
+            order: Arc::clone(&order),
+            name: "second",
+        }),
+        MemorySessionPool::new().observed_by(Trace {
+            order: Arc::clone(&order),
+            name: "third",
+        }),
+    );
 
     block_on(pool.session(async |session| session.atomic(async |_| Ok::<_, AppError>(())).await))
         .unwrap();
 
-    for journal in [first_journal, second_journal, third_journal] {
-        assert_eq!(journal.entries(), ["BEGIN", "COMMIT"]);
-    }
+    assert_eq!(
+        *order.lock().unwrap(),
+        [
+            // session scopes
+            "first open",
+            "second open",
+            "third open",
+            // transaction scopes, opened inside them
+            "first open",
+            "second open",
+            "third open",
+            "third close",
+            "second close",
+            "first close",
+            "third close",
+            "second close",
+            "first close",
+        ],
+    );
 }

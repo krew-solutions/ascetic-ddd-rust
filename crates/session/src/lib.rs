@@ -46,7 +46,6 @@ pub mod rest;
 pub mod session;
 pub mod testing;
 
-pub use crate::composite::{CompositeSession, CompositeSessionPool};
 pub use crate::error::{BoxError, SessionError};
 pub use crate::identity_key::IdentityKey;
 pub use crate::identity_map::{DEFAULT_CACHE_SIZE, IdentityMap, Lookup};
