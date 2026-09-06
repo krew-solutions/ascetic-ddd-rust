@@ -234,9 +234,9 @@ fn observer_sees_the_whole_lifecycle() {
             (0, ScopeKind::Session, None),
             (1, ScopeKind::Transaction, None),
             (2, ScopeKind::Savepoint, None),
-            (2, ScopeKind::Savepoint, Some(Outcome::Committed)),
-            (1, ScopeKind::Transaction, Some(Outcome::Committed)),
-            (0, ScopeKind::Session, Some(Outcome::Committed)),
+            (2, ScopeKind::Savepoint, Some(Outcome::Succeeded)),
+            (1, ScopeKind::Transaction, Some(Outcome::Succeeded)),
+            (0, ScopeKind::Session, Some(Outcome::Succeeded)),
         ],
     );
 }

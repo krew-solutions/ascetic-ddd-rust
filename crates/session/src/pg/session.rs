@@ -116,9 +116,9 @@ impl Session for PgSession {
             depth,
             kind,
             outcome: if committed {
-                Outcome::Committed
+                Outcome::Succeeded
             } else {
-                Outcome::RolledBack
+                Outcome::Failed
             },
         });
 
@@ -212,9 +212,9 @@ impl SessionPool for PgSessionPool {
             depth: 0,
             kind: ScopeKind::Session,
             outcome: if outcome.is_ok() {
-                Outcome::Committed
+                Outcome::Succeeded
             } else {
-                Outcome::RolledBack
+                Outcome::Failed
             },
         });
 

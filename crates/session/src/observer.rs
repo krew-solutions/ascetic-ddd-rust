@@ -61,14 +61,16 @@ pub enum ScopeKind {
 
 /// How a scope ended.
 ///
-/// For a [`ScopeKind::Logical`] scope the names mean simply "succeeded" and
-/// "failed": there is nothing to commit.
+/// What *happened* on success depends on the scope — a transaction was
+/// committed, a savepoint released, a logical scope simply finished — and that
+/// is what [`ScopeKind`] says. This says only whether it worked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// The scope succeeded and was committed (or released).
-    Committed,
-    /// The scope failed and was rolled back.
-    RolledBack,
+    /// The scope finished without error.
+    Succeeded,
+    /// The scope reported an error; a transaction or savepoint opened for it
+    /// has been rolled back.
+    Failed,
 }
 
 /// A scope has been opened.

@@ -139,9 +139,9 @@ impl SessionPool for MemorySessionPool {
             depth: 0,
             kind: ScopeKind::Session,
             outcome: if outcome.is_ok() {
-                Outcome::Committed
+                Outcome::Succeeded
             } else {
-                Outcome::RolledBack
+                Outcome::Failed
             },
         });
         outcome
@@ -245,9 +245,9 @@ impl Session for MemorySession {
             depth,
             kind,
             outcome: if committed {
-                Outcome::Committed
+                Outcome::Succeeded
             } else {
-                Outcome::RolledBack
+                Outcome::Failed
             },
         });
 

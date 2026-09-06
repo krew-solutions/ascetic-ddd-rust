@@ -141,9 +141,9 @@ impl<C: Send + Sync> Session for RestSession<C> {
             depth,
             kind: ScopeKind::Logical,
             outcome: if outcome.is_ok() {
-                Outcome::Committed
+                Outcome::Succeeded
             } else {
-                Outcome::RolledBack
+                Outcome::Failed
             },
         });
 
@@ -232,9 +232,9 @@ impl<C: Send + Sync> SessionPool for RestSessionPool<C> {
             depth: 0,
             kind: ScopeKind::Session,
             outcome: if outcome.is_ok() {
-                Outcome::Committed
+                Outcome::Succeeded
             } else {
-                Outcome::RolledBack
+                Outcome::Failed
             },
         });
 

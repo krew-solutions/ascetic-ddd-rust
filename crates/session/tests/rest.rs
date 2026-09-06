@@ -163,9 +163,9 @@ fn scopes_are_reported_as_logical() {
             (0, ScopeKind::Session, None),
             (1, ScopeKind::Logical, None),
             (2, ScopeKind::Logical, None),
-            (2, ScopeKind::Logical, Some(Outcome::Committed)),
-            (1, ScopeKind::Logical, Some(Outcome::Committed)),
-            (0, ScopeKind::Session, Some(Outcome::Committed)),
+            (2, ScopeKind::Logical, Some(Outcome::Succeeded)),
+            (1, ScopeKind::Logical, Some(Outcome::Succeeded)),
+            (0, ScopeKind::Session, Some(Outcome::Succeeded)),
         ],
     );
     assert_eq!(
@@ -198,7 +198,7 @@ fn a_failing_scope_is_reported_as_rolled_back() {
             .last()
             .copied()
             .map(|s| s.2),
-        Some(Some(Outcome::RolledBack)),
+        Some(Some(Outcome::Failed)),
     );
 }
 
