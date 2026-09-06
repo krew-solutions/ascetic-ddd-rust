@@ -133,7 +133,9 @@ abstraction.
 
 Observers are synchronous and infallible on purpose: they observe, they do not
 participate. In the Go port a failing `Notify` aborts the surrounding
-transaction, which turns logging into a source of business failures.
+transaction, which turns logging into a source of business failures. An observer
+that has to do IO — pushing metrics, shipping spans — enqueues instead, and a
+task of its own does the awaiting: see [OBSERVERS.md](OBSERVERS.md).
 
 `SessionObserver` carries only what every session does — opening and closing
 scopes. What a session does besides that is transport-specific and lives with
