@@ -37,7 +37,7 @@ and a `ScopeFlag` shared by clones. Cloning one costs reference counts, not a
 resource.
 
 The composite owns clones of the sessions its delegates hand out
-(`crates/session/src/composite.rs`), so its own type carries no lifetime.
+(`crates/session/src/composite/pair.rs`), so its own type carries no lifetime.
 
 ## Consequences
 

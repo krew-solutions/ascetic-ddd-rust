@@ -92,6 +92,12 @@ impl<S> FromIterator<S> for Many<S> {
     }
 }
 
+/// The opened sessions so far, plus one. A new vector rather than a push, so
+/// that nothing in the recursion is mutated.
+fn with<S>(opened: Vec<S>, next: S) -> Vec<S> {
+    opened.into_iter().chain(std::iter::once(next)).collect()
+}
+
 /// Opens a scope on the first delegate and continues with the rest inside it.
 fn open_scopes<'a, S, T, E, F>(rest: &'a [S], opened: Vec<S>, scope: F) -> Nested<'a, T, E>
 where
@@ -105,9 +111,7 @@ where
             None => scope(&Many(opened)).await,
             Some((head, tail)) => {
                 head.atomic(async |opened_head: &S| {
-                    let mut opened = opened;
-                    opened.push(opened_head.clone());
-                    open_scopes(tail, opened, scope).await
+                    open_scopes(tail, with(opened, opened_head.clone()), scope).await
                 })
                 .await
             }
@@ -132,9 +136,7 @@ where
             None => scope(&Many(opened)).await,
             Some((head, tail)) => {
                 head.session(async |opened_head: &P::Session| {
-                    let mut opened = opened;
-                    opened.push(opened_head.clone());
-                    open_sessions(tail, opened, scope).await
+                    open_sessions(tail, with(opened, opened_head.clone()), scope).await
                 })
                 .await
             }
@@ -151,14 +153,11 @@ impl<S: Session> Session for Many<S> {
         F: AsyncFnOnce(&Self) -> Result<T, E>,
         E: From<SessionError>,
     {
-        open_scopes(&self.0, Vec::with_capacity(self.0.len()), scope).await
+        open_scopes(&self.0, Vec::new(), scope).await
     }
 }
 
-impl<P: SessionPool> SessionPool for Many<P>
-where
-    P::Session: Clone,
-{
+impl<P: SessionPool> SessionPool for Many<P> {
     type Session = Many<P::Session>;
 
     async fn session<T, E, F>(&self, scope: F) -> Result<T, E>
@@ -166,6 +165,6 @@ where
         F: AsyncFnOnce(&Self::Session) -> Result<T, E>,
         E: From<SessionError>,
     {
-        open_sessions(&self.0, Vec::with_capacity(self.0.len()), scope).await
+        open_sessions(&self.0, Vec::new(), scope).await
     }
 }

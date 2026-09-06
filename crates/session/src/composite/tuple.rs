@@ -1,12 +1,8 @@
-//! Several sessions acting as one.
+//! A tuple of sessions is itself a session.
 //!
-//! A use case that must write to a database *and* call a service opens both
-//! scopes at once. A tuple of sessions is itself a [`Session`], so the use case
-//! is written against one session as usual, and the scopes nest:
-//!
-//! ```text
-//! first open, second open, … work …, second close, first close
-//! ```
+//! Delegates open left to right and close right to left; what a composite is
+//! and is not, and how an application reaches a delegate's capabilities, is
+//! described in the [parent module][super].
 //!
 //! ```
 //! use ascetic_ddd_session::testing::MemorySessionPool;
@@ -37,59 +33,8 @@
 //!
 //! The number of delegates is fixed at compile time. A count known only at run
 //! time needs a collection, which in turn needs every delegate to be of the
-//! same type — see the note on homogeneous delegates below.
+//! same type — see [`many`][super::many].
 //!
-//! # What it is not
-//!
-//! It is not a distributed transaction. If the first delegate commits and the
-//! second fails, the two diverge — no amount of composition can prevent that.
-//! Work that must be undone across systems belongs in a saga; a tuple only
-//! spares a use case from threading two sessions by hand.
-//!
-//! # Capabilities
-//!
-//! Repositories ask for capabilities (`S: Session + PgAccess`), so a composite
-//! must offer the capabilities of its delegates. This crate deliberately does
-//! **not** provide those impls: an impl taking a capability from one position
-//! and one taking it from another would overlap wherever both offer it, so a
-//! blanket impl would have to fix a position — and would then take the first
-//! delegate that fits, silently. That is exactly what Python's `__getattr__`
-//! does, and getting the wrong database out of a composite of two is not a
-//! failure worth inheriting.
-//!
-//! An application names the delegate itself, in a newtype it owns:
-//!
-//! ```ignore
-//! pub struct AppSession((PgSession, RestSession<Client>));
-//!
-//! impl Session for AppSession {
-//!     async fn atomic<T, E, F>(&self, scope: F) -> Result<T, E>
-//!     where
-//!         F: AsyncFnOnce(&Self) -> Result<T, E>,
-//!         E: From<SessionError>,
-//!     {
-//!         self.0.atomic(async |inner| scope(&AppSession(inner.clone())).await).await
-//!     }
-//! }
-//!
-//! impl PgAccess for AppSession {
-//!     fn connection(&self) -> &PgConnection {
-//!         self.0.0.connection()
-//!     }
-//! }
-//! ```
-//!
-//! The newtype is also what the orphan rule requires: neither the capability
-//! nor the tuple belongs to the application, so it cannot write the impl for
-//! the pair directly. Naming the delegate is a line of code; picking it by
-//! search is a bug waiting for the second database.
-//!
-//! # Homogeneous delegates
-//!
-//! Delegates of the *same* type — shards of one database, say — are a different
-//! problem: their count is usually dynamic, and a tuple's is not. See
-//! [`Many`][crate::many::Many], which trades a `Send` future for that.
-
 use crate::error::SessionError;
 use crate::session::{Session, SessionPool};
 
@@ -97,9 +42,14 @@ use crate::session::{Session, SessionPool};
 /// they hand out into a tuple of the same shape.
 macro_rules! open_scopes {
     // Every delegate is open: hand the collected sessions to the scope.
-    ($self:ident, $scope:ident, [], [$($opened:ident),*]) => {
-        $scope(&($($opened.clone(),)*)).await
-    };
+    ($self:ident, $scope:ident, [], [$($opened:ident),*]) => {{
+        let sessions = ($($opened.clone(),)*);
+        // Boxed: each level nests one closure per delegate, and the compiler
+        // walks that nesting when it lays out the outer future. The box ends
+        // the walk here, so nesting depth stays within the default
+        // `recursion_limit`. The type is concrete, so `Send` is unaffected.
+        Box::pin($scope(&sessions)).await
+    }};
     // Open the next delegate and carry on inside its scope.
     ($self:ident, $scope:ident, [$index:tt $($rest:tt)*], [$($opened:ident),*]) => {
         $self.$index
@@ -110,9 +60,11 @@ macro_rules! open_scopes {
 
 /// Same, for a tuple of pools handing out a tuple of sessions.
 macro_rules! open_sessions {
-    ($self:ident, $scope:ident, [], [$($opened:ident),*]) => {
-        $scope(&($($opened.clone(),)*)).await
-    };
+    ($self:ident, $scope:ident, [], [$($opened:ident),*]) => {{
+        let sessions = ($($opened.clone(),)*);
+        // Boxed for the same reason as in `open_scopes!`.
+        Box::pin($scope(&sessions)).await
+    }};
     ($self:ident, $scope:ident, [$index:tt $($rest:tt)*], [$($opened:ident),*]) => {
         $self.$index
             .session(async |next| open_sessions!($self, $scope, [$($rest)*], [$($opened,)* next]))

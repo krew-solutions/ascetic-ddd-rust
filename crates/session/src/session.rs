@@ -23,8 +23,7 @@ use crate::error::SessionError;
 /// clones of the sessions its delegates hand out, so its own type carries no
 /// lifetime and a plain borrow can be handed to the scope. Sharing the scope
 /// flag also means a clone cannot open a scope beside the one it was cloned
-/// from. See [`composite`][crate::composite], where a tuple of sessions is
-/// itself a session.
+/// from. See [`composite`][crate::composite] for the shapes a composite takes.
 ///
 /// ```
 /// # use ascetic_ddd_session::{Session, SessionError};

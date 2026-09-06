@@ -175,13 +175,13 @@ rolled back. The HTTP client is a type parameter, so the crate depends on no
 HTTP library — requests are timed by wrapping the call, which replaces
 `aiohttp.TraceConfig` and a custom `http.RoundTripper`.
 
-A tuple of sessions is itself a session — two to eight of them — so a use case
-that writes to a database and calls a service is still written against one
-session. Delegates open left to right and close right to left, and are reached
-by position (`sessions.0`), which stays flat however many there are. The count
-is fixed at compile time. Capability impls are deliberately *not* provided: a
-blanket impl
-would have to fix a position and would then take the first delegate that fits,
+Two composite shapes are kept side by side so that they can be compared in
+use. `CompositeSession<A, B>` is a named pair; more than two delegates nest and
+are reached as `.second().first()`. A tuple of two to eight sessions is itself a
+session; its delegates stay flat and are reached by position (`sessions.0`). In
+both, delegates open left to right and close right to left, the count is fixed
+at compile time, and capability impls are deliberately *not* provided: a blanket
+impl would have to fix a position and would then take the first delegate that fits,
 silently — which is exactly what Python's `__getattr__` does, and getting the
 wrong database out of a composite of two is not a failure worth inheriting. The
 application names the delegate in a newtype it owns (which the orphan rule
@@ -275,10 +275,13 @@ What the integration tests cover:
   one hand-written `Clone` in the crate);
 * 5 on `Many` — every shard gets a scope, the order they open and close in, a
   failure rolling every shard back, an empty set, and nesting;
-* 6 on the composite — one use case driving both delegates through their
+* 6 on the pair — one use case driving both delegates through their
   capabilities, nesting across delegates, rollback of the transactional delegate
-  only, the guard, four delegates staying flat, and the order delegates open and
-  close in;
+  only, the guard, three delegates composed, and five nested scopes through the
+  application's newtype (compile-depth regression);
+* 7 on the tuple — the same use case, nesting, rollback and guard, four
+  delegates staying flat, the order delegates open and close in, and the same
+  compile-depth regression;
 * 6 against a real PostgreSQL — durable nested commit, a savepoint rolled back
   inside a live transaction, full rollback, pipelined statements in one scope,
   the statements the observer actually sees, and two concurrent scopes refused.
