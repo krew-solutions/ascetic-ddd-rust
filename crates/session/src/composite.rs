@@ -87,8 +87,8 @@
 //! # Homogeneous delegates
 //!
 //! Delegates of the *same* type — shards of one database, say — are a different
-//! problem: their count is usually dynamic, and a tuple's is not. That case
-//! wants a collection and is not covered here yet.
+//! problem: their count is usually dynamic, and a tuple's is not. See
+//! [`Many`][crate::many::Many], which trades a `Send` future for that.
 
 use crate::error::SessionError;
 use crate::session::{Session, SessionPool};

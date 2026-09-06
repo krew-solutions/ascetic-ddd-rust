@@ -39,6 +39,7 @@ pub mod error;
 pub mod identity_key;
 pub mod identity_map;
 pub mod isolation;
+pub mod many;
 pub mod observer;
 #[cfg(feature = "pg")]
 pub mod pg;
@@ -50,6 +51,7 @@ pub use crate::error::{BoxError, SessionError};
 pub use crate::identity_key::IdentityKey;
 pub use crate::identity_map::{DEFAULT_CACHE_SIZE, IdentityMap, Lookup};
 pub use crate::isolation::IsolationLevel;
+pub use crate::many::Many;
 pub use crate::observer::SessionObserver;
 #[cfg(feature = "pg")]
 pub use crate::pg::{PgAccess, PgConnection, PgObserver, PgSession, PgSessionPool};

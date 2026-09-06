@@ -187,6 +187,12 @@ wrong database out of a composite of two is not a failure worth inheriting. The
 application names the delegate in a newtype it owns (which the orphan rule
 requires anyway).
 
+Delegates of the same type whose number is known only at run time — shards of
+one database — are `Many<S>` instead. It pays for the dynamic count with a
+future that is not `Send`: the scopes nest a run-time number of times, so the
+future has to be boxed, and the box cannot promise more than `Session::atomic`
+requires of the scope it carries.
+
 ## PostgreSQL
 
 Behind the `pg` feature, on `tokio-postgres` and `deadpool-postgres`:
@@ -267,6 +273,8 @@ What the integration tests cover:
 * 6 on the REST session — capability access, logical scopes, failure, the
   identity map, the scope guard, and a clone refused beside the original (the
   one hand-written `Clone` in the crate);
+* 5 on `Many` — every shard gets a scope, the order they open and close in, a
+  failure rolling every shard back, an empty set, and nesting;
 * 6 on the composite — one use case driving both delegates through their
   capabilities, nesting across delegates, rollback of the transactional delegate
   only, the guard, four delegates staying flat, and the order delegates open and
