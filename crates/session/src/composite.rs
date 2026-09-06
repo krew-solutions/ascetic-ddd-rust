@@ -112,7 +112,11 @@ impl<A: Session, B: Session> Session for CompositeSession<A, B> {
                 self.second
                     .atomic(async |second| {
                         let composite = CompositeSession::new(first.clone(), second.clone());
-                        scope(&composite).await
+                        // Boxed: each level nests one closure per delegate, and the compiler
+                        // walks that nesting when it lays out the outer future. The box ends
+                        // the walk here, so nesting depth stays within the default
+                        // `recursion_limit`. The type is concrete, so `Send` is unaffected.
+                        Box::pin(scope(&composite)).await
                     })
                     .await
             })
@@ -156,7 +160,11 @@ impl<A: SessionPool, B: SessionPool> SessionPool for CompositeSessionPool<A, B> 
                 self.second
                     .session(async |second| {
                         let composite = CompositeSession::new(first.clone(), second.clone());
-                        scope(&composite).await
+                        // Boxed: each level nests one closure per delegate, and the compiler
+                        // walks that nesting when it lays out the outer future. The box ends
+                        // the walk here, so nesting depth stays within the default
+                        // `recursion_limit`. The type is concrete, so `Send` is unaffected.
+                        Box::pin(scope(&composite)).await
                     })
                     .await
             })

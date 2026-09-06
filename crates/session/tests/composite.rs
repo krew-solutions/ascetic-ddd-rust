@@ -307,3 +307,50 @@ fn three_delegates_compose() {
         assert_eq!(journal.entries(), ["BEGIN", "COMMIT"]);
     }
 }
+
+/// Each composite level nests one async closure per delegate, so the state
+/// machine of a scope grows with delegates × nesting depth. The composite boxes
+/// the scope future to cut that growth; without the box this test does not
+/// compile at the default `recursion_limit` ("queries overflow the depth
+/// limit"), which is the regression it guards against.
+///
+/// The failure shows only from a clean build: a warm incremental cache hands
+/// the compiler intermediate layouts and hides the depth. Judge this test after
+/// `cargo clean -p ascetic-ddd-session`.
+#[test]
+fn five_nested_scopes_compile_through_the_newtype() {
+    let (pool, journal, _client) = pools();
+
+    block_on(pool.session(async |inner| {
+        let session = AppSession(inner.clone());
+        session
+            .atomic(async |s| {
+                s.atomic(async |s| {
+                    s.atomic(async |s| {
+                        s.atomic(async |s| s.atomic(async |_| Ok::<_, AppError>(())).await)
+                            .await
+                    })
+                    .await
+                })
+                .await
+            })
+            .await
+    }))
+    .unwrap();
+
+    assert_eq!(
+        journal.entries(),
+        [
+            "BEGIN",
+            "SAVEPOINT sp1",
+            "SAVEPOINT sp2",
+            "SAVEPOINT sp3",
+            "SAVEPOINT sp4",
+            "RELEASE SAVEPOINT sp4",
+            "RELEASE SAVEPOINT sp3",
+            "RELEASE SAVEPOINT sp2",
+            "RELEASE SAVEPOINT sp1",
+            "COMMIT",
+        ],
+    );
+}

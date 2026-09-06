@@ -261,9 +261,10 @@ What the integration tests cover:
 * 6 on the REST session — capability access, logical scopes, failure, the
   identity map, the scope guard, and a clone refused beside the original (the
   one hand-written `Clone` in the crate);
-* 5 on the composite — one use case driving both delegates through their
+* 6 on the composite — one use case driving both delegates through their
   capabilities, nesting across delegates, rollback of the transactional delegate
-  only, the guard, and three delegates composed;
+  only, the guard, three delegates composed, and five nested scopes through the
+  application's newtype (compile-depth regression);
 * 6 against a real PostgreSQL — durable nested commit, a savepoint rolled back
   inside a live transaction, full rollback, pipelined statements in one scope,
   the statements the observer actually sees, and two concurrent scopes refused.
