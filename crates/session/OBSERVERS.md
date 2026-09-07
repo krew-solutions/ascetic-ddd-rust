@@ -104,7 +104,7 @@ backend actually needs — usually far less than the event carries.
 ```rust
 let consumer = tokio::spawn(async move {
     while let Some(sample) = inbox.recv().await {
-        push_to_gateway(&sample).await;   // здесь можно и ждать, и падать
+        push_to_gateway(&sample).await;   // here it may wait, and it may fail
     }
 });
 ```

@@ -2,7 +2,8 @@
 //!
 //! There is no transaction behind it. A scope here bounds an identity map and
 //! reports itself to the observer — the same shape as a database session, so a
-//! use case can be written once against [`Session`] and run against either.
+//! use case can be written once against [`Session`][crate::session::Session]
+//! and run against either.
 //! What it deliberately does *not* do is pretend that HTTP calls can be rolled
 //! back; work that must be undone across services belongs in a saga.
 //!

@@ -9,16 +9,16 @@
 //! capability it needs as a bound.
 //!
 //! ```ignore
-//! // порт: сессия параметром, домен видит только `Session`
+//! // the port: the session is a parameter; the domain sees only `Session`
 //! pub trait OrderRepository<S: Session>: Sync {
 //!     fn save<'a>(&'a self, session: &'a S, order: &'a Order)
 //!         -> BoxFuture<'a, Result<(), Error>>;
 //! }
 //!
-//! // инфраструктура: способность вместо подтипа
+//! // the infrastructure: a capability instead of a subtype
 //! pub trait PgAccess { fn connection(&self) -> &PgConnection; }
 //!
-//! impl<S: Session + PgAccess> OrderRepository<S> for PgOrderRepository { … }
+//! impl<S: Session + PgAccess> OrderRepository<S> for PgOrderRepository { /* … */ }
 //! ```
 //!
 //! Python needs `ISession` plus `IPgSession` plus a cast in

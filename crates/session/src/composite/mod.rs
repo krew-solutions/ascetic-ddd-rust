@@ -1,7 +1,8 @@
 //! Several sessions acting as one.
 //!
 //! A use case that must write to a database *and* call a service opens both
-//! scopes at once. A composite is itself a [`Session`], so the use case is
+//! scopes at once. A composite is itself a [`Session`][crate::session::Session],
+//! so the use case is
 //! written against one session as usual, and the scopes nest:
 //!
 //! ```text
@@ -35,7 +36,8 @@
 //! does, and getting the wrong database out of a composite of two is not a
 //! failure worth inheriting.
 //!
-//! An application names the delegate itself, in a newtype it owns:
+//! An application names the delegate itself, in a newtype it owns. Over a
+//! tuple:
 //!
 //! ```ignore
 //! pub struct AppSession((PgSession, RestSession<Client>));
@@ -52,18 +54,28 @@
 //!
 //! impl PgAccess for AppSession {
 //!     fn connection(&self) -> &PgConnection {
-//!         self.0.0.connection()          // `self.0.first()` over a pair
+//!         self.0.0.connection()
 //!     }
 //! }
+//!
+//! impl HttpAccess for AppSession {
+//!     type Client = Client;
+//!
+//!     fn http(&self) -> &Client {
+//!         self.0.1.http()
+//!     }
+//!     // …request() delegates the same way
+//! }
 //! ```
+//!
+//! Over a pair the newtype is `AppSession(CompositeSession<PgSession, RestSession<Client>>)`
+//! and the delegates are reached as `self.0.first()` and `self.0.second()`;
+//! everything else reads the same.
 //!
 //! The newtype is also what the orphan rule requires: neither the capability
 //! nor the composite belongs to the application, so it cannot write the impl
 //! directly. Naming the delegate is a line of code; picking it by search is a
 //! bug waiting for the second database.
-
-#[allow(unused_imports)] // referenced by the module documentation
-use crate::session::Session;
 
 pub mod many;
 pub mod pair;

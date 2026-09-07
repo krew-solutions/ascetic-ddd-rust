@@ -27,7 +27,7 @@
 //!     fn on_scope_ended(&self, _event: &ScopeEnded) { /* … */ }
 //! }
 //!
-//! let observer = (Log, Metrics);   // CompositeSignal, выраженный значением
+//! let observer = (Log, Metrics);   // the other ports' CompositeSignal, as a value
 //! ```
 //!
 //! This trait carries only what every session does: opening and closing scopes.

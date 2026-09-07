@@ -30,7 +30,7 @@ use crate::error::SessionError;
 /// # async fn example<S: Session>(session: &S) -> Result<i64, SessionError> {
 /// session.atomic(async |session| {
 ///     // … repositories take `session` …
-///     session.atomic(async |_session| Ok(())).await?;   // вложенный => SAVEPOINT
+///     session.atomic(async |_session| Ok(())).await?;   // nested => SAVEPOINT
 ///     Ok(42)
 /// }).await
 /// # }

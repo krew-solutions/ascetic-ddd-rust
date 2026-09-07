@@ -18,7 +18,7 @@ use super::observer::PgObserver;
 /// mentions this trait, which is what keeps the connection out of its reach.
 ///
 /// ```ignore
-/// impl<S: Session + PgAccess> OrderRepository<S> for PgOrderRepository { … }
+/// impl<S: Session + PgAccess> OrderRepository<S> for PgOrderRepository { /* … */ }
 /// ```
 pub trait PgAccess {
     /// The connection of the current scope.

@@ -192,6 +192,13 @@ one database — are `Many<S>` instead. The scopes nest a run-time number of
 times, so the recursion is boxed; the box holds the concrete future, so `Send`
 is inferred from the scope as it is for every other session.
 
+Every composite boxes the scope future at each level, which keeps the
+compiler's layout of nested scopes within the default `recursion_limit`. The
+`Send` check of nested futures is a separate recursion the box does not cut:
+an application that spawns deeply nested composite scopes on a multi-thread
+runtime — measured at two delegates and five nested scopes — may need
+`#![recursion_limit = "256"]` in its own crate. The error names the limit.
+
 ## PostgreSQL
 
 Behind the `pg` feature, on `tokio-postgres` and `deadpool-postgres`:
