@@ -59,10 +59,14 @@ Pushing to a Prometheus pushgateway, shipping spans to a collector, writing to a
 remote log — all of it is `await`, and none of it belongs inside a scope. Put a
 channel between them: the observer enqueues, a task of its own does the IO.
 
-The code below is `tests/observer_channel.rs`, which runs on every `cargo test`.
+The observer below is quoted from `tests/observer_channel.rs`, and a test
+(`tests/observers_md.rs`) checks that the quote is exact, so it cannot drift
+from what runs. The consumer is a sketch: the test's one collects the samples
+instead of pushing them.
 
 ### The observer enqueues
 
+<!-- verbatim: tests/observer_channel.rs -->
 ```rust
 struct Metrics {
     samples: mpsc::Sender<Sample>,
@@ -77,6 +81,10 @@ impl SessionObserver for Metrics {
             outcome: event.outcome,
         };
 
+        // `try_send` never waits. A full queue means the consumer is behind;
+        // dropping a sample is the right answer, and counting the drops keeps
+        // that visible. Blocking here would put the metrics backend on the
+        // completion path of a transaction.
         if self.samples.try_send(sample).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
