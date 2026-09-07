@@ -15,8 +15,7 @@
 //!   reached as `.second().first()`.
 //! - [`tuple`][mod@tuple] — a tuple of two to eight sessions is itself a session, and the
 //!   delegates stay flat: `sessions.0`, `sessions.1`, `sessions.2`.
-//! - [`many`] — delegates of one type whose number is known only at run time,
-//!   at the price of a future that is not `Send`.
+//! - [`many`] — delegates of one type whose number is known only at run time.
 //!
 //! # What it is not
 //!

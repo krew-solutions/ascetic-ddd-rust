@@ -27,33 +27,19 @@
 //! a scope of its own — a scope over three shards is three transactions, not
 //! one. Nothing here makes them atomic together; that is what a saga is for.
 //!
-//! # The future is not `Send`
+//! # `Send`
 //!
 //! A count known only at run time means the scopes nest a run-time number of
-//! times, which means the future has to be boxed — and a boxed future is `Send`
-//! only if what it holds is. What it holds includes the caller's scope closure
-//! and its result, and [`Session::atomic`] requires neither to be `Send`. So
-//! the box cannot promise it either:
+//! times, so the recursion is boxed. The box holds the concrete future, not a
+//! `dyn Future`, so whether the whole is `Send` is still read off its contents
+//! — as for every other session in this crate: a `Send` scope gives a `Send`
+//! future, and a scope that is not `Send` is still accepted.
 //!
-//! ```text
-//! error[E0277]: `dyn Future<Output = …>` cannot be sent between threads safely
-//! ```
-//!
-//! In practice: a `Many` scope runs on a current-thread runtime, or anywhere
-//! the future is awaited rather than handed to `tokio::spawn` on a multi-thread
-//! runtime. Every other session in this crate returns a `Send` future.
-//!
-//! Lifting this means requiring `Send` of the scope and its result in
-//! [`Session`] itself, so that the box can promise it. That is a change to the
-//! trait every session implements, and it has not been made.
-
-use std::pin::Pin;
+//! The box also ends the compiler's walk over nested closures at each level, so
+//! the layout of a `Many` scope does not grow with the number of delegates.
 
 use crate::error::SessionError;
 use crate::session::{Session, SessionPool};
-
-/// A future that has to be boxed because the recursion depth is dynamic.
-type Nested<'a, T, E> = Pin<Box<dyn Future<Output = Result<T, E>> + 'a>>;
 
 /// Several sessions — or pools — of the same type, acting as one.
 #[derive(Clone, Debug, Default)]
@@ -99,49 +85,47 @@ fn with<S>(opened: Vec<S>, next: S) -> Vec<S> {
 }
 
 /// Opens a scope on the first delegate and continues with the rest inside it.
-fn open_scopes<'a, S, T, E, F>(rest: &'a [S], opened: Vec<S>, scope: F) -> Nested<'a, T, E>
+///
+/// The recursive call is boxed, as a recursive `async fn` must be; the box
+/// holds the concrete future, so `Send` is inferred rather than promised.
+async fn open_scopes<S, T, E, F>(rest: &[S], opened: Vec<S>, scope: F) -> Result<T, E>
 where
-    S: Session + 'a,
-    T: 'a,
-    E: From<SessionError> + 'a,
-    F: AsyncFnOnce(&Many<S>) -> Result<T, E> + 'a,
+    S: Session,
+    E: From<SessionError>,
+    F: AsyncFnOnce(&Many<S>) -> Result<T, E>,
 {
-    Box::pin(async move {
-        match rest.split_first() {
-            None => scope(&Many(opened)).await,
-            Some((head, tail)) => {
-                head.atomic(async |opened_head: &S| {
-                    open_scopes(tail, with(opened, opened_head.clone()), scope).await
-                })
-                .await
-            }
+    match rest.split_first() {
+        None => scope(&Many(opened)).await,
+        Some((head, tail)) => {
+            head.atomic(async |opened_head: &S| {
+                Box::pin(open_scopes(tail, with(opened, opened_head.clone()), scope)).await
+            })
+            .await
         }
-    })
+    }
 }
 
 /// Same, for a set of pools handing out a set of sessions.
-fn open_sessions<'a, P, T, E, F>(
-    rest: &'a [P],
-    opened: Vec<P::Session>,
-    scope: F,
-) -> Nested<'a, T, E>
+async fn open_sessions<P, T, E, F>(rest: &[P], opened: Vec<P::Session>, scope: F) -> Result<T, E>
 where
-    P: SessionPool + 'a,
-    T: 'a,
-    E: From<SessionError> + 'a,
-    F: AsyncFnOnce(&Many<P::Session>) -> Result<T, E> + 'a,
+    P: SessionPool,
+    E: From<SessionError>,
+    F: AsyncFnOnce(&Many<P::Session>) -> Result<T, E>,
 {
-    Box::pin(async move {
-        match rest.split_first() {
-            None => scope(&Many(opened)).await,
-            Some((head, tail)) => {
-                head.session(async |opened_head: &P::Session| {
-                    open_sessions(tail, with(opened, opened_head.clone()), scope).await
-                })
+    match rest.split_first() {
+        None => scope(&Many(opened)).await,
+        Some((head, tail)) => {
+            head.session(async |opened_head: &P::Session| {
+                Box::pin(open_sessions(
+                    tail,
+                    with(opened, opened_head.clone()),
+                    scope,
+                ))
                 .await
-            }
+            })
+            .await
         }
-    })
+    }
 }
 
 impl<S: Session> Session for Many<S> {

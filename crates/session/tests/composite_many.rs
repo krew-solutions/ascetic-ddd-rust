@@ -198,3 +198,64 @@ fn shard_scopes_nest() {
         ["BEGIN", "SAVEPOINT sp1", "RELEASE SAVEPOINT sp1", "COMMIT"],
     );
 }
+
+fn assert_send<T: Send>(future: T) -> T {
+    future
+}
+
+/// The recursion is boxed with a concrete type, so a `Send` scope gives a
+/// `Send` future — no bound in `Session` promises it.
+#[test]
+fn a_send_scope_gives_a_send_future() {
+    let (pools, _journals) = shards(3);
+
+    let count = block_on(assert_send(pools.session(async |shards| {
+        shards
+            .atomic(async |shards| Ok::<_, AppError>(shards.len()))
+            .await
+    })))
+    .unwrap();
+
+    assert_eq!(count, 3);
+}
+
+/// And a scope that is not `Send` is still accepted, as everywhere else.
+#[test]
+fn a_scope_that_is_not_send_is_still_accepted() {
+    let (pools, _journals) = shards(2);
+    let local = std::rc::Rc::new(());
+
+    block_on(pools.session(async |shards| {
+        shards
+            .atomic(async |_| {
+                let _held_across_await = &local;
+                Ok::<_, AppError>(())
+            })
+            .await
+    }))
+    .unwrap();
+}
+
+/// What the `Send` future is for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_scope_can_be_spawned_on_a_multi_thread_runtime() {
+    let (pools, journals) = shards(3);
+
+    let count = tokio::spawn(async move {
+        pools
+            .session(async |shards| {
+                shards
+                    .atomic(async |shards| Ok::<_, AppError>(shards.len()))
+                    .await
+            })
+            .await
+    })
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(count, 3);
+    for journal in &journals {
+        assert_eq!(journal.entries(), ["BEGIN", "COMMIT"]);
+    }
+}
