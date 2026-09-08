@@ -100,7 +100,10 @@ Three points where it differs from the other ports:
   lacking weak references, degraded this to a plain LRU cache — there an entity
   evicted from the window is gone even though the domain still holds it, which
   breaks the "one instance per session" guarantee. `Weak<T>` restores the
-  Python semantics.
+  Python semantics. What it does not restore is the weak dictionary's
+  self-cleaning: a `Weak` has no callback, so an entry whose entity has died
+  is swept once every `len` operations instead — a constant per operation, and
+  a stream of any length leaves no dead entries behind.
 * **Three outcomes instead of two exceptions.** `KeyError` and `ObjectNotFound`
   become `Lookup::Unknown` and `Lookup::Absent`, so the caller matches on the
   answer rather than catching.
