@@ -13,6 +13,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ascetic-ddd-outbox"
+version = "0.1.0"
+dependencies = [
+ "ascetic-ddd-session",
+ "futures",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
 name = "ascetic-ddd-rop"
 version = "0.1.0"
 
@@ -570,6 +581,8 @@ dependencies = [
  "bytes",
  "fallible-iterator",
  "postgres-protocol",
+ "serde_core",
+ "serde_json",
 ]
 
 [[package]]
