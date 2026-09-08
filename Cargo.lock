@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "ascetic-ddd-rop"
+version = "0.1.0"
+
+[[package]]
 name = "ascetic-ddd-saga"
 version = "0.1.0"
 dependencies = [
