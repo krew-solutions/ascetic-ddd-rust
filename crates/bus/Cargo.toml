@@ -1,0 +1,28 @@
+[package]
+name = "ascetic-ddd-bus"
+description = "Scheme-dispatched message bus: typed producers and consumers over opaque wire messages, with in-memory and Kafka adapters."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[features]
+# Kafka adapter: pulls in the driver; librdkafka is built from source unless
+# `rdkafka/dynamic-linking` is enabled downstream.
+kafka = ["dep:rdkafka"]
+
+[dependencies]
+futures.workspace = true
+log = "0.4"
+rdkafka = { version = "0.39", optional = true }
+tokio = { version = "1.53.1", features = ["rt", "sync"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "time"] }
