@@ -77,6 +77,9 @@ impl IdentityKey for OrderKey {
     type Entity = Order;    // the key pins the entity type
 }
 
+// the same five lines, written by the crate:
+identity_key!(OrderKey(i64) => Order);
+
 match map.get(&OrderKey(7)) {
     Lookup::Found(order) => Ok(Some(order)),  // already loaded
     Lookup::Absent       => Ok(None),         // known not to exist: no query
@@ -268,7 +271,7 @@ ASCETIC_DDD_TEST_PG_URL=postgresql://user:pass@localhost/db \
 
 What the integration tests cover:
 
-* 19 on the identity map — the 18 from the Python suite plus the LRU-eviction
+* 21 on the identity map — the 18 from the Python suite plus the LRU-eviction
   case the Go port adds, with two extra cases for weak-reference behaviour that
   only this port can express;
 * 15 on the session — nesting, both failure paths, scope notifications,

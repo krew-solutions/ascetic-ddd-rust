@@ -36,7 +36,6 @@
 
 pub mod composite;
 pub mod error;
-pub mod identity_key;
 pub mod identity_map;
 pub mod isolation;
 pub mod observer;
@@ -49,8 +48,7 @@ pub mod testing;
 pub use crate::composite::many::Many;
 pub use crate::composite::pair::{CompositeSession, CompositeSessionPool};
 pub use crate::error::{BoxError, SessionError};
-pub use crate::identity_key::IdentityKey;
-pub use crate::identity_map::{DEFAULT_CACHE_SIZE, IdentityMap, Lookup};
+pub use crate::identity_map::{DEFAULT_CACHE_SIZE, IdentityKey, IdentityMap, Lookup};
 pub use crate::isolation::IsolationLevel;
 pub use crate::observer::SessionObserver;
 #[cfg(feature = "pg")]

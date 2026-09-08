@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use ascetic_ddd_session::{IdentityKey, IdentityMap, IsolationLevel, Lookup};
+use ascetic_ddd_session::{IdentityKey, IdentityMap, IsolationLevel, Lookup, identity_key};
 
 #[derive(Debug, PartialEq)]
 struct Model {
@@ -273,4 +273,41 @@ fn shrinking_the_window_drops_anchors() {
 
     assert!(matches!(map.get(&ModelKey(1)), Lookup::Unknown));
     assert!(matches!(map.get(&ModelKey(2)), Lookup::Found(_)));
+}
+
+/// What has just been used is recently used: an entity found after the window
+/// let it go re-enters the window, and pushes out what is older.
+#[test]
+fn a_found_entity_is_anchored_again() {
+    let map = IdentityMap::new(1, IsolationLevel::Serializable);
+    let held = model(1);
+    map.add(ModelKey(1), Arc::clone(&held));
+    map.add(ModelKey(2), model(2)); // 1 is released, 2 is anchored
+
+    assert!(matches!(map.get(&ModelKey(1)), Lookup::Found(_))); // 1 is anchored again
+    assert!(matches!(map.get(&ModelKey(2)), Lookup::Unknown)); // 2 fell out and nobody held it
+}
+
+/// The macro writes the newtype and the pairing; the key then behaves like a
+/// hand-written one.
+#[test]
+fn a_key_declared_by_the_macro_works() {
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    struct ModelId(i64);
+
+    identity_key!(#[derive(Debug)] ModelIdKey(ModelId) => Model);
+
+    let map = serializable();
+    let entity = model(7);
+    map.add(ModelIdKey(ModelId(7)), Arc::clone(&entity));
+
+    let Lookup::Found(found) = map.get(&ModelIdKey(ModelId(7))) else {
+        panic!("expected the entity to be found");
+    };
+
+    assert!(Arc::ptr_eq(&entity, &found));
+    assert!(
+        !map.has(&ModelKey(7)),
+        "a different key type is a different key"
+    );
 }

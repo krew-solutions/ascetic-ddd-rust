@@ -18,22 +18,3 @@ pub enum IsolationLevel {
     #[default]
     Serializable,
 }
-
-impl IsolationLevel {
-    /// True if the map remembers entities it has been given.
-    pub(crate) fn caches_present(self) -> bool {
-        matches!(
-            self,
-            IsolationLevel::RepeatableRead | IsolationLevel::Serializable
-        )
-    }
-
-    /// True if the map remembers that an entity does *not* exist.
-    ///
-    /// Only a serializable transaction may do this: at a weaker level another
-    /// transaction may insert the row in the meantime, so a remembered absence
-    /// would become a phantom.
-    pub(crate) fn caches_absent(self) -> bool {
-        matches!(self, IsolationLevel::Serializable)
-    }
-}
