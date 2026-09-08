@@ -92,8 +92,11 @@ Three points where it differs from the other ports:
 * **The key carries the entity type.** Python pairs `(type, id)` at run time;
   Go marks the pairing with a phantom method. Here `type Entity` makes the
   lookup return `Arc<K::Entity>` with no type argument and no cast.
-* **Entries are weak, anchored by an LRU window.** An entity stays reachable
-  while the domain holds it *or* while it is inside the window. The Go port,
+* **Entries are weak, anchored by a window.** An entity stays reachable
+  while the domain holds it *or* while it is inside the window. The window
+  keeps an exact order of last use by default; `IdentityMap::generational`
+  swaps in Storm's generational cache, which keeps no order and lets a whole
+  generation go at once. The Go port,
   lacking weak references, degraded this to a plain LRU cache — there an entity
   evicted from the window is gone even though the domain still holds it, which
   breaks the "one instance per session" guarantee. `Weak<T>` restores the
@@ -271,9 +274,10 @@ ASCETIC_DDD_TEST_PG_URL=postgresql://user:pass@localhost/db \
 
 What the integration tests cover:
 
-* 21 on the identity map — the 18 from the Python suite plus the LRU-eviction
+* 27 on the identity map — the 18 from the Python suite plus the LRU-eviction
   case the Go port adds, with two extra cases for weak-reference behaviour that
-  only this port can express;
+  only this port can express, the key macro, and six on the generational
+  window;
 * 15 on the session — nesting, both failure paths, scope notifications,
   identity-map sharing, concurrent work inside one scope, error conversion, and
   the scope guard (refusal, nesting still allowed, sequential scopes allowed,

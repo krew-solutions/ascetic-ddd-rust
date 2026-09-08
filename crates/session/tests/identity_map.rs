@@ -311,3 +311,89 @@ fn a_key_declared_by_the_macro_works() {
         "a different key type is a different key"
     );
 }
+
+// -------------------------- the generational window --------------------------
+// After Storm's `GenerationalCache`: no order is kept. A key survives between
+// `size` and `2 * size` admissions, and one that keeps being used survives.
+
+fn generational(size: usize) -> IdentityMap {
+    IdentityMap::generational(size, IsolationLevel::Serializable)
+}
+
+#[test]
+fn generations_forget_an_entity_nobody_holds_two_generations_later() {
+    let map = generational(1);
+    map.add(ModelKey(1), model(1));
+    map.add(ModelKey(2), model(2)); // the generation of 1 grows old
+    map.add(ModelKey(3), model(3)); // and is let go of
+
+    assert!(matches!(map.get(&ModelKey(1)), Lookup::Unknown));
+    assert!(matches!(map.get(&ModelKey(2)), Lookup::Found(_)));
+    assert!(matches!(map.get(&ModelKey(3)), Lookup::Found(_)));
+}
+
+#[test]
+fn generations_keep_an_entity_the_domain_holds() {
+    let map = generational(1);
+    let held = model(1);
+    map.add(ModelKey(1), Arc::clone(&held));
+    map.add(ModelKey(2), model(2));
+    map.add(ModelKey(3), model(3));
+
+    let Lookup::Found(found) = map.get(&ModelKey(1)) else {
+        panic!("the domain still holds the entity, so the map must find it");
+    };
+
+    assert!(Arc::ptr_eq(&held, &found));
+}
+
+#[test]
+fn generations_keep_an_entity_that_keeps_being_used() {
+    let map = generational(1);
+    map.add(ModelKey(1), model(1));
+    for other in 2..=10 {
+        assert!(matches!(map.get(&ModelKey(1)), Lookup::Found(_)));
+        map.add(ModelKey(other), model(other));
+    }
+
+    assert!(matches!(map.get(&ModelKey(1)), Lookup::Found(_)));
+    assert!(matches!(map.get(&ModelKey(2)), Lookup::Unknown));
+}
+
+#[test]
+fn generations_anchor_a_found_entity_again() {
+    let map = generational(1);
+    let held = model(1);
+    map.add(ModelKey(1), Arc::clone(&held));
+    map.add(ModelKey(2), model(2));
+    map.add(ModelKey(3), model(3)); // 1 is released: alive only because the domain holds it
+
+    assert!(matches!(map.get(&ModelKey(1)), Lookup::Found(_))); // and anchored again
+    map.add(ModelKey(4), model(4));
+    map.add(ModelKey(5), model(5)); // two generations later 1 is released once more
+
+    drop(held);
+    assert!(matches!(map.get(&ModelKey(1)), Lookup::Unknown));
+    assert!(matches!(map.get(&ModelKey(3)), Lookup::Unknown));
+}
+
+#[test]
+fn generations_hold_between_size_and_twice_the_size() {
+    let map = generational(2);
+    for id in 1..=10 {
+        map.add(ModelKey(id), model(id));
+    }
+
+    assert!((2..=4).contains(&map.len()), "{}", map.len());
+}
+
+#[test]
+fn generations_shrink_to_at_most_the_new_size() {
+    let map = generational(10);
+    map.add(ModelKey(1), model(1));
+    map.add(ModelKey(2), model(2));
+
+    map.set_size(1);
+
+    assert_eq!(map.len(), 1);
+}

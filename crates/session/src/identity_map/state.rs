@@ -1,40 +1,34 @@
-//! The map's memory: a slot per key, and the recency window over the anchored
-//! ones.
+//! The map's memory: a slot per key, and a window over the anchored ones.
 //!
-//! One invariant, kept in one place (`place`): a slot is anchored exactly when
-//! `recency` holds its tick, so the window is `recency` itself and its size is
-//! `recency.len()`.
+//! One invariant: a key is in the window exactly when its slot is anchored.
+//! The window says which keys it lets go of; `release` turns their slots into
+//! released ones, or forgets them.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use super::Lookup;
 use super::key::{DynKey, KeyBox};
 use super::slot::{AnyLookup, Fact, Slot};
+use super::window::Window;
 
 pub(super) struct State {
-    size: usize,
-    clock: u64,
     slots: HashMap<KeyBox, Slot>,
-    /// Anchored keys by the tick of their last use, oldest first.
-    recency: BTreeMap<u64, KeyBox>,
+    window: Window,
 }
 
 impl State {
-    pub(super) fn new(size: usize) -> Self {
+    pub(super) fn new(window: Window) -> Self {
         State {
-            size,
-            clock: 0,
             slots: HashMap::new(),
-            recency: BTreeMap::new(),
+            window,
         }
     }
 
-    /// Remembers a fact as the most recently used, replacing what the key had.
+    /// Remembers a fact as just used, replacing what the key had.
     pub(super) fn remember(&mut self, key: KeyBox, fact: Fact) {
-        let previous = self.slots.remove(&key).and_then(|slot| slot.since());
-        let since = self.tick();
-        self.place(key, previous, Some(Slot::Anchored { since, fact }));
-        self.evict();
+        self.slots.insert(key.clone(), Slot::Anchored(fact));
+        let gone = self.window.admit(key);
+        self.release(gone);
     }
 
     /// Answers for the key, and records the use.
@@ -42,23 +36,26 @@ impl State {
         let Some((key, slot)) = self.slots.remove_entry(key) else {
             return Lookup::Unknown;
         };
-        let previous = slot.since();
-        let now = self.tick();
-        let (next, answer) = slot.recall(now);
-        self.place(key, previous, next);
-        self.evict();
+        let (next, answer) = slot.recall();
+        match next {
+            Some(slot) => {
+                self.slots.insert(key.clone(), slot);
+                let gone = self.window.admit(key);
+                self.release(gone);
+            }
+            None => self.window.remove(key.as_dyn()),
+        }
         answer
     }
 
     pub(super) fn forget(&mut self, key: &(dyn DynKey + 'static)) {
-        if let Some(tick) = self.slots.remove(key).and_then(|slot| slot.since()) {
-            self.recency.remove(&tick);
-        }
+        self.slots.remove(key);
+        self.window.remove(key);
     }
 
     pub(super) fn forget_all(&mut self) {
         self.slots.clear();
-        self.recency.clear();
+        self.window.clear();
     }
 
     /// Number of keys that can still be answered for. Entities the domain has
@@ -69,34 +66,13 @@ impl State {
     }
 
     pub(super) fn resize(&mut self, size: usize) {
-        self.size = size;
-        self.evict();
+        let gone = self.window.resize(size);
+        self.release(gone);
     }
 
-    fn tick(&mut self) -> u64 {
-        self.clock += 1;
-        self.clock
-    }
-
-    /// Installs the next state of a key, keeping `recency` in step with it.
-    fn place(&mut self, key: KeyBox, previous: Option<u64>, next: Option<Slot>) {
-        if let Some(tick) = previous {
-            self.recency.remove(&tick);
-        }
-        if let Some(slot) = next {
-            if let Some(since) = slot.since() {
-                self.recency.insert(since, key.clone());
-            }
-            self.slots.insert(key, slot);
-        }
-    }
-
-    /// Releases the least recently used keys until the window fits.
-    fn evict(&mut self) {
-        while self.recency.len() > self.size {
-            let Some((_, key)) = self.recency.pop_first() else {
-                break;
-            };
+    /// The window let these keys go: their slots leave the anchored state.
+    fn release(&mut self, gone: Vec<KeyBox>) {
+        for key in gone {
             if let Some(next) = self.slots.remove(&key).and_then(Slot::release) {
                 self.slots.insert(key, next);
             }

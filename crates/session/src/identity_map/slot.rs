@@ -49,26 +49,17 @@ impl Fact {
 
 /// What the map knows about a key.
 pub(super) enum Slot {
-    /// In the window, kept alive by the map; `since` is its place in the
-    /// recency order.
-    Anchored { since: u64, fact: Fact },
+    /// In the window, kept alive by the map.
+    Anchored(Fact),
     /// Out of the window: alive only while the domain holds the entity.
     Released(AnyWeak),
 }
 
 impl Slot {
-    /// The slot's place in the recency order, if it is in the window.
-    pub(super) fn since(&self) -> Option<u64> {
-        match self {
-            Slot::Anchored { since, .. } => Some(*since),
-            Slot::Released(_) => None,
-        }
-    }
-
     /// True while the slot can still answer.
     pub(super) fn is_alive(&self) -> bool {
         match self {
-            Slot::Anchored { .. } => true,
+            Slot::Anchored(_) => true,
             Slot::Released(weak) => weak.strong_count() > 0,
         }
     }
@@ -77,37 +68,28 @@ impl Slot {
     /// an entity nobody holds, or an absence, is forgotten.
     pub(super) fn release(self) -> Option<Slot> {
         match self {
-            Slot::Anchored {
-                fact: Fact::Entity(entity),
-                ..
-            } => {
+            Slot::Anchored(Fact::Entity(entity)) => {
                 let weak = Arc::downgrade(&entity);
                 drop(entity);
                 (weak.strong_count() > 0).then_some(Slot::Released(weak))
             }
-            Slot::Anchored {
-                fact: Fact::Absence,
-                ..
-            } => None,
+            Slot::Anchored(Fact::Absence) => None,
             released @ Slot::Released(_) => Some(released),
         }
     }
 
-    /// Answers for the key and moves it to the front of the window: what has
-    /// just been used is recently used. A released entity the domain has let
-    /// go of is found to be gone, and the slot with it.
-    pub(super) fn recall(self, now: u64) -> (Option<Slot>, AnyLookup) {
+    /// Answers for the key. A released entity the domain still holds is
+    /// anchored again — what has just been used is recently used; one the
+    /// domain has let go of is found to be gone, and the slot with it.
+    pub(super) fn recall(self) -> (Option<Slot>, AnyLookup) {
         match self {
-            Slot::Anchored { fact, .. } => {
+            Slot::Anchored(fact) => {
                 let answer = fact.recall();
-                (Some(Slot::Anchored { since: now, fact }), answer)
+                (Some(Slot::Anchored(fact)), answer)
             }
             Slot::Released(weak) => match weak.upgrade() {
                 Some(entity) => (
-                    Some(Slot::Anchored {
-                        since: now,
-                        fact: Fact::Entity(Arc::clone(&entity)),
-                    }),
+                    Some(Slot::Anchored(Fact::Entity(Arc::clone(&entity)))),
                     Lookup::Found(entity),
                 ),
                 None => (None, Lookup::Unknown),

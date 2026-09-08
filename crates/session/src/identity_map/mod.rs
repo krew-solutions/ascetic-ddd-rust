@@ -12,8 +12,10 @@
 //!   anchored in the recency window, or released and alive only while the
 //!   domain holds the entity. Every change of knowledge is a function from one
 //!   state to the next; the map only applies them. See `slot`.
-//! * Recency is exact — a `BTreeMap` from tick to key — so there is nothing to
-//!   compact and every operation is O(log n) with n bounded by the window.
+//! * The window that anchors keys comes in two kinds, as in Storm's ORM: an
+//!   exact order of last use ([`IdentityMap::new`]), or generations
+//!   ([`IdentityMap::generational`]), which keep no order and let a whole
+//!   generation go at once. See `window`.
 //! * An entity found after it was released is anchored again: what has just
 //!   been used is, by definition, recently used.
 //!
@@ -22,10 +24,13 @@
 //! and disappears once neither is true. Every method takes `&self`; the
 //! mutation lives behind a lock.
 
+mod generations;
 mod key;
 mod policy;
+mod recency;
 mod slot;
 mod state;
+mod window;
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -33,9 +38,10 @@ pub use self::key::IdentityKey;
 use self::key::KeyBox;
 use self::slot::{AnyLookup, Fact, Kind};
 use self::state::State;
+use self::window::Window;
 use crate::isolation::IsolationLevel;
 
-/// Default size of the recency window.
+/// Default size of the window.
 pub const DEFAULT_CACHE_SIZE: usize = 100;
 
 /// Outcome of a lookup.
@@ -90,11 +96,30 @@ pub struct IdentityMap {
 }
 
 impl IdentityMap {
-    /// Creates a map with the given window and isolation level.
+    /// Creates a map whose window keeps an exact order of last use and lets
+    /// the oldest key go first.
     pub fn new(cache_size: usize, isolation: IsolationLevel) -> Self {
+        IdentityMap::over(
+            Window::Recency(recency::Recency::new(cache_size)),
+            isolation,
+        )
+    }
+
+    /// Creates a map whose window keeps no order: keys are let go of a
+    /// generation at a time, after Storm's `GenerationalCache`. A key survives
+    /// between `cache_size` and `2 * cache_size` admissions, and one that keeps
+    /// being used survives for as long as it is used.
+    pub fn generational(cache_size: usize, isolation: IsolationLevel) -> Self {
+        IdentityMap::over(
+            Window::Generations(generations::Generations::new(cache_size)),
+            isolation,
+        )
+    }
+
+    fn over(window: Window, isolation: IsolationLevel) -> Self {
         IdentityMap {
             isolation,
-            state: Mutex::new(State::new(cache_size)),
+            state: Mutex::new(State::new(window)),
         }
     }
 
