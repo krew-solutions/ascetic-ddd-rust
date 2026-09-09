@@ -132,7 +132,7 @@ fn message(uri: &str, id: u64) -> OutboxMessage {
     OutboxMessage::new(
         uri,
         id.to_string(),
-        json!({ "event_id": format!("00000000-0000-4000-8000-{event:012x}") }),
+        json!({ "message_id": format!("00000000-0000-4000-8000-{event:012x}") }),
     )
 }
 
@@ -386,8 +386,8 @@ async fn a_failing_subscriber_rolls_the_batch_back() {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
-async fn an_event_id_is_published_once() {
-    let f = fixture("event_id").await;
+async fn an_message_id_is_published_once() {
+    let f = fixture("message_id").await;
     let first = message("kafka://orders", 1);
     let mut duplicate = message("kafka://orders", 2);
     duplicate.metadata = first.metadata.clone();

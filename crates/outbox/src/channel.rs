@@ -11,7 +11,7 @@
 //! `Target::Header("destination")` is the dispatcher process.
 //!
 //! Headers become `metadata`: each header is a string field of the JSONB
-//! object, so `event_id` keeps its unique index, and every metadata field
+//! object, so `message_id` keeps its unique index, and every metadata field
 //! comes back as a header. The channel name after `outbox://` is not read
 //! yet: the whole outbox is one channel.
 

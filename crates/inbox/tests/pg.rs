@@ -113,7 +113,7 @@ fn message(stream: &str, position: i32) -> InboxMessage {
         format!("kafka://orders/{stream}"),
         format!("{stream}@{position}"),
     )
-    .with_metadata(json!({ "event_id": format!("00000000-0000-4000-8000-{event:012x}") }))
+    .with_metadata(json!({ "message_id": format!("00000000-0000-4000-8000-{event:012x}") }))
 }
 
 fn label(message: &InboxMessage) -> String {
@@ -185,8 +185,8 @@ async fn receiving_the_same_message_twice_stores_it_once() {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
-async fn an_event_id_is_stored_once() {
-    let f = fixture("event_id").await;
+async fn an_message_id_is_stored_once() {
+    let f = fixture("message_id").await;
     let first = message("a", 1);
     let mut other = message("a", 2);
     other.metadata = first.metadata.clone();

@@ -4,7 +4,7 @@
 //!
 //! A message is a row whose primary key is its identity,
 //! `(tenant_id, stream_type, stream_id, stream_position)`. Receiving the
-//! same message again is `INSERT … ON CONFLICT DO NOTHING`. An `event_id` in
+//! same message again is `INSERT … ON CONFLICT DO NOTHING`. A `message_id` in
 //! the metadata is unique in the table too.
 //!
 //! # Processing
@@ -236,8 +236,8 @@ where
             CREATE INDEX IF NOT EXISTS {table}__received_position_idx ON {table} (received_position);
             CREATE INDEX IF NOT EXISTS {table}__processed_position_idx
                 ON {table} (processed_position) WHERE processed_position IS NULL;
-            CREATE UNIQUE INDEX IF NOT EXISTS {table}__event_id_uniq
-                ON {table} (((metadata->>'event_id')::uuid));
+            CREATE UNIQUE INDEX IF NOT EXISTS {table}__message_id_uniq
+                ON {table} (((metadata->>'message_id')::uuid));
             "#
         );
         session.connection().batch_execute(&ddl).await?;

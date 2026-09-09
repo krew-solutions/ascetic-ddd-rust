@@ -26,7 +26,7 @@ outbox.run(send_to_broker, &Selection::group("broker"), Workers::default(), ctrl
   transaction commits after a fast one that took the next number.
 * **At least once.** The subscriber runs inside the dispatcher's transaction
   and the position is acknowledged after the batch. A crash in between
-  redelivers; consumers deduplicate on `metadata.event_id`, which is unique
+  redelivers; consumers deduplicate on `metadata.message_id`, which is unique
   in the table.
 * **One dispatcher at a time per group.** The group's position row is locked
   for the length of a batch.
@@ -63,7 +63,7 @@ session.atomic(async |tx| placed.publish(tx, &event).await).await?;
 let dispatcher = Bridge::new(bus).run("outbox://all", "dispatcher", Target::Header("destination".into()))?;
 ```
 
-Headers travel as string fields of `metadata`, so `event_id` keeps its unique
+Headers travel as string fields of `metadata`, so `message_id` keeps its unique
 index. The dispatcher runs on a thread of its own that blocks on the tokio
 runtime: code generic over the session pool cannot show its future is
 `Send`, so it cannot be a spawned task. Cancel the subscription before the
@@ -83,6 +83,10 @@ runtime shuts down.
 * The transaction id is a `u64`, which is exactly `xid8`.
 * `payload` is bytes, not JSONB: serialized, and encrypted where required,
   before the outbox (ADR-0002); `metadata` stays JSONB.
+* The identifier is `message_id`, not `event_id`: the outbox carries command
+  messages as well as event messages, and the receiver deduplicates on the
+  message, whatever it says. This port is the reference now; the other
+  ports follow.
 
 ## Testing
 

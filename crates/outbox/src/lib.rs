@@ -13,7 +13,7 @@
 //!     outbox.publish(tx, &OutboxMessage::new(
 //!         "kafka://orders",
 //!         encode(&OrderPlaced { order_id: order.id }),   // wire bytes, ADR-0002
-//!         json!({ "event_id": event_id }),
+//!         json!({ "message_id": message_id }),
 //!     )).await?;
 //!     Ok(())
 //! }).await?;

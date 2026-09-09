@@ -16,7 +16,7 @@ pub struct OutboxMessage {
     /// The message as it goes on the wire: serialized, and encrypted where
     /// the deployment requires it, before it reaches the outbox (ADR-0002).
     pub payload: Vec<u8>,
-    /// About the message: must carry an `event_id` (a UUID) for idempotency,
+    /// About the message: must carry an `message_id` (a UUID) for idempotency,
     /// and may carry `correlation_id`, `causation_id` and the like.
     pub metadata: Value,
     /// When the row was inserted, as the database prints it.

@@ -26,7 +26,7 @@
 //!
 //! At least once. The subscriber runs inside the dispatcher's transaction
 //! and the position is acknowledged after the batch; a crash in between
-//! redelivers the batch. Consumers deduplicate on `metadata.event_id`.
+//! redelivers the batch. Consumers deduplicate on `metadata.message_id`.
 
 use std::time::Duration;
 
@@ -335,8 +335,8 @@ where
             );
             CREATE INDEX IF NOT EXISTS {outbox}_position_idx ON {outbox} ("position");
             CREATE INDEX IF NOT EXISTS {outbox}_uri_idx ON {outbox} ("uri");
-            CREATE UNIQUE INDEX IF NOT EXISTS {outbox}_event_id_uniq
-                ON {outbox} (((metadata->>'event_id')::uuid));
+            CREATE UNIQUE INDEX IF NOT EXISTS {outbox}_message_id_uniq
+                ON {outbox} (((metadata->>'message_id')::uuid));
             CREATE TABLE IF NOT EXISTS {offsets} (
                 "consumer_group" VARCHAR(255) NOT NULL,
                 "uri" VARCHAR(255) NOT NULL DEFAULT '',

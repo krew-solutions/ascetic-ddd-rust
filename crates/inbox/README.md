@@ -17,7 +17,7 @@ inbox.run(|tx, message| handle(tx, message), Workers::default(), ctrl_c).await?;
 
 * **Idempotency.** A message's identity is
   `(tenant_id, stream_type, stream_id, stream_position)` and is the primary
-  key; receiving it again is `ON CONFLICT DO NOTHING`. An `event_id` in the
+  key; receiving it again is `ON CONFLICT DO NOTHING`. A `message_id` in the
   metadata is unique in the table as well.
 * **Once, with the work.** The subscriber runs inside the transaction that
   marks the message processed, and is given that transaction. Its writes and
@@ -47,6 +47,7 @@ loop.
   passes. A subscriber returns a `Result`. There is no async iterator.
 * `payload` is bytes, not JSONB, mirroring the outbox (ADR-0002).
 * `tenant_id` is a `String`; `uri` is 255 characters rather than 60.
+* The identifier is `message_id`, not `event_id`, as in the outbox.
 
 ## Testing
 

@@ -80,7 +80,7 @@ async fn a_committed_message_crosses_the_bridge_and_a_rolled_back_one_does_not()
 
     let producer = outbox.producer("in-memory://orders/order-7", |order: &String| {
         Message::new(order.as_bytes())
-            .with_header("event_id", "00000000-0000-4000-8000-000000000001")
+            .with_header("message_id", "00000000-0000-4000-8000-000000000001")
     });
 
     // Rolled back: never leaves the outbox.
@@ -121,7 +121,7 @@ async fn a_committed_message_crosses_the_bridge_and_a_rolled_back_one_does_not()
         Some(&b"in-memory://orders/order-7"[..])
     );
     assert_eq!(
-        message.header("event_id"),
+        message.header("message_id"),
         Some(&b"00000000-0000-4000-8000-000000000001"[..])
     );
     assert!(

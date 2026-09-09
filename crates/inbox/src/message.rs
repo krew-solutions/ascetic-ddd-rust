@@ -25,7 +25,7 @@ pub struct InboxMessage {
     /// The message as it came off the wire: serialized, and encrypted where
     /// the deployment requires it (ADR-0002).
     pub payload: Vec<u8>,
-    /// About the message: `event_id`, and `causal_dependencies` — messages
+    /// About the message: `message_id`, and `causal_dependencies` — messages
     /// that must be processed before this one.
     pub metadata: Option<Value>,
     /// Order of arrival, assigned by the database.
@@ -99,10 +99,10 @@ impl InboxMessage {
     }
 
     /// The event id, if the metadata carries one.
-    pub fn event_id(&self) -> Option<&str> {
+    pub fn message_id(&self) -> Option<&str> {
         self.metadata
             .as_ref()
-            .and_then(|metadata| metadata.get("event_id"))
+            .and_then(|metadata| metadata.get("message_id"))
             .and_then(Value::as_str)
     }
 }
