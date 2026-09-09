@@ -71,7 +71,9 @@ pub mod uri;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub use crate::adapter::{Adapter, Handler, Subscription, WireConsumer, WireProducer};
+pub use crate::adapter::{
+    Adapter, Handler, Subscription, TransactionalWireProducer, WireConsumer, WireProducer,
+};
 pub use crate::bridge::{Bridge, Target};
 pub use crate::error::{BoxError, Error};
 pub use crate::message::Message;
@@ -214,6 +216,42 @@ impl<T> Producer<T> {
     /// Sends one value. Waits while the transport applies back-pressure.
     pub async fn publish(&self, value: &T) -> Result<(), Error> {
         self.wire.publish((self.encode)(value)).await
+    }
+}
+
+/// A typed producer that publishes inside the caller's transaction.
+///
+/// Built once, at the composition root, from the adapter that offers it —
+/// the outbox — and used with the transaction of the moment: the command
+/// handler's, or the inbox's. The extra argument is the guarantee itself,
+/// named at the call site (ADR-0003).
+pub struct TransactionalProducer<T, S> {
+    wire: Box<dyn TransactionalWireProducer<S>>,
+    encode: Box<dyn Fn(&T) -> Message + Send + Sync>,
+}
+
+impl<T, S> TransactionalProducer<T, S> {
+    /// A typed producer over a transactional wire producer.
+    pub fn new(
+        wire: Box<dyn TransactionalWireProducer<S>>,
+        encode: impl Fn(&T) -> Message + Send + Sync + 'static,
+    ) -> Self {
+        TransactionalProducer {
+            wire,
+            encode: Box::new(encode),
+        }
+    }
+
+    /// Sends one value within `session`'s transaction.
+    pub async fn publish(&self, session: &S, value: &T) -> Result<(), Error> {
+        self.wire.publish(session, (self.encode)(value)).await
+    }
+}
+
+impl<T, S> std::fmt::Debug for TransactionalProducer<T, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TransactionalProducer")
+            .finish_non_exhaustive()
     }
 }
 

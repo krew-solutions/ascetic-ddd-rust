@@ -38,6 +38,15 @@ pub trait WireProducer: Send + Sync {
     fn publish(&self, message: Message) -> BoxFuture<'_, Result<(), Error>>;
 }
 
+/// A producer of wire messages that publishes inside a transaction the
+/// caller holds — the outbox. `S` is whatever the caller's transaction is;
+/// the bus does not know sessions, it only passes one through.
+pub trait TransactionalWireProducer<S>: Send + Sync {
+    /// Sends one message within `session`'s transaction: it is committed
+    /// with the caller's state change, or not at all.
+    fn publish<'a>(&'a self, session: &'a S, message: Message) -> BoxFuture<'a, Result<(), Error>>;
+}
+
 /// A handle on a subscription. [`cancel`][Subscription::cancel] detaches the
 /// handler; a second `cancel` does nothing. Dropping the handle does *not*
 /// cancel — a subscription made at the composition root lives with the
