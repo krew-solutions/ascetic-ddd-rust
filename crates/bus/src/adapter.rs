@@ -9,11 +9,12 @@ use std::sync::{Arc, Mutex};
 
 use futures::future::BoxFuture;
 
-use crate::error::Error;
+use crate::error::{BoxError, Error};
 use crate::message::Message;
 
-/// A wire-level handler: what a consumer runs for each message.
-pub type Handler = Arc<dyn Fn(Message) -> BoxFuture<'static, ()> + Send + Sync>;
+/// A wire-level handler: what a consumer runs for each message. An error
+/// means the message was not handled: a transport that can, redelivers it.
+pub type Handler = Arc<dyn Fn(Message) -> BoxFuture<'static, Result<(), BoxError>> + Send + Sync>;
 
 /// A transport, bound to a URI scheme by [`Bus::register`][crate::Bus::register].
 pub trait Adapter: Send + Sync {

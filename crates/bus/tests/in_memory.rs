@@ -249,3 +249,60 @@ async fn messages_keep_their_order() {
         assert_eq!(next(&mut inbox).await, Some(i.to_string()));
     }
 }
+
+/// `scheme://channel/key`: the key does not make a topic of its own, and a
+/// message published with it carries it.
+#[tokio::test]
+async fn a_key_in_the_uri_selects_the_channel_and_keys_the_message() {
+    let bus = setup();
+    let consumer = bus
+        .consumer("in-memory://orders", "g", |m: &Message| Ok(m.clone()))
+        .unwrap();
+    let (seen, mut inbox) = mpsc::unbounded_channel();
+    consumer
+        .subscribe(move |message: Message| {
+            let seen = seen.clone();
+            async move {
+                seen.send(message).ok();
+            }
+        })
+        .unwrap();
+
+    bus.producer("in-memory://orders/order-7", |m: &Message| m.clone())
+        .unwrap()
+        .publish(&Message::new("x"))
+        .await
+        .unwrap();
+
+    let message = tokio::time::timeout(Duration::from_secs(1), inbox.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(message.key(), Some(&b"order-7"[..]));
+}
+
+/// A handler that fails does not stop delivery of what follows.
+#[tokio::test]
+async fn a_failing_handler_does_not_stop_delivery() {
+    let bus = setup();
+    let consumer = consumer(&bus, "in-memory://test.t1", "g");
+    let (seen, mut inbox) = mpsc::unbounded_channel();
+    consumer
+        .subscribe(move |value: String| {
+            let seen = seen.clone();
+            async move {
+                if value == "bad" {
+                    return Err::<(), BoxError>("refused".into());
+                }
+                seen.send(value).ok();
+                Ok(())
+            }
+        })
+        .unwrap();
+    let producer = producer(&bus, "in-memory://test.t1");
+
+    producer.publish(&"bad".to_owned()).await.unwrap();
+    producer.publish(&"good".to_owned()).await.unwrap();
+
+    assert_eq!(next(&mut inbox).await.as_deref(), Some("good"));
+}

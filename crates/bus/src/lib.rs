@@ -63,13 +63,16 @@
 
 mod adapter;
 pub mod adapters;
+mod bridge;
 mod error;
 mod message;
+pub mod uri;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use crate::adapter::{Adapter, Handler, Subscription, WireConsumer, WireProducer};
+pub use crate::bridge::{Bridge, Target};
 pub use crate::error::{BoxError, Error};
 pub use crate::message::Message;
 
@@ -126,19 +129,12 @@ impl Bus {
     }
 
     fn adapter(&self, uri: &str) -> Result<&dyn Adapter, Error> {
-        let scheme = scheme_of(uri)?;
+        let scheme = uri::scheme(uri)?;
         self.adapters
             .get(scheme)
             .map(Arc::as_ref)
             .ok_or_else(|| Error::UnknownScheme(scheme.to_owned()))
     }
-}
-
-/// The scheme of a URI: what comes before the first `:`.
-fn scheme_of(uri: &str) -> Result<&str, Error> {
-    uri.split_once(':')
-        .map(|(scheme, _)| scheme)
-        .ok_or_else(|| Error::UnknownScheme(uri.to_owned()))
 }
 
 /// How a consumer reads a wire message.
@@ -155,18 +151,26 @@ pub struct Consumer<T> {
 impl<T: 'static> Consumer<T> {
     /// Runs `handler` for every message, in order, until the subscription is
     /// cancelled. Subscribing again replaces the handler.
-    pub fn subscribe<F, Fut>(&self, handler: F) -> Result<Subscription, Error>
+    ///
+    /// A handler that cannot fail returns `()`; one that can returns a
+    /// `Result`, and an error means the message was not handled — a transport
+    /// that can, redelivers it.
+    pub fn subscribe<F, Fut, O>(&self, handler: F) -> Result<Subscription, Error>
     where
         F: Fn(T) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = ()> + Send + 'static,
+        Fut: Future<Output = O> + Send + 'static,
+        O: Outcome,
     {
         let decode = Arc::clone(&self.decode);
         let (uri, group) = (self.uri.clone(), self.group.clone());
         let handler: Handler = Arc::new(move |message: Message| match decode(&message) {
-            Ok(value) => Box::pin(handler(value)),
+            Ok(value) => {
+                let outcome = handler(value);
+                Box::pin(async move { outcome.await.into_result() })
+            }
             Err(error) => {
                 log::warn!("bus[{uri}/{group}]: decoding failed: {error}");
-                Box::pin(async {})
+                Box::pin(async { Ok(()) })
             }
         });
         self.wire.subscribe(handler)
@@ -179,6 +183,24 @@ impl<T> std::fmt::Debug for Consumer<T> {
             .field("uri", &self.uri)
             .field("group", &self.group)
             .finish_non_exhaustive()
+    }
+}
+
+/// What a handler may return: nothing, or a result.
+pub trait Outcome: Send + 'static {
+    /// The outcome as a result.
+    fn into_result(self) -> Result<(), BoxError>;
+}
+
+impl Outcome for () {
+    fn into_result(self) -> Result<(), BoxError> {
+        Ok(())
+    }
+}
+
+impl<E: Into<BoxError> + Send + 'static> Outcome for Result<(), E> {
+    fn into_result(self) -> Result<(), BoxError> {
+        self.map_err(Into::into)
     }
 }
 

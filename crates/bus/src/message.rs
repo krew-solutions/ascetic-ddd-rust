@@ -15,6 +15,7 @@
 pub struct Message {
     key: Option<Vec<u8>>,
     payload: Vec<u8>,
+    headers: Vec<(String, Vec<u8>)>,
 }
 
 impl Message {
@@ -23,6 +24,7 @@ impl Message {
         Message {
             key: None,
             payload: payload.into(),
+            headers: Vec::new(),
         }
     }
 
@@ -32,6 +34,26 @@ impl Message {
             key: Some(key.into()),
             ..self
         }
+    }
+
+    /// The same message with one more header. Headers are flat, name to
+    /// bytes, as Kafka's are; anything nested travels as a JSON string.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<Vec<u8>>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// The first header of that name.
+    pub fn header(&self, name: &str) -> Option<&[u8]> {
+        self.headers
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, value)| value.as_slice())
+    }
+
+    /// Every header, in order.
+    pub fn headers(&self) -> &[(String, Vec<u8>)] {
+        &self.headers
     }
 
     /// The key, if the message has one.

@@ -25,6 +25,7 @@ use futures::future::BoxFuture;
 use rdkafka::Message as _;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{Consumer as _, StreamConsumer};
+use rdkafka::message::{Header, Headers as _, OwnedHeaders};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::util::Timeout;
 use tokio::task::AbortHandle;
@@ -32,6 +33,7 @@ use tokio::task::AbortHandle;
 use crate::adapter::{Adapter, Handler, Subscription, WireConsumer, WireProducer};
 use crate::error::Error;
 use crate::message::Message;
+use crate::uri;
 
 // Re-exported so that a user of this crate configures the driver without
 // matching versions with it independently.
@@ -79,17 +81,9 @@ impl KafkaBroker {
     }
 }
 
-/// The topic named by a `kafka://topic` URI.
-fn topic_of(uri: &str) -> Result<&str, Error> {
-    uri.split_once("://")
-        .map(|(_, topic)| topic)
-        .filter(|topic| !topic.is_empty())
-        .ok_or_else(|| Error::Transport(format!("`{uri}` names no topic").into()))
-}
-
 impl Adapter for KafkaBroker {
     fn consumer(&self, uri: &str, group: &str) -> Result<Box<dyn WireConsumer>, Error> {
-        let topic = topic_of(uri)?.to_owned();
+        let topic = uri::channel(uri)?.to_owned();
         let mut config = self.config.clone();
         config
             .set("group.id", group)
@@ -106,11 +100,12 @@ impl Adapter for KafkaBroker {
     }
 
     fn producer(&self, uri: &str) -> Result<Box<dyn WireProducer>, Error> {
-        let topic = topic_of(uri)?.to_owned();
+        let topic = uri::channel(uri)?.to_owned();
         let producer: FutureProducer = self.config.create().map_err(transport)?;
         Ok(Box::new(KafkaProducer {
             producer,
             topic,
+            key: uri::key(uri).map(|key| key.as_bytes().to_vec()),
             timeout: self.send_timeout,
         }))
     }
@@ -139,12 +134,33 @@ impl WireConsumer for KafkaConsumer {
                             Some(key) => message.with_key(key),
                             None => message,
                         };
-                        if AssertUnwindSafe(handler(message))
-                            .catch_unwind()
-                            .await
-                            .is_err()
-                        {
-                            log::warn!("kafka[{uri}/{group}]: handler panicked");
+                        let message = received
+                            .headers()
+                            .map(|headers| headers.iter())
+                            .into_iter()
+                            .flatten()
+                            .fold(message, |message, header| {
+                                message.with_header(header.key, header.value.unwrap_or_default())
+                            });
+                        // A handler that fails is retried until it succeeds: the
+                        // partition waits, which is what keeps its order.
+                        loop {
+                            match AssertUnwindSafe(handler(message.clone()))
+                                .catch_unwind()
+                                .await
+                            {
+                                Ok(Ok(())) => break,
+                                Ok(Err(error)) => {
+                                    log::warn!(
+                                        "kafka[{uri}/{group}]: handler failed, retrying: {error}"
+                                    );
+                                    tokio::time::sleep(RETRY_AFTER).await;
+                                }
+                                Err(_) => {
+                                    log::warn!("kafka[{uri}/{group}]: handler panicked, skipping");
+                                    break;
+                                }
+                            }
                         }
                         if let Err(error) = consumer.store_offset_from_message(&received) {
                             log::warn!("kafka[{uri}/{group}]: storing the offset failed: {error}");
@@ -162,9 +178,14 @@ impl WireConsumer for KafkaConsumer {
     }
 }
 
+/// How long a consumer waits before retrying a handler that failed.
+const RETRY_AFTER: Duration = Duration::from_secs(1);
+
 struct KafkaProducer {
     producer: FutureProducer,
     topic: String,
+    /// The key the producer's URI carries; a message without one gets it.
+    key: Option<Vec<u8>>,
     timeout: Duration,
 }
 
@@ -172,10 +193,21 @@ impl WireProducer for KafkaProducer {
     fn publish(&self, message: Message) -> BoxFuture<'_, Result<(), Error>> {
         Box::pin(async move {
             let record = FutureRecord::<[u8], [u8]>::to(&self.topic).payload(message.payload());
-            let record = match message.key() {
+            let record = match message.key().or(self.key.as_deref()) {
                 Some(key) => record.key(key),
                 None => record,
             };
+            let headers =
+                message
+                    .headers()
+                    .iter()
+                    .fold(OwnedHeaders::new(), |headers, (name, value)| {
+                        headers.insert(Header {
+                            key: name,
+                            value: Some(value.as_slice()),
+                        })
+                    });
+            let record = record.headers(headers);
             self.producer
                 .send(record, Timeout::After(self.timeout))
                 .await

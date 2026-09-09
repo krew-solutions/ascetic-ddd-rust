@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 use crate::adapter::{Adapter, Handler, Subscription, WireConsumer, WireProducer};
 use crate::error::Error;
 use crate::message::Message;
+use crate::uri;
 
 /// Messages a topic queues before producers wait.
 pub const DEFAULT_CAPACITY: usize = 1024;
@@ -67,9 +68,11 @@ impl InMemoryBroker {
         }
     }
 
-    /// The topic for `uri`, started on first use. Must be called on a Tokio
-    /// runtime: the delivery task is spawned here.
+    /// The topic for `uri` — its channel, whatever key the URI carries —
+    /// started on first use. Must be called on a Tokio runtime: the delivery
+    /// task is spawned here.
     fn topic(&self, uri: &str) -> (mpsc::Sender<Message>, Groups) {
+        let uri = uri::without_key(uri);
         let mut topics = lock(&self.inner.topics);
         let topic = topics.entry(uri.to_owned()).or_insert_with(|| {
             let (queue, inbox) = mpsc::channel(self.inner.capacity);
@@ -96,12 +99,13 @@ async fn deliver(uri: String, mut inbox: mpsc::Receiver<Message>, groups: Groups
             .filter_map(|(group, handler)| handler.clone().map(|h| (group.clone(), h)))
             .collect();
         for (group, handler) in handlers {
-            if AssertUnwindSafe(handler(message.clone()))
+            match AssertUnwindSafe(handler(message.clone()))
                 .catch_unwind()
                 .await
-                .is_err()
             {
-                log::warn!("in-memory[{uri}/{group}]: handler panicked");
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => log::warn!("in-memory[{uri}/{group}]: handler failed: {error}"),
+                Err(_) => log::warn!("in-memory[{uri}/{group}]: handler panicked"),
             }
         }
     }
@@ -115,7 +119,7 @@ impl Adapter for InMemoryBroker {
             let mut groups = lock(&groups);
             if groups.contains_key(group) {
                 return Err(Error::AlreadyInGroup {
-                    uri: uri.to_owned(),
+                    uri: uri::without_key(uri).to_owned(),
                     group: group.to_owned(),
                 });
             }
@@ -129,7 +133,10 @@ impl Adapter for InMemoryBroker {
 
     fn producer(&self, uri: &str) -> Result<Box<dyn WireProducer>, Error> {
         let (queue, _) = self.topic(uri);
-        Ok(Box::new(InMemoryProducer { queue }))
+        Ok(Box::new(InMemoryProducer {
+            queue,
+            key: uri::key(uri).map(|key| key.as_bytes().to_vec()),
+        }))
     }
 }
 
@@ -153,12 +160,18 @@ impl WireConsumer for InMemoryConsumer {
 
 struct InMemoryProducer {
     queue: mpsc::Sender<Message>,
+    /// The key the producer's URI carries; a message without one gets it.
+    key: Option<Vec<u8>>,
 }
 
 impl WireProducer for InMemoryProducer {
     /// Queues the message; waits while the topic's queue is full.
     fn publish(&self, message: Message) -> BoxFuture<'_, Result<(), Error>> {
         Box::pin(async move {
+            let message = match (&self.key, message.key()) {
+                (Some(key), None) => message.with_key(key.clone()),
+                _ => message,
+            };
             self.queue
                 .send(message)
                 .await
