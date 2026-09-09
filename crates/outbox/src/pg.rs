@@ -308,7 +308,7 @@ where
             CREATE TABLE IF NOT EXISTS {outbox} (
                 "position" BIGSERIAL,
                 "uri" VARCHAR(255) NOT NULL,
-                "payload" JSONB NOT NULL,
+                "payload" BYTEA NOT NULL,
                 "metadata" JSONB NOT NULL,
                 "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 "transaction_id" xid8 NOT NULL,

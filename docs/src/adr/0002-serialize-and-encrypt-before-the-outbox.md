@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-09-09). Under discussion; nothing below is decided.
+Accepted (2026-09-09): option 1. `payload` is `BYTEA`, `metadata` stays JSONB.
 
 ## Context
 

@@ -32,6 +32,7 @@
 //!   in the source a negative hash matched no worker.
 //! * `run` stops cooperatively, between messages, on a future the caller
 //!   passes; a subscriber returns a `Result`. There is no async iterator.
+//! * `payload` is bytes, not JSONB, mirroring the outbox (ADR-0002).
 //! * `tenant_id` is a `String`; the source leaves its type to the schema.
 //!   `uri` is 255 characters, as in the outbox, rather than 60.
 

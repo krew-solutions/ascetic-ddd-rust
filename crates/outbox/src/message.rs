@@ -13,8 +13,9 @@ pub struct OutboxMessage {
     /// The part after the topic is a partition key: messages with one full
     /// URI are dispatched by one worker, in order.
     pub uri: String,
-    /// The message itself. By convention carries a `type` for the consumer.
-    pub payload: Value,
+    /// The message as it goes on the wire: serialized, and encrypted where
+    /// the deployment requires it, before it reaches the outbox (ADR-0002).
+    pub payload: Vec<u8>,
     /// About the message: must carry an `event_id` (a UUID) for idempotency,
     /// and may carry `correlation_id`, `causation_id` and the like.
     pub metadata: Value,
@@ -28,10 +29,10 @@ pub struct OutboxMessage {
 
 impl OutboxMessage {
     /// A message to publish.
-    pub fn new(uri: impl Into<String>, payload: Value, metadata: Value) -> Self {
+    pub fn new(uri: impl Into<String>, payload: impl Into<Vec<u8>>, metadata: Value) -> Self {
         OutboxMessage {
             uri: uri.into(),
-            payload,
+            payload: payload.into(),
             metadata,
             created_at: None,
             position: None,

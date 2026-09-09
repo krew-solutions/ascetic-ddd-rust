@@ -131,13 +131,16 @@ fn message(uri: &str, id: u64) -> OutboxMessage {
     let event = EVENT.fetch_add(1, Ordering::Relaxed);
     OutboxMessage::new(
         uri,
-        json!({ "type": "Test", "id": id }),
+        id.to_string(),
         json!({ "event_id": format!("00000000-0000-4000-8000-{event:012x}") }),
     )
 }
 
 fn id_of(message: &OutboxMessage) -> u64 {
-    message.payload["id"].as_u64().unwrap()
+    std::str::from_utf8(&message.payload)
+        .unwrap()
+        .parse()
+        .unwrap()
 }
 
 type Seen = Arc<Mutex<Vec<u64>>>;

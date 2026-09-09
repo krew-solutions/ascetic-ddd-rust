@@ -12,7 +12,7 @@
 //!     orders.save(tx, &order).await?;
 //!     outbox.publish(tx, &OutboxMessage::new(
 //!         "kafka://orders",
-//!         json!({ "type": "OrderPlaced", "order_id": order.id }),
+//!         encode(&OrderPlaced { order_id: order.id }),   // wire bytes, ADR-0002
 //!         json!({ "event_id": event_id }),
 //!     )).await?;
 //!     Ok(())
@@ -39,6 +39,9 @@
 //!   know when the consumer is done with it, and the acknowledgement must
 //!   follow the processing. The subscriber form is the only one.
 //! * The transaction id is a `u64`, which is exactly `xid8`.
+//! * `payload` is bytes, not JSONB: the message is serialized, and encrypted
+//!   where required, before the outbox, so the dispatcher relays bytes and
+//!   plaintext never rests in the database (ADR-0002).
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

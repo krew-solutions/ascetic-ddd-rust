@@ -52,6 +52,8 @@ is on `PgOutbox`, because dispatching is the business of a separate process.
 * No async iterator: an iterator cannot know when the consumer is done with
   a message, and the acknowledgement must follow the processing.
 * The transaction id is a `u64`, which is exactly `xid8`.
+* `payload` is bytes, not JSONB: serialized, and encrypted where required,
+  before the outbox (ADR-0002); `metadata` stays JSONB.
 
 ## Testing
 

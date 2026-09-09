@@ -111,7 +111,7 @@ fn message(stream: &str, position: i32) -> InboxMessage {
         json!({ "id": stream }),
         position,
         format!("kafka://orders/{stream}"),
-        json!({ "type": "Test", "stream": stream, "position": position }),
+        format!("{stream}@{position}"),
     )
     .with_metadata(json!({ "event_id": format!("00000000-0000-4000-8000-{event:012x}") }))
 }
@@ -176,7 +176,7 @@ async fn receiving_the_same_message_twice_stores_it_once() {
     let f = fixture("idempotent").await;
     let once = message("a", 1);
     let mut again = once.clone();
-    again.payload = json!({ "type": "Test", "note": "a duplicate with a different payload" });
+    again.payload = b"a duplicate with a different payload".to_vec();
 
     f.publish(&[once, again]).await;
 

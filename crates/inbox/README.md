@@ -45,6 +45,7 @@ loop.
   workers and checks that each is processed exactly once.
 * `run` stops cooperatively, between messages, on a future the caller
   passes. A subscriber returns a `Result`. There is no async iterator.
+* `payload` is bytes, not JSONB, mirroring the outbox (ADR-0002).
 * `tenant_id` is a `String`; `uri` is 255 characters rather than 60.
 
 ## Testing

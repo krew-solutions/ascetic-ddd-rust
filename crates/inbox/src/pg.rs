@@ -227,7 +227,7 @@ where
                 stream_id jsonb NOT NULL,
                 stream_position integer NOT NULL,
                 uri varchar(255) NOT NULL,
-                payload jsonb NOT NULL,
+                payload bytea NOT NULL,
                 metadata jsonb NULL,
                 received_position bigint NOT NULL UNIQUE DEFAULT nextval('{sequence}'),
                 processed_position bigint NULL,

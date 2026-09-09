@@ -22,8 +22,9 @@ pub struct InboxMessage {
     pub stream_position: i32,
     /// Where the message came from: `kafka://orders/order-123`.
     pub uri: String,
-    /// The message itself. By convention carries a `type`.
-    pub payload: Value,
+    /// The message as it came off the wire: serialized, and encrypted where
+    /// the deployment requires it (ADR-0002).
+    pub payload: Vec<u8>,
     /// About the message: `event_id`, and `causal_dependencies` — messages
     /// that must be processed before this one.
     pub metadata: Option<Value>,
@@ -41,7 +42,7 @@ impl InboxMessage {
         stream_id: Value,
         stream_position: i32,
         uri: impl Into<String>,
-        payload: Value,
+        payload: impl Into<Vec<u8>>,
     ) -> Self {
         InboxMessage {
             tenant_id: tenant_id.into(),
@@ -49,7 +50,7 @@ impl InboxMessage {
             stream_id,
             stream_position,
             uri: uri.into(),
-            payload,
+            payload: payload.into(),
             metadata: None,
             received_position: None,
             processed_position: None,
