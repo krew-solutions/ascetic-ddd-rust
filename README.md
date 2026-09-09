@@ -60,6 +60,10 @@ others behind features, so that `ascetic_ddd::saga` keeps working as one import
 
 - [ADR-0001](docs/src/adr/0001-session-is-a-cloneable-handle.md) — a session is a
   cloneable handle, and the scope receives a borrow.
+- [ADR-0002](docs/src/adr/0002-serialize-and-encrypt-before-the-outbox.md) — where a message is
+  serialized and encrypted relative to the outbox *(proposed)*.
+- [ADR-0003](docs/src/adr/0003-transactional-producers-and-consumers-on-the-bus.md) — how the
+  session enters the bus *(proposed)*.
 
 ## Development
 
