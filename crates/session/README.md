@@ -208,6 +208,15 @@ an application that spawns deeply nested composite scopes on a multi-thread
 runtime — measured at two delegates and five nested scopes — may need
 `#![recursion_limit = "256"]` in its own crate. The error names the limit.
 
+`Send` is inferred, never promised. `Session::atomic` and
+`SessionPool::session` return `impl Future` without `Send`, because the
+scope's own future cannot be bounded on stable Rust. Where the session type
+is concrete the compiler sees through the trait and infers `Send` from the
+scope, so the future can be spawned. Code that is *generic* over the pool or
+the session cannot show its future `Send` at all, and `tokio::spawn` refuses
+it: spawn where the types are concrete, or give the loop a thread that blocks
+on the runtime, as the outbox channel does.
+
 ## PostgreSQL
 
 Behind the `pg` feature, on `tokio-postgres` and `deadpool-postgres`:

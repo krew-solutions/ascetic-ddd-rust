@@ -28,8 +28,10 @@ dependencies = [
 name = "ascetic-ddd-outbox"
 version = "0.1.0"
 dependencies = [
+ "ascetic-ddd-bus",
  "ascetic-ddd-session",
  "futures",
+ "log",
  "serde_json",
  "tokio",
  "tokio-postgres",

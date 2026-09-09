@@ -40,6 +40,35 @@ The application layer sees `Outbox`, one method, `publish`. A test double
 collects messages. Everything else — `dispatch`, `run`, positions, `setup` —
 is on `PgOutbox`, because dispatching is the business of a separate process.
 
+## As a channel of the bus
+
+The outbox is also an adapter of `ascetic-ddd-bus` (ADR-0003). Its producer
+is transactional, built once at the composition root for a destination on
+another channel, and publishing takes the session of the current
+transaction. Its consumer is the dispatcher: every committed row reaches the
+handler as a wire message whose `destination` header is the row's URI, and a
+`Bridge` to that header is the whole dispatcher process.
+
+```rust
+let mut bus = Bus::new();
+bus.register(OUTBOX_SCHEME, outbox.channel())?;
+bus.register("kafka", kafka)?;
+let bus = Arc::new(bus);
+
+// in the command handler, inside the transaction
+let placed = outbox.producer("kafka://orders/order-7", encode_order_placed);
+session.atomic(async |tx| placed.publish(tx, &event).await).await?;
+
+// the dispatcher process
+let dispatcher = Bridge::new(bus).run("outbox://all", "dispatcher", Target::Header("destination".into()))?;
+```
+
+Headers travel as string fields of `metadata`, so `event_id` keeps its unique
+index. The dispatcher runs on a thread of its own that blocks on the tokio
+runtime: code generic over the session pool cannot show its future is
+`Send`, so it cannot be a spawned task. Cancel the subscription before the
+runtime shuts down.
+
 ## Deviations from the Python source
 
 * The worker filter clears the sign bit of `hashtext(uri)`. In the source a

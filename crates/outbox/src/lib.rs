@@ -47,6 +47,7 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod channel;
 mod error;
 mod message;
 pub mod pg;
@@ -56,3 +57,5 @@ pub use crate::error::{BoxError, Error};
 pub use crate::message::{OutboxMessage, Position};
 pub use crate::pg::{DEFAULT_BATCH_SIZE, PgOutbox, Selection, Worker, Workers};
 pub use crate::port::Outbox;
+
+pub use crate::channel::{OUTBOX_SCHEME, OutboxChannel};

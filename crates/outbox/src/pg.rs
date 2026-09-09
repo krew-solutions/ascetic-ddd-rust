@@ -124,6 +124,7 @@ pub struct PgOutbox<P> {
     outbox_table: String,
     offsets_table: String,
     batch_size: i64,
+    poll_interval: Duration,
 }
 
 impl<P> PgOutbox<P> {
@@ -134,7 +135,25 @@ impl<P> PgOutbox<P> {
             outbox_table: "outbox".to_owned(),
             offsets_table: "outbox_offsets".to_owned(),
             batch_size: DEFAULT_BATCH_SIZE as i64,
+            poll_interval: Duration::from_secs(1),
         }
+    }
+
+    /// The same outbox whose channel consumer waits `interval` when there is
+    /// nothing to dispatch.
+    pub fn with_poll_interval(self, interval: Duration) -> Self {
+        PgOutbox {
+            poll_interval: interval,
+            ..self
+        }
+    }
+
+    pub(crate) fn outbox_table(&self) -> &str {
+        &self.outbox_table
+    }
+
+    pub(crate) fn poll_interval(&self) -> Duration {
+        self.poll_interval
     }
 
     /// The same outbox in other tables.
