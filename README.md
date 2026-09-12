@@ -67,6 +67,12 @@ others behind features, so that `ascetic_ddd::saga` keeps working as one import
 - [ADR-0004](docs/src/adr/0004-the-scope-receives-its-session-by-value.md) — the scope
   receives its session by value, and the session promises `Send`.
 
+## Specifications
+
+TLA+ models of the outbox protocol, checked with TLC, live in
+[`verify/tla`](verify/tla/README.md): what is proved, on which instance, and
+what is left to tests.
+
 ## Development
 
 ```bash
