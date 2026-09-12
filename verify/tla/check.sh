@@ -18,3 +18,16 @@ if tlc -config outbox/OutboxNoRule.cfg outbox/Outbox.tla > "${TMPDIR:-/tmp}/tlc-
 fi
 grep -q "Invariant NoPassedOver is violated" "${TMPDIR:-/tmp}/tlc-outbox-norule.log"
 echo "   violation found, as expected"
+
+echo "== inbox: as implemented, every property holds"
+tlc -config inbox/Inbox.cfg inbox/MCInbox.tla
+
+echo "== inbox: a dependency that never arrives is stepped over; the rest still flows"
+tlc -config inbox/InboxMissingDep.cfg inbox/MCInbox.tla
+
+echo "== inbox: without stepping over, TLC must find the partition blocked"
+if tlc -config inbox/InboxNoSkip.cfg inbox/MCInbox.tla > "${TMPDIR:-/tmp}/tlc-inbox-noskip.log" 2>&1; then
+  echo "unexpected: no violation without stepping over"; exit 1
+fi
+grep -q "Temporal properties were violated" "${TMPDIR:-/tmp}/tlc-inbox-noskip.log"
+echo "   violation found, as expected"
