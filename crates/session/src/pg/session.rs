@@ -8,7 +8,7 @@ use crate::error::SessionError;
 use crate::identity_map::IdentityMap;
 use crate::isolation::IsolationLevel;
 use crate::observer::{Outcome, ScopeEnded, ScopeKind, ScopeStarted, SessionObserver};
-use crate::session::{ScopeFlag, Session, SessionPool};
+use crate::session::{AsyncScope, ScopeFlag, Session, SessionPool};
 
 use super::connection::PgConnection;
 use super::observer::PgObserver;
@@ -74,8 +74,9 @@ impl PgAccess for PgSession {
 impl Session for PgSession {
     async fn atomic<T, E, F>(&self, scope: F) -> Result<T, E>
     where
-        F: AsyncFnOnce(&Self) -> Result<T, E>,
-        E: From<SessionError>,
+        F: AsyncScope<Self, Result<T, E>, Fut: Send> + Send,
+        T: Send,
+        E: From<SessionError> + Send,
     {
         // Claimed for the whole scope and released on the way out, whether the
         // scope returns, fails early or unwinds.
@@ -101,7 +102,8 @@ impl Session for PgSession {
         observer.on_scope_started(&ScopeStarted { depth, kind });
 
         let child = self.child();
-        let outcome = scope(&child).await;
+        let identity_map = Arc::clone(&child.identity_map);
+        let outcome = scope(child).await;
         let committed = outcome.is_ok();
 
         let close = match (&savepoint, committed) {
@@ -124,7 +126,7 @@ impl Session for PgSession {
 
         // The identity map lives exactly as long as the outermost transaction.
         if self.depth == 0 {
-            child.identity_map.clear();
+            identity_map.clear();
         }
 
         match (outcome, closed) {
@@ -181,44 +183,38 @@ impl PgSessionPool {
 impl SessionPool for PgSessionPool {
     type Session = PgSession;
 
-    async fn session<T, E, F>(&self, scope: F) -> Result<T, E>
-    where
-        F: AsyncFnOnce(&Self::Session) -> Result<T, E>,
-        E: From<SessionError>,
-    {
+    async fn acquire(&self) -> Result<PgSession, SessionError> {
         let client = self
             .pool
             .get()
             .await
             .map_err(|error| SessionError::Acquire(Box::new(error)))?;
-
-        let session = PgSession {
+        Ok(PgSession {
             connection: PgConnection::new(client, Arc::clone(&self.observer)),
             // Outside a transaction nothing may be cached.
             identity_map: Arc::new(IdentityMap::with_isolation(IsolationLevel::ReadUncommitted)),
             isolation: self.isolation,
             depth: 0,
             scope_open: ScopeFlag::new(),
-        };
+        })
+    }
 
+    fn scope_opened(&self) {
         self.observer.on_scope_started(&ScopeStarted {
             depth: 0,
             kind: ScopeKind::Session,
         });
+    }
 
-        let outcome = scope(&session).await;
-
+    fn scope_closed(&self, succeeded: bool) {
         self.observer.on_scope_ended(&ScopeEnded {
             depth: 0,
             kind: ScopeKind::Session,
-            outcome: if outcome.is_ok() {
+            outcome: if succeeded {
                 Outcome::Succeeded
             } else {
                 Outcome::Failed
             },
         });
-
-        outcome
-        // The connection returns to the pool as `session` is dropped here.
     }
 }

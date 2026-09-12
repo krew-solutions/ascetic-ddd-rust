@@ -203,8 +203,8 @@ fn assert_send<T: Send>(future: T) -> T {
     future
 }
 
-/// The recursion is boxed with a concrete type, so a `Send` scope gives a
-/// `Send` future — no bound in `Session` promises it.
+/// The trait promises a `Send` future (ADR-0004); a scope that is not `Send`
+/// is refused at compile time, which the doc-test on `Session` states.
 #[test]
 fn a_send_scope_gives_a_send_future() {
     let (pools, _journals) = shards(3);
@@ -217,23 +217,6 @@ fn a_send_scope_gives_a_send_future() {
     .unwrap();
 
     assert_eq!(count, 3);
-}
-
-/// And a scope that is not `Send` is still accepted, as everywhere else.
-#[test]
-fn a_scope_that_is_not_send_is_still_accepted() {
-    let (pools, _journals) = shards(2);
-    let local = std::rc::Rc::new(());
-
-    block_on(pools.session(async |shards| {
-        shards
-            .atomic(async |_| {
-                let _held_across_await = &local;
-                Ok::<_, AppError>(())
-            })
-            .await
-    }))
-    .unwrap();
 }
 
 /// What the `Send` future is for.

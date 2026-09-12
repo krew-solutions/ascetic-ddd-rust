@@ -130,18 +130,10 @@ where
     P: SessionPool + Send + Sync + 'static,
     P::Session: PgAccess + Sync,
 {
-    /// Runs the dispatcher until cancelled. A batch whose handler fails is
-    /// rolled back and retried after the poll interval; the position of the
-    /// group moves only past messages the handler accepted.
-    ///
-    /// The dispatcher gets a thread of its own, driven by the current tokio
-    /// runtime, rather than a spawned task. Code generic over the session
-    /// pool cannot show its future is `Send` — [`SessionPool::session`] does
-    /// not promise it, because the scope's own future cannot be bounded on
-    /// stable Rust — and `tokio::spawn` insists on it. The thread waits on
-    /// the same runtime, so connections, timers and the handler all run
-    /// where they would have anyway. Cancel the subscription before the
-    /// runtime shuts down, or the thread is left waiting on it.
+    /// Runs the dispatcher as a task on the current runtime until cancelled.
+    /// A batch whose handler fails is rolled back and retried after the poll
+    /// interval; the position of the group moves only past messages the
+    /// handler accepted. Outside a runtime this is an error, not a panic.
     fn subscribe(&self, handler: Handler) -> Result<Subscription, BusError> {
         let stop = Arc::new(Notify::new());
         let (outbox, group, stopped) = (
@@ -151,7 +143,7 @@ where
         );
         let runtime =
             Handle::try_current().map_err(|error| BusError::Transport(Box::new(error)))?;
-        let dispatcher = move || async move {
+        runtime.spawn(async move {
             let selection = Selection::group(&group);
             let workers = Workers {
                 poll_interval: outbox.poll_interval(),
@@ -177,11 +169,7 @@ where
                     }
                 }
             }
-        };
-        std::thread::Builder::new()
-            .name(format!("outbox-dispatcher:{}", self.group))
-            .spawn(move || runtime.block_on(dispatcher()))
-            .map_err(|error| BusError::Transport(Box::new(error)))?;
+        });
         Ok(Subscription::new(move || stop.notify_one()))
     }
 }

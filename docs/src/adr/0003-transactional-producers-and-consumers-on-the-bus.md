@@ -41,10 +41,17 @@ inside the message, so one table serves every topic.
   delivery is at least once. The outbox dispatcher is a bridge from the
   outbox channel to the destination named in each message; the inbox intake
   is the same bridge from a Kafka channel to the inbox channel.
-- **The inbox's consumer hands the handler its transaction**:
-  `subscribe_transactional(Fn(&S, T))`. This is where the port goes beyond
-  Watermill, whose SQL subscriber acknowledges in a transaction of its own
-  and leaves the handler's writes outside it.
+- **The inbox's consumer hands the handler its transaction.**
+  `inbox.consumer(decode)` gives a `TransactionalConsumer<T, S>` whose
+  `subscribe(Fn(S, T))` runs the handler inside the transaction that marks
+  the message processed, with a clone of that session — a handle
+  (ADR-0001), so the handler's future owns it and crosses the wire boundary
+  boxed. It comes from the inbox adapter, as the transactional producer
+  comes from the outbox's; a bus consumer of `inbox://…` is refused, since
+  through it the handler's writes would fall outside the mark's
+  transaction. This is where the port goes beyond Watermill, whose SQL
+  subscriber acknowledges in a transaction of its own and leaves the
+  handler's writes outside it.
 
 ## Refutations attempted
 
@@ -59,11 +66,21 @@ inside the message, so one table serves every topic.
 - The destination header is a second source of truth beside the channel. —
   It is the only source: the outbox channel has no destination of its own,
   exactly as the forwarder's envelope.
+- The consumer hands the session by value where the producer takes it by
+  reference. — The producer's call has the caller's borrow at hand. The
+  consumer's handler is a trait object whose future outlives the call that
+  made it; a borrow would need a lifetime the object cannot name on stable
+  Rust, and a clone of a handle costs reference counts.
 
 ## Consequences
 
-- `Message` gains headers: destination, tenant, key id, event id,
-  correlation, causal dependencies as a JSON string.
+- `Message` carries headers: `destination`, stamped by the outbox and read
+  by the bridge and the inbox; the inbox's identity, `tenant_id`,
+  `stream_type`, `stream_id`, `stream_position`; and whatever else the
+  metadata holds — `message_id`, `causal_dependencies` — as text,
+  structured again on the way into the inbox.
+- Both channels are tasks on the runtime: the session promises `Send`
+  (ADR-0004).
 - `bus` gains a `Bridge`; `outbox` and `inbox` implement `Adapter` for
   their channels and depend on `bus`; `bus` stays free of database
   dependencies.

@@ -91,6 +91,7 @@ pub struct PgInbox<P> {
     table: String,
     sequence: String,
     partition: Box<dyn PartitionKey>,
+    poll_interval: Duration,
 }
 
 impl<P> PgInbox<P> {
@@ -101,7 +102,21 @@ impl<P> PgInbox<P> {
             table: "inbox".to_owned(),
             sequence: "inbox_received_position_seq".to_owned(),
             partition: Box::new(ByUri),
+            poll_interval: Duration::from_secs(1),
         }
+    }
+
+    /// The same inbox, whose channel consumer waits `poll_interval` when
+    /// there was nothing to process.
+    pub fn with_poll_interval(self, poll_interval: Duration) -> Self {
+        PgInbox {
+            poll_interval,
+            ..self
+        }
+    }
+
+    pub(crate) fn poll_interval(&self) -> Duration {
+        self.poll_interval
     }
 
     /// The same inbox in another table, with its own position sequence.
@@ -135,18 +150,18 @@ where
     /// retried.
     pub async fn dispatch<F, Fut>(&self, subscriber: F, worker: Worker) -> Result<bool, Error>
     where
-        F: Fn(&P::Session, &InboxMessage) -> Fut + Sync,
-        Fut: Future<Output = Result<(), BoxError>>,
+        F: Fn(&P::Session, &InboxMessage) -> Fut + Send + Sync,
+        Fut: Future<Output = Result<(), BoxError>> + Send,
     {
         self.pool
             .session(async |session| {
                 session
                     .atomic(async |tx| {
-                        let Some(message) = self.next_processable(tx, worker).await? else {
+                        let Some(message) = self.next_processable(&tx, worker).await? else {
                             return Ok(false);
                         };
-                        subscriber(tx, &message).await.map_err(Error::Subscriber)?;
-                        self.mark_processed(tx, &message).await?;
+                        subscriber(&tx, &message).await.map_err(Error::Subscriber)?;
+                        self.mark_processed(&tx, &message).await?;
                         Ok(true)
                     })
                     .await
@@ -167,8 +182,8 @@ where
         shutdown: impl Future<Output = ()>,
     ) -> Result<(), Error>
     where
-        F: Fn(&P::Session, &InboxMessage) -> Fut + Sync,
-        Fut: Future<Output = Result<(), BoxError>>,
+        F: Fn(&P::Session, &InboxMessage) -> Fut + Send + Sync,
+        Fut: Future<Output = Result<(), BoxError>> + Send,
     {
         let (stop, _) = watch::channel(false);
         let concurrency = workers.concurrency.max(1);

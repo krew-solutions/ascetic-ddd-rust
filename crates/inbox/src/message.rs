@@ -83,11 +83,17 @@ impl InboxMessage {
     }
 
     /// The messages this one must wait for. Entries that are not
-    /// dependencies are ignored.
+    /// dependencies are ignored. The list may arrive as its JSON text, which
+    /// is how flat broker headers carry it.
     pub fn causal_dependencies(&self) -> Vec<CausalDependency> {
         self.metadata
             .as_ref()
             .and_then(|metadata| metadata.get("causal_dependencies"))
+            .map(|entries| match entries {
+                Value::String(text) => serde_json::from_str(text).unwrap_or(Value::Null),
+                other => other.clone(),
+            })
+            .as_ref()
             .and_then(Value::as_array)
             .map(|entries| {
                 entries
@@ -98,7 +104,7 @@ impl InboxMessage {
             .unwrap_or_default()
     }
 
-    /// The event id, if the metadata carries one.
+    /// The message id, if the metadata carries one.
     pub fn message_id(&self) -> Option<&str> {
         self.metadata
             .as_ref()

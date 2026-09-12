@@ -7,7 +7,7 @@
 //! [parent module][super].
 
 use crate::error::SessionError;
-use crate::session::{Session, SessionPool};
+use crate::session::{AsyncScope, Session, SessionPool};
 
 /// Two sessions acting as one.
 #[derive(Clone)]
@@ -46,19 +46,20 @@ impl<A: Session, B: Session> Session for CompositeSession<A, B> {
     /// delegate is asked first.
     async fn atomic<T, E, F>(&self, scope: F) -> Result<T, E>
     where
-        F: AsyncFnOnce(&Self) -> Result<T, E>,
-        E: From<SessionError>,
+        F: AsyncScope<Self, Result<T, E>, Fut: Send> + Send,
+        T: Send,
+        E: From<SessionError> + Send,
     {
+        let second = self.second.clone();
         self.first
-            .atomic(async |first| {
-                self.second
-                    .atomic(async |second| {
-                        let composite = CompositeSession::new(first.clone(), second.clone());
+            .atomic(async move |first: A| {
+                second
+                    .atomic(async move |second: B| {
                         // Boxed: each level nests one closure per delegate, and the compiler
                         // walks that nesting when it lays out the outer future. The box ends
                         // the walk here, so nesting depth stays within the default
-                        // `recursion_limit`. The type is concrete, so `Send` is unaffected.
-                        Box::pin(scope(&composite)).await
+                        // `recursion_limit`.
+                        Box::pin(scope(CompositeSession::new(first, second))).await
                     })
                     .await
             })
@@ -92,24 +93,22 @@ impl<A, B> CompositeSessionPool<A, B> {
 impl<A: SessionPool, B: SessionPool> SessionPool for CompositeSessionPool<A, B> {
     type Session = CompositeSession<A::Session, B::Session>;
 
-    async fn session<T, E, F>(&self, scope: F) -> Result<T, E>
-    where
-        F: AsyncFnOnce(&Self::Session) -> Result<T, E>,
-        E: From<SessionError>,
-    {
-        self.first
-            .session(async |first| {
-                self.second
-                    .session(async |second| {
-                        let composite = CompositeSession::new(first.clone(), second.clone());
-                        // Boxed: each level nests one closure per delegate, and the compiler
-                        // walks that nesting when it lays out the outer future. The box ends
-                        // the walk here, so nesting depth stays within the default
-                        // `recursion_limit`. The type is concrete, so `Send` is unaffected.
-                        Box::pin(scope(&composite)).await
-                    })
-                    .await
-            })
-            .await
+    /// Delegates are acquired left to right; scopes open in that order and
+    /// close in reverse.
+    async fn acquire(&self) -> Result<Self::Session, SessionError> {
+        Ok(CompositeSession::new(
+            self.first.acquire().await?,
+            self.second.acquire().await?,
+        ))
+    }
+
+    fn scope_opened(&self) {
+        self.first.scope_opened();
+        self.second.scope_opened();
+    }
+
+    fn scope_closed(&self, succeeded: bool) {
+        self.second.scope_closed(succeeded);
+        self.first.scope_closed(succeeded);
     }
 }

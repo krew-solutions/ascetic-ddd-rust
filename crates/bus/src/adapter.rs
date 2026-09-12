@@ -47,6 +47,21 @@ pub trait TransactionalWireProducer<S>: Send + Sync {
     fn publish<'a>(&'a self, session: &'a S, message: Message) -> BoxFuture<'a, Result<(), Error>>;
 }
 
+/// A wire-level handler that is given a transaction along with the message:
+/// what a transactional consumer runs for each message. The session is a
+/// handle (ADR-0001), handed over by value so that the handler's future owns
+/// it; the bus does not know sessions, it only passes one through.
+pub type TransactionalHandler<S> =
+    Arc<dyn Fn(S, Message) -> BoxFuture<'static, Result<(), BoxError>> + Send + Sync>;
+
+/// A consumer of wire messages that runs the handler inside a transaction
+/// of its own — the inbox. The handler's writes through the session it is
+/// given commit with the acknowledgement of the message, or not at all.
+pub trait TransactionalWireConsumer<S>: Send + Sync {
+    /// Starts delivering messages, each with its transaction, to `handler`.
+    fn subscribe(&self, handler: TransactionalHandler<S>) -> Result<Subscription, Error>;
+}
+
 /// A handle on a subscription. [`cancel`][Subscription::cancel] detaches the
 /// handler; a second `cancel` does nothing. Dropping the handle does *not*
 /// cancel — a subscription made at the composition root lives with the

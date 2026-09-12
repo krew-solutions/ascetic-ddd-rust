@@ -45,10 +45,11 @@
 //! impl Session for AppSession {
 //!     async fn atomic<T, E, F>(&self, scope: F) -> Result<T, E>
 //!     where
-//!         F: AsyncFnOnce(&Self) -> Result<T, E>,
-//!         E: From<SessionError>,
+//!         F: AsyncScope<Self, Result<T, E>, Fut: Send> + Send,
+//!         T: Send,
+//!         E: From<SessionError> + Send,
 //!     {
-//!         self.0.atomic(async |inner| scope(&AppSession(inner.clone())).await).await
+//!         self.0.atomic(async move |inner| scope(AppSession(inner)).await).await
 //!     }
 //! }
 //!

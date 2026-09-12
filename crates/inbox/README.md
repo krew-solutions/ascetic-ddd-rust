@@ -35,6 +35,45 @@ The edge sees `Inbox`, one method, `publish`. Processing — `dispatch`,
 `run`, `setup` — is on `PgInbox`, because it is the business of a separate
 loop.
 
+## As a channel of the bus
+
+The inbox is also an adapter of `ascetic-ddd-bus` (ADR-0003). A bridge from
+a broker channel to the inbox channel is the intake: every wire message is
+stored under the identity its headers name, and the same identity again is
+ignored. The consumer is transactional and comes from the inbox itself: its
+handler runs inside the transaction that marks the message processed, and is
+given that transaction.
+
+```rust
+let mut bus = Bus::new();
+bus.register("kafka", kafka)?;
+bus.register(INBOX_SCHEME, inbox.channel())?;
+let bus = Arc::new(bus);
+
+// the intake
+let intake = Bridge::new(Arc::clone(&bus))
+    .run("kafka://orders", "orders-intake", Target::Fixed("inbox://orders".into()))?;
+
+// the processing; `tx` is the transaction the mark commits in
+let orders = inbox.consumer(decode_order_placed);
+let processing = orders.subscribe(|tx: PgSession, order: OrderPlaced| async move {
+    place(&tx, order).await
+})?;
+```
+
+Headers become columns: `tenant_id`, `stream_type`, `stream_id`,
+`stream_position`; `destination`, the channel the message was sent to as
+the outbox stamps it, becomes `uri`, and without one the inbox channel the
+message was published to, key included, does. Every other header is a
+field of `metadata`, structured again when its text is a JSON array or
+object. Published from an outbox to `inbox://orders/order-7`, a message
+crosses the outbox dispatcher's bridge into the inbox without a broker:
+after-commit delivery and processing in the marking transaction, in one
+database.
+
+The processing loop is a task on the tokio runtime; cancel the subscription
+to stop it.
+
 ## Deviations from the Python source
 
 * A causal dependency is a type, `CausalDependency`, with `serde`; entries

@@ -35,39 +35,28 @@
 //! time needs a collection, which in turn needs every delegate to be of the
 //! same type — see [`many`][super::many].
 //!
+
 use crate::error::SessionError;
-use crate::session::{Session, SessionPool};
+use crate::session::{AsyncScope, Session, SessionPool};
 
 /// Opens a scope on each delegate, left to right, and collects the sessions
 /// they hand out into a tuple of the same shape.
 macro_rules! open_scopes {
     // Every delegate is open: hand the collected sessions to the scope.
     ($self:ident, $scope:ident, [], [$($opened:ident),*]) => {{
-        let sessions = ($($opened.clone(),)*);
+        let sessions = ($($opened,)*);
         // Boxed: each level nests one closure per delegate, and the compiler
         // walks that nesting when it lays out the outer future. The box ends
         // the walk here, so nesting depth stays within the default
-        // `recursion_limit`. The type is concrete, so `Send` is unaffected.
-        Box::pin($scope(&sessions)).await
+        // `recursion_limit`.
+        Box::pin($scope(sessions)).await
     }};
     // Open the next delegate and carry on inside its scope.
     ($self:ident, $scope:ident, [$index:tt $($rest:tt)*], [$($opened:ident),*]) => {
         $self.$index
-            .atomic(async |next| open_scopes!($self, $scope, [$($rest)*], [$($opened,)* next]))
-            .await
-    };
-}
-
-/// Same, for a tuple of pools handing out a tuple of sessions.
-macro_rules! open_sessions {
-    ($self:ident, $scope:ident, [], [$($opened:ident),*]) => {{
-        let sessions = ($($opened.clone(),)*);
-        // Boxed for the same reason as in `open_scopes!`.
-        Box::pin($scope(&sessions)).await
-    }};
-    ($self:ident, $scope:ident, [$index:tt $($rest:tt)*], [$($opened:ident),*]) => {
-        $self.$index
-            .session(async |next| open_sessions!($self, $scope, [$($rest)*], [$($opened,)* next]))
+            .atomic(async move |next| {
+                open_scopes!($self, $scope, [$($rest)*], [$($opened,)* next])
+            })
             .await
     };
 }
@@ -82,23 +71,33 @@ macro_rules! impl_composite {
         impl<$($name: Session),+> Session for ($($name,)+) {
             async fn atomic<T, E, F>(&self, scope: F) -> Result<T, E>
             where
-                F: AsyncFnOnce(&Self) -> Result<T, E>,
-                E: From<SessionError>,
+                F: AsyncScope<Self, Result<T, E>, Fut: Send> + Send,
+                T: Send,
+                E: From<SessionError> + Send,
             {
                 open_scopes!(self, scope, [$($index)+], [])
             }
         }
 
-        /// A tuple of pools hands out a tuple of sessions.
+        /// A tuple of pools hands out a tuple of sessions. Delegates are
+        /// acquired left to right; scopes open in that order and close in
+        /// reverse.
         impl<$($name: SessionPool),+> SessionPool for ($($name,)+) {
             type Session = ($($name::Session,)+);
 
-            async fn session<T, E, F>(&self, scope: F) -> Result<T, E>
-            where
-                F: AsyncFnOnce(&Self::Session) -> Result<T, E>,
-                E: From<SessionError>,
-            {
-                open_sessions!(self, scope, [$($index)+], [])
+            async fn acquire(&self) -> Result<Self::Session, SessionError> {
+                Ok(($(self.$index.acquire().await?,)+))
+            }
+
+            fn scope_opened(&self) {
+                $(self.$index.scope_opened();)+
+            }
+
+            fn scope_closed(&self, succeeded: bool) {
+                let hooks: &[&dyn Fn(bool)] = &[$(&|ok| self.$index.scope_closed(ok)),+];
+                for hook in hooks.iter().rev() {
+                    hook(succeeded);
+                }
             }
         }
     };

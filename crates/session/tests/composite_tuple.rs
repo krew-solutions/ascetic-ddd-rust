@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use ascetic_ddd_session::observer::{ScopeEnded, ScopeStarted, SessionObserver};
 use ascetic_ddd_session::rest::{HttpAccess, RestSession, RestSessionPool};
 use ascetic_ddd_session::testing::{MemorySession, MemorySessionPool};
-use ascetic_ddd_session::{Session, SessionError, SessionPool};
+use ascetic_ddd_session::{AsyncScope, Session, SessionError, SessionPool};
 use futures::executor::block_on;
 use futures::future::BoxFuture;
 
@@ -43,11 +43,12 @@ struct AppSession((MemorySession, RestSession<FakeClient>));
 impl Session for AppSession {
     async fn atomic<T, E, F>(&self, scope: F) -> Result<T, E>
     where
-        F: AsyncFnOnce(&Self) -> Result<T, E>,
-        E: From<SessionError>,
+        F: AsyncScope<Self, Result<T, E>, Fut: Send> + Send,
+        T: Send,
+        E: From<SessionError> + Send,
     {
         self.0
-            .atomic(async |inner| scope(&AppSession(inner.clone())).await)
+            .atomic(async move |inner| scope(AppSession(inner)).await)
             .await
     }
 }
@@ -122,8 +123,8 @@ where
 {
     session
         .atomic(async |session| {
-            orders.save(session, &order).await?;
-            notifier.notify(session, &order).await?;
+            orders.save(&session, &order).await?;
+            notifier.notify(&session, &order).await?;
             Ok(order.id)
         })
         .await

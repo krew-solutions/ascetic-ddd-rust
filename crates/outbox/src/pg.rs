@@ -191,18 +191,18 @@ where
         worker: Worker,
     ) -> Result<bool, Error>
     where
-        F: Fn(&OutboxMessage) -> Fut + Sync,
-        Fut: Future<Output = Result<(), BoxError>>,
+        F: Fn(&OutboxMessage) -> Fut + Send + Sync,
+        Fut: Future<Output = Result<(), BoxError>> + Send,
     {
         let group = effective_group(&selection.consumer_group, worker);
         self.pool
-            .session(async |session| self.ensure_group(session, &group, &selection.uri).await)
+            .session(async |session| self.ensure_group(&session, &group, &selection.uri).await)
             .await?;
         self.pool
             .session(async |session| {
                 session
                     .atomic(async |tx| {
-                        let messages = self.fetch(tx, &group, &selection.uri, worker).await?;
+                        let messages = self.fetch(&tx, &group, &selection.uri, worker).await?;
                         let Some(last) = messages.last() else {
                             return Ok(false);
                         };
@@ -213,7 +213,7 @@ where
                             transaction_id: last.transaction_id.unwrap_or_default(),
                             offset: last.position.unwrap_or_default(),
                         };
-                        self.ack(tx, &group, &selection.uri, acked).await?;
+                        self.ack(&tx, &group, &selection.uri, acked).await?;
                         Ok(true)
                     })
                     .await
@@ -235,8 +235,8 @@ where
         shutdown: impl Future<Output = ()>,
     ) -> Result<(), Error>
     where
-        F: Fn(&OutboxMessage) -> Fut + Sync,
-        Fut: Future<Output = Result<(), BoxError>>,
+        F: Fn(&OutboxMessage) -> Fut + Send + Sync,
+        Fut: Future<Output = Result<(), BoxError>> + Send,
     {
         let (stop, _) = watch::channel(false);
         let total = workers.num_processes.max(1) * workers.concurrency.max(1);

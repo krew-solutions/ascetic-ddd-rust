@@ -16,8 +16,11 @@ dependencies = [
 name = "ascetic-ddd-inbox"
 version = "0.1.0"
 dependencies = [
+ "ascetic-ddd-bus",
+ "ascetic-ddd-outbox",
  "ascetic-ddd-session",
  "futures",
+ "log",
  "serde",
  "serde_json",
  "tokio",

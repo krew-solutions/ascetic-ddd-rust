@@ -20,8 +20,10 @@
 //! ```
 //!
 //! The edge sees [`Inbox`], one method; processing is on the adapter,
-//! [`PgInbox`]. A port of `ascetic_ddd.inbox` (Python); see the `pg` module
-//! for what the table and queries guarantee.
+//! [`PgInbox`]. As a channel of the bus — a bridge for the intake, a
+//! transactional consumer for the processing — see [`channel`]. A port of
+//! `ascetic_ddd.inbox` (Python); see the `pg` module for what the table
+//! and queries guarantee.
 //!
 //! # Deviations from the Python source
 //!
@@ -40,12 +42,14 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod channel;
 mod error;
 mod message;
 mod partition;
 pub mod pg;
 mod port;
 
+pub use crate::channel::{INBOX_SCHEME, InboxChannel};
 pub use crate::error::{BoxError, Error};
 pub use crate::message::{CausalDependency, InboxMessage};
 pub use crate::partition::{ByStream, ByUri, PartitionKey};

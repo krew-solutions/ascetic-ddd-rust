@@ -13,7 +13,7 @@
 //!
 //! futures::executor::block_on(pool.session(async |session| {
 //!     session.atomic(async |session| {
-//!         session.atomic(async |_session| Ok(())).await?;
+//!         session.atomic(async |_session| { Ok(()) }).await?;
 //!         Ok::<_, SessionError>(())
 //!     }).await
 //! })).unwrap();
@@ -31,7 +31,7 @@ use crate::error::SessionError;
 use crate::identity_map::IdentityMap;
 use crate::isolation::IsolationLevel;
 use crate::observer::{Outcome, ScopeEnded, ScopeKind, ScopeStarted, SessionObserver};
-use crate::session::{ScopeFlag, Session, SessionPool};
+use crate::session::{AsyncScope, ScopeFlag, Session, SessionPool};
 
 /// Everything the in-memory session has recorded.
 #[derive(Debug, Default)]
@@ -114,12 +114,8 @@ impl Default for MemorySessionPool {
 impl SessionPool for MemorySessionPool {
     type Session = MemorySession;
 
-    async fn session<T, E, F>(&self, scope: F) -> Result<T, E>
-    where
-        F: AsyncFnOnce(&Self::Session) -> Result<T, E>,
-        E: From<SessionError>,
-    {
-        let session = MemorySession {
+    async fn acquire(&self) -> Result<MemorySession, SessionError> {
+        Ok(MemorySession {
             journal: Arc::clone(&self.journal),
             observer: Arc::clone(&self.observer),
             // Outside a transaction nothing may be cached.
@@ -127,24 +123,26 @@ impl SessionPool for MemorySessionPool {
             isolation: self.isolation,
             depth: 0,
             scope_open: ScopeFlag::new(),
-        };
+        })
+    }
+
+    fn scope_opened(&self) {
         self.observer.on_scope_started(&ScopeStarted {
             depth: 0,
             kind: ScopeKind::Session,
         });
+    }
 
-        let outcome = scope(&session).await;
-
+    fn scope_closed(&self, succeeded: bool) {
         self.observer.on_scope_ended(&ScopeEnded {
             depth: 0,
             kind: ScopeKind::Session,
-            outcome: if outcome.is_ok() {
+            outcome: if succeeded {
                 Outcome::Succeeded
             } else {
                 Outcome::Failed
             },
         });
-        outcome
     }
 }
 
@@ -211,8 +209,9 @@ impl MemorySession {
 impl Session for MemorySession {
     async fn atomic<T, E, F>(&self, scope: F) -> Result<T, E>
     where
-        F: AsyncFnOnce(&Self) -> Result<T, E>,
-        E: From<SessionError>,
+        F: AsyncScope<Self, Result<T, E>, Fut: Send> + Send,
+        T: Send,
+        E: From<SessionError> + Send,
     {
         let _guard = self.scope_open.acquire()?;
 
@@ -232,7 +231,8 @@ impl Session for MemorySession {
             .on_scope_started(&ScopeStarted { depth, kind });
 
         let child = self.child();
-        let outcome = scope(&child).await;
+        let identity_map = Arc::clone(&child.identity_map);
+        let outcome = scope(child).await;
         let committed = outcome.is_ok();
 
         self.journal.record(match (savepoint, committed) {
@@ -253,7 +253,7 @@ impl Session for MemorySession {
 
         // The identity map lives exactly as long as the outermost transaction.
         if self.depth == 0 {
-            child.identity_map.clear();
+            identity_map.clear();
         }
 
         outcome

@@ -53,7 +53,7 @@ async fn fixture(name: &str) -> Fixture {
     sessions
         .session(async |session| {
             session.connection().batch_execute(&drop).await.unwrap();
-            outbox.setup(session).await
+            outbox.setup(&session).await
         })
         .await
         .unwrap();
@@ -81,7 +81,7 @@ impl Fixture {
             self.sessions
                 .session(async |session| {
                     session
-                        .atomic(async |tx| self.outbox.publish(tx, message).await)
+                        .atomic(async |tx| self.outbox.publish(&tx, message).await)
                         .await
                 })
                 .await
@@ -120,7 +120,7 @@ impl Fixture {
 
     async fn position(&self, selection: &Selection) -> Position {
         self.sessions
-            .session(async |session| self.outbox.position(session, selection).await)
+            .session(async |session| self.outbox.position(&session, selection).await)
             .await
             .unwrap()
     }
@@ -227,7 +227,7 @@ async fn the_position_follows_the_last_acknowledged_message_and_can_be_moved() {
     f.sessions
         .session(async |session| {
             f.outbox
-                .set_position(session, &selection, Position::default())
+                .set_position(&session, &selection, Position::default())
                 .await
         })
         .await
@@ -326,14 +326,14 @@ async fn nothing_is_dispatched_past_an_open_transaction() {
             session
                 .atomic(async |open| {
                     f.outbox
-                        .publish(open, &message("kafka://orders", 1))
+                        .publish(&open, &message("kafka://orders", 1))
                         .await?;
                     // A later transaction commits while the first is open.
                     f.sessions
                         .session(async |session| {
                             session
                                 .atomic(async |tx| {
-                                    f.outbox.publish(tx, &message("kafka://orders", 2)).await
+                                    f.outbox.publish(&tx, &message("kafka://orders", 2)).await
                                 })
                                 .await
                         })
@@ -397,7 +397,7 @@ async fn an_message_id_is_published_once() {
         .sessions
         .session(async |session| {
             session
-                .atomic(async |tx| f.outbox.publish(tx, &duplicate).await)
+                .atomic(async |tx| f.outbox.publish(&tx, &duplicate).await)
                 .await
         })
         .await;
@@ -534,7 +534,7 @@ async fn the_port_is_implementable_without_a_database() {
     sessions
         .session(async |session| {
             session
-                .atomic(async |tx| fake.publish(tx, &message("kafka://orders", 1)).await)
+                .atomic(async |tx| fake.publish(&tx, &message("kafka://orders", 1)).await)
                 .await
         })
         .await

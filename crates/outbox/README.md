@@ -64,10 +64,8 @@ let dispatcher = Bridge::new(bus).run("outbox://all", "dispatcher", Target::Head
 ```
 
 Headers travel as string fields of `metadata`, so `message_id` keeps its unique
-index. The dispatcher runs on a thread of its own that blocks on the tokio
-runtime: code generic over the session pool cannot show its future is
-`Send`, so it cannot be a spawned task. Cancel the subscription before the
-runtime shuts down.
+index. The dispatcher is a task on the tokio runtime; cancel the subscription
+to stop it.
 
 ## Deviations from the Python source
 

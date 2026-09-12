@@ -51,7 +51,7 @@ async fn fixture(name: &str) -> Fixture {
     sessions
         .session(async |session| {
             session.connection().batch_execute(&drop).await.unwrap();
-            inbox.setup(session).await
+            inbox.setup(&session).await
         })
         .await
         .unwrap();

@@ -16,5 +16,5 @@ pub trait Inbox: Send + Sync {
     /// Whether the returned future is `Send` follows from the implementation,
     /// as with `Session::atomic`: through a concrete inbox it is, through a
     /// generic `I: Inbox` it is not promised.
-    fn publish(&self, message: &InboxMessage) -> impl Future<Output = Result<(), Error>>;
+    fn publish(&self, message: &InboxMessage) -> impl Future<Output = Result<(), Error>> + Send;
 }

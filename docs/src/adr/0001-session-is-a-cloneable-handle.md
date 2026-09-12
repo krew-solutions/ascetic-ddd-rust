@@ -54,6 +54,17 @@ The composite owns clones of the sessions its delegates hand out
   state the rule from both sides (`crates/session/tests/session.rs`).
 - One `Arc` allocation per session value.
 
+## Revisited (2026-09-11)
+
+The borrow decision is superseded by ADR-0004: the scope now receives the
+session by value. A borrow handed to an async closure is quantified over every
+lifetime, and a future built from it could not be shown `Send` through a
+composite on stable Rust (rustc #100013), so the trait could not promise `Send`
+and code generic over the pool could not be spawned. The first alternative
+below, an owned session handed to the scope, is the one adopted. The handle
+decision, `Session: Clone` with clones sharing the scope flag, stands, and is
+what makes the value cheap.
+
 ## Alternatives rejected
 
 **An owned session handed to the scope** (`F: AsyncFnOnce(Self)`,

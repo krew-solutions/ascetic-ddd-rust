@@ -30,16 +30,18 @@
 //! # `Send`
 //!
 //! A count known only at run time means the scopes nest a run-time number of
-//! times, so the recursion is boxed. The box holds the concrete future, not a
-//! `dyn Future`, so whether the whole is `Send` is still read off its contents
-//! — as for every other session in this crate: a `Send` scope gives a `Send`
-//! future, and a scope that is not `Send` is still accepted.
+//! times, so the recursion is boxed. The box holds a `dyn Future + Send`: a
+//! recursive future cannot show the compiler its own `Send`-ness, and the
+//! promise the trait makes (ADR-0004) names it instead.
 //!
 //! The box also ends the compiler's walk over nested closures at each level, so
 //! the layout of a `Many` scope does not grow with the number of delegates.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use crate::error::SessionError;
-use crate::session::{Session, SessionPool};
+use crate::session::{AsyncScope, Session, SessionPool};
 
 /// Several sessions — or pools — of the same type, acting as one.
 #[derive(Clone, Debug, Default)]
@@ -84,58 +86,36 @@ fn with<S>(opened: Vec<S>, next: S) -> Vec<S> {
     opened.into_iter().chain(std::iter::once(next)).collect()
 }
 
-/// Opens a scope on the first delegate and continues with the rest inside it.
+/// Opens a scope on each delegate in turn, then hands the scope all of them.
 ///
-/// The recursive call is boxed, as a recursive `async fn` must be; the box
-/// holds the concrete future, so `Send` is inferred rather than promised.
-async fn open_scopes<S, T, E, F>(rest: &[S], opened: Vec<S>, scope: F) -> Result<T, E>
+/// Recursive, so boxed; the box holds a `dyn Future + Send`, because a
+/// recursive future cannot show its own `Send`-ness and the promise the trait
+/// makes names it instead — see the module documentation.
+fn open_scopes<'a, S, T, E, F>(
+    rest: &'a [S],
+    opened: Vec<S>,
+    scope: F,
+) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'a>>
 where
     S: Session,
-    E: From<SessionError>,
-    F: AsyncFnOnce(&Many<S>) -> Result<T, E>,
+    T: Send + 'a,
+    E: From<SessionError> + Send + 'a,
+    F: AsyncScope<Many<S>, Result<T, E>, Fut: Send> + Send + 'a,
 {
     match rest.split_first() {
-        None => scope(&Many(opened)).await,
-        Some((head, tail)) => {
-            head.atomic(async |opened_head: &S| {
-                Box::pin(open_scopes(tail, with(opened, opened_head.clone()), scope)).await
-            })
-            .await
-        }
-    }
-}
-
-/// Same, for a set of pools handing out a set of sessions.
-async fn open_sessions<P, T, E, F>(rest: &[P], opened: Vec<P::Session>, scope: F) -> Result<T, E>
-where
-    P: SessionPool,
-    E: From<SessionError>,
-    F: AsyncFnOnce(&Many<P::Session>) -> Result<T, E>,
-{
-    match rest.split_first() {
-        None => scope(&Many(opened)).await,
-        Some((head, tail)) => {
-            head.session(async |opened_head: &P::Session| {
-                Box::pin(open_sessions(
-                    tail,
-                    with(opened, opened_head.clone()),
-                    scope,
-                ))
-                .await
-            })
-            .await
-        }
+        None => Box::pin(async move { scope(Many(opened)).await }),
+        Some((head, tail)) => Box::pin(head.atomic(async move |opened_head: S| {
+            open_scopes(tail, with(opened, opened_head), scope).await
+        })),
     }
 }
 
 impl<S: Session> Session for Many<S> {
-    /// Opens a scope on every delegate, in order, closing them in reverse.
-    ///
-    /// Each delegate refuses a second scope of its own, so this needs no guard.
     async fn atomic<T, E, F>(&self, scope: F) -> Result<T, E>
     where
-        F: AsyncFnOnce(&Self) -> Result<T, E>,
-        E: From<SessionError>,
+        F: AsyncScope<Self, Result<T, E>, Fut: Send> + Send,
+        T: Send,
+        E: From<SessionError> + Send,
     {
         open_scopes(&self.0, Vec::new(), scope).await
     }
@@ -144,11 +124,25 @@ impl<S: Session> Session for Many<S> {
 impl<P: SessionPool> SessionPool for Many<P> {
     type Session = Many<P::Session>;
 
-    async fn session<T, E, F>(&self, scope: F) -> Result<T, E>
-    where
-        F: AsyncFnOnce(&Self::Session) -> Result<T, E>,
-        E: From<SessionError>,
-    {
-        open_sessions(&self.0, Vec::new(), scope).await
+    /// Delegates are acquired in order; scopes open in that order and close
+    /// in reverse.
+    async fn acquire(&self) -> Result<Self::Session, SessionError> {
+        let mut opened = Vec::with_capacity(self.0.len());
+        for pool in &self.0 {
+            opened.push(pool.acquire().await?);
+        }
+        Ok(Many(opened))
+    }
+
+    fn scope_opened(&self) {
+        for pool in &self.0 {
+            pool.scope_opened();
+        }
+    }
+
+    fn scope_closed(&self, succeeded: bool) {
+        for pool in self.0.iter().rev() {
+            pool.scope_closed(succeeded);
+        }
     }
 }

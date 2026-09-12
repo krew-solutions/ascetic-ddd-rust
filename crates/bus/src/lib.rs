@@ -72,7 +72,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use crate::adapter::{
-    Adapter, Handler, Subscription, TransactionalWireProducer, WireConsumer, WireProducer,
+    Adapter, Handler, Subscription, TransactionalHandler, TransactionalWireConsumer,
+    TransactionalWireProducer, WireConsumer, WireProducer,
 };
 pub use crate::bridge::{Bridge, Target};
 pub use crate::error::{BoxError, Error};
@@ -245,6 +246,65 @@ impl<T, S> TransactionalProducer<T, S> {
     /// Sends one value within `session`'s transaction.
     pub async fn publish(&self, session: &S, value: &T) -> Result<(), Error> {
         self.wire.publish(session, (self.encode)(value)).await
+    }
+}
+
+/// A typed consumer that runs the handler inside the transport's own
+/// transaction.
+///
+/// Obtained from the adapter that offers it — the inbox — as the
+/// transactional producer is obtained from the outbox (ADR-0003). The
+/// handler is given the session of the transaction that acknowledges the
+/// message, so its writes and the acknowledgement commit together.
+pub struct TransactionalConsumer<T, S> {
+    wire: Box<dyn TransactionalWireConsumer<S>>,
+    decode: Decoder<T>,
+}
+
+impl<T: 'static, S: 'static> TransactionalConsumer<T, S> {
+    /// A typed consumer over a transactional wire consumer.
+    pub fn new(
+        wire: Box<dyn TransactionalWireConsumer<S>>,
+        decode: impl Fn(&Message) -> Result<T, BoxError> + Send + Sync + 'static,
+    ) -> Self {
+        TransactionalConsumer {
+            wire,
+            decode: Arc::new(decode),
+        }
+    }
+
+    /// Runs `handler` for every message, with the transaction the message is
+    /// acknowledged in, until the subscription is cancelled.
+    ///
+    /// A message that `decode` rejects is reported and acknowledged without a
+    /// handler, as [`Consumer::subscribe`] does: a poison message must not
+    /// stop the rest.
+    pub fn subscribe<F, Fut, O>(&self, handler: F) -> Result<Subscription, Error>
+    where
+        F: Fn(S, T) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = O> + Send + 'static,
+        O: Outcome,
+    {
+        let decode = Arc::clone(&self.decode);
+        let handler: TransactionalHandler<S> =
+            Arc::new(move |session: S, message: Message| match decode(&message) {
+                Ok(value) => {
+                    let outcome = handler(session, value);
+                    Box::pin(async move { outcome.await.into_result() })
+                }
+                Err(error) => {
+                    log::warn!("bus[transactional]: decoding failed: {error}");
+                    Box::pin(async { Ok(()) })
+                }
+            });
+        self.wire.subscribe(handler)
+    }
+}
+
+impl<T, S> std::fmt::Debug for TransactionalConsumer<T, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TransactionalConsumer")
+            .finish_non_exhaustive()
     }
 }
 

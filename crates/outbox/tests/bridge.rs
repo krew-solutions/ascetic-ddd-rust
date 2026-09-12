@@ -47,7 +47,7 @@ async fn a_committed_message_crosses_the_bridge_and_a_rolled_back_one_does_not()
                 .batch_execute("DROP TABLE IF EXISTS outbox_bridge; DROP TABLE IF EXISTS outbox_bridge_offsets;")
                 .await
                 .unwrap();
-            outbox.setup(session).await
+            outbox.setup(&session).await
         })
         .await
         .unwrap();
@@ -88,7 +88,7 @@ async fn a_committed_message_crosses_the_bridge_and_a_rolled_back_one_does_not()
         .session(async |session| {
             session
                 .atomic(async |tx| {
-                    producer.publish(tx, &"lost".to_owned()).await.unwrap();
+                    producer.publish(&tx, &"lost".to_owned()).await.unwrap();
                     Err(ascetic_ddd_outbox::Error::Malformed(
                         "rolled back on purpose".into(),
                     ))
@@ -102,7 +102,7 @@ async fn a_committed_message_crosses_the_bridge_and_a_rolled_back_one_does_not()
         .session(async |session| {
             session
                 .atomic(async |tx| {
-                    producer.publish(tx, &"placed".to_owned()).await.unwrap();
+                    producer.publish(&tx, &"placed".to_owned()).await.unwrap();
                     Ok::<(), ascetic_ddd_outbox::Error>(())
                 })
                 .await

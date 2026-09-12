@@ -39,6 +39,14 @@ Two decisions taken in the port:
 A subscription is cancelled explicitly, never by dropping its handle: the
 composition root discards most handles. Errors are values.
 
+A producer or consumer that is transactional by nature — the outbox, the
+inbox — is obtained from its adapter rather than from the registry, and
+names the transaction at the call: `TransactionalProducer::publish(&session,
+&value)` publishes inside the caller's transaction,
+`TransactionalConsumer::subscribe(|session, value| …)` runs the handler
+inside the transaction that acknowledges the message. The bus never sees a
+session; it passes one through (ADR-0003).
+
 ## Adapters
 
 `InMemoryBroker` is the monolithic transport: topics in a process-local

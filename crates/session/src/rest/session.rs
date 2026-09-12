@@ -1,5 +1,6 @@
 //! The REST session and the pool that hands them out.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -7,7 +8,7 @@ use crate::error::SessionError;
 use crate::identity_map::IdentityMap;
 use crate::isolation::IsolationLevel;
 use crate::observer::{Outcome, ScopeEnded, ScopeKind, ScopeStarted, SessionObserver};
-use crate::session::{ScopeFlag, Session, SessionPool};
+use crate::session::{AsyncScope, ScopeFlag, Session, SessionPool};
 
 use super::observer::{RequestEnded, RequestStarted, RestObserver};
 
@@ -120,11 +121,12 @@ impl<C: Send + Sync> HttpAccess for RestSession<C> {
     }
 }
 
-impl<C: Send + Sync> Session for RestSession<C> {
+impl<C: Send + Sync + 'static> Session for RestSession<C> {
     async fn atomic<T, E, F>(&self, scope: F) -> Result<T, E>
     where
-        F: AsyncFnOnce(&Self) -> Result<T, E>,
-        E: From<SessionError>,
+        F: AsyncScope<Self, Result<T, E>, Fut: Send> + Send,
+        T: Send,
+        E: From<SessionError> + Send,
     {
         let _guard = self.scope_open.acquire()?;
 
@@ -135,7 +137,8 @@ impl<C: Send + Sync> Session for RestSession<C> {
         });
 
         let child = self.child();
-        let outcome = scope(&child).await;
+        let identity_map = Arc::clone(&child.identity_map);
+        let outcome = scope(child).await;
 
         self.observer.on_scope_ended(&ScopeEnded {
             depth,
@@ -149,7 +152,7 @@ impl<C: Send + Sync> Session for RestSession<C> {
 
         // The identity map lives exactly as long as the outermost scope.
         if self.depth == 0 {
-            child.identity_map.clear();
+            identity_map.clear();
         }
 
         outcome
@@ -203,15 +206,11 @@ impl<C> RestSessionPool<C> {
     }
 }
 
-impl<C: Send + Sync> SessionPool for RestSessionPool<C> {
+impl<C: Send + Sync + 'static> SessionPool for RestSessionPool<C> {
     type Session = RestSession<C>;
 
-    async fn session<T, E, F>(&self, scope: F) -> Result<T, E>
-    where
-        F: AsyncFnOnce(&Self::Session) -> Result<T, E>,
-        E: From<SessionError>,
-    {
-        let session = RestSession {
+    async fn acquire(&self) -> Result<RestSession<C>, SessionError> {
+        Ok(RestSession {
             client: Arc::clone(&self.client),
             observer: Arc::clone(&self.observer),
             // Outside a scope nothing may be cached.
@@ -219,25 +218,25 @@ impl<C: Send + Sync> SessionPool for RestSessionPool<C> {
             isolation: self.isolation,
             depth: 0,
             scope_open: ScopeFlag::new(),
-        };
+        })
+    }
 
+    fn scope_opened(&self) {
         self.observer.on_scope_started(&ScopeStarted {
             depth: 0,
             kind: ScopeKind::Session,
         });
+    }
 
-        let outcome = scope(&session).await;
-
+    fn scope_closed(&self, succeeded: bool) {
         self.observer.on_scope_ended(&ScopeEnded {
             depth: 0,
             kind: ScopeKind::Session,
-            outcome: if outcome.is_ok() {
+            outcome: if succeeded {
                 Outcome::Succeeded
             } else {
                 Outcome::Failed
             },
         });
-
-        outcome
     }
 }

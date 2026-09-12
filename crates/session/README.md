@@ -15,17 +15,22 @@ Two decisions shape the whole crate.
 ### The domain sees exactly one operation
 
 ```rust
-pub trait Session: Clone + Sync {
-    fn atomic<T, E, F>(&self, scope: F) -> impl Future<Output = Result<T, E>>
-    where F: AsyncFnOnce(&Self) -> Result<T, E>, E: From<SessionError>;
+pub trait Session: Clone + Send + Sync + 'static {
+    fn atomic<T, E, F>(&self, scope: F) -> impl Future<Output = Result<T, E>> + Send
+    where F: AsyncScope<Self, Result<T, E>, Fut: Send> + Send,
+          T: Send, E: From<SessionError> + Send;
 }
 ```
+
+Read `F` as `async |session| …` whose future is `Send`; `AsyncScope` only
+gives that future a name so the bound can be written (ADR-0004).
 
 A session is a handle, not a resource: `Clone` gives a second name for the same
 connection, identity map and scope flag, and costs a few reference counts.
 Requiring it is what makes a composite session expressible — it owns clones of
-the sessions its delegates hand out, so its own type carries no lifetime and a
-plain borrow can be handed to the scope. Because the scope flag is shared, a
+the sessions its delegates hand out, so its own type carries no lifetime — and what makes handing the scope a session *by value* cheap: the
+scope receives a clone of the handle and passes it on to repositories as
+`&session` (ADR-0004). Because the scope flag is shared, a
 clone cannot open a scope beside the one it was cloned from.
 
 `atomic` is closed under itself: a nested scope hands the closure another
@@ -59,7 +64,7 @@ one scope run concurrently, which `&mut self` forbids:
 
 ```rust
 session.atomic(async |session| {
-    futures::try_join!(lines.save(session, &a), lines.save(session, &b))?;
+    futures::try_join!(lines.save(&session, &a), lines.save(&session, &b))?;
     Ok::<_, Error>(())
 }).await?;
 ```
@@ -208,14 +213,15 @@ an application that spawns deeply nested composite scopes on a multi-thread
 runtime — measured at two delegates and five nested scopes — may need
 `#![recursion_limit = "256"]` in its own crate. The error names the limit.
 
-`Send` is inferred, never promised. `Session::atomic` and
-`SessionPool::session` return `impl Future` without `Send`, because the
-scope's own future cannot be bounded on stable Rust. Where the session type
-is concrete the compiler sees through the trait and infers `Send` from the
-scope, so the future can be spawned. Code that is *generic* over the pool or
-the session cannot show its future `Send` at all, and `tokio::spawn` refuses
-it: spawn where the types are concrete, or give the loop a thread that blocks
-on the runtime, as the outbox channel does.
+`Send` is promised, not inferred. `Session::atomic` and
+`SessionPool::session` return `impl Future + Send`, so code that is generic
+over the pool or the session can be spawned; the price is that every scope
+must be `Send`, and one holding an `Rc` across an `.await` is refused at
+compile time. Two things make the promise possible: the scope receives its
+session by value, so no borrow has to hold for every lifetime, and `AsyncScope`
+names the future of the async closure, the way diesel-async's `AsyncFunc` does.
+A pool implements only `acquire`; the bracket `session` is written once in the
+trait (ADR-0004).
 
 ## PostgreSQL
 
@@ -230,9 +236,9 @@ let sessions = PgSessionPool::new(pool).observed_by(QueryLog);
 
 sessions.session(async |session| {
     session.atomic(async |session| {
-        repository.save(session, &order).await?;      // BEGIN
+        repository.save(&session, &order).await?;     // BEGIN
         session.atomic(async |session| {              // SAVEPOINT sp1
-            outbox.publish(session, &event).await
+            outbox.publish(&session, &event).await
         }).await?;                                    // RELEASE SAVEPOINT sp1
         Ok(())
     }).await                                          // COMMIT
@@ -298,10 +304,9 @@ What the integration tests cover:
 * 6 on the REST session — capability access, logical scopes, failure, the
   identity map, the scope guard, and a clone refused beside the original (the
   one hand-written `Clone` in the crate);
-* 8 on `Many` — every shard gets a scope, the order they open and close in, a
+* 7 on `Many` — every shard gets a scope, the order they open and close in, a
   failure rolling every shard back, an empty set, nesting, a `Send` scope giving
-  a `Send` future, a scope that is not `Send` still accepted, and a scope
-  spawned on a multi-thread runtime;
+  a `Send` future, and a scope spawned on a multi-thread runtime;
 * 6 on the pair — one use case driving both delegates through their
   capabilities, nesting across delegates, rollback of the transactional delegate
   only, the guard, three delegates composed, and five nested scopes through the
