@@ -4,6 +4,7 @@
 
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ascetic_ddd_bus::adapters::in_memory::InMemoryBroker;
@@ -131,4 +132,83 @@ async fn a_committed_message_crosses_the_bridge_and_a_rolled_back_one_does_not()
         "the rolled-back message never arrives"
     );
     dispatcher.cancel();
+}
+
+/// A subscriber of the outbox channel that fails leaves the batch
+/// unacknowledged; it is delivered again after the poll interval.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_failing_subscriber_gets_the_batch_again() {
+    let sessions = PgSessionPool::new(pool());
+    let outbox = Arc::new(
+        PgOutbox::new(PgSessionPool::new(pool()))
+            .with_tables("outbox_retry", "outbox_retry_offsets")
+            .with_poll_interval(Duration::from_millis(20)),
+    );
+    sessions
+        .session(async |session| {
+            session
+                .connection()
+                .batch_execute(
+                    "DROP TABLE IF EXISTS outbox_retry; DROP TABLE IF EXISTS outbox_retry_offsets;",
+                )
+                .await
+                .unwrap();
+            outbox.setup(&session).await
+        })
+        .await
+        .unwrap();
+
+    let mut bus = Bus::new();
+    bus.register(OUTBOX_SCHEME, outbox.channel()).unwrap();
+    let bus = Arc::new(bus);
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let (seen, mut received) = mpsc::unbounded_channel();
+    let flaky = bus
+        .consumer("outbox://all", "flaky", |message: &Message| {
+            Ok(String::from_utf8(message.payload().to_vec())?)
+        })
+        .unwrap();
+    let subscription = flaky
+        .subscribe({
+            let attempts = Arc::clone(&attempts);
+            move |order: String| {
+                let (seen, attempts) = (seen.clone(), Arc::clone(&attempts));
+                async move {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        return Err::<(), ascetic_ddd_bus::BoxError>(
+                            "the first attempt fails on purpose".into(),
+                        );
+                    }
+                    seen.send(order).ok();
+                    Ok(())
+                }
+            }
+        })
+        .unwrap();
+
+    let placed = outbox.producer("in-memory://orders/order-9", |order: &String| {
+        Message::new(order.as_bytes())
+            .with_header("message_id", "00000000-0000-4000-8000-000000000009")
+    });
+    sessions
+        .session(async |session| {
+            session
+                .atomic(async |tx| {
+                    placed.publish(&tx, &"placed".to_owned()).await.unwrap();
+                    Ok::<(), ascetic_ddd_outbox::Error>(())
+                })
+                .await
+        })
+        .await
+        .unwrap();
+
+    let delivered = tokio::time::timeout(Duration::from_secs(20), received.recv())
+        .await
+        .expect("the batch is delivered again")
+        .unwrap();
+    assert_eq!(delivered, "placed");
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    subscription.cancel();
 }

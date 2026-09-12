@@ -4,6 +4,7 @@
 
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ascetic_ddd_bus::adapters::in_memory::InMemoryBroker;
@@ -255,5 +256,69 @@ async fn the_outbox_feeds_the_inbox_without_a_broker() {
         "the destination the outbox stamped"
     );
     dispatcher.cancel();
+    processing.cancel();
+}
+
+/// A handler that fails leaves the message unprocessed and its own writes
+/// rolled back; the loop retries after the poll interval, and the second
+/// attempt goes through.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_failing_handler_is_retried_and_its_writes_are_rolled_back() {
+    let fixture = fixture("retry").await;
+    let mut bus = Bus::new();
+    bus.register("in-memory", InMemoryBroker::new()).unwrap();
+    bus.register(INBOX_SCHEME, fixture.inbox.channel()).unwrap();
+    let bus = Arc::new(bus);
+    let intake = Bridge::new(Arc::clone(&bus))
+        .run(
+            "in-memory://orders",
+            "intake",
+            Target::Fixed("inbox://orders".into()),
+        )
+        .unwrap();
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let (seen, mut received) = mpsc::unbounded_channel();
+    let handled = format!(
+        "INSERT INTO {}_handled (payload) VALUES ($1)",
+        fixture.table
+    );
+    let orders = fixture
+        .inbox
+        .consumer(|message: &Message| Ok(String::from_utf8(message.payload().to_vec())?));
+    let processing = orders
+        .subscribe({
+            let attempts = Arc::clone(&attempts);
+            move |tx: PgSession, order: String| {
+                let (seen, handled, attempts) =
+                    (seen.clone(), handled.clone(), Arc::clone(&attempts));
+                async move {
+                    tx.connection().execute(&handled, &[&order]).await?;
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        return Err::<(), BoxError>("the first attempt fails on purpose".into());
+                    }
+                    seen.send(order).ok();
+                    Ok(())
+                }
+            }
+        })
+        .unwrap();
+
+    bus.producer("in-memory://orders", |message: &Message| message.clone())
+        .unwrap()
+        .publish(&order("retried", 3, "00000000-0000-4000-8000-000000000003"))
+        .await
+        .unwrap();
+
+    assert_eq!(next(&mut received).await, "retried");
+    assert_eq!(fixture.processed_soon(1).await, 1);
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        fixture.handled().await,
+        1,
+        "the failed attempt's write was rolled back with it"
+    );
+    intake.cancel();
     processing.cancel();
 }

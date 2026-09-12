@@ -23,4 +23,4 @@ tokio-postgres = { version = "0.7.18", optional = true }
 
 [dev-dependencies]
 futures.workspace = true
-tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }

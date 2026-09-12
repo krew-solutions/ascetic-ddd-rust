@@ -8,7 +8,7 @@ use crate::error::SessionError;
 use crate::identity_map::IdentityMap;
 use crate::isolation::IsolationLevel;
 use crate::observer::{Outcome, ScopeEnded, ScopeKind, ScopeStarted, SessionObserver};
-use crate::session::{AsyncScope, ScopeFlag, Session, SessionPool};
+use crate::session::{Abandon, AsyncScope, ScopeFlag, Session, SessionPool};
 
 use super::connection::PgConnection;
 use super::observer::PgObserver;
@@ -50,6 +50,12 @@ impl PgSession {
         self.depth
     }
 
+    /// Whether a scope on this session's connection was dropped before it
+    /// closed; see [`SessionError::Abandoned`].
+    pub fn is_abandoned(&self) -> bool {
+        self.connection.is_poisoned()
+    }
+
     fn child(&self) -> Self {
         PgSession {
             connection: self.connection.clone(),
@@ -81,6 +87,9 @@ impl Session for PgSession {
         // Claimed for the whole scope and released on the way out, whether the
         // scope returns, fails early or unwinds.
         let _guard = self.scope_open.acquire()?;
+        if self.connection.is_poisoned() {
+            return Err(SessionError::Abandoned.into());
+        }
 
         let savepoint = (self.depth > 0).then(|| self.connection.next_savepoint());
         let kind = if savepoint.is_some() {
@@ -95,15 +104,26 @@ impl Session for PgSession {
             None => "BEGIN".to_owned(),
             Some(name) => format!("SAVEPOINT {name}"),
         };
-        self.connection
-            .batch_execute(&open)
-            .await
-            .map_err(|error| SessionError::Begin(Box::new(error)))?;
+        // Armed until the closing statement has run: a future dropped anywhere
+        // in between leaves the transaction open, and the guard poisons the
+        // connection.
+        let mut abandon = Abandon::armed(self.connection.poisoned(), &*observer, depth, kind);
+        if let Err(error) = self.connection.batch_execute(&open).await {
+            abandon.disarm();
+            return Err(SessionError::Begin(Box::new(error)).into());
+        }
         observer.on_scope_started(&ScopeStarted { depth, kind });
+        abandon.started();
 
         let child = self.child();
         let identity_map = Arc::clone(&child.identity_map);
         let outcome = scope(child).await;
+        // A nested scope dropped mid-way poisoned the connection: nothing done
+        // since may be committed.
+        let outcome = match outcome {
+            Ok(_) if self.connection.is_poisoned() => Err(SessionError::Abandoned.into()),
+            outcome => outcome,
+        };
         let committed = outcome.is_ok();
 
         let close = match (&savepoint, committed) {
@@ -113,6 +133,7 @@ impl Session for PgSession {
             (Some(name), false) => format!("ROLLBACK TO SAVEPOINT {name}"),
         };
         let closed = self.connection.batch_execute(&close).await;
+        abandon.disarm();
 
         observer.on_scope_ended(&ScopeEnded {
             depth,

@@ -8,7 +8,7 @@
 //! [`PgAccess`]: super::PgAccess
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use deadpool_postgres::Object;
@@ -21,9 +21,26 @@ use super::observer::{PgObserver, QueryEnded, QueryStarted};
 pub type PgError = tokio_postgres::Error;
 
 struct Shared {
-    client: Object,
+    /// `None` only while `Drop` runs.
+    client: Option<Object>,
     observer: Arc<dyn PgObserver>,
     savepoints: AtomicU64,
+    /// Set when a scope's future was dropped before the scope closed: the
+    /// connection may be inside a transaction nobody will finish.
+    poisoned: AtomicBool,
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        // A poisoned connection is taken out of the pool for good; the server
+        // ends whatever transaction it was in when the socket closes. A
+        // healthy one returns to the pool as usual.
+        if self.poisoned.load(Ordering::SeqCst) {
+            if let Some(client) = self.client.take() {
+                drop(Object::take(client));
+            }
+        }
+    }
 }
 
 /// A connection that reports what it executes.
@@ -41,9 +58,10 @@ impl PgConnection {
     pub(super) fn new(client: Object, observer: Arc<dyn PgObserver>) -> Self {
         PgConnection {
             shared: Arc::new(Shared {
-                client,
+                client: Some(client),
                 observer,
                 savepoints: AtomicU64::new(0),
+                poisoned: AtomicBool::new(false),
             }),
         }
     }
@@ -58,7 +76,19 @@ impl PgConnection {
     ///
     /// Statements issued through it are not reported to the observer.
     pub fn client(&self) -> &Client {
-        &self.shared.client
+        self.shared
+            .client
+            .as_ref()
+            .expect("the client lives as long as the connection")
+    }
+
+    /// Whether a scope on this connection was dropped before it closed.
+    pub fn is_poisoned(&self) -> bool {
+        self.shared.poisoned.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn poisoned(&self) -> &AtomicBool {
+        &self.shared.poisoned
     }
 
     /// Executes a statement, returning the number of rows affected.

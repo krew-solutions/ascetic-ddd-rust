@@ -280,6 +280,15 @@ A failing `COMMIT` becomes `SessionError::Commit` — the caller believes the wo
 is durable and it is not. A failing `ROLLBACK` does *not* replace the error that
 caused it; the observer has already seen it as a failed statement.
 
+A scope whose future is dropped before it closes — a timeout, the losing branch
+of a `select!` — would leave the connection inside an open transaction. The
+session notices: the connection is poisoned, an enclosing scope is refused at
+commit with `SessionError::Abandoned` and rolled back, a handle carried out of
+the dropped scope refuses new scopes the same way, and the connection is taken
+out of the pool for good when its last handle drops, so the server ends the
+transaction with the socket. The observer sees the dropped scope end as failed.
+`MemorySession` behaves the same, minus the socket.
+
 ## Testing
 
 ```bash
@@ -296,11 +305,11 @@ What the integration tests cover:
   case the Go port adds, with two extra cases for weak-reference behaviour that
   only this port can express, the key macro, and six on the generational
   window;
-* 15 on the session — nesting, both failure paths, scope notifications,
+* 17 on the session — nesting, both failure paths, scope notifications,
   identity-map sharing, concurrent work inside one scope, error conversion, and
   the scope guard (refusal, nesting still allowed, sequential scopes allowed,
   release after failure, a clone refused beside the original, a clone of the
-  handed-out session still nesting);
+  handed-out session still nesting), and two scopes dropped mid-way;
 * 6 on the REST session — capability access, logical scopes, failure, the
   identity map, the scope guard, and a clone refused beside the original (the
   one hand-written `Clone` in the crate);
@@ -314,6 +323,8 @@ What the integration tests cover:
 * 7 on the tuple — the same use case, nesting, rollback and guard, four
   delegates staying flat, the order delegates open and close in, and the same
   compile-depth regression;
-* 6 against a real PostgreSQL — durable nested commit, a savepoint rolled back
+* 8 against a real PostgreSQL — durable nested commit, a savepoint rolled back
   inside a live transaction, full rollback, pipelined statements in one scope,
-  the statements the observer actually sees, and two concurrent scopes refused.
+  the statements the observer actually sees, two concurrent scopes refused, a
+  dropped scope discarding its connection, and an outer scope refused after an
+  inner one was dropped.

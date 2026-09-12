@@ -34,6 +34,13 @@ pub enum SessionError {
     /// Since the session is shared by `&`, the compiler cannot rule this out —
     /// so it is refused at run time instead.
     ScopeAlreadyOpen,
+    /// A scope's future was dropped before the scope closed — a timeout, the
+    /// losing branch of a `select!` — so its transaction was never committed
+    /// or rolled back. The session is poisoned: an enclosing scope is refused
+    /// at commit and rolled back, a handle carried out of the dropped scope
+    /// refuses new scopes, and the connection is discarded rather than
+    /// returned to the pool.
+    Abandoned,
 }
 
 impl fmt::Display for SessionError {
@@ -48,6 +55,11 @@ impl fmt::Display for SessionError {
                 "a scope is already open on this session: open a nested scope on \
                  the session the outer scope handed out, or use another session",
             ),
+            SessionError::Abandoned => write!(
+                f,
+                "a scope was dropped before it closed: its transaction is abandoned \
+                 and the connection is discarded",
+            ),
         }
     }
 }
@@ -59,7 +71,7 @@ impl std::error::Error for SessionError {
             | SessionError::Begin(error)
             | SessionError::Commit(error)
             | SessionError::Rollback(error) => Some(&**error),
-            SessionError::ScopeAlreadyOpen => None,
+            SessionError::ScopeAlreadyOpen | SessionError::Abandoned => None,
         }
     }
 }

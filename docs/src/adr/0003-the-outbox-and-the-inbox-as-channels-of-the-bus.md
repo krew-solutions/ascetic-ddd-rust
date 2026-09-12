@@ -2,8 +2,11 @@
 
 ## Status
 
-Proposed (2026-09-09). Depends on ADR-0002. Supersedes the first draft,
-which nested reliability into URI schemes (`outbox://kafka/…`); rejected.
+Accepted (2026-09-12); proposed 2026-09-09. Depends on ADR-0002. Supersedes
+the first draft, which nested reliability into URI schemes
+(`outbox://kafka/…`). Implemented in `crates/bus/src/bridge.rs`,
+`crates/outbox/src/channel.rs` and `crates/inbox/src/channel.rs`, with the
+outbox-to-inbox path without a broker covered by `crates/inbox/tests/bridge.rs`.
 
 ## Context
 

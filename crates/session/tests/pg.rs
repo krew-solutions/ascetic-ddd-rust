@@ -12,6 +12,7 @@
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use ascetic_ddd_session::observer::{ScopeEnded, ScopeKind, ScopeStarted, SessionObserver};
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -23,6 +24,10 @@ use futures::future::BoxFuture;
 const DEFAULT_URL: &str = "postgresql://devel:devel@localhost:5432/devel_karmabot_test";
 
 fn make_pool() -> Pool {
+    make_pool_of(4)
+}
+
+fn make_pool_of(max_size: usize) -> Pool {
     let url = std::env::var("ASCETIC_DDD_TEST_PG_URL").unwrap_or_else(|_| DEFAULT_URL.to_owned());
     let config = ascetic_ddd_session::pg::tokio_postgres::Config::from_str(&url)
         .expect("a valid PostgreSQL URL");
@@ -34,7 +39,7 @@ fn make_pool() -> Pool {
         },
     );
     Pool::builder(manager)
-        .max_size(4)
+        .max_size(max_size)
         .build()
         .expect("the pool can be built")
 }
@@ -391,4 +396,86 @@ async fn concurrent_scopes_on_one_session_are_refused() {
         assert_eq!(count, 1, "only the scope that ran wrote anything");
     })
     .await;
+}
+
+/// A scope dropped mid-statement leaves the connection inside a transaction.
+/// The connection is poisoned and taken out of the pool: the next session gets
+/// a fresh one, outside any transaction.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_dropped_scope_discards_its_connection() {
+    let pool = make_pool_of(1);
+    let sessions = PgSessionPool::new(pool.clone());
+
+    let cut_short = tokio::time::timeout(
+        Duration::from_millis(200),
+        sessions.session(async |session| {
+            session
+                .atomic(async |tx| {
+                    tx.connection()
+                        .batch_execute("SELECT pg_sleep(30)")
+                        .await
+                        .map_err(|error| AppError::Driver(error.to_string()))?;
+                    Ok::<(), AppError>(())
+                })
+                .await
+        }),
+    )
+    .await;
+    assert!(cut_short.is_err(), "the scope was cut short by the timeout");
+    assert_eq!(
+        pool.status().size,
+        0,
+        "the poisoned connection left the pool"
+    );
+
+    let in_transaction: bool = sessions
+        .session(async |session| {
+            let row = session
+                .connection()
+                .query_one("SELECT pg_current_xact_id_if_assigned() IS NOT NULL", &[])
+                .await
+                .map_err(|error| AppError::Driver(error.to_string()))?;
+            Ok::<bool, AppError>(row.get(0))
+        })
+        .await
+        .unwrap();
+    assert!(
+        !in_transaction,
+        "the next session starts on a clean connection"
+    );
+}
+
+/// An inner scope dropped mid-way poisons the connection: the outer scope is
+/// refused at commit and rolled back, and the connection is discarded with it.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn an_outer_scope_is_refused_after_an_inner_one_was_dropped() {
+    let pool = make_pool_of(1);
+    let sessions = PgSessionPool::new(pool.clone());
+
+    let outcome = sessions
+        .session(async |session| {
+            session
+                .atomic(async |tx| {
+                    let inner = Box::pin(tx.atomic(async |_| {
+                        std::future::pending::<()>().await;
+                        Ok::<(), AppError>(())
+                    }));
+                    let _ = futures::future::select(inner, std::future::ready(())).await;
+                    Ok::<(), AppError>(())
+                })
+                .await
+        })
+        .await;
+
+    assert!(matches!(
+        outcome,
+        Err(AppError::Session(SessionError::Abandoned))
+    ));
+    assert_eq!(
+        pool.status().size,
+        0,
+        "the poisoned connection left the pool"
+    );
 }

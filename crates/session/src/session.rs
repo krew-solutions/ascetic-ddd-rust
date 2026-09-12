@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::SessionError;
+use crate::observer::{Outcome, ScopeEnded, ScopeKind, SessionObserver};
 
 /// An asynchronous scope whose future has a name.
 ///
@@ -208,5 +209,67 @@ pub struct ScopeGuard<'a>(&'a AtomicBool);
 impl Drop for ScopeGuard<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Poisons a scope's resource if the scope's future is dropped before the
+/// scope has closed.
+///
+/// Armed before the opening statement and disarmed after the closing one, so
+/// that a future dropped anywhere in between — during `BEGIN`, inside the
+/// scope, during `COMMIT` — leaves the flag set: the transaction's state is
+/// unknown, and nothing may be committed on that connection again. The
+/// observer is told the scope ended in failure, once it has been told it
+/// started.
+pub(crate) struct Abandon<'a> {
+    poisoned: &'a AtomicBool,
+    observer: &'a dyn SessionObserver,
+    depth: usize,
+    kind: ScopeKind,
+    armed: bool,
+    started: bool,
+}
+
+impl<'a> Abandon<'a> {
+    pub(crate) fn armed(
+        poisoned: &'a AtomicBool,
+        observer: &'a dyn SessionObserver,
+        depth: usize,
+        kind: ScopeKind,
+    ) -> Self {
+        Abandon {
+            poisoned,
+            observer,
+            depth,
+            kind,
+            armed: true,
+            started: false,
+        }
+    }
+
+    /// The observer has seen the scope start; it will see it end.
+    pub(crate) fn started(&mut self) {
+        self.started = true;
+    }
+
+    /// The scope has closed: nothing to do on drop.
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for Abandon<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.poisoned.store(true, Ordering::SeqCst);
+        if self.started {
+            self.observer.on_scope_ended(&ScopeEnded {
+                depth: self.depth,
+                kind: self.kind,
+                outcome: Outcome::Failed,
+            });
+        }
     }
 }

@@ -24,14 +24,14 @@
 //! );
 //! ```
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::error::SessionError;
 use crate::identity_map::IdentityMap;
 use crate::isolation::IsolationLevel;
 use crate::observer::{Outcome, ScopeEnded, ScopeKind, ScopeStarted, SessionObserver};
-use crate::session::{AsyncScope, ScopeFlag, Session, SessionPool};
+use crate::session::{Abandon, AsyncScope, ScopeFlag, Session, SessionPool};
 
 /// Everything the in-memory session has recorded.
 #[derive(Debug, Default)]
@@ -123,6 +123,7 @@ impl SessionPool for MemorySessionPool {
             isolation: self.isolation,
             depth: 0,
             scope_open: ScopeFlag::new(),
+            poisoned: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -156,9 +157,17 @@ pub struct MemorySession {
     depth: usize,
     /// Set while a scope opened on this session, or on a clone of it, is running.
     scope_open: ScopeFlag,
+    /// Set when a scope on this session tree was dropped before it closed.
+    poisoned: Arc<AtomicBool>,
 }
 
 impl MemorySession {
+    /// Whether a scope on this session tree was dropped before it closed; see
+    /// [`SessionError::Abandoned`].
+    pub fn is_abandoned(&self) -> bool {
+        self.poisoned.load(Ordering::SeqCst)
+    }
+
     /// The journal this session records into.
     pub fn journal(&self) -> &Journal {
         &self.journal
@@ -202,6 +211,7 @@ impl MemorySession {
             isolation: self.isolation,
             depth: self.depth + 1,
             scope_open: ScopeFlag::new(),
+            poisoned: Arc::clone(&self.poisoned),
         }
     }
 }
@@ -214,6 +224,9 @@ impl Session for MemorySession {
         E: From<SessionError> + Send,
     {
         let _guard = self.scope_open.acquire()?;
+        if self.is_abandoned() {
+            return Err(SessionError::Abandoned.into());
+        }
 
         let savepoint = (self.depth > 0).then(|| self.journal.next_savepoint());
         let kind = if savepoint.is_some() {
@@ -223,16 +236,24 @@ impl Session for MemorySession {
         };
         let depth = self.depth + 1;
 
+        let mut abandon = Abandon::armed(&self.poisoned, &*self.observer, depth, kind);
         self.journal.record(match savepoint {
             None => "BEGIN".to_owned(),
             Some(number) => format!("SAVEPOINT sp{number}"),
         });
         self.observer
             .on_scope_started(&ScopeStarted { depth, kind });
+        abandon.started();
 
         let child = self.child();
         let identity_map = Arc::clone(&child.identity_map);
         let outcome = scope(child).await;
+        // A nested scope dropped mid-way poisoned the session: nothing done
+        // since may be committed.
+        let outcome = match outcome {
+            Ok(_) if self.is_abandoned() => Err(SessionError::Abandoned.into()),
+            outcome => outcome,
+        };
         let committed = outcome.is_ok();
 
         self.journal.record(match (savepoint, committed) {
@@ -241,6 +262,7 @@ impl Session for MemorySession {
             (Some(number), true) => format!("RELEASE SAVEPOINT sp{number}"),
             (Some(number), false) => format!("ROLLBACK TO SAVEPOINT sp{number}"),
         });
+        abandon.disarm();
         self.observer.on_scope_ended(&ScopeEnded {
             depth,
             kind,

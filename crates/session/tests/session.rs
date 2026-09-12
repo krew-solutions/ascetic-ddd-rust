@@ -460,3 +460,75 @@ fn a_clone_of_the_handed_out_session_may_still_nest() {
         ["BEGIN", "SAVEPOINT sp1", "RELEASE SAVEPOINT sp1", "COMMIT"],
     );
 }
+
+/// A scope whose future is dropped before it closes leaves the transaction
+/// open. The session is poisoned: the journal shows the `BEGIN` that was never
+/// closed, and a handle carried out of the dropped scope refuses another scope.
+#[test]
+fn a_dropped_scope_abandons_the_transaction() {
+    let pool = MemorySessionPool::new();
+    let journal = pool.journal();
+    let carried: Arc<Mutex<Option<MemorySession>>> = Arc::default();
+    let slot = Arc::clone(&carried);
+
+    let mut scope = Box::pin(pool.session(async move |session| {
+        session
+            .atomic(async |tx| {
+                *slot.lock().unwrap() = Some(tx.clone());
+                std::future::pending::<()>().await;
+                Ok::<(), AppError>(())
+            })
+            .await
+    }));
+    block_on(async {
+        assert!(futures::poll!(scope.as_mut()).is_pending());
+    });
+    drop(scope);
+
+    assert_eq!(journal.entries(), ["BEGIN"]);
+    let tx = carried.lock().unwrap().take().unwrap();
+    assert!(tx.is_abandoned());
+    let refused = block_on(tx.atomic(async |_| Ok::<(), AppError>(())));
+    assert!(matches!(
+        refused,
+        Err(AppError::Session(SessionError::Abandoned))
+    ));
+}
+
+/// An inner scope dropped mid-way — the losing branch of a `select!` — poisons
+/// the session: the outer scope is refused at commit and rolled back, so
+/// nothing done beside the half-finished savepoint is kept.
+#[test]
+fn an_outer_scope_is_rolled_back_when_an_inner_one_was_dropped() {
+    let pool = MemorySessionPool::new();
+    let journal = pool.journal();
+
+    let outcome = block_on(pool.session(async |session| {
+        session
+            .atomic(async |tx| {
+                let inner = Box::pin(tx.atomic(async |_| {
+                    std::future::pending::<()>().await;
+                    Ok::<(), AppError>(())
+                }));
+                // The inner scope loses the race and is dropped mid-way.
+                let _ = futures::future::select(inner, std::future::ready(())).await;
+                tx.record("INSERT INTO orders (id) VALUES (7)");
+                Ok::<(), AppError>(())
+            })
+            .await
+    }));
+
+    assert!(matches!(
+        outcome,
+        Err(AppError::Session(SessionError::Abandoned))
+    ));
+    assert_eq!(
+        journal.entries(),
+        [
+            "BEGIN",
+            "SAVEPOINT sp1",
+            "INSERT INTO orders (id) VALUES (7)",
+            "ROLLBACK",
+        ]
+    );
+}

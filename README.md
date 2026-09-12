@@ -62,8 +62,8 @@ others behind features, so that `ascetic_ddd::saga` keeps working as one import
   cloneable handle *(the borrow is superseded by ADR-0004)*.
 - [ADR-0002](docs/src/adr/0002-serialize-and-encrypt-before-the-outbox.md) — where a message is
   serialized and encrypted relative to the outbox.
-- [ADR-0003](docs/src/adr/0003-transactional-producers-and-consumers-on-the-bus.md) — how the
-  session enters the bus *(proposed)*.
+- [ADR-0003](docs/src/adr/0003-the-outbox-and-the-inbox-as-channels-of-the-bus.md) — the
+  outbox and the inbox as channels of the bus, joined by bridges.
 - [ADR-0004](docs/src/adr/0004-the-scope-receives-its-session-by-value.md) — the scope
   receives its session by value, and the session promises `Send`.
 
