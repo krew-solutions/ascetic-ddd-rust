@@ -11,7 +11,7 @@ later by trace validation, where test runs are checked against the model.
 ./verify/tla/check.sh          # needs Java and tla2tools.jar, see the script
 ```
 
-## Outbox — `outbox/Outbox.tla`
+## Outbox — `Outbox.tla`
 
 Producers publish inside transactions; a dispatcher per (group, worker)
 fetches committed messages of its partition in `(transaction_id, position)`
@@ -51,7 +51,7 @@ transaction, and the arithmetic of `hashtext` — the worker assignment is an
 arbitrary function, so the sign bug fixed in the Rust port is out of scope
 here and covered by a test instead.
 
-## Inbox — `inbox/Inbox.tla`
+## Inbox — `Inbox.tla`
 
 Messages arrive under an identity, in some order; a dispatcher takes the
 oldest unprocessed row of its partition whose causal dependencies are
@@ -95,3 +95,40 @@ Two more configurations pin the two decisions around dependencies:
 Surfaced, not fixed: a subscriber that never succeeds blocks its partition,
 because the oldest eligible row is taken first. The model bounds failures to
 state liveness; a dead-letter policy is an open item of the target project.
+
+## Bridge — `Bridge.tla`
+
+The composition: a source outbox, the bridge, a destination inbox, built with
+`INSTANCE` from the two modules above so that what each proved on its own is
+inherited, not restated. A source dispatcher hands each message of a batch to
+the bridge, whose subscriber stores it in the inbox in a transaction of the
+inbox's own before returning; the batch is acknowledged after the last one.
+Either process dies at any point, in particular between the store and the
+acknowledgement, which delivers the batch again. `MCBridge.tla` fixes the
+instance: three messages over two URIs, one source worker, two destination
+partitions with a dispatcher each, batches of two, one crash per side; which
+URI a message has and which partition a URI lands on are left open.
+
+| property | kind | meaning |
+| --- | --- | --- |
+| `SourceInvariants`, `DestinationInvariants` | invariants | everything the outbox and the inbox proved alone still holds in the composition |
+| `ReceivedWasCommitted` | invariant | the inbox holds rows only for messages committed at the source |
+| `EventuallyProcessed` | liveness | every message committed at the source is eventually processed at the destination |
+| `EndToEndOrder` | invariant | messages of one URI are processed in the order they were published |
+
+`EventuallyProcessed` with the inbox's `EffectsOnce` is the theorem the whole
+construction exists for, and neither half can state it alone: however often a
+crash makes the bridge cross the same message again, its effects at the
+destination happen exactly once. `EndToEndOrder` holds under the conditions
+the instance states — the inbox partitions by URI, one dispatcher per
+partition, no causal dependencies — and not otherwise: two dispatchers on one
+partition may commit out of arrival order, which `Inbox.tla` allows.
+
+`BridgeAckFirst.cfg` turns `StoreBeforeAck` off: the bridge counts a message
+handled on delivery and stores it afterwards, the shape of the channel API in
+the earlier Go port. TLC finds the loss on a single message: delivered,
+acknowledged, the process dies, the store never happens. `check.sh` requires
+that violation.
+
+The main configuration explores three quarters of a million states and takes
+a few minutes; the rest run in seconds.

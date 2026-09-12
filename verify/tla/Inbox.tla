@@ -24,7 +24,7 @@
 (* bounds failures so that liveness can be stated; both facts are          *)
 (* recorded in verify/tla/README.md.                                       *)
 (***************************************************************************)
-EXTENDS Naturals, FiniteSets
+EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
   Msgs,           \* messages, by identity
@@ -49,9 +49,10 @@ VARIABLES
   processed,  \* SUBSET Msgs, the committed marks
   effects,    \* [Msgs -> Nat], the subscriber's committed writes, per message
   holding,    \* [Dispatchers -> Msgs \cup {None}], the row a dispatcher's open transaction holds
+  procOrder,  \* Seq(Msgs), the order marks were committed in: processed_position
   crashes
 
-vars == <<part, received, recvPos, nextRecv, processed, effects, holding, crashes>>
+vars == <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes>>
 
 Locked == {holding[d] : d \in Dispatchers} \ {None}
 
@@ -63,6 +64,7 @@ Init ==
   /\ processed = {}
   /\ effects = [m \in Msgs |-> 0]
   /\ holding = [d \in Dispatchers |-> None]
+  /\ procOrder = <<>>
   /\ crashes = 0
 
 (* ------------------------------------------------------------------------ *)
@@ -77,7 +79,7 @@ Receive(m) ==
   /\ received' = received \cup {m}
   /\ recvPos' = [recvPos EXCEPT ![m] = nextRecv]
   /\ nextRecv' = nextRecv + 1
-  /\ UNCHANGED <<part, processed, effects, holding, crashes>>
+  /\ UNCHANGED <<part, processed, effects, holding, procOrder, crashes>>
 
 (* ------------------------------------------------------------------------ *)
 (* Processing                                                                 *)
@@ -107,7 +109,7 @@ Fetch(d) ==
   /\ Candidates(d) # {}
   /\ Takes(d) # {}
   /\ holding' = [holding EXCEPT ![d] = CHOOSE m \in Takes(d) : TRUE]
-  /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, crashes>>
+  /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, procOrder, crashes>>
 
 \* The subscriber ran with the dispatcher's transaction; its writes and the
 \* mark commit together.
@@ -115,6 +117,7 @@ Commit(d) ==
   /\ holding[d] # None
   /\ processed' = processed \cup {holding[d]}
   /\ effects' = [effects EXCEPT ![holding[d]] = @ + 1]
+  /\ procOrder' = Append(procOrder, holding[d])
   /\ holding' = [holding EXCEPT ![d] = None]
   /\ UNCHANGED <<part, received, recvPos, nextRecv, crashes>>
 
@@ -125,7 +128,7 @@ Crash(d) ==
   /\ crashes < MaxCrashes
   /\ crashes' = crashes + 1
   /\ holding' = [holding EXCEPT ![d] = None]
-  /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects>>
+  /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, procOrder>>
 
 (* ------------------------------------------------------------------------ *)
 
@@ -152,6 +155,7 @@ TypeOK ==
   /\ processed \subseteq Msgs
   /\ effects \in [Msgs -> Nat]
   /\ holding \in [Dispatchers -> Msgs \cup {None}]
+  /\ procOrder \in Seq(Msgs)
   /\ crashes \in Nat
 
 \* The subscriber's writes for a message are committed at most once, however
