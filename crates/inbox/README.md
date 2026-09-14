@@ -74,6 +74,19 @@ database.
 The processing loop is a task on the tokio runtime; cancel the subscription
 to stop it.
 
+## Observing the inbox
+
+`PgInbox::observed_by(observer)` attaches an `InboxObserver`, in the shape of
+the session and outbox observers: a synchronous, infallible value, composed as
+a tuple, fixed when the inbox is built. It is told of six things — a message
+received, with its order of arrival or that the identity was already there; a
+row stepped over while its causal dependencies are unprocessed; a row taken,
+or none; the subscriber's outcome; the mark, with its order of processing; the
+dispatcher's transaction closed, committed or rolled back. These are the
+actions of the protocol model in `verify/tla/Inbox.tla`, with the steps the
+model folds into one made visible, so a recording observer yields a trace the
+model can be checked against.
+
 ## Deviations from the Python source
 
 * A causal dependency is a type, `CausalDependency`, with `serde`; entries

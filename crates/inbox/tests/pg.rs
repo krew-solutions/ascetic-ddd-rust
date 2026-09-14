@@ -6,10 +6,13 @@
 //! ```
 
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use ascetic_ddd_inbox::observer::{
+    Dispatched, Fetched, Handled, InboxObserver, Marked, Received, Skipped,
+};
 use ascetic_ddd_inbox::{
     BoxError, ByStream, CausalDependency, Error, Inbox, InboxMessage, PgInbox, Worker, Workers,
 };
@@ -35,18 +38,25 @@ fn pool() -> Pool {
         .expect("the pool can be built")
 }
 
-struct Fixture {
+struct Fixture<O = ()> {
     sessions: PgSessionPool,
-    inbox: PgInbox<PgSessionPool>,
+    inbox: PgInbox<PgSessionPool, O>,
     table: String,
 }
 
 /// A table of its own per test, so tests run in parallel.
 async fn fixture(name: &str) -> Fixture {
+    fixture_observed(name, ()).await
+}
+
+/// The same, watched by `observer`.
+async fn fixture_observed<O: InboxObserver>(name: &str, observer: O) -> Fixture<O> {
     let table = format!("inbox_{name}");
     let sequence = format!("inbox_{name}_seq");
     let sessions = PgSessionPool::new(pool());
-    let inbox = PgInbox::new(PgSessionPool::new(pool())).with_table(&table, &sequence);
+    let inbox = PgInbox::new(PgSessionPool::new(pool()))
+        .with_table(&table, &sequence)
+        .observed_by(observer);
     let drop = format!("DROP TABLE IF EXISTS {table}; DROP SEQUENCE IF EXISTS {sequence};");
     sessions
         .session(async |session| {
@@ -62,13 +72,12 @@ async fn fixture(name: &str) -> Fixture {
     }
 }
 
-impl Fixture {
-    fn partitioned_by_stream(mut self) -> Self {
-        let sequence = format!("{}_seq", self.table);
-        self.inbox = PgInbox::new(PgSessionPool::new(pool()))
-            .with_table(&self.table, &sequence)
-            .partitioned_by(ByStream);
-        self
+impl<O: InboxObserver> Fixture<O> {
+    fn partitioned_by_stream(self) -> Self {
+        Fixture {
+            inbox: self.inbox.partitioned_by(ByStream),
+            ..self
+        }
     }
 
     async fn publish(&self, messages: &[InboxMessage]) {
@@ -366,4 +375,153 @@ async fn the_port_is_implementable_without_a_database() {
     let fake = Fake(Mutex::new(Vec::new()));
     fake.publish(&message("a", 1)).await.unwrap();
     assert_eq!(*fake.0.lock().unwrap(), ["a@1"]);
+}
+
+/// Records what the inbox reports, in the words of the protocol model.
+#[derive(Default)]
+struct Recorder {
+    events: Mutex<Vec<String>>,
+    received: Mutex<Vec<(String, Option<i64>)>>,
+    marked: Mutex<Vec<(String, i64)>>,
+}
+
+impl Recorder {
+    fn note(&self, event: impl Into<String>) {
+        self.events.lock().unwrap().push(event.into());
+    }
+}
+
+impl InboxObserver for Recorder {
+    fn on_received(&self, event: &Received<'_>) {
+        self.received
+            .lock()
+            .unwrap()
+            .push((label(event.message), event.received_position));
+        let how = match event.received_position {
+            Some(_) => "stored",
+            None => "duplicate",
+        };
+        self.note(format!("received {} {how}", label(event.message)));
+    }
+    fn on_skipped(&self, event: &Skipped<'_>) {
+        self.note(format!("skipped {}", label(event.message)));
+    }
+    fn on_fetched(&self, event: &Fetched<'_>) {
+        self.note(match event.message {
+            Some(message) => format!("fetched {}", label(message)),
+            None => "fetched nothing".to_owned(),
+        });
+    }
+    fn on_handled(&self, event: &Handled<'_>) {
+        let outcome = if event.outcome.is_ok() {
+            "ok"
+        } else {
+            "failed"
+        };
+        self.note(format!("handled {} {outcome}", label(event.message)));
+    }
+    fn on_marked(&self, event: &Marked<'_>) {
+        self.marked
+            .lock()
+            .unwrap()
+            .push((label(event.message), event.processed_position));
+        self.note(format!("marked {}", label(event.message)));
+    }
+    fn on_dispatched(&self, event: &Dispatched<'_>) {
+        self.note(match event.outcome {
+            Ok(true) => "dispatched a message",
+            Ok(false) => "dispatched nothing",
+            Err(_) => "rolled back",
+        });
+    }
+}
+
+/// The observer sees the protocol the model in verify/tla/Inbox.tla is
+/// written in: a message received with its order of arrival, or ignored as
+/// a duplicate; a row stepped over while its dependency is unprocessed, then
+/// taken once it is; the subscriber's outcome; the mark with its order of
+/// processing; the close of the transaction — a rollback when the subscriber
+/// failed, and the message again afterwards.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_observer_sees_the_protocol() {
+    let recorder = Arc::new(Recorder::default());
+    let f = fixture_observed("observed", Arc::clone(&recorder)).await;
+    let first = message("a", 1);
+    let second = message("b", 1).depending_on(&[CausalDependency::on(&first)]);
+    let (_, subscriber) = collector();
+
+    // The dependent arrives first and is stepped over until the other is
+    // processed.
+    f.publish(&[second.clone(), first.clone()]).await;
+    assert!(f.inbox.dispatch(&subscriber, Worker::ALONE).await.unwrap());
+    assert!(f.inbox.dispatch(&subscriber, Worker::ALONE).await.unwrap());
+    assert!(!f.inbox.dispatch(&subscriber, Worker::ALONE).await.unwrap());
+
+    // The same identity again is not a step.
+    f.publish(&[first]).await;
+
+    // The subscriber fails once: nothing is marked, the message comes again.
+    f.publish(&[message("c", 1)]).await;
+    let attempts = AtomicUsize::new(0);
+    let flaky = |_: &PgSession, _: &InboxMessage| {
+        let first = attempts.fetch_add(1, Ordering::SeqCst) == 0;
+        std::future::ready(if first {
+            Err::<(), BoxError>("the first attempt fails on purpose".into())
+        } else {
+            Ok(())
+        })
+    };
+    assert!(f.inbox.dispatch(&flaky, Worker::ALONE).await.is_err());
+    assert!(f.inbox.dispatch(&flaky, Worker::ALONE).await.unwrap());
+
+    assert_eq!(
+        *recorder.events.lock().unwrap(),
+        [
+            "received b@1 stored",
+            "received a@1 stored",
+            "skipped b@1",
+            "fetched a@1",
+            "handled a@1 ok",
+            "marked a@1",
+            "dispatched a message",
+            "fetched b@1",
+            "handled b@1 ok",
+            "marked b@1",
+            "dispatched a message",
+            "fetched nothing",
+            "dispatched nothing",
+            "received a@1 duplicate",
+            "received c@1 stored",
+            "fetched c@1",
+            "handled c@1 failed",
+            "rolled back",
+            "fetched c@1",
+            "handled c@1 ok",
+            "marked c@1",
+            "dispatched a message",
+        ]
+    );
+
+    // Arrival order and processing order are what the sequences say.
+    let received: Vec<Option<i64>> = recorder
+        .received
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, position)| *position)
+        .collect();
+    assert_eq!(received.len(), 4);
+    assert!(received[0].unwrap() < received[1].unwrap());
+    assert_eq!(received[2], None);
+    assert!(received[1].unwrap() < received[3].unwrap());
+    let marked = recorder.marked.lock().unwrap().clone();
+    assert_eq!(
+        marked
+            .iter()
+            .map(|(label, _)| label.as_str())
+            .collect::<Vec<_>>(),
+        ["a@1", "b@1", "c@1"]
+    );
+    assert!(marked.windows(2).all(|pair| pair[0].1 < pair[1].1));
 }

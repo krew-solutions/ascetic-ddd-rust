@@ -45,6 +45,7 @@
 pub mod channel;
 mod error;
 mod message;
+pub mod observer;
 mod partition;
 pub mod pg;
 mod port;
@@ -52,6 +53,7 @@ mod port;
 pub use crate::channel::{INBOX_SCHEME, InboxChannel};
 pub use crate::error::{BoxError, Error};
 pub use crate::message::{CausalDependency, InboxMessage};
+pub use crate::observer::InboxObserver;
 pub use crate::partition::{ByStream, ByUri, PartitionKey};
 pub use crate::pg::{PgInbox, Worker, Workers};
 pub use crate::port::Inbox;

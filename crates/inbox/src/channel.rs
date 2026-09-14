@@ -36,6 +36,7 @@ use tokio::runtime::Handle;
 use tokio::sync::Notify;
 
 use crate::message::InboxMessage;
+use crate::observer::InboxObserver;
 use crate::pg::{PgInbox, Workers};
 use crate::port::Inbox;
 
@@ -57,10 +58,11 @@ const COLUMNS: [&str; 5] = [
     DESTINATION,
 ];
 
-impl<P> PgInbox<P>
+impl<P, O> PgInbox<P, O>
 where
     P: SessionPool + Send + Sync + 'static,
     P::Session: PgAccess + Sync + 'static,
+    O: InboxObserver + 'static,
 {
     /// A consumer whose handler runs inside the transaction that marks each
     /// message processed, reading values with `decode`.
@@ -73,19 +75,20 @@ where
 }
 
 /// The inbox as a bus adapter: what [`Bus::register`][ascetic_ddd_bus::Bus::register] takes.
-pub struct InboxChannel<P>(Arc<PgInbox<P>>);
+pub struct InboxChannel<P, O = ()>(Arc<PgInbox<P, O>>);
 
-impl<P> PgInbox<P> {
+impl<P, O> PgInbox<P, O> {
     /// The inbox as a channel of the bus.
-    pub fn channel(self: &Arc<Self>) -> InboxChannel<P> {
+    pub fn channel(self: &Arc<Self>) -> InboxChannel<P, O> {
         InboxChannel(Arc::clone(self))
     }
 }
 
-impl<P> Adapter for InboxChannel<P>
+impl<P, O> Adapter for InboxChannel<P, O>
 where
     P: SessionPool + Send + Sync + 'static,
     P::Session: PgAccess + Sync + 'static,
+    O: InboxObserver + 'static,
 {
     /// The inbox hands the handler its transaction, which a bus consumer
     /// cannot: see [`PgInbox::consumer`].
@@ -105,15 +108,16 @@ where
     }
 }
 
-struct InboxProducer<P> {
-    inbox: Arc<PgInbox<P>>,
+struct InboxProducer<P, O> {
+    inbox: Arc<PgInbox<P, O>>,
     uri: String,
 }
 
-impl<P> WireProducer for InboxProducer<P>
+impl<P, O> WireProducer for InboxProducer<P, O>
 where
     P: SessionPool + Send + Sync + 'static,
     P::Session: PgAccess + Sync,
+    O: InboxObserver + 'static,
 {
     /// Stores the message in a transaction of its own; the same identity
     /// again is ignored.
@@ -125,12 +129,13 @@ where
     }
 }
 
-struct InboxConsumer<P>(Arc<PgInbox<P>>);
+struct InboxConsumer<P, O>(Arc<PgInbox<P, O>>);
 
-impl<P> TransactionalWireConsumer<P::Session> for InboxConsumer<P>
+impl<P, O> TransactionalWireConsumer<P::Session> for InboxConsumer<P, O>
 where
     P: SessionPool + Send + Sync + 'static,
     P::Session: PgAccess + Sync + 'static,
+    O: InboxObserver + 'static,
 {
     /// Runs the processing loop as a task on the current runtime until
     /// cancelled. A message whose handler fails is left unprocessed and
