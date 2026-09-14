@@ -67,6 +67,18 @@ Headers travel as string fields of `metadata`, so `message_id` keeps its unique
 index. The dispatcher is a task on the tokio runtime; cancel the subscription
 to stop it.
 
+## Observing the outbox
+
+`PgOutbox::observed_by(observer)` attaches an `OutboxObserver`, in the shape of
+the session observers: a synchronous, infallible value, composed as a tuple,
+fixed when the outbox is built. It is told of five things — a message
+published, with the id of the writing transaction and the row's position; a
+batch fetched, with the visibility horizon of the statement that read it; a
+message handed to the subscriber, with the outcome; the position acknowledged;
+the dispatcher's transaction closed, committed or rolled back. These are the
+actions of the protocol model in `verify/tla/Outbox.tla`, so a recording
+observer yields a trace the model can be checked against.
+
 ## Deviations from the Python source
 
 * The worker filter clears the sign bit of `hashtext(uri)`. In the source a

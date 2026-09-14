@@ -28,15 +28,18 @@ use tokio::runtime::Handle;
 use tokio::sync::Notify;
 
 use crate::message::OutboxMessage;
+use crate::observer::OutboxObserver;
 use crate::pg::{PgOutbox, Selection, Workers};
+use crate::port::Outbox;
 
 /// The scheme the outbox is registered under.
 pub const OUTBOX_SCHEME: &str = "outbox";
 
-impl<P> PgOutbox<P>
+impl<P, O> PgOutbox<P, O>
 where
     P: SessionPool + Send + Sync + 'static,
     P::Session: PgAccess + Sync,
+    O: OutboxObserver + 'static,
 {
     /// A producer to `destination` that publishes inside the caller's
     /// transaction. `destination` is a URI of another channel,
@@ -47,22 +50,29 @@ where
         encode: impl Fn(&T) -> Message + Send + Sync + 'static,
     ) -> TransactionalProducer<T, P::Session> {
         let wire = OutboxProducer {
-            table: self.outbox_table().to_owned(),
+            outbox: Arc::clone(self),
             destination: destination.to_owned(),
         };
         TransactionalProducer::new(Box::new(wire), encode)
     }
 }
 
-struct OutboxProducer {
-    table: String,
+/// Publishes through [`Outbox::publish`], so that the row is written in one
+/// place and the observer sees it.
+struct OutboxProducer<P, O> {
+    outbox: Arc<PgOutbox<P, O>>,
     destination: String,
 }
 
-impl<S: PgAccess + Sync> TransactionalWireProducer<S> for OutboxProducer {
+impl<P, O> TransactionalWireProducer<P::Session> for OutboxProducer<P, O>
+where
+    P: SessionPool + Send + Sync + 'static,
+    P::Session: PgAccess + Sync,
+    O: OutboxObserver + 'static,
+{
     fn publish<'a>(
         &'a self,
-        session: &'a S,
+        session: &'a P::Session,
         message: Message,
     ) -> BoxFuture<'a, Result<(), BusError>> {
         Box::pin(async move {
@@ -71,35 +81,30 @@ impl<S: PgAccess + Sync> TransactionalWireProducer<S> for OutboxProducer {
                 _ => self.destination.clone(),
             };
             let metadata = metadata_of(&message)?;
-            let sql = format!(
-                "INSERT INTO {} (uri, payload, metadata, transaction_id) \
-                 VALUES ($1, $2, $3, pg_current_xact_id())",
-                self.table
-            );
-            session
-                .connection()
-                .execute(&sql, &[&destination, &message.payload(), &metadata])
+            let row = OutboxMessage::new(destination, message.payload().to_vec(), metadata);
+            self.outbox
+                .publish(session, &row)
                 .await
-                .map_err(|error| BusError::Transport(Box::new(error)))?;
-            Ok(())
+                .map_err(|error| BusError::Transport(Box::new(error)))
         })
     }
 }
 
 /// The outbox as a bus adapter: what [`Bus::register`][ascetic_ddd_bus::Bus::register] takes.
-pub struct OutboxChannel<P>(Arc<PgOutbox<P>>);
+pub struct OutboxChannel<P, O = ()>(Arc<PgOutbox<P, O>>);
 
-impl<P> PgOutbox<P> {
+impl<P, O> PgOutbox<P, O> {
     /// The outbox as a channel of the bus.
-    pub fn channel(self: &Arc<Self>) -> OutboxChannel<P> {
+    pub fn channel(self: &Arc<Self>) -> OutboxChannel<P, O> {
         OutboxChannel(Arc::clone(self))
     }
 }
 
-impl<P> Adapter for OutboxChannel<P>
+impl<P, O> Adapter for OutboxChannel<P, O>
 where
     P: SessionPool + Send + Sync + 'static,
     P::Session: PgAccess + Sync,
+    O: OutboxObserver + 'static,
 {
     /// A consumer of the outbox channel: the dispatcher for `group`.
     fn consumer(&self, _uri: &str, group: &str) -> Result<Box<dyn WireConsumer>, BusError> {
@@ -120,15 +125,16 @@ where
     }
 }
 
-struct OutboxConsumer<P> {
-    outbox: Arc<PgOutbox<P>>,
+struct OutboxConsumer<P, O> {
+    outbox: Arc<PgOutbox<P, O>>,
     group: String,
 }
 
-impl<P> WireConsumer for OutboxConsumer<P>
+impl<P, O> WireConsumer for OutboxConsumer<P, O>
 where
     P: SessionPool + Send + Sync + 'static,
     P::Session: PgAccess + Sync,
+    O: OutboxObserver + 'static,
 {
     /// Runs the dispatcher as a task on the current runtime until cancelled.
     /// A batch whose handler fails is rolled back and retried after the poll

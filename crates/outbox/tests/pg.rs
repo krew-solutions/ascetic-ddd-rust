@@ -6,10 +6,13 @@
 //! ```
 
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use ascetic_ddd_outbox::observer::{
+    Acked, Dispatched, Fetched, Handled, OutboxObserver, Published, Receipt,
+};
 use ascetic_ddd_outbox::{
     BoxError, Error, Outbox, OutboxMessage, PgOutbox, Position, Selection, Worker, Workers,
 };
@@ -35,17 +38,24 @@ fn pool() -> Pool {
         .expect("the pool can be built")
 }
 
-struct Fixture {
+struct Fixture<O = ()> {
     sessions: PgSessionPool,
-    outbox: PgOutbox<PgSessionPool>,
+    outbox: PgOutbox<PgSessionPool, O>,
     tables: (String, String),
 }
 
 /// Tables of its own per test, so tests run in parallel.
 async fn fixture(name: &str) -> Fixture {
+    fixture_observed(name, ()).await
+}
+
+/// The same, watched by `observer`.
+async fn fixture_observed<O: OutboxObserver>(name: &str, observer: O) -> Fixture<O> {
     let tables = (format!("outbox_{name}"), format!("outbox_{name}_offsets"));
     let sessions = PgSessionPool::new(pool());
-    let outbox = PgOutbox::new(PgSessionPool::new(pool())).with_tables(&tables.0, &tables.1);
+    let outbox = PgOutbox::new(PgSessionPool::new(pool()))
+        .with_tables(&tables.0, &tables.1)
+        .observed_by(observer);
     let drop = format!(
         "DROP TABLE IF EXISTS {}; DROP TABLE IF EXISTS {};",
         tables.0, tables.1
@@ -64,12 +74,12 @@ async fn fixture(name: &str) -> Fixture {
     }
 }
 
-impl Fixture {
-    fn with_batch_size(mut self, size: usize) -> Self {
-        self.outbox = PgOutbox::new(PgSessionPool::new(pool()))
-            .with_tables(&self.tables.0, &self.tables.1)
-            .with_batch_size(size);
-        self
+impl<O: OutboxObserver> Fixture<O> {
+    fn with_batch_size(self, size: usize) -> Self {
+        Fixture {
+            outbox: self.outbox.with_batch_size(size),
+            ..self
+        }
     }
 
     /// Publishes each message in a transaction of its own, then waits until
@@ -541,4 +551,157 @@ async fn the_port_is_implementable_without_a_database() {
         .unwrap();
 
     assert_eq!(*fake.0.lock().unwrap(), ["kafka://orders"]);
+}
+
+/// Records what the outbox reports, in the words of the protocol model.
+#[derive(Default)]
+struct Recorder {
+    events: Mutex<Vec<String>>,
+    receipts: Mutex<Vec<Receipt>>,
+    fetches: Mutex<Vec<(Option<u64>, Option<u64>)>>,
+    acked: Mutex<Vec<Position>>,
+}
+
+impl Recorder {
+    fn note(&self, event: impl Into<String>) {
+        self.events.lock().unwrap().push(event.into());
+    }
+}
+
+impl OutboxObserver for Recorder {
+    fn on_published(&self, event: &Published<'_>) {
+        self.receipts.lock().unwrap().push(event.receipt);
+        self.note(format!("published {}", id_of(event.message)));
+    }
+    fn on_fetched(&self, event: &Fetched<'_>) {
+        let newest = event.messages.iter().filter_map(|m| m.transaction_id).max();
+        self.fetches.lock().unwrap().push((event.horizon, newest));
+        let ids: Vec<u64> = event.messages.iter().map(id_of).collect();
+        self.note(format!("fetched {ids:?}"));
+    }
+    fn on_handled(&self, event: &Handled<'_>) {
+        let outcome = if event.outcome.is_ok() {
+            "ok"
+        } else {
+            "failed"
+        };
+        self.note(format!("handled {} {outcome}", id_of(event.message)));
+    }
+    fn on_acked(&self, event: &Acked<'_>) {
+        self.acked.lock().unwrap().push(event.position);
+        self.note("acked");
+    }
+    fn on_dispatched(&self, event: &Dispatched<'_>) {
+        self.note(match event.outcome {
+            Ok(true) => "dispatched a batch",
+            Ok(false) => "dispatched nothing",
+            Err(_) => "rolled back",
+        });
+    }
+}
+
+/// The observer sees the protocol the model in verify/tla/Outbox.tla is
+/// written in: publish with the writing transaction's id, fetch with the
+/// visibility horizon, one handling per message, the acknowledgement, the
+/// close of the transaction — a rollback when the subscriber failed, and the
+/// batch again afterwards.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_observer_sees_the_protocol() {
+    let recorder = Arc::new(Recorder::default());
+    let f = fixture_observed("observed", Arc::clone(&recorder)).await;
+    let selection = Selection::group("broker");
+
+    f.publish(&[message("kafka://orders", 1), message("kafka://orders", 2)])
+        .await;
+    f.wait_visible().await;
+    let (_, subscriber) = collector();
+    assert!(
+        f.outbox
+            .dispatch(&subscriber, &selection, Worker::ALONE)
+            .await
+            .unwrap()
+    );
+
+    // The subscriber fails once: the batch is rolled back and comes again.
+    f.publish(&[message("kafka://orders", 3)]).await;
+    f.wait_visible().await;
+    let failed_once = AtomicUsize::new(0);
+    let flaky = |_: &OutboxMessage| {
+        let first = failed_once.fetch_add(1, Ordering::SeqCst) == 0;
+        std::future::ready(if first {
+            Err::<(), BoxError>("the first attempt fails on purpose".into())
+        } else {
+            Ok(())
+        })
+    };
+    assert!(
+        f.outbox
+            .dispatch(&flaky, &selection, Worker::ALONE)
+            .await
+            .is_err()
+    );
+    assert!(
+        f.outbox
+            .dispatch(&flaky, &selection, Worker::ALONE)
+            .await
+            .unwrap()
+    );
+
+    assert_eq!(
+        *recorder.events.lock().unwrap(),
+        [
+            "published 1",
+            "published 2",
+            "fetched [1, 2]",
+            "handled 1 ok",
+            "handled 2 ok",
+            "acked",
+            "dispatched a batch",
+            "published 3",
+            "fetched [3]",
+            "handled 3 failed",
+            "rolled back",
+            "fetched [3]",
+            "handled 3 ok",
+            "acked",
+            "dispatched a batch",
+        ]
+    );
+
+    // Every batch was read below a horizon past its newest transaction: the
+    // visibility rule, as the dispatcher saw it.
+    let fetches = recorder.fetches.lock().unwrap().clone();
+    assert_eq!(fetches.len(), 3);
+    assert!(
+        fetches
+            .iter()
+            .all(|(horizon, newest)| match (horizon, newest) {
+                (Some(horizon), Some(newest)) => newest < horizon,
+                _ => false,
+            })
+    );
+
+    // The receipt names the row the dispatcher later acknowledges.
+    let receipts = recorder.receipts.lock().unwrap().clone();
+    let acked = recorder.acked.lock().unwrap().clone();
+    assert_eq!(receipts.len(), 3);
+    assert!(
+        receipts
+            .windows(2)
+            .all(|pair| pair[0].position < pair[1].position)
+    );
+    assert_eq!(
+        acked,
+        [
+            Position {
+                transaction_id: receipts[1].transaction_id,
+                offset: receipts[1].position
+            },
+            Position {
+                transaction_id: receipts[2].transaction_id,
+                offset: receipts[2].position
+            },
+        ]
+    );
 }
