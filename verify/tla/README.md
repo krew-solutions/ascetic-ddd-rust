@@ -55,17 +55,19 @@ here and covered by a test instead.
 ## Inbox — `Inbox.tla`
 
 Messages arrive under an identity, in some order; a dispatcher takes the
-oldest unprocessed row of its partition whose causal dependencies are
-processed, runs the subscriber inside its own transaction and marks the row
-in that transaction; several dispatchers may serve one partition; any of them
-crashes, and a subscriber may fail.
+oldest unprocessed row of its partition, runs the subscriber inside its own
+transaction and marks the row in that transaction; a row whose causal
+dependencies are not processed is set aside to wait, and the transaction that
+marks the dependency puts it back; several dispatchers may serve one
+partition; any of them crashes, and a subscriber may fail.
 
 PostgreSQL is reduced to five facts: `ON CONFLICT DO NOTHING` makes an
 identity one row however often it arrives; `FOR UPDATE SKIP LOCKED` makes a
 row held by an open transaction invisible to the others; the dependency check
-reads committed marks; the subscriber's writes and the mark commit together
-or not at all; a savepoint lets the subscriber's writes roll back while the
-transaction goes on to record the attempt. `MCInbox.tla` fixes the instance:
+reads committed marks; the subscriber's writes, the mark and the waking of
+what waited for the message commit together or not at all; a savepoint lets
+the subscriber's writes roll back while the transaction goes on to record the
+attempt. `MCInbox.tla` fixes the instance:
 three messages, the second depending on the first, two workers, one of them
 served by two dispatchers at once, one crash or transient failure. Which
 message lands on which worker is left open, so every partitioning is checked,
@@ -77,26 +79,33 @@ including dependencies across workers.
 | `EffectsIffProcessed` | invariant | ... and exactly when the message is marked: writes and mark are one transaction, unless an operator resolved it |
 | `CausalOrder` | invariant | a message is processed only after everything it depends on |
 | `HeldOnce` | invariant | two dispatchers never hold the same row |
-| `ParkedIsAside` | invariant | a parked message is out of the queue, unprocessed, and got there by exhausting its attempts |
+| `ParkedIsAside` | invariant | a parked message is out of the queue, unprocessed, and got there by exhausting its attempts or its wait |
+| `WaitingIsAside` | invariant | a message set aside waits for a dependency of its own that is not processed, and is neither processed nor parked meanwhile |
 | `ArrivalOrder` | invariant | messages without dependencies of one partition are processed in order of arrival, given one dispatcher per partition |
 | `EventuallyProcessed` | liveness | a received message whose dependencies are processed is eventually processed, unless its subscriber never succeeds |
 | `EventuallyParked` | liveness | with parking on, a message whose subscriber never succeeds is eventually parked or resolved |
+| `EventuallyAside` | liveness | with parking and expiring waits, every received message ends up processed or parked |
 
 `EffectsIffProcessed` is the guarantee the inbox exists for, and the one the
 Go channel API of the earlier port broke by marking a message on delivery
 rather than on completion.
 
-Two more configurations pin the two decisions around dependencies:
+Dependencies (ADR-0006). The walk looks at the head of the queue only. A head
+whose dependencies are not processed is set aside, `Wait`, out of the queue,
+and the `Commit` or `Resolve` of the dependency puts back everything that
+waited for it, in the same step. Three configurations pin the decisions:
 
-- `InboxMissingDep.cfg`: the first message never arrives. The second is
-  stepped over for ever, by design for now, and everything else still holds,
-  the third message included. A separate waiting channel for such messages is
-  planned; until then this is the contract.
-- `InboxNoSkip.cfg`: the dispatcher takes only the oldest row, without the
-  `OFFSET n` loop that steps over rows whose dependencies are not processed.
-  TLC finds the partition blocked: the second message arrives before the
-  first, sits at the head, and nothing behind it, its own dependency
-  included, is ever taken. `check.sh` requires this violation.
+- `InboxMissingDep.cfg`: the first message never arrives. The second is set
+  aside and waits for ever, by default, and everything else still holds, the
+  third message included.
+- `InboxMissingDepExpires.cfg`: the same with waits that run out. The second
+  message is parked with its dependency named, `Expire`, and
+  `EventuallyAside` holds: every received message ends up processed or
+  parked.
+- `InboxNoWaiting.cfg`: the head is not set aside but waits in place. TLC
+  finds the partition held: the second message arrives before the first,
+  sits at the head, and nothing behind it, its own dependency included, is
+  ever taken. `check.sh` requires this violation.
 
 Failures and parking (ADR-0005). A subscriber that fails rolls its writes back
 to a savepoint; the attempt is recorded in the same transaction, and the row
@@ -194,21 +203,22 @@ model's invariants hold after it. A run that fits ends with the trace consumed,
 which `check.sh` reads off a violated `NotFinished`; one that does not fit
 deadlocks at the refused step, and TLC prints the state, `i` naming the step.
 
-`TraceInbox.tla` is the same for the inbox. Receiving, taking a row, failing,
-committing, unparking and resolving are all logged; the one thing that is not
-is time, so the passing of a backoff is the hidden step before the failed
-row is taken again. A store carries the id of its transaction and every step
+`TraceInbox.tla` is the same for the inbox. Receiving, setting aside, taking
+a row, failing, committing, expiring, unparking and resolving are all logged,
+the rows a mark or a resolve woke with it; the one thing that is not is
+time, so the passing of a backoff is the hidden step before the failed row is
+taken again. A store carries the id of its transaction and every step
 of a walk over the table the snapshot its statement ran under, and the checks
 go by what the snapshot could see, as the outbox's go by the horizon: a walk
 is checked over the stored rows visible to it, and a store logged after a
 walk that saw it is taken as the hidden step before that walk. A dispatcher is `<<worker, slot>>`: several `dispatch`
 calls of one worker run at once under `FOR UPDATE SKIP LOCKED`, and
 `trace2tla.py` gives each open call the lowest free slot of its worker, so the
-instance has as many dispatchers as ever ran together. Stepping over a row, an
-empty fetch, a row found waiting for its backoff and a handling are checks
-rather than steps: the row must be a candidate whose dependencies are
-unprocessed, nothing eligible must exist, the waiting row must be the oldest
-not stepped over and not yet due, the message must be the one held. The
+instance has as many dispatchers as ever ran together. An empty fetch, a
+head found waiting for its backoff and a handling are checks rather than
+steps: nothing eligible must exist, the head must be the oldest candidate and
+not yet due, the message must be the one held; a commit's woken rows must be
+exactly those the model has waiting for the message. The
 parking policy is read off the trace: `MaxAttempts` is the count at which a
 message was parked, so a run that parked one message at two attempts and let
 another fail twice does not fit. `ArrivalOrder` is asked for when the run had
@@ -246,11 +256,7 @@ snapshots settle it, on both sides. What they do not settle is the visibility
 of marks to the inbox's dependency check, a statement of its own whose
 snapshot is not logged: a run with two dispatchers, dependencies between
 their messages and a mark committed between one's walk and the other's check
-could show as not fitting, and would be a false alarm, not a false pass. And
-one thing the inbox model leaves out: a row stepped over stays locked until
-the call's transaction ends, so another dispatcher polling in that window
-does not see it. A trace where that row became eligible in the window would
-not fit either.
+could show as not fitting, and would be a false alarm, not a false pass.
 
 ## Notes on TLC
 

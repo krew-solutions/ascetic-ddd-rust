@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ascetic_ddd_inbox::observer::{
-    Deferred, Dispatched, Failed, Fetched, Handled, InboxObserver, Marked, Received, Resolved,
-    Skipped, Unparked,
+    Deferred, Dispatched, Expired, Failed, Fetched, Handled, InboxObserver, Marked, Received,
+    Resolved, Unparked, Waiting,
 };
 use ascetic_ddd_inbox::{
     BoxError, ByStream, CausalDependency, Error, Inbox, InboxMessage, Outcome, PgInbox, Receipt,
@@ -97,6 +97,13 @@ impl<O: InboxObserver> Fixture<O> {
     fn with_retries(self, retries: Retries) -> Self {
         Fixture {
             inbox: self.inbox.with_retries(retries),
+            ..self
+        }
+    }
+
+    fn with_max_wait(self, max_wait: Duration) -> Self {
+        Fixture {
+            inbox: self.inbox.with_max_wait(max_wait),
             ..self
         }
     }
@@ -468,7 +475,11 @@ async fn a_resolved_message_releases_its_dependents() {
         .await
         .unwrap();
     assert!(resolved);
-    assert_eq!(f.dispatch(&subscriber).await, Outcome::Processed);
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::Processed,
+        "b@1 was woken"
+    );
 
     assert_eq!(*seen.lock().unwrap(), ["b@1"], "a@1 never had its effects");
     assert_eq!(f.processed().await, 2);
@@ -625,8 +636,17 @@ impl InboxObserver for Recorder {
         };
         self.note(format!("received {} {how}", label(event.message)));
     }
-    fn on_skipped(&self, event: &Skipped<'_>) {
-        self.note(format!("skipped {}", label(event.message)));
+    fn on_waiting(&self, event: &Waiting<'_>) {
+        self.note(format!(
+            "waiting {} for {}@{}",
+            label(event.message),
+            event.dependency.stream_id["id"].as_str().unwrap(),
+            event.dependency.stream_position
+        ));
+    }
+    fn on_expired(&self, event: &Expired<'_>) {
+        let ids: Vec<String> = event.messages.iter().map(label).collect();
+        self.note(format!("expired {}", ids.join(" ")));
     }
     fn on_fetched(&self, event: &Fetched<'_>) {
         if let Some(message) = event.message {
@@ -661,7 +681,11 @@ impl InboxObserver for Recorder {
             .lock()
             .unwrap()
             .push((label(event.message), event.processed_position));
-        self.note(format!("marked {}", label(event.message)));
+        let woken: Vec<String> = event.woken.iter().map(label).collect();
+        self.note(match woken.is_empty() {
+            true => format!("marked {}", label(event.message)),
+            false => format!("marked {} woke {}", label(event.message), woken.join(" ")),
+        });
     }
     fn on_failed(&self, event: &Failed<'_>) {
         self.note(format!(
@@ -686,15 +710,19 @@ impl InboxObserver for Recorder {
         self.note(format!("unparked {}", label(event.message)));
     }
     fn on_resolved(&self, event: &Resolved<'_>) {
-        self.note(format!("resolved {}", label(event.message)));
+        let woken: Vec<String> = event.woken.iter().map(label).collect();
+        self.note(match woken.is_empty() {
+            true => format!("resolved {}", label(event.message)),
+            false => format!("resolved {} woke {}", label(event.message), woken.join(" ")),
+        });
     }
 }
 
 /// The observer sees the protocol the model in verify/tla/Inbox.tla is
 /// written in: a message received with its order of arrival, or ignored as
-/// a duplicate; a row stepped over while its dependency is unprocessed, then
-/// taken once it is; the subscriber's outcome; the mark with its order of
-/// processing; the close of the transaction — a recorded attempt when the
+/// a duplicate; a row set aside to wait for its dependency, and woken by the
+/// mark of that dependency; the subscriber's outcome; the mark with its order
+/// of processing; the close of the transaction — a recorded attempt when the
 /// subscriber failed, and the message again afterwards.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
@@ -740,10 +768,10 @@ async fn the_observer_sees_the_protocol() {
         [
             "received b@1 stored",
             "received a@1 stored",
-            "skipped b@1",
+            "waiting b@1 for a@1",
             "fetched a@1",
             "handled a@1 ok",
-            "marked a@1",
+            "marked a@1 woke b@1",
             "dispatched a message",
             "fetched b@1",
             "handled b@1 ok",
@@ -791,4 +819,73 @@ async fn the_observer_sees_the_protocol() {
         ["a@1", "b@1", "c@1"]
     );
     assert!(marked.windows(2).all(|pair| pair[0].1 < pair[1].1));
+}
+
+/// A message whose dependency never arrives waits out of the queue, costing
+/// the walk nothing, and with `max_wait` set is parked with the dependency
+/// named (ADR-0006).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_dependency_that_never_arrives_parks_the_message_after_max_wait() {
+    let f = fixture("expire")
+        .await
+        .with_max_wait(Duration::from_millis(300));
+    let cause = message("user", 5);
+    let effect = message("order", 1).depending_on(&[CausalDependency::on(&cause)]);
+    f.publish(std::slice::from_ref(&effect)).await;
+    let (seen, subscriber) = collector();
+
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing, "set aside");
+    let waiting = f
+        .sessions
+        .session(async |session| {
+            let sql = format!(
+                "SELECT count(*) FROM {} WHERE waiting_for IS NOT NULL",
+                f.table
+            );
+            Ok::<i64, Error>(session.connection().query_one(&sql, &[]).await?.get(0))
+        })
+        .await
+        .unwrap();
+    assert_eq!(waiting, 1);
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::Nothing,
+        "still waiting"
+    );
+
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::Nothing,
+        "expired and parked"
+    );
+    assert_eq!(f.parked().await, ["order@1"]);
+    let parked = f
+        .sessions
+        .session(async |session| f.inbox.parked(&session).await)
+        .await
+        .unwrap();
+    assert!(
+        parked[0]
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("never arrived"),
+        "{:?}",
+        parked[0].last_error
+    );
+    assert!(seen.lock().unwrap().is_empty());
+
+    // The dependency arrives after all: unparked, the message waits again,
+    // and is woken by the dependency's mark.
+    f.publish(std::slice::from_ref(&cause)).await;
+    let unparked = f
+        .sessions
+        .session(async |session| f.inbox.unpark(&session, &effect).await)
+        .await
+        .unwrap();
+    assert!(unparked);
+    while f.dispatch(&subscriber).await != Outcome::Nothing {}
+    assert_eq!(*seen.lock().unwrap(), ["user@5", "order@1"]);
 }

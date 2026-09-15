@@ -1,17 +1,17 @@
-{"deps": [], "event": "received", "id": "tenant-1/orders.Order/{\"id\":\"b\"}/1", "message_id": "00000000-0000-4000-8000-000000000010", "observer": "inbox", "received_position": 1, "xid": 2035929}
-{"deps": [], "event": "received", "id": "tenant-1/orders.Order/{\"id\":\"a\"}/1", "message_id": "00000000-0000-4000-8000-000000000012", "observer": "inbox", "received_position": 2, "xid": 2035941}
-{"deps": [], "event": "received", "id": "tenant-1/orders.Order/{\"id\":\"a\"}/2", "message_id": "00000000-0000-4000-8000-000000000013", "observer": "inbox", "received_position": 3, "xid": 2035948}
-{"call": 1, "event": "fetched", "id": "tenant-1/orders.Order/{\"id\":\"b\"}/1", "observer": "inbox", "of": 1, "snapshot": {"xip": [], "xmax": 2035929, "xmin": 2035929}, "worker": 0}
+{"deps": [], "event": "received", "id": "tenant-1/orders.Order/{\"id\":\"b\"}/1", "message_id": "00000000-0000-4000-8000-000000000011", "observer": "inbox", "received_position": 1, "xid": 2038518}
+{"deps": [], "event": "received", "id": "tenant-1/orders.Order/{\"id\":\"a\"}/1", "message_id": "00000000-0000-4000-8000-000000000012", "observer": "inbox", "received_position": 2, "xid": 2038529}
+{"deps": [], "event": "received", "id": "tenant-1/orders.Order/{\"id\":\"a\"}/2", "message_id": "00000000-0000-4000-8000-000000000013", "observer": "inbox", "received_position": 3, "xid": 2038533}
+{"call": 1, "event": "fetched", "id": "tenant-1/orders.Order/{\"id\":\"b\"}/1", "observer": "inbox", "of": 1, "snapshot": {"xip": [], "xmax": 2038518, "xmin": 2038518}, "worker": 0}
 {"call": 1, "event": "handled", "id": "tenant-1/orders.Order/{\"id\":\"b\"}/1", "observer": "inbox", "of": 1, "ok": true, "worker": 0}
-{"call": 1, "event": "marked", "id": "tenant-1/orders.Order/{\"id\":\"b\"}/1", "observer": "inbox", "of": 1, "processed_position": 4, "worker": 0}
+{"call": 1, "event": "marked", "id": "tenant-1/orders.Order/{\"id\":\"b\"}/1", "observer": "inbox", "of": 1, "processed_position": 4, "woken": [], "worker": 0}
 {"call": 1, "event": "dispatched", "observer": "inbox", "of": 1, "outcome": "processed", "worker": 0}
-{"call": 2, "event": "fetched", "id": "tenant-1/orders.Order/{\"id\":\"a\"}/1", "observer": "inbox", "of": 1, "snapshot": {"xip": [], "xmax": 2035954, "xmin": 2035954}, "worker": 0}
+{"call": 2, "event": "fetched", "id": "tenant-1/orders.Order/{\"id\":\"a\"}/1", "observer": "inbox", "of": 1, "snapshot": {"xip": [2038523], "xmax": 2038541, "xmin": 2038523}, "worker": 0}
 {"call": 2, "event": "handled", "id": "tenant-1/orders.Order/{\"id\":\"a\"}/1", "observer": "inbox", "of": 1, "ok": true, "worker": 0}
-{"call": 2, "event": "marked", "id": "tenant-1/orders.Order/{\"id\":\"a\"}/1", "observer": "inbox", "of": 1, "processed_position": 5, "worker": 0}
+{"call": 2, "event": "marked", "id": "tenant-1/orders.Order/{\"id\":\"a\"}/1", "observer": "inbox", "of": 1, "processed_position": 5, "woken": [], "worker": 0}
 {"call": 2, "event": "dispatched", "observer": "inbox", "of": 1, "outcome": "processed", "worker": 0}
-{"call": 3, "event": "fetched", "id": "tenant-1/orders.Order/{\"id\":\"a\"}/2", "observer": "inbox", "of": 1, "snapshot": {"xip": [], "xmax": 2035958, "xmin": 2035958}, "worker": 0}
+{"call": 3, "event": "fetched", "id": "tenant-1/orders.Order/{\"id\":\"a\"}/2", "observer": "inbox", "of": 1, "snapshot": {"xip": [2038523], "xmax": 2038543, "xmin": 2038523}, "worker": 0}
 {"call": 3, "event": "handled", "id": "tenant-1/orders.Order/{\"id\":\"a\"}/2", "observer": "inbox", "of": 1, "ok": true, "worker": 0}
-{"call": 3, "event": "marked", "id": "tenant-1/orders.Order/{\"id\":\"a\"}/2", "observer": "inbox", "of": 1, "processed_position": 6, "worker": 0}
+{"call": 3, "event": "marked", "id": "tenant-1/orders.Order/{\"id\":\"a\"}/2", "observer": "inbox", "of": 1, "processed_position": 6, "woken": [], "worker": 0}
 {"call": 3, "event": "dispatched", "observer": "inbox", "of": 1, "outcome": "processed", "worker": 0}
-{"call": 4, "event": "fetched", "id": null, "observer": "inbox", "of": 1, "snapshot": {"xip": [], "xmax": 2035961, "xmin": 2035961}, "worker": 0}
+{"call": 4, "event": "fetched", "id": null, "observer": "inbox", "of": 1, "snapshot": {"xip": [2038523], "xmax": 2038546, "xmin": 2038523}, "worker": 0}
 {"call": 4, "event": "dispatched", "observer": "inbox", "of": 1, "outcome": "nothing", "worker": 0}

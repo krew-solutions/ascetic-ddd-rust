@@ -54,14 +54,17 @@ echo "   refused, as expected"
 echo "== inbox: as implemented, every property holds"
 tlc -config Inbox.cfg MCInbox.tla
 
-echo "== inbox: a dependency that never arrives is stepped over; the rest still flows"
+echo "== inbox: a dependency that never arrives leaves its message waiting aside; the rest still flows"
 tlc -config InboxMissingDep.cfg MCInbox.tla
 
-echo "== inbox: without stepping over, TLC must find the partition blocked"
-if tlc -config InboxNoSkip.cfg MCInbox.tla > "${TMPDIR:-/tmp}/tlc-inbox-noskip.log" 2>&1; then
-  echo "unexpected: no violation without stepping over"; exit 1
+echo "== inbox: with waits that run out, every received message ends up processed or parked"
+tlc -config InboxMissingDepExpires.cfg MCInbox.tla
+
+echo "== inbox: without setting a message aside for its dependency, TLC must find the partition held"
+if tlc -config InboxNoWaiting.cfg MCInbox.tla > "${TMPDIR:-/tmp}/tlc-inbox-nowaiting.log" 2>&1; then
+  echo "unexpected: no violation without waiting"; exit 1
 fi
-grep -q "Temporal properties were violated" "${TMPDIR:-/tmp}/tlc-inbox-noskip.log"
+grep -q "Temporal properties were violated" "${TMPDIR:-/tmp}/tlc-inbox-nowaiting.log"
 echo "   violation found, as expected"
 
 echo "== inbox: a poison message is parked after its attempts and the partition flows"

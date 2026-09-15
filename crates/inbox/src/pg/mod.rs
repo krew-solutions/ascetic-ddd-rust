@@ -25,6 +25,16 @@
 //! left to nobody. With causal dependencies, partition by stream, so that a
 //! message and what it depends on land with one worker.
 //!
+//! # Dependencies
+//!
+//! The walk looks at the head of the queue only. A head whose causal
+//! dependencies are not all processed is set aside to wait for the first
+//! missing one, `waiting_for`, out of the queue; the transaction that marks
+//! that dependency processed puts every row waiting for it back, in the
+//! same statement. Nothing polls for a dependency. With
+//! [`PgInbox::with_max_wait`] a row waiting longer is parked with the
+//! dependency named; by default it waits for ever (ADR-0006).
+//!
 //! # Failures
 //!
 //! The subscriber runs in a savepoint. When it fails, its writes roll back to
@@ -191,11 +201,13 @@ pub struct PgInbox<P, O = ()> {
     partition: Box<dyn PartitionKey>,
     poll_interval: Duration,
     retries: Retries,
+    max_wait: Option<Duration>,
 }
 
 impl<P> PgInbox<P> {
     /// An inbox in table `inbox`, partitioned by URI, observed by nobody,
-    /// retrying a failed message for ever.
+    /// retrying a failed message for ever and letting a message wait for its
+    /// dependencies for ever.
     pub fn new(pool: P) -> Self {
         PgInbox {
             pool,
@@ -205,6 +217,7 @@ impl<P> PgInbox<P> {
             partition: Box::new(ByUri),
             poll_interval: Duration::from_secs(1),
             retries: Retries::default(),
+            max_wait: None,
         }
     }
 }
@@ -220,6 +233,7 @@ impl<P, O> PgInbox<P, O> {
             partition: self.partition,
             poll_interval: self.poll_interval,
             retries: self.retries,
+            max_wait: self.max_wait,
         }
     }
 
@@ -256,5 +270,14 @@ impl<P, O> PgInbox<P, O> {
     /// The same inbox, treating a failed message as `retries` says.
     pub fn with_retries(self, retries: Retries) -> Self {
         PgInbox { retries, ..self }
+    }
+
+    /// The same inbox, parking a message that has waited longer than
+    /// `max_wait` for a dependency, with the dependency named.
+    pub fn with_max_wait(self, max_wait: Duration) -> Self {
+        PgInbox {
+            max_wait: Some(max_wait),
+            ..self
+        }
     }
 }

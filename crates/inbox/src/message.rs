@@ -36,6 +36,8 @@ pub struct InboxMessage {
     pub attempts: u32,
     /// What the subscriber returned the last time it failed.
     pub last_error: Option<String>,
+    /// The dependency the row is set aside to wait for, if any (ADR-0006).
+    pub waiting_for: Option<CausalDependency>,
 }
 
 impl InboxMessage {
@@ -60,6 +62,7 @@ impl InboxMessage {
             processed_position: None,
             attempts: 0,
             last_error: None,
+            waiting_for: None,
         }
     }
 

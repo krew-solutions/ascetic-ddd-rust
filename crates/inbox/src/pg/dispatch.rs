@@ -9,8 +9,8 @@ use super::{Outcome, PgInbox, Worker, Workers};
 use crate::error::{BoxError, Error};
 use crate::message::InboxMessage;
 use crate::observer::{
-    Deferred, Dispatched, Failed, Fetched, Handled, InboxObserver, Marked, Resolved, Skipped,
-    Unparked,
+    Deferred, Dispatched, Expired, Failed, Fetched, Handled, InboxObserver, Marked, Resolved,
+    Unparked, Waiting,
 };
 use crate::snapshot::Snapshot;
 
@@ -49,6 +49,16 @@ where
             .session(async |session| {
                 session
                     .atomic(async |tx| {
+                        if let Some(max_wait) = self.max_wait {
+                            let expired = self.expire_waiting(&tx, max_wait).await?;
+                            if !expired.is_empty() {
+                                self.observer.on_expired(&Expired {
+                                    worker,
+                                    call,
+                                    messages: &expired,
+                                });
+                            }
+                        }
                         let (taken, snapshot) = self.next_processable(&tx, worker, call).await?;
                         self.observer.on_fetched(&Fetched {
                             worker,
@@ -79,12 +89,14 @@ where
                         });
                         match failure {
                             None => {
-                                let processed_position = self.mark_processed(&tx, &message).await?;
+                                let (processed_position, woken) =
+                                    self.mark_processed(&tx, &message).await?;
                                 self.observer.on_marked(&Marked {
                                     worker,
                                     call,
                                     message: &message,
                                     processed_position,
+                                    woken: &woken,
                                 });
                                 Ok(Outcome::Processed)
                             }
@@ -220,36 +232,36 @@ where
     }
 
     /// Marks a parked message processed by hand, without the subscriber's
-    /// effects; what depends on it may go ahead. Returns whether the message
-    /// was parked.
+    /// effects, and puts what waited for it back into the queue. Returns
+    /// whether the message was parked.
     pub async fn resolve(
         &self,
         session: &P::Session,
         message: &InboxMessage,
     ) -> Result<bool, Error> {
         let resolved = self.resolve_row(session, message).await?;
-        if let Some(processed_position) = resolved {
+        if let Some((processed_position, woken)) = &resolved {
             self.observer.on_resolved(&Resolved {
                 message,
-                processed_position,
+                processed_position: *processed_position,
+                woken,
             });
         }
         Ok(resolved.is_some())
     }
 
-    /// The oldest unprocessed message whose dependencies are processed, or
-    /// nothing when the oldest row still waits for its backoff; with the
-    /// snapshot of the statement that decided. Rows whose dependencies are
-    /// not processed are stepped over, and the observer is told of each.
+    /// The head of the queue, once every head ahead of it that depends on
+    /// something unprocessed has been set aside to wait; or nothing, when the
+    /// queue is empty or its head still waits for its backoff. With it, the
+    /// snapshot of the statement that decided.
     async fn next_processable(
         &self,
         session: &P::Session,
         worker: Worker,
         call: u64,
     ) -> Result<(Option<InboxMessage>, Snapshot), Error> {
-        let mut skipped = 0i64;
         loop {
-            let step = self.unprocessed(session, skipped, worker).await?;
+            let step = self.head(session, worker).await?;
             let Some((message, deferred)) = step.row else {
                 return Ok((None, step.snapshot));
             };
@@ -262,16 +274,18 @@ where
                 });
                 return Ok((None, step.snapshot));
             }
-            if self.dependencies_processed(session, &message).await? {
+            let Some(dependency) = self.first_unprocessed_dependency(session, &message).await?
+            else {
                 return Ok((Some(message), step.snapshot));
-            }
-            self.observer.on_skipped(&Skipped {
+            };
+            self.set_waiting(session, &message, &dependency).await?;
+            self.observer.on_waiting(&Waiting {
                 worker,
                 call,
                 message: &message,
+                dependency: &dependency,
                 snapshot: &step.snapshot,
             });
-            skipped += 1;
         }
     }
 }

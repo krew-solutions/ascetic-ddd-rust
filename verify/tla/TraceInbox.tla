@@ -4,9 +4,9 @@
 (*                                                                         *)
 (* The inbox observer of the tests writes every event as a line of JSON;   *)
 (* trace2tla.py turns the file into `Trace`, a sequence of the model's     *)
-(* steps: receive (or duplicate), skip, fetch (or nofetch, or blocked),     *)
-(* handle, commit, fail, crash, unpark, resolve, each with what PostgreSQL  *)
-(* assigned.  Receiving, taking a row and closing the transaction are all   *)
+(* steps: receive (or duplicate), wait, fetch (or nofetch, or blocked),     *)
+(* handle, commit, fail, crash, expire, unpark, resolve, each with what     *)
+(* PostgreSQL assigned.  Receiving, taking a row and closing the transaction are all   *)
 (* logged; the one thing that is not is time: a failed row's backoff has    *)
 (* passed by the time the row is taken again, and only then, so Elapse is   *)
 (* the hidden step before such a fetch.  TLC walks the trace checking that  *)
@@ -58,8 +58,9 @@ InboxEvents == {r \in Events : r.side = "inbox"}
 \* that was not a duplicate is a receive for the purposes of this module.
 Receives == {r \in Events : \/ r.side = "inbox" /\ r.event = "receive"
                             \/ r.side = "bridge" /\ r.event = "forward" /\ ~r.dup}
-Dispatching == {r \in InboxEvents : r.event \in {"skip", "fetch", "nofetch", "blocked", "handle", "commit", "fail", "crash"}}
+Dispatching == {r \in InboxEvents : r.event \in {"wait", "fetch", "nofetch", "blocked", "handle", "commit", "fail", "crash"}}
 Parks == {r \in InboxEvents : r.event = "fail" /\ r.parked}
+Expires == {r \in InboxEvents : r.event = "expire"}
 
 Arrives == {r.msg : r \in Receives}
 Stored(m) == CHOOSE r \in Receives : r.msg = m
@@ -72,7 +73,8 @@ Deps == [m \in Msgs |-> IF m \in Arrives THEN Range((CHOOSE r \in Receives : r.m
 Workers == IF Dispatching = {} THEN {0} ELSE 0..((CHOOSE r \in Dispatching : TRUE).of - 1)
 Dispatchers == {r.d : r \in Dispatching}
 MaxCrashes == Cardinality({j \in 1..Len(Trace) : Trace[j].side = "inbox" /\ Trace[j].event \in {"crash", "fail"}})
-SkipIneligible == TRUE
+WaitsOnDependencies == TRUE
+WaitExpires == Expires # {}
 None == "None"
 Poison == {}
 MaxAttempts == IF Parks = {} THEN 0 ELSE (CHOOSE r \in Parks : TRUE).attempts
@@ -81,20 +83,20 @@ MaxAdmin == Cardinality({j \in 1..Len(Trace) : Trace[j].side = "inbox" /\ Trace[
 
 \* The worker a message's partition key hashes to, read off the fetches and
 \* skips; a message nobody touched may go anywhere.
-TouchedBy(m) == {r.d[1] : r \in {e \in InboxEvents : e.event \in {"skip", "fetch"} /\ e.msg = m}}
+TouchedBy(m) == {r.d[1] : r \in {e \in InboxEvents : e.event \in {"wait", "fetch"} /\ e.msg = m}}
 Part == [m \in Msgs |-> IF TouchedBy(m) = {} THEN CHOOSE w \in Workers : TRUE
                                             ELSE CHOOSE w \in TouchedBy(m) : TRUE]
 
 VARIABLES part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
-          attempts, due, parked, resolved, admin,
+          attempts, due, parked, resolved, admin, waiting, expired,
           i  \* the next step of the trace
 
 vars == <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
-          attempts, due, parked, resolved, admin, i>>
+          attempts, due, parked, resolved, admin, waiting, expired, i>>
 
 O == INSTANCE Inbox WITH Msgs <- Msgs, Deps <- Deps, Arrives <- Arrives, Workers <- Workers,
                          Dispatchers <- Dispatchers, MaxCrashes <- MaxCrashes,
-                         SkipIneligible <- SkipIneligible, None <- None,
+                         WaitsOnDependencies <- WaitsOnDependencies, WaitExpires <- WaitExpires, None <- None,
                          Poison <- Poison, MaxAttempts <- MaxAttempts,
                          BlockOnBackoff <- BlockOnBackoff, MaxAdmin <- MaxAdmin
 
@@ -116,7 +118,7 @@ Init ==
   /\ O!Init
   /\ i = 1
 
-Walks == {"skip", "fetch", "nofetch", "blocked"}
+Walks == {"wait", "fetch", "nofetch", "blocked"}
 
 \* Time is not logged: the backoff of a failed row has passed by the time
 \* the row is taken again, and only then.
@@ -157,18 +159,14 @@ Logged ==
      \/ /\ Step.event = "receive"
         /\ Step.msg \in received
         /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
-                      attempts, due, parked, resolved, admin>>
+                      attempts, due, parked, resolved, admin, waiting, expired>>
      \/ /\ Step.event = "duplicate"
         /\ Step.msg \in received
         \* the tuple in full: TLC cannot prime an instance's tuple, and TraceBridge instances this module
         /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
-                      attempts, due, parked, resolved, admin>>
-     \/ /\ Step.event = "skip"
-        /\ Step.msg \in O!CandidatesIn(Step.d, Visible(Step.snap))
-        /\ ~O!DepsProcessed(Step.msg)
-        \* the tuple in full: TLC cannot prime an instance's tuple, and TraceBridge instances this module
-        /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
-                      attempts, due, parked, resolved, admin>>
+                      attempts, due, parked, resolved, admin, waiting, expired>>
+     \/ /\ Step.event = "wait"
+        /\ O!WaitIn(Step.d, Visible(Step.snap), Step.msg, Step.dep)
      \/ /\ Step.event = "fetch"
         /\ O!FetchFrom(Step.d, Visible(Step.snap))
         /\ holding'[Step.d] = Step.msg
@@ -178,23 +176,24 @@ Logged ==
         /\ \A m \in O!CandidatesIn(Step.d, Visible(Step.snap)) : due[m]
         \* the tuple in full: TLC cannot prime an instance's tuple, and TraceBridge instances this module
         /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
-                      attempts, due, parked, resolved, admin>>
-     \* the oldest row not stepped over for its dependencies waits for its
-     \* backoff, and holds the partition
+                      attempts, due, parked, resolved, admin, waiting, expired>>
+     \* the head of the queue waits for its backoff, and holds the partition
      \/ /\ Step.event = "blocked"
         /\ holding[Step.d] = None
         /\ Step.msg \in O!CandidatesIn(Step.d, Visible(Step.snap))
+        /\ Step.msg = O!Oldest(O!CandidatesIn(Step.d, Visible(Step.snap)))
         /\ ~due[Step.msg]
-        /\ \A n \in O!CandidatesIn(Step.d, Visible(Step.snap)) : recvPos[n] < recvPos[Step.msg] => ~O!DepsProcessed(n)
         /\ O!TakesIn(Step.d, Visible(Step.snap)) = {}
         /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
-                      attempts, due, parked, resolved, admin>>
+                      attempts, due, parked, resolved, admin, waiting, expired>>
      \/ /\ Step.event = "handle"
         /\ holding[Step.d] = Step.msg
         \* the tuple in full: TLC cannot prime an instance's tuple, and TraceBridge instances this module
         /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
-                      attempts, due, parked, resolved, admin>>
+                      attempts, due, parked, resolved, admin, waiting, expired>>
+     \* the mark wakes exactly what waited for the message, in the same transaction
      \/ /\ Step.event = "commit"
+        /\ {n \in Msgs : waiting[n] = holding[Step.d]} = Range(Step.woken)
         /\ O!Commit(Step.d)
      \/ /\ Step.event = "fail"
         /\ holding[Step.d] = Step.msg
@@ -203,9 +202,12 @@ Logged ==
         /\ (Step.msg \in parked') = Step.parked
      \/ /\ Step.event = "crash"
         /\ O!Crash(Step.d)
+     \/ /\ Step.event = "expire"
+        /\ O!Expire(Step.msg)
      \/ /\ Step.event = "unpark"
         /\ O!Unpark(Step.msg)
      \/ /\ Step.event = "resolve"
+        /\ {n \in Msgs : waiting[n] = Step.msg} = Range(Step.woken)
         /\ O!Resolve(Step.msg)
 
 Next == Hidden \/ Logged
@@ -221,6 +223,7 @@ CausalOrder == O!CausalOrder
 HeldOnce == O!HeldOnce
 ProcessedWasReceived == O!ProcessedWasReceived
 ParkedIsAside == O!ParkedIsAside
+WaitingIsAside == O!WaitingIsAside
 \* Only with one dispatcher per partition; trace2tla.py asks for it then.
 ArrivalOrder == O!ArrivalOrder
 

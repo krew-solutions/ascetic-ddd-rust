@@ -172,14 +172,15 @@ impl InboxObserver for JsonTrace {
             "xid": event.receipt.map(|receipt| receipt.transaction_id),
         }));
     }
-    fn on_skipped(&self, event: &inbox::Skipped<'_>) {
+    fn on_waiting(&self, event: &inbox::Waiting<'_>) {
         self.record(json!({
             "observer": "inbox",
-            "event": "skipped",
+            "event": "waiting",
             "worker": event.worker.id,
             "of": event.worker.of,
             "call": event.call,
             "id": inbox_id(event.message),
+            "dependency": dependency_id(event.dependency),
             "snapshot": snapshot_json(event.snapshot),
         }));
     }
@@ -225,6 +226,17 @@ impl InboxObserver for JsonTrace {
             "call": event.call,
             "id": inbox_id(event.message),
             "processed_position": event.processed_position,
+            "woken": event.woken.iter().map(inbox_id).collect::<Vec<_>>(),
+        }));
+    }
+    fn on_expired(&self, event: &inbox::Expired<'_>) {
+        self.record(json!({
+            "observer": "inbox",
+            "event": "expired",
+            "worker": event.worker.id,
+            "of": event.worker.of,
+            "call": event.call,
+            "ids": event.messages.iter().map(inbox_id).collect::<Vec<_>>(),
         }));
     }
     fn on_failed(&self, event: &inbox::Failed<'_>) {
@@ -269,6 +281,7 @@ impl InboxObserver for JsonTrace {
             "event": "resolved",
             "id": inbox_id(event.message),
             "processed_position": event.processed_position,
+            "woken": event.woken.iter().map(inbox_id).collect::<Vec<_>>(),
         }));
     }
 }

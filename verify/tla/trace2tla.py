@@ -29,7 +29,7 @@ The inbox mapping:
 
     received, stored          -> receive   (msg, pos, xid, deps)
     received, duplicate       -> duplicate (msg)
-    skipped                   -> skip      (d, of, msg, snap)
+    waiting                   -> wait      (d, of, msg, dep, snap): set aside for the dependency
     fetched, a row            -> fetch     (d, of, msg, snap)
     fetched, none             -> nofetch   (d, of, snap)
     deferred + fetched, none  -> blocked   (d, of, msg, snap): the oldest row waits for its backoff
@@ -38,11 +38,13 @@ The inbox mapping:
     marked                    -> nothing: the mark commits with the transaction
     failed + dispatched failed
                               -> fail      (d, of, msg, attempts, parked): the attempt commits
-    dispatched processed      -> commit    (d, of)
+    marked + dispatched processed
+                              -> commit    (d, of, woken): the mark and the rows it woke
     dispatched nothing        -> nothing: the nofetch already said it
     dispatched rolled_back    -> crash     (d, of), if a row was fetched
+    expired                   -> expire    (msg), one per row parked
     unparked                  -> unpark    (msg)
-    resolved                  -> resolve   (msg)
+    resolved                  -> resolve   (msg, woken)
 
 Messages are named in order of first mention, a dependency that never arrives
 included; a dispatcher is <<worker, slot>>, where each open `dispatch` call
@@ -161,6 +163,12 @@ def inbox_steps(events, names=None, by_message_id=False):
     holding = {}  # (worker, call) -> the row fetched, if any
     deferred = {} # (worker, call) -> the row found waiting for its backoff
     failed = {}   # (worker, call) -> (attempts, parked) recorded, awaiting COMMIT
+    woken = {}    # (worker, call) -> the rows the mark woke, awaiting COMMIT
+
+    def dependency(identity):
+        if by_message_id:
+            raise SystemExit("a dependency in a bridge trace: rows are named by message_id there, dependencies by identity")
+        return names.of(identity)
 
     def row(identity, what):
         if identity not in rows:
@@ -176,8 +184,12 @@ def inbox_steps(events, names=None, by_message_id=False):
 
     for e in events:
         kind = e["event"]
-        if kind in ("unparked", "resolved"):
-            yield record(side="inbox", event=kind[:-2] if kind == "unparked" else "resolve", msg=row(e["id"], f"an {kind}"))
+        if kind == "unparked":
+            yield record(side="inbox", event="unpark", msg=row(e["id"], "an unpark"))
+            continue
+        if kind == "resolved":
+            yield record(side="inbox", event="resolve", msg=row(e["id"], "a resolve"),
+                         woken=[row(w, "a waking") for w in e["woken"]])
             continue
         if kind == "received":
             if by_message_id:
@@ -194,8 +206,12 @@ def inbox_steps(events, names=None, by_message_id=False):
                 yield record(side="inbox", event="receive", msg=msg, pos=e["received_position"], xid=e["xid"], deps=deps)
             continue
         key, d, of = dispatcher(e)
-        if kind == "skipped":
-            yield record(side="inbox", event="skip", d=d, of=of, msg=row(e["id"], "a skip"), snap=snapshot(e))
+        if kind == "waiting":
+            yield record(side="inbox", event="wait", d=d, of=of, msg=row(e["id"], "a wait"),
+                         dep=dependency(e["dependency"]), snap=snapshot(e))
+        elif kind == "expired":
+            for identity in e["ids"]:
+                yield record(side="inbox", event="expire", msg=row(identity, "an expiry"))
         elif kind == "deferred":
             deferred[key] = (row(e["id"], "a deferral"), snapshot(e))
         elif kind == "fetched":
@@ -215,16 +231,18 @@ def inbox_steps(events, names=None, by_message_id=False):
         elif kind == "marked":
             if holding.get(key) != row(e["id"], "a mark"):
                 raise SystemExit(f"call {key} marked a row it did not fetch: {e['id']}")
+            woken[key] = [row(w, "a waking") for w in e["woken"]]
         elif kind == "dispatched":
             outcome = e["outcome"]
             if outcome == "processed":
-                yield record(side="inbox", event="commit", d=d, of=of)
+                yield record(side="inbox", event="commit", d=d, of=of, woken=woken.get(key, []))
             elif outcome == "failed":
                 attempts, parked = failed.pop(key)
                 yield record(side="inbox", event="fail", d=d, of=of, msg=holding[key], attempts=attempts, parked=parked)
             elif outcome == "rolled_back" and key in holding:
                 yield record(side="inbox", event="crash", d=d, of=of)
             failed.pop(key, None)
+            woken.pop(key, None)
             holding.pop(key, None)
             deferred.pop(key, None)
             del slots[key]

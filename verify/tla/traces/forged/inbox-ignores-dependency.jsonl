@@ -1,6 +1,6 @@
-{"deps": ["tenant-1/orders.Order/{\"id\":\"user\"}/5"], "event": "received", "id": "tenant-1/orders.Order/{\"id\":\"order\"}/1", "message_id": "00000000-0000-4000-8000-00000000000a", "observer": "inbox", "received_position": 1, "xid": 2035911}
-{"deps": [], "event": "received", "id": "tenant-1/orders.Order/{\"id\":\"other\"}/1", "message_id": "00000000-0000-4000-8000-00000000000b", "observer": "inbox", "received_position": 2, "xid": 2035916}
-{"call": 1, "event": "fetched", "id": "tenant-1/orders.Order/{\"id\":\"order\"}/1", "observer": "inbox", "of": 1, "snapshot": {"xip": [2035926], "xmax": 2035928, "xmin": 2035925}, "worker": 0}
+{"deps": ["tenant-1/orders.Order/{\"id\":\"user\"}/5"], "event": "received", "id": "tenant-1/orders.Order/{\"id\":\"order\"}/1", "message_id": "00000000-0000-4000-8000-00000000000a", "observer": "inbox", "received_position": 1, "xid": 2038517}
+{"deps": [], "event": "received", "id": "tenant-1/orders.Order/{\"id\":\"other\"}/1", "message_id": "00000000-0000-4000-8000-00000000000d", "observer": "inbox", "received_position": 2, "xid": 2038520}
+{"call": 1, "event": "fetched", "id": "tenant-1/orders.Order/{\"id\":\"order\"}/1", "observer": "inbox", "of": 1, "snapshot": {"xip": [2038523, 2038532], "xmax": 2038538, "xmin": 2038523}, "worker": 0}
 {"call": 1, "event": "handled", "id": "tenant-1/orders.Order/{\"id\":\"order\"}/1", "observer": "inbox", "of": 1, "ok": true, "worker": 0}
-{"call": 1, "event": "marked", "id": "tenant-1/orders.Order/{\"id\":\"order\"}/1", "observer": "inbox", "of": 1, "processed_position": 3, "worker": 0}
+{"call": 1, "event": "marked", "id": "tenant-1/orders.Order/{\"id\":\"order\"}/1", "observer": "inbox", "of": 1, "processed_position": 3, "woken": [], "worker": 0}
 {"call": 1, "event": "dispatched", "observer": "inbox", "of": 1, "outcome": "processed", "worker": 0}

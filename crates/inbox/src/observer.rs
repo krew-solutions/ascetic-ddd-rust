@@ -6,11 +6,11 @@
 //! own do the awaiting.
 //!
 //! The events are the actions of the protocol model in
-//! `verify/tla/Inbox.tla` — receive, fetch, fail, and the close of the
-//! dispatcher's transaction, plus the operator's unpark and resolve — with
-//! the steps the model folds into one made visible: the rows stepped over,
-//! the row that holds the partition while it waits for its backoff, the
-//! subscriber's outcome, the mark.
+//! `verify/tla/Inbox.tla` — receive, wait, fetch, fail, expire, and the close
+//! of the dispatcher's transaction, plus the operator's unpark and resolve —
+//! with the steps the model folds into one made visible: the row that holds
+//! the partition while it waits for its backoff, the subscriber's outcome,
+//! the mark and what it woke.
 //!
 //! A dispatcher's events name the worker and the number of the `dispatch`
 //! call, which the caller supplies: unlike the outbox, whose position lock
@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::{BoxError, Error};
-use crate::message::InboxMessage;
+use crate::message::{CausalDependency, InboxMessage};
 use crate::pg::{Outcome, Worker};
 use crate::snapshot::Snapshot;
 
@@ -52,15 +52,18 @@ pub struct Received<'a> {
     pub receipt: Option<Receipt>,
 }
 
-/// A dispatcher stepped over a row whose causal dependencies are not yet
-/// processed; it will be looked at again next time.
-pub struct Skipped<'a> {
-    /// The worker that stepped over it.
+/// A dispatcher found the head of its queue depending on a message not yet
+/// processed, and set it aside to wait for that one, out of the queue; the
+/// transaction that marks the dependency processed puts it back.
+pub struct Waiting<'a> {
+    /// The worker that set it aside.
     pub worker: Worker,
     /// The `dispatch` call, as its caller numbered it.
     pub call: u64,
     /// The row.
     pub message: &'a InboxMessage,
+    /// The first of its dependencies found unprocessed.
+    pub dependency: &'a CausalDependency,
     /// What the statement that returned the row could see.
     pub snapshot: &'a Snapshot,
 }
@@ -114,6 +117,20 @@ pub struct Marked<'a> {
     pub message: &'a InboxMessage,
     /// Its order of processing.
     pub processed_position: i64,
+    /// The rows that waited for this message, back in the queue by the same
+    /// statement.
+    pub woken: &'a [InboxMessage],
+}
+
+/// Rows whose wait for a dependency ran out were parked, with the dependency
+/// named in their `last_error`, inside the dispatcher's transaction.
+pub struct Expired<'a> {
+    /// The worker whose call found them.
+    pub worker: Worker,
+    /// The `dispatch` call, as its caller numbered it.
+    pub call: u64,
+    /// The rows, oldest first.
+    pub messages: &'a [InboxMessage],
 }
 
 /// The subscriber failed: its writes were rolled back to the savepoint and
@@ -161,6 +178,9 @@ pub struct Resolved<'a> {
     pub message: &'a InboxMessage,
     /// Its order of processing.
     pub processed_position: i64,
+    /// The rows that waited for this message, back in the queue by the same
+    /// statement.
+    pub woken: &'a [InboxMessage],
 }
 
 /// What an inbox reports. Every method has an empty default, so an observer
@@ -168,8 +188,8 @@ pub struct Resolved<'a> {
 pub trait InboxObserver: Send + Sync {
     /// A message was handed to the inbox.
     fn on_received(&self, _event: &Received<'_>) {}
-    /// A row was stepped over for its dependencies.
-    fn on_skipped(&self, _event: &Skipped<'_>) {}
+    /// The head of the queue was set aside to wait for a dependency.
+    fn on_waiting(&self, _event: &Waiting<'_>) {}
     /// The oldest row waits for its backoff; nothing was taken.
     fn on_deferred(&self, _event: &Deferred<'_>) {}
     /// A dispatcher took a row, or found none.
@@ -180,6 +200,8 @@ pub trait InboxObserver: Send + Sync {
     fn on_marked(&self, _event: &Marked<'_>) {}
     /// The attempt was recorded after the subscriber failed.
     fn on_failed(&self, _event: &Failed<'_>) {}
+    /// Waits ran out; the rows were parked.
+    fn on_expired(&self, _event: &Expired<'_>) {}
     /// The dispatcher's transaction closed.
     fn on_dispatched(&self, _event: &Dispatched<'_>) {}
     /// A parked message was given another go.
@@ -218,12 +240,13 @@ macro_rules! forward_to_each {
 
 forward_to_each! {
     on_received: Received,
-    on_skipped: Skipped,
+    on_waiting: Waiting,
     on_deferred: Deferred,
     on_fetched: Fetched,
     on_handled: Handled,
     on_marked: Marked,
     on_failed: Failed,
+    on_expired: Expired,
     on_dispatched: Dispatched,
     on_unparked: Unparked,
     on_resolved: Resolved,

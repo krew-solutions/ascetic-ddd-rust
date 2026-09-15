@@ -1,12 +1,12 @@
-{"deps":[],"event":"received","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","message_id":"00000000-0000-4000-8000-000000000006","observer":"inbox","received_position":1,"xid":2035922}
-{"call":1,"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","of":1,"snapshot":{"xip":[2035923],"xmax":2035925,"xmin":2035923},"worker":0}
+{"deps":[],"event":"received","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","message_id":"00000000-0000-4000-8000-00000000000c","observer":"inbox","received_position":1,"xid":2038516}
+{"call":1,"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","of":1,"snapshot":{"xip":[2038518],"xmax":2038520,"xmin":2038518},"worker":0}
 {"call":1,"event":"handled","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","of":1,"ok":false,"worker":0}
 {"attempts":1,"call":1,"error":"the first attempt fails on purpose","event":"failed","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","of":1,"parked":true,"retry_after_ms":0,"worker":0}
 {"call":1,"event":"dispatched","observer":"inbox","of":1,"outcome":"failed","worker":0}
-{"call":2,"event":"fetched","id":null,"observer":"inbox","of":1,"snapshot":{"xip":[],"xmax":2035939,"xmin":2035939},"worker":0}
+{"call":2,"event":"fetched","id":null,"observer":"inbox","of":1,"snapshot":{"xip":[2038521,2038523,2038524,2038526],"xmax":2038530,"xmin":2038521},"worker":0}
 {"call":2,"event":"dispatched","observer":"inbox","of":1,"outcome":"nothing","worker":0}
 {"event":"unparked","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox"}
-{"call":3,"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","of":1,"snapshot":{"xip":[2035947],"xmax":2035950,"xmin":2035947},"worker":0}
+{"call":3,"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","of":1,"snapshot":{"xip":[2038523,2038531,2038532],"xmax":2038538,"xmin":2038523},"worker":0}
 {"call":3,"event":"handled","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","of":1,"ok":true,"worker":0}
-{"call":3,"event":"marked","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","of":1,"processed_position":2,"worker":0}
+{"call":3,"event":"marked","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","of":1,"processed_position":2,"woken":[],"worker":0}
 {"call":3,"event":"dispatched","observer":"inbox","of":1,"outcome":"processed","worker":0}

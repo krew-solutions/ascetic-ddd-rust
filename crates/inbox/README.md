@@ -74,6 +74,24 @@ database.
 The processing loop is a task on the tokio runtime; cancel the subscription
 to stop it.
 
+## Dependencies
+
+A message may name causal dependencies, messages that must be processed
+before it, and may arrive before them. The walk looks at the head of the
+queue only: a head whose dependencies are not all processed is set aside to
+wait for the first missing one, `waiting_for`, out of the queue, and the
+statement that marks that dependency processed puts every row waiting for it
+back, in the same transaction. Nothing polls for a dependency, and a waiting
+row costs the walk nothing. The row stays in the table, so a later arrival of
+the same message is still a duplicate. With `with_max_wait` a row waiting
+longer is parked with the dependency named in `last_error`; by default it
+waits for ever (ADR-0006).
+
+The mark and the waking are one statement, so the happy path keeps its round
+trips. Draining 200 messages with a subscriber that does nothing, over
+localhost, three runs: 1.43–1.76 ms per message, against 1.54–1.83 ms before
+the waking was added; no difference the measurement can tell.
+
 ## Failures, backoff and parking
 
 A subscriber that fails does not roll the whole transaction back. It runs in a
@@ -124,12 +142,12 @@ tenth with a subscriber that does nothing, less with one that does anything.
 the session and outbox observers: a synchronous, infallible value, composed as
 a tuple, fixed when the inbox is built. It is told of six things — a message
 received, with its order of arrival or that the identity was already there; a
-row stepped over while its causal dependencies are unprocessed; the oldest
-row found waiting for its backoff; a row taken, or none; the subscriber's
-outcome; the mark, with its order of processing; the attempt recorded after a
-failure, with whether it parked the message; the dispatcher's transaction
-closed, committed or rolled back; a message unparked or resolved by an
-operator. A dispatcher's events carry the worker and the number of the
+row set aside to wait for a dependency; the head of the queue found waiting
+for its backoff; a row taken, or none; the subscriber's outcome; the mark,
+with its order of processing and the rows it woke; the attempt recorded after
+a failure, with whether it parked the message; rows whose wait ran out,
+parked; the dispatcher's transaction closed, committed or rolled back; a
+message unparked or resolved by an operator, with the rows the resolve woke. A dispatcher's events carry the worker and the number of the
 `dispatch` call, which the caller supplies and keeps unique among the calls
 of one worker open at once, because several of them run at once under
 `FOR UPDATE SKIP LOCKED`. A stored message comes with the id of the transaction that stored
@@ -149,6 +167,8 @@ through the model.
 * A failed message is retried with a recorded attempt, may wait for a
   backoff and may be parked (ADR-0005); the source rolls the transaction back
   and retries at once, for ever.
+* A message ahead of its dependency is set aside and woken by the
+  dependency's mark (ADR-0006); the source steps over it on every walk.
 
 * A causal dependency is a type, `CausalDependency`, with `serde`; entries
   in the metadata that are not dependencies are ignored.
