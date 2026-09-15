@@ -74,15 +74,62 @@ database.
 The processing loop is a task on the tokio runtime; cancel the subscription
 to stop it.
 
+## Failures, backoff and parking
+
+A subscriber that fails does not roll the whole transaction back. It runs in a
+savepoint; its writes roll back to it, and the transaction goes on to record
+the attempt: `attempts`, `last_error`, and `next_attempt_at`. Until that time
+the message is not taken, and it holds its partition — the rows behind it wait
+— so that the order of arrival survives the failure; a retry topic would let
+them pass and lose it. After `max_attempts` failures the message is parked:
+`parked_at` is set, the selection passes it by, the partition flows, and the
+row stays where it is, so a later arrival of the same message is still a
+duplicate. Off by default: unlimited attempts, no backoff, the message is
+taken again at the next call (ADR-0005).
+
+```rust,ignore
+let inbox = PgInbox::new(pool)
+    .with_retries(Retries::up_to(5).with_backoff(Retries::exponential(
+        Duration::from_secs(1),
+        Duration::from_secs(300),
+    )));
+
+match inbox.dispatch(&subscriber, Worker::ALONE).await? {
+    Outcome::Processed => {}
+    Outcome::Failed { attempts, parked } => {}
+    Outcome::Nothing => {}
+}
+
+for message in inbox.parked(&session).await? {
+    inbox.unpark(&session, &message).await?;  // another go, attempts reset
+    inbox.resolve(&session, &message).await?; // or: processed by hand, no effects
+}
+```
+
+Only errors the subscriber returns are counted. A message that kills the
+process is retried on restart with the count unchanged; counting at delivery
+would need a lease with a timeout, which the inbox does without. A message
+depending on a parked one waits, as it waits for a dependency that never
+arrived, until the parked one is unparked and processed or resolved.
+
+The savepoint costs two statements per message on the happy path. Draining
+200 messages with a subscriber that does nothing, on one PostgreSQL over
+localhost, best of three runs: 1.39 ms per message before, 1.54 ms after;
+the other runs 1.69–1.74 ms before and 1.80–1.83 ms after. About 150 µs, a
+tenth with a subscriber that does nothing, less with one that does anything.
+
 ## Observing the inbox
 
 `PgInbox::observed_by(observer)` attaches an `InboxObserver`, in the shape of
 the session and outbox observers: a synchronous, infallible value, composed as
 a tuple, fixed when the inbox is built. It is told of six things — a message
 received, with its order of arrival or that the identity was already there; a
-row stepped over while its causal dependencies are unprocessed; a row taken,
-or none; the subscriber's outcome; the mark, with its order of processing; the
-dispatcher's transaction closed, committed or rolled back. A dispatcher's
+row stepped over while its causal dependencies are unprocessed; the oldest
+row found waiting for its backoff; a row taken, or none; the subscriber's
+outcome; the mark, with its order of processing; the attempt recorded after a
+failure, with whether it parked the message; the dispatcher's transaction
+closed, committed or rolled back; a message unparked or resolved by an
+operator. A dispatcher's
 events carry the worker and the number of the `dispatch` call, because
 several calls of one worker run at once under `FOR UPDATE SKIP LOCKED`. These
 are the actions of the protocol model in `verify/tla/Inbox.tla`, with the
@@ -93,6 +140,10 @@ write one JSON line per event, and `verify/tla/check.sh` replays those files
 through the model.
 
 ## Deviations from the Python source
+
+* A failed message is retried with a recorded attempt, may wait for a
+  backoff and may be parked (ADR-0005); the source rolls the transaction back
+  and retries at once, for ever.
 
 * A causal dependency is a type, `CausalDependency`, with `serde`; entries
   in the metadata that are not dependencies are ignored.

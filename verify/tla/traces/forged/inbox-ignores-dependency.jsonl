@@ -3,4 +3,4 @@
 {"call": 1, "event": "fetched", "id": "tenant-1/orders.Order/{\"id\":\"order\"}/1", "observer": "inbox", "of": 1, "worker": 0}
 {"call": 1, "event": "handled", "id": "tenant-1/orders.Order/{\"id\":\"order\"}/1", "observer": "inbox", "of": 1, "ok": true, "worker": 0}
 {"call": 1, "event": "marked", "id": "tenant-1/orders.Order/{\"id\":\"order\"}/1", "observer": "inbox", "of": 1, "processed_position": 3, "worker": 0}
-{"call": 1, "event": "dispatched", "observer": "inbox", "of": 1, "outcome": "message", "worker": 0}
+{"call": 1, "event": "dispatched", "observer": "inbox", "of": 1, "outcome": "processed", "worker": 0}

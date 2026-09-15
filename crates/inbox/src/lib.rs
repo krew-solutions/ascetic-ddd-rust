@@ -4,8 +4,10 @@
 //! depends on. The inbox stores every message under its identity, so a
 //! second arrival is the same row; processes each one in a transaction that
 //! also marks it processed, so the subscriber's writes and the mark commit
-//! together; and holds a message back until the messages it names as causal
-//! dependencies have been processed.
+//! together; holds a message back until the messages it names as causal
+//! dependencies have been processed; and, when the subscriber fails, records
+//! the attempt, lets the message wait for its backoff without letting newer
+//! ones pass it, and parks it after the attempts allowed (ADR-0005).
 //!
 //! ```ignore
 //! // at the edge: a bus subscriber hands the message over
@@ -55,5 +57,5 @@ pub use crate::error::{BoxError, Error};
 pub use crate::message::{CausalDependency, InboxMessage};
 pub use crate::observer::InboxObserver;
 pub use crate::partition::{ByStream, ByUri, PartitionKey};
-pub use crate::pg::{PgInbox, Worker, Workers};
+pub use crate::pg::{Outcome, PgInbox, Retries, Worker, Workers};
 pub use crate::port::Inbox;

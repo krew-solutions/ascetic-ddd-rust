@@ -1,9 +1,9 @@
-{"event":"published","message_id":"00000000-0000-4000-8000-00000000000b","observer":"outbox","position":1,"uri":"kafka://orders","xid":2031543}
-{"event":"published","message_id":"00000000-0000-4000-8000-00000000000c","observer":"outbox","position":2,"uri":"kafka://orders","xid":2031551}
-{"event":"fetched","group":"broker","horizon":2031643,"limit":100,"messages":["00000000-0000-4000-8000-00000000000b","00000000-0000-4000-8000-00000000000c"],"observer":"outbox","of":1,"worker":0}
-{"event":"handled","group":"broker","message_id":"00000000-0000-4000-8000-00000000000b","observer":"outbox","of":1,"ok":true,"worker":0}
-{"event":"handled","group":"broker","message_id":"00000000-0000-4000-8000-00000000000c","observer":"outbox","of":1,"ok":true,"worker":0}
-{"event":"acked","group":"broker","observer":"outbox","of":1,"position":2,"worker":0,"xid":2031551}
+{"event":"published","message_id":"00000000-0000-4000-8000-000000000009","observer":"outbox","position":1,"uri":"kafka://orders","xid":2032471}
+{"event":"published","message_id":"00000000-0000-4000-8000-00000000000a","observer":"outbox","position":2,"uri":"kafka://orders","xid":2032478}
+{"event":"fetched","group":"broker","horizon":2032543,"limit":100,"messages":["00000000-0000-4000-8000-000000000009","00000000-0000-4000-8000-00000000000a"],"observer":"outbox","of":1,"worker":0}
+{"event":"handled","group":"broker","message_id":"00000000-0000-4000-8000-000000000009","observer":"outbox","of":1,"ok":true,"worker":0}
+{"event":"handled","group":"broker","message_id":"00000000-0000-4000-8000-00000000000a","observer":"outbox","of":1,"ok":true,"worker":0}
+{"event":"acked","group":"broker","observer":"outbox","of":1,"position":2,"worker":0,"xid":2032478}
 {"event":"dispatched","group":"broker","observer":"outbox","of":1,"outcome":"batch","worker":0}
-{"event":"fetched","group":"broker","horizon":2031647,"limit":100,"messages":[],"observer":"outbox","of":1,"worker":0}
+{"event":"fetched","group":"broker","horizon":2032547,"limit":100,"messages":[],"observer":"outbox","of":1,"worker":0}
 {"event":"dispatched","group":"broker","observer":"outbox","of":1,"outcome":"nothing","worker":0}

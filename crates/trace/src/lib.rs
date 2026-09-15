@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use ascetic_ddd_inbox::observer as inbox;
-use ascetic_ddd_inbox::{CausalDependency, InboxMessage, InboxObserver};
+use ascetic_ddd_inbox::{CausalDependency, InboxMessage, InboxObserver, Outcome};
 use ascetic_ddd_outbox::observer as outbox;
 use ascetic_ddd_outbox::{OutboxMessage, OutboxObserver};
 use serde_json::{Value, json};
@@ -177,6 +177,16 @@ impl InboxObserver for JsonTrace {
             "id": inbox_id(event.message),
         }));
     }
+    fn on_deferred(&self, event: &inbox::Deferred<'_>) {
+        self.record(json!({
+            "observer": "inbox",
+            "event": "deferred",
+            "worker": event.worker.id,
+            "of": event.worker.of,
+            "call": event.call,
+            "id": inbox_id(event.message),
+        }));
+    }
     fn on_fetched(&self, event: &inbox::Fetched<'_>) {
         self.record(json!({
             "observer": "inbox",
@@ -209,6 +219,20 @@ impl InboxObserver for JsonTrace {
             "processed_position": event.processed_position,
         }));
     }
+    fn on_failed(&self, event: &inbox::Failed<'_>) {
+        self.record(json!({
+            "observer": "inbox",
+            "event": "failed",
+            "worker": event.worker.id,
+            "of": event.worker.of,
+            "call": event.call,
+            "id": inbox_id(event.message),
+            "attempts": event.attempts,
+            "parked": event.parked,
+            "retry_after_ms": event.retry_after.as_millis() as u64,
+            "error": event.error.to_string(),
+        }));
+    }
     fn on_dispatched(&self, event: &inbox::Dispatched<'_>) {
         self.record(json!({
             "observer": "inbox",
@@ -217,10 +241,26 @@ impl InboxObserver for JsonTrace {
             "of": event.worker.of,
             "call": event.call,
             "outcome": match event.outcome {
-                Ok(true) => "message",
-                Ok(false) => "nothing",
+                Ok(Outcome::Processed) => "processed",
+                Ok(Outcome::Failed { .. }) => "failed",
+                Ok(Outcome::Nothing) => "nothing",
                 Err(_) => "rolled_back",
             },
+        }));
+    }
+    fn on_unparked(&self, event: &inbox::Unparked<'_>) {
+        self.record(json!({
+            "observer": "inbox",
+            "event": "unparked",
+            "id": inbox_id(event.message),
+        }));
+    }
+    fn on_resolved(&self, event: &inbox::Resolved<'_>) {
+        self.record(json!({
+            "observer": "inbox",
+            "event": "resolved",
+            "id": inbox_id(event.message),
+            "processed_position": event.processed_position,
         }));
     }
 }

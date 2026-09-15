@@ -32,6 +32,10 @@ pub struct InboxMessage {
     pub received_position: Option<i64>,
     /// Order of processing, assigned when processed; `None` until then.
     pub processed_position: Option<i64>,
+    /// Failed attempts so far (ADR-0005).
+    pub attempts: u32,
+    /// What the subscriber returned the last time it failed.
+    pub last_error: Option<String>,
 }
 
 impl InboxMessage {
@@ -54,6 +58,8 @@ impl InboxMessage {
             metadata: None,
             received_position: None,
             processed_position: None,
+            attempts: 0,
+            last_error: None,
         }
     }
 

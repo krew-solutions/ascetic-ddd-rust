@@ -6,9 +6,11 @@
 //! own do the awaiting.
 //!
 //! The events are the actions of the protocol model in
-//! `verify/tla/Inbox.tla` — receive, fetch, and the close of the
-//! dispatcher's transaction — with the steps the model folds into one made
-//! visible: the rows stepped over, the subscriber's outcome, the mark.
+//! `verify/tla/Inbox.tla` — receive, fetch, fail, and the close of the
+//! dispatcher's transaction, plus the operator's unpark and resolve — with
+//! the steps the model folds into one made visible: the rows stepped over,
+//! the row that holds the partition while it waits for its backoff, the
+//! subscriber's outcome, the mark.
 //!
 //! A dispatcher's events name the worker and the number of the `dispatch`
 //! call: unlike the outbox, whose position lock allows one transaction per
@@ -17,10 +19,11 @@
 //! apart.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::error::{BoxError, Error};
 use crate::message::InboxMessage;
-use crate::pg::Worker;
+use crate::pg::{Outcome, Worker};
 
 /// A message was handed to the inbox, in a transaction of its own.
 pub struct Received<'a> {
@@ -39,6 +42,18 @@ pub struct Skipped<'a> {
     /// The `dispatch` call, numbered per inbox.
     pub call: u64,
     /// The row.
+    pub message: &'a InboxMessage,
+}
+
+/// A dispatcher found the oldest row of its partition waiting for its
+/// backoff, and took nothing: the row holds the partition, so that the order
+/// survives the failure.
+pub struct Deferred<'a> {
+    /// The worker that found it.
+    pub worker: Worker,
+    /// The `dispatch` call, numbered per inbox.
+    pub call: u64,
+    /// The row that waits.
     pub message: &'a InboxMessage,
 }
 
@@ -77,17 +92,51 @@ pub struct Marked<'a> {
     pub processed_position: i64,
 }
 
-/// The dispatcher's transaction closed: committed, with whether there was a
-/// message, or rolled back, with the error.
+/// The subscriber failed: its writes were rolled back to the savepoint and
+/// the attempt was recorded, inside the dispatcher's transaction. Not
+/// durable until [`Dispatched`] reports a commit.
+pub struct Failed<'a> {
+    /// The worker.
+    pub worker: Worker,
+    /// The `dispatch` call, numbered per inbox.
+    pub call: u64,
+    /// The message.
+    pub message: &'a InboxMessage,
+    /// What the subscriber returned.
+    pub error: &'a BoxError,
+    /// Failed attempts so far, this one included.
+    pub attempts: u32,
+    /// Whether this attempt was the last: the message is parked.
+    pub parked: bool,
+    /// How long the message waits before it may be taken again.
+    pub retry_after: Duration,
+}
+
+/// The dispatcher's transaction closed: committed, with what it did, or
+/// rolled back, with the error.
 pub struct Dispatched<'a> {
     /// The worker whose transaction closed.
     pub worker: Worker,
     /// The `dispatch` call, numbered per inbox.
     pub call: u64,
-    /// `Ok(true)`: a message was marked; `Ok(false)`: there was nothing;
-    /// `Err`: the subscriber's writes and the mark were rolled back and the
-    /// message will be taken again.
-    pub outcome: Result<bool, &'a Error>,
+    /// `Ok`: what was committed; `Err`: nothing was, and whatever row was
+    /// held is free again.
+    pub outcome: Result<Outcome, &'a Error>,
+}
+
+/// An operator gave a parked message another go.
+pub struct Unparked<'a> {
+    /// The message.
+    pub message: &'a InboxMessage,
+}
+
+/// An operator marked a parked message processed, without the subscriber's
+/// effects.
+pub struct Resolved<'a> {
+    /// The message.
+    pub message: &'a InboxMessage,
+    /// Its order of processing.
+    pub processed_position: i64,
 }
 
 /// What an inbox reports. Every method has an empty default, so an observer
@@ -97,86 +146,61 @@ pub trait InboxObserver: Send + Sync {
     fn on_received(&self, _event: &Received<'_>) {}
     /// A row was stepped over for its dependencies.
     fn on_skipped(&self, _event: &Skipped<'_>) {}
+    /// The oldest row waits for its backoff; nothing was taken.
+    fn on_deferred(&self, _event: &Deferred<'_>) {}
     /// A dispatcher took a row, or found none.
     fn on_fetched(&self, _event: &Fetched<'_>) {}
     /// The subscriber returned.
     fn on_handled(&self, _event: &Handled<'_>) {}
     /// The message was marked processed.
     fn on_marked(&self, _event: &Marked<'_>) {}
+    /// The attempt was recorded after the subscriber failed.
+    fn on_failed(&self, _event: &Failed<'_>) {}
     /// The dispatcher's transaction closed.
     fn on_dispatched(&self, _event: &Dispatched<'_>) {}
+    /// A parked message was given another go.
+    fn on_unparked(&self, _event: &Unparked<'_>) {}
+    /// A parked message was marked processed by hand.
+    fn on_resolved(&self, _event: &Resolved<'_>) {}
 }
 
 /// Observes nothing.
 impl InboxObserver for () {}
 
-/// Two observers, told in order.
-impl<A: InboxObserver, B: InboxObserver> InboxObserver for (A, B) {
-    fn on_received(&self, event: &Received<'_>) {
-        self.0.on_received(event);
-        self.1.on_received(event);
-    }
-    fn on_skipped(&self, event: &Skipped<'_>) {
-        self.0.on_skipped(event);
-        self.1.on_skipped(event);
-    }
-    fn on_fetched(&self, event: &Fetched<'_>) {
-        self.0.on_fetched(event);
-        self.1.on_fetched(event);
-    }
-    fn on_handled(&self, event: &Handled<'_>) {
-        self.0.on_handled(event);
-        self.1.on_handled(event);
-    }
-    fn on_marked(&self, event: &Marked<'_>) {
-        self.0.on_marked(event);
-        self.1.on_marked(event);
-    }
-    fn on_dispatched(&self, event: &Dispatched<'_>) {
-        self.0.on_dispatched(event);
-        self.1.on_dispatched(event);
-    }
+macro_rules! forward_to_each {
+    ($($method:ident: $event:ident),* $(,)?) => {
+        /// Two observers, told in order.
+        impl<A: InboxObserver, B: InboxObserver> InboxObserver for (A, B) {
+            $(fn $method(&self, event: &$event<'_>) {
+                self.0.$method(event);
+                self.1.$method(event);
+            })*
+        }
+
+        impl<O: InboxObserver + ?Sized> InboxObserver for Arc<O> {
+            $(fn $method(&self, event: &$event<'_>) {
+                (**self).$method(event);
+            })*
+        }
+
+        /// Any number of observers, told in order.
+        impl<O: InboxObserver> InboxObserver for Vec<O> {
+            $(fn $method(&self, event: &$event<'_>) {
+                self.iter().for_each(|o| o.$method(event));
+            })*
+        }
+    };
 }
 
-impl<O: InboxObserver + ?Sized> InboxObserver for Arc<O> {
-    fn on_received(&self, event: &Received<'_>) {
-        (**self).on_received(event);
-    }
-    fn on_skipped(&self, event: &Skipped<'_>) {
-        (**self).on_skipped(event);
-    }
-    fn on_fetched(&self, event: &Fetched<'_>) {
-        (**self).on_fetched(event);
-    }
-    fn on_handled(&self, event: &Handled<'_>) {
-        (**self).on_handled(event);
-    }
-    fn on_marked(&self, event: &Marked<'_>) {
-        (**self).on_marked(event);
-    }
-    fn on_dispatched(&self, event: &Dispatched<'_>) {
-        (**self).on_dispatched(event);
-    }
-}
-
-/// Any number of observers, told in order.
-impl<O: InboxObserver> InboxObserver for Vec<O> {
-    fn on_received(&self, event: &Received<'_>) {
-        self.iter().for_each(|o| o.on_received(event));
-    }
-    fn on_skipped(&self, event: &Skipped<'_>) {
-        self.iter().for_each(|o| o.on_skipped(event));
-    }
-    fn on_fetched(&self, event: &Fetched<'_>) {
-        self.iter().for_each(|o| o.on_fetched(event));
-    }
-    fn on_handled(&self, event: &Handled<'_>) {
-        self.iter().for_each(|o| o.on_handled(event));
-    }
-    fn on_marked(&self, event: &Marked<'_>) {
-        self.iter().for_each(|o| o.on_marked(event));
-    }
-    fn on_dispatched(&self, event: &Dispatched<'_>) {
-        self.iter().for_each(|o| o.on_dispatched(event));
-    }
+forward_to_each! {
+    on_received: Received,
+    on_skipped: Skipped,
+    on_deferred: Deferred,
+    on_fetched: Fetched,
+    on_handled: Handled,
+    on_marked: Marked,
+    on_failed: Failed,
+    on_dispatched: Dispatched,
+    on_unparked: Unparked,
+    on_resolved: Resolved,
 }

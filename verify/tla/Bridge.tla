@@ -38,18 +38,23 @@ SrcDispatchers == {SrcGroup} \X SrcWorkers
 \* The source outbox, then the destination inbox.
 VARIABLES uriOf, srcAssign, txState, xid, pos, nextXid, nextPos, position, batch, done, delivered, srcCrashes,
           part, received, recvPos, nextRecv, processed, effects, holding, procOrder, dstCrashes,
+          attempts, due, parked, resolved, admin,
           pending  \* SUBSET Msgs: handed over but not yet stored, when the store is deferred
 
 vars == <<uriOf, srcAssign, txState, xid, pos, nextXid, nextPos, position, batch, done, delivered, srcCrashes,
-          part, received, recvPos, nextRecv, processed, effects, holding, procOrder, dstCrashes, pending>>
+          part, received, recvPos, nextRecv, processed, effects, holding, procOrder, dstCrashes,
+          attempts, due, parked, resolved, admin, pending>>
 
 Src == INSTANCE Outbox WITH
   Groups <- {SrcGroup}, Workers <- SrcWorkers, VisibilityRule <- TRUE,
   assign <- srcAssign, crashes <- srcCrashes
 
+\* A destination failure is a crash here; recorded attempts, backoff and
+\* parking are the inbox's own matter, checked in Inbox.tla.
 Dst == INSTANCE Inbox WITH
   Deps <- [m \in Msgs |-> {}], Arrives <- Msgs, Workers <- DstWorkers,
   Dispatchers <- DstDispatchers, SkipIneligible <- TRUE,
+  Poison <- {}, MaxAttempts <- 0, BlockOnBackoff <- TRUE, MaxAdmin <- 0,
   crashes <- dstCrashes
 
 (* ------------------------------------------------------------------------ *)
@@ -62,7 +67,8 @@ Init ==
   /\ pending = {}
 
 SrcUnchanged == UNCHANGED <<uriOf, srcAssign, txState, xid, pos, nextXid, nextPos, position, batch, done, delivered, srcCrashes>>
-DstUnchanged == UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, dstCrashes>>
+DstUnchanged == UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, dstCrashes,
+                            attempts, due, parked, resolved, admin>>
 
 \* Every action names both sides, so that fairness over it is well defined.
 

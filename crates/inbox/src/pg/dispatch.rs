@@ -7,10 +7,13 @@ use ascetic_ddd_session::{PgAccess, Session, SessionPool};
 use futures::future::join_all;
 use tokio::sync::watch;
 
-use super::{PgInbox, Worker, Workers};
+use super::{Outcome, PgInbox, Worker, Workers};
 use crate::error::{BoxError, Error};
 use crate::message::InboxMessage;
-use crate::observer::{Dispatched, Fetched, Handled, InboxObserver, Marked, Skipped};
+use crate::observer::{
+    Deferred, Dispatched, Failed, Fetched, Handled, InboxObserver, Marked, Resolved, Skipped,
+    Unparked,
+};
 
 impl<P, O> PgInbox<P, O>
 where
@@ -20,15 +23,16 @@ where
 {
     /// Processes the next eligible message with `subscriber`, as `worker`.
     ///
-    /// Returns whether there was one. The subscriber runs inside the
-    /// transaction that marks the message processed, and is given that
-    /// transaction; if it fails, nothing is marked and the message is
-    /// retried.
+    /// The subscriber runs inside the transaction that marks the message
+    /// processed, and is given that transaction, in a savepoint of its own:
+    /// if it fails, its writes are rolled back to the savepoint, and the
+    /// attempt is recorded and committed instead of the mark. `Err` is for
+    /// the database; a failing subscriber is an [`Outcome`].
     ///
     /// Several calls of one worker may run at once, `FOR UPDATE SKIP LOCKED`
     /// keeps them apart; the observer tells their events apart by the call
     /// number.
-    pub async fn dispatch<F, Fut>(&self, subscriber: F, worker: Worker) -> Result<bool, Error>
+    pub async fn dispatch<F, Fut>(&self, subscriber: F, worker: Worker) -> Result<Outcome, Error>
     where
         F: Fn(&P::Session, &InboxMessage) -> Fut + Send + Sync,
         Fut: Future<Output = Result<(), BoxError>> + Send,
@@ -46,24 +50,62 @@ where
                             message: taken.as_ref(),
                         });
                         let Some(message) = taken else {
-                            return Ok(false);
+                            return Ok(Outcome::Nothing);
                         };
-                        let handled = subscriber(&tx, &message).await;
+                        let attempt = tx
+                            .atomic(async |inner| {
+                                subscriber(&inner, &message)
+                                    .await
+                                    .map_err(Error::Subscriber)
+                            })
+                            .await;
+                        let failure = match attempt {
+                            Ok(()) => None,
+                            Err(Error::Subscriber(error)) => Some(error),
+                            Err(other) => return Err(other),
+                        };
                         self.observer.on_handled(&Handled {
                             worker,
                             call,
                             message: &message,
-                            outcome: handled.as_ref().map(|_| ()),
+                            outcome: failure.as_ref().map_or(Ok(()), Err),
                         });
-                        handled.map_err(Error::Subscriber)?;
-                        let processed_position = self.mark_processed(&tx, &message).await?;
-                        self.observer.on_marked(&Marked {
-                            worker,
-                            call,
-                            message: &message,
-                            processed_position,
-                        });
-                        Ok(true)
+                        match failure {
+                            None => {
+                                let processed_position = self.mark_processed(&tx, &message).await?;
+                                self.observer.on_marked(&Marked {
+                                    worker,
+                                    call,
+                                    message: &message,
+                                    processed_position,
+                                });
+                                Ok(Outcome::Processed)
+                            }
+                            Some(error) => {
+                                let retry_after = (self.retries.backoff)(message.attempts + 1);
+                                let (attempts, parked) = self
+                                    .record_failure(&tx, &message, &error, retry_after)
+                                    .await?;
+                                log::warn!(
+                                    "inbox: attempt {attempts} on {}/{}/{}/{} failed{}: {error}",
+                                    message.tenant_id,
+                                    message.stream_type,
+                                    message.stream_id,
+                                    message.stream_position,
+                                    if parked { ", parked" } else { "" },
+                                );
+                                self.observer.on_failed(&Failed {
+                                    worker,
+                                    call,
+                                    message: &message,
+                                    error: &error,
+                                    attempts,
+                                    parked,
+                                    retry_after,
+                                });
+                                Ok(Outcome::Failed { attempts, parked })
+                            }
+                        }
                     })
                     .await
             })
@@ -71,7 +113,7 @@ where
         self.observer.on_dispatched(&Dispatched {
             worker,
             call,
-            outcome: outcome.as_ref().map(|dispatched| *dispatched),
+            outcome: outcome.as_ref().map(|outcome| *outcome),
         });
         outcome
     }
@@ -81,7 +123,7 @@ where
     /// A loop that finds nothing waits `poll_interval`. Shutdown is
     /// cooperative: a loop finishes its message, commits, and only then
     /// stops. If a loop fails, the others are stopped the same way and its
-    /// error is returned.
+    /// error is returned; a failing subscriber is not such a failure.
     pub async fn run<F, Fut>(
         &self,
         subscriber: F,
@@ -109,8 +151,8 @@ where
                         return Ok(());
                     }
                     match self.dispatch(subscriber, worker).await {
-                        Ok(true) => {}
-                        Ok(false) => {
+                        Ok(Outcome::Processed | Outcome::Failed { .. }) => {}
+                        Ok(Outcome::Nothing) => {
                             tokio::select! {
                                 _ = stopped.changed() => return Ok(()),
                                 _ = tokio::time::sleep(workers.poll_interval) => {}
@@ -137,9 +179,47 @@ where
         Ok(())
     }
 
-    /// The oldest unprocessed message whose dependencies are processed.
-    /// Messages that are not yet eligible are stepped over, and the
-    /// observer is told of each.
+    /// The parked messages, oldest first, with their attempts and last error.
+    pub async fn parked(&self, session: &P::Session) -> Result<Vec<InboxMessage>, Error> {
+        self.parked_rows(session).await
+    }
+
+    /// Gives a parked message another go: attempts reset, due at once.
+    /// Returns whether the message was parked.
+    pub async fn unpark(
+        &self,
+        session: &P::Session,
+        message: &InboxMessage,
+    ) -> Result<bool, Error> {
+        let unparked = self.unpark_row(session, message).await?;
+        if unparked {
+            self.observer.on_unparked(&Unparked { message });
+        }
+        Ok(unparked)
+    }
+
+    /// Marks a parked message processed by hand, without the subscriber's
+    /// effects; what depends on it may go ahead. Returns whether the message
+    /// was parked.
+    pub async fn resolve(
+        &self,
+        session: &P::Session,
+        message: &InboxMessage,
+    ) -> Result<bool, Error> {
+        let resolved = self.resolve_row(session, message).await?;
+        if let Some(processed_position) = resolved {
+            self.observer.on_resolved(&Resolved {
+                message,
+                processed_position,
+            });
+        }
+        Ok(resolved.is_some())
+    }
+
+    /// The oldest unprocessed message whose dependencies are processed, or
+    /// nothing when the oldest row still waits for its backoff. Rows whose
+    /// dependencies are not processed are stepped over, and the observer is
+    /// told of each.
     async fn next_processable(
         &self,
         session: &P::Session,
@@ -148,9 +228,18 @@ where
     ) -> Result<Option<InboxMessage>, Error> {
         let mut skipped = 0i64;
         loop {
-            let Some(message) = self.unprocessed(session, skipped, worker).await? else {
+            let Some((message, deferred)) = self.unprocessed(session, skipped, worker).await?
+            else {
                 return Ok(None);
             };
+            if deferred {
+                self.observer.on_deferred(&Deferred {
+                    worker,
+                    call,
+                    message: &message,
+                });
+                return Ok(None);
+            }
             if self.dependencies_processed(session, &message).await? {
                 return Ok(Some(message));
             }

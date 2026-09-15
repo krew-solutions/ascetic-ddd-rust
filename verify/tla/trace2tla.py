@@ -32,12 +32,17 @@ The inbox mapping:
     skipped                   -> skip      (d, of, msg)
     fetched, a row            -> fetch     (d, of, msg)
     fetched, none             -> nofetch   (d, of)
-    handled ok                -> handle    (d, msg)
+    deferred + fetched, none  -> blocked   (d, of, msg): the oldest row waits for its backoff
+    handled ok                -> handle    (d, of, msg)
     handled failed            -> nothing: the subscriber declined
     marked                    -> nothing: the mark commits with the transaction
-    dispatched message        -> commit    (d)
+    failed + dispatched failed
+                              -> fail      (d, of, msg, attempts, parked): the attempt commits
+    dispatched processed      -> commit    (d, of)
     dispatched nothing        -> nothing: the nofetch already said it
-    dispatched rolled_back    -> crash     (d), if a row was fetched
+    dispatched rolled_back    -> crash     (d, of), if a row was fetched
+    unparked                  -> unpark    (msg)
+    resolved                  -> resolve   (msg)
 
 Messages are named in order of first mention, a dependency that never arrives
 included; a dispatcher is <<worker, slot>>, where each open `dispatch` call
@@ -146,6 +151,8 @@ def inbox_steps(events, names=None, by_message_id=False):
     rows = {}     # row identity -> name
     slots = {}    # (worker, call) -> slot
     holding = {}  # (worker, call) -> the row fetched, if any
+    deferred = {} # (worker, call) -> the row found waiting for its backoff
+    failed = {}   # (worker, call) -> (attempts, parked) recorded, awaiting COMMIT
 
     def row(identity, what):
         if identity not in rows:
@@ -161,6 +168,9 @@ def inbox_steps(events, names=None, by_message_id=False):
 
     for e in events:
         kind = e["event"]
+        if kind in ("unparked", "resolved"):
+            yield record(side="inbox", event=kind[:-2] if kind == "unparked" else "resolve", msg=row(e["id"], f"an {kind}"))
+            continue
         if kind == "received":
             if by_message_id:
                 if e["message_id"] is None:
@@ -178,12 +188,18 @@ def inbox_steps(events, names=None, by_message_id=False):
         key, d, of = dispatcher(e)
         if kind == "skipped":
             yield record(side="inbox", event="skip", d=d, of=of, msg=row(e["id"], "a skip"))
+        elif kind == "deferred":
+            deferred[key] = row(e["id"], "a deferral")
         elif kind == "fetched":
-            if e["id"] is None:
+            if e["id"] is None and key in deferred:
+                yield record(side="inbox", event="blocked", d=d, of=of, msg=deferred.pop(key))
+            elif e["id"] is None:
                 yield record(side="inbox", event="nofetch", d=d, of=of)
             else:
                 holding[key] = row(e["id"], "a fetch")
                 yield record(side="inbox", event="fetch", d=d, of=of, msg=holding[key])
+        elif kind == "failed":
+            failed[key] = (e["attempts"], e["parked"])
         elif kind == "handled":
             if e["ok"]:
                 yield record(side="inbox", event="handle", d=d, of=of, msg=row(e["id"], "a handling"))
@@ -192,11 +208,16 @@ def inbox_steps(events, names=None, by_message_id=False):
                 raise SystemExit(f"call {key} marked a row it did not fetch: {e['id']}")
         elif kind == "dispatched":
             outcome = e["outcome"]
-            if outcome == "message":
+            if outcome == "processed":
                 yield record(side="inbox", event="commit", d=d, of=of)
+            elif outcome == "failed":
+                attempts, parked = failed.pop(key)
+                yield record(side="inbox", event="fail", d=d, of=of, msg=holding[key], attempts=attempts, parked=parked)
             elif outcome == "rolled_back" and key in holding:
                 yield record(side="inbox", event="crash", d=d, of=of)
+            failed.pop(key, None)
             holding.pop(key, None)
+            deferred.pop(key, None)
             del slots[key]
         else:
             raise SystemExit(f"unknown inbox event: {kind}")
@@ -247,7 +268,7 @@ CHECKERS = {
                ["TypeOK", "DeliveredCommitted", "NoPassedOver", "OrderPerUri", "NotFinished"]),
     "inbox": (inbox_steps, "TraceInbox",
               ["TypeOK", "EffectsOnce", "EffectsIffProcessed", "CausalOrder", "HeldOnce",
-               "ProcessedWasReceived", "NotFinished"]),
+               "ProcessedWasReceived", "ParkedIsAside", "NotFinished"]),
     "bridge": (bridge_steps, "TraceBridge",
                ["TypeOK", "SourceInvariants", "DestinationInvariants", "ReceivedWasCommitted",
                 "EndToEndOrder", "NotFinished"]),
@@ -266,7 +287,11 @@ def main(trace, out):
         if foreign:
             raise SystemExit(f"{trace.name} holds {foreign[0]} events; name it bridge-*.jsonl to check both sides")
     name = "Trace_" + re.sub(r"[^A-Za-z0-9_]", "_", trace.stem)
-    body = ",\n  ".join(str(step) for step in steps(events))
+    produced = list(steps(events))
+    body = ",\n  ".join(str(step) for step in produced)
+    # The order of arrival is a promise only with one dispatcher per partition.
+    if crate == "inbox" and all(step["fields"].get("d", (0, 0))[1] == 0 for step in produced):
+        invariants = invariants[:-1] + ["ArrivalOrder", "NotFinished"]
     (out / f"{name}.tla").write_text(
         f"---- MODULE {name} ----\n"
         f"\\* Generated by trace2tla.py from {trace.name}; do not edit.\n"

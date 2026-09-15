@@ -60,22 +60,27 @@ processed, runs the subscriber inside its own transaction and marks the row
 in that transaction; several dispatchers may serve one partition; any of them
 crashes, and a subscriber may fail.
 
-PostgreSQL is reduced to four facts: `ON CONFLICT DO NOTHING` makes an
+PostgreSQL is reduced to five facts: `ON CONFLICT DO NOTHING` makes an
 identity one row however often it arrives; `FOR UPDATE SKIP LOCKED` makes a
 row held by an open transaction invisible to the others; the dependency check
 reads committed marks; the subscriber's writes and the mark commit together
-or not at all. `MCInbox.tla` fixes the instance: three messages, the second
-depending on the first, two workers, one of them served by two dispatchers at
-once, one crash. Which message lands on which worker is left open, so every
-partitioning is checked, including dependencies across workers.
+or not at all; a savepoint lets the subscriber's writes roll back while the
+transaction goes on to record the attempt. `MCInbox.tla` fixes the instance:
+three messages, the second depending on the first, two workers, one of them
+served by two dispatchers at once, one crash or transient failure. Which
+message lands on which worker is left open, so every partitioning is checked,
+including dependencies across workers.
 
 | property | kind | meaning |
 | --- | --- | --- |
 | `EffectsOnce` | invariant | the subscriber's writes for a message are committed at most once |
-| `EffectsIffProcessed` | invariant | ... and exactly when the message is marked: writes and mark are one transaction |
+| `EffectsIffProcessed` | invariant | ... and exactly when the message is marked: writes and mark are one transaction, unless an operator resolved it |
 | `CausalOrder` | invariant | a message is processed only after everything it depends on |
 | `HeldOnce` | invariant | two dispatchers never hold the same row |
-| `EventuallyProcessed` | liveness | a received message whose dependencies are processed is eventually processed |
+| `ParkedIsAside` | invariant | a parked message is out of the queue, unprocessed, and got there by exhausting its attempts |
+| `ArrivalOrder` | invariant | messages without dependencies of one partition are processed in order of arrival, given one dispatcher per partition |
+| `EventuallyProcessed` | liveness | a received message whose dependencies are processed is eventually processed, unless its subscriber never succeeds |
+| `EventuallyParked` | liveness | with parking on, a message whose subscriber never succeeds is eventually parked or resolved |
 
 `EffectsIffProcessed` is the guarantee the inbox exists for, and the one the
 Go channel API of the earlier port broke by marking a message on delivery
@@ -93,9 +98,29 @@ Two more configurations pin the two decisions around dependencies:
   first, sits at the head, and nothing behind it, its own dependency
   included, is ever taken. `check.sh` requires this violation.
 
-Surfaced, not fixed: a subscriber that never succeeds blocks its partition,
-because the oldest eligible row is taken first. The model bounds failures to
-state liveness; a dead-letter policy is an open item of the target project.
+Failures and parking (ADR-0005). A subscriber that fails rolls its writes back
+to a savepoint; the attempt is recorded in the same transaction, and the row
+is not due again until its backoff has passed. While it waits it holds its
+partition: `ArrivalOrder` is why. After `MaxAttempts` failures the row is
+parked, out of the queue but in the table, and the partition flows; an
+operator may unpark it or resolve it, marking it processed without effects.
+`Poison` names the messages whose subscriber never succeeds. Three
+configurations, on one partition with one dispatcher and no dependencies:
+
+- `InboxPoison.cfg`: `m1` is poison, `MaxAttempts = 2`, one operator action.
+  Everything holds: `m1` is parked, `m2` and `m3` are processed in order, and
+  resolving `m1` marks it without effects.
+- `InboxPoisonNoParking.cfg`: the same with `MaxAttempts = 0`. TLC finds
+  `EventuallyProcessed` violated: `m2` and `m3` wait behind `m1` for ever. This
+  is the inbox before ADR-0005, and `check.sh` requires the violation.
+- `InboxSkipNotDue.cfg`: a message in backoff is stepped over instead of
+  holding its partition. TLC finds `ArrivalOrder` violated: `m1` fails once,
+  `m2` is processed meanwhile, `m1` after it. The order loss of a retry topic;
+  `check.sh` requires the violation.
+
+Attempts are counted in the model only where the count decides something:
+with `MaxAttempts = 0` an unbounded counter would make the state space
+infinite.
 
 ## Bridge — `Bridge.tla`
 
@@ -169,16 +194,22 @@ model's invariants hold after it. A run that fits ends with the trace consumed,
 which `check.sh` reads off a violated `NotFinished`; one that does not fit
 deadlocks at the refused step, and TLC prints the state, `i` naming the step.
 
-`TraceInbox.tla` is the same for the inbox, with nothing hidden: receiving,
-taking a row and closing the transaction are all logged, so the trace is the
-behaviour. A dispatcher is `<<worker, slot>>`: several `dispatch` calls of one
-worker run at once under `FOR UPDATE SKIP LOCKED`, and `trace2tla.py` gives
-each open call the lowest free slot of its worker, so the instance has as many
-dispatchers as ever ran together. Stepping over a row, an empty fetch and a
-handling are checks rather than steps: the row must be a candidate whose
-dependencies are unprocessed, nothing eligible must exist, the message must
-be the one held. A dependency that never arrives is a message of the instance
-all the same, as in `InboxMissingDep.cfg`.
+`TraceInbox.tla` is the same for the inbox. Receiving, taking a row, failing,
+committing, unparking and resolving are all logged; the one thing that is not
+is time, so the passing of a backoff is the hidden step before the failed
+row is taken again. A dispatcher is `<<worker, slot>>`: several `dispatch`
+calls of one worker run at once under `FOR UPDATE SKIP LOCKED`, and
+`trace2tla.py` gives each open call the lowest free slot of its worker, so the
+instance has as many dispatchers as ever ran together. Stepping over a row, an
+empty fetch, a row found waiting for its backoff and a handling are checks
+rather than steps: the row must be a candidate whose dependencies are
+unprocessed, nothing eligible must exist, the waiting row must be the oldest
+not stepped over and not yet due, the message must be the one held. The
+parking policy is read off the trace: `MaxAttempts` is the count at which a
+message was parked, so a run that parked one message at two attempts and let
+another fail twice does not fit. `ArrivalOrder` is asked for when the run had
+one dispatcher per partition. A dependency that never arrives is a message of
+the instance all the same, as in `InboxMissingDep.cfg`.
 
 `TraceBridge.tla` checks a run of an outbox feeding an inbox against
 `Bridge.tla`. It instances the two checkers above over the same trace, each

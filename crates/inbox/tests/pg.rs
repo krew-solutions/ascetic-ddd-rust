@@ -15,10 +15,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ascetic_ddd_inbox::observer::{
-    Dispatched, Fetched, Handled, InboxObserver, Marked, Received, Skipped,
+    Deferred, Dispatched, Failed, Fetched, Handled, InboxObserver, Marked, Received, Resolved,
+    Skipped, Unparked,
 };
 use ascetic_ddd_inbox::{
-    BoxError, ByStream, CausalDependency, Error, Inbox, InboxMessage, PgInbox, Worker, Workers,
+    BoxError, ByStream, CausalDependency, Error, Inbox, InboxMessage, Outcome, PgInbox, Retries,
+    Worker, Workers,
 };
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use ascetic_ddd_session::pg::tokio_postgres::{Config, NoTls};
@@ -87,6 +89,35 @@ impl<O: InboxObserver> Fixture<O> {
             inbox: self.inbox.partitioned_by(ByStream),
             ..self
         }
+    }
+
+    fn with_retries(self, retries: Retries) -> Self {
+        Fixture {
+            inbox: self.inbox.with_retries(retries),
+            ..self
+        }
+    }
+
+    /// One `dispatch` call, as the only worker.
+    async fn dispatch<F, Fut>(&self, subscriber: F) -> Outcome
+    where
+        F: Fn(&PgSession, &InboxMessage) -> Fut + Send + Sync,
+        Fut: std::future::Future<Output = Result<(), BoxError>> + Send,
+    {
+        self.inbox
+            .dispatch(subscriber, Worker::ALONE)
+            .await
+            .unwrap()
+    }
+
+    async fn parked(&self) -> Vec<String> {
+        self.sessions
+            .session(async |session| self.inbox.parked(&session).await)
+            .await
+            .unwrap()
+            .iter()
+            .map(label)
+            .collect()
     }
 
     async fn publish(&self, messages: &[InboxMessage]) {
@@ -181,8 +212,8 @@ async fn a_received_message_is_processed_once_in_its_transaction() {
         }
     };
 
-    assert!(f.inbox.dispatch(&subscriber, Worker::ALONE).await.unwrap());
-    assert!(!f.inbox.dispatch(&subscriber, Worker::ALONE).await.unwrap());
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Processed);
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
 
     assert_eq!(*seen.lock().unwrap(), ["a@1"]);
     assert_eq!(f.processed().await, 1);
@@ -224,7 +255,7 @@ async fn messages_are_processed_in_order_of_arrival() {
         .await;
     let (seen, subscriber) = collector();
 
-    while f.inbox.dispatch(&subscriber, Worker::ALONE).await.unwrap() {}
+    while f.dispatch(&subscriber).await != Outcome::Nothing {}
 
     assert_eq!(*seen.lock().unwrap(), ["b@1", "a@1", "a@2"]);
 }
@@ -241,12 +272,12 @@ async fn a_message_waits_for_its_causal_dependencies() {
     f.publish(&[effect, unrelated]).await; // the cause has not arrived
 
     let (seen, subscriber) = collector();
-    assert!(f.inbox.dispatch(&subscriber, Worker::ALONE).await.unwrap());
-    assert!(!f.inbox.dispatch(&subscriber, Worker::ALONE).await.unwrap());
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Processed);
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
     assert_eq!(*seen.lock().unwrap(), ["other@1"], "the effect waits");
 
     f.publish(&[cause]).await;
-    while f.inbox.dispatch(&subscriber, Worker::ALONE).await.unwrap() {}
+    while f.dispatch(&subscriber).await != Outcome::Nothing {}
 
     assert_eq!(*seen.lock().unwrap(), ["other@1", "user@5", "order@1"]);
 }
@@ -260,15 +291,184 @@ async fn a_failing_subscriber_leaves_the_message_unprocessed() {
     let failing = |_: &PgSession, _: &InboxMessage| {
         std::future::ready(Err::<(), BoxError>("handler down".into()))
     };
-    assert!(matches!(
-        f.inbox.dispatch(&failing, Worker::ALONE).await,
-        Err(Error::Subscriber(_))
-    ));
+    assert_eq!(
+        f.dispatch(&failing).await,
+        Outcome::Failed {
+            attempts: 1,
+            parked: false
+        }
+    );
     assert_eq!(f.processed().await, 0);
 
     let (seen, subscriber) = collector();
-    assert!(f.inbox.dispatch(&subscriber, Worker::ALONE).await.unwrap());
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Processed);
     assert_eq!(*seen.lock().unwrap(), ["a@1"]);
+}
+
+/// A subscriber that fails on one message and succeeds on the others.
+fn failing_on(
+    poison: &str,
+) -> (
+    Seen,
+    impl Fn(&PgSession, &InboxMessage) -> std::future::Ready<Result<(), BoxError>>,
+) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (sink, poison) = (Arc::clone(&seen), poison.to_owned());
+    (seen, move |_: &PgSession, message: &InboxMessage| {
+        std::future::ready(if label(message) == poison {
+            Err(format!("{poison} is poison").into())
+        } else {
+            sink.lock().unwrap().push(label(message));
+            Ok(())
+        })
+    })
+}
+
+/// A subscriber that fails the first time it is called and succeeds after.
+fn failing_once() -> (
+    Seen,
+    impl Fn(&PgSession, &InboxMessage) -> std::future::Ready<Result<(), BoxError>>,
+) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let calls = AtomicUsize::new(0);
+    (seen, move |_: &PgSession, message: &InboxMessage| {
+        std::future::ready(if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err("the first attempt fails on purpose".into())
+        } else {
+            sink.lock().unwrap().push(label(message));
+            Ok(())
+        })
+    })
+}
+
+/// After `max_attempts` failures the message is parked, in place, and the
+/// partition behind it flows (ADR-0005).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_poison_message_is_parked_after_its_attempts_and_the_partition_flows() {
+    let f = fixture("parking").await.with_retries(Retries::up_to(2));
+    f.publish(&[message("a", 1), message("b", 1)]).await;
+    let (seen, subscriber) = failing_on("a@1");
+
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::Failed {
+            attempts: 1,
+            parked: false
+        }
+    );
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::Failed {
+            attempts: 2,
+            parked: true
+        }
+    );
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Processed);
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
+
+    assert_eq!(*seen.lock().unwrap(), ["b@1"]);
+    assert_eq!(f.parked().await, ["a@1"]);
+    assert_eq!(f.rows().await, 2, "a parked row stays in the table");
+    let parked = f
+        .sessions
+        .session(async |session| f.inbox.parked(&session).await)
+        .await
+        .unwrap();
+    assert_eq!(parked[0].attempts, 2);
+    assert_eq!(parked[0].last_error.as_deref(), Some("a@1 is poison"));
+}
+
+/// While a failed message waits for its backoff it holds its partition: the
+/// message behind it is not processed first.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_message_in_backoff_holds_its_partition() {
+    let f = fixture("backoff")
+        .await
+        .with_retries(Retries::unlimited().with_backoff(|_| Duration::from_millis(300)));
+    f.publish(&[message("a", 1), message("b", 1)]).await;
+    let (seen, subscriber) = failing_once();
+
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::Failed {
+            attempts: 1,
+            parked: false
+        }
+    );
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::Nothing,
+        "b@1 waits behind a@1"
+    );
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Processed);
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Processed);
+
+    assert_eq!(*seen.lock().unwrap(), ["a@1", "b@1"]);
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn an_unparked_message_is_tried_again() {
+    let f = fixture("unpark").await.with_retries(Retries::up_to(1));
+    let poison = message("a", 1);
+    f.publish(std::slice::from_ref(&poison)).await;
+    let (seen, subscriber) = failing_once();
+
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::Failed {
+            attempts: 1,
+            parked: true
+        }
+    );
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
+
+    let unparked = f
+        .sessions
+        .session(async |session| f.inbox.unpark(&session, &poison).await)
+        .await
+        .unwrap();
+    assert!(unparked);
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Processed);
+    assert_eq!(*seen.lock().unwrap(), ["a@1"]);
+    assert!(f.parked().await.is_empty());
+}
+
+/// Resolving a parked message marks it processed without its effects, and
+/// what depended on it goes ahead.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_resolved_message_releases_its_dependents() {
+    let f = fixture("resolve").await.with_retries(Retries::up_to(1));
+    let cause = message("a", 1);
+    let effect = message("b", 1).depending_on(&[CausalDependency::on(&cause)]);
+    f.publish(&[cause.clone(), effect]).await;
+    let (seen, subscriber) = failing_on("a@1");
+
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::Failed {
+            attempts: 1,
+            parked: true
+        }
+    );
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing, "b@1 waits");
+
+    let resolved = f
+        .sessions
+        .session(async |session| f.inbox.resolve(&session, &cause).await)
+        .await
+        .unwrap();
+    assert!(resolved);
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Processed);
+
+    assert_eq!(*seen.lock().unwrap(), ["b@1"], "a@1 never had its effects");
+    assert_eq!(f.processed().await, 2);
+    assert!(f.parked().await.is_empty());
 }
 
 /// Two dispatchers at once: `SKIP LOCKED` gives each its own message, and
@@ -295,7 +495,10 @@ async fn concurrent_dispatchers_do_not_share_a_message() {
         f.inbox.dispatch(slow(Arc::clone(&seen)), Worker::ALONE),
     );
 
-    assert!(a.unwrap() && b.unwrap());
+    assert_eq!(
+        (a.unwrap(), b.unwrap()),
+        (Outcome::Processed, Outcome::Processed)
+    );
     let mut all = seen.lock().unwrap().clone();
     all.sort();
     assert_eq!(all, ["a@1", "b@1"]);
@@ -317,7 +520,7 @@ async fn workers_share_the_streams_without_gaps_or_overlap() {
 
     for id in 0..3 {
         let worker = Worker { id, of: 3 };
-        while f.inbox.dispatch(&subscriber, worker).await.unwrap() {}
+        while f.inbox.dispatch(&subscriber, worker).await.unwrap() != Outcome::Nothing {}
     }
 
     let mut all = seen.lock().unwrap().clone();
@@ -436,12 +639,30 @@ impl InboxObserver for Recorder {
             .push((label(event.message), event.processed_position));
         self.note(format!("marked {}", label(event.message)));
     }
+    fn on_failed(&self, event: &Failed<'_>) {
+        self.note(format!(
+            "failed {} {}{}",
+            label(event.message),
+            event.attempts,
+            if event.parked { " parked" } else { "" }
+        ));
+    }
+    fn on_deferred(&self, event: &Deferred<'_>) {
+        self.note(format!("deferred {}", label(event.message)));
+    }
     fn on_dispatched(&self, event: &Dispatched<'_>) {
         self.note(match event.outcome {
-            Ok(true) => "dispatched a message",
-            Ok(false) => "dispatched nothing",
+            Ok(Outcome::Processed) => "dispatched a message",
+            Ok(Outcome::Failed { .. }) => "dispatched a failure",
+            Ok(Outcome::Nothing) => "dispatched nothing",
             Err(_) => "rolled back",
         });
+    }
+    fn on_unparked(&self, event: &Unparked<'_>) {
+        self.note(format!("unparked {}", label(event.message)));
+    }
+    fn on_resolved(&self, event: &Resolved<'_>) {
+        self.note(format!("resolved {}", label(event.message)));
     }
 }
 
@@ -449,8 +670,8 @@ impl InboxObserver for Recorder {
 /// written in: a message received with its order of arrival, or ignored as
 /// a duplicate; a row stepped over while its dependency is unprocessed, then
 /// taken once it is; the subscriber's outcome; the mark with its order of
-/// processing; the close of the transaction — a rollback when the subscriber
-/// failed, and the message again afterwards.
+/// processing; the close of the transaction — a recorded attempt when the
+/// subscriber failed, and the message again afterwards.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn the_observer_sees_the_protocol() {
@@ -463,9 +684,9 @@ async fn the_observer_sees_the_protocol() {
     // The dependent arrives first and is stepped over until the other is
     // processed.
     f.publish(&[second.clone(), first.clone()]).await;
-    assert!(f.inbox.dispatch(&subscriber, Worker::ALONE).await.unwrap());
-    assert!(f.inbox.dispatch(&subscriber, Worker::ALONE).await.unwrap());
-    assert!(!f.inbox.dispatch(&subscriber, Worker::ALONE).await.unwrap());
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Processed);
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Processed);
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
 
     // The same identity again is not a step.
     f.publish(&[first]).await;
@@ -481,8 +702,14 @@ async fn the_observer_sees_the_protocol() {
             Ok(())
         })
     };
-    assert!(f.inbox.dispatch(&flaky, Worker::ALONE).await.is_err());
-    assert!(f.inbox.dispatch(&flaky, Worker::ALONE).await.unwrap());
+    assert_eq!(
+        f.dispatch(&flaky).await,
+        Outcome::Failed {
+            attempts: 1,
+            parked: false
+        }
+    );
+    assert_eq!(f.dispatch(&flaky).await, Outcome::Processed);
 
     assert_eq!(
         *recorder.events.lock().unwrap(),
@@ -504,7 +731,8 @@ async fn the_observer_sees_the_protocol() {
             "received c@1 stored",
             "fetched c@1",
             "handled c@1 failed",
-            "rolled back",
+            "failed c@1 1",
+            "dispatched a failure",
             "fetched c@1",
             "handled c@1 ok",
             "marked c@1",

@@ -1,11 +1,11 @@
 {"call":1,"event":"fetched","id":null,"observer":"inbox","of":1,"worker":0}
-{"call":1,"event":"dispatched","observer":"inbox","of":1,"outcome":"nothing","worker":0}
 {"deps":[],"event":"received","id":"t1/orders.Order/7/1","message_id":"00000000-0000-4000-8000-000000000001","observer":"inbox","received_position":1}
+{"call":1,"event":"dispatched","observer":"inbox","of":1,"outcome":"nothing","worker":0}
 {"deps":[],"event":"received","id":"t1/orders.Order/7/1","message_id":"00000000-0000-4000-8000-000000000001","observer":"inbox","received_position":null}
 {"call":2,"event":"fetched","id":"t1/orders.Order/7/1","observer":"inbox","of":1,"worker":0}
 {"call":2,"event":"handled","id":"t1/orders.Order/7/1","observer":"inbox","of":1,"ok":true,"worker":0}
 {"call":2,"event":"marked","id":"t1/orders.Order/7/1","observer":"inbox","of":1,"processed_position":3,"worker":0}
-{"call":2,"event":"dispatched","observer":"inbox","of":1,"outcome":"message","worker":0}
+{"call":2,"event":"dispatched","observer":"inbox","of":1,"outcome":"processed","worker":0}
 {"call":3,"event":"fetched","id":null,"observer":"inbox","of":1,"worker":0}
 {"call":3,"event":"dispatched","observer":"inbox","of":1,"outcome":"nothing","worker":0}
 {"call":4,"event":"fetched","id":null,"observer":"inbox","of":1,"worker":0}
@@ -32,3 +32,5 @@
 {"call":14,"event":"dispatched","observer":"inbox","of":1,"outcome":"nothing","worker":0}
 {"call":15,"event":"fetched","id":null,"observer":"inbox","of":1,"worker":0}
 {"call":15,"event":"dispatched","observer":"inbox","of":1,"outcome":"nothing","worker":0}
+{"call":16,"event":"fetched","id":null,"observer":"inbox","of":1,"worker":0}
+{"call":16,"event":"dispatched","observer":"inbox","of":1,"outcome":"nothing","worker":0}

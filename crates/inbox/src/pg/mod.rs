@@ -25,6 +25,20 @@
 //! left to nobody. With causal dependencies, partition by stream, so that a
 //! message and what it depends on land with one worker.
 //!
+//! # Failures
+//!
+//! The subscriber runs in a savepoint. When it fails, its writes roll back to
+//! the savepoint and the transaction goes on to record the attempt:
+//! `attempts`, `last_error`, `next_attempt_at`. Until that time the row is
+//! not taken, and it holds its partition, so that the order of arrival
+//! survives the failure; a row whose dependencies are not processed is
+//! stepped over instead, as before. After [`Retries::max_attempts`] failures
+//! the row is parked, `parked_at`: out of the queue, in the table, so that a
+//! later arrival of the same message is still a duplicate. An operator lists
+//! the parked rows and either [`PgInbox::unpark`]s one or
+//! [`PgInbox::resolve`]s it, marking it processed without the subscriber's
+//! effects. Off by default: unlimited attempts, no backoff (ADR-0005).
+//!
 //! # Observing
 //!
 //! [`PgInbox::observed_by`] attaches an [`InboxObserver`]: it is told of
@@ -35,6 +49,8 @@
 mod dispatch;
 mod store;
 
+use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
@@ -89,6 +105,84 @@ impl Default for Workers {
     }
 }
 
+/// What one `dispatch` call did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// Nothing was taken: the partition is empty, or its oldest row waits
+    /// for its backoff and holds it.
+    Nothing,
+    /// A message was processed and marked.
+    Processed,
+    /// The subscriber failed; its writes were rolled back and the attempt
+    /// recorded.
+    Failed {
+        /// Failed attempts so far, this one included.
+        attempts: u32,
+        /// Whether the message was parked by this attempt.
+        parked: bool,
+    },
+}
+
+/// What happens to a message whose subscriber fails (ADR-0005).
+#[derive(Clone)]
+pub struct Retries {
+    /// Failed attempts after which the message is parked; `0`: never, it is
+    /// retried for ever.
+    pub max_attempts: u32,
+    /// How long the message waits after its `n`th failed attempt, `n` from 1.
+    /// While it waits it holds its partition.
+    pub backoff: Arc<dyn Fn(u32) -> Duration + Send + Sync>,
+}
+
+impl Retries {
+    /// Unlimited attempts, no backoff: the message is taken again at the
+    /// next call. The default.
+    pub fn unlimited() -> Self {
+        Retries {
+            max_attempts: 0,
+            backoff: Arc::new(|_| Duration::ZERO),
+        }
+    }
+
+    /// Parked after `max_attempts` failures, no backoff.
+    pub fn up_to(max_attempts: u32) -> Self {
+        Retries {
+            max_attempts,
+            ..Retries::unlimited()
+        }
+    }
+
+    /// The same, waiting `backoff(n)` after the `n`th failure.
+    pub fn with_backoff(self, backoff: impl Fn(u32) -> Duration + Send + Sync + 'static) -> Self {
+        Retries {
+            backoff: Arc::new(backoff),
+            ..self
+        }
+    }
+
+    /// `base`, doubled with every failure, at most `cap`.
+    pub fn exponential(base: Duration, cap: Duration) -> impl Fn(u32) -> Duration {
+        move |attempt| {
+            base.checked_mul(1u32 << attempt.saturating_sub(1).min(31))
+                .map_or(cap, |wait| wait.min(cap))
+        }
+    }
+}
+
+impl Default for Retries {
+    fn default() -> Self {
+        Retries::unlimited()
+    }
+}
+
+impl fmt::Debug for Retries {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Retries")
+            .field("max_attempts", &self.max_attempts)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The inbox over a PostgreSQL session pool, watched by `O`.
 pub struct PgInbox<P, O = ()> {
     pool: P,
@@ -99,10 +193,12 @@ pub struct PgInbox<P, O = ()> {
     sequence: String,
     partition: Box<dyn PartitionKey>,
     poll_interval: Duration,
+    retries: Retries,
 }
 
 impl<P> PgInbox<P> {
-    /// An inbox in table `inbox`, partitioned by URI, observed by nobody.
+    /// An inbox in table `inbox`, partitioned by URI, observed by nobody,
+    /// retrying a failed message for ever.
     pub fn new(pool: P) -> Self {
         PgInbox {
             pool,
@@ -112,6 +208,7 @@ impl<P> PgInbox<P> {
             sequence: "inbox_received_position_seq".to_owned(),
             partition: Box::new(ByUri),
             poll_interval: Duration::from_secs(1),
+            retries: Retries::default(),
         }
     }
 }
@@ -127,6 +224,7 @@ impl<P, O> PgInbox<P, O> {
             sequence: self.sequence,
             partition: self.partition,
             poll_interval: self.poll_interval,
+            retries: self.retries,
         }
     }
 
@@ -158,5 +256,10 @@ impl<P, O> PgInbox<P, O> {
             partition: Box::new(key),
             ..self
         }
+    }
+
+    /// The same inbox, treating a failed message as `retries` says.
+    pub fn with_retries(self, retries: Retries) -> Self {
+        PgInbox { retries, ..self }
     }
 }

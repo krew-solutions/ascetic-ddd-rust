@@ -64,6 +64,23 @@ fi
 grep -q "Temporal properties were violated" "${TMPDIR:-/tmp}/tlc-inbox-noskip.log"
 echo "   violation found, as expected"
 
+echo "== inbox: a poison message is parked after its attempts and the partition flows"
+tlc -config InboxPoison.cfg MCInbox.tla
+
+echo "== inbox: without parking, TLC must find the partition held for ever"
+if tlc -config InboxPoisonNoParking.cfg MCInbox.tla > "${TMPDIR:-/tmp}/tlc-inbox-poison.log" 2>&1; then
+  echo "unexpected: no violation without parking"; exit 1
+fi
+grep -q "Temporal properties were violated" "${TMPDIR:-/tmp}/tlc-inbox-poison.log"
+echo "   violation found, as expected"
+
+echo "== inbox: stepping over a message in backoff, TLC must find the order lost"
+if tlc -config InboxSkipNotDue.cfg MCInbox.tla > "${TMPDIR:-/tmp}/tlc-inbox-skipnotdue.log" 2>&1; then
+  echo "unexpected: no violation when stepping over a message in backoff"; exit 1
+fi
+grep -q "Invariant ArrivalOrder is violated" "${TMPDIR:-/tmp}/tlc-inbox-skipnotdue.log"
+echo "   violation found, as expected"
+
 echo "== inbox: recorded runs of the tests fit the model"
 for trace in traces/inbox-*.jsonl; do
   check_trace "$trace"

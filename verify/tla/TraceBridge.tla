@@ -23,11 +23,13 @@ CONSTANT Trace  \* Seq of records, see trace2tla.py
 
 VARIABLES uriOf, srcAssign, txState, xid, pos, nextXid, nextPos, position, batch, done, delivered, srcCrashes,
           part, received, recvPos, nextRecv, processed, effects, holding, procOrder, dstCrashes,
+          attempts, due, parked, resolved, admin,
           pending,
           i  \* the next step of the trace
 
 vars == <<uriOf, srcAssign, txState, xid, pos, nextXid, nextPos, position, batch, done, delivered, srcCrashes,
-          part, received, recvPos, nextRecv, processed, effects, holding, procOrder, dstCrashes, pending, i>>
+          part, received, recvPos, nextRecv, processed, effects, holding, procOrder, dstCrashes,
+          attempts, due, parked, resolved, admin, pending, i>>
 
 \* The checkers of the two sides, each seeing the records of its side.
 TO == INSTANCE TraceOutbox WITH assign <- srcAssign, crashes <- srcCrashes
