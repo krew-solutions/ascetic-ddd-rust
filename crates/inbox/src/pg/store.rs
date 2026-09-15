@@ -9,8 +9,18 @@ use tokio_postgres::Row;
 use super::{PgInbox, Worker};
 use crate::error::{BoxError, Error};
 use crate::message::{CausalDependency, InboxMessage};
-use crate::observer::{InboxObserver, Received};
+use crate::observer::{InboxObserver, Receipt, Received};
 use crate::port::Inbox;
+use crate::snapshot::Snapshot;
+
+/// What one walk statement returned: the row at the offset, with whether it
+/// still waits for its backoff, or no row; and the snapshot the statement
+/// ran under, read in the same statement because under `READ COMMITTED`
+/// every statement takes a snapshot of its own.
+pub(super) struct Step {
+    pub(super) row: Option<(InboxMessage, bool)>,
+    pub(super) snapshot: Snapshot,
+}
 
 /// The columns of a row, in the order `message_of` reads them.
 const COLUMNS: &str = "tenant_id, stream_type, stream_id, stream_position, uri, payload, metadata, \
@@ -64,35 +74,46 @@ where
     /// The unprocessed, unparked row of the worker's share at `skipped` from
     /// the oldest, locked for the transaction and stepped over by every
     /// other: `FOR UPDATE SKIP LOCKED`. With it, whether the row still waits
-    /// for its backoff.
+    /// for its backoff, and the statement's snapshot. The outer join makes
+    /// the statement return a row even when there is none, so that the
+    /// snapshot is always known.
     pub(super) async fn unprocessed(
         &self,
         session: &P::Session,
         skipped: i64,
         worker: Worker,
-    ) -> Result<Option<(InboxMessage, bool)>, Error> {
+    ) -> Result<Step, Error> {
         let sql = format!(
             r#"
-            SELECT {COLUMNS},
-                   next_attempt_at IS NOT NULL AND next_attempt_at > CURRENT_TIMESTAMP AS deferred
-            FROM {table}
-            WHERE processed_position IS NULL AND parked_at IS NULL
-              AND ($1 <= 1 OR (hashtext({key}) & 2147483647) % $1 = $2)
-            ORDER BY received_position ASC
-            LIMIT 1 OFFSET $3
-            FOR UPDATE SKIP LOCKED
+            WITH r AS (
+                SELECT {COLUMNS},
+                       next_attempt_at IS NOT NULL AND next_attempt_at > CURRENT_TIMESTAMP AS deferred
+                FROM {table}
+                WHERE processed_position IS NULL AND parked_at IS NULL
+                  AND ($1 <= 1 OR (hashtext({key}) & 2147483647) % $1 = $2)
+                ORDER BY received_position ASC
+                LIMIT 1 OFFSET $3
+                FOR UPDATE SKIP LOCKED
+            )
+            SELECT r.*, pg_current_snapshot()::text AS snapshot
+            FROM (SELECT 1) AS one
+            LEFT JOIN r ON true
             "#,
             table = self.table,
             key = self.partition.sql_expression(),
         );
         let row = session
             .connection()
-            .query_opt(&sql, &[&(worker.of as i32), &(worker.id as i32), &skipped])
+            .query_one(&sql, &[&(worker.of as i32), &(worker.id as i32), &skipped])
             .await?;
-        Ok(row.map(|row| {
-            let deferred: bool = row.get(11);
-            (message_of(&row), deferred)
-        }))
+        let snapshot = row.get::<_, String>(12).parse().map_err(
+            |error: crate::snapshot::MalformedSnapshot| Error::Subscriber(Box::new(error)),
+        )?;
+        let found = row.get::<_, Option<i64>>(7).is_some();
+        Ok(Step {
+            row: found.then(|| (message_of(&row), row.get::<_, bool>(11))),
+            snapshot,
+        })
     }
 
     /// Whether every causal dependency of `message` has a committed mark.
@@ -248,16 +269,16 @@ where
     O: InboxObserver,
 {
     /// Stores the message in a transaction of its own and tells the
-    /// observer its order of arrival, or that it was already there.
+    /// observer where it landed, or that it was already there.
     async fn publish(&self, message: &InboxMessage) -> Result<(), Error> {
         let sql = format!(
             "INSERT INTO {} (tenant_id, stream_type, stream_id, stream_position, uri, payload, metadata) \
              VALUES ($1, $2, $3, $4, $5, $6, $7) \
              ON CONFLICT (tenant_id, stream_type, stream_id, stream_position) DO NOTHING \
-             RETURNING received_position",
+             RETURNING pg_current_xact_id()::text, received_position",
             self.table
         );
-        let received_position = self
+        let receipt = self
             .pool
             .session(async |session| {
                 session
@@ -277,17 +298,26 @@ where
                                 ],
                             )
                             .await?;
-                        Ok::<_, Error>(row.map(|row| row.get::<_, i64>(0)))
+                        row.map(|row| {
+                            Ok::<_, Error>(Receipt {
+                                transaction_id: transaction_id(row.get::<_, String>(0))?,
+                                received_position: row.get::<_, i64>(1),
+                            })
+                        })
+                        .transpose()
                     })
                     .await
             })
             .await?;
-        self.observer.on_received(&Received {
-            message,
-            received_position,
-        });
+        self.observer.on_received(&Received { message, receipt });
         Ok(())
     }
+}
+
+/// `xid8` has no driver type; it travels as decimal text and is unsigned.
+fn transaction_id(text: String) -> Result<u64, Error> {
+    text.parse()
+        .map_err(|_| Error::Subscriber(format!("not a transaction id: `{text}`").into()))
 }
 
 /// The primary key of `message`, as statement parameters `$1`..`$4`.

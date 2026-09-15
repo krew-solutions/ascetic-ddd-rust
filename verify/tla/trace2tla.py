@@ -27,12 +27,12 @@ Messages are named m1, m2, ... in order of publication; a dispatcher is
 
 The inbox mapping:
 
-    received, stored          -> receive   (msg, pos, deps)
+    received, stored          -> receive   (msg, pos, xid, deps)
     received, duplicate       -> duplicate (msg)
-    skipped                   -> skip      (d, of, msg)
-    fetched, a row            -> fetch     (d, of, msg)
-    fetched, none             -> nofetch   (d, of)
-    deferred + fetched, none  -> blocked   (d, of, msg): the oldest row waits for its backoff
+    skipped                   -> skip      (d, of, msg, snap)
+    fetched, a row            -> fetch     (d, of, msg, snap)
+    fetched, none             -> nofetch   (d, of, snap)
+    deferred + fetched, none  -> blocked   (d, of, msg, snap): the oldest row waits for its backoff
     handled ok                -> handle    (d, of, msg)
     handled failed            -> nothing: the subscriber declined
     marked                    -> nothing: the mark commits with the transaction
@@ -52,7 +52,7 @@ The bridge mapping is both of the above, with messages named by `message_id`
 on both sides and one step of its own:
 
     inbox received + outbox handled ok of the same message
-                              -> forward   (d, msg, dup, pos, deps): Bridge's Forward, at the store
+                              -> forward   (d, msg, dup, pos, xid, deps): Bridge's Forward, at the store
     a handled ok with no store, or a store no handling follows
                               -> handle / receive, as above: not steps of the bridge, refused
 """
@@ -71,6 +71,8 @@ def tla(v):
         return '"' + v.replace('"', '\\"') + '"'
     if isinstance(v, (tuple, list)):
         return "<<" + ", ".join(tla(x) for x in v) + ">>"
+    if isinstance(v, dict):
+        return "[" + ", ".join(f"{k} |-> {tla(x)}" for k, x in v.items()) + "]"
     raise TypeError(v)
 
 
@@ -144,6 +146,12 @@ def outbox_steps(events, names=None):
             raise SystemExit(f"unknown outbox event: {kind}")
 
 
+def snapshot(e):
+    """The snapshot a walk statement ran under, as the model reads it."""
+    s = e["snapshot"]
+    return {"xmin": s["xmin"], "xmax": s["xmax"], "xip": list(s["xip"])}
+
+
 def inbox_steps(events, names=None, by_message_id=False):
     """`by_message_id`: name rows by the `message_id` of their metadata, as
     the outbox does, so that a bridge trace names a message once."""
@@ -183,21 +191,22 @@ def inbox_steps(events, names=None, by_message_id=False):
             if e["received_position"] is None:
                 yield record(side="inbox", event="duplicate", msg=msg)
             else:
-                yield record(side="inbox", event="receive", msg=msg, pos=e["received_position"], deps=deps)
+                yield record(side="inbox", event="receive", msg=msg, pos=e["received_position"], xid=e["xid"], deps=deps)
             continue
         key, d, of = dispatcher(e)
         if kind == "skipped":
-            yield record(side="inbox", event="skip", d=d, of=of, msg=row(e["id"], "a skip"))
+            yield record(side="inbox", event="skip", d=d, of=of, msg=row(e["id"], "a skip"), snap=snapshot(e))
         elif kind == "deferred":
-            deferred[key] = row(e["id"], "a deferral")
+            deferred[key] = (row(e["id"], "a deferral"), snapshot(e))
         elif kind == "fetched":
             if e["id"] is None and key in deferred:
-                yield record(side="inbox", event="blocked", d=d, of=of, msg=deferred.pop(key))
+                msg, snap = deferred.pop(key)
+                yield record(side="inbox", event="blocked", d=d, of=of, msg=msg, snap=snap)
             elif e["id"] is None:
-                yield record(side="inbox", event="nofetch", d=d, of=of)
+                yield record(side="inbox", event="nofetch", d=d, of=of, snap=snapshot(e))
             else:
                 holding[key] = row(e["id"], "a fetch")
-                yield record(side="inbox", event="fetch", d=d, of=of, msg=holding[key])
+                yield record(side="inbox", event="fetch", d=d, of=of, msg=holding[key], snap=snapshot(e))
         elif kind == "failed":
             failed[key] = (e["attempts"], e["parked"])
         elif kind == "handled":
@@ -257,7 +266,7 @@ def bridge_steps(events):
                 store = out[at]["fields"]
                 out[at] = record(side="bridge", event="forward", d=fields["d"], msg=fields["msg"],
                                  dup=store["event"] == "duplicate", pos=store.get("pos", 0),
-                                 deps=store.get("deps", []))
+                                 xid=store.get("xid", 0), deps=store.get("deps", []))
             else:
                 out.append(step)
     return out

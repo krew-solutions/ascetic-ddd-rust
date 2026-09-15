@@ -116,9 +116,12 @@ Receive(m) == ReceiveAs(m, nextRecv)
 
 DepsProcessed(m) == Deps[m] \subseteq processed
 
-\* Unprocessed, unparked rows of the dispatcher's partition that no other
-\* transaction holds: FOR UPDATE SKIP LOCKED, and parked_at IS NULL.
-Candidates(d) == {m \in received : m \notin processed /\ m \notin parked /\ m \notin Locked /\ part[m] = d[1]}
+\* Unprocessed, unparked rows among `rows` that no other transaction holds:
+\* FOR UPDATE SKIP LOCKED, and parked_at IS NULL.  The rows are the received
+\* ones; a trace of the implementation passes those its statement's snapshot
+\* could see, as the outbox's FetchWith takes the logged horizon.
+CandidatesIn(d, rows) == {m \in rows : m \notin processed /\ m \notin parked /\ m \notin Locked /\ part[m] = d[1]}
+Candidates(d) == CandidatesIn(d, received)
 
 Oldest(S) == CHOOSE m \in S : \A n \in S : recvPos[m] <= recvPos[n]
 
@@ -127,27 +130,29 @@ Ready(m) == due[m] /\ DepsProcessed(m)
 
 \* Nothing not yet due stands before m: a failed row waiting for its backoff
 \* holds everything behind it, so that the order survives the failure.
-Ahead(d, m) == \A n \in Candidates(d) : (BlockOnBackoff /\ ~due[n]) => recvPos[m] < recvPos[n]
+AheadIn(d, m, rows) == \A n \in CandidatesIn(d, rows) : (BlockOnBackoff /\ ~due[n]) => recvPos[m] < recvPos[n]
 
 \* The row the dispatcher takes: the oldest ready candidate nothing holds
 \* back, stepping over those whose dependencies are not processed; or the
 \* oldest candidate alone, when not stepping over.
-Takes(d) ==
+TakesIn(d, rows) ==
   IF SkipIneligible
-  THEN {m \in Candidates(d) :
-          /\ Ready(m) /\ Ahead(d, m)
-          /\ \A n \in Candidates(d) : (Ready(n) /\ Ahead(d, n)) => recvPos[m] <= recvPos[n]}
-  ELSE {m \in Candidates(d) : m = Oldest(Candidates(d)) /\ Ready(m)}
+  THEN {m \in CandidatesIn(d, rows) :
+          /\ Ready(m) /\ AheadIn(d, m, rows)
+          /\ \A n \in CandidatesIn(d, rows) : (Ready(n) /\ AheadIn(d, n, rows)) => recvPos[m] <= recvPos[n]}
+  ELSE {m \in CandidatesIn(d, rows) : m = Oldest(CandidatesIn(d, rows)) /\ Ready(m)}
+Takes(d) == TakesIn(d, received)
 
 \* SELECT ... ORDER BY received_position LIMIT 1 OFFSET n FOR UPDATE SKIP LOCKED,
 \* then the dependency check, inside the dispatcher's transaction.
-Fetch(d) ==
+FetchFrom(d, rows) ==
   /\ holding[d] = None
-  /\ Candidates(d) # {}
-  /\ Takes(d) # {}
-  /\ holding' = [holding EXCEPT ![d] = CHOOSE m \in Takes(d) : TRUE]
+  /\ CandidatesIn(d, rows) # {}
+  /\ TakesIn(d, rows) # {}
+  /\ holding' = [holding EXCEPT ![d] = CHOOSE m \in TakesIn(d, rows) : TRUE]
   /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, procOrder, crashes,
                 attempts, due, parked, resolved, admin>>
+Fetch(d) == FetchFrom(d, received)
 
 \* The subscriber ran with the dispatcher's transaction; its writes and the
 \* mark commit together.  A poison message never gets here.

@@ -51,11 +51,13 @@ pub mod observer;
 mod partition;
 pub mod pg;
 mod port;
+mod snapshot;
 
 pub use crate::channel::{INBOX_SCHEME, InboxChannel};
 pub use crate::error::{BoxError, Error};
 pub use crate::message::{CausalDependency, InboxMessage};
-pub use crate::observer::InboxObserver;
+pub use crate::observer::{InboxObserver, Receipt};
 pub use crate::partition::{ByStream, ByUri, PartitionKey};
 pub use crate::pg::{Outcome, PgInbox, Retries, Worker, Workers};
 pub use crate::port::Inbox;
+pub use crate::snapshot::Snapshot;

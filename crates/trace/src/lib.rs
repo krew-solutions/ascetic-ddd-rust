@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use ascetic_ddd_inbox::observer as inbox;
-use ascetic_ddd_inbox::{CausalDependency, InboxMessage, InboxObserver, Outcome};
+use ascetic_ddd_inbox::{CausalDependency, InboxMessage, InboxObserver, Outcome, Snapshot};
 use ascetic_ddd_outbox::observer as outbox;
 use ascetic_ddd_outbox::{OutboxMessage, OutboxObserver};
 use serde_json::{Value, json};
@@ -83,6 +83,10 @@ fn inbox_id(message: &InboxMessage) -> String {
         "{}/{}/{}/{}",
         message.tenant_id, message.stream_type, message.stream_id, message.stream_position
     )
+}
+
+fn snapshot_json(snapshot: &Snapshot) -> Value {
+    json!({ "xmin": snapshot.xmin, "xmax": snapshot.xmax, "xip": snapshot.in_progress })
 }
 
 fn dependency_id(dependency: &CausalDependency) -> String {
@@ -164,7 +168,8 @@ impl InboxObserver for JsonTrace {
             "id": inbox_id(event.message),
             "message_id": event.message.message_id(),
             "deps": event.message.causal_dependencies().iter().map(dependency_id).collect::<Vec<_>>(),
-            "received_position": event.received_position,
+            "received_position": event.receipt.map(|receipt| receipt.received_position),
+            "xid": event.receipt.map(|receipt| receipt.transaction_id),
         }));
     }
     fn on_skipped(&self, event: &inbox::Skipped<'_>) {
@@ -175,6 +180,7 @@ impl InboxObserver for JsonTrace {
             "of": event.worker.of,
             "call": event.call,
             "id": inbox_id(event.message),
+            "snapshot": snapshot_json(event.snapshot),
         }));
     }
     fn on_deferred(&self, event: &inbox::Deferred<'_>) {
@@ -185,6 +191,7 @@ impl InboxObserver for JsonTrace {
             "of": event.worker.of,
             "call": event.call,
             "id": inbox_id(event.message),
+            "snapshot": snapshot_json(event.snapshot),
         }));
     }
     fn on_fetched(&self, event: &inbox::Fetched<'_>) {
@@ -195,6 +202,7 @@ impl InboxObserver for JsonTrace {
             "of": event.worker.of,
             "call": event.call,
             "id": event.message.map(inbox_id),
+            "snapshot": snapshot_json(event.snapshot),
         }));
     }
     fn on_handled(&self, event: &inbox::Handled<'_>) {

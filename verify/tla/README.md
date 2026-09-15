@@ -197,7 +197,11 @@ deadlocks at the refused step, and TLC prints the state, `i` naming the step.
 `TraceInbox.tla` is the same for the inbox. Receiving, taking a row, failing,
 committing, unparking and resolving are all logged; the one thing that is not
 is time, so the passing of a backoff is the hidden step before the failed
-row is taken again. A dispatcher is `<<worker, slot>>`: several `dispatch`
+row is taken again. A store carries the id of its transaction and every step
+of a walk over the table the snapshot its statement ran under, and the checks
+go by what the snapshot could see, as the outbox's go by the horizon: a walk
+is checked over the stored rows visible to it, and a store logged after a
+walk that saw it is taken as the hidden step before that walk. A dispatcher is `<<worker, slot>>`: several `dispatch`
 calls of one worker run at once under `FOR UPDATE SKIP LOCKED`, and
 `trace2tla.py` gives each open call the lowest free slot of its worker, so the
 instance has as many dispatchers as ever ran together. Stepping over a row, an
@@ -227,17 +231,23 @@ inbox's bridge tests from an in-memory broker, and the one run of an outbox
 feeding an inbox. Two outbox tests are not recorded there, because what they
 exercise the model does not describe: moving the position by hand
 (`set_position`), and the URI filter of a selection. `traces/forged/` holds
-three runs edited by hand: an outbox dispatcher without the visibility rule,
+four runs edited by hand: an outbox dispatcher without the visibility rule,
 fetching the later, committed transaction while the earlier one is open; an
-inbox dispatcher that takes a message before the one it depends on; a bridge
-that stores the message after acknowledging the batch, the shape
+inbox dispatcher that takes a message before the one it depends on; an inbox
+fetch that returns a row its snapshot could not have seen; a bridge that
+stores the message after acknowledging the batch, the shape
 `BridgeAckFirst.cfg` shows loses messages. `check.sh` requires TLC to refuse
-all three.
+all four.
 
 What a trace check cannot see: the order of lines is the order the observer
-was called in, on one thread. Two dispatchers' events are serialised as their
-statements completed; an interleaving the log misrepresents would show as a
-run that does not fit, not as a false pass. And one thing the inbox model
-leaves out: a row stepped over stays locked until the call's transaction ends,
-so another dispatcher polling in that window does not see it. A trace where
-that row became eligible in the window would not fit either.
+was called in, on one thread, and two tasks' lines may come in the other order
+than the database saw their statements. For stores against walks the
+snapshots settle it, on both sides. What they do not settle is the visibility
+of marks to the inbox's dependency check, a statement of its own whose
+snapshot is not logged: a run with two dispatchers, dependencies between
+their messages and a mark committed between one's walk and the other's check
+could show as not fitting, and would be a false alarm, not a false pass. And
+one thing the inbox model leaves out: a row stepped over stays locked until
+the call's transaction ends, so another dispatcher polling in that window
+does not see it. A trace where that row became eligible in the window would
+not fit either.

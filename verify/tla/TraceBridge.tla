@@ -77,7 +77,7 @@ Forward ==
 Next ==
   \/ TO!Hidden /\ B!DstUnchanged /\ UNCHANGED pending
   \/ TO!Logged /\ Step.event # "handle" /\ B!DstUnchanged /\ UNCHANGED pending
-  \/ TI!Next /\ Step.event \notin {"receive", "duplicate"} /\ B!SrcUnchanged /\ UNCHANGED pending
+  \/ (TI!Elapsing \/ TI!Logged) /\ Step.event \notin {"receive", "duplicate"} /\ B!SrcUnchanged /\ UNCHANGED pending
   \/ Forward
 
 Spec == Init /\ [][Next]_vars

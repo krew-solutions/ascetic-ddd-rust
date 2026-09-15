@@ -12,6 +12,19 @@
 (* the hidden step before such a fetch.  TLC walks the trace checking that  *)
 (* every step is a step of the model and that the invariants hold.         *)
 (*                                                                         *)
+(* The order of lines is the order the observer was called in, and the     *)
+(* intake and a dispatcher are two tasks: a store may be logged before a    *)
+(* walk whose statement ran under a snapshot from before the store's       *)
+(* commit, or after a walk that saw it.  Every receive carries the id of    *)
+(* the storing transaction and every walk step the snapshot it ran under,  *)
+(* and the checks go by what the snapshot could see, as the outbox's go by  *)
+(* the horizon: a walk is checked over the stored rows visible to it, and   *)
+(* a store logged later but visible to a walk is taken as the hidden step   *)
+(* before that walk, its logged line then being a step that changes         *)
+(* nothing.  What the checks do not cover is the visibility of marks: the   *)
+(* dependency check is a statement of its own, whose snapshot is not        *)
+(* logged.                                                                 *)
+(*                                                                         *)
 (* The parking policy is read off the trace: MaxAttempts is the count at   *)
 (* which a message was parked, or 0 when none was; a run that parked one    *)
 (* message at two attempts and let another fail twice unparked does not     *)
@@ -49,6 +62,9 @@ Dispatching == {r \in InboxEvents : r.event \in {"skip", "fetch", "nofetch", "bl
 Parks == {r \in InboxEvents : r.event = "fail" /\ r.parked}
 
 Arrives == {r.msg : r \in Receives}
+Stored(m) == CHOOSE r \in Receives : r.msg = m
+XidOf == [m \in Arrives |-> Stored(m).xid]
+PosOf == [m \in Arrives |-> Stored(m).pos]
 \* A dependency that never arrives is a message all the same: it is what the
 \* dependent one waits for.
 Msgs == Arrives \cup UNION {Range(r.deps) : r \in Receives}
@@ -85,7 +101,13 @@ O == INSTANCE Inbox WITH Msgs <- Msgs, Deps <- Deps, Arrives <- Arrives, Workers
 Pending == i <= Len(Trace)
 Step == Trace[i]
 
-Eligible(d) == {m \in O!Candidates(d) : O!DepsProcessed(m)}
+\* What a statement under snapshot `snap` could see of the stored rows: the
+\* transaction had ended before xmin, or was neither in progress nor yet
+\* started.
+Sees(snap, xid) == xid < snap.xmin \/ (xid < snap.xmax /\ \A j \in 1..Len(snap.xip) : snap.xip[j] # xid)
+Visible(snap) == {m \in received : Sees(snap, XidOf[m])}
+
+EligibleIn(d, rows) == {m \in O!CandidatesIn(d, rows) : O!DepsProcessed(m)}
 
 (* ------------------------------------------------------------------------ *)
 
@@ -94,9 +116,11 @@ Init ==
   /\ O!Init
   /\ i = 1
 
+Walks == {"skip", "fetch", "nofetch", "blocked"}
+
 \* Time is not logged: the backoff of a failed row has passed by the time
 \* the row is taken again, and only then.
-Hidden ==
+Elapsing ==
   /\ Pending
   /\ Step.side = "inbox"
   /\ Step.event = "fetch"
@@ -104,30 +128,54 @@ Hidden ==
   /\ O!Elapse(Step.msg)
   /\ UNCHANGED i
 
+\* A store logged after a walk that could see it, or after a duplicate of
+\* it, happened before: it is received here, in one fixed order, and its own
+\* line later changes nothing.
+Unlogged(snap) == {m \in Arrives \ received : Sees(snap, XidOf[m])}
+FirstStored(S) == CHOOSE m \in S : \A n \in S : XidOf[m] <= XidOf[n]
+Receiving ==
+  /\ Pending
+  /\ Step.side = "inbox"
+  /\ UNCHANGED i
+  /\ \/ /\ Step.event \in Walks
+        /\ Unlogged(Step.snap) # {}
+        /\ LET m == FirstStored(Unlogged(Step.snap)) IN O!ReceiveAs(m, PosOf[m])
+     \/ /\ Step.event = "duplicate"
+        /\ Step.msg \notin received
+        /\ O!ReceiveAs(Step.msg, PosOf[Step.msg])
+
+Hidden == Elapsing \/ Receiving
+
 Logged ==
   /\ Pending
   /\ Step.side = "inbox"
   /\ i' = i + 1
   /\ \/ /\ Step.event = "receive"
+        /\ Step.msg \notin received
         /\ O!ReceiveAs(Step.msg, Step.pos)
+     \* received already, as the hidden step before a walk that saw it
+     \/ /\ Step.event = "receive"
+        /\ Step.msg \in received
+        /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
+                      attempts, due, parked, resolved, admin>>
      \/ /\ Step.event = "duplicate"
         /\ Step.msg \in received
         \* the tuple in full: TLC cannot prime an instance's tuple, and TraceBridge instances this module
         /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
                       attempts, due, parked, resolved, admin>>
      \/ /\ Step.event = "skip"
-        /\ Step.msg \in O!Candidates(Step.d)
+        /\ Step.msg \in O!CandidatesIn(Step.d, Visible(Step.snap))
         /\ ~O!DepsProcessed(Step.msg)
         \* the tuple in full: TLC cannot prime an instance's tuple, and TraceBridge instances this module
         /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
                       attempts, due, parked, resolved, admin>>
      \/ /\ Step.event = "fetch"
-        /\ O!Fetch(Step.d)
+        /\ O!FetchFrom(Step.d, Visible(Step.snap))
         /\ holding'[Step.d] = Step.msg
      \/ /\ Step.event = "nofetch"
         /\ holding[Step.d] = None
-        /\ Eligible(Step.d) = {}
-        /\ \A m \in O!Candidates(Step.d) : due[m]
+        /\ EligibleIn(Step.d, Visible(Step.snap)) = {}
+        /\ \A m \in O!CandidatesIn(Step.d, Visible(Step.snap)) : due[m]
         \* the tuple in full: TLC cannot prime an instance's tuple, and TraceBridge instances this module
         /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
                       attempts, due, parked, resolved, admin>>
@@ -135,10 +183,10 @@ Logged ==
      \* backoff, and holds the partition
      \/ /\ Step.event = "blocked"
         /\ holding[Step.d] = None
-        /\ Step.msg \in O!Candidates(Step.d)
+        /\ Step.msg \in O!CandidatesIn(Step.d, Visible(Step.snap))
         /\ ~due[Step.msg]
-        /\ \A n \in O!Candidates(Step.d) : recvPos[n] < recvPos[Step.msg] => ~O!DepsProcessed(n)
-        /\ O!Takes(Step.d) = {}
+        /\ \A n \in O!CandidatesIn(Step.d, Visible(Step.snap)) : recvPos[n] < recvPos[Step.msg] => ~O!DepsProcessed(n)
+        /\ O!TakesIn(Step.d, Visible(Step.snap)) = {}
         /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
                       attempts, due, parked, resolved, admin>>
      \/ /\ Step.event = "handle"

@@ -19,8 +19,8 @@ use ascetic_ddd_inbox::observer::{
     Skipped, Unparked,
 };
 use ascetic_ddd_inbox::{
-    BoxError, ByStream, CausalDependency, Error, Inbox, InboxMessage, Outcome, PgInbox, Retries,
-    Worker, Workers,
+    BoxError, ByStream, CausalDependency, Error, Inbox, InboxMessage, Outcome, PgInbox, Receipt,
+    Retries, Worker, Workers,
 };
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use ascetic_ddd_session::pg::tokio_postgres::{Config, NoTls};
@@ -593,7 +593,9 @@ async fn the_port_is_implementable_without_a_database() {
 #[derive(Default)]
 struct Recorder {
     events: Mutex<Vec<String>>,
-    received: Mutex<Vec<(String, Option<i64>)>>,
+    received: Mutex<Vec<(String, Option<Receipt>)>>,
+    /// Each fetch of a row, with whether its snapshot saw the row's transaction.
+    fetches_saw_their_row: Mutex<Vec<bool>>,
     marked: Mutex<Vec<(String, i64)>>,
 }
 
@@ -608,8 +610,8 @@ impl InboxObserver for Recorder {
         self.received
             .lock()
             .unwrap()
-            .push((label(event.message), event.received_position));
-        let how = match event.received_position {
+            .push((label(event.message), event.receipt));
+        let how = match event.receipt {
             Some(_) => "stored",
             None => "duplicate",
         };
@@ -619,6 +621,20 @@ impl InboxObserver for Recorder {
         self.note(format!("skipped {}", label(event.message)));
     }
     fn on_fetched(&self, event: &Fetched<'_>) {
+        if let Some(message) = event.message {
+            let stored = self
+                .received
+                .lock()
+                .unwrap()
+                .iter()
+                .find_map(|(name, receipt)| {
+                    (*name == label(message)).then_some(*receipt).flatten()
+                });
+            self.fetches_saw_their_row
+                .lock()
+                .unwrap()
+                .push(stored.is_some_and(|receipt| event.snapshot.sees(receipt.transaction_id)));
+        }
         self.note(match event.message {
             Some(message) => format!("fetched {}", label(message)),
             None => "fetched nothing".to_owned(),
@@ -746,12 +762,18 @@ async fn the_observer_sees_the_protocol() {
         .lock()
         .unwrap()
         .iter()
-        .map(|(_, position)| *position)
+        .map(|(_, receipt)| receipt.map(|receipt| receipt.received_position))
         .collect();
     assert_eq!(received.len(), 4);
     assert!(received[0].unwrap() < received[1].unwrap());
     assert_eq!(received[2], None);
     assert!(received[1].unwrap() < received[3].unwrap());
+
+    // Every fetch ran under a snapshot that saw the transaction which stored
+    // the row it returned: visibility, as the dispatcher saw it.
+    let saw = recorder.fetches_saw_their_row.lock().unwrap().clone();
+    assert_eq!(saw.len(), 4, "a@1, b@1, c@1 twice");
+    assert!(saw.iter().all(|saw| *saw));
     let marked = recorder.marked.lock().unwrap().clone();
     assert_eq!(
         marked

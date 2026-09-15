@@ -14,6 +14,7 @@ use crate::observer::{
     Deferred, Dispatched, Failed, Fetched, Handled, InboxObserver, Marked, Resolved, Skipped,
     Unparked,
 };
+use crate::snapshot::Snapshot;
 
 impl<P, O> PgInbox<P, O>
 where
@@ -43,11 +44,12 @@ where
             .session(async |session| {
                 session
                     .atomic(async |tx| {
-                        let taken = self.next_processable(&tx, worker, call).await?;
+                        let (taken, snapshot) = self.next_processable(&tx, worker, call).await?;
                         self.observer.on_fetched(&Fetched {
                             worker,
                             call,
                             message: taken.as_ref(),
+                            snapshot: &snapshot,
                         });
                         let Some(message) = taken else {
                             return Ok(Outcome::Nothing);
@@ -217,36 +219,38 @@ where
     }
 
     /// The oldest unprocessed message whose dependencies are processed, or
-    /// nothing when the oldest row still waits for its backoff. Rows whose
-    /// dependencies are not processed are stepped over, and the observer is
-    /// told of each.
+    /// nothing when the oldest row still waits for its backoff; with the
+    /// snapshot of the statement that decided. Rows whose dependencies are
+    /// not processed are stepped over, and the observer is told of each.
     async fn next_processable(
         &self,
         session: &P::Session,
         worker: Worker,
         call: u64,
-    ) -> Result<Option<InboxMessage>, Error> {
+    ) -> Result<(Option<InboxMessage>, Snapshot), Error> {
         let mut skipped = 0i64;
         loop {
-            let Some((message, deferred)) = self.unprocessed(session, skipped, worker).await?
-            else {
-                return Ok(None);
+            let step = self.unprocessed(session, skipped, worker).await?;
+            let Some((message, deferred)) = step.row else {
+                return Ok((None, step.snapshot));
             };
             if deferred {
                 self.observer.on_deferred(&Deferred {
                     worker,
                     call,
                     message: &message,
+                    snapshot: &step.snapshot,
                 });
-                return Ok(None);
+                return Ok((None, step.snapshot));
             }
             if self.dependencies_processed(session, &message).await? {
-                return Ok(Some(message));
+                return Ok((Some(message), step.snapshot));
             }
             self.observer.on_skipped(&Skipped {
                 worker,
                 call,
                 message: &message,
+                snapshot: &step.snapshot,
             });
             skipped += 1;
         }

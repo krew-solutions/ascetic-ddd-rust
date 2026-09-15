@@ -17,6 +17,13 @@
 //! worker, the inbox runs several calls of one worker at once, kept apart by
 //! `FOR UPDATE SKIP LOCKED`, and the call number is what tells their events
 //! apart.
+//!
+//! A receipt names the transaction that stored a row, and every step of a
+//! walk over the table carries the [`Snapshot`] its statement ran under, so
+//! that a recorded run says which rows each walk could see. The order events
+//! were logged in is the order the observer was called in, on one thread;
+//! two tasks' events may be logged in the other order than the database saw
+//! them, and the snapshots settle it.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,14 +31,25 @@ use std::time::Duration;
 use crate::error::{BoxError, Error};
 use crate::message::InboxMessage;
 use crate::pg::{Outcome, Worker};
+use crate::snapshot::Snapshot;
+
+/// What the inbox knows about a row once it is stored: the transaction that
+/// wrote it and its order of arrival.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Receipt {
+    /// `pg_current_xact_id()` of the storing transaction.
+    pub transaction_id: u64,
+    /// The row's order of arrival.
+    pub received_position: i64,
+}
 
 /// A message was handed to the inbox, in a transaction of its own.
 pub struct Received<'a> {
     /// The message as handed over.
     pub message: &'a InboxMessage,
-    /// Its order of arrival; `None` when a message of the same identity was
+    /// Where it landed; `None` when a message of the same identity was
     /// already stored and this one was ignored.
-    pub received_position: Option<i64>,
+    pub receipt: Option<Receipt>,
 }
 
 /// A dispatcher stepped over a row whose causal dependencies are not yet
@@ -43,6 +61,8 @@ pub struct Skipped<'a> {
     pub call: u64,
     /// The row.
     pub message: &'a InboxMessage,
+    /// What the statement that returned the row could see.
+    pub snapshot: &'a Snapshot,
 }
 
 /// A dispatcher found the oldest row of its partition waiting for its
@@ -55,6 +75,8 @@ pub struct Deferred<'a> {
     pub call: u64,
     /// The row that waits.
     pub message: &'a InboxMessage,
+    /// What the statement that returned the row could see.
+    pub snapshot: &'a Snapshot,
 }
 
 /// A dispatcher took a row, locked for the length of its transaction.
@@ -65,6 +87,8 @@ pub struct Fetched<'a> {
     pub call: u64,
     /// The row; `None` when nothing was eligible.
     pub message: Option<&'a InboxMessage>,
+    /// What the statement that returned the row, or found none, could see.
+    pub snapshot: &'a Snapshot,
 }
 
 /// The subscriber was given the message and the dispatcher's transaction.

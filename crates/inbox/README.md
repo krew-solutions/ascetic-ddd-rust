@@ -129,7 +129,10 @@ row found waiting for its backoff; a row taken, or none; the subscriber's
 outcome; the mark, with its order of processing; the attempt recorded after a
 failure, with whether it parked the message; the dispatcher's transaction
 closed, committed or rolled back; a message unparked or resolved by an
-operator. A dispatcher's
+operator. A stored message comes with the id of the transaction that stored
+it, and every step of a walk over the table with the snapshot its statement
+ran under, so that a recorded run says which rows each walk could see
+whatever order two tasks' events were logged in. A dispatcher's
 events carry the worker and the number of the `dispatch` call, because
 several calls of one worker run at once under `FOR UPDATE SKIP LOCKED`. These
 are the actions of the protocol model in `verify/tla/Inbox.tla`, with the
