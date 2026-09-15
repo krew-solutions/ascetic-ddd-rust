@@ -135,22 +135,23 @@ The main configuration explores three quarters of a million states and takes
 a few minutes; the rest run in seconds.
 
 
-## Trace validation — `TraceOutbox.tla`, `TraceInbox.tla`
+## Trace validation — `TraceOutbox.tla`, `TraceInbox.tla`, `TraceBridge.tla`
 
 A model proves the protocol; a trace check shows the code follows it. The
-outbox and inbox tests attach an observer that writes every event as a line
-of JSON. For the outbox: what was published, with the transaction id and
-serial PostgreSQL assigned; what a fetch returned, with the
-`pg_snapshot_xmin` it ran under and its `LIMIT`; each message handed to the
-subscriber and the outcome; the acknowledged position; how the dispatcher's
-transaction closed. For the inbox: what was received, with its arrival
-position and dependencies, or that it was a duplicate; each row stepped
-over, taken, handed over, marked, with the number of the `dispatch` call, and
-how the call's transaction closed.
+tests attach the recorder of `crates/trace`, an observer of both the outbox
+and the inbox that writes every event as a line of JSON. For the outbox: what
+was published, with the transaction id and serial PostgreSQL assigned; what a
+fetch returned, with the `pg_snapshot_xmin` it ran under and its `LIMIT`;
+each message handed to the subscriber and the outcome; the acknowledged
+position; how the dispatcher's transaction closed. For the inbox: what was
+received, with its arrival position and dependencies, or that it was a
+duplicate; each row stepped over, taken, handed over, marked, with the number
+of the `dispatch` call, and how the call's transaction closed. One recorder
+watching an outbox that feeds an inbox keeps the order across both.
 
 ```bash
 ASCETIC_DDD_TRACE_DIR=verify/tla/traces \
-    cargo test -p ascetic-ddd-outbox -p ascetic-ddd-inbox --test pg -- --include-ignored
+    cargo test -p ascetic-ddd-outbox -p ascetic-ddd-inbox --test pg --test bridge -- --include-ignored
 ./verify/tla/check.sh
 ```
 
@@ -179,13 +180,28 @@ dependencies are unprocessed, nothing eligible must exist, the message must
 be the one held. A dependency that never arrives is a message of the instance
 all the same, as in `InboxMissingDep.cfg`.
 
-`traces/` holds one recorded run per test. Two outbox tests are not recorded
-there, because what they exercise the model does not describe: moving the
-position by hand (`set_position`), and the URI filter of a selection.
-`traces/forged/` holds two runs edited by hand: an outbox dispatcher without
-the visibility rule, fetching the later, committed transaction while the
-earlier one is open; an inbox dispatcher that takes a message before the one
-it depends on. `check.sh` requires TLC to refuse both.
+`TraceBridge.tla` checks a run of an outbox feeding an inbox against
+`Bridge.tla`. It instances the two checkers above over the same trace, each
+seeing the records of its side, and the composition supplies the frame of the
+other side and the invariants of the whole. The one step of its own is
+`Forward`: the bridge's subscriber stores the message in the inbox and
+returns, and the outbox counts it handled. The trace shows two events, the
+inbox's receive and the outbox's handle, and `trace2tla.py` joins them into
+one step placed where the store happened. A handle without a store, or a
+store outside a handling, is refused: with the store before the
+acknowledgement those are not steps of the bridge.
+
+`traces/` holds one recorded run per test: the outbox and inbox tests, the
+inbox's bridge tests from an in-memory broker, and the one run of an outbox
+feeding an inbox. Two outbox tests are not recorded there, because what they
+exercise the model does not describe: moving the position by hand
+(`set_position`), and the URI filter of a selection. `traces/forged/` holds
+three runs edited by hand: an outbox dispatcher without the visibility rule,
+fetching the later, committed transaction while the earlier one is open; an
+inbox dispatcher that takes a message before the one it depends on; a bridge
+that stores the message after acknowledging the batch, the shape
+`BridgeAckFirst.cfg` shows loses messages. `check.sh` requires TLC to refuse
+all three.
 
 What a trace check cannot see: the order of lines is the order the observer
 was called in, on one thread. Two dispatchers' events are serialised as their

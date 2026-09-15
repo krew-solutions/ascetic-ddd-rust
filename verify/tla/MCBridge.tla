@@ -11,6 +11,7 @@ MCUris == {u1, u2}
 MCSrcWorkers == {w1}
 MCDstWorkers == {v1, v2}
 MCDstDispatchers == {<<v1, 1>>, <<v2, 1>>}
+MCGroup == "bridge"
 
 \* The small instance for the acknowledge-before-store variant: one message is enough to lose it.
 MCOneMsg == {m1}

@@ -9,7 +9,6 @@
 //! reported as `inbox-<name>.jsonl` into that directory, one event per line,
 //! for validation against the protocol model: see `verify/tla/README.md`.
 
-use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,7 +23,8 @@ use ascetic_ddd_inbox::{
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use ascetic_ddd_session::pg::tokio_postgres::{Config, NoTls};
 use ascetic_ddd_session::{PgAccess, PgSession, PgSessionPool, SessionPool};
-use serde_json::{Value, json};
+use ascetic_ddd_trace::{JsonTrace, TraceFile};
+use serde_json::json;
 
 const DEFAULT_URL: &str = "postgresql://devel:devel@localhost:5432/devel_karmabot_test";
 
@@ -61,10 +61,10 @@ async fn fixture_observed<O: InboxObserver>(name: &str, observer: O) -> Fixture<
     let table = format!("inbox_{name}");
     let sequence = format!("inbox_{name}_seq");
     let sessions = PgSessionPool::new(pool());
-    let trace = TraceFile::new(name);
+    let trace = TraceFile::from_env(&format!("inbox-{name}"));
     let inbox = PgInbox::new(PgSessionPool::new(pool()))
         .with_table(&table, &sequence)
-        .observed_by((observer, Arc::clone(&trace.trace)));
+        .observed_by((observer, trace.recorder()));
     let drop = format!("DROP TABLE IF EXISTS {table}; DROP SEQUENCE IF EXISTS {sequence};");
     sessions
         .session(async |session| {
@@ -533,132 +533,4 @@ async fn the_observer_sees_the_protocol() {
         ["a@1", "b@1", "c@1"]
     );
     assert!(marked.windows(2).all(|pair| pair[0].1 < pair[1].1));
-}
-
-/// Every event of the inbox as a line of JSON: the trace a test run leaves
-/// for validation against `verify/tla/Inbox.tla`. Fields are the event's
-/// own; the mapping onto the model's steps is the business of `trace2tla`.
-#[derive(Default)]
-struct JsonTrace {
-    lines: Mutex<Vec<Value>>,
-}
-
-impl JsonTrace {
-    fn record(&self, line: Value) {
-        self.lines.lock().unwrap().push(line);
-    }
-}
-
-/// A row's identity as one string.
-fn identity(message: &InboxMessage) -> String {
-    format!(
-        "{}/{}/{}/{}",
-        message.tenant_id, message.stream_type, message.stream_id, message.stream_position
-    )
-}
-
-fn dependency_identity(dependency: &CausalDependency) -> String {
-    format!(
-        "{}/{}/{}/{}",
-        dependency.tenant_id,
-        dependency.stream_type,
-        dependency.stream_id,
-        dependency.stream_position
-    )
-}
-
-impl InboxObserver for JsonTrace {
-    fn on_received(&self, event: &Received<'_>) {
-        self.record(json!({
-            "event": "received",
-            "id": identity(event.message),
-            "deps": event.message.causal_dependencies().iter().map(dependency_identity).collect::<Vec<_>>(),
-            "received_position": event.received_position,
-        }));
-    }
-    fn on_skipped(&self, event: &Skipped<'_>) {
-        self.record(json!({
-            "event": "skipped",
-            "worker": event.worker.id,
-            "of": event.worker.of,
-            "call": event.call,
-            "id": identity(event.message),
-        }));
-    }
-    fn on_fetched(&self, event: &Fetched<'_>) {
-        self.record(json!({
-            "event": "fetched",
-            "worker": event.worker.id,
-            "of": event.worker.of,
-            "call": event.call,
-            "id": event.message.map(identity),
-        }));
-    }
-    fn on_handled(&self, event: &Handled<'_>) {
-        self.record(json!({
-            "event": "handled",
-            "worker": event.worker.id,
-            "of": event.worker.of,
-            "call": event.call,
-            "id": identity(event.message),
-            "ok": event.outcome.is_ok(),
-        }));
-    }
-    fn on_marked(&self, event: &Marked<'_>) {
-        self.record(json!({
-            "event": "marked",
-            "worker": event.worker.id,
-            "of": event.worker.of,
-            "call": event.call,
-            "id": identity(event.message),
-            "processed_position": event.processed_position,
-        }));
-    }
-    fn on_dispatched(&self, event: &Dispatched<'_>) {
-        self.record(json!({
-            "event": "dispatched",
-            "worker": event.worker.id,
-            "of": event.worker.of,
-            "call": event.call,
-            "outcome": match event.outcome {
-                Ok(true) => "message",
-                Ok(false) => "nothing",
-                Err(_) => "rolled_back",
-            },
-        }));
-    }
-}
-
-/// Writes the trace to `$ASCETIC_DDD_TRACE_DIR/inbox-<name>.jsonl` when
-/// dropped, if the variable is set; a test that panics leaves what it had.
-struct TraceFile {
-    trace: Arc<JsonTrace>,
-    path: Option<PathBuf>,
-}
-
-impl TraceFile {
-    fn new(name: &str) -> Self {
-        TraceFile {
-            trace: Arc::new(JsonTrace::default()),
-            path: std::env::var_os("ASCETIC_DDD_TRACE_DIR")
-                .map(|dir| PathBuf::from(dir).join(format!("inbox-{name}.jsonl"))),
-        }
-    }
-}
-
-impl Drop for TraceFile {
-    fn drop(&mut self) {
-        let Some(path) = &self.path else {
-            return;
-        };
-        let lines = self.trace.lines.lock().unwrap();
-        let text = lines
-            .iter()
-            .map(|line| format!("{line}\n"))
-            .collect::<String>();
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).expect("the trace directory can be created");
-        }
-        std::fs::write(path, text).expect("the trace can be written");
-    }
 }

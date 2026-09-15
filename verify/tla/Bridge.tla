@@ -30,10 +30,10 @@ CONSTANTS
   BatchSize,
   MaxCrashes,      \* per side
   StoreBeforeAck,  \* TRUE: a message is stored in the inbox before the subscriber returns, as implemented
+  SrcGroup,        \* the consumer group of the source dispatchers
   None
 
-Group == "bridge"
-SrcDispatchers == {Group} \X SrcWorkers
+SrcDispatchers == {SrcGroup} \X SrcWorkers
 
 \* The source outbox, then the destination inbox.
 VARIABLES uriOf, srcAssign, txState, xid, pos, nextXid, nextPos, position, batch, done, delivered, srcCrashes,
@@ -44,7 +44,7 @@ vars == <<uriOf, srcAssign, txState, xid, pos, nextXid, nextPos, position, batch
           part, received, recvPos, nextRecv, processed, effects, holding, procOrder, dstCrashes, pending>>
 
 Src == INSTANCE Outbox WITH
-  Groups <- {Group}, Workers <- SrcWorkers, VisibilityRule <- TRUE,
+  Groups <- {SrcGroup}, Workers <- SrcWorkers, VisibilityRule <- TRUE,
   assign <- srcAssign, crashes <- srcCrashes
 
 Dst == INSTANCE Inbox WITH

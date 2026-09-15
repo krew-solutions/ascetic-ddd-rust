@@ -19,6 +19,7 @@ dependencies = [
  "ascetic-ddd-bus",
  "ascetic-ddd-outbox",
  "ascetic-ddd-session",
+ "ascetic-ddd-trace",
  "futures",
  "log",
  "serde",
@@ -33,6 +34,7 @@ version = "0.1.0"
 dependencies = [
  "ascetic-ddd-bus",
  "ascetic-ddd-session",
+ "ascetic-ddd-trace",
  "futures",
  "log",
  "serde_json",
@@ -62,6 +64,15 @@ dependencies = [
  "futures",
  "tokio",
  "tokio-postgres",
+]
+
+[[package]]
+name = "ascetic-ddd-trace"
+version = "0.1.0"
+dependencies = [
+ "ascetic-ddd-inbox",
+ "ascetic-ddd-outbox",
+ "serde_json",
 ]
 
 [[package]]

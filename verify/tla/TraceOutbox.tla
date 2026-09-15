@@ -30,14 +30,17 @@ CONSTANT Trace  \* Seq of records, see trace2tla.py
 
 Range(s) == {s[j] : j \in 1..Len(s)}
 Events == Range(Trace)
-Publishes == {r \in Events : r.event = "publish"}
-Fetches == {r \in Events : r.event \in {"fetch", "nofetch"}}
+\* Every record names its side, so that a bridge trace, which holds both an
+\* outbox and an inbox, can be checked by this module and TraceInbox at once.
+OutboxEvents == {r \in Events : r.side = "outbox"}
+Publishes == {r \in OutboxEvents : r.event = "publish"}
+Fetches == {r \in OutboxEvents : r.event \in {"fetch", "nofetch"}}
 
 Msgs == {r.msg : r \in Publishes}
 Uris == {r.uri : r \in Publishes}
 Groups == {r.d[1] : r \in Fetches}
 Workers == IF Fetches = {} THEN {0} ELSE 0..((CHOOSE r \in Fetches : TRUE).of - 1)
-MaxCrashes == Cardinality({j \in 1..Len(Trace) : Trace[j].event = "crash"})
+MaxCrashes == Cardinality({j \in 1..Len(Trace) : Trace[j].side = "outbox" /\ Trace[j].event = "crash"})
 BatchSize == 1  \* unused: every fetch brings the limit it ran with
 VisibilityRule == TRUE
 
@@ -56,10 +59,7 @@ O == INSTANCE Outbox WITH Msgs <- Msgs, Uris <- Uris, Groups <- Groups, Workers 
                           BatchSize <- BatchSize, MaxCrashes <- MaxCrashes,
                           VisibilityRule <- VisibilityRule
 
-\* Spelled out rather than <<O!vars, i>>: TLC cannot evaluate an instance's
-\* variable tuple under UNCHANGED.
-outboxVars == <<uriOf, assign, txState, xid, pos, nextXid, nextPos, position, batch, done, delivered, crashes>>
-vars == <<outboxVars, i>>
+vars == <<uriOf, assign, txState, xid, pos, nextXid, nextPos, position, batch, done, delivered, crashes, i>>
 
 Pending == i <= Len(Trace)
 Step == Trace[i]
@@ -96,6 +96,7 @@ Init ==
 \* The steps the trace does not record but determines.
 Hidden ==
   /\ Pending
+  /\ Step.side = "outbox"
   /\ UNCHANGED i
   /\ \/ /\ Step.event = "publish"
         /\ O!Begin(Step.msg)
@@ -109,6 +110,7 @@ Hidden ==
 \* The steps the trace records, with the logged values.
 Logged ==
   /\ Pending
+  /\ Step.side = "outbox"
   /\ i' = i + 1
   /\ \/ /\ Step.event = "publish"
         /\ txState[Step.msg] = "open"
@@ -120,7 +122,8 @@ Logged ==
      \/ /\ Step.event = "nofetch"
         /\ Settled(Step)
         /\ O!Eligible(Step.d, Step.horizon) = {}
-        /\ UNCHANGED outboxVars
+        \* the tuple in full: TLC cannot prime an instance's tuple, and TraceBridge instances this module
+        /\ UNCHANGED <<uriOf, assign, txState, xid, pos, nextXid, nextPos, position, batch, done, delivered, crashes>>
      \/ /\ Step.event = "handle"
         /\ O!Handle(Step.d)
         /\ batch[Step.d][done[Step.d] + 1] = Step.msg

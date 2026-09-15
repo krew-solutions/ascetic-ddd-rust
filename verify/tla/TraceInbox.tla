@@ -30,8 +30,14 @@ CONSTANT Trace  \* Seq of records, see trace2tla.py
 
 Range(s) == {s[j] : j \in 1..Len(s)}
 Events == Range(Trace)
-Receives == {r \in Events : r.event = "receive"}
-Dispatching == {r \in Events : r.event \in {"skip", "fetch", "nofetch", "handle", "commit", "crash"}}
+\* Every record names its side, so that a bridge trace, which holds both an
+\* outbox and an inbox, can be checked by this module and TraceOutbox at once.
+InboxEvents == {r \in Events : r.side = "inbox"}
+\* In a bridge trace a store is inside a `forward`, the bridge's own step; one
+\* that was not a duplicate is a receive for the purposes of this module.
+Receives == {r \in Events : \/ r.side = "inbox" /\ r.event = "receive"
+                            \/ r.side = "bridge" /\ r.event = "forward" /\ ~r.dup}
+Dispatching == {r \in InboxEvents : r.event \in {"skip", "fetch", "nofetch", "handle", "commit", "crash"}}
 
 Arrives == {r.msg : r \in Receives}
 \* A dependency that never arrives is a message all the same: it is what the
@@ -40,23 +46,20 @@ Msgs == Arrives \cup UNION {Range(r.deps) : r \in Receives}
 Deps == [m \in Msgs |-> IF m \in Arrives THEN Range((CHOOSE r \in Receives : r.msg = m).deps) ELSE {}]
 Workers == IF Dispatching = {} THEN {0} ELSE 0..((CHOOSE r \in Dispatching : TRUE).of - 1)
 Dispatchers == {r.d : r \in Dispatching}
-MaxCrashes == Cardinality({j \in 1..Len(Trace) : Trace[j].event = "crash"})
+MaxCrashes == Cardinality({j \in 1..Len(Trace) : Trace[j].side = "inbox" /\ Trace[j].event = "crash"})
 SkipIneligible == TRUE
 None == "None"
 
 \* The worker a message's partition key hashes to, read off the fetches and
 \* skips; a message nobody touched may go anywhere.
-TouchedBy(m) == {r.d[1] : r \in {e \in Events : e.event \in {"skip", "fetch"} /\ e.msg = m}}
+TouchedBy(m) == {r.d[1] : r \in {e \in InboxEvents : e.event \in {"skip", "fetch"} /\ e.msg = m}}
 Part == [m \in Msgs |-> IF TouchedBy(m) = {} THEN CHOOSE w \in Workers : TRUE
                                             ELSE CHOOSE w \in TouchedBy(m) : TRUE]
 
 VARIABLES part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
           i  \* the next step of the trace
 
-\* Spelled out rather than through the instance: TLC cannot evaluate an
-\* instance's variable tuple under UNCHANGED.
-inboxVars == <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes>>
-vars == <<inboxVars, i>>
+vars == <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes, i>>
 
 O == INSTANCE Inbox WITH Msgs <- Msgs, Deps <- Deps, Arrives <- Arrives, Workers <- Workers,
                          Dispatchers <- Dispatchers, MaxCrashes <- MaxCrashes,
@@ -76,26 +79,31 @@ Init ==
 
 Next ==
   /\ Pending
+  /\ Step.side = "inbox"
   /\ i' = i + 1
   /\ \/ /\ Step.event = "receive"
         /\ O!ReceiveAs(Step.msg, Step.pos)
      \/ /\ Step.event = "duplicate"
         /\ Step.msg \in received
-        /\ UNCHANGED inboxVars
+        \* the tuple in full: TLC cannot prime an instance's tuple, and TraceBridge instances this module
+        /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes>>
      \/ /\ Step.event = "skip"
         /\ Step.msg \in O!Candidates(Step.d)
         /\ ~O!DepsProcessed(Step.msg)
-        /\ UNCHANGED inboxVars
+        \* the tuple in full: TLC cannot prime an instance's tuple, and TraceBridge instances this module
+        /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes>>
      \/ /\ Step.event = "fetch"
         /\ O!Fetch(Step.d)
         /\ holding'[Step.d] = Step.msg
      \/ /\ Step.event = "nofetch"
         /\ holding[Step.d] = None
         /\ Eligible(Step.d) = {}
-        /\ UNCHANGED inboxVars
+        \* the tuple in full: TLC cannot prime an instance's tuple, and TraceBridge instances this module
+        /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes>>
      \/ /\ Step.event = "handle"
         /\ holding[Step.d] = Step.msg
-        /\ UNCHANGED inboxVars
+        \* the tuple in full: TLC cannot prime an instance's tuple, and TraceBridge instances this module
+        /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes>>
      \/ /\ Step.event = "commit"
         /\ O!Commit(Step.d)
      \/ /\ Step.event = "crash"

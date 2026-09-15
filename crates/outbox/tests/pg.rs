@@ -10,7 +10,6 @@
 //! line, for validation against the protocol model: see
 //! `verify/tla/README.md`.
 
-use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -25,7 +24,8 @@ use ascetic_ddd_outbox::{
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use ascetic_ddd_session::pg::tokio_postgres::{Config, NoTls};
 use ascetic_ddd_session::{PgAccess, PgSessionPool, Session, SessionPool};
-use serde_json::{Value, json};
+use ascetic_ddd_trace::{JsonTrace, TraceFile};
+use serde_json::json;
 
 const DEFAULT_URL: &str = "postgresql://devel:devel@localhost:5432/devel_karmabot_test";
 
@@ -61,10 +61,10 @@ async fn fixture(name: &str) -> Fixture {
 async fn fixture_observed<O: OutboxObserver>(name: &str, observer: O) -> Fixture<O> {
     let tables = (format!("outbox_{name}"), format!("outbox_{name}_offsets"));
     let sessions = PgSessionPool::new(pool());
-    let trace = TraceFile::new(name);
+    let trace = TraceFile::from_env(&format!("outbox-{name}"));
     let outbox = PgOutbox::new(PgSessionPool::new(pool()))
         .with_tables(&tables.0, &tables.1)
-        .observed_by((observer, Arc::clone(&trace.trace)));
+        .observed_by((observer, trace.recorder()));
     let drop = format!(
         "DROP TABLE IF EXISTS {}; DROP TABLE IF EXISTS {};",
         tables.0, tables.1
@@ -717,112 +717,4 @@ async fn the_observer_sees_the_protocol() {
             },
         ]
     );
-}
-
-/// Every event of the outbox as a line of JSON: the trace a test run leaves
-/// for validation against `verify/tla/Outbox.tla`. Fields are the event's
-/// own; the mapping onto the model's steps is the business of `trace2tla`.
-#[derive(Default)]
-struct JsonTrace {
-    lines: Mutex<Vec<Value>>,
-}
-
-impl JsonTrace {
-    fn record(&self, line: Value) {
-        self.lines.lock().unwrap().push(line);
-    }
-}
-
-fn message_id_of(message: &OutboxMessage) -> Value {
-    message.metadata["message_id"].clone()
-}
-
-impl OutboxObserver for JsonTrace {
-    fn on_published(&self, event: &Published<'_>) {
-        self.record(json!({
-            "event": "published",
-            "message_id": message_id_of(event.message),
-            "uri": event.message.uri,
-            "xid": event.receipt.transaction_id,
-            "position": event.receipt.position,
-        }));
-    }
-    fn on_fetched(&self, event: &Fetched<'_>) {
-        self.record(json!({
-            "event": "fetched",
-            "group": event.group,
-            "worker": event.worker.id,
-            "of": event.worker.of,
-            "horizon": event.horizon,
-            "limit": event.limit,
-            "messages": event.messages.iter().map(message_id_of).collect::<Vec<_>>(),
-        }));
-    }
-    fn on_handled(&self, event: &Handled<'_>) {
-        self.record(json!({
-            "event": "handled",
-            "group": event.group,
-            "worker": event.worker.id,
-            "of": event.worker.of,
-            "message_id": message_id_of(event.message),
-            "ok": event.outcome.is_ok(),
-        }));
-    }
-    fn on_acked(&self, event: &Acked<'_>) {
-        self.record(json!({
-            "event": "acked",
-            "group": event.group,
-            "worker": event.worker.id,
-            "of": event.worker.of,
-            "xid": event.position.transaction_id,
-            "position": event.position.offset,
-        }));
-    }
-    fn on_dispatched(&self, event: &Dispatched<'_>) {
-        self.record(json!({
-            "event": "dispatched",
-            "group": event.group,
-            "worker": event.worker.id,
-            "of": event.worker.of,
-            "outcome": match event.outcome {
-                Ok(true) => "batch",
-                Ok(false) => "nothing",
-                Err(_) => "rolled_back",
-            },
-        }));
-    }
-}
-
-/// Writes the trace to `$ASCETIC_DDD_TRACE_DIR/outbox-<name>.jsonl` when
-/// dropped, if the variable is set; a test that panics leaves what it had.
-struct TraceFile {
-    trace: Arc<JsonTrace>,
-    path: Option<PathBuf>,
-}
-
-impl TraceFile {
-    fn new(name: &str) -> Self {
-        TraceFile {
-            trace: Arc::new(JsonTrace::default()),
-            path: std::env::var_os("ASCETIC_DDD_TRACE_DIR")
-                .map(|dir| PathBuf::from(dir).join(format!("outbox-{name}.jsonl"))),
-        }
-    }
-}
-
-impl Drop for TraceFile {
-    fn drop(&mut self) {
-        let Some(path) = &self.path else {
-            return;
-        };
-        let lines = self.trace.lines.lock().unwrap();
-        let text = lines
-            .iter()
-            .map(|line| format!("{line}\n"))
-            .collect::<String>();
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).expect("the trace directory can be created");
-        }
-        std::fs::write(path, text).expect("the trace can be written");
-    }
 }

@@ -3,11 +3,13 @@
 
     trace2tla.py <trace.jsonl> <out dir>
 
-Reads the lines the observer of the crate's tests writes, one JSON object per
-event, and writes `<out dir>/<Name>.tla` defining `TraceDef`, the sequence of
-steps the model takes, plus `<Name>.cfg`. Prints `<Name>`. Which crate is
-read off the file name: `outbox-*.jsonl` checks against TraceOutbox.tla,
-`inbox-*.jsonl` against TraceInbox.tla.
+Reads the lines `ascetic-ddd-trace` writes, one JSON object per event, and
+writes `<out dir>/<Name>.tla` defining `TraceDef`, the sequence of steps the
+model takes, plus `<Name>.cfg`. Prints `<Name>`. Which model is read off the
+file name: `outbox-*.jsonl` checks against TraceOutbox.tla, `inbox-*.jsonl`
+against TraceInbox.tla, `bridge-*.jsonl`, a run of an outbox feeding an inbox
+recorded by one observer, against TraceBridge.tla. Every step names its side,
+`outbox`, `inbox` or `bridge`.
 
 The outbox mapping:
 
@@ -40,6 +42,14 @@ The inbox mapping:
 Messages are named in order of first mention, a dependency that never arrives
 included; a dispatcher is <<worker, slot>>, where each open `dispatch` call
 takes the lowest slot of its worker not held by another open call.
+
+The bridge mapping is both of the above, with messages named by `message_id`
+on both sides and one step of its own:
+
+    inbox received + outbox handled ok of the same message
+                              -> forward   (d, msg, dup, pos, deps): Bridge's Forward, at the store
+    a handled ok with no store, or a store no handling follows
+                              -> handle / receive, as above: not steps of the bridge, refused
 """
 import json
 import pathlib
@@ -59,8 +69,18 @@ def tla(v):
     raise TypeError(v)
 
 
+class Step(dict):
+    """A step: its fields, rendered as a TLA+ record."""
+
+    def __init__(self, fields):
+        super().__init__(fields=fields)
+
+    def __str__(self):
+        return "[" + ", ".join(f"{k} |-> {tla(v)}" for k, v in self["fields"].items()) + "]"
+
+
 def record(**fields):
-    return "[" + ", ".join(f"{k} |-> {tla(v)}" for k, v in fields.items()) + "]"
+    return Step(fields)
 
 
 class Names:
@@ -78,8 +98,8 @@ class Names:
         return self.names[key]
 
 
-def outbox_steps(events):
-    names = Names()
+def outbox_steps(events, names=None):
+    names = names or Names()
     pending = {}  # dispatcher -> a batch was fetched and not yet closed
     acked = {}    # dispatcher -> the position acknowledged, awaiting COMMIT
 
@@ -92,37 +112,45 @@ def outbox_steps(events):
     for e in events:
         kind = e["event"]
         if kind == "published":
-            yield record(event="publish", msg=names.of(e["message_id"]), uri=e["uri"], xid=e["xid"], pos=e["position"])
+            yield record(side="outbox", event="publish", msg=names.of(e["message_id"]), uri=e["uri"], xid=e["xid"], pos=e["position"])
             continue
         d, of = dispatcher(e)
         if kind == "fetched":
             msgs = [names.known(m, "a fetch") for m in e["messages"]]
             pending[d] = bool(msgs)
-            yield record(event="fetch" if msgs else "nofetch", d=d, of=of,
+            yield record(side="outbox", event="fetch" if msgs else "nofetch", d=d, of=of,
                          horizon=e["horizon"], limit=e["limit"], msgs=msgs)
         elif kind == "handled":
             if e["ok"]:
-                yield record(event="handle", d=d, msg=names.known(e["message_id"], "a handling"))
+                yield record(side="outbox", event="handle", d=d, msg=names.known(e["message_id"], "a handling"))
         elif kind == "acked":
             acked[d] = (e["xid"], e["position"])
         elif kind == "dispatched":
             outcome = e["outcome"]
             if outcome == "batch":
                 xid, pos = acked.pop(d)
-                yield record(event="ack", d=d, xid=xid, pos=pos)
+                yield record(side="outbox", event="ack", d=d, xid=xid, pos=pos)
             elif outcome == "rolled_back":
                 acked.pop(d, None)
                 if pending.get(d):
-                    yield record(event="crash", d=d)
+                    yield record(side="outbox", event="crash", d=d)
             pending[d] = False
         else:
             raise SystemExit(f"unknown outbox event: {kind}")
 
 
-def inbox_steps(events):
-    names = Names()
+def inbox_steps(events, names=None, by_message_id=False):
+    """`by_message_id`: name rows by the `message_id` of their metadata, as
+    the outbox does, so that a bridge trace names a message once."""
+    names = names or Names()
+    rows = {}     # row identity -> name
     slots = {}    # (worker, call) -> slot
     holding = {}  # (worker, call) -> the row fetched, if any
+
+    def row(identity, what):
+        if identity not in rows:
+            raise SystemExit(f"{what} names a row never received: {identity}")
+        return rows[identity]
 
     def dispatcher(e):
         key = (e["worker"], e["call"])
@@ -134,38 +162,84 @@ def inbox_steps(events):
     for e in events:
         kind = e["event"]
         if kind == "received":
-            msg = names.of(e["id"])
+            if by_message_id:
+                if e["message_id"] is None:
+                    raise SystemExit(f"a row without a message_id in a bridge trace: {e['id']}")
+                rows[e["id"]] = names.of(e["message_id"])
+            else:
+                rows[e["id"]] = names.of(e["id"])
+            msg = rows[e["id"]]
             deps = [names.of(dep) for dep in e["deps"]]
             if e["received_position"] is None:
-                yield record(event="duplicate", msg=msg)
+                yield record(side="inbox", event="duplicate", msg=msg)
             else:
-                yield record(event="receive", msg=msg, pos=e["received_position"], deps=deps)
+                yield record(side="inbox", event="receive", msg=msg, pos=e["received_position"], deps=deps)
             continue
         key, d, of = dispatcher(e)
         if kind == "skipped":
-            yield record(event="skip", d=d, of=of, msg=names.known(e["id"], "a skip"))
+            yield record(side="inbox", event="skip", d=d, of=of, msg=row(e["id"], "a skip"))
         elif kind == "fetched":
             if e["id"] is None:
-                yield record(event="nofetch", d=d, of=of)
+                yield record(side="inbox", event="nofetch", d=d, of=of)
             else:
-                holding[key] = names.known(e["id"], "a fetch")
-                yield record(event="fetch", d=d, of=of, msg=holding[key])
+                holding[key] = row(e["id"], "a fetch")
+                yield record(side="inbox", event="fetch", d=d, of=of, msg=holding[key])
         elif kind == "handled":
             if e["ok"]:
-                yield record(event="handle", d=d, of=of, msg=names.known(e["id"], "a handling"))
+                yield record(side="inbox", event="handle", d=d, of=of, msg=row(e["id"], "a handling"))
         elif kind == "marked":
-            if holding.get(key) != names.known(e["id"], "a mark"):
+            if holding.get(key) != row(e["id"], "a mark"):
                 raise SystemExit(f"call {key} marked a row it did not fetch: {e['id']}")
         elif kind == "dispatched":
             outcome = e["outcome"]
             if outcome == "message":
-                yield record(event="commit", d=d, of=of)
+                yield record(side="inbox", event="commit", d=d, of=of)
             elif outcome == "rolled_back" and key in holding:
-                yield record(event="crash", d=d, of=of)
+                yield record(side="inbox", event="crash", d=d, of=of)
             holding.pop(key, None)
             del slots[key]
         else:
             raise SystemExit(f"unknown inbox event: {kind}")
+
+
+def bridge_steps(events):
+    """Both sides through one naming, with a store and the handling that
+    follows it joined into `forward`, placed where the store happened.
+
+    Line by line: each side's mapping is re-run on its lines so far and the
+    newly produced steps are appended, so the two sides interleave as they
+    did; a receive stays a placeholder until the handling of the same message
+    joins it, and one nothing joins is refused by the model."""
+    names = Names()
+    out = []
+    stores = {}
+    outbox_seen, inbox_seen = [], []
+    produced_outbox = produced_inbox = 0
+    for e in events:
+        if e["observer"] == "outbox":
+            outbox_seen.append(e)
+            steps = list(outbox_steps(outbox_seen, names))
+            new = steps[produced_outbox:]
+            produced_outbox = len(steps)
+        else:
+            inbox_seen.append(e)
+            steps = list(inbox_steps(inbox_seen, names, by_message_id=True))
+            new = steps[produced_inbox:]
+            produced_inbox = len(steps)
+        for step in new:
+            fields = step["fields"]
+            if fields["side"] == "inbox" and fields["event"] in ("receive", "duplicate"):
+                stores[fields["msg"]] = len(out)
+                out.append(step)
+            elif fields["side"] == "outbox" and fields["event"] == "handle" and fields["msg"] in stores:
+                at = stores.pop(fields["msg"])
+                store = out[at]["fields"]
+                out[at] = record(side="bridge", event="forward", d=fields["d"], msg=fields["msg"],
+                                 dup=store["event"] == "duplicate", pos=store.get("pos", 0),
+                                 deps=store.get("deps", []))
+            else:
+                out.append(step)
+    return out
 
 
 CHECKERS = {
@@ -174,6 +248,9 @@ CHECKERS = {
     "inbox": (inbox_steps, "TraceInbox",
               ["TypeOK", "EffectsOnce", "EffectsIffProcessed", "CausalOrder", "HeldOnce",
                "ProcessedWasReceived", "NotFinished"]),
+    "bridge": (bridge_steps, "TraceBridge",
+               ["TypeOK", "SourceInvariants", "DestinationInvariants", "ReceivedWasCommitted",
+                "EndToEndOrder", "NotFinished"]),
 }
 
 
@@ -184,8 +261,12 @@ def main(trace, out):
         raise SystemExit(f"the file name must start with one of {sorted(CHECKERS)}: {trace.name}")
     steps, checker, invariants = CHECKERS[crate]
     events = [json.loads(line) for line in trace.read_text().splitlines() if line.strip()]
+    if crate != "bridge":
+        foreign = [e["observer"] for e in events if e["observer"] != crate]
+        if foreign:
+            raise SystemExit(f"{trace.name} holds {foreign[0]} events; name it bridge-*.jsonl to check both sides")
     name = "Trace_" + re.sub(r"[^A-Za-z0-9_]", "_", trace.stem)
-    body = ",\n  ".join(steps(events))
+    body = ",\n  ".join(str(step) for step in steps(events))
     (out / f"{name}.tla").write_text(
         f"---- MODULE {name} ----\n"
         f"\\* Generated by trace2tla.py from {trace.name}; do not edit.\n"

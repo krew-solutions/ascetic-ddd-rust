@@ -1,6 +1,10 @@
 //! The inbox as a channel of the bus: a bridge from a broker channel is the
 //! intake, and the transactional consumer processes each message once, in
 //! the transaction that marks it. Needs a live PostgreSQL, like `pg.rs`.
+//!
+//! With `ASCETIC_DDD_TRACE_DIR` set, every test writes what its inbox — and,
+//! where there is one, its outbox — reported, one event per line, for
+//! validation against the protocol models: see `verify/tla/README.md`.
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -14,6 +18,7 @@ use ascetic_ddd_outbox::{OUTBOX_SCHEME, PgOutbox};
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use ascetic_ddd_session::pg::tokio_postgres::{Config, NoTls};
 use ascetic_ddd_session::{PgAccess, PgSession, PgSessionPool, Session, SessionPool};
+use ascetic_ddd_trace::{JsonTrace, TraceFile};
 use tokio::sync::mpsc;
 
 const DEFAULT_URL: &str = "postgresql://devel:devel@localhost:5432/devel_karmabot_test";
@@ -35,19 +40,26 @@ fn pool() -> Pool {
 
 struct Fixture {
     sessions: PgSessionPool,
-    inbox: Arc<PgInbox<PgSessionPool>>,
+    inbox: Arc<PgInbox<PgSessionPool, Arc<JsonTrace>>>,
     table: String,
+    /// One recorder for the inbox and, where a test has one, the outbox, so
+    /// that the trace keeps the order across both. Written when dropped.
+    trace: TraceFile,
 }
 
-/// A table of its own per test, plus one the handler writes into.
-async fn fixture(name: &str) -> Fixture {
+/// A table of its own per test, plus one the handler writes into. `stem`
+/// names the trace file: `inbox-…` for a run the inbox model checks alone,
+/// `bridge-…` for one with an outbox in front.
+async fn fixture(name: &str, stem: &str) -> Fixture {
     let table = format!("inbox_bridge_{name}");
     let sequence = format!("{table}_seq");
     let sessions = PgSessionPool::new(pool());
+    let trace = TraceFile::from_env(stem);
     let inbox = Arc::new(
         PgInbox::new(PgSessionPool::new(pool()))
             .with_table(&table, &sequence)
-            .with_poll_interval(Duration::from_millis(20)),
+            .with_poll_interval(Duration::from_millis(20))
+            .observed_by(trace.recorder()),
     );
     let reset = format!(
         "DROP TABLE IF EXISTS {table}; DROP SEQUENCE IF EXISTS {sequence}; \
@@ -65,6 +77,7 @@ async fn fixture(name: &str) -> Fixture {
         sessions,
         inbox,
         table,
+        trace,
     }
 }
 
@@ -155,7 +168,7 @@ async fn next(received: &mut mpsc::UnboundedReceiver<String>) -> String {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_message_from_a_broker_is_processed_once_in_the_marking_transaction() {
-    let fixture = fixture("broker").await;
+    let fixture = fixture("broker", "inbox-bridge-broker").await;
     let mut bus = Bus::new();
     bus.register("in-memory", InMemoryBroker::new()).unwrap();
     bus.register(INBOX_SCHEME, fixture.inbox.channel()).unwrap();
@@ -197,11 +210,12 @@ async fn a_message_from_a_broker_is_processed_once_in_the_marking_transaction() 
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn the_outbox_feeds_the_inbox_without_a_broker() {
-    let fixture = fixture("outbox").await;
+    let fixture = fixture("outbox", "bridge-outbox-to-inbox").await;
     let outbox = Arc::new(
         PgOutbox::new(PgSessionPool::new(pool()))
             .with_tables("inbox_bridge_outbox_out", "inbox_bridge_outbox_out_offsets")
-            .with_poll_interval(Duration::from_millis(20)),
+            .with_poll_interval(Duration::from_millis(20))
+            .observed_by(fixture.trace.recorder()),
     );
     fixture
         .sessions
@@ -265,7 +279,7 @@ async fn the_outbox_feeds_the_inbox_without_a_broker() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_failing_handler_is_retried_and_its_writes_are_rolled_back() {
-    let fixture = fixture("retry").await;
+    let fixture = fixture("retry", "inbox-bridge-retry").await;
     let mut bus = Bus::new();
     bus.register("in-memory", InMemoryBroker::new()).unwrap();
     bus.register(INBOX_SCHEME, fixture.inbox.channel()).unwrap();

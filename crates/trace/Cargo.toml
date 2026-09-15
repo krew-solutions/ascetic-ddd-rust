@@ -1,0 +1,19 @@
+[package]
+name = "ascetic-ddd-trace"
+description = "Observers that record what the outbox and the inbox report as lines of JSON, for validation against the protocol models."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[dependencies]
+ascetic-ddd-inbox = { path = "../inbox" }
+ascetic-ddd-outbox = { path = "../outbox" }
+serde_json.workspace = true

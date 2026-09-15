@@ -87,9 +87,10 @@ events carry the worker and the number of the `dispatch` call, because
 several calls of one worker run at once under `FOR UPDATE SKIP LOCKED`. These
 are the actions of the protocol model in `verify/tla/Inbox.tla`, with the
 steps the model folds into one made visible, so a recording observer yields a
-trace the model can be checked against. The tests do exactly that: with
-`ASCETIC_DDD_TRACE_DIR` set they write one JSON line per event, and
-`verify/tla/check.sh` replays those files through the model.
+trace the model can be checked against. The tests do exactly that, through
+the recorder of `ascetic-ddd-trace`: with `ASCETIC_DDD_TRACE_DIR` set they
+write one JSON line per event, and `verify/tla/check.sh` replays those files
+through the model.
 
 ## Deviations from the Python source
 

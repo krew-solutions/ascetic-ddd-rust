@@ -78,8 +78,9 @@ message handed to the subscriber, with the outcome; the position acknowledged;
 the dispatcher's transaction closed, committed or rolled back. These are the
 actions of the protocol model in `verify/tla/Outbox.tla`, so a recording
 observer yields a trace the model can be checked against. The tests do
-exactly that: with `ASCETIC_DDD_TRACE_DIR` set they write one JSON line per
-event, and `verify/tla/check.sh` replays those files through the model.
+exactly that, through the recorder of `ascetic-ddd-trace`: with
+`ASCETIC_DDD_TRACE_DIR` set they write one JSON line per event, and
+`verify/tla/check.sh` replays those files through the model.
 
 ## Deviations from the Python source
 
