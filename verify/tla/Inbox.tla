@@ -72,14 +72,18 @@ Init ==
 
 \* INSERT ... ON CONFLICT DO NOTHING, in a transaction of its own.  An
 \* identity that arrives again is the same row: nothing happens, so the
-\* model has no step for it.
-Receive(m) ==
+\* model has no step for it.  ReceiveAs takes the arrival position as an
+\* argument so that a trace of the implementation can supply the one the
+\* sequence assigned; Receive is the model's own, dense numbering.
+ReceiveAs(m, p) ==
   /\ m \in Arrives
   /\ m \notin received
   /\ received' = received \cup {m}
-  /\ recvPos' = [recvPos EXCEPT ![m] = nextRecv]
-  /\ nextRecv' = nextRecv + 1
+  /\ recvPos' = [recvPos EXCEPT ![m] = p]
+  /\ nextRecv' = IF p >= nextRecv THEN p + 1 ELSE nextRecv
   /\ UNCHANGED <<part, processed, effects, holding, procOrder, crashes>>
+
+Receive(m) == ReceiveAs(m, nextRecv)
 
 (* ------------------------------------------------------------------------ *)
 (* Processing                                                                 *)

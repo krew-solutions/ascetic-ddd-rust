@@ -1,6 +1,8 @@
 //! The dispatcher: one message inside one transaction, and the loop of
 //! workers around it. The SQL is in `store`.
 
+use std::sync::atomic::Ordering;
+
 use ascetic_ddd_session::{PgAccess, Session, SessionPool};
 use futures::future::join_all;
 use tokio::sync::watch;
@@ -22,19 +24,25 @@ where
     /// transaction that marks the message processed, and is given that
     /// transaction; if it fails, nothing is marked and the message is
     /// retried.
+    ///
+    /// Several calls of one worker may run at once, `FOR UPDATE SKIP LOCKED`
+    /// keeps them apart; the observer tells their events apart by the call
+    /// number.
     pub async fn dispatch<F, Fut>(&self, subscriber: F, worker: Worker) -> Result<bool, Error>
     where
         F: Fn(&P::Session, &InboxMessage) -> Fut + Send + Sync,
         Fut: Future<Output = Result<(), BoxError>> + Send,
     {
+        let call = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
         let outcome = self
             .pool
             .session(async |session| {
                 session
                     .atomic(async |tx| {
-                        let taken = self.next_processable(&tx, worker).await?;
+                        let taken = self.next_processable(&tx, worker, call).await?;
                         self.observer.on_fetched(&Fetched {
                             worker,
+                            call,
                             message: taken.as_ref(),
                         });
                         let Some(message) = taken else {
@@ -43,6 +51,7 @@ where
                         let handled = subscriber(&tx, &message).await;
                         self.observer.on_handled(&Handled {
                             worker,
+                            call,
                             message: &message,
                             outcome: handled.as_ref().map(|_| ()),
                         });
@@ -50,6 +59,7 @@ where
                         let processed_position = self.mark_processed(&tx, &message).await?;
                         self.observer.on_marked(&Marked {
                             worker,
+                            call,
                             message: &message,
                             processed_position,
                         });
@@ -60,6 +70,7 @@ where
             .await;
         self.observer.on_dispatched(&Dispatched {
             worker,
+            call,
             outcome: outcome.as_ref().map(|dispatched| *dispatched),
         });
         outcome
@@ -133,6 +144,7 @@ where
         &self,
         session: &P::Session,
         worker: Worker,
+        call: u64,
     ) -> Result<Option<InboxMessage>, Error> {
         let mut skipped = 0i64;
         loop {
@@ -144,6 +156,7 @@ where
             }
             self.observer.on_skipped(&Skipped {
                 worker,
+                call,
                 message: &message,
             });
             skipped += 1;

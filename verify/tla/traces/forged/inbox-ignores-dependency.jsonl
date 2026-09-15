@@ -1,0 +1,6 @@
+{"deps": ["tenant-1/orders.Order/{\"id\":\"user\"}/5"], "event": "received", "id": "tenant-1/orders.Order/{\"id\":\"order\"}/1", "received_position": 1}
+{"deps": [], "event": "received", "id": "tenant-1/orders.Order/{\"id\":\"other\"}/1", "received_position": 2}
+{"call": 1, "event": "fetched", "id": "tenant-1/orders.Order/{\"id\":\"order\"}/1", "of": 1, "worker": 0}
+{"call": 1, "event": "handled", "id": "tenant-1/orders.Order/{\"id\":\"order\"}/1", "of": 1, "ok": true, "worker": 0}
+{"call": 1, "event": "marked", "id": "tenant-1/orders.Order/{\"id\":\"order\"}/1", "of": 1, "processed_position": 3, "worker": 0}
+{"call": 1, "event": "dispatched", "of": 1, "outcome": "message", "worker": 0}

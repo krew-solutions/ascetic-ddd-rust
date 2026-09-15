@@ -9,14 +9,15 @@ cd "$(dirname "$0")"
 TLA2TOOLS="${TLA2TOOLS:-$HOME/.local/share/tla/tla2tools.jar}"
 tlc() { java -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -workers auto -deadlock "$@"; }
 
-# Checks one recorded run against the model: trace2tla.py turns the JSON lines
-# into a module over TraceOutbox.tla, and TLC follows it step by step.  A run
-# that fits ends past the trace and violates NotFinished, which is the success
-# here; one that does not fit deadlocks at the step the model refuses, and TLC
-# prints that state.  Deadlock detection stays on for that reason.
+# Checks one recorded run against its model: trace2tla.py turns the JSON lines
+# into a module over TraceOutbox.tla or TraceInbox.tla, and TLC follows it step
+# by step.  A run that fits ends past the trace and violates NotFinished, which
+# is the success here; one that does not fit deadlocks at the step the model
+# refuses, and TLC prints that state.  Deadlock detection stays on for that
+# reason.
 check_trace() {
   work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
-  cp Outbox.tla TraceOutbox.tla "$work"
+  cp Outbox.tla TraceOutbox.tla Inbox.tla TraceInbox.tla "$work"
   name=$(python3 trace2tla.py "$1" "$work")
   log="$work/tlc.log"
   if java -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -workers 1 -config "$work/$name.cfg" "$work/$name.tla" > "$log" 2>&1; then
@@ -62,6 +63,18 @@ if tlc -config InboxNoSkip.cfg MCInbox.tla > "${TMPDIR:-/tmp}/tlc-inbox-noskip.l
 fi
 grep -q "Temporal properties were violated" "${TMPDIR:-/tmp}/tlc-inbox-noskip.log"
 echo "   violation found, as expected"
+
+echo "== inbox: recorded runs of the tests fit the model"
+for trace in traces/inbox-*.jsonl; do
+  check_trace "$trace"
+done
+
+echo "== inbox: a forged run, taking a message before its dependency, must not fit"
+if check_trace traces/forged/inbox-ignores-dependency.jsonl > "${TMPDIR:-/tmp}/tlc-inbox-forged.log" 2>&1; then
+  echo "unexpected: the forged run fits the model"; exit 1
+fi
+grep -q "Deadlock reached" "${TMPDIR:-/tmp}/tlc-inbox-forged.log" || { cat "${TMPDIR:-/tmp}/tlc-inbox-forged.log"; exit 1; }
+echo "   refused, as expected"
 
 echo "== bridge: outbox -> inbox with crashes on both sides, every property holds"
 tlc -config Bridge.cfg MCBridge.tla

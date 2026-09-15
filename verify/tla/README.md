@@ -135,18 +135,22 @@ The main configuration explores three quarters of a million states and takes
 a few minutes; the rest run in seconds.
 
 
-## Trace validation — `TraceOutbox.tla`
+## Trace validation — `TraceOutbox.tla`, `TraceInbox.tla`
 
 A model proves the protocol; a trace check shows the code follows it. The
-outbox tests attach an observer that writes every event as a line of JSON:
-what was published, with the transaction id and serial PostgreSQL assigned;
-what a fetch returned, with the `pg_snapshot_xmin` it ran under and its
-`LIMIT`; each message handed to the subscriber and the outcome; the
-acknowledged position; how the dispatcher's transaction closed.
+outbox and inbox tests attach an observer that writes every event as a line
+of JSON. For the outbox: what was published, with the transaction id and
+serial PostgreSQL assigned; what a fetch returned, with the
+`pg_snapshot_xmin` it ran under and its `LIMIT`; each message handed to the
+subscriber and the outcome; the acknowledged position; how the dispatcher's
+transaction closed. For the inbox: what was received, with its arrival
+position and dependencies, or that it was a duplicate; each row stepped
+over, taken, handed over, marked, with the number of the `dispatch` call, and
+how the call's transaction closed.
 
 ```bash
 ASCETIC_DDD_TRACE_DIR=verify/tla/traces \
-    cargo test -p ascetic-ddd-outbox --test pg -- --include-ignored
+    cargo test -p ascetic-ddd-outbox -p ascetic-ddd-inbox --test pg -- --include-ignored
 ./verify/tla/check.sh
 ```
 
@@ -164,14 +168,29 @@ model's invariants hold after it. A run that fits ends with the trace consumed,
 which `check.sh` reads off a violated `NotFinished`; one that does not fit
 deadlocks at the refused step, and TLC prints the state, `i` naming the step.
 
-`traces/` holds one recorded run per test. Two tests are not recorded there,
-because what they exercise the model does not describe: moving the position by
-hand (`set_position`), and the URI filter of a selection. `traces/forged/`
-holds a run edited by hand into what a dispatcher without the visibility rule
-would report — the later, committed transaction fetched while the earlier one
-is open — and `check.sh` requires TLC to refuse it.
+`TraceInbox.tla` is the same for the inbox, with nothing hidden: receiving,
+taking a row and closing the transaction are all logged, so the trace is the
+behaviour. A dispatcher is `<<worker, slot>>`: several `dispatch` calls of one
+worker run at once under `FOR UPDATE SKIP LOCKED`, and `trace2tla.py` gives
+each open call the lowest free slot of its worker, so the instance has as many
+dispatchers as ever ran together. Stepping over a row, an empty fetch and a
+handling are checks rather than steps: the row must be a candidate whose
+dependencies are unprocessed, nothing eligible must exist, the message must
+be the one held. A dependency that never arrives is a message of the instance
+all the same, as in `InboxMissingDep.cfg`.
+
+`traces/` holds one recorded run per test. Two outbox tests are not recorded
+there, because what they exercise the model does not describe: moving the
+position by hand (`set_position`), and the URI filter of a selection.
+`traces/forged/` holds two runs edited by hand: an outbox dispatcher without
+the visibility rule, fetching the later, committed transaction while the
+earlier one is open; an inbox dispatcher that takes a message before the one
+it depends on. `check.sh` requires TLC to refuse both.
 
 What a trace check cannot see: the order of lines is the order the observer
 was called in, on one thread. Two dispatchers' events are serialised as their
 statements completed; an interleaving the log misrepresents would show as a
-run that does not fit, not as a false pass.
+run that does not fit, not as a false pass. And one thing the inbox model
+leaves out: a row stepped over stays locked until the call's transaction ends,
+so another dispatcher polling in that window does not see it. A trace where
+that row became eligible in the window would not fit either.

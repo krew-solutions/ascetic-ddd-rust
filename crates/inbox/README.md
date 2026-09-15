@@ -82,10 +82,14 @@ a tuple, fixed when the inbox is built. It is told of six things — a message
 received, with its order of arrival or that the identity was already there; a
 row stepped over while its causal dependencies are unprocessed; a row taken,
 or none; the subscriber's outcome; the mark, with its order of processing; the
-dispatcher's transaction closed, committed or rolled back. These are the
-actions of the protocol model in `verify/tla/Inbox.tla`, with the steps the
-model folds into one made visible, so a recording observer yields a trace the
-model can be checked against.
+dispatcher's transaction closed, committed or rolled back. A dispatcher's
+events carry the worker and the number of the `dispatch` call, because
+several calls of one worker run at once under `FOR UPDATE SKIP LOCKED`. These
+are the actions of the protocol model in `verify/tla/Inbox.tla`, with the
+steps the model folds into one made visible, so a recording observer yields a
+trace the model can be checked against. The tests do exactly that: with
+`ASCETIC_DDD_TRACE_DIR` set they write one JSON line per event, and
+`verify/tla/check.sh` replays those files through the model.
 
 ## Deviations from the Python source
 

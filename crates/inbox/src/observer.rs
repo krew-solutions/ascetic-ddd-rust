@@ -9,6 +9,12 @@
 //! `verify/tla/Inbox.tla` — receive, fetch, and the close of the
 //! dispatcher's transaction — with the steps the model folds into one made
 //! visible: the rows stepped over, the subscriber's outcome, the mark.
+//!
+//! A dispatcher's events name the worker and the number of the `dispatch`
+//! call: unlike the outbox, whose position lock allows one transaction per
+//! worker, the inbox runs several calls of one worker at once, kept apart by
+//! `FOR UPDATE SKIP LOCKED`, and the call number is what tells their events
+//! apart.
 
 use std::sync::Arc;
 
@@ -30,6 +36,8 @@ pub struct Received<'a> {
 pub struct Skipped<'a> {
     /// The worker that stepped over it.
     pub worker: Worker,
+    /// The `dispatch` call, numbered per inbox.
+    pub call: u64,
     /// The row.
     pub message: &'a InboxMessage,
 }
@@ -38,6 +46,8 @@ pub struct Skipped<'a> {
 pub struct Fetched<'a> {
     /// The worker that took it.
     pub worker: Worker,
+    /// The `dispatch` call, numbered per inbox.
+    pub call: u64,
     /// The row; `None` when nothing was eligible.
     pub message: Option<&'a InboxMessage>,
 }
@@ -46,6 +56,8 @@ pub struct Fetched<'a> {
 pub struct Handled<'a> {
     /// The worker.
     pub worker: Worker,
+    /// The `dispatch` call, numbered per inbox.
+    pub call: u64,
     /// The message.
     pub message: &'a InboxMessage,
     /// What the subscriber returned.
@@ -57,6 +69,8 @@ pub struct Handled<'a> {
 pub struct Marked<'a> {
     /// The worker.
     pub worker: Worker,
+    /// The `dispatch` call, numbered per inbox.
+    pub call: u64,
     /// The message.
     pub message: &'a InboxMessage,
     /// Its order of processing.
@@ -68,6 +82,8 @@ pub struct Marked<'a> {
 pub struct Dispatched<'a> {
     /// The worker whose transaction closed.
     pub worker: Worker,
+    /// The `dispatch` call, numbered per inbox.
+    pub call: u64,
     /// `Ok(true)`: a message was marked; `Ok(false)`: there was nothing;
     /// `Err`: the subscriber's writes and the mark were rolled back and the
     /// message will be taken again.
