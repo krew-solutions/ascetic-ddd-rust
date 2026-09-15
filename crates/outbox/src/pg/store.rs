@@ -11,11 +11,12 @@ use crate::observer::{OutboxObserver, Published, Receipt};
 use crate::port::Outbox;
 
 /// What one fetch read: the rows, and the visibility horizon of the statement
-/// that read them, `pg_snapshot_xmin`, which travels with the rows and is
-/// therefore unknown when there are none.
+/// that read them, `pg_snapshot_xmin`. The horizon is read in the same
+/// statement, because under `READ COMMITTED` every statement takes a snapshot
+/// of its own: read separately it would be another statement's horizon.
 pub(super) struct Batch {
     pub(super) messages: Vec<OutboxMessage>,
-    pub(super) horizon: Option<u64>,
+    pub(super) horizon: u64,
 }
 
 impl<P, O> PgOutbox<P, O>
@@ -99,6 +100,8 @@ where
     /// The next batch, under the lock of the group's position row: committed
     /// rows past the position, visible below the snapshot's `xmin`, of the
     /// worker's share of the selection, in `(transaction_id, position)` order.
+    /// The outer join makes the statement return a row even when the batch is
+    /// empty, so that the horizon is always known.
     pub(super) async fn fetch(
         &self,
         session: &P::Session,
@@ -108,9 +111,10 @@ where
     ) -> Result<Batch, Error> {
         let sql = format!(
             r#"
-            SELECT "position", transaction_id::text, uri, payload, metadata, created_at::text,
-                   pg_snapshot_xmin(pg_current_snapshot())::text
-            FROM (
+            SELECT m."position", m.transaction_id::text, m.uri, m.payload, m.metadata,
+                   m.created_at::text, pg_snapshot_xmin(pg_current_snapshot())::text
+            FROM (SELECT 1) AS snapshot
+            LEFT JOIN (
                 WITH last_processed AS (
                     SELECT offset_acked, last_processed_transaction_id
                     FROM {offsets}
@@ -127,9 +131,10 @@ where
                 AND transaction_id < pg_snapshot_xmin(pg_current_snapshot())
                 AND ($3 = '' OR uri = $3 OR uri LIKE $4)
                 AND ($5 <= 1 OR (hashtext(uri) & 2147483647) % $5 = $6)
-            ) AS messages
-            ORDER BY transaction_id, "position"
-            LIMIT $7
+                ORDER BY transaction_id, "position"
+                LIMIT $7
+            ) AS m ON true
+            ORDER BY m.transaction_id, m."position"
             "#,
             outbox = self.outbox_table,
             offsets = self.offsets_table,
@@ -151,10 +156,18 @@ where
             )
             .await?;
         let horizon = match rows.first() {
-            Some(row) => Some(transaction_id(row.get::<_, String>(6))?),
-            None => None,
+            Some(row) => transaction_id(row.get::<_, String>(6))?,
+            None => {
+                return Err(Error::Malformed(
+                    "a fetch returned no row at all".to_owned(),
+                ));
+            }
         };
-        let messages = rows.into_iter().map(message_of).collect::<Result<_, _>>()?;
+        let messages = rows
+            .into_iter()
+            .filter(|row| row.get::<_, Option<i64>>(0).is_some())
+            .map(message_of)
+            .collect::<Result<_, _>>()?;
         Ok(Batch { messages, horizon })
     }
 

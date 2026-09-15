@@ -45,6 +45,7 @@ where
                             group: &group,
                             worker,
                             horizon: batch.horizon,
+                            limit: self.batch_size as usize,
                             messages: &batch.messages,
                         });
                         let Some(last) = batch.messages.last() else {

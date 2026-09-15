@@ -9,6 +9,25 @@ cd "$(dirname "$0")"
 TLA2TOOLS="${TLA2TOOLS:-$HOME/.local/share/tla/tla2tools.jar}"
 tlc() { java -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -workers auto -deadlock "$@"; }
 
+# Checks one recorded run against the model: trace2tla.py turns the JSON lines
+# into a module over TraceOutbox.tla, and TLC follows it step by step.  A run
+# that fits ends past the trace and violates NotFinished, which is the success
+# here; one that does not fit deadlocks at the step the model refuses, and TLC
+# prints that state.  Deadlock detection stays on for that reason.
+check_trace() {
+  work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+  cp Outbox.tla TraceOutbox.tla "$work"
+  name=$(python3 trace2tla.py "$1" "$work")
+  log="$work/tlc.log"
+  if java -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -workers 1 -config "$work/$name.cfg" "$work/$name.tla" > "$log" 2>&1; then
+    echo "   $1: TLC found nothing, which cannot happen; see $log"; return 1
+  fi
+  if grep -q "Invariant NotFinished is violated" "$log"; then
+    echo "   $1: fits"; rm -rf "$work"; return 0
+  fi
+  echo "   $1: does not fit the model:"; grep -E "^Error|^/\\\\ i = " "$log" | head -4; return 1
+}
+
 echo "== outbox: with the visibility rule, every property holds"
 tlc -config Outbox.cfg Outbox.tla
 
@@ -18,6 +37,18 @@ if tlc -config OutboxNoRule.cfg Outbox.tla > "${TMPDIR:-/tmp}/tlc-outbox-norule.
 fi
 grep -q "Invariant NoPassedOver is violated" "${TMPDIR:-/tmp}/tlc-outbox-norule.log"
 echo "   violation found, as expected"
+
+echo "== outbox: recorded runs of the tests fit the model"
+for trace in traces/outbox-*.jsonl; do
+  check_trace "$trace"
+done
+
+echo "== outbox: a forged run, fetching by position alone, must not fit"
+if check_trace traces/forged/outbox-passed-over.jsonl > "${TMPDIR:-/tmp}/tlc-outbox-forged.log" 2>&1; then
+  echo "unexpected: the forged run fits the model"; exit 1
+fi
+grep -q "Deadlock reached" "${TMPDIR:-/tmp}/tlc-outbox-forged.log" || { cat "${TMPDIR:-/tmp}/tlc-outbox-forged.log"; exit 1; }
+echo "   refused, as expected"
 
 echo "== inbox: as implemented, every property holds"
 tlc -config Inbox.cfg MCInbox.tla

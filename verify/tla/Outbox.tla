@@ -90,15 +90,20 @@ Begin(m) ==
   /\ txState' = [txState EXCEPT ![m] = "open"]
   /\ UNCHANGED <<uriOf, assign, xid, pos, nextXid, nextPos, position, batch, done, delivered, crashes>>
 
-\* INSERT ... transaction_id = pg_current_xact_id(): the id is assigned at the write.
-Publish(m) ==
+\* INSERT ... transaction_id = pg_current_xact_id(): the id is assigned at the
+\* write.  PublishAs takes the id and the serial as arguments so that a trace
+\* of the implementation can supply the ones PostgreSQL assigned; Publish is
+\* the model's own, dense numbering.
+PublishAs(m, x, p) ==
   /\ txState[m] = "open"
   /\ xid[m] = NoXid
-  /\ xid' = [xid EXCEPT ![m] = nextXid]
-  /\ nextXid' = nextXid + 1
-  /\ pos' = [pos EXCEPT ![m] = nextPos]
-  /\ nextPos' = nextPos + 1
+  /\ xid' = [xid EXCEPT ![m] = x]
+  /\ nextXid' = IF x >= nextXid THEN x + 1 ELSE nextXid
+  /\ pos' = [pos EXCEPT ![m] = p]
+  /\ nextPos' = IF p >= nextPos THEN p + 1 ELSE nextPos
   /\ UNCHANGED <<uriOf, assign, txState, position, batch, done, delivered, crashes>>
+
+Publish(m) == PublishAs(m, nextXid, nextPos)
 
 Commit(m) ==
   /\ txState[m] = "open"
@@ -114,12 +119,14 @@ Abort(m) ==
 (* ------------------------------------------------------------------------ *)
 (* Dispatchers                                                                *)
 
-Visible(m) ==
+\* Visible and Eligible take the horizon as an argument for the same reason
+\* as PublishAs: a trace supplies the pg_snapshot_xmin its fetch ran with.
+Visible(m, xmin) ==
   /\ txState[m] = "committed"
-  /\ (VisibilityRule => xid[m] < Xmin)
+  /\ (VisibilityRule => xid[m] < xmin)
 
-Eligible(d) ==
-  {m \in Msgs : /\ Visible(m)
+Eligible(d, xmin) ==
+  {m \in Msgs : /\ Visible(m, xmin)
                 /\ assign[uriOf[m]] = d[2]
                 /\ Before(position[d], Key(m))}
 
@@ -132,12 +139,14 @@ Sorted(S) ==
 Take(seq, n) == SubSeq(seq, 1, IF Len(seq) < n THEN Len(seq) ELSE n)
 
 \* SELECT ... ORDER BY transaction_id, position LIMIT BatchSize FOR UPDATE on the position row.
-Fetch(d) ==
+FetchWith(d, xmin, size) ==
   /\ batch[d] = <<>>
-  /\ Eligible(d) # {}
-  /\ batch' = [batch EXCEPT ![d] = Take(Sorted(Eligible(d)), BatchSize)]
+  /\ Eligible(d, xmin) # {}
+  /\ batch' = [batch EXCEPT ![d] = Take(Sorted(Eligible(d, xmin)), size)]
   /\ done' = [done EXCEPT ![d] = 0]
   /\ UNCHANGED <<uriOf, assign, txState, xid, pos, nextXid, nextPos, position, delivered, crashes>>
+
+Fetch(d) == FetchWith(d, Xmin, BatchSize)
 
 \* The subscriber receives the next message of the batch.  Its effect is
 \* outside the database and is not rolled back with the batch.

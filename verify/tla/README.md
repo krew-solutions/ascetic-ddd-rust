@@ -5,10 +5,11 @@ describes the participants and their steps — transactions, dispatchers,
 workers, crashes, retries — and TLC explores every interleaving on a small
 instance, looking for a state that breaks a property. What is checked is the
 *protocol*, not the Rust code: the gap between the two is closed by tests, and
-later by trace validation, where test runs are checked against the model.
+by trace validation, where recorded test runs are checked against the model
+(see the section at the end).
 
 ```bash
-./verify/tla/check.sh          # needs Java and tla2tools.jar, see the script
+./verify/tla/check.sh          # needs Java, tla2tools.jar and Python 3, see the script
 ```
 
 ## Outbox — `Outbox.tla`
@@ -40,7 +41,7 @@ fetching by transaction id alone. TLC finds `NoPassedOver` violated in a few
 steps: a transaction takes id 1 and stays open, a later one takes id 2 and
 commits, the dispatcher delivers and acknowledges 2, then 1 commits behind the
 position and is never fetched. That trace is the reason the rule exists
-(`crates/outbox/src/pg.rs`), and `check.sh` requires it to appear.
+(`crates/outbox/src/pg/store.rs`), and `check.sh` requires it to appear.
 
 The fairness assumption spells out a known property: `EventuallyDelivered`
 needs every transaction to end. One transaction left open stalls every later
@@ -132,3 +133,45 @@ that violation.
 
 The main configuration explores three quarters of a million states and takes
 a few minutes; the rest run in seconds.
+
+
+## Trace validation — `TraceOutbox.tla`
+
+A model proves the protocol; a trace check shows the code follows it. The
+outbox tests attach an observer that writes every event as a line of JSON:
+what was published, with the transaction id and serial PostgreSQL assigned;
+what a fetch returned, with the `pg_snapshot_xmin` it ran under and its
+`LIMIT`; each message handed to the subscriber and the outcome; the
+acknowledged position; how the dispatcher's transaction closed.
+
+```bash
+ASCETIC_DDD_TRACE_DIR=verify/tla/traces \
+    cargo test -p ascetic-ddd-outbox --test pg -- --include-ignored
+./verify/tla/check.sh
+```
+
+`trace2tla.py` maps the lines onto the model's steps — an acknowledgement and
+the commit that follows it become one `Ack`, a rolled-back batch a `Crash`, a
+failed handling nothing — and `TraceOutbox.tla` makes the model take exactly
+those steps with the logged values in place of its own: `PublishAs` takes the
+logged id, `FetchWith` the logged horizon and limit. What was not logged, the
+producers' commits and aborts, the trace determines: at a fetch with horizon
+`h`, a message with an id below `h` in the dispatcher's partition past its
+position has ended, and it committed if it is in the batch, aborted if it is
+missing before the batch's end. The behaviour is therefore one chain, and TLC
+walks it checking that each logged step is a step of the model and that the
+model's invariants hold after it. A run that fits ends with the trace consumed,
+which `check.sh` reads off a violated `NotFinished`; one that does not fit
+deadlocks at the refused step, and TLC prints the state, `i` naming the step.
+
+`traces/` holds one recorded run per test. Two tests are not recorded there,
+because what they exercise the model does not describe: moving the position by
+hand (`set_position`), and the URI filter of a selection. `traces/forged/`
+holds a run edited by hand into what a dispatcher without the visibility rule
+would report — the later, committed transaction fetched while the earlier one
+is open — and `check.sh` requires TLC to refuse it.
+
+What a trace check cannot see: the order of lines is the order the observer
+was called in, on one thread. Two dispatchers' events are serialised as their
+statements completed; an interleaving the log misrepresents would show as a
+run that does not fit, not as a false pass.

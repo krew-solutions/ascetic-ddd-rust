@@ -40,9 +40,12 @@ pub struct Fetched<'a> {
     /// The worker that read.
     pub worker: Worker,
     /// The visibility horizon of the statement that read the batch,
-    /// `pg_snapshot_xmin`: every transaction below it had ended. Unknown when
-    /// the batch is empty, because the horizon travels with the rows.
-    pub horizon: Option<u64>,
+    /// `pg_snapshot_xmin`: every transaction below it had ended, so every
+    /// message of the batch has a smaller transaction id.
+    pub horizon: u64,
+    /// The most the statement would return: the batch is shorter only when
+    /// nothing more was eligible.
+    pub limit: usize,
     /// The batch, in `(transaction_id, position)` order; empty when there was
     /// nothing to dispatch.
     pub messages: &'a [OutboxMessage],
