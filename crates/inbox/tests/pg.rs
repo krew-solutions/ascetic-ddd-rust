@@ -49,6 +49,8 @@ struct Fixture<O = ()> {
     sessions: PgSessionPool,
     inbox: PgInbox<PgSessionPool, (O, Arc<JsonTrace>)>,
     table: String,
+    /// Numbers the fixture's `dispatch` calls, which run one at a time.
+    calls: AtomicU64,
     /// Written when the fixture is dropped, if a trace directory is set.
     _trace: TraceFile,
 }
@@ -79,6 +81,7 @@ async fn fixture_observed<O: InboxObserver>(name: &str, observer: O) -> Fixture<
         sessions,
         inbox,
         table,
+        calls: AtomicU64::new(0),
         _trace: trace,
     }
 }
@@ -104,8 +107,9 @@ impl<O: InboxObserver> Fixture<O> {
         F: Fn(&PgSession, &InboxMessage) -> Fut + Send + Sync,
         Fut: std::future::Future<Output = Result<(), BoxError>> + Send,
     {
+        let call = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
         self.inbox
-            .dispatch(subscriber, Worker::ALONE)
+            .dispatch(subscriber, Worker::ALONE, call)
             .await
             .unwrap()
     }
@@ -491,8 +495,8 @@ async fn concurrent_dispatchers_do_not_share_a_message() {
     };
 
     let (a, b) = tokio::join!(
-        f.inbox.dispatch(slow(Arc::clone(&seen)), Worker::ALONE),
-        f.inbox.dispatch(slow(Arc::clone(&seen)), Worker::ALONE),
+        f.inbox.dispatch(slow(Arc::clone(&seen)), Worker::ALONE, 1),
+        f.inbox.dispatch(slow(Arc::clone(&seen)), Worker::ALONE, 2),
     );
 
     assert_eq!(
@@ -520,7 +524,11 @@ async fn workers_share_the_streams_without_gaps_or_overlap() {
 
     for id in 0..3 {
         let worker = Worker { id, of: 3 };
-        while f.inbox.dispatch(&subscriber, worker).await.unwrap() != Outcome::Nothing {}
+        let mut call = 0;
+        while {
+            call += 1;
+            f.inbox.dispatch(&subscriber, worker, call).await.unwrap() != Outcome::Nothing
+        } {}
     }
 
     let mut all = seen.lock().unwrap().clone();

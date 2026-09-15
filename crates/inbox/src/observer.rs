@@ -13,10 +13,10 @@
 //! subscriber's outcome, the mark.
 //!
 //! A dispatcher's events name the worker and the number of the `dispatch`
-//! call: unlike the outbox, whose position lock allows one transaction per
-//! worker, the inbox runs several calls of one worker at once, kept apart by
-//! `FOR UPDATE SKIP LOCKED`, and the call number is what tells their events
-//! apart.
+//! call, which the caller supplies: unlike the outbox, whose position lock
+//! allows one transaction per worker, the inbox runs several calls of one
+//! worker at once, kept apart by `FOR UPDATE SKIP LOCKED`, and the call
+//! number is what tells their events apart.
 //!
 //! A receipt names the transaction that stored a row, and every step of a
 //! walk over the table carries the [`Snapshot`] its statement ran under, so
@@ -57,7 +57,7 @@ pub struct Received<'a> {
 pub struct Skipped<'a> {
     /// The worker that stepped over it.
     pub worker: Worker,
-    /// The `dispatch` call, numbered per inbox.
+    /// The `dispatch` call, as its caller numbered it.
     pub call: u64,
     /// The row.
     pub message: &'a InboxMessage,
@@ -71,7 +71,7 @@ pub struct Skipped<'a> {
 pub struct Deferred<'a> {
     /// The worker that found it.
     pub worker: Worker,
-    /// The `dispatch` call, numbered per inbox.
+    /// The `dispatch` call, as its caller numbered it.
     pub call: u64,
     /// The row that waits.
     pub message: &'a InboxMessage,
@@ -83,7 +83,7 @@ pub struct Deferred<'a> {
 pub struct Fetched<'a> {
     /// The worker that took it.
     pub worker: Worker,
-    /// The `dispatch` call, numbered per inbox.
+    /// The `dispatch` call, as its caller numbered it.
     pub call: u64,
     /// The row; `None` when nothing was eligible.
     pub message: Option<&'a InboxMessage>,
@@ -95,7 +95,7 @@ pub struct Fetched<'a> {
 pub struct Handled<'a> {
     /// The worker.
     pub worker: Worker,
-    /// The `dispatch` call, numbered per inbox.
+    /// The `dispatch` call, as its caller numbered it.
     pub call: u64,
     /// The message.
     pub message: &'a InboxMessage,
@@ -108,7 +108,7 @@ pub struct Handled<'a> {
 pub struct Marked<'a> {
     /// The worker.
     pub worker: Worker,
-    /// The `dispatch` call, numbered per inbox.
+    /// The `dispatch` call, as its caller numbered it.
     pub call: u64,
     /// The message.
     pub message: &'a InboxMessage,
@@ -122,7 +122,7 @@ pub struct Marked<'a> {
 pub struct Failed<'a> {
     /// The worker.
     pub worker: Worker,
-    /// The `dispatch` call, numbered per inbox.
+    /// The `dispatch` call, as its caller numbered it.
     pub call: u64,
     /// The message.
     pub message: &'a InboxMessage,
@@ -141,7 +141,7 @@ pub struct Failed<'a> {
 pub struct Dispatched<'a> {
     /// The worker whose transaction closed.
     pub worker: Worker,
-    /// The `dispatch` call, numbered per inbox.
+    /// The `dispatch` call, as its caller numbered it.
     pub call: u64,
     /// `Ok`: what was committed; `Err`: nothing was, and whatever row was
     /// held is free again.

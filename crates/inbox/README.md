@@ -94,7 +94,7 @@ let inbox = PgInbox::new(pool)
         Duration::from_secs(300),
     )));
 
-match inbox.dispatch(&subscriber, Worker::ALONE).await? {
+match inbox.dispatch(&subscriber, Worker::ALONE, call).await? {
     Outcome::Processed => {}
     Outcome::Failed { attempts, parked } => {}
     Outcome::Nothing => {}
@@ -129,12 +129,14 @@ row found waiting for its backoff; a row taken, or none; the subscriber's
 outcome; the mark, with its order of processing; the attempt recorded after a
 failure, with whether it parked the message; the dispatcher's transaction
 closed, committed or rolled back; a message unparked or resolved by an
-operator. A stored message comes with the id of the transaction that stored
+operator. A dispatcher's events carry the worker and the number of the
+`dispatch` call, which the caller supplies and keeps unique among the calls
+of one worker open at once, because several of them run at once under
+`FOR UPDATE SKIP LOCKED`. A stored message comes with the id of the transaction that stored
 it, and every step of a walk over the table with the snapshot its statement
 ran under, so that a recorded run says which rows each walk could see
 whatever order two tasks' events were logged in. A dispatcher's
-events carry the worker and the number of the `dispatch` call, because
-several calls of one worker run at once under `FOR UPDATE SKIP LOCKED`. These
+events carry the worker and the number of the `dispatch` call. These
 are the actions of the protocol model in `verify/tla/Inbox.tla`, with the
 steps the model folds into one made visible, so a recording observer yields a
 trace the model can be checked against. The tests do exactly that, through

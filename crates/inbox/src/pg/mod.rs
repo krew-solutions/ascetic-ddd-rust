@@ -51,7 +51,6 @@ mod store;
 
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use crate::observer::InboxObserver;
@@ -187,8 +186,6 @@ impl fmt::Debug for Retries {
 pub struct PgInbox<P, O = ()> {
     pool: P,
     observer: O,
-    /// Numbers the `dispatch` calls, for the observer.
-    calls: AtomicU64,
     table: String,
     sequence: String,
     partition: Box<dyn PartitionKey>,
@@ -203,7 +200,6 @@ impl<P> PgInbox<P> {
         PgInbox {
             pool,
             observer: (),
-            calls: AtomicU64::new(0),
             table: "inbox".to_owned(),
             sequence: "inbox_received_position_seq".to_owned(),
             partition: Box::new(ByUri),
@@ -219,7 +215,6 @@ impl<P, O> PgInbox<P, O> {
         PgInbox {
             pool: self.pool,
             observer,
-            calls: self.calls,
             table: self.table,
             sequence: self.sequence,
             partition: self.partition,

@@ -1,8 +1,6 @@
 //! The dispatcher: one message inside one transaction, and the loop of
 //! workers around it. The SQL is in `store`.
 
-use std::sync::atomic::Ordering;
-
 use ascetic_ddd_session::{PgAccess, Session, SessionPool};
 use futures::future::join_all;
 use tokio::sync::watch;
@@ -22,7 +20,8 @@ where
     P::Session: PgAccess + Sync,
     O: InboxObserver,
 {
-    /// Processes the next eligible message with `subscriber`, as `worker`.
+    /// Processes the next eligible message with `subscriber`, as `worker`,
+    /// in the call numbered `call`.
     ///
     /// The subscriber runs inside the transaction that marks the message
     /// processed, and is given that transaction, in a savepoint of its own:
@@ -31,14 +30,20 @@ where
     /// the database; a failing subscriber is an [`Outcome`].
     ///
     /// Several calls of one worker may run at once, `FOR UPDATE SKIP LOCKED`
-    /// keeps them apart; the observer tells their events apart by the call
-    /// number.
-    pub async fn dispatch<F, Fut>(&self, subscriber: F, worker: Worker) -> Result<Outcome, Error>
+    /// keeps them apart, and the observer tells their events apart by the
+    /// call number: the caller keeps it unique among the worker's calls open
+    /// at the same time, as [`PgInbox::run`] does by counting each loop's
+    /// iterations. The inbox itself keeps no state between calls.
+    pub async fn dispatch<F, Fut>(
+        &self,
+        subscriber: F,
+        worker: Worker,
+        call: u64,
+    ) -> Result<Outcome, Error>
     where
         F: Fn(&P::Session, &InboxMessage) -> Fut + Send + Sync,
         Fut: Future<Output = Result<(), BoxError>> + Send,
     {
-        let call = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
         let outcome = self
             .pool
             .session(async |session| {
@@ -88,14 +93,26 @@ where
                                 let (attempts, parked) = self
                                     .record_failure(&tx, &message, &error, retry_after)
                                     .await?;
-                                log::warn!(
-                                    "inbox: attempt {attempts} on {}/{}/{}/{} failed{}: {error}",
+                                // The `log` facade is the observer everyone has: a
+                                // parked message must not be silent when no
+                                // observer of ours is attached. An attempt is
+                                // expected and repeats; parking needs a person.
+                                let identity = format!(
+                                    "{}/{}/{}/{}",
                                     message.tenant_id,
                                     message.stream_type,
                                     message.stream_id,
-                                    message.stream_position,
-                                    if parked { ", parked" } else { "" },
+                                    message.stream_position
                                 );
+                                if parked {
+                                    log::error!(
+                                        "inbox: {identity} parked after {attempts} failed attempts: {error}"
+                                    );
+                                } else {
+                                    log::warn!(
+                                        "inbox: attempt {attempts} on {identity} failed, next in {retry_after:?}: {error}"
+                                    );
+                                }
                                 self.observer.on_failed(&Failed {
                                     worker,
                                     call,
@@ -148,11 +165,13 @@ where
             let stop = stop.clone();
             let subscriber = &subscriber;
             async move {
+                let mut call = 0u64;
                 loop {
                     if *stopped.borrow() {
                         return Ok(());
                     }
-                    match self.dispatch(subscriber, worker).await {
+                    call += 1;
+                    match self.dispatch(subscriber, worker, call).await {
                         Ok(Outcome::Processed | Outcome::Failed { .. }) => {}
                         Ok(Outcome::Nothing) => {
                             tokio::select! {
