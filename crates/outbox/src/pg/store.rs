@@ -25,7 +25,16 @@ where
     P::Session: PgAccess + Sync,
     O: OutboxObserver,
 {
-    /// Creates the tables and indexes if they do not exist.
+    /// Creates the tables and indexes if they do not exist, and replaces the
+    /// indexes of an earlier layout.
+    ///
+    /// The primary key `(transaction_id, position)` is the order a fetch
+    /// reads in, from the group's position on. The index on
+    /// `(uri, transaction_id, position)` serves a selection by URI, equal or
+    /// by prefix — `varchar_pattern_ops` is what makes `LIKE 'prefix/%'` a
+    /// range — in the same order. Nothing serves the worker filter, a hash
+    /// of the URI: it is applied while reading in order, and reads `of` rows
+    /// for every one it keeps.
     pub async fn setup(&self, session: &P::Session) -> Result<(), Error> {
         let (outbox, offsets) = (&self.outbox_table, &self.offsets_table);
         let ddl = format!(
@@ -39,8 +48,10 @@ where
                 "transaction_id" xid8 NOT NULL,
                 PRIMARY KEY ("transaction_id", "position")
             );
-            CREATE INDEX IF NOT EXISTS {outbox}_position_idx ON {outbox} ("position");
-            CREATE INDEX IF NOT EXISTS {outbox}_uri_idx ON {outbox} ("uri");
+            DROP INDEX IF EXISTS {outbox}_position_idx;
+            DROP INDEX IF EXISTS {outbox}_uri_idx;
+            CREATE INDEX IF NOT EXISTS {outbox}_uri_position_idx
+                ON {outbox} ("uri" varchar_pattern_ops, "transaction_id", "position");
             CREATE UNIQUE INDEX IF NOT EXISTS {outbox}_message_id_uniq
                 ON {outbox} (((metadata->>'message_id')::uuid));
             CREATE TABLE IF NOT EXISTS {offsets} (
@@ -102,6 +113,13 @@ where
     /// worker's share of the selection, in `(transaction_id, position)` order.
     /// The outer join makes the statement return a row even when the batch is
     /// empty, so that the horizon is always known.
+    ///
+    /// "Past the position" is the row comparison
+    /// `(transaction_id, position) > (last, offset)`: the same predicate as
+    /// the disjunction "a later transaction, or the same one at a later
+    /// position", but one the planner takes as the start of the index range.
+    /// Spelled as a disjunction, it was a filter over every row from the
+    /// beginning of the table.
     pub(super) async fn fetch(
         &self,
         session: &P::Session,
@@ -123,11 +141,8 @@ where
                 )
                 SELECT "position", transaction_id, uri, payload, metadata, created_at
                 FROM {outbox}
-                WHERE (
-                    (transaction_id = (SELECT last_processed_transaction_id FROM last_processed)
-                     AND "position" > (SELECT offset_acked FROM last_processed))
-                    OR transaction_id > (SELECT last_processed_transaction_id FROM last_processed)
-                )
+                WHERE (transaction_id, "position")
+                      > (SELECT last_processed_transaction_id, offset_acked FROM last_processed)
                 AND transaction_id < pg_snapshot_xmin(pg_current_snapshot())
                 AND ($3 = '' OR uri = $3 OR uri LIKE $4)
                 AND ($5 <= 1 OR (hashtext(uri) & 2147483647) % $5 = $6)

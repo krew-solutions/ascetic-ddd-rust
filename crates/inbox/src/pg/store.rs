@@ -33,7 +33,14 @@ where
     O: InboxObserver,
 {
     /// Creates the sequence, the table and its indexes if they do not exist,
-    /// and adds the columns of ADR-0005 to a table from before it.
+    /// adds the columns of ADR-0005 to a table from before it, and replaces
+    /// the indexes of an earlier layout.
+    ///
+    /// The queue index, `received_position` over the unprocessed and
+    /// unparked rows only, is the walk's order: the oldest such row is its
+    /// first entry whatever the backlog, and a processed row leaves it. The
+    /// `UNIQUE` on `received_position` already indexes the column as a whole;
+    /// the dependency check goes by the primary key.
     pub async fn setup(&self, session: &P::Session) -> Result<(), Error> {
         let (table, sequence) = (&self.table, &self.sequence);
         let ddl = format!(
@@ -60,9 +67,10 @@ where
                 ADD COLUMN IF NOT EXISTS last_error text NULL,
                 ADD COLUMN IF NOT EXISTS next_attempt_at timestamptz NULL,
                 ADD COLUMN IF NOT EXISTS parked_at timestamptz NULL;
-            CREATE INDEX IF NOT EXISTS {table}__received_position_idx ON {table} (received_position);
-            CREATE INDEX IF NOT EXISTS {table}__processed_position_idx
-                ON {table} (processed_position) WHERE processed_position IS NULL;
+            DROP INDEX IF EXISTS {table}__received_position_idx;
+            DROP INDEX IF EXISTS {table}__processed_position_idx;
+            CREATE INDEX IF NOT EXISTS {table}__queue_idx
+                ON {table} (received_position) WHERE processed_position IS NULL AND parked_at IS NULL;
             CREATE UNIQUE INDEX IF NOT EXISTS {table}__message_id_uniq
                 ON {table} (((metadata->>'message_id')::uuid));
             "#

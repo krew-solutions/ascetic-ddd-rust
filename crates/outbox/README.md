@@ -82,6 +82,14 @@ exactly that, through the recorder of `ascetic-ddd-trace`: with
 `ASCETIC_DDD_TRACE_DIR` set they write one JSON line per event, and
 `verify/tla/check.sh` replays those files through the model.
 
+## What is not here
+
+The outbox keeps every row it ever stored; nothing deletes acknowledged
+messages. Retention is the deployment's: the table is meant to be rotated by
+partitions, which is simpler and cheaper than a cleaner inside the library.
+The fetch does not slow down with the history, because it reads from the
+group's position on.
+
 ## Deviations from the Python source
 
 * The worker filter clears the sign bit of `hashtext(uri)`. In the source a
