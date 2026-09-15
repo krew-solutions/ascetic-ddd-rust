@@ -251,3 +251,41 @@ one thing the inbox model leaves out: a row stepped over stays locked until
 the call's transaction ends, so another dispatcher polling in that window
 does not see it. A trace where that row became eligible in the window would
 not fit either.
+
+## Notes on TLC
+
+What the checker itself taught while these models were written, each with
+the place that carries the scar. TLC 2.19, Java 17.
+
+- **`:>` and `@@` need `EXTENDS TLC`.** The function constructors used to
+  write `Deps` and other small maps in the instance modules live in the `TLC`
+  standard module, not in `Naturals` or `Sequences`: `MCInbox.tla`,
+  `MCBridge.tla`.
+- **An action under fairness must fix every variable, both sides included.**
+  `WF_vars(A)` evaluates `ENABLED <<A>>_vars`; if `A` leaves a variable of
+  the other side unmentioned, TLC reports "identifier X is either undefined
+  or not an operator", pointing at the `vars` tuple, not at `A`. Every action
+  of `Bridge.tla` therefore conjoins the other side's `UNCHANGED`.
+- **`UNCHANGED I!vars` does not work.** TLC cannot prime a tuple that reaches
+  it through an instance; the error is again "identifier … is either
+  undefined or not an operator", pointing at the `INSTANCE` line. The trace
+  modules spell the tuple out where they leave the state unchanged:
+  `TraceOutbox.tla`, `TraceInbox.tla`.
+- **A counter without a bound is an infinite state space.** TLC does not
+  finish, and says nothing about why. `Inbox.tla` counts attempts only where
+  the count decides something, since with parking off a poison message fails
+  for ever.
+- **Bind a variable before you constrain it in `Init`.** `uriOf = UriOf`
+  comes before `O!Init`, whose `uriOf \in [Msgs -> Uris]` would otherwise
+  enumerate every function of that set: `TraceOutbox.tla`, `TraceBridge.tla`.
+- **A `.cfg` holds simple values only.** Model values, numbers, strings and
+  sets of them; a sequence of records, such as a trace, goes into a generated
+  module and is bound with `Trace <- TraceDef`: `trace2tla.py`.
+- **Modules are looked up in one directory.** `-DTLA-Library` is ignored, so
+  the models live flat here, and `check.sh` copies what a trace check needs
+  into a temporary directory next to the generated module.
+- **Deadlock detection is a tool, not only a nuisance.** The model checks run
+  with `-deadlock`, since their behaviours are meant to end; the trace checks
+  run without it, so that a run the model refuses stops as a deadlock at the
+  refused step, with the state printed and `i` naming the step.
+
