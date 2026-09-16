@@ -223,9 +223,12 @@ is checked over the stored rows visible to it, and a store logged after a
 walk that saw it is taken as the hidden step before that walk. A dispatcher
 is the slot it holds, whoever ran it: a slot has one holder at a time, so
 the events between a fetch naming a slot and the close naming it are one
-dispatch, and `trace2tla.py` matches a slot's closes to its fetches in order,
-since the close is logged after the COMMIT and the next holder's fetch may
-come first. An empty fetch and a handling are checks rather than steps: a
+dispatch. The close is logged after the COMMIT, and the COMMIT is what frees
+the slot, so the next holder's fetch may be logged before it; the take
+proves the close came first, and `trace2tla.py` moves the close to just
+before the take, for both crates. `traces/reordered/` holds two recorded
+runs with a close moved past the next take by hand, and `check.sh` requires
+them to fit. An empty fetch and a handling are checks rather than steps: a
 fetch that took a slot and found its head waiting for its backoff must find
 nothing due in that slot, one that took no slot nothing due in any slot
 nobody holds — the held ones were passed by, `SKIP LOCKED`; the handled

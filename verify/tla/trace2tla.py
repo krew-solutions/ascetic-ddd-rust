@@ -23,7 +23,11 @@ The outbox mapping:
     dispatched rolled_back    -> crash    (d), if a batch was fetched
 
 Messages are named m1, m2, ... in order of publication; a dispatcher is
-<<group, slot>>: the slot whose position it holds, whoever runs it.
+<<group, slot>>: the slot whose position it holds, whoever runs it. The close
+of a dispatch is logged after its COMMIT, and the COMMIT is what frees the
+slot, so the next take of the same slot may be logged before the close; the
+close is moved to just before that take, where it happened (see
+`closes_before_the_next_take`).
 
 The inbox mapping:
 
@@ -49,9 +53,8 @@ The inbox mapping:
 Messages are named in order of first mention, a dependency that never arrives
 included; a dispatcher is the slot it holds, whoever ran it. A slot has one
 holder at a time, so the events between a fetch naming a slot and the close
-of a transaction naming it are one dispatch; the close is logged after the
-COMMIT, so the next holder's fetch may be logged before it, and the closes of
-a slot are matched to its fetches in order.
+naming it are one dispatch; a close logged after the next take of its slot is
+moved before it, as for the outbox.
 
 The bridge mapping is both of the above, with messages named by `message_id`
 on both sides and one step of its own:
@@ -110,6 +113,49 @@ class Names:
         return self.names[key]
 
 
+def closes_before_the_next_take(events, key_of, opens):
+    """The close of a dispatch — `dispatched` — is logged after its COMMIT,
+    and the COMMIT is what frees the slot: another dispatcher may take the
+    slot and log its `fetched` before the first one's close is written. The
+    take proves the close happened first, so the close is moved to just
+    before the take. What it says — committed, failed, rolled back — is the
+    same wherever it is read. `key_of(e)` is the slot an event is about, or
+    `None`; `opens(e)` whether a `fetched` took a slot."""
+    events = list(events)
+    open_ = {}  # slot -> dispatches that took it and are not closed yet
+    i = 0
+    while i < len(events):
+        e = events[i]
+        key = key_of(e)
+        if key is not None and e["event"] == "fetched" and opens(e):
+            if open_.get(key, 0) > 0:
+                close = next((j for j in range(i + 1, len(events))
+                              if events[j]["event"] == "dispatched" and key_of(events[j]) == key), None)
+                if close is None:
+                    raise SystemExit(f"slot {key} was taken again while its dispatch was open, and that dispatch never closed")
+                events.insert(i, events.pop(close))
+                continue  # the close is at i now, and is read before the take
+            open_[key] = open_.get(key, 0) + 1
+        elif key is not None and e["event"] == "dispatched":
+            open_[key] = open_.get(key, 0) - 1
+        i += 1
+    return events
+
+
+def outbox_key(e):
+    return (e["group"], e["slot"]) if e.get("observer") == "outbox" and e.get("slot") is not None else None
+
+
+def inbox_key(e):
+    return e["slot"] if e.get("observer") == "inbox" and e.get("slot") is not None else None
+
+
+def in_order(events):
+    """Both sides' closes moved before the next take of their slot."""
+    events = closes_before_the_next_take(events, outbox_key, lambda e: bool(e["messages"]))
+    return closes_before_the_next_take(events, inbox_key, lambda e: True)
+
+
 def outbox_steps(events, names=None):
     names = names or Names()
     pending = {}  # dispatcher -> a batch was fetched and not yet closed
@@ -163,15 +209,15 @@ def snapshot(e):
 
 def inbox_steps(events, names=None, by_message_id=False):
     """`by_message_id`: name rows by the `message_id` of their metadata, as
-    the outbox does, so that a bridge trace names a message once."""
+    the outbox does, so that a bridge trace names a message once. Expects
+    the closes in place (`in_order`): one open dispatch per slot."""
     names = names or Names()
     rows = {}     # row identity -> name
     # how many slots the table is cut into: one number, logged with every fetch
     slots = next((e["slots"] for e in events if e["event"] == "fetched"), 1)
-    # slot -> the dispatches that took it and have not been closed, oldest
-    # first: each is the row fetched (or None), the failure recorded and the
-    # rows the mark woke, all awaiting the close of the transaction
-    opened = {}
+    holding = {}  # slot -> the row its open dispatch fetched, if any
+    failed = {}   # slot -> (attempts, parked) recorded, awaiting the close
+    woken = {}    # slot -> the rows the mark woke, awaiting the close
 
     def dependency(identity):
         if by_message_id:
@@ -182,11 +228,6 @@ def inbox_steps(events, names=None, by_message_id=False):
         if identity not in rows:
             raise SystemExit(f"{what} names a row never received: {identity}")
         return rows[identity]
-
-    def current(slot, what):
-        if not opened.get(slot):
-            raise SystemExit(f"{what} names slot {slot}, which no open dispatch holds")
-        return opened[slot][-1]
 
     for e in events:
         kind = e["event"]
@@ -219,42 +260,43 @@ def inbox_steps(events, names=None, by_message_id=False):
         if kind == "fetched":
             if slot is None:
                 yield record(side="inbox", event="nofetch", of=slots, snap=snapshot(e))
-                continue
-            held = row(e["id"], "a fetch") if e["id"] is not None else None
-            opened.setdefault(slot, []).append({"holding": held, "failed": None, "woken": []})
-            if held is None:
+            elif slot in holding:
+                raise SystemExit(f"slot {slot} was taken while its dispatch was open")
+            elif e["id"] is None:
+                holding[slot] = None
                 yield record(side="inbox", event="nofetch", slot=slot, of=slots, snap=snapshot(e))
             else:
-                yield record(side="inbox", event="fetch", slot=slot, of=slots, msg=held, snap=snapshot(e))
+                holding[slot] = row(e["id"], "a fetch")
+                yield record(side="inbox", event="fetch", slot=slot, of=slots, msg=holding[slot], snap=snapshot(e))
         elif kind == "waiting":
-            # the wait is inside the dispatch that took the slot, before its fetch
             yield record(side="inbox", event="wait", slot=slot, of=slots, msg=row(e["id"], "a wait"),
                          dep=dependency(e["dependency"]), snap=snapshot(e))
         elif kind == "failed":
-            current(slot, "a failure")["failed"] = (e["attempts"], e["parked"])
+            failed[slot] = (e["attempts"], e["parked"])
         elif kind == "handled":
             if e["ok"]:
                 yield record(side="inbox", event="handle", slot=slot, of=slots, msg=row(e["id"], "a handling"))
         elif kind == "marked":
-            dispatch = current(slot, "a mark")
-            if dispatch["holding"] != row(e["id"], "a mark"):
+            if holding.get(slot) != row(e["id"], "a mark"):
                 raise SystemExit(f"slot {slot} marked a row it did not fetch: {e['id']}")
-            dispatch["woken"] = [row(w, "a waking") for w in e["woken"]]
+            woken[slot] = [row(w, "a waking") for w in e["woken"]]
         elif kind == "dispatched":
-            outcome = e["outcome"]
             if slot is None:
                 continue  # nothing taken: the nofetch said it, or a rollback before any slot was taken
-            if not opened.get(slot):
+            if slot not in holding:
                 raise SystemExit(f"slot {slot} closed a dispatch that never opened")
-            dispatch = opened[slot].pop(0)
+            outcome = e["outcome"]
             if outcome == "processed":
-                yield record(side="inbox", event="commit", slot=slot, of=slots, woken=dispatch["woken"])
+                yield record(side="inbox", event="commit", slot=slot, of=slots, woken=woken.get(slot, []))
             elif outcome == "failed":
-                attempts, parked = dispatch["failed"]
-                yield record(side="inbox", event="fail", slot=slot, of=slots, msg=dispatch["holding"],
+                attempts, parked = failed[slot]
+                yield record(side="inbox", event="fail", slot=slot, of=slots, msg=holding[slot],
                              attempts=attempts, parked=parked)
-            elif outcome == "rolled_back" and dispatch["holding"] is not None:
+            elif outcome == "rolled_back" and holding[slot] is not None:
                 yield record(side="inbox", event="crash", slot=slot, of=slots)
+            del holding[slot]
+            failed.pop(slot, None)
+            woken.pop(slot, None)
         else:
             raise SystemExit(f"unknown inbox event: {kind}")
 
@@ -272,7 +314,7 @@ def bridge_steps(events):
     stores = {}
     outbox_seen, inbox_seen = [], []
     produced_outbox = produced_inbox = 0
-    for e in events:
+    for e in in_order(events):
         if e["observer"] == "outbox":
             outbox_seen.append(e)
             steps = list(outbox_steps(outbox_seen, names))
@@ -323,7 +365,7 @@ def main(trace, out):
         if foreign:
             raise SystemExit(f"{trace.name} holds {foreign[0]} events; name it bridge-*.jsonl to check both sides")
     name = "Trace_" + re.sub(r"[^A-Za-z0-9_]", "_", trace.stem)
-    produced = list(steps(events))
+    produced = list(steps(events if crate == "bridge" else in_order(events)))
     body = ",\n  ".join(str(step) for step in produced)
     # The order of arrival is a promise only with one slot.
     if crate == "inbox" and all(step["fields"].get("of", 1) == 1 for step in produced):

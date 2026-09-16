@@ -165,18 +165,13 @@ neither processed, parked nor waiting, is the only index in
 column the planner walked that one from the first row, past the whole
 processed history, 89 ms at sixteen slots.
 
-A table from before slots is migrated by hand, with the inbox stopped; for a
-table `inbox` cut by URI into one slot:
-
-```sql
-ALTER TABLE inbox ADD COLUMN slot smallint
-    GENERATED ALWAYS AS ((hashtext(uri) & 2147483647) % 1) STORED;
-DROP INDEX inbox__head_idx;
-ALTER TABLE inbox DROP CONSTRAINT inbox_received_position_key;
-```
-
-By stream the key is `tenant_id || ':' || stream_type || ':' || stream_id::text`.
-The next `setup` adds the head index, `inbox_meta` and `inbox_slots`.
+A table from before slots is migrated once, with the inbox stopped, by the
+statements `PgInbox::migration_to_slots()` returns for the configured cut:
+the slot column, the head index in place of the old one, the unique
+constraint on `received_position` dropped, then what `setup` creates. They
+come from the same expression `setup` pins, so the cut cannot differ from
+what the table records; adding the column rewrites the table, which is why
+`setup` refuses the table instead of migrating it on a restart.
 
 ## Observing the inbox
 

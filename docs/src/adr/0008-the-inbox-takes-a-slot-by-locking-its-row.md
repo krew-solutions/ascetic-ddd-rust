@@ -58,9 +58,10 @@ identity the protocol never needed, carried through the API for the observer.
   taken. `Fetched` names the slot taken, or none, and the count of slots;
   `Dispatched` the slot held. In a trace a dispatcher is its slot — a slot
   has one holder at a time, so the events between a fetch naming it and the
-  close naming it are one dispatch. The close is logged after the COMMIT, so
-  the next holder's fetch may be logged first; `trace2tla.py` matches a
-  slot's closes to its fetches in order. A fetch that took no slot must find
+  close naming it are one dispatch. The close is logged after the COMMIT,
+  which is what frees the slot, so the next holder's fetch may be logged
+  first; the take proves the close came first, and `trace2tla.py` moves it
+  before the take, for the outbox too. A fetch that took no slot must find
   nothing due in the slots nobody holds; the held ones were passed by.
 - The head index, `(slot, received_position)` over the queue, is the only
   index in `received_position` order. Measured on 200,000 rows, a quarter of
@@ -74,10 +75,12 @@ identity the protocol never needed, carried through the API for the observer.
   take; one dispatch is a sweep, a take, a walk within the slot, the outcome.
 - Model: `Slots` replaces `Workers` and `Dispatchers`, a dispatcher being a
   slot; `Bridge.tla` takes `DstSlots`. The state space is unchanged.
-- A table from before slots is migrated by hand: the column, the head index
-  over `(slot, received_position)` in place of the old one, the unique
-  constraint dropped; the README carries the statements. `setup` then adds
-  `<table>_meta` and `<table>_slots`.
+- A table from before slots is migrated once by the statements
+  `migration_to_slots()` returns for the configured cut — the column, the
+  head index in place of the old one, the unique constraint dropped, then
+  what `setup` creates — from the expression `setup` pins, so the cut cannot
+  differ from what `<table>_meta` records. `setup` refuses the table rather
+  than rewriting it on a restart.
 
 ## Alternatives rejected
 

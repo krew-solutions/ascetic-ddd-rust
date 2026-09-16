@@ -112,6 +112,11 @@ fi
 grep -q "Deadlock reached" "${TMPDIR:-/tmp}/tlc-inbox-forged-snapshot.log" || { cat "${TMPDIR:-/tmp}/tlc-inbox-forged-snapshot.log"; exit 1; }
 echo "   refused, as expected"
 
+echo "== both: a close logged after the next take of its slot is read before it, and the run fits"
+for trace in traces/reordered/*.jsonl; do
+  check_trace "$trace"
+done
+
 echo "== bridge: outbox -> inbox with crashes on both sides, every property holds"
 tlc -config Bridge.cfg MCBridge.tla
 

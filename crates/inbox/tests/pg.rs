@@ -586,6 +586,94 @@ async fn run_processes_until_shutdown() {
     assert_eq!(f.processed().await, 6);
 }
 
+/// A table from before slots is refused until the statements the inbox
+/// gives have run; then it is cut as configured, the head index is the only
+/// one in queue order, and the queue flows.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_table_from_before_slots_is_migrated_by_the_statements_the_inbox_gives() {
+    let (table, sequence) = ("inbox_migration", "inbox_migration_seq");
+    let sessions = PgSessionPool::new(pool());
+    let inbox = PgInbox::new(PgSessionPool::new(pool()))
+        .with_table(table, sequence)
+        .with_slots(2)
+        .partitioned_by(ByStream);
+    // The shape before slots, with rows: a processed one, then two to go.
+    let before = format!(
+        r#"
+        DROP TABLE IF EXISTS {table}, {table}_meta, {table}_slots;
+        DROP SEQUENCE IF EXISTS {sequence};
+        CREATE SEQUENCE {sequence};
+        CREATE TABLE {table} (
+            tenant_id varchar(128) NOT NULL,
+            stream_type varchar(128) NOT NULL,
+            stream_id jsonb NOT NULL,
+            stream_position integer NOT NULL,
+            uri varchar(255) NOT NULL,
+            payload bytea NOT NULL,
+            metadata jsonb NULL,
+            received_position bigint NOT NULL UNIQUE DEFAULT nextval('{sequence}'),
+            processed_position bigint NULL,
+            attempts integer NOT NULL DEFAULT 0,
+            last_error text NULL,
+            next_attempt_at timestamptz NULL,
+            parked_at timestamptz NULL,
+            waiting_for jsonb NULL,
+            waiting_since timestamptz NULL,
+            CONSTRAINT {table}_pk PRIMARY KEY (tenant_id, stream_type, stream_id, stream_position)
+        );
+        CREATE INDEX {table}__head_idx ON {table} (received_position)
+            WHERE processed_position IS NULL AND parked_at IS NULL AND waiting_for IS NULL;
+        INSERT INTO {table} (tenant_id, stream_type, stream_id, stream_position, uri, payload, processed_position)
+        VALUES ('tenant-1', 'orders.Order', '{{"id":"a"}}', 1, 'kafka://orders', '\x00', 1),
+               ('tenant-1', 'orders.Order', '{{"id":"a"}}', 2, 'kafka://orders', '\x00', NULL),
+               ('tenant-1', 'orders.Order', '{{"id":"b"}}', 1, 'kafka://orders', '\x00', NULL);
+        "#
+    );
+
+    let indexes = sessions
+        .session(async |session| {
+            session.connection().batch_execute(&before).await?;
+            match inbox.setup(&session).await {
+                Err(Error::Subscriber(error)) if error.to_string().contains("predates slots") => {}
+                other => panic!("a table from before slots must be refused, got {other:?}"),
+            }
+            session
+                .connection()
+                .batch_execute(&inbox.migration_to_slots())
+                .await?;
+            inbox.setup(&session).await?;
+            let rows = session
+                .connection()
+                .query(
+                    "SELECT indexdef FROM pg_indexes WHERE tablename = $1 ORDER BY indexname",
+                    &[&table],
+                )
+                .await?;
+            Ok::<Vec<String>, Error>(rows.iter().map(|row| row.get(0)).collect())
+        })
+        .await
+        .unwrap();
+    assert!(
+        indexes
+            .iter()
+            .any(|def| def.contains("(slot, received_position)")),
+        "the head index is over (slot, received_position): {indexes:?}"
+    );
+    assert!(
+        !indexes
+            .iter()
+            .any(|def| def.contains("received_position_key")),
+        "the unique index on received_position is gone: {indexes:?}"
+    );
+
+    let (seen, subscriber) = collector();
+    while inbox.dispatch(&subscriber).await.unwrap() != Outcome::Nothing {}
+    let mut all = seen.lock().unwrap().clone();
+    all.sort();
+    assert_eq!(all, ["a@2", "b@1"]);
+}
+
 /// The port is what the edge depends on; a fake collects what it received.
 #[tokio::test]
 async fn the_port_is_implementable_without_a_database() {
