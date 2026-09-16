@@ -167,6 +167,33 @@ impl<O: OutboxObserver> Fixture<O> {
     }
 
     /// The positions of the selection, by slot.
+    /// Two URIs that land in different slots, by the table's cut, for tests
+    /// that need two slots busy at once.
+    async fn uris_in_different_slots(&self) -> (String, String) {
+        let slots = self.outbox.slots() as i32;
+        let slot_of = |uri: String| async move {
+            self.sessions
+                .session(async |session| {
+                    let row = session
+                        .connection()
+                        .query_one("SELECT (hashtext($1) & 2147483647) % $2", &[&uri, &slots])
+                        .await?;
+                    Ok::<i32, Error>(row.get(0))
+                })
+                .await
+                .unwrap()
+        };
+        let first = "kafka://orders/order-1".to_owned();
+        let slot = slot_of(first.clone()).await;
+        for i in 2.. {
+            let candidate = format!("kafka://orders/order-{i}");
+            if slot_of(candidate.clone()).await != slot {
+                return (first, candidate);
+            }
+        }
+        unreachable!("a second slot has some URI")
+    }
+
     async fn positions(&self, selection: &Selection) -> Vec<Position> {
         self.sessions
             .session(async |session| self.outbox.positions(&session, selection).await)
@@ -444,6 +471,38 @@ async fn two_dispatchers_of_one_group_do_not_overlap() {
 
     assert!(a.unwrap() ^ b.unwrap(), "exactly one of them had the batch");
     assert_eq!(*seen.lock().unwrap(), [1, 2, 3]);
+}
+
+/// Two slots, two dispatchers, a subscriber that takes its time: the locks
+/// are per slot, so the two run side by side, not one after the other. The
+/// selection's position rows exist already: their creation, at first
+/// contact, is one transaction's work and would serialize the pair.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn two_slots_are_dispatched_at_once() {
+    let f = fixture_concurrent("parallel", 2).await;
+    let selection = Selection::group("broker");
+    let quick = |_: &OutboxMessage| async { Ok::<(), BoxError>(()) };
+    assert!(!f.outbox.dispatch(quick, &selection).await.unwrap());
+    let (first, second) = f.uris_in_different_slots().await;
+    f.publish(&[message(&first, 1), message(&second, 2)]).await;
+    let slow = |_: &OutboxMessage| async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Ok::<(), BoxError>(())
+    };
+
+    let started = std::time::Instant::now();
+    let (a, b) = tokio::join!(
+        f.outbox.dispatch(slow, &selection),
+        f.outbox.dispatch(slow, &selection),
+    );
+    let elapsed = started.elapsed();
+
+    assert_eq!((a.unwrap(), b.unwrap()), (true, true));
+    assert!(
+        elapsed < Duration::from_millis(550),
+        "two slots took {elapsed:?}: one after the other"
+    );
 }
 
 /// Every keyed URI lands in exactly one of the slots — including the half
