@@ -88,6 +88,16 @@ the same message is still a duplicate. With `with_max_wait` a row waiting
 longer is parked with the dependency named in `last_error`; by default it
 waits for ever (ADR-0006).
 
+Setting a head aside is the whole of that `dispatch`, `Outcome::SetAside`:
+the wait is committed at once, and the next call takes the slot's next
+head. The wait and the mark of the dependency take a transaction-level
+advisory lock on the dependency's identity, the wait before its last look
+at the dependency, the mark before the mark; under READ COMMITTED a mark
+cannot see a wait that is not committed, and without the lock a mark could
+slip between the look and the wait, and the row would wait for a processed
+dependency for ever (ADR-0009). The mark takes the lock only on tables with
+more than one slot: with one, every dispatcher serializes on it.
+
 The mark and the waking are one statement, so the happy path keeps its round
 trips. Draining 200 messages with a subscriber that does nothing, over
 localhost, three runs: 1.43–1.76 ms per message, against 1.54–1.83 ms before
@@ -116,6 +126,7 @@ let inbox = PgInbox::new(pool)
 match inbox.dispatch(&subscriber).await? {
     Outcome::Processed => {}
     Outcome::Failed { attempts, parked } => {}
+    Outcome::SetAside => {}
     Outcome::Nothing => {}
 }
 
@@ -157,9 +168,14 @@ its slot, and the other slots flow. Changing the number of slots or the key
 moves rows between slots and is a migration, not a restart: `setup` refuses a
 table cut otherwise (ADR-0008).
 
-The take is one statement. On 200,000 rows, a quarter of them processed:
-0.07 ms for one slot, 0.21 ms for sixteen, 0.43 ms for sixty-four; idle
-0.05–0.08 ms. The head index, `(slot, received_position)` over the rows
+Taking a slot is one statement, and reading its head another, under a
+snapshot taken after the lock: a statement's snapshot predates the lock it
+takes, and what the slot's previous holder committed in between — its head
+processed, set aside, put in backoff — is out of the first statement's
+sight. Measured on 200,000 rows, a quarter of them processed, with the head
+read in the same statement: 0.07 ms for one slot, 0.21 ms for sixteen,
+0.43 ms for sixty-four; idle 0.05–0.08 ms; the second statement is one
+round trip more. The head index, `(slot, received_position)` over the rows
 neither processed, parked nor waiting, is the only index in
 `received_position` order on purpose: beside a second one over the whole
 column the planner walked that one from the first row, past the whole
@@ -170,9 +186,11 @@ processed history, 89 ms at sixteen slots.
 `PgInbox::observed_by(observer)` attaches an `InboxObserver`, in the shape of
 the session and outbox observers: a synchronous, infallible value, composed as
 a tuple, fixed when the inbox is built. It is told of a message
-received, with its order of arrival or that the identity was already there; a
-row set aside to wait for a dependency; a slot taken and its head, or no
-slot, or a slot whose head waits for its backoff; the subscriber's outcome;
+received, with its order of arrival, its slot and the id of the storing
+transaction, or that the identity was already there; a row set aside to wait
+for a dependency, which is the whole of that dispatch; a slot taken and its
+head, or no slot, or a slot taken with nothing due in it; the subscriber's
+outcome;
 the mark, with its order of processing and the rows it woke; the attempt
 recorded after a failure, with whether it parked the message; rows whose
 wait ran out, parked; the dispatcher's transaction closed, committed or
@@ -185,10 +203,12 @@ snapshot its statement ran under, so that a recorded run says which rows
 each walk could see whatever order two tasks' events were logged in. These
 are the actions of the protocol model in `verify/tla/Inbox.tla`, with the
 steps the model folds into one made visible, so a recording observer yields a
-trace the model can be checked against. The tests do exactly that, through
-the recorder of `ascetic-ddd-trace`: with `ASCETIC_DDD_TRACE_DIR` set they
-write one JSON line per event, and `verify/tla/check.sh` replays those files
-through the model.
+trace the model can be checked against. The tests with one dispatcher at a
+time do exactly that, through the recorder of `ascetic-ddd-trace`: with
+`ASCETIC_DDD_TRACE_DIR` set they write one JSON line per event, and
+`verify/tla/check.sh` replays those files through the model. A test with
+several dispatchers at once records nothing — the order its events are logged
+in is not the order of their commits — and asserts the table's state instead.
 
 ## Deviations from the Python source
 

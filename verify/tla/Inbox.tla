@@ -53,6 +53,8 @@ CONSTANTS
   Poison,         \* SUBSET Msgs: messages whose subscriber never succeeds
   MaxAttempts,    \* failed attempts after which a message is parked; 0: never, retry for ever
   BlockOnBackoff, \* TRUE: a failed message not yet due holds its slot; FALSE: it is stepped over
+  AtomicWait,     \* TRUE: the check of a dependency and the wait are one step, as under the lock of
+                  \* ADR-0009; FALSE: the wait is settled in a later step, and a mark in between cannot see it
   MaxAdmin,       \* unpark and resolve actions, in all
   None            \* a model value: no row held
 
@@ -174,18 +176,31 @@ WaitIn(d, rows, m, dep) ==
   /\ m = Oldest(CandidatesIn(d, rows))
   /\ dep \in Deps[m] \ processed
   /\ waiting' = [waiting EXCEPT ![m] = dep]
-  /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
+  \* without the lock the wait is not committed yet: the row stays held
+  /\ holding' = IF AtomicWait THEN holding ELSE [holding EXCEPT ![d] = m]
+  /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, procOrder, crashes,
                 attempts, due, parked, resolved, admin, expired>>
 Wait(d) == \E m \in Msgs, dep \in Msgs : WaitIn(d, received, m, dep)
 
+\* The wait commits, whatever was marked in between (AtomicWait = FALSE).
+Settle(d) ==
+  /\ ~AtomicWait
+  /\ holding[d] # None
+  /\ waiting[holding[d]] # None
+  /\ holding' = [holding EXCEPT ![d] = None]
+  /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, procOrder, crashes,
+                attempts, due, parked, resolved, admin, waiting, expired>>
+
 \* What waited for m comes back into the queue: waiting_for IS NULL again.
-Woken(m) == [n \in Msgs |-> IF waiting[n] = m THEN None ELSE waiting[n]]
+\* A wait not committed yet -- its row still held -- is not seen.
+Woken(m) == [n \in Msgs |-> IF waiting[n] = m /\ (AtomicWait \/ n \notin Locked) THEN None ELSE waiting[n]]
 
 \* The subscriber ran with the dispatcher's transaction; its writes, the
 \* mark and the waking of what waited for the message commit together.  A
 \* poison message never gets here.
 Commit(d) ==
   /\ holding[d] # None
+  /\ waiting[holding[d]] = None
   /\ holding[d] \notin Poison
   /\ processed' = processed \cup {holding[d]}
   /\ effects' = [effects EXCEPT ![holding[d]] = @ + 1]
@@ -203,6 +218,7 @@ Commit(d) ==
 \* state space infinite.
 Fail(d) ==
   /\ holding[d] # None
+  /\ waiting[holding[d]] = None
   /\ LET m == holding[d] IN
      /\ m \in Poison \/ crashes < MaxCrashes
      /\ crashes' = IF m \in Poison THEN crashes ELSE crashes + 1
@@ -235,6 +251,7 @@ Expire(m) ==
 \* nothing is recorded, and the row is free again.
 Crash(d) ==
   /\ holding[d] # None
+  /\ waiting[holding[d]] = None
   /\ crashes < MaxCrashes
   /\ crashes' = crashes + 1
   /\ holding' = [holding EXCEPT ![d] = None]
@@ -275,14 +292,14 @@ Resolve(m) ==
 
 Next ==
   \/ \E m \in Msgs : Receive(m) \/ Elapse(m) \/ Expire(m) \/ Unpark(m) \/ Resolve(m)
-  \/ \E d \in Slots : Fetch(d) \/ Wait(d) \/ Commit(d) \/ Fail(d) \/ Crash(d)
+  \/ \E d \in Slots : Fetch(d) \/ Wait(d) \/ Settle(d) \/ Commit(d) \/ Fail(d) \/ Crash(d)
 
 \* Every message that arrives at all arrives eventually; every backoff
 \* passes, and every wait runs out where waits do; every dispatcher keeps
 \* walking its queue and finishes what it took, one way or the other.
 Fairness ==
   /\ \A m \in Msgs : WF_vars(Receive(m)) /\ WF_vars(Elapse(m)) /\ WF_vars(Expire(m))
-  /\ \A d \in Slots : WF_vars(Fetch(d) \/ Wait(d)) /\ WF_vars(Commit(d) \/ Fail(d))
+  /\ \A d \in Slots : WF_vars(Fetch(d) \/ Wait(d) \/ Settle(d)) /\ WF_vars(Commit(d) \/ Fail(d))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 

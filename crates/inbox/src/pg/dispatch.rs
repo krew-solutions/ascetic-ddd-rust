@@ -7,12 +7,11 @@ use tokio::sync::watch;
 
 use super::{Loops, Outcome, PgInbox};
 use crate::error::{BoxError, Error};
-use crate::message::InboxMessage;
+use crate::message::{CausalDependency, InboxMessage};
 use crate::observer::{
     Dispatched, Expired, Failed, Fetched, Handled, InboxObserver, Marked, Resolved, Unparked,
     Waiting,
 };
-use crate::snapshot::Snapshot;
 
 /// What ended a dispatch transaction in failure, with the slot it held, so
 /// that the observer learns which slot's work rolled back.
@@ -36,38 +35,47 @@ where
     P::Session: PgAccess + Sync,
     O: InboxObserver,
 {
-    /// Processes the next eligible message with `subscriber`.
+    /// Processes the next eligible message with `subscriber`, in one
+    /// transaction.
     ///
     /// Takes whichever slot has a due head and is held by nobody, least
     /// recently served first, and holds it for the length of the transaction,
     /// so that one dispatcher at a time works a slot and the order of arrival
-    /// within it is kept. The subscriber runs inside the transaction that
-    /// marks the message processed, and is given that transaction, in a
-    /// savepoint of its own: if it fails, its writes are rolled back to the
-    /// savepoint, and the attempt is recorded and committed instead of the
-    /// mark. `Err` is for the database; a failing subscriber is an
-    /// [`Outcome`]. A dispatcher has no identity: any number of them, in any
-    /// number of processes, share the slots through the locks alone.
+    /// within it is kept. A head whose dependency is not processed is set
+    /// aside to wait for it, and that is the whole transaction: the wait is
+    /// committed at once, under a lock on the dependency's identity that its
+    /// mark takes too, so that neither misses the other (ADR-0009); the next
+    /// call takes the slot's next head. Otherwise the subscriber runs inside
+    /// the transaction that marks the message processed, and is given that
+    /// transaction, in a savepoint of its own: if it fails, its writes are
+    /// rolled back to the savepoint, and the attempt is recorded and
+    /// committed instead of the mark. `Err` is for the database; a failing
+    /// subscriber is an [`Outcome`]. A dispatcher has no identity: any number
+    /// of them, in any number of processes, share the slots through the locks
+    /// alone.
     pub async fn dispatch<F, Fut>(&self, subscriber: F) -> Result<Outcome, Error>
     where
         F: Fn(&P::Session, &InboxMessage) -> Fut + Send + Sync,
         Fut: Future<Output = Result<(), BoxError>> + Send,
     {
+        if let Some(max_wait) = self.max_wait {
+            // A statement of its own, outside the dispatch transaction: a
+            // transaction holding expired rows must never wait for a lock a
+            // marker holds (ADR-0009).
+            let expired = self
+                .pool
+                .session(async |session| self.expire_waiting(&session, max_wait).await)
+                .await?;
+            if !expired.is_empty() {
+                self.observer.on_expired(&Expired { messages: &expired });
+            }
+        }
         let before_slot = |error: Error| Rolled { slot: None, error };
         let outcome: Result<(Option<u32>, Outcome), Rolled> = self
             .pool
             .session(async |session| {
                 session
                     .atomic(async |tx| {
-                        if let Some(max_wait) = self.max_wait {
-                            let expired = self
-                                .expire_waiting(&tx, max_wait)
-                                .await
-                                .map_err(before_slot)?;
-                            if !expired.is_empty() {
-                                self.observer.on_expired(&Expired { messages: &expired });
-                            }
-                        }
                         let taken = self.take(&tx).await.map_err(before_slot)?;
                         let Some(slot) = taken.slot else {
                             self.observer.on_fetched(&Fetched {
@@ -82,19 +90,55 @@ where
                             slot: Some(slot),
                             error,
                         };
-                        let (taken_head, snapshot) = self
-                            .next_processable(&tx, slot, taken.head, taken.snapshot)
+                        let step = self.head_of(&tx, slot).await.map_err(in_slot)?;
+                        let snapshot = step.snapshot;
+                        let message = match step.row {
+                            Some((message, false)) => message,
+                            // the previous holder changed the head after the
+                            // take chose the slot: nothing due in it now
+                            Some((_, true)) | None => {
+                                self.observer.on_fetched(&Fetched {
+                                    slot: Some(slot),
+                                        slots: taken.slots,
+                                    message: None,
+                                    snapshot: &snapshot,
+                                });
+                                return Ok((Some(slot), Outcome::Nothing));
+                            }
+                        };
+                        if let Some(dependency) = self
+                            .first_unprocessed_dependency(&tx, &message)
                             .await
-                            .map_err(in_slot)?;
+                            .map_err(in_slot)?
+                        {
+                            self.lock_identity(&tx, &dependency)
+                                .await
+                                .map_err(in_slot)?;
+                            let set = self
+                                .set_waiting_unless_processed(&tx, &message, &dependency)
+                                .await
+                                .map_err(in_slot)?;
+                            if !set {
+                                // marked between the check and the lock: nothing
+                                // to wait for, and the lock is the one this
+                                // transaction may hold; the next call takes the
+                                // head again
+                                return Ok((Some(slot), Outcome::Nothing));
+                            }
+                            self.observer.on_waiting(&Waiting {
+                                slot,
+                                message: &message,
+                                dependency: &dependency,
+                                snapshot: &snapshot,
+                            });
+                            return Ok((Some(slot), Outcome::SetAside));
+                        }
                         self.observer.on_fetched(&Fetched {
                             slot: Some(slot),
                             slots: taken.slots,
-                            message: taken_head.as_ref(),
+                            message: Some(&message),
                             snapshot: &snapshot,
                         });
-                        let Some(message) = taken_head else {
-                            return Ok((Some(slot), Outcome::Nothing));
-                        };
                         let attempt = tx
                             .atomic(async |inner| {
                                 subscriber(&inner, &message)
@@ -114,6 +158,13 @@ where
                         });
                         match failure {
                             None => {
+                                if self.slots > 1 {
+                                    // with one slot every dispatcher serializes on
+                                    // it, and no wait can race the mark
+                                    self.lock_identity(&tx, &CausalDependency::on(&message))
+                                        .await
+                                        .map_err(in_slot)?;
+                                }
                                 let (processed_position, woken) = self
                                     .mark_processed(&tx, &message)
                                     .await
@@ -183,8 +234,9 @@ where
     }
 
     /// Processes messages until `shutdown` completes, with `loops.concurrency`
-    /// loops. A loop that finds nothing waits `loops.poll_interval`. Shutdown
-    /// is cooperative: a loop finishes its message, commits, and only then
+    /// loops. A loop that finds nothing waits `loops.poll_interval`; one that
+    /// processed, failed or set a message aside goes on at once. Shutdown is
+    /// cooperative: a loop finishes its message, commits, and only then
     /// stops. If a loop fails, the others are stopped the same way and its
     /// error is returned; a failing subscriber is not such a failure.
     pub async fn run<F, Fut>(
@@ -208,7 +260,7 @@ where
                         return Ok(());
                     }
                     match self.dispatch(subscriber).await {
-                        Ok(Outcome::Processed | Outcome::Failed { .. }) => {}
+                        Ok(Outcome::Processed | Outcome::Failed { .. } | Outcome::SetAside) => {}
                         Ok(Outcome::Nothing) => {
                             tokio::select! {
                                 _ = stopped.changed() => return Ok(()),
@@ -256,14 +308,22 @@ where
     }
 
     /// Marks a parked message processed by hand, without the subscriber's
-    /// effects, and puts what waited for it back into the queue. Returns
+    /// effects, and puts what waited for it back into the queue. Runs in a
+    /// transaction of `session`, under the lock a mark takes (ADR-0009), so
+    /// a wait for this message set beside it is woken all the same. Returns
     /// whether the message was parked.
     pub async fn resolve(
         &self,
         session: &P::Session,
         message: &InboxMessage,
     ) -> Result<bool, Error> {
-        let resolved = self.resolve_row(session, message).await?;
+        let resolved = session
+            .atomic(async |tx| {
+                self.lock_identity(&tx, &CausalDependency::on(message))
+                    .await?;
+                self.resolve_row(&tx, message).await
+            })
+            .await?;
         if let Some((processed_position, woken)) = &resolved {
             self.observer.on_resolved(&Resolved {
                 message,
@@ -272,42 +332,5 @@ where
             });
         }
         Ok(resolved.is_some())
-    }
-
-    /// The head of the held slot, once every head ahead of it that depends
-    /// on something unprocessed has been set aside to wait; or nothing, when
-    /// the slot's queue is empty or its head waits for its backoff. Starts
-    /// from the head the taking statement locked; with it, the snapshot of
-    /// the statement that decided.
-    async fn next_processable(
-        &self,
-        session: &P::Session,
-        slot: u32,
-        head: Option<InboxMessage>,
-        snapshot: Snapshot,
-    ) -> Result<(Option<InboxMessage>, Snapshot), Error> {
-        let (mut head, mut snapshot) = (head, snapshot);
-        loop {
-            let Some(message) = head else {
-                return Ok((None, snapshot));
-            };
-            let Some(dependency) = self.first_unprocessed_dependency(session, &message).await?
-            else {
-                return Ok((Some(message), snapshot));
-            };
-            self.set_waiting(session, &message, &dependency).await?;
-            self.observer.on_waiting(&Waiting {
-                slot,
-                message: &message,
-                dependency: &dependency,
-                snapshot: &snapshot,
-            });
-            let step = self.head_of(session, slot).await?;
-            snapshot = step.snapshot;
-            head = match step.row {
-                Some((next, deferred)) if !deferred => Some(next),
-                _ => None,
-            };
-        }
     }
 }

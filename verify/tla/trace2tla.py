@@ -23,19 +23,18 @@ The outbox mapping:
     dispatched rolled_back    -> crash    (d), if a batch was fetched
 
 Messages are named m1, m2, ... in order of publication; a dispatcher is
-<<group, slot>>: the slot whose position it holds, whoever runs it. The close
-of a dispatch is logged after its COMMIT, and the COMMIT is what frees the
-slot, so the next take of the same slot may be logged before the close; the
-close is moved to just before that take, where it happened (see
-`closes_before_the_next_take`).
+<<group, slot>>: the slot whose position it holds, whoever runs it. A run
+with several dispatchers at once is not checked: the order its events are
+logged in is not the order of their commits (see verify/tla/README.md).
 
 The inbox mapping:
 
-    received, stored          -> receive   (msg, pos, xid, deps)
+    received, stored          -> receive   (msg, pos, xid, slot, deps)
     received, duplicate       -> duplicate (msg)
-    waiting                   -> wait      (slot, of, msg, dep, snap): set aside for the dependency
+    waiting                   -> wait      (slot, of, msg, dep, snap): set aside for the dependency;
+                                            the whole dispatch, closed by `dispatched set_aside`
     fetched, a row            -> fetch     (slot, of, msg, snap)
-    fetched, a slot, no row   -> nofetch   (slot, of, snap): the slot's head waits for its backoff
+    fetched, a slot, no row   -> nofetch   (slot, of, snap): nothing due in the slot once taken
     fetched, no slot          -> nofetch   (of, snap): no slot had a due head
     handled ok                -> handle    (slot, of, msg)
     handled failed            -> nothing: the subscriber declined
@@ -44,23 +43,25 @@ The inbox mapping:
                               -> fail      (slot, of, msg, attempts, parked): the attempt commits
     marked + dispatched processed
                               -> commit    (slot, of, woken): the mark and the rows it woke
-    dispatched nothing        -> nothing: the nofetch already said it
+    dispatched set_aside      -> nothing: the wait already said it
+    dispatched nothing        -> nothing: the nofetch already said it, or a wait was not
+                                          set because the dependency was marked meanwhile
     dispatched rolled_back    -> crash     (slot, of), if a row was fetched
     expired                   -> expire    (msg), one per row parked
     unparked                  -> unpark    (msg)
     resolved                  -> resolve   (msg, woken)
 
 Messages are named in order of first mention, a dependency that never arrives
-included; a dispatcher is the slot it holds, whoever ran it. A slot has one
-holder at a time, so the events between a fetch naming a slot and the close
-naming it are one dispatch; a close logged after the next take of its slot is
-moved before it, as for the outbox.
+included; a dispatcher is the slot it holds, whoever ran it: the events
+between a fetch, or a set-aside, naming a slot and the close naming it are
+one dispatch. As for the outbox, a run with several dispatchers at once is
+not checked.
 
 The bridge mapping is both of the above, with messages named by `message_id`
 on both sides and one step of its own:
 
     inbox received + outbox handled ok of the same message
-                              -> forward   (d, msg, dup, pos, xid, deps): Bridge's Forward, at the store
+                              -> forward   (d, msg, dup, pos, xid, slot, deps): Bridge's Forward, at the store
     a handled ok with no store, or a store no handling follows
                               -> handle / receive, as above: not steps of the bridge, refused
 """
@@ -111,49 +112,6 @@ class Names:
         if key not in self.names:
             raise SystemExit(f"{what} names a message never seen before: {key}")
         return self.names[key]
-
-
-def closes_before_the_next_take(events, key_of, opens):
-    """The close of a dispatch — `dispatched` — is logged after its COMMIT,
-    and the COMMIT is what frees the slot: another dispatcher may take the
-    slot and log its `fetched` before the first one's close is written. The
-    take proves the close happened first, so the close is moved to just
-    before the take. What it says — committed, failed, rolled back — is the
-    same wherever it is read. `key_of(e)` is the slot an event is about, or
-    `None`; `opens(e)` whether a `fetched` took a slot."""
-    events = list(events)
-    open_ = {}  # slot -> dispatches that took it and are not closed yet
-    i = 0
-    while i < len(events):
-        e = events[i]
-        key = key_of(e)
-        if key is not None and e["event"] == "fetched" and opens(e):
-            if open_.get(key, 0) > 0:
-                close = next((j for j in range(i + 1, len(events))
-                              if events[j]["event"] == "dispatched" and key_of(events[j]) == key), None)
-                if close is None:
-                    raise SystemExit(f"slot {key} was taken again while its dispatch was open, and that dispatch never closed")
-                events.insert(i, events.pop(close))
-                continue  # the close is at i now, and is read before the take
-            open_[key] = open_.get(key, 0) + 1
-        elif key is not None and e["event"] == "dispatched":
-            open_[key] = open_.get(key, 0) - 1
-        i += 1
-    return events
-
-
-def outbox_key(e):
-    return (e["group"], e["slot"]) if e.get("observer") == "outbox" and e.get("slot") is not None else None
-
-
-def inbox_key(e):
-    return e["slot"] if e.get("observer") == "inbox" and e.get("slot") is not None else None
-
-
-def in_order(events):
-    """Both sides' closes moved before the next take of their slot."""
-    events = closes_before_the_next_take(events, outbox_key, lambda e: bool(e["messages"]))
-    return closes_before_the_next_take(events, inbox_key, lambda e: True)
 
 
 def outbox_steps(events, names=None):
@@ -209,8 +167,7 @@ def snapshot(e):
 
 def inbox_steps(events, names=None, by_message_id=False):
     """`by_message_id`: name rows by the `message_id` of their metadata, as
-    the outbox does, so that a bridge trace names a message once. Expects
-    the closes in place (`in_order`): one open dispatch per slot."""
+    the outbox does, so that a bridge trace names a message once."""
     names = names or Names()
     rows = {}     # row identity -> name
     # how many slots the table is cut into: one number, logged with every fetch
@@ -254,7 +211,8 @@ def inbox_steps(events, names=None, by_message_id=False):
             if e["received_position"] is None:
                 yield record(side="inbox", event="duplicate", msg=msg)
             else:
-                yield record(side="inbox", event="receive", msg=msg, pos=e["received_position"], xid=e["xid"], deps=deps)
+                yield record(side="inbox", event="receive", msg=msg, pos=e["received_position"], xid=e["xid"],
+                             slot=e["slot"], deps=deps)
             continue
         slot = e["slot"]
         if kind == "fetched":
@@ -269,6 +227,10 @@ def inbox_steps(events, names=None, by_message_id=False):
                 holding[slot] = row(e["id"], "a fetch")
                 yield record(side="inbox", event="fetch", slot=slot, of=slots, msg=holding[slot], snap=snapshot(e))
         elif kind == "waiting":
+            # the wait is the dispatch: it holds no row and is closed by `set_aside`
+            if slot in holding:
+                raise SystemExit(f"slot {slot} set a row aside while holding {holding[slot]}")
+            holding[slot] = None
             yield record(side="inbox", event="wait", slot=slot, of=slots, msg=row(e["id"], "a wait"),
                          dep=dependency(e["dependency"]), snap=snapshot(e))
         elif kind == "failed":
@@ -283,9 +245,11 @@ def inbox_steps(events, names=None, by_message_id=False):
         elif kind == "dispatched":
             if slot is None:
                 continue  # nothing taken: the nofetch said it, or a rollback before any slot was taken
-            if slot not in holding:
-                raise SystemExit(f"slot {slot} closed a dispatch that never opened")
             outcome = e["outcome"]
+            if slot not in holding:
+                if outcome in ("nothing", "rolled_back"):
+                    continue  # a slot taken and nothing durable done: the dependency was marked meanwhile
+                raise SystemExit(f"slot {slot} closed a dispatch that never opened")
             if outcome == "processed":
                 yield record(side="inbox", event="commit", slot=slot, of=slots, woken=woken.get(slot, []))
             elif outcome == "failed":
@@ -314,7 +278,7 @@ def bridge_steps(events):
     stores = {}
     outbox_seen, inbox_seen = [], []
     produced_outbox = produced_inbox = 0
-    for e in in_order(events):
+    for e in events:
         if e["observer"] == "outbox":
             outbox_seen.append(e)
             steps = list(outbox_steps(outbox_seen, names))
@@ -335,7 +299,7 @@ def bridge_steps(events):
                 store = out[at]["fields"]
                 out[at] = record(side="bridge", event="forward", d=fields["d"], msg=fields["msg"],
                                  dup=store["event"] == "duplicate", pos=store.get("pos", 0),
-                                 xid=store.get("xid", 0), deps=store.get("deps", []))
+                                 xid=store.get("xid", 0), slot=store.get("slot", 0), deps=store.get("deps", []))
             else:
                 out.append(step)
     return out
@@ -365,7 +329,7 @@ def main(trace, out):
         if foreign:
             raise SystemExit(f"{trace.name} holds {foreign[0]} events; name it bridge-*.jsonl to check both sides")
     name = "Trace_" + re.sub(r"[^A-Za-z0-9_]", "_", trace.stem)
-    produced = list(steps(events if crate == "bridge" else in_order(events)))
+    produced = list(steps(events))
     body = ",\n  ".join(str(step) for step in produced)
     # The order of arrival is a promise only with one slot.
     if crate == "inbox" and all(step["fields"].get("of", 1) == 1 for step in produced):

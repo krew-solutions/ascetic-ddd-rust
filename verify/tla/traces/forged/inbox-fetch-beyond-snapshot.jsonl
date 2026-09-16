@@ -1,6 +1,6 @@
-{"deps": [], "event": "received", "id": "tenant-1/orders.Order/{\"id\":\"b\"}/1", "message_id": "00000000-0000-4000-8000-000000000011", "observer": "inbox", "received_position": 1, "xid": 2038518}
-{"deps": [], "event": "received", "id": "tenant-1/orders.Order/{\"id\":\"a\"}/1", "message_id": "00000000-0000-4000-8000-000000000012", "observer": "inbox", "received_position": 2, "xid": 2038529}
-{"deps": [], "event": "received", "id": "tenant-1/orders.Order/{\"id\":\"a\"}/2", "message_id": "00000000-0000-4000-8000-000000000013", "observer": "inbox", "received_position": 3, "xid": 2038533}
+{"deps": [], "event": "received", "id": "tenant-1/orders.Order/{\"id\":\"b\"}/1", "message_id": "00000000-0000-4000-8000-000000000011", "observer": "inbox", "received_position": 1, "slot": 0, "xid": 2038518}
+{"deps": [], "event": "received", "id": "tenant-1/orders.Order/{\"id\":\"a\"}/1", "message_id": "00000000-0000-4000-8000-000000000012", "observer": "inbox", "received_position": 2, "slot": 0, "xid": 2038529}
+{"deps": [], "event": "received", "id": "tenant-1/orders.Order/{\"id\":\"a\"}/2", "message_id": "00000000-0000-4000-8000-000000000013", "observer": "inbox", "received_position": 3, "slot": 0, "xid": 2038533}
 {"event": "fetched", "id": "tenant-1/orders.Order/{\"id\":\"b\"}/1", "observer": "inbox", "slot": 0, "slots": 1, "snapshot": {"xip": [], "xmax": 2038518, "xmin": 2038518}}
 {"event": "handled", "id": "tenant-1/orders.Order/{\"id\":\"b\"}/1", "observer": "inbox", "ok": true, "slot": 0}
 {"event": "marked", "id": "tenant-1/orders.Order/{\"id\":\"b\"}/1", "observer": "inbox", "processed_position": 4, "slot": 0, "woken": []}

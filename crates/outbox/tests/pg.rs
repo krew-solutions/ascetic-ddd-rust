@@ -65,9 +65,30 @@ async fn fixture_slotted(name: &str, slots: u32) -> Fixture {
 
 /// The same, watched by `observer`.
 async fn fixture_observed<O: OutboxObserver>(name: &str, observer: O, slots: u32) -> Fixture<O> {
+    fixture_built(
+        name,
+        observer,
+        slots,
+        TraceFile::from_env(&format!("outbox-{name}")),
+    )
+    .await
+}
+
+/// The same for a test that runs several dispatchers at once, which records
+/// no trace: the order its events are logged in is not the order of their
+/// commits.
+async fn fixture_concurrent(name: &str, slots: u32) -> Fixture {
+    fixture_built(name, (), slots, TraceFile::off()).await
+}
+
+async fn fixture_built<O: OutboxObserver>(
+    name: &str,
+    observer: O,
+    slots: u32,
+    trace: TraceFile,
+) -> Fixture<O> {
     let tables = (format!("outbox_{name}"), format!("outbox_{name}_offsets"));
     let sessions = PgSessionPool::new(pool());
-    let trace = TraceFile::from_env(&format!("outbox-{name}"));
     let outbox = PgOutbox::new(PgSessionPool::new(pool()))
         .with_tables(&tables.0, &tables.1)
         .with_slots(slots)
@@ -395,7 +416,7 @@ async fn an_message_id_is_published_once() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn two_dispatchers_of_one_group_do_not_overlap() {
-    let f = fixture("lock").await;
+    let f = fixture_concurrent("lock", 1).await;
     f.publish(
         &(1..=3)
             .map(|i| message("kafka://orders", i))
@@ -460,7 +481,7 @@ async fn slots_share_the_uris_without_gaps_or_overlap() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn run_dispatches_until_shutdown() {
-    let f = fixture_slotted("run", 4).await;
+    let f = fixture_concurrent("run", 4).await;
     f.publish(
         &(1..=6)
             .map(|i| message(&format!("kafka://orders/order-{i}"), i))

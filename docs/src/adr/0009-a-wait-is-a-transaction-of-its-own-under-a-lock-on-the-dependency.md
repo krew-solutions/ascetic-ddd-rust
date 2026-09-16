@@ -135,25 +135,43 @@ signature could not move.
 - The `waiting_since` stamp is now the commit of the wait, so `max_wait`
   counts from when the wait became visible, not from a call that may still
   be running a subscriber.
-- Model: `Inbox.tla` unchanged — `WaitIn` and `Commit` are now literally the
-  implementation. In the project's habit, a constant `AtomicWait` whose
-  `FALSE` splits `WaitIn` into a check step and a set step, with
-  `InboxSplitWait.cfg` required to violate `WaitingIsAside`: the model then
-  records why the lock exists, as `InboxNoWaiting.cfg` records why waiting
-  exists.
-- Tests required. Two exist and fail until the change lands:
+- Model: `WaitIn` and `Commit` are now literally the implementation. A
+  constant `AtomicWait`, `TRUE` everywhere but in `InboxSplitWait.cfg`,
+  where a wait is settled a step after its check and a mark in between
+  cannot see it: TLC finds `WaitingIsAside` violated, a message waiting
+  for a processed dependency. The model records why the lock exists, as
+  `InboxNoWaiting.cfg` records why waiting exists; with `TRUE` the state
+  space is unchanged.
+- Tests, all in `crates/inbox/tests/pg.rs`:
   `a_wait_set_while_its_dependency_arrives_and_is_marked_elsewhere_is_woken`
   (dependency not yet arrived) and
   `a_wait_set_while_its_dependency_is_being_marked_elsewhere_is_woken`
   (dependency in flight; `served_at` biased so the dependent's slot is taken
-  first), both in `crates/inbox/tests/pg.rs`; `two_slots_are_worked_at_once`
-  there shows the slots stay independent. Still to write: the wait visible
-  from another session while the first dispatcher's call is still running;
-  a stress run — several loops, several slots, hundreds of messages with
-  random acyclic cross-slot dependencies, small random sleeps, `max_wait`
-  and an occasional `resolve` — that must end in `Ok` with everything
-  processed, its trace replayed through `verify/tla/check.sh`, whose
-  exact-`woken` check is what proves no wake was lost.
+  first) failed at the commit that accepted this ADR and pass now;
+  `two_slots_are_worked_at_once` shows the slots stay independent; the wait
+  visible from another session once the call returned is the first
+  assertion of `a_dependency_that_never_arrives_parks_the_message_after_max_wait`;
+  `loops_over_slots_with_dependencies_across_them_lose_no_wake` is the
+  stress run — three loops over four slots, 120 messages with random
+  acyclic dependencies across slots, published in random order while the
+  loops run, small random sleeps, `max_wait`, one poison message parked and
+  resolved by hand — which must end in `Ok` with everything processed and
+  no row waiting for a processed dependency: the lost wake as one query.
+- The stress run found the take of ADR-0008 wrong: one statement locks the
+  slot and reads its head, but its snapshot predates the lock, and a head
+  the previous holder processed in between fails the re-check `FOR UPDATE`
+  makes on the latest version — the slot came back without a head, a
+  database error that stopped the loops. The head is now read in a
+  statement of its own after the lock, one round trip more per dispatch;
+  ADR-0008's point 2 is amended so.
+- A receipt names the slot the row landed in, so the trace model places
+  every arrived message exactly instead of guessing the untouched ones.
+  Runs with several dispatchers at once are not trace-checked any more: the
+  order their events are logged in is not the order of their commits, and
+  the rules that reordered the log by snapshots and transaction ids kept
+  growing and missing cases while finding no defect of the library; such
+  runs assert their outcome and the table's state instead
+  (`verify/tla/README.md`).
 
 ## Alternatives rejected
 

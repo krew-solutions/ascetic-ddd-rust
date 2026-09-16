@@ -38,6 +38,8 @@ pub struct Receipt {
     pub transaction_id: u64,
     /// The row's order of arrival.
     pub received_position: i64,
+    /// The slot the row landed in, by the table's cut.
+    pub slot: u32,
 }
 
 /// A message was handed to the inbox, in a transaction of its own.
@@ -66,13 +68,15 @@ pub struct Waiting<'a> {
 /// A dispatcher took a row, locked for the length of its transaction; or
 /// took nothing.
 pub struct Fetched<'a> {
-    /// The slot the dispatcher holds; `None` when no slot had a due head.
+    /// The slot the dispatcher holds; `None` when no slot had a due head
+    /// that nobody held.
     pub slot: Option<u32>,
     /// How many slots the table is cut into.
     pub slots: u32,
-    /// The row; `None` when nothing was eligible: no slot had a due head, or
-    /// the head of the slot held waits for its backoff after what was in
-    /// front of it was set aside.
+    /// The row about to be handed to the subscriber; `None` when no slot was
+    /// taken, or when the slot taken had no due head once it was read after
+    /// the lock. A head set aside for a dependency is a [`Waiting`], not a
+    /// fetch.
     pub message: Option<&'a InboxMessage>,
     /// What the statement that returned the row, or found none, could see.
     pub snapshot: &'a Snapshot,

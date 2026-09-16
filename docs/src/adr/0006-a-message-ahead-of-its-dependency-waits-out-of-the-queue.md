@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted (2026-09-15).
+Accepted (2026-09-15). Amended by ADR-0009: setting a head aside is a
+transaction of its own, under a lock on the dependency's identity that the
+dependency's mark takes too.
 
 ## Context
 

@@ -1,12 +1,12 @@
-{"deps":[],"event":"received","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","message_id":"00000000-0000-4000-8000-000000000008","observer":"inbox","received_position":1,"xid":2043085}
-{"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","slot":0,"slots":1,"snapshot":{"xip":[2043087,2043089],"xmax":2043091,"xmin":2043087}}
+{"deps":[],"event":"received","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","message_id":"00000000-0000-4000-8000-000000000004","observer":"inbox","received_position":1,"slot":0,"xid":2048628}
+{"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","slot":0,"slots":1,"snapshot":{"xip":[2048636],"xmax":2048638,"xmin":2048636}}
 {"event":"handled","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","ok":false,"slot":0}
 {"attempts":1,"error":"the first attempt fails on purpose","event":"failed","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","parked":true,"retry_after_ms":0,"slot":0}
 {"event":"dispatched","observer":"inbox","outcome":"failed","slot":0}
-{"event":"fetched","id":null,"observer":"inbox","slot":null,"slots":1,"snapshot":{"xip":[],"xmax":2043097,"xmin":2043097}}
+{"event":"fetched","id":null,"observer":"inbox","slot":null,"slots":1,"snapshot":{"xip":[2048643],"xmax":2048645,"xmin":2048643}}
 {"event":"dispatched","observer":"inbox","outcome":"nothing","slot":null}
 {"event":"unparked","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox"}
-{"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","slot":0,"slots":1,"snapshot":{"xip":[2043097,2043098],"xmax":2043102,"xmin":2043097}}
+{"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","slot":0,"slots":1,"snapshot":{"xip":[2048645,2048646,2048649,2048653],"xmax":2048658,"xmin":2048645}}
 {"event":"handled","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","ok":true,"slot":0}
 {"event":"marked","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","processed_position":2,"slot":0,"woken":[]}
 {"event":"dispatched","observer":"inbox","outcome":"processed","slot":0}

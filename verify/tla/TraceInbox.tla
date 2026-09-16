@@ -33,8 +33,8 @@
 (*                                                                         *)
 (* A dispatcher is the slot it holds, whoever ran it: the recorded events   *)
 (* name the slot.  A fetch that took no slot names none, and the check      *)
-(* then speaks for every slot; one that took a slot and found its head      *)
-(* waiting for its backoff names the slot, and the check speaks for it.    *)
+(* then speaks for every slot nobody holds; one that took a slot and found  *)
+(* nothing due in it names the slot, and the check speaks for it.          *)
 (*                                                                         *)
 (* Nofetch and handle are checks, not steps of the model: an empty fetch    *)
 (* must find nothing to take in the slots it speaks for; a handled message  *)
@@ -79,11 +79,9 @@ MaxAttempts == IF Parks = {} THEN 0 ELSE (CHOOSE r \in Parks : TRUE).attempts
 BlockOnBackoff == TRUE
 MaxAdmin == Cardinality({j \in 1..Len(Trace) : Trace[j].side = "inbox" /\ Trace[j].event \in {"unpark", "resolve"}})
 
-\* The slot a message's partition key hashes to, read off the fetches and
-\* waits; a message nobody touched may go anywhere.
-TouchedBy(m) == {r.slot : r \in {e \in InboxEvents : e.event \in {"wait", "fetch"} /\ e.msg = m}}
-Part == [m \in Msgs |-> IF TouchedBy(m) = {} THEN CHOOSE w \in Slots : TRUE
-                                            ELSE CHOOSE w \in TouchedBy(m) : TRUE]
+\* The slot a message's partition key hashes to, as its receipt says; a
+\* dependency that never arrives may go anywhere.
+Part == [m \in Msgs |-> IF m \in Arrives THEN Stored(m).slot ELSE CHOOSE w \in Slots : TRUE]
 
 VARIABLES part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
           attempts, due, parked, resolved, admin, waiting, expired,
@@ -96,7 +94,7 @@ O == INSTANCE Inbox WITH Msgs <- Msgs, Deps <- Deps, Arrives <- Arrives, Slots <
                          MaxCrashes <- MaxCrashes,
                          WaitsOnDependencies <- WaitsOnDependencies, WaitExpires <- WaitExpires, None <- None,
                          Poison <- Poison, MaxAttempts <- MaxAttempts,
-                         BlockOnBackoff <- BlockOnBackoff, MaxAdmin <- MaxAdmin
+                         BlockOnBackoff <- BlockOnBackoff, MaxAdmin <- MaxAdmin, AtomicWait <- TRUE
 
 Pending == i <= Len(Trace)
 Step == Trace[i]
@@ -167,9 +165,9 @@ Logged ==
      \/ /\ Step.event = "fetch"
         /\ O!FetchFrom(Step.slot, Visible(Step.snap))
         /\ holding'[Step.slot] = Step.msg
-     \* nothing to take: in the slot the dispatcher held, whose head may be
-     \* waiting for its backoff, or, when no slot was taken, in any slot
-     \* nobody holds -- a held slot is passed by, SKIP LOCKED
+     \* nothing to take: in the slot the dispatcher took, whose head was
+     \* read after the lock, or, when no slot was taken, in any slot nobody
+     \* holds -- a held slot is passed by, SKIP LOCKED
      \/ /\ Step.event = "nofetch"
         /\ ("slot" \in DOMAIN Step) => holding[Step.slot] = None
         /\ \A s \in (IF "slot" \in DOMAIN Step THEN {Step.slot} ELSE Slots) :

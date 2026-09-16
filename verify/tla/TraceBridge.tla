@@ -46,11 +46,9 @@ B == INSTANCE Bridge WITH Msgs <- Msgs, Uris <- TO!Uris, SrcGroup <- SrcGroup, S
 Pending == i <= Len(Trace)
 Step == Trace[i]
 
-\* Which inbox worker a message landed on, read off the inbox's fetches; a
-\* message nobody touched may go anywhere.  The inbox partitions by URI, and
-\* Bridge's Init requires the partitioning to respect that.
-Part == [m \in Msgs |-> IF TI!TouchedBy(m) = {} THEN CHOOSE w \in TI!Slots : TRUE
-                                                ELSE CHOOSE w \in TI!TouchedBy(m) : TRUE]
+\* Which inbox slot a message landed in, as its receipt says; the inbox is
+\* cut by URI, which Bridge's Init requires the placement to respect.
+Part == TI!Part
 
 (* ------------------------------------------------------------------------ *)
 

@@ -167,6 +167,7 @@ impl InboxObserver for JsonTrace {
             "deps": event.message.causal_dependencies().iter().map(dependency_id).collect::<Vec<_>>(),
             "received_position": event.receipt.map(|receipt| receipt.received_position),
             "xid": event.receipt.map(|receipt| receipt.transaction_id),
+            "slot": event.receipt.map(|receipt| receipt.slot),
         }));
     }
     fn on_waiting(&self, event: &inbox::Waiting<'_>) {
@@ -235,6 +236,7 @@ impl InboxObserver for JsonTrace {
             "outcome": match event.outcome {
                 Ok(Outcome::Processed) => "processed",
                 Ok(Outcome::Failed { .. }) => "failed",
+                Ok(Outcome::SetAside) => "set_aside",
                 Ok(Outcome::Nothing) => "nothing",
                 Err(_) => "rolled_back",
             },
@@ -276,6 +278,16 @@ impl TraceFile {
             recorder: Arc::new(JsonTrace::new()),
             path: std::env::var_os("ASCETIC_DDD_TRACE_DIR")
                 .map(|dir| PathBuf::from(dir).join(format!("{stem}.jsonl"))),
+        }
+    }
+
+    /// A recorder that writes nothing: for a run with several dispatchers at
+    /// once, whose events are logged in an order that is not the order of
+    /// their commits, and which the trace check therefore does not cover.
+    pub fn off() -> Self {
+        TraceFile {
+            recorder: Arc::new(JsonTrace::new()),
+            path: None,
         }
     }
 

@@ -1,5 +1,5 @@
-{"deps": ["tenant-1/orders.Order/{\"id\":\"user\"}/5"], "event": "received", "id": "tenant-1/orders.Order/{\"id\":\"order\"}/1", "message_id": "00000000-0000-4000-8000-00000000000a", "observer": "inbox", "received_position": 1, "xid": 2038517}
-{"deps": [], "event": "received", "id": "tenant-1/orders.Order/{\"id\":\"other\"}/1", "message_id": "00000000-0000-4000-8000-00000000000d", "observer": "inbox", "received_position": 2, "xid": 2038520}
+{"deps": ["tenant-1/orders.Order/{\"id\":\"user\"}/5"], "event": "received", "id": "tenant-1/orders.Order/{\"id\":\"order\"}/1", "message_id": "00000000-0000-4000-8000-00000000000a", "observer": "inbox", "received_position": 1, "slot": 0, "xid": 2038517}
+{"deps": [], "event": "received", "id": "tenant-1/orders.Order/{\"id\":\"other\"}/1", "message_id": "00000000-0000-4000-8000-00000000000d", "observer": "inbox", "received_position": 2, "slot": 0, "xid": 2038520}
 {"event": "fetched", "id": "tenant-1/orders.Order/{\"id\":\"order\"}/1", "observer": "inbox", "slot": 0, "slots": 1, "snapshot": {"xip": [2038523, 2038532], "xmax": 2038538, "xmin": 2038523}}
 {"event": "handled", "id": "tenant-1/orders.Order/{\"id\":\"order\"}/1", "observer": "inbox", "ok": true, "slot": 0}
 {"event": "marked", "id": "tenant-1/orders.Order/{\"id\":\"order\"}/1", "observer": "inbox", "processed_position": 3, "slot": 0, "woken": []}

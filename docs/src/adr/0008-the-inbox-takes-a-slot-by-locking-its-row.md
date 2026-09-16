@@ -3,7 +3,9 @@
 ## Status
 
 Accepted (2026-09-16). ADR-0007 applied to the inbox: the question that ADR
-left open.
+left open. Point 2 amended by ADR-0009: the head is read in a statement of
+its own after the slot's lock, the one statement's snapshot being older
+than the lock it takes.
 
 ## Context
 

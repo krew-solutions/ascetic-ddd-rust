@@ -115,6 +115,12 @@ waited for it, in the same step. Three configurations pin the decisions:
   finds the slot held: the second message arrives before the first,
   sits at the head, and nothing behind it, its own dependency included, is
   ever taken. `check.sh` requires this violation.
+- `InboxSplitWait.cfg`: the check of a dependency and the wait are two
+  steps, `AtomicWait = FALSE`, and a mark in between cannot see a wait not
+  yet settled — the implementation before ADR-0009. TLC finds
+  `WaitingIsAside` violated: a message waits for a processed dependency,
+  and nothing will wake it. `check.sh` requires this violation; the lock of
+  ADR-0009 is what makes the two steps one.
 
 Failures and parking (ADR-0005). A subscriber that fails rolls its writes back
 to a savepoint; the attempt is recorded in the same transaction, and the row
@@ -216,14 +222,28 @@ deadlocks at the refused step, and TLC prints the state, `i` naming the step.
 a row, failing, committing, expiring, unparking and resolving are all logged,
 the rows a mark or a resolve woke with it; the one thing that is not is
 time, so the passing of a backoff is the hidden step before the failed row is
-taken again. A store carries the id of its transaction and every step
-of a walk over the table the snapshot its statement ran under, and the checks
-go by what the snapshot could see, as the outbox's go by the horizon: a walk
-is checked over the stored rows visible to it, and a store logged after a
-walk that saw it is taken as the hidden step before that walk. A dispatcher
-is the slot it holds, whoever ran it: a slot has one holder at a time, so
-the events between a fetch naming a slot and the close naming it are one
-dispatch. The close is logged after the COMMIT, and the COMMIT is what frees
+taken again. A store carries the id of its transaction and the slot the row
+landed in, so the model places every arrived message where the table did,
+and every step of a walk over the table the snapshot its statement ran
+under, and the checks go by what the snapshot could see, as the outbox's go
+by the horizon: a walk is checked over the stored rows visible to it, and a
+store logged after a walk that saw it is taken as the hidden step before
+that walk. A dispatcher is the slot it holds, whoever ran it: a slot has one
+holder at a time, so the events between a fetch, or a set-aside, naming a
+slot and the close naming it are one dispatch; a set-aside is a dispatch of
+its own (ADR-0009).
+
+Only runs with one dispatcher at a time are recorded and checked. With
+several, the order events are logged in is not the order of their commits:
+a close is logged after its COMMIT, a slot is taken in one statement and its
+head read in the next, a mark on one slot is logged before a walk of another
+whose snapshot predates it. Each of those needed a rule of its own to
+reorder the log by snapshots and transaction ids; the rules grew, kept
+missing cases, and found no defect of the library, while the tests' own
+assertions found two. So a test with several dispatchers asserts its outcome
+and the table's state — in particular that no row waits for a processed
+dependency, the lost wake of ADR-0009 as one query — and leaves the
+interleavings to the model. The close is logged after the COMMIT, and the COMMIT is what frees
 the slot, so the next holder's fetch may be logged before it; the take
 proves the close came first, and `trace2tla.py` moves the close to just
 before the take, for both crates. `traces/reordered/` holds two recorded

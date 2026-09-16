@@ -53,7 +53,7 @@ Src == INSTANCE Outbox WITH
 Dst == INSTANCE Inbox WITH
   Deps <- [m \in Msgs |-> {}], Arrives <- Msgs, Slots <- DstSlots,
   WaitsOnDependencies <- TRUE, WaitExpires <- FALSE,
-  Poison <- {}, MaxAttempts <- 0, BlockOnBackoff <- TRUE, MaxAdmin <- 0,
+  Poison <- {}, MaxAttempts <- 0, BlockOnBackoff <- TRUE, MaxAdmin <- 0, AtomicWait <- TRUE,
   crashes <- dstCrashes
 
 (* ------------------------------------------------------------------------ *)

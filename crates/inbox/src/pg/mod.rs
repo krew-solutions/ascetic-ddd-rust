@@ -35,9 +35,12 @@
 //!
 //! The walk looks at the head of the queue only. A head whose causal
 //! dependencies are not all processed is set aside to wait for the first
-//! missing one, `waiting_for`, out of the queue; the transaction that marks
-//! that dependency processed puts every row waiting for it back, in the
-//! same statement. Nothing polls for a dependency. With
+//! missing one, `waiting_for`, out of the queue, and that is the whole
+//! transaction, [`Outcome::SetAside`]; the transaction that marks that
+//! dependency processed puts every row waiting for it back, in the same
+//! statement. Nothing polls for a dependency. The wait and the mark take a
+//! transaction-level advisory lock on the dependency's identity, so that a
+//! mark cannot slip between the check and the wait (ADR-0009). With
 //! [`PgInbox::with_max_wait`] a row waiting longer is parked with the
 //! dependency named; by default it waits for ever (ADR-0006).
 //!
@@ -94,9 +97,15 @@ impl Default for Loops {
 /// What one `dispatch` call did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// Nothing was taken: no slot had a due head, or the slot taken had its
-    /// head waiting for its backoff once what was ahead of it was set aside.
+    /// Nothing was done: no slot had a due head; or the slot taken had none
+    /// once its head was read after the lock; or the head was about to wait
+    /// for a dependency that was marked meanwhile, and the next call takes
+    /// it again.
     Nothing,
+    /// The head of the slot taken was set aside to wait for a dependency
+    /// (ADR-0006), and that wait is committed (ADR-0009); the next call
+    /// takes the slot's next head.
+    SetAside,
     /// A message was processed and marked.
     Processed,
     /// The subscriber failed; its writes were rolled back and the attempt

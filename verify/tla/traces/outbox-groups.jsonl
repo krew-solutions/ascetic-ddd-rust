@@ -1,9 +1,9 @@
-{"event":"published","message_id":"00000000-0000-4000-8000-000000000031","observer":"outbox","position":1,"uri":"kafka://orders","xid":2042304}
-{"event":"fetched","group":"a","horizon":2042386,"limit":100,"messages":["00000000-0000-4000-8000-000000000031"],"observer":"outbox","slot":0,"slots":1}
-{"event":"handled","group":"a","message_id":"00000000-0000-4000-8000-000000000031","observer":"outbox","ok":true,"slot":0}
-{"event":"acked","group":"a","observer":"outbox","position":1,"slot":0,"xid":2042304}
+{"event":"published","message_id":"00000000-0000-4000-8000-000000000015","observer":"outbox","position":1,"uri":"kafka://orders","xid":2049131}
+{"event":"fetched","group":"a","horizon":2049198,"limit":100,"messages":["00000000-0000-4000-8000-000000000015"],"observer":"outbox","slot":0,"slots":1}
+{"event":"handled","group":"a","message_id":"00000000-0000-4000-8000-000000000015","observer":"outbox","ok":true,"slot":0}
+{"event":"acked","group":"a","observer":"outbox","position":1,"slot":0,"xid":2049131}
 {"event":"dispatched","group":"a","observer":"outbox","outcome":"batch","slot":0}
-{"event":"fetched","group":"b","horizon":2042390,"limit":100,"messages":["00000000-0000-4000-8000-000000000031"],"observer":"outbox","slot":0,"slots":1}
-{"event":"handled","group":"b","message_id":"00000000-0000-4000-8000-000000000031","observer":"outbox","ok":true,"slot":0}
-{"event":"acked","group":"b","observer":"outbox","position":1,"slot":0,"xid":2042304}
+{"event":"fetched","group":"b","horizon":2049202,"limit":100,"messages":["00000000-0000-4000-8000-000000000015"],"observer":"outbox","slot":0,"slots":1}
+{"event":"handled","group":"b","message_id":"00000000-0000-4000-8000-000000000015","observer":"outbox","ok":true,"slot":0}
+{"event":"acked","group":"b","observer":"outbox","position":1,"slot":0,"xid":2049131}
 {"event":"dispatched","group":"b","observer":"outbox","outcome":"batch","slot":0}

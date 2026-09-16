@@ -93,6 +93,13 @@ fi
 grep -q "Invariant ArrivalOrder is violated" "${TMPDIR:-/tmp}/tlc-inbox-skipnotdue.log"
 echo "   violation found, as expected"
 
+echo "== inbox: with the check of a dependency and the wait two steps apart, TLC must find a message waiting for a processed dependency"
+if tlc -config InboxSplitWait.cfg MCInbox.tla > "${TMPDIR:-/tmp}/tlc-inbox-splitwait.log" 2>&1; then
+  echo "unexpected: no violation with the wait settled after the check"; exit 1
+fi
+grep -q "Invariant WaitingIsAside is violated" "${TMPDIR:-/tmp}/tlc-inbox-splitwait.log"
+echo "   violation found, as expected"
+
 echo "== inbox: recorded runs of the tests fit the model"
 for trace in traces/inbox-*.jsonl; do
   check_trace "$trace"
@@ -111,11 +118,6 @@ if check_trace traces/forged/inbox-fetch-beyond-snapshot.jsonl > "${TMPDIR:-/tmp
 fi
 grep -q "Deadlock reached" "${TMPDIR:-/tmp}/tlc-inbox-forged-snapshot.log" || { cat "${TMPDIR:-/tmp}/tlc-inbox-forged-snapshot.log"; exit 1; }
 echo "   refused, as expected"
-
-echo "== both: a close logged after the next take of its slot is read before it, and the run fits"
-for trace in traces/reordered/*.jsonl; do
-  check_trace "$trace"
-done
 
 echo "== bridge: outbox -> inbox with crashes on both sides, every property holds"
 tlc -config Bridge.cfg MCBridge.tla

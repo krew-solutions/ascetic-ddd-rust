@@ -5,9 +5,12 @@
 //!     cargo test -p ascetic-ddd-inbox -- --ignored
 //! ```
 //!
-//! With `ASCETIC_DDD_TRACE_DIR` set, every test writes what its inbox
-//! reported as `inbox-<name>.jsonl` into that directory, one event per line,
-//! for validation against the protocol model: see `verify/tla/README.md`.
+//! With `ASCETIC_DDD_TRACE_DIR` set, every test with one dispatcher at a
+//! time writes what its inbox reported as `inbox-<name>.jsonl` into that
+//! directory, one event per line, for validation against the protocol model:
+//! see `verify/tla/README.md`. A test with several dispatchers at once
+//! records nothing: the order its events are logged in is not the order of
+//! their commits; it asserts its outcome and the table's state instead.
 
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -60,21 +63,35 @@ async fn fixture(name: &str) -> Fixture {
 
 /// The same, watched by `observer`.
 async fn fixture_observed<O: InboxObserver>(name: &str, observer: O) -> Fixture<O> {
-    fixture_cut(name, observer, 1).await
+    fixture_cut(name, observer, 1, recorded(name)).await
 }
 
 /// A table cut into `slots` by stream, the cut that keeps causal order.
 async fn fixture_slotted(name: &str, slots: u32) -> Fixture {
-    fixture_cut(name, (), slots).await
+    fixture_cut(name, (), slots, recorded(name)).await
+}
+
+/// The same for a test that runs several dispatchers at once, which records
+/// no trace.
+async fn fixture_concurrent(name: &str, slots: u32) -> Fixture {
+    fixture_cut(name, (), slots, TraceFile::off()).await
+}
+
+fn recorded(name: &str) -> TraceFile {
+    TraceFile::from_env(&format!("inbox-{name}"))
 }
 
 /// The number of slots and the key are read at `setup`, so they are set
 /// before the table exists.
-async fn fixture_cut<O: InboxObserver>(name: &str, observer: O, slots: u32) -> Fixture<O> {
+async fn fixture_cut<O: InboxObserver>(
+    name: &str,
+    observer: O,
+    slots: u32,
+    trace: TraceFile,
+) -> Fixture<O> {
     let table = format!("inbox_{name}");
     let sequence = format!("inbox_{name}_seq");
     let sessions = PgSessionPool::new(pool());
-    let trace = TraceFile::from_env(&format!("inbox-{name}"));
     let inbox = PgInbox::new(PgSessionPool::new(pool()))
         .with_table(&table, &sequence)
         .with_slots(slots)
@@ -118,6 +135,13 @@ impl<O: InboxObserver> Fixture<O> {
         Fut: std::future::Future<Output = Result<(), BoxError>> + Send,
     {
         self.inbox.dispatch(subscriber).await.unwrap()
+    }
+
+    async fn parked_messages(&self) -> Vec<InboxMessage> {
+        self.sessions
+            .session(async |session| self.inbox.parked(&session).await)
+            .await
+            .unwrap()
     }
 
     async fn parked(&self) -> Vec<String> {
@@ -200,6 +224,28 @@ impl<O: InboxObserver> Fixture<O> {
             })
             .await
             .unwrap();
+    }
+
+    /// Rows waiting for a dependency that is processed: wakes lost. Must be
+    /// none whatever the interleaving (ADR-0009).
+    async fn lost_wakes(&self) -> i64 {
+        let sql = format!(
+            "SELECT count(*) FROM {table} w \
+             WHERE w.waiting_for IS NOT NULL AND EXISTS ( \
+                SELECT 1 FROM {table} d \
+                WHERE d.tenant_id = w.waiting_for->>'tenant_id' \
+                  AND d.stream_type = w.waiting_for->>'stream_type' \
+                  AND d.stream_id = w.waiting_for->'stream_id' \
+                  AND d.stream_position = (w.waiting_for->>'stream_position')::int \
+                  AND d.processed_position IS NOT NULL)",
+            table = self.table
+        );
+        self.sessions
+            .session(async |session| {
+                Ok::<i64, Error>(session.connection().query_one(&sql, &[]).await?.get(0))
+            })
+            .await
+            .unwrap()
     }
 
     async fn processed(&self) -> i64 {
@@ -338,6 +384,11 @@ async fn a_message_waits_for_its_causal_dependencies() {
     f.publish(&[effect, unrelated]).await; // the cause has not arrived
 
     let (seen, subscriber) = collector();
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::SetAside,
+        "the effect"
+    );
     assert_eq!(f.dispatch(&subscriber).await, Outcome::Processed);
     assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
     assert_eq!(*seen.lock().unwrap(), ["other@1"], "the effect waits");
@@ -522,7 +573,11 @@ async fn a_resolved_message_releases_its_dependents() {
             parked: true
         }
     );
-    assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing, "b@1 waits");
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::SetAside,
+        "b@1 waits"
+    );
 
     let resolved = f
         .sessions
@@ -547,7 +602,7 @@ async fn a_resolved_message_releases_its_dependents() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_held_slot_is_passed_by() {
-    let f = fixture("skip_locked").await;
+    let f = fixture_concurrent("skip_locked", 1).await;
     f.publish(&[message("a", 1), message("b", 1)]).await;
     let seen = Arc::new(Mutex::new(Vec::new()));
     let slow = |sink: Seen| {
@@ -604,7 +659,7 @@ async fn slots_share_the_streams_without_gaps_or_overlap() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn run_processes_until_shutdown() {
-    let f = fixture_slotted("run", 4).await;
+    let f = fixture_concurrent("run", 4).await;
     f.publish(
         &(1..=6)
             .map(|i| message(&format!("s{i}"), 1))
@@ -647,7 +702,7 @@ async fn run_processes_until_shutdown() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn two_slots_are_worked_at_once() {
-    let f = fixture_slotted("parallel", 2).await;
+    let f = fixture_concurrent("parallel", 2).await;
     let (first, second) = f.streams_in_different_slots().await;
     f.publish(&[message(&first, 1), message(&second, 1)]).await;
     let slow = |_: &PgSession, _: &InboxMessage| async {
@@ -669,8 +724,8 @@ async fn two_slots_are_worked_at_once() {
     );
 }
 
-/// Tells the test when a row was set aside to wait: the moment the race
-/// of the two tests below is opened.
+/// Tells the test when a row was set aside to wait: the moment the races
+/// below are opened.
 struct OnWaiting(Arc<tokio::sync::Notify>);
 
 impl InboxObserver for OnWaiting {
@@ -679,65 +734,67 @@ impl InboxObserver for OnWaiting {
     }
 }
 
-/// A subscriber that keeps the first dispatcher's transaction open for a
-/// while on the row behind the one it set aside, and is quick otherwise.
-/// A subscriber's future, boxed so that one closure serves several calls.
-type Handling = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), BoxError>> + Send>>;
-
-fn slow_behind() -> impl Fn(&PgSession, &InboxMessage) -> Handling + Copy {
-    |_, message| {
-        let pause = if message.stream_position == 2 { 300 } else { 0 };
-        Box::pin(async move {
-            tokio::time::sleep(Duration::from_millis(pause)).await;
-            Ok(())
-        })
-    }
-}
-
-/// A dispatcher that finds a dependency unprocessed sets its row aside
-/// inside its transaction. If another dispatcher, in another slot, marks
-/// that dependency before the first one commits, the row must be woken all
-/// the same: the mark and the wait must not miss each other (ADR-0006).
-/// Here the dependency has not arrived when the row is set aside.
+/// A dispatcher that finds a dependency unprocessed sets its row aside and
+/// commits, under a lock on the dependency's identity that the mark of the
+/// dependency takes too. However the two interleave, the row is woken
+/// (ADR-0009). Here the dependency has not arrived when the row is set
+/// aside, and arrives and is processed in another slot right after.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_wait_set_while_its_dependency_arrives_and_is_marked_elsewhere_is_woken() {
     let waited = Arc::new(tokio::sync::Notify::new());
-    let f = fixture_cut("lost_wake", OnWaiting(Arc::clone(&waited)), 2).await;
+    let f = fixture_cut(
+        "lost_wake",
+        OnWaiting(Arc::clone(&waited)),
+        2,
+        TraceFile::off(),
+    )
+    .await;
     let (dependent, dependency) = f.streams_in_different_slots().await;
     let d = message(&dependency, 1);
     let m = message(&dependent, 1).depending_on(&[CausalDependency::on(&d)]);
     let behind = message(&dependent, 2);
     f.publish(&[m, behind]).await;
+    let (seen, subscriber) = collector();
 
-    let (a, b) = tokio::join!(f.inbox.dispatch(slow_behind()), async {
-        // m is set aside, uncommitted; the dependency arrives and is
-        // processed in its own slot before the first transaction commits
+    let (a, b) = tokio::join!(f.inbox.dispatch(&subscriber), async {
+        // m is being set aside; the dependency arrives and is processed in
+        // its own slot, racing the commit of the wait
         waited.notified().await;
         f.publish(&[d]).await;
-        f.inbox.dispatch(slow_behind()).await
+        f.inbox.dispatch(&subscriber).await
     });
 
     assert_eq!(
         (a.unwrap(), b.unwrap()),
-        (Outcome::Processed, Outcome::Processed)
+        (Outcome::SetAside, Outcome::Processed)
     );
     assert_eq!(
-        f.dispatch(slow_behind()).await,
+        f.dispatch(&subscriber).await,
         Outcome::Processed,
         "the dependent message was woken by the mark of its dependency"
     );
-    assert_eq!(f.processed().await, 3);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [format!("{dependency}@1"), format!("{dependent}@1")]
+    );
+    assert_eq!(f.lost_wakes().await, 0);
 }
 
 /// The same race with the dependency already in the table, unprocessed, in
 /// its own slot: the dependent's slot is served first, the dependency's
-/// while the first transaction is still open.
+/// right after.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_wait_set_while_its_dependency_is_being_marked_elsewhere_is_woken() {
     let waited = Arc::new(tokio::sync::Notify::new());
-    let f = fixture_cut("lost_wake_in_flight", OnWaiting(Arc::clone(&waited)), 2).await;
+    let f = fixture_cut(
+        "lost_wake_in_flight",
+        OnWaiting(Arc::clone(&waited)),
+        2,
+        TraceFile::off(),
+    )
+    .await;
     let (dependent, dependency) = f.streams_in_different_slots().await;
     let d = message(&dependency, 1);
     let m = message(&dependent, 1).depending_on(&[CausalDependency::on(&d)]);
@@ -745,24 +802,127 @@ async fn a_wait_set_while_its_dependency_is_being_marked_elsewhere_is_woken() {
     f.publish(&[d, m, behind]).await;
     // The dependent's slot is the least recently served, so it is taken first.
     f.serve_first(&dependent).await;
+    let (seen, subscriber) = collector();
 
-    let (a, b) = tokio::join!(f.inbox.dispatch(slow_behind()), async {
-        // m is set aside, uncommitted; the dependency is processed in its
-        // own slot before the first transaction commits
+    let (a, b) = tokio::join!(f.inbox.dispatch(&subscriber), async {
         waited.notified().await;
-        f.inbox.dispatch(slow_behind()).await
+        f.inbox.dispatch(&subscriber).await
     });
 
     assert_eq!(
         (a.unwrap(), b.unwrap()),
-        (Outcome::Processed, Outcome::Processed)
+        (Outcome::SetAside, Outcome::Processed)
     );
     assert_eq!(
-        f.dispatch(slow_behind()).await,
+        f.dispatch(&subscriber).await,
         Outcome::Processed,
         "the dependent message was woken by the mark of its dependency"
     );
-    assert_eq!(f.processed().await, 3);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [format!("{dependency}@1"), format!("{dependent}@1")]
+    );
+    assert_eq!(f.lost_wakes().await, 0);
+}
+
+/// Several loops over several slots; messages with dependencies across
+/// slots, published in random order while the loops run, so dependencies
+/// arrive before and after their dependents; one poison message, parked and
+/// resolved by hand. Everything ends processed, no lock cycle stops the
+/// loops, and no row waits for a processed dependency: no wake was lost
+/// (ADR-0009).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn loops_over_slots_with_dependencies_across_them_lose_no_wake() {
+    const N: usize = 120;
+    let f = fixture_concurrent("stress", 4)
+        .await
+        .with_retries(Retries::up_to(1))
+        .with_max_wait(Duration::from_secs(60));
+    // A fixed pseudo-random sequence, so the run is the same every time.
+    let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = move || {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (seed >> 33) as usize
+    };
+    let mut messages: Vec<InboxMessage> = Vec::with_capacity(N);
+    for i in 0..N {
+        let mut m = message(&format!("s{}", i % 7), (i / 7) as i32 + 1);
+        if i > 0 && next() % 2 == 0 {
+            let earlier = &messages[next() % i];
+            m = m.depending_on(&[CausalDependency::on(earlier)]);
+        }
+        messages.push(m);
+    }
+    let mut order: Vec<usize> = (0..N).collect();
+    for i in (1..N).rev() {
+        order.swap(i, next() % (i + 1));
+    }
+    let poison = label(&messages[N / 3]);
+    let (seen, subscriber) = failing_on(&poison);
+    let subscriber = |session: &PgSession, message: &InboxMessage| {
+        let handled = subscriber(session, message);
+        let pause = Duration::from_millis((message.received_position.unwrap_or(0) % 3) as u64);
+        async move {
+            tokio::time::sleep(pause).await;
+            handled.await
+        }
+    };
+    let done = Arc::new(tokio::sync::Notify::new());
+    let loops = Loops {
+        concurrency: 3,
+        poll_interval: Duration::from_millis(5),
+    };
+
+    let publishing = async {
+        for i in order {
+            f.publish(std::slice::from_ref(&messages[i])).await;
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    let operating = async {
+        // resolves the parked poison as an operator would, and stops the
+        // loops once everything is processed
+        loop {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            for parked in f.parked_messages().await {
+                f.sessions
+                    .session(async |session| f.inbox.resolve(&session, &parked).await)
+                    .await
+                    .unwrap();
+            }
+            if f.processed().await == N as i64 {
+                done.notify_one();
+                return;
+            }
+        }
+    };
+    let running = tokio::time::timeout(
+        Duration::from_secs(60),
+        f.inbox
+            .run(&subscriber, loops, async { done.notified().await }),
+    );
+    let ((), ran) = tokio::join!(publishing, async {
+        // the operator stops with the loops, whichever way they stop
+        tokio::pin!(running);
+        tokio::select! {
+            () = operating => running.await,
+            ran = &mut running => ran,
+        }
+    });
+
+    ran.expect("everything is processed within the minute")
+        .expect("no loop fails, in particular on a lock cycle");
+    assert_eq!(f.processed().await, N as i64);
+    assert_eq!(f.lost_wakes().await, 0);
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        N - 1,
+        "every message but the poison had its effects once"
+    );
+    assert!(f.parked().await.is_empty());
 }
 
 /// The port is what the edge depends on; a fake collects what it received.
@@ -873,6 +1033,7 @@ impl InboxObserver for Recorder {
         self.note(match event.outcome {
             Ok(Outcome::Processed) => "dispatched a message",
             Ok(Outcome::Failed { .. }) => "dispatched a failure",
+            Ok(Outcome::SetAside) => "dispatched a set-aside",
             Ok(Outcome::Nothing) => "dispatched nothing",
             Err(_) => "rolled back",
         });
@@ -904,9 +1065,10 @@ async fn the_observer_sees_the_protocol() {
     let second = message("b", 1).depending_on(&[CausalDependency::on(&first)]);
     let (_, subscriber) = collector();
 
-    // The dependent arrives first and is stepped over until the other is
+    // The dependent arrives first and is set aside until the other is
     // processed.
     f.publish(&[second.clone(), first.clone()]).await;
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::SetAside);
     assert_eq!(f.dispatch(&subscriber).await, Outcome::Processed);
     assert_eq!(f.dispatch(&subscriber).await, Outcome::Processed);
     assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
@@ -940,6 +1102,7 @@ async fn the_observer_sees_the_protocol() {
             "received b@1 stored",
             "received a@1 stored",
             "waiting b@1 for a@1",
+            "dispatched a set-aside",
             "fetched a@1",
             "handled a@1 ok",
             "marked a@1 woke b@1",
@@ -1006,7 +1169,7 @@ async fn a_dependency_that_never_arrives_parks_the_message_after_max_wait() {
     f.publish(std::slice::from_ref(&effect)).await;
     let (seen, subscriber) = collector();
 
-    assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing, "set aside");
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::SetAside);
     let waiting = f
         .sessions
         .session(async |session| {

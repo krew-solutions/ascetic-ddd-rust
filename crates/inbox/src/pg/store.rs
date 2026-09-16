@@ -21,21 +21,18 @@ const WIDTH: usize = 12;
 /// The rows a dispatcher may take: neither processed, parked nor waiting.
 const QUEUE: &str = "processed_position IS NULL AND parked_at IS NULL AND waiting_for IS NULL";
 
-/// What taking a slot returned, all in one statement: the slot whose row the
-/// statement locked, or none when no slot had a due head; that slot's head,
-/// locked too; the statement's snapshot; and how many slots the table is cut
-/// into.
+/// What taking a slot returned: the slot whose row the statement locked, or
+/// none when no slot had a due head; the statement's snapshot, read in the
+/// same statement because under `READ COMMITTED` every statement takes a
+/// snapshot of its own; and how many slots the table is cut into.
 pub(super) struct Taken {
     pub(super) slot: Option<u32>,
-    pub(super) head: Option<InboxMessage>,
     pub(super) snapshot: Snapshot,
     pub(super) slots: u32,
 }
 
 /// What one look at the head of a held slot returned: the row, with whether
-/// it still waits for its backoff, or no row; and the snapshot the statement
-/// ran under, read in the same statement because under `READ COMMITTED`
-/// every statement takes a snapshot of its own.
+/// it still waits for its backoff, or no row; and the statement's snapshot.
 pub(super) struct Step {
     pub(super) row: Option<(InboxMessage, bool)>,
     pub(super) snapshot: Snapshot,
@@ -145,10 +142,16 @@ where
     /// Takes a slot: the one least recently served among those whose head —
     /// the oldest row of the queue in the slot — is due, locking its row in
     /// `<table>_slots` for the length of the transaction, `FOR UPDATE SKIP
-    /// LOCKED`, so that a slot another dispatcher holds is passed by; then
-    /// locks the head itself. One statement, one snapshot. A slot whose head
-    /// waits for its backoff is not taken: the head holds the slot, and the
-    /// others go on.
+    /// LOCKED`, so that a slot another dispatcher holds is passed by. A slot
+    /// whose head waits for its backoff is not taken: the head holds the
+    /// slot, and the others go on.
+    ///
+    /// The head itself is read by [`Self::head_of`], a statement of its own:
+    /// a statement's snapshot predates the lock it takes, and the previous
+    /// holder of the slot may commit between the two — a head it processed
+    /// then fails the re-check `FOR UPDATE` makes on the latest version, and
+    /// the slot comes back without a head, or with the wrong one. The head
+    /// read after the lock, under a fresh snapshot, is the head.
     pub(super) async fn take(&self, session: &P::Session) -> Result<Taken, Error> {
         let sql = format!(
             r#"
@@ -163,37 +166,26 @@ where
                 FOR UPDATE OF s SKIP LOCKED
             ), touched AS (
                 UPDATE {table}_slots SET served_at = CURRENT_TIMESTAMP WHERE slot IN (SELECT slot FROM taken)
-            ), head AS (
-                SELECT {COLUMNS} FROM {table}
-                WHERE slot = (SELECT slot FROM taken) AND {QUEUE}
-                ORDER BY received_position LIMIT 1
-                FOR UPDATE
             )
-            SELECT t.slot, h.*, pg_current_snapshot()::text, (SELECT slots FROM {table}_meta)
+            SELECT t.slot, pg_current_snapshot()::text, (SELECT slots FROM {table}_meta)
             FROM (SELECT 1) AS one
             LEFT JOIN taken t ON true
-            LEFT JOIN head h ON true
             "#,
             table = self.table,
         );
         let row = session.connection().query_one(&sql, &[]).await?;
-        let snapshot = snapshot_of(&row, WIDTH + 1)?;
-        let slot = row.get::<_, Option<i16>>(0).map(|slot| slot as u32);
-        let head = row
-            .get::<_, Option<i64>>(8)
-            .is_some()
-            .then(|| message_of(&row, 1));
         Ok(Taken {
-            slot,
-            head,
-            snapshot,
-            slots: row.get::<_, i32>(WIDTH + 2) as u32,
+            slot: row.get::<_, Option<i16>>(0).map(|slot| slot as u32),
+            snapshot: snapshot_of(&row, 1)?,
+            slots: row.get::<_, i32>(2) as u32,
         })
     }
 
     /// The head of a slot the dispatcher holds: the oldest row of its queue,
     /// locked, with whether it still waits for its backoff, and the
-    /// statement's snapshot; no row when the slot's queue is empty.
+    /// statement's snapshot; no row when the slot's queue is empty. Read
+    /// after the slot was taken, so that what its previous holder committed
+    /// is in view.
     pub(super) async fn head_of(&self, session: &P::Session, slot: u32) -> Result<Step, Error> {
         let sql = format!(
             r#"
@@ -238,21 +230,46 @@ where
         Ok(None)
     }
 
-    /// Sets the row aside to wait for `dependency`: out of the queue until
-    /// the mark of that dependency puts it back.
-    pub(super) async fn set_waiting(
+    /// Takes the lock that orders a wait for `identity` against its mark
+    /// (ADR-0009): a transaction-level advisory lock, keyed by the table and
+    /// the identity's canonical `jsonb` text, the one expression for every
+    /// side. Held to the end of the transaction, so a transaction takes it
+    /// last and takes nothing else after it: that is what rules cycles out.
+    pub(super) async fn lock_identity(
+        &self,
+        session: &P::Session,
+        identity: &CausalDependency,
+    ) -> Result<(), Error> {
+        session
+            .connection()
+            .execute(
+                "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2::jsonb::text))",
+                &[&self.table, &identity_json(identity)],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Sets the row aside to wait for `dependency` unless that dependency
+    /// has a committed mark by now — one statement, under the lock of
+    /// [`Self::lock_identity`], so the check and the wait are one step as in
+    /// the model. Returns whether the row was set aside.
+    pub(super) async fn set_waiting_unless_processed(
         &self,
         session: &P::Session,
         message: &InboxMessage,
         dependency: &CausalDependency,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         let sql = format!(
-            "UPDATE {} SET waiting_for = $5::jsonb, waiting_since = CURRENT_TIMESTAMP \
-             WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4",
-            self.table
+            "UPDATE {table} SET waiting_for = $5::jsonb, waiting_since = CURRENT_TIMESTAMP \
+             WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4 \
+               AND NOT EXISTS (SELECT 1 FROM {table} d \
+                               WHERE d.tenant_id = $6 AND d.stream_type = $7 AND d.stream_id = $8 \
+                                 AND d.stream_position = $9 AND d.processed_position IS NOT NULL)",
+            table = self.table
         );
         let [tenant, stream_type, stream_id, position] = identity(message);
-        session
+        let changed = session
             .connection()
             .execute(
                 &sql,
@@ -262,10 +279,14 @@ where
                     stream_id,
                     position,
                     &identity_json(dependency),
+                    &dependency.tenant_id,
+                    &dependency.stream_type,
+                    &dependency.stream_id,
+                    &dependency.stream_position,
                 ],
             )
             .await?;
-        Ok(())
+        Ok(changed == 1)
     }
 
     /// Parks the rows that have waited longer than `max_wait`, naming the
@@ -484,7 +505,7 @@ where
             "INSERT INTO {} (tenant_id, stream_type, stream_id, stream_position, uri, payload, metadata) \
              VALUES ($1, $2, $3, $4, $5, $6, $7) \
              ON CONFLICT (tenant_id, stream_type, stream_id, stream_position) DO NOTHING \
-             RETURNING pg_current_xact_id()::text, received_position",
+             RETURNING pg_current_xact_id()::text, received_position, slot",
             self.table
         );
         let receipt = self
@@ -511,6 +532,7 @@ where
                             Ok::<_, Error>(Receipt {
                                 transaction_id: transaction_id(row.get::<_, String>(0))?,
                                 received_position: row.get::<_, i64>(1),
+                                slot: row.get::<_, i16>(2) as u32,
                             })
                         })
                         .transpose()
