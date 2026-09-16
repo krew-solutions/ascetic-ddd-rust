@@ -19,8 +19,8 @@ use ascetic_ddd_inbox::observer::{
     Unparked, Waiting,
 };
 use ascetic_ddd_inbox::{
-    BoxError, ByStream, CausalDependency, Error, Inbox, InboxMessage, Loops, Outcome, PgInbox,
-    Receipt, Retries,
+    BoxError, ByStream, CausalDependency, Error, Inbox, InboxMessage, Loops, Outcome, PartitionKey,
+    PgInbox, Receipt, Retries,
 };
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use ascetic_ddd_session::pg::tokio_postgres::{Config, NoTls};
@@ -144,6 +144,62 @@ impl<O: InboxObserver> Fixture<O> {
             })
             .await
             .unwrap()
+    }
+
+    /// Two stream ids that land in different slots, by the cut's own
+    /// expression, for tests that need two slots busy at once.
+    async fn streams_in_different_slots(&self) -> (String, String) {
+        let sql = format!(
+            "SELECT ((hashtext({}) & 2147483647) % $2)::int \
+             FROM (SELECT 'tenant-1'::varchar AS tenant_id, 'orders.Order'::varchar AS stream_type, \
+                          $1::jsonb AS stream_id) AS r",
+            ByStream.sql_expression()
+        );
+        let slots = self.inbox.slots() as i32;
+        let slot_of = |stream: String| {
+            let sql = sql.clone();
+            async move {
+                self.sessions
+                    .session(async |session| {
+                        let row = session
+                            .connection()
+                            .query_one(&sql, &[&json!({ "id": stream }), &slots])
+                            .await?;
+                        Ok::<i32, Error>(row.get(0))
+                    })
+                    .await
+                    .unwrap()
+            }
+        };
+        let first = "s1".to_owned();
+        let slot = slot_of(first.clone()).await;
+        for i in 2.. {
+            let candidate = format!("s{i}");
+            if slot_of(candidate.clone()).await != slot {
+                return (first, candidate);
+            }
+        }
+        unreachable!("a second slot has some stream")
+    }
+
+    /// Makes the slot of `stream` the least recently served, so that the
+    /// next take picks it.
+    async fn serve_first(&self, stream: &str) {
+        let sql = format!(
+            "UPDATE {table}_slots SET served_at = served_at - interval '1 hour' \
+             WHERE slot = (SELECT slot FROM {table} WHERE stream_id = $1 LIMIT 1)",
+            table = self.table
+        );
+        self.sessions
+            .session(async |session| {
+                session
+                    .connection()
+                    .execute(&sql, &[&json!({ "id": stream })])
+                    .await?;
+                Ok::<(), Error>(())
+            })
+            .await
+            .unwrap();
     }
 
     async fn processed(&self) -> i64 {
@@ -584,6 +640,129 @@ async fn run_processes_until_shutdown() {
 
     assert_eq!(seen.lock().unwrap().len(), 6);
     assert_eq!(f.processed().await, 6);
+}
+
+/// Two slots, two dispatchers, a subscriber that takes its time: the locks
+/// are per slot, so the two run side by side, not one after the other.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn two_slots_are_worked_at_once() {
+    let f = fixture_slotted("parallel", 2).await;
+    let (first, second) = f.streams_in_different_slots().await;
+    f.publish(&[message(&first, 1), message(&second, 1)]).await;
+    let slow = |_: &PgSession, _: &InboxMessage| async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Ok::<(), BoxError>(())
+    };
+
+    let started = std::time::Instant::now();
+    let (a, b) = tokio::join!(f.inbox.dispatch(slow), f.inbox.dispatch(slow));
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        (a.unwrap(), b.unwrap()),
+        (Outcome::Processed, Outcome::Processed)
+    );
+    assert!(
+        elapsed < Duration::from_millis(550),
+        "two slots took {elapsed:?}: one after the other"
+    );
+}
+
+/// Tells the test when a row was set aside to wait: the moment the race
+/// of the two tests below is opened.
+struct OnWaiting(Arc<tokio::sync::Notify>);
+
+impl InboxObserver for OnWaiting {
+    fn on_waiting(&self, _: &Waiting<'_>) {
+        self.0.notify_one();
+    }
+}
+
+/// A subscriber that keeps the first dispatcher's transaction open for a
+/// while on the row behind the one it set aside, and is quick otherwise.
+/// A subscriber's future, boxed so that one closure serves several calls.
+type Handling = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), BoxError>> + Send>>;
+
+fn slow_behind() -> impl Fn(&PgSession, &InboxMessage) -> Handling + Copy {
+    |_, message| {
+        let pause = if message.stream_position == 2 { 300 } else { 0 };
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_millis(pause)).await;
+            Ok(())
+        })
+    }
+}
+
+/// A dispatcher that finds a dependency unprocessed sets its row aside
+/// inside its transaction. If another dispatcher, in another slot, marks
+/// that dependency before the first one commits, the row must be woken all
+/// the same: the mark and the wait must not miss each other (ADR-0006).
+/// Here the dependency has not arrived when the row is set aside.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_wait_set_while_its_dependency_arrives_and_is_marked_elsewhere_is_woken() {
+    let waited = Arc::new(tokio::sync::Notify::new());
+    let f = fixture_cut("lost_wake", OnWaiting(Arc::clone(&waited)), 2).await;
+    let (dependent, dependency) = f.streams_in_different_slots().await;
+    let d = message(&dependency, 1);
+    let m = message(&dependent, 1).depending_on(&[CausalDependency::on(&d)]);
+    let behind = message(&dependent, 2);
+    f.publish(&[m, behind]).await;
+
+    let (a, b) = tokio::join!(f.inbox.dispatch(slow_behind()), async {
+        // m is set aside, uncommitted; the dependency arrives and is
+        // processed in its own slot before the first transaction commits
+        waited.notified().await;
+        f.publish(&[d]).await;
+        f.inbox.dispatch(slow_behind()).await
+    });
+
+    assert_eq!(
+        (a.unwrap(), b.unwrap()),
+        (Outcome::Processed, Outcome::Processed)
+    );
+    assert_eq!(
+        f.dispatch(slow_behind()).await,
+        Outcome::Processed,
+        "the dependent message was woken by the mark of its dependency"
+    );
+    assert_eq!(f.processed().await, 3);
+}
+
+/// The same race with the dependency already in the table, unprocessed, in
+/// its own slot: the dependent's slot is served first, the dependency's
+/// while the first transaction is still open.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_wait_set_while_its_dependency_is_being_marked_elsewhere_is_woken() {
+    let waited = Arc::new(tokio::sync::Notify::new());
+    let f = fixture_cut("lost_wake_in_flight", OnWaiting(Arc::clone(&waited)), 2).await;
+    let (dependent, dependency) = f.streams_in_different_slots().await;
+    let d = message(&dependency, 1);
+    let m = message(&dependent, 1).depending_on(&[CausalDependency::on(&d)]);
+    let behind = message(&dependent, 2);
+    f.publish(&[d, m, behind]).await;
+    // The dependent's slot is the least recently served, so it is taken first.
+    f.serve_first(&dependent).await;
+
+    let (a, b) = tokio::join!(f.inbox.dispatch(slow_behind()), async {
+        // m is set aside, uncommitted; the dependency is processed in its
+        // own slot before the first transaction commits
+        waited.notified().await;
+        f.inbox.dispatch(slow_behind()).await
+    });
+
+    assert_eq!(
+        (a.unwrap(), b.unwrap()),
+        (Outcome::Processed, Outcome::Processed)
+    );
+    assert_eq!(
+        f.dispatch(slow_behind()).await,
+        Outcome::Processed,
+        "the dependent message was woken by the mark of its dependency"
+    );
+    assert_eq!(f.processed().await, 3);
 }
 
 /// The port is what the edge depends on; a fake collects what it received.
