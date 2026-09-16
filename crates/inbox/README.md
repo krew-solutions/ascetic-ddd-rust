@@ -155,7 +155,7 @@ the whole table; more slots are parallelism, and order within a stream
 still, since a stream is in one slot. A head waiting for its backoff holds
 its slot, and the other slots flow. Changing the number of slots or the key
 moves rows between slots and is a migration, not a restart: `setup` refuses a
-table cut otherwise, or one from before slots (ADR-0008).
+table cut otherwise (ADR-0008).
 
 The take is one statement. On 200,000 rows, a quarter of them processed:
 0.07 ms for one slot, 0.21 ms for sixteen, 0.43 ms for sixty-four; idle
@@ -164,14 +164,6 @@ neither processed, parked nor waiting, is the only index in
 `received_position` order on purpose: beside a second one over the whole
 column the planner walked that one from the first row, past the whole
 processed history, 89 ms at sixteen slots.
-
-A table from before slots is migrated once, with the inbox stopped, by the
-statements `PgInbox::migration_to_slots()` returns for the configured cut:
-the slot column, the head index in place of the old one, the unique
-constraint on `received_position` dropped, then what `setup` creates. They
-come from the same expression `setup` pins, so the cut cannot differ from
-what the table records; adding the column rewrites the table, which is why
-`setup` refuses the table instead of migrating it on a restart.
 
 ## Observing the inbox
 

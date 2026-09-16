@@ -31,7 +31,7 @@ re-sliced silently — and it put partitions into the API: "Всё, что ну�
    once at insert; `S` is a literal of the DDL and a row of `<outbox>_meta`,
    fixed for the life of the table. No statement recomputes the hash, so
    nothing at run time can re-slice. `with_slots(S)` is read by `setup` only,
-   which refuses a table cut otherwise, or a table from before slots.
+   which refuses a table cut otherwise.
 
 2. **Ownership is a transactional lock.** Positions are rows
    `(consumer_group, uri, slot)`. A fetch is one statement: it takes the

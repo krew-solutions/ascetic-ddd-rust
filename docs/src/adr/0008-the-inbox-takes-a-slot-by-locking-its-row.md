@@ -24,8 +24,7 @@ identity the protocol never needed, carried through the API for the observer.
    `(hashtext(<key>) & 2147483647) % S`, a stored generated column computed
    once at insert; the key is `uri` or the stream, as `partitioned_by`
    names it. `S` and the key's expression are a row of `<table>_meta`, fixed
-   for the life of the table; `setup` refuses a table cut otherwise, or one
-   from before slots.
+   for the life of the table; `setup` refuses a table cut otherwise.
 
 2. **Ownership is a transactional lock.** `<table>_slots` has one row per
    slot. A take is one statement: the slot least recently served among those
@@ -75,12 +74,10 @@ identity the protocol never needed, carried through the API for the observer.
   take; one dispatch is a sweep, a take, a walk within the slot, the outcome.
 - Model: `Slots` replaces `Workers` and `Dispatchers`, a dispatcher being a
   slot; `Bridge.tla` takes `DstSlots`. The state space is unchanged.
-- A table from before slots is migrated once by the statements
-  `migration_to_slots()` returns for the configured cut — the column, the
-  head index in place of the old one, the unique constraint dropped, then
-  what `setup` creates — from the expression `setup` pins, so the cut cannot
-  differ from what `<table>_meta` records. `setup` refuses the table rather
-  than rewriting it on a restart.
+- No migration path from a table before slots: no such table exists, in
+  this repository or in the project the crate is for, and a mechanism with
+  no executor is not a decision. `setup` creates the current shape; a table
+  without the column would fail its `CREATE INDEX` aloud.
 
 ## Alternatives rejected
 

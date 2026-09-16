@@ -47,9 +47,10 @@ where
     P::Session: PgAccess + Sync,
     O: InboxObserver,
 {
-    /// The statements that create what a table of this inbox's shape has,
-    /// every one of them idempotent: the sequence, the table, the indexes,
-    /// and the tables of the cut and of the slots.
+    /// Creates the sequence, the table, the indexes and the tables of the
+    /// cut and of the slots if they do not exist, and refuses to go on when
+    /// the table is cut into another number of slots or by another key: that
+    /// is a migration, not a restart.
     ///
     /// The head index, `(slot, received_position)` over the queue — the rows
     /// neither processed, parked nor waiting — is the walk's order: the
@@ -68,10 +69,10 @@ where
     /// recomputes it; `<table>_meta` holds the number of slots and the key
     /// the table was cut by, and `<table>_slots` one row per slot, the row a
     /// dispatcher locks to hold the slot.
-    fn ddl(&self) -> String {
+    pub async fn setup(&self, session: &P::Session) -> Result<(), Error> {
         let (table, sequence, slots) = (&self.table, &self.sequence, self.slots);
         let key = self.partition.sql_expression();
-        format!(
+        let ddl = format!(
             r#"
             CREATE SEQUENCE IF NOT EXISTS {sequence};
             CREATE TABLE IF NOT EXISTS {table} (
@@ -109,34 +110,8 @@ where
             INSERT INTO {table}_slots (slot) SELECT s FROM generate_series(0, {slots} - 1) AS s
                 ON CONFLICT DO NOTHING;
             "#
-        )
-    }
-
-    /// Creates what does not exist, and refuses to go on when the table is
-    /// cut into another number of slots or by another key, or predates
-    /// slots: those are migrations, not restarts. For a table from before
-    /// slots, [`PgInbox::migration_to_slots`] gives the statements.
-    pub async fn setup(&self, session: &P::Session) -> Result<(), Error> {
-        let (table, slots) = (&self.table, self.slots);
-        let key = self.partition.sql_expression();
-        let predates = "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = $1) \
-                        AND NOT EXISTS (SELECT 1 FROM information_schema.columns \
-                                        WHERE table_name = $1 AND column_name = 'slot')";
-        let old: bool = session
-            .connection()
-            .query_one(predates, &[table])
-            .await?
-            .get(0);
-        if old {
-            return Err(Error::Subscriber(
-                format!(
-                    "table `{table}` predates slots; run the statements of \
-                     `PgInbox::migration_to_slots()` before starting"
-                )
-                .into(),
-            ));
-        }
-        session.connection().batch_execute(&self.ddl()).await?;
+        );
+        session.connection().batch_execute(&ddl).await?;
         session
             .connection()
             .execute(
@@ -165,45 +140,6 @@ where
             ));
         }
         Ok(())
-    }
-
-    /// The statements that bring a table from before slots — any earlier
-    /// shape of this crate's — to this inbox's cut. To be run once, with the
-    /// inbox stopped, at a moment of the operator's choosing: adding the slot
-    /// column rewrites the table under an exclusive lock, which is why
-    /// `setup` does not do it on a restart. The key expression is the one
-    /// `setup` pins in `<table>_meta`, so the cut cannot differ from what the
-    /// table records. The old head index goes by name, since
-    /// `CREATE INDEX IF NOT EXISTS` would keep its old definition; so does the
-    /// unique constraint on `received_position`, the second index in that
-    /// order the planner must not have (see `ddl`). The statements of `setup`
-    /// follow, so the table is complete when the script is.
-    pub fn migration_to_slots(&self) -> String {
-        let (table, slots) = (&self.table, self.slots);
-        let key = self.partition.sql_expression();
-        let quoted = key.replace('\'', "''");
-        format!(
-            r#"
-            ALTER TABLE {table}
-                ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0,
-                ADD COLUMN IF NOT EXISTS last_error text NULL,
-                ADD COLUMN IF NOT EXISTS next_attempt_at timestamptz NULL,
-                ADD COLUMN IF NOT EXISTS parked_at timestamptz NULL,
-                ADD COLUMN IF NOT EXISTS waiting_for jsonb NULL,
-                ADD COLUMN IF NOT EXISTS waiting_since timestamptz NULL,
-                ADD COLUMN IF NOT EXISTS slot smallint
-                    GENERATED ALWAYS AS ((hashtext({key}) & 2147483647) % {slots}) STORED;
-            ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {table}_received_position_key;
-            DROP INDEX IF EXISTS {table}__received_position_idx;
-            DROP INDEX IF EXISTS {table}__processed_position_idx;
-            DROP INDEX IF EXISTS {table}__queue_idx;
-            DROP INDEX IF EXISTS {table}__head_idx;
-            {ddl}
-            INSERT INTO {table}_meta (slots, partition_key) SELECT {slots}, '{quoted}'
-                WHERE NOT EXISTS (SELECT 1 FROM {table}_meta);
-            "#,
-            ddl = self.ddl().trim(),
-        )
     }
 
     /// Takes a slot: the one least recently served among those whose head —

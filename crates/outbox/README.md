@@ -99,7 +99,7 @@ takes it. One slot is one position per group and the order of the whole
 selection; more slots are parallelism, and order within a URI still, since a
 URI is in one slot. Changing the number of slots moves rows between
 positions and is a migration, not a restart: `setup` refuses a table cut
-otherwise, or one from before slots (ADR-0007).
+otherwise (ADR-0007).
 
 The fetch is one statement. On 200,000 rows, with work at three quarters of
 the table: 0.06 ms for one slot, 0.20 ms for sixteen, 0.26 ms for

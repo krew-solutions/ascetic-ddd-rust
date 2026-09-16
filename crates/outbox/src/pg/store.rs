@@ -33,8 +33,8 @@ where
     O: OutboxObserver,
 {
     /// Creates the tables and indexes if they do not exist, and refuses to go
-    /// on when the table exists with another number of slots, or from before
-    /// slots existed: both are migrations, not restarts.
+    /// on when the table exists with another number of slots: that is a
+    /// migration, not a restart.
     ///
     /// The primary key `(transaction_id, position)` is the order a fetch
     /// reads in. The index on `(slot, transaction_id, position)` serves a
@@ -46,19 +46,6 @@ where
     /// holds the number of slots the table was cut into.
     pub async fn setup(&self, session: &P::Session) -> Result<(), Error> {
         let (outbox, offsets, slots) = (&self.outbox_table, &self.offsets_table, self.slots);
-        let predates = "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = $1) \
-                        AND NOT EXISTS (SELECT 1 FROM information_schema.columns \
-                                        WHERE table_name = $1 AND column_name = 'slot')";
-        let old: bool = session
-            .connection()
-            .query_one(predates, &[outbox])
-            .await?
-            .get(0);
-        if old {
-            return Err(Error::Malformed(format!(
-                "table `{outbox}` predates slots; migrate it before starting (see the README)"
-            )));
-        }
         let ddl = format!(
             r#"
             CREATE TABLE IF NOT EXISTS {outbox} (
