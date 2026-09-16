@@ -24,7 +24,7 @@ EXTENDS Naturals, Sequences, FiniteSets
 CONSTANTS
   Msgs,
   Uris,
-  SrcWorkers,      \* workers of the source dispatcher
+  SrcSlots,        \* slots of the source outbox
   DstWorkers,      \* partitions of the destination inbox
   DstDispatchers,  \* SUBSET (DstWorkers \X Nat)
   BatchSize,
@@ -33,7 +33,7 @@ CONSTANTS
   SrcGroup,        \* the consumer group of the source dispatchers
   None
 
-SrcDispatchers == {SrcGroup} \X SrcWorkers
+SrcDispatchers == {SrcGroup} \X SrcSlots
 
 \* The source outbox, then the destination inbox.
 VARIABLES uriOf, srcAssign, txState, xid, pos, nextXid, nextPos, position, batch, done, delivered, srcCrashes,
@@ -46,7 +46,7 @@ vars == <<uriOf, srcAssign, txState, xid, pos, nextXid, nextPos, position, batch
           attempts, due, parked, resolved, admin, waiting, expired, pending>>
 
 Src == INSTANCE Outbox WITH
-  Groups <- {SrcGroup}, Workers <- SrcWorkers, VisibilityRule <- TRUE,
+  Groups <- {SrcGroup}, Slots <- SrcSlots, VisibilityRule <- TRUE, RehashAllowed <- FALSE,
   assign <- srcAssign, crashes <- srcCrashes
 
 \* A destination failure is a crash here; recorded attempts, backoff and

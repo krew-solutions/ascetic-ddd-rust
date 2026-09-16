@@ -14,8 +14,8 @@ recorded by one observer, against TraceBridge.tla. Every step names its side,
 The outbox mapping:
 
     published                 -> publish  (msg, uri, xid, pos)
-    fetched, some messages    -> fetch    (d, of, horizon, limit, msgs)
-    fetched, none             -> nofetch  (d, of, horizon, limit, msgs = <<>>)
+    fetched, a slot           -> fetch    (d, of, horizon, limit, msgs)
+    fetched, no slot          -> nofetch  (group, of, horizon, limit): no slot had work
     handled ok                -> handle   (d, msg)
     handled failed            -> nothing: the subscriber declined
     acked + dispatched batch  -> ack      (d, xid, pos): position and COMMIT, one step
@@ -23,7 +23,7 @@ The outbox mapping:
     dispatched rolled_back    -> crash    (d), if a batch was fetched
 
 Messages are named m1, m2, ... in order of publication; a dispatcher is
-<<group, worker>>, the group without the `:worker` suffix several workers add.
+<<group, slot>>: the slot whose position it holds, whoever runs it.
 
 The inbox mapping:
 
@@ -112,23 +112,27 @@ def outbox_steps(events, names=None):
     pending = {}  # dispatcher -> a batch was fetched and not yet closed
     acked = {}    # dispatcher -> the position acknowledged, awaiting COMMIT
 
-    def dispatcher(e):
-        group, worker, of = e["group"], e["worker"], e["of"]
-        if of > 1 and group.endswith(f":{worker}"):
-            group = group[: -len(f":{worker}")]
-        return (group, worker), of
+    slots = {}    # group -> how many slots, from the fetches
 
     for e in events:
         kind = e["event"]
         if kind == "published":
             yield record(side="outbox", event="publish", msg=names.of(e["message_id"]), uri=e["uri"], xid=e["xid"], pos=e["position"])
             continue
-        d, of = dispatcher(e)
+        group = e["group"]
+        d = (group, e["slot"]) if e.get("slot") is not None else None
         if kind == "fetched":
+            slots[group] = e["slots"]
+            if d is None:
+                yield record(side="outbox", event="nofetch", group=group, of=e["slots"],
+                             horizon=e["horizon"], limit=e["limit"])
+                continue
             msgs = [names.known(m, "a fetch") for m in e["messages"]]
             pending[d] = bool(msgs)
-            yield record(side="outbox", event="fetch" if msgs else "nofetch", d=d, of=of,
+            yield record(side="outbox", event="fetch", d=d, of=e["slots"],
                          horizon=e["horizon"], limit=e["limit"], msgs=msgs)
+        elif d is None:
+            pass  # a dispatched-nothing, or a rollback before any slot was taken
         elif kind == "handled":
             if e["ok"]:
                 yield record(side="outbox", event="handle", d=d, msg=names.known(e["message_id"], "a handling"))

@@ -14,7 +14,7 @@ by trace validation, where recorded test runs are checked against the model
 
 ## Outbox — `Outbox.tla`
 
-Producers publish inside transactions; a dispatcher per (group, worker)
+Producers publish inside transactions; a dispatcher per (group, slot)
 fetches committed messages of its partition in `(transaction_id, position)`
 order, hands each to a subscriber, acknowledges the last of the batch; any of
 them crashes at any point, and a subscriber may fail.
@@ -26,7 +26,7 @@ one; the position row is locked per dispatcher. The header of the module says
 why "visible iff committed" is a sound stand-in for a snapshot under the
 visibility rule.
 
-Properties, on three messages, two URIs, one group, two workers, batches of
+Properties, on three messages, two URIs, one group, two slots, batches of
 two and one crash:
 
 | property | kind | meaning |
@@ -48,9 +48,18 @@ needs every transaction to end. One transaction left open stalls every later
 message, of every group.
 
 Not modelled: the URI prefix of a selection, several messages in one
-transaction, and the arithmetic of `hashtext` — the worker assignment is an
-arbitrary function, so the sign bug fixed in the Rust port is out of scope
-here and covered by a test instead.
+transaction, and the arithmetic of `hashtext` — the assignment of URIs to
+slots is an arbitrary function, so the sign bug fixed in the Rust port is out
+of scope here and covered by a test instead. Who serves a slot is not
+modelled either: a dispatcher is whoever holds the lock on the slot's
+position, and has no other identity (ADR-0007).
+
+`OutboxRehash.cfg` lets the assignment change under the positions, `Rehash`:
+what a deployment did when it changed the number of workers with `hash % n`
+at start-up. TLC finds `NoPassedOver` violated on two messages: a URI moves to
+a slot whose position is already past its message. That is the deployment
+level loss made visible, and the reason a row carries its slot for good;
+`check.sh` requires the violation.
 
 ## Inbox — `Inbox.tla`
 
@@ -140,7 +149,7 @@ the bridge, whose subscriber stores it in the inbox in a transaction of the
 inbox's own before returning; the batch is acknowledged after the last one.
 Either process dies at any point, in particular between the store and the
 acknowledgement, which delivers the batch again. `MCBridge.tla` fixes the
-instance: three messages over two URIs, one source worker, two destination
+instance: three messages over two URIs, one source slot, two destination
 partitions with a dispatcher each, batches of two, one crash per side; which
 URI a message has and which partition a URI lands on are left open.
 
@@ -236,7 +245,9 @@ one step placed where the store happened. A handle without a store, or a
 store outside a handling, is refused: with the store before the
 acknowledgement those are not steps of the bridge.
 
-`traces/` holds one recorded run per test: the outbox and inbox tests, the
+A fetch that took no slot names the group only, and the check then speaks for
+every slot: none may have had visible work. `traces/` holds one recorded run
+per test: the outbox and inbox tests, the
 inbox's bridge tests from an in-memory broker, and the one run of an outbox
 feeding an inbox. Two outbox tests are not recorded there, because what they
 exercise the model does not describe: moving the position by hand

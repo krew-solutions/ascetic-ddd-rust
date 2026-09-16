@@ -7,13 +7,13 @@
 //! The five events are the actions of the protocol model in
 //! `verify/tla/Outbox.tla` — publish, fetch, handle, acknowledge, and the
 //! close of the dispatcher's transaction — so a recording observer yields a
-//! trace the model can be checked against.
+//! trace the model can be checked against. A dispatcher is named by the
+//! slot it holds, not by who runs it: it has no other identity.
 
 use std::sync::Arc;
 
 use crate::error::{BoxError, Error};
 use crate::message::{OutboxMessage, Position};
-use crate::pg::Worker;
 
 /// What the outbox knows about a message once it is written: the id of the
 /// writing transaction and the message's position in the table.
@@ -33,12 +33,15 @@ pub struct Published<'a> {
     pub receipt: Receipt,
 }
 
-/// A dispatcher read a batch.
+/// A dispatcher read a batch, or found no slot with work.
 pub struct Fetched<'a> {
-    /// The consumer group, worker suffix included.
+    /// The consumer group.
     pub group: &'a str,
-    /// The worker that read.
-    pub worker: Worker,
+    /// The slot whose position row the statement locked; `None` when no slot
+    /// of the selection had visible work.
+    pub slot: Option<u32>,
+    /// How many slots the table is cut into.
+    pub slots: u32,
     /// The visibility horizon of the statement that read the batch,
     /// `pg_snapshot_xmin`: every transaction below it had ended, so every
     /// message of the batch has a smaller transaction id.
@@ -53,10 +56,10 @@ pub struct Fetched<'a> {
 
 /// The subscriber was handed a message of the batch.
 pub struct Handled<'a> {
-    /// The consumer group, worker suffix included.
+    /// The consumer group.
     pub group: &'a str,
-    /// The worker that handed it over.
-    pub worker: Worker,
+    /// The slot of the batch.
+    pub slot: u32,
     /// The message.
     pub message: &'a OutboxMessage,
     /// What the subscriber returned.
@@ -66,10 +69,10 @@ pub struct Handled<'a> {
 /// The position of the group moved past the batch, inside the dispatcher's
 /// transaction: not durable until [`Dispatched`] reports a commit.
 pub struct Acked<'a> {
-    /// The consumer group, worker suffix included.
+    /// The consumer group.
     pub group: &'a str,
-    /// The worker that acknowledged.
-    pub worker: Worker,
+    /// The slot whose position moved.
+    pub slot: u32,
     /// The last message of the batch.
     pub position: Position,
 }
@@ -77,10 +80,11 @@ pub struct Acked<'a> {
 /// The dispatcher's transaction closed: committed, with whether there was a
 /// batch, or rolled back, with the error.
 pub struct Dispatched<'a> {
-    /// The consumer group, worker suffix included.
+    /// The consumer group.
     pub group: &'a str,
-    /// The worker whose transaction closed.
-    pub worker: Worker,
+    /// The slot whose batch the transaction held, whether it committed or
+    /// rolled back; `None` when no slot had work, or nothing was taken yet.
+    pub slot: Option<u32>,
     /// `Ok(true)`: a batch was acknowledged; `Ok(false)`: there was nothing;
     /// `Err`: the batch was rolled back and will come again.
     pub outcome: Result<bool, &'a Error>,

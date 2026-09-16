@@ -1,14 +1,32 @@
-//! The dispatcher: a batch inside one transaction, and the loop of workers
-//! around it. The SQL is in `store`.
+//! The dispatcher: a batch inside one transaction, and the loops of a
+//! process around it. The SQL is in `store`.
 
 use ascetic_ddd_session::{PgAccess, Session, SessionPool};
 use futures::future::join_all;
 use tokio::sync::watch;
 
-use super::{PgOutbox, Selection, Worker, Workers};
+use super::{Loops, PgOutbox, Selection};
+use ascetic_ddd_session::SessionError;
+
 use crate::error::{BoxError, Error};
 use crate::message::{OutboxMessage, Position};
 use crate::observer::{Acked, Dispatched, Fetched, Handled, OutboxObserver};
+
+/// What ended a dispatch transaction in failure, with the slot it had taken,
+/// so that the observer learns which batch rolled back.
+struct Failed {
+    slot: Option<u32>,
+    error: Error,
+}
+
+impl From<SessionError> for Failed {
+    fn from(error: SessionError) -> Self {
+        Failed {
+            slot: None,
+            error: error.into(),
+        }
+    }
+}
 
 impl<P, O> PgOutbox<P, O>
 where
@@ -16,85 +34,108 @@ where
     P::Session: PgAccess + Sync,
     O: OutboxObserver,
 {
-    /// Dispatches the next batch of `selection` to `subscriber`, as `worker`.
+    /// Dispatches the next batch of `selection` to `subscriber`: the batch of
+    /// whichever slot has visible work and is held by nobody, least recently
+    /// served first.
     ///
     /// Returns whether there was anything to dispatch. The subscriber runs
-    /// inside the dispatcher's transaction, under the lock of the group's
-    /// position; if it fails, the batch is rolled back and redelivered.
+    /// inside the dispatcher's transaction, under the lock of the slot's
+    /// position; if it fails, the batch is rolled back and redelivered. A
+    /// dispatcher has no identity: any number of them, in any number of
+    /// processes, share a selection through the locks alone, and one that
+    /// dies releases its slot with its transaction.
     pub async fn dispatch<F, Fut>(
         &self,
         subscriber: F,
         selection: &Selection,
-        worker: Worker,
     ) -> Result<bool, Error>
     where
         F: Fn(&OutboxMessage) -> Fut + Send + Sync,
         Fut: Future<Output = Result<(), BoxError>> + Send,
     {
-        let group = effective_group(&selection.consumer_group, worker);
-        self.pool
-            .session(async |session| self.ensure_group(&session, &group, &selection.uri).await)
-            .await?;
-        let outcome = self
+        let (group, uri) = (&selection.consumer_group, &selection.uri);
+        let before_slot = |error: Error| Failed { slot: None, error };
+        let outcome: Result<Option<u32>, Failed> = self
             .pool
             .session(async |session| {
                 session
                     .atomic(async |tx| {
-                        let batch = self.fetch(&tx, &group, &selection.uri, worker).await?;
+                        let mut batch = self.fetch(&tx, group, uri).await.map_err(before_slot)?;
+                        if !batch.known {
+                            // the first contact of this selection: its position rows
+                            self.ensure_positions(&tx, group, uri)
+                                .await
+                                .map_err(before_slot)?;
+                            batch = self.fetch(&tx, group, uri).await.map_err(before_slot)?;
+                        }
                         self.observer.on_fetched(&Fetched {
-                            group: &group,
-                            worker,
+                            group,
+                            slot: batch.slot,
+                            slots: batch.slots,
                             horizon: batch.horizon,
                             limit: self.batch_size as usize,
                             messages: &batch.messages,
                         });
-                        let Some(last) = batch.messages.last() else {
-                            return Ok(false);
+                        let (Some(slot), Some(last)) = (batch.slot, batch.messages.last()) else {
+                            return Ok(None);
+                        };
+                        let in_slot = |error: Error| Failed {
+                            slot: Some(slot),
+                            error,
                         };
                         for message in &batch.messages {
                             let handled = subscriber(message).await;
                             self.observer.on_handled(&Handled {
-                                group: &group,
-                                worker,
+                                group,
+                                slot,
                                 message,
                                 outcome: handled.as_ref().map(|_| ()),
                             });
-                            handled.map_err(Error::Subscriber)?;
+                            handled.map_err(Error::Subscriber).map_err(in_slot)?;
                         }
                         let acked = Position {
                             transaction_id: last.transaction_id.unwrap_or_default(),
                             offset: last.position.unwrap_or_default(),
                         };
-                        self.ack(&tx, &group, &selection.uri, acked).await?;
+                        self.ack(&tx, group, uri, slot, acked)
+                            .await
+                            .map_err(in_slot)?;
                         self.observer.on_acked(&Acked {
-                            group: &group,
-                            worker,
+                            group,
+                            slot,
                             position: acked,
                         });
-                        Ok(true)
+                        Ok(Some(slot))
                     })
                     .await
             })
             .await;
         self.observer.on_dispatched(&Dispatched {
-            group: &group,
-            worker,
-            outcome: outcome.as_ref().map(|dispatched| *dispatched),
+            group,
+            slot: match &outcome {
+                Ok(slot) => *slot,
+                Err(failed) => failed.slot,
+            },
+            outcome: outcome
+                .as_ref()
+                .map(|slot| slot.is_some())
+                .map_err(|failed| &failed.error),
         });
         outcome
+            .map(|slot| slot.is_some())
+            .map_err(|failed| failed.error)
     }
 
-    /// Dispatches `selection` until `shutdown` completes, with `workers`.
-    ///
-    /// A loop that finds nothing waits `poll_interval`. Shutdown is
-    /// cooperative: a loop finishes its batch, commits, and only then stops,
-    /// so no transaction is cut in the middle. If a loop fails, the others
-    /// are stopped the same way and its error is returned.
+    /// Dispatches `selection` until `shutdown` completes, with `loops.concurrency`
+    /// loops. A loop that finds nothing waits `loops.poll_interval`. Shutdown
+    /// is cooperative: a loop finishes its batch, commits, and only then
+    /// stops, so no transaction is cut in the middle. If a loop fails, the
+    /// others are stopped the same way and its error is returned.
     pub async fn run<F, Fut>(
         &self,
         subscriber: F,
         selection: &Selection,
-        workers: Workers,
+        loops: Loops,
         shutdown: impl Future<Output = ()>,
     ) -> Result<(), Error>
     where
@@ -102,12 +143,7 @@ where
         Fut: Future<Output = Result<(), BoxError>> + Send,
     {
         let (stop, _) = watch::channel(false);
-        let total = workers.num_processes.max(1) * workers.concurrency.max(1);
-        let loops = (0..workers.concurrency.max(1)).map(|local| {
-            let worker = Worker {
-                id: workers.process_id * workers.concurrency.max(1) + local,
-                of: total,
-            };
+        let futures = (0..loops.concurrency.max(1)).map(|_| {
             let mut stopped = stop.subscribe();
             let stop = stop.clone();
             let subscriber = &subscriber;
@@ -116,12 +152,12 @@ where
                     if *stopped.borrow() {
                         return Ok(());
                     }
-                    match self.dispatch(subscriber, selection, worker).await {
+                    match self.dispatch(subscriber, selection).await {
                         Ok(true) => {}
                         Ok(false) => {
                             tokio::select! {
                                 _ = stopped.changed() => return Ok(()),
-                                _ = tokio::time::sleep(workers.poll_interval) => {}
+                                _ = tokio::time::sleep(loops.poll_interval) => {}
                             }
                         }
                         Err(error) => {
@@ -132,48 +168,42 @@ where
                 }
             }
         });
-        let loops = join_all(loops);
-        tokio::pin!(loops);
+        let futures = join_all(futures);
+        tokio::pin!(futures);
         let outcomes = tokio::select! {
-            outcomes = &mut loops => outcomes,
+            outcomes = &mut futures => outcomes,
             _ = shutdown => {
                 let _ = stop.send(true);
-                loops.await
+                futures.await
             }
         };
         outcomes.into_iter().collect::<Result<Vec<()>, Error>>()?;
         Ok(())
     }
 
-    /// Where `selection` is: the last acknowledged transaction and offset,
-    /// zero before anything was acknowledged.
-    pub async fn position(
+    /// Where `selection` is, by slot: the last acknowledged transaction and
+    /// offset of each, zero before anything was acknowledged; empty before
+    /// the first dispatch. The minimum over the slots is a watermark for the
+    /// whole selection.
+    pub async fn positions(
         &self,
         session: &P::Session,
         selection: &Selection,
-    ) -> Result<Position, Error> {
-        self.read_position(session, &selection.consumer_group, &selection.uri)
+    ) -> Result<Vec<Position>, Error> {
+        self.read_positions(session, &selection.consumer_group, &selection.uri)
             .await
     }
 
-    /// Moves `selection` to `position`: back to zero to replay, or ahead
-    /// to skip.
+    /// Moves every slot of `selection` to `position`: back to zero to replay,
+    /// or ahead to skip. Creates the position rows if the selection has none.
     pub async fn set_position(
         &self,
         session: &P::Session,
         selection: &Selection,
         position: Position,
     ) -> Result<(), Error> {
-        self.ack(session, &selection.consumer_group, &selection.uri, position)
-            .await
-    }
-}
-
-/// Several workers of one group each keep a position of their own.
-fn effective_group(group: &str, worker: Worker) -> String {
-    if worker.of > 1 {
-        format!("{group}:{}", worker.id)
-    } else {
-        group.to_owned()
+        let (group, uri) = (&selection.consumer_group, &selection.uri);
+        self.ensure_positions(session, group, uri).await?;
+        self.move_all(session, group, uri, position).await
     }
 }

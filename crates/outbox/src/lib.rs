@@ -28,9 +28,15 @@
 //!
 //! # Deviations from the Python source
 //!
-//! * The worker filter clears the sign bit of `hashtext(uri)`. In the source
-//!   a negative hash matched no worker, so about half of all keyed URIs were
-//!   never dispatched once `num_workers > 1`.
+//! * The slot of a row is `hashtext(uri) % slots` with the sign bit cleared,
+//!   stored with the row. In the source a negative hash matched no worker,
+//!   so about half of all keyed URIs were never dispatched once
+//!   `num_workers > 1`.
+//! * Dispatchers have no identity. The source split a group's work by
+//!   `hash % num_workers` per worker with a position per worker, so changing
+//!   the number of workers moved messages between positions and lost some;
+//!   here a fetch takes whichever slot has work under a lock on that slot's
+//!   position (ADR-0007).
 //! * `run` stops cooperatively, between batches, on a future the caller
 //!   passes; there is no event to poll. A subscriber returns a `Result`
 //!   instead of raising, and `run` returns the first error after stopping
@@ -57,7 +63,7 @@ mod port;
 pub use crate::error::{BoxError, Error};
 pub use crate::message::{OutboxMessage, Position};
 pub use crate::observer::{OutboxObserver, Receipt};
-pub use crate::pg::{DEFAULT_BATCH_SIZE, PgOutbox, Selection, Worker, Workers};
+pub use crate::pg::{DEFAULT_BATCH_SIZE, Loops, PgOutbox, Selection};
 pub use crate::port::Outbox;
 
 pub use crate::channel::{OUTBOX_SCHEME, OutboxChannel};

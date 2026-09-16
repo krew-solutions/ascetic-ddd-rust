@@ -29,7 +29,7 @@ use tokio::sync::Notify;
 
 use crate::message::OutboxMessage;
 use crate::observer::OutboxObserver;
-use crate::pg::{PgOutbox, Selection, Workers};
+use crate::pg::{Loops, PgOutbox, Selection};
 use crate::port::Outbox;
 
 /// The scheme the outbox is registered under.
@@ -151,9 +151,9 @@ where
             Handle::try_current().map_err(|error| BusError::Transport(Box::new(error)))?;
         runtime.spawn(async move {
             let selection = Selection::group(&group);
-            let workers = Workers {
+            let loops = Loops {
                 poll_interval: outbox.poll_interval(),
-                ..Workers::default()
+                ..Loops::default()
             };
             let subscriber = |row: &OutboxMessage| {
                 let handler = Arc::clone(&handler);
@@ -162,7 +162,7 @@ where
             };
             loop {
                 let outcome = outbox
-                    .run(&subscriber, &selection, workers, stopped.notified())
+                    .run(&subscriber, &selection, loops, stopped.notified())
                     .await;
                 match outcome {
                     Ok(()) => break,
@@ -170,7 +170,7 @@ where
                         log::warn!("outbox[{group}]: dispatch failed, retrying: {error}");
                         tokio::select! {
                             _ = stopped.notified() => break,
-                            _ = tokio::time::sleep(workers.poll_interval) => {}
+                            _ = tokio::time::sleep(loops.poll_interval) => {}
                         }
                     }
                 }

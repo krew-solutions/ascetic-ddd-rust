@@ -19,7 +19,7 @@ use ascetic_ddd_outbox::observer::{
     Acked, Dispatched, Fetched, Handled, OutboxObserver, Published, Receipt,
 };
 use ascetic_ddd_outbox::{
-    BoxError, Error, Outbox, OutboxMessage, PgOutbox, Position, Selection, Worker, Workers,
+    BoxError, Error, Loops, Outbox, OutboxMessage, PgOutbox, Position, Selection,
 };
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use ascetic_ddd_session::pg::tokio_postgres::{Config, NoTls};
@@ -52,21 +52,28 @@ struct Fixture<O = ()> {
     _trace: TraceFile,
 }
 
-/// Tables of its own per test, so tests run in parallel.
+/// Tables of its own per test, so tests run in parallel; one slot.
 async fn fixture(name: &str) -> Fixture {
-    fixture_observed(name, ()).await
+    fixture_observed(name, (), 1).await
+}
+
+/// The same, cut into `slots` slots: a property of the table, so set before
+/// it is created.
+async fn fixture_slotted(name: &str, slots: u32) -> Fixture {
+    fixture_observed(name, (), slots).await
 }
 
 /// The same, watched by `observer`.
-async fn fixture_observed<O: OutboxObserver>(name: &str, observer: O) -> Fixture<O> {
+async fn fixture_observed<O: OutboxObserver>(name: &str, observer: O, slots: u32) -> Fixture<O> {
     let tables = (format!("outbox_{name}"), format!("outbox_{name}_offsets"));
     let sessions = PgSessionPool::new(pool());
     let trace = TraceFile::from_env(&format!("outbox-{name}"));
     let outbox = PgOutbox::new(PgSessionPool::new(pool()))
         .with_tables(&tables.0, &tables.1)
+        .with_slots(slots)
         .observed_by((observer, trace.recorder()));
     let drop = format!(
-        "DROP TABLE IF EXISTS {}; DROP TABLE IF EXISTS {};",
+        "DROP TABLE IF EXISTS {0}; DROP TABLE IF EXISTS {0}_meta; DROP TABLE IF EXISTS {1};",
         tables.0, tables.1
     );
     sessions
@@ -138,9 +145,10 @@ impl<O: OutboxObserver> Fixture<O> {
         }
     }
 
-    async fn position(&self, selection: &Selection) -> Position {
+    /// The positions of the selection, by slot.
+    async fn positions(&self, selection: &Selection) -> Vec<Position> {
         self.sessions
-            .session(async |session| self.outbox.position(&session, selection).await)
+            .session(async |session| self.outbox.positions(&session, selection).await)
             .await
             .unwrap()
     }
@@ -187,18 +195,8 @@ async fn published_messages_are_dispatched_in_order_once() {
     let (seen, subscriber) = collector();
     let selection = Selection::group("broker");
 
-    assert!(
-        f.outbox
-            .dispatch(&subscriber, &selection, Worker::ALONE)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !f.outbox
-            .dispatch(&subscriber, &selection, Worker::ALONE)
-            .await
-            .unwrap()
-    );
+    assert!(f.outbox.dispatch(&subscriber, &selection).await.unwrap());
+    assert!(!f.outbox.dispatch(&subscriber, &selection).await.unwrap());
 
     assert_eq!(*seen.lock().unwrap(), [1, 2]);
 }
@@ -211,14 +209,8 @@ async fn every_consumer_group_gets_every_message() {
     let (seen_a, a) = collector();
     let (seen_b, b) = collector();
 
-    f.outbox
-        .dispatch(&a, &Selection::group("a"), Worker::ALONE)
-        .await
-        .unwrap();
-    f.outbox
-        .dispatch(&b, &Selection::group("b"), Worker::ALONE)
-        .await
-        .unwrap();
+    f.outbox.dispatch(&a, &Selection::group("a")).await.unwrap();
+    f.outbox.dispatch(&b, &Selection::group("b")).await.unwrap();
 
     assert_eq!(*seen_a.lock().unwrap(), [1]);
     assert_eq!(*seen_b.lock().unwrap(), [1]);
@@ -229,17 +221,14 @@ async fn every_consumer_group_gets_every_message() {
 async fn the_position_follows_the_last_acknowledged_message_and_can_be_moved() {
     let f = fixture("position").await;
     let selection = Selection::group("broker");
-    assert_eq!(f.position(&selection).await, Position::default());
+    assert!(f.positions(&selection).await.is_empty(), "no contact yet");
 
     f.publish(&[message("kafka://orders", 1), message("kafka://orders", 2)])
         .await;
     let (seen, subscriber) = collector();
-    f.outbox
-        .dispatch(&subscriber, &selection, Worker::ALONE)
-        .await
-        .unwrap();
+    f.outbox.dispatch(&subscriber, &selection).await.unwrap();
 
-    let position = f.position(&selection).await;
+    let position = f.positions(&selection).await[0];
     assert!(position.transaction_id > 0);
     assert_eq!(position.offset, 2);
 
@@ -252,10 +241,7 @@ async fn the_position_follows_the_last_acknowledged_message_and_can_be_moved() {
         })
         .await
         .unwrap();
-    f.outbox
-        .dispatch(&subscriber, &selection, Worker::ALONE)
-        .await
-        .unwrap();
+    f.outbox.dispatch(&subscriber, &selection).await.unwrap();
     assert_eq!(*seen.lock().unwrap(), [1, 2, 1, 2]);
 }
 
@@ -273,18 +259,13 @@ async fn a_uri_selects_itself_and_everything_under_it() {
     let (payments_seen, payments) = collector();
 
     f.outbox
-        .dispatch(
-            &orders,
-            &Selection::group("broker").uri("kafka://orders"),
-            Worker::ALONE,
-        )
+        .dispatch(&orders, &Selection::group("broker").uri("kafka://orders"))
         .await
         .unwrap();
     f.outbox
         .dispatch(
             &payments,
             &Selection::group("broker").uri("kafka://payments"),
-            Worker::ALONE,
         )
         .await
         .unwrap();
@@ -293,15 +274,12 @@ async fn a_uri_selects_itself_and_everything_under_it() {
     assert_eq!(*payments_seen.lock().unwrap(), [3]);
     // Each (group, uri) has a position of its own.
     assert_eq!(
-        f.position(&Selection::group("broker").uri("kafka://payments"))
-            .await
+        f.positions(&Selection::group("broker").uri("kafka://payments"))
+            .await[0]
             .offset,
         3
     );
-    assert_eq!(
-        f.position(&Selection::group("broker")).await,
-        Position::default()
-    );
+    assert!(f.positions(&Selection::group("broker")).await.is_empty());
 }
 
 #[tokio::test]
@@ -318,12 +296,7 @@ async fn a_batch_is_at_most_batch_size_messages() {
     let selection = Selection::group("broker");
 
     let mut batches = 0;
-    while f
-        .outbox
-        .dispatch(&subscriber, &selection, Worker::ALONE)
-        .await
-        .unwrap()
-    {
+    while f.outbox.dispatch(&subscriber, &selection).await.unwrap() {
         batches += 1;
     }
 
@@ -358,11 +331,7 @@ async fn nothing_is_dispatched_past_an_open_transaction() {
                                 .await
                         })
                         .await?;
-                    assert!(
-                        !f.outbox
-                            .dispatch(&subscriber, &selection, Worker::ALONE)
-                            .await?
-                    );
+                    assert!(!f.outbox.dispatch(&subscriber, &selection).await?);
                     Ok::<_, Error>(())
                 })
                 .await
@@ -371,12 +340,7 @@ async fn nothing_is_dispatched_past_an_open_transaction() {
         .unwrap();
 
     f.wait_visible().await;
-    assert!(
-        f.outbox
-            .dispatch(&subscriber, &selection, Worker::ALONE)
-            .await
-            .unwrap()
-    );
+    assert!(f.outbox.dispatch(&subscriber, &selection).await.unwrap());
     assert_eq!(*seen.lock().unwrap(), [1, 2]);
 }
 
@@ -389,18 +353,20 @@ async fn a_failing_subscriber_rolls_the_batch_back() {
 
     let failing = |_: &OutboxMessage| std::future::ready(Err::<(), BoxError>("broker down".into()));
     assert!(matches!(
-        f.outbox.dispatch(&failing, &selection, Worker::ALONE).await,
+        f.outbox.dispatch(&failing, &selection).await,
         Err(Error::Subscriber(_))
     ));
-    assert_eq!(f.position(&selection).await, Position::default());
+    // The first contact created the positions inside the transaction that
+    // rolled back, so there are none yet; either way nothing is acknowledged.
+    assert!(
+        f.positions(&selection)
+            .await
+            .iter()
+            .all(|p| *p == Position::default())
+    );
 
     let (seen, subscriber) = collector();
-    assert!(
-        f.outbox
-            .dispatch(&subscriber, &selection, Worker::ALONE)
-            .await
-            .unwrap()
-    );
+    assert!(f.outbox.dispatch(&subscriber, &selection).await.unwrap());
     assert_eq!(*seen.lock().unwrap(), [1]);
 }
 
@@ -424,8 +390,8 @@ async fn an_message_id_is_published_once() {
     assert!(matches!(refused, Err(Error::Database(_))));
 }
 
-/// Two dispatchers of one group: the second waits for the first's lock and
-/// then finds nothing, so no message is processed twice.
+/// Two dispatchers of one group and one slot: the second finds the slot
+/// held and nothing else with work, so no message is processed twice.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn two_dispatchers_of_one_group_do_not_overlap() {
@@ -451,22 +417,21 @@ async fn two_dispatchers_of_one_group_do_not_overlap() {
     let selection = Selection::group("broker");
 
     let (a, b) = tokio::join!(
-        f.outbox
-            .dispatch(slow(Arc::clone(&seen)), &selection, Worker::ALONE),
-        f.outbox
-            .dispatch(slow(Arc::clone(&seen)), &selection, Worker::ALONE),
+        f.outbox.dispatch(slow(Arc::clone(&seen)), &selection),
+        f.outbox.dispatch(slow(Arc::clone(&seen)), &selection),
     );
 
     assert!(a.unwrap() ^ b.unwrap(), "exactly one of them had the batch");
     assert_eq!(*seen.lock().unwrap(), [1, 2, 3]);
 }
 
-/// Every keyed URI lands with exactly one of the workers — including the
-/// half whose `hashtext` is negative, which the Python source lost.
+/// Every keyed URI lands in exactly one of the slots — including the half
+/// whose `hashtext` is negative, which the Python source lost — and a
+/// dispatcher with no identity drains them all, one slot per call.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
-async fn workers_share_the_uris_without_gaps_or_overlap() {
-    let f = fixture("workers").await;
+async fn slots_share_the_uris_without_gaps_or_overlap() {
+    let f = fixture_slotted("workers", 3).await;
     f.publish(
         &(1..=40)
             .map(|i| message(&format!("kafka://orders/order-{i}"), i))
@@ -476,26 +441,26 @@ async fn workers_share_the_uris_without_gaps_or_overlap() {
     let (seen, subscriber) = collector();
     let selection = Selection::group("broker").uri("kafka://orders");
 
-    for id in 0..3 {
-        let worker = Worker { id, of: 3 };
-        while f
-            .outbox
-            .dispatch(&subscriber, &selection, worker)
-            .await
-            .unwrap()
-        {}
+    let mut batches = 0;
+    while f.outbox.dispatch(&subscriber, &selection).await.unwrap() {
+        batches += 1;
     }
 
     let mut all = seen.lock().unwrap().clone();
     all.sort_unstable();
     assert_eq!(all, (1..=40).collect::<Vec<_>>());
+    assert_eq!(batches, 3, "one batch per slot with work");
+    let positions = f.positions(&selection).await;
+    assert_eq!(positions.len(), 3);
+    assert!(positions.iter().all(|p| p.offset > 0));
 }
 
-/// `run` dispatches until told to stop, and stops between batches.
+/// `run` dispatches until told to stop, and stops between batches; two loops
+/// share four slots through the locks alone.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn run_dispatches_until_shutdown() {
-    let f = fixture("run").await;
+    let f = fixture_slotted("run", 4).await;
     f.publish(
         &(1..=6)
             .map(|i| message(&format!("kafka://orders/order-{i}"), i))
@@ -515,17 +480,16 @@ async fn run_dispatches_until_shutdown() {
             std::future::ready(Ok::<(), BoxError>(()))
         }
     };
-    let workers = Workers {
+    let loops = Loops {
         concurrency: 2,
         poll_interval: Duration::from_millis(20),
-        ..Workers::default()
     };
 
     let shutdown = async { done.notified().await };
     tokio::time::timeout(
         Duration::from_secs(10),
         f.outbox
-            .run(subscriber, &Selection::group("broker"), workers, shutdown),
+            .run(subscriber, &Selection::group("broker"), loops, shutdown),
     )
     .await
     .expect("run stops after shutdown")
@@ -622,19 +586,14 @@ impl OutboxObserver for Recorder {
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn the_observer_sees_the_protocol() {
     let recorder = Arc::new(Recorder::default());
-    let f = fixture_observed("observed", Arc::clone(&recorder)).await;
+    let f = fixture_observed("observed", Arc::clone(&recorder), 1).await;
     let selection = Selection::group("broker");
 
     f.publish(&[message("kafka://orders", 1), message("kafka://orders", 2)])
         .await;
     f.wait_visible().await;
     let (_, subscriber) = collector();
-    assert!(
-        f.outbox
-            .dispatch(&subscriber, &selection, Worker::ALONE)
-            .await
-            .unwrap()
-    );
+    assert!(f.outbox.dispatch(&subscriber, &selection).await.unwrap());
 
     // The subscriber fails once: the batch is rolled back and comes again.
     f.publish(&[message("kafka://orders", 3)]).await;
@@ -648,18 +607,8 @@ async fn the_observer_sees_the_protocol() {
             Ok(())
         })
     };
-    assert!(
-        f.outbox
-            .dispatch(&flaky, &selection, Worker::ALONE)
-            .await
-            .is_err()
-    );
-    assert!(
-        f.outbox
-            .dispatch(&flaky, &selection, Worker::ALONE)
-            .await
-            .unwrap()
-    );
+    assert!(f.outbox.dispatch(&flaky, &selection).await.is_err());
+    assert!(f.outbox.dispatch(&flaky, &selection).await.unwrap());
 
     assert_eq!(
         *recorder.events.lock().unwrap(),

@@ -39,6 +39,13 @@ fi
 grep -q "Invariant NoPassedOver is violated" "${TMPDIR:-/tmp}/tlc-outbox-norule.log"
 echo "   violation found, as expected"
 
+echo "== outbox: with the assignment of URIs to slots changing under the positions, TLC must find a message passed over"
+if tlc -config OutboxRehash.cfg Outbox.tla > "${TMPDIR:-/tmp}/tlc-outbox-rehash.log" 2>&1; then
+  echo "unexpected: no violation when rehashing under the positions"; exit 1
+fi
+grep -q "Invariant NoPassedOver is violated" "${TMPDIR:-/tmp}/tlc-outbox-rehash.log"
+echo "   violation found, as expected"
+
 echo "== outbox: recorded runs of the tests fit the model"
 for trace in traces/outbox-*.jsonl; do
   check_trace "$trace"

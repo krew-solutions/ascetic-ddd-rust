@@ -38,7 +38,7 @@ TI == INSTANCE TraceInbox WITH crashes <- dstCrashes
 Msgs == TO!Msgs
 SrcGroup == IF TO!Groups = {} THEN "bridge" ELSE CHOOSE g \in TO!Groups : TRUE
 
-B == INSTANCE Bridge WITH Msgs <- Msgs, Uris <- TO!Uris, SrcGroup <- SrcGroup, SrcWorkers <- TO!Workers,
+B == INSTANCE Bridge WITH Msgs <- Msgs, Uris <- TO!Uris, SrcGroup <- SrcGroup, SrcSlots <- TO!Slots,
                           DstWorkers <- TI!Workers, DstDispatchers <- TI!Dispatchers,
                           BatchSize <- 1, MaxCrashes <- TO!MaxCrashes + TI!MaxCrashes,
                           StoreBeforeAck <- TRUE, None <- TI!None

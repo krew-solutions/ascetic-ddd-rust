@@ -3,10 +3,13 @@
 (* The Transactional Outbox of `crates/outbox`, as a protocol.             *)
 (*                                                                         *)
 (* Producers publish messages inside transactions.  A dispatcher per       *)
-(* (group, worker) fetches the committed messages of its partition in      *)
+(* (group, slot) fetches the committed messages of its slot in             *)
 (* (transaction id, position) order, hands each one to a subscriber, and   *)
-(* acknowledges the last of the batch.  Dispatchers crash at any point,    *)
-(* and a subscriber may fail, which rolls the batch back the same way.     *)
+(* acknowledges the last of the batch.  A slot is a share of the URIs by   *)
+(* hash, stored with each row, with a position of its own; a dispatcher    *)
+(* is whoever holds the lock on that position, and has no other identity.  *)
+(* Dispatchers crash at any point, and a subscriber may fail, which rolls  *)
+(* the batch back the same way.                                            *)
 (*                                                                         *)
 (* PostgreSQL is abstracted to what the protocol relies on:                *)
 (*   - a transaction id (xid8) is assigned at the first write, increasing; *)
@@ -27,10 +30,11 @@ CONSTANTS
   Msgs,           \* messages, one per producing transaction
   Uris,           \* partition keys: the URI a message is addressed to
   Groups,         \* consumer groups
-  Workers,        \* the workers every group is spread over
+  Slots,          \* the slots every group is spread over, each with a position of its own
   BatchSize,
   MaxCrashes,     \* crashes and subscriber failures, in all
-  VisibilityRule  \* TRUE: `transaction_id < pg_snapshot_xmin(pg_current_snapshot())`
+  VisibilityRule, \* TRUE: `transaction_id < pg_snapshot_xmin(pg_current_snapshot())`
+  RehashAllowed   \* TRUE: the assignment of URIs to slots may change under the positions
 
 ASSUME BatchSize \in Nat \ {0}
 ASSUME MaxCrashes \in Nat
@@ -39,7 +43,7 @@ NoXid == 0
 
 VARIABLES
   uriOf,      \* [Msgs -> Uris], fixed at the start: any addressing is allowed
-  assign,     \* [Uris -> Workers], fixed: `hashtext(uri) % n`, made explicit
+  assign,     \* [Uris -> Slots], fixed: `hashtext(uri) % n`, made explicit; see Rehash
   txState,    \* [Msgs -> {"idle", "open", "committed", "aborted"}]
   xid,        \* [Msgs -> Nat], NoXid until the write
   pos,        \* [Msgs -> Nat], the serial, NoXid until the write
@@ -53,7 +57,7 @@ VARIABLES
 
 vars == <<uriOf, assign, txState, xid, pos, nextXid, nextPos, position, batch, done, delivered, crashes>>
 
-Dispatchers == Groups \X Workers
+Dispatchers == Groups \X Slots
 
 (* ------------------------------------------------------------------------ *)
 (* PostgreSQL                                                                 *)
@@ -70,7 +74,7 @@ Before(a, b) == a[1] < b[1] \/ (a[1] = b[1] /\ a[2] < b[2])
 
 Init ==
   /\ uriOf \in [Msgs -> Uris]
-  /\ assign \in [Uris -> Workers]
+  /\ assign \in [Uris -> Slots]
   /\ txState = [m \in Msgs |-> "idle"]
   /\ xid = [m \in Msgs |-> NoXid]
   /\ pos = [m \in Msgs |-> NoXid]
@@ -176,11 +180,24 @@ Crash(d) ==
   /\ done' = [done EXCEPT ![d] = 0]
   /\ UNCHANGED <<uriOf, assign, txState, xid, pos, nextXid, nextPos, position, delivered>>
 
+\* The deployment recomputes the hash — another modulus, another function —
+\* and every URI may land in another slot while the positions keep their
+\* values.  Not a step of the implementation: a row carries its slot for
+\* good, and the number of slots is pinned to the table (ADR-0007).  It is
+\* here so that the loss it would cause is seen: OutboxRehash.cfg allows it
+\* and NoPassedOver must fall.
+Rehash ==
+  /\ RehashAllowed
+  /\ assign' \in [Uris -> Slots]
+  /\ assign' # assign
+  /\ UNCHANGED <<uriOf, txState, xid, pos, nextXid, nextPos, position, batch, done, delivered, crashes>>
+
 (* ------------------------------------------------------------------------ *)
 
 Next ==
   \/ \E m \in Msgs : Begin(m) \/ Publish(m) \/ Commit(m) \/ Abort(m)
   \/ \E d \in Dispatchers : Fetch(d) \/ Handle(d) \/ Ack(d) \/ Crash(d)
+  \/ Rehash
 
 \* Every transaction ends, and every dispatcher keeps polling.  A transaction
 \* that never ends stalls every later message of every group: drop the first
@@ -196,7 +213,7 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 
 TypeOK ==
   /\ uriOf \in [Msgs -> Uris]
-  /\ assign \in [Uris -> Workers]
+  /\ assign \in [Uris -> Slots]
   /\ txState \in [Msgs -> {"idle", "open", "committed", "aborted"}]
   /\ xid \in [Msgs -> Nat]
   /\ pos \in [Msgs -> Nat]

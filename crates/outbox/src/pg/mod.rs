@@ -11,16 +11,21 @@
 //! `transaction_id < pg_snapshot_xmin(pg_current_snapshot())` — in
 //! `(transaction_id, position)` order.
 //!
-//! # Consumer groups and workers
+//! # Consumer groups and slots
 //!
-//! Each `(consumer_group, uri)` keeps its own position, and the dispatcher
-//! locks that row for the length of a batch, so two dispatchers of one group
-//! never process a message twice. With several workers the group name is
-//! extended with the worker id, `broker:0`, and each worker takes the URIs
-//! whose hash falls to it. The hash is `hashtext(uri)` with the sign bit
-//! cleared: `hashtext` is signed and `%` keeps the sign of the dividend, so
-//! without that a negative hash would match no worker and the message would
-//! never be dispatched.
+//! A row carries its slot, `hashtext(uri) % slots` with the sign bit cleared
+//! — `hashtext` is signed and `%` keeps the sign of the dividend, so without
+//! that a negative hash would match no slot — computed once at insert and
+//! stored, and the number of slots is fixed for the life of the table
+//! (ADR-0007). Each `(consumer_group, uri, slot)` keeps its own position. A
+//! dispatcher has no identity: a fetch takes whichever slot of the selection
+//! has visible work and is held by nobody, locks that slot's position row
+//! for the length of the batch, `FOR UPDATE SKIP LOCKED`, and so two
+//! dispatchers never process a message twice and any number of them share a
+//! selection without being told who they are. A dispatcher that dies
+//! releases its slot with its transaction. One slot, the default, is one
+//! position per group and the order of the whole selection; more slots are
+//! parallelism, and order within a URI still, since a URI is in one slot.
 //!
 //! # Delivery
 //!
@@ -73,48 +78,20 @@ impl Selection {
     }
 }
 
-/// This worker among `of` sharing one selection: it takes the URIs whose
-/// hash falls to `id`.
+/// How [`PgOutbox::run`] runs: `concurrency` loops in this process, each
+/// taking whatever slot has work. Processes need no identity and no count;
+/// start as many as the slots make useful.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Worker {
-    /// This worker, `0..of`.
-    pub id: u32,
-    /// How many workers share the selection.
-    pub of: u32,
-}
-
-impl Worker {
-    /// The only worker.
-    pub const ALONE: Worker = Worker { id: 0, of: 1 };
-}
-
-impl Default for Worker {
-    fn default() -> Self {
-        Worker::ALONE
-    }
-}
-
-/// How [`PgOutbox::run`] spreads the work: `concurrency` loops in this
-/// process, `num_processes` processes in all, so that worker
-/// `process_id * concurrency + local` of `num_processes * concurrency`
-/// runs each loop.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Workers {
-    /// This process, `0..num_processes`.
-    pub process_id: u32,
-    /// How many processes run the same selection.
-    pub num_processes: u32,
+pub struct Loops {
     /// How many loops this process runs.
     pub concurrency: u32,
     /// How long a loop waits when there was nothing to dispatch.
     pub poll_interval: Duration,
 }
 
-impl Default for Workers {
+impl Default for Loops {
     fn default() -> Self {
-        Workers {
-            process_id: 0,
-            num_processes: 1,
+        Loops {
             concurrency: 1,
             poll_interval: Duration::from_secs(1),
         }
@@ -129,10 +106,12 @@ pub struct PgOutbox<P, O = ()> {
     offsets_table: String,
     batch_size: i64,
     poll_interval: Duration,
+    slots: u32,
 }
 
 impl<P> PgOutbox<P> {
-    /// An outbox in tables `outbox` and `outbox_offsets`, observed by nobody.
+    /// An outbox in tables `outbox` and `outbox_offsets`, observed by nobody,
+    /// cut into one slot: one position per group.
     pub fn new(pool: P) -> Self {
         PgOutbox {
             pool,
@@ -141,6 +120,7 @@ impl<P> PgOutbox<P> {
             offsets_table: "outbox_offsets".to_owned(),
             batch_size: DEFAULT_BATCH_SIZE as i64,
             poll_interval: Duration::from_secs(1),
+            slots: 1,
         }
     }
 }
@@ -155,6 +135,7 @@ impl<P, O> PgOutbox<P, O> {
             offsets_table: self.offsets_table,
             batch_size: self.batch_size,
             poll_interval: self.poll_interval,
+            slots: self.slots,
         }
     }
 
@@ -182,6 +163,22 @@ impl<P, O> PgOutbox<P, O> {
             batch_size: size.max(1) as i64,
             ..self
         }
+    }
+
+    /// The same outbox cutting its table into `slots` slots, `1..=32767`,
+    /// each with a position of its own per group. Read by [`PgOutbox::setup`]
+    /// when it creates the table; a table already cut otherwise is refused,
+    /// because the rows carry their slot for good (ADR-0007).
+    pub fn with_slots(self, slots: u32) -> Self {
+        PgOutbox {
+            slots: slots.clamp(1, i16::MAX as u32),
+            ..self
+        }
+    }
+
+    /// How many slots this outbox cuts its table into.
+    pub fn slots(&self) -> u32 {
+        self.slots
     }
 
     pub(crate) fn poll_interval(&self) -> Duration {

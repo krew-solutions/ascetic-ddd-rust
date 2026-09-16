@@ -28,11 +28,11 @@ outbox.run(send_to_broker, &Selection::group("broker"), Workers::default(), ctrl
   and the position is acknowledged after the batch. A crash in between
   redelivers; consumers deduplicate on `metadata.message_id`, which is unique
   in the table.
-* **One dispatcher at a time per group.** The group's position row is locked
-  for the length of a batch.
-* **Partitioning.** `kafka://orders/order-7` names a partition key; the
-  messages of one full URI go to one worker, in order. Workers share a
-  selection by the hash of the URI.
+* **One dispatcher at a time per slot.** A slot's position row is locked for
+  the length of a batch, and a dispatcher is whoever holds that lock.
+* **Slots.** `kafka://orders/order-7` names a key; the messages of one full
+  URI are in one slot, `hashtext(uri) % slots`, stored with the row, and go
+  out in order. One slot by default.
 
 ## The port and the adapter
 
@@ -82,6 +82,29 @@ exactly that, through the recorder of `ascetic-ddd-trace`: with
 `ASCETIC_DDD_TRACE_DIR` set they write one JSON line per event, and
 `verify/tla/check.sh` replays those files through the model.
 
+## Slots
+
+A row carries its slot, `hashtext(uri) % slots` with the sign bit cleared,
+stored at insert; the number of slots is fixed for the life of the table,
+`with_slots(S)` before `setup` creates it, one by default. Each
+`(consumer_group, uri, slot)` keeps a position of its own. A dispatcher has
+no identity: `dispatch(subscriber, selection)` takes whichever slot of the
+selection has visible work and is held by nobody, least recently served
+first, locks that slot's position for the length of the batch,
+`FOR UPDATE SKIP LOCKED`, and moves it. Any number of loops in any number of
+processes share a selection through the locks alone, `run(subscriber,
+selection, Loops { concurrency, poll_interval }, shutdown)`; a process that
+dies releases its slot with its transaction, and the next poll of a survivor
+takes it. One slot is one position per group and the order of the whole
+selection; more slots are parallelism, and order within a URI still, since a
+URI is in one slot. Changing the number of slots moves rows between
+positions and is a migration, not a restart: `setup` refuses a table cut
+otherwise, or one from before slots (ADR-0007).
+
+The fetch is one statement. On 200,000 rows, with work at three quarters of
+the table: 0.06 ms for one slot, 0.20 ms for sixteen, 0.26 ms for
+sixty-four; idle, 0.03, 0.10 and 0.11 ms.
+
 ## What is not here
 
 The outbox keeps every row it ever stored; nothing deletes acknowledged
@@ -92,10 +115,15 @@ group's position on.
 
 ## Deviations from the Python source
 
-* The worker filter clears the sign bit of `hashtext(uri)`. In the source a
-  negative hash matched no worker, so about half of all keyed URIs were never
-  dispatched once `num_workers > 1`. A test publishes forty keyed messages
-  and checks that three workers deliver each exactly once.
+* The slot of a row is `hashtext(uri) % slots` with the sign bit cleared,
+  stored with the row. In the source a negative hash matched no worker, so
+  about half of all keyed URIs were never dispatched once `num_workers > 1`.
+  A test publishes forty keyed messages and checks that three slots deliver
+  each exactly once.
+* Dispatchers have no identity (ADR-0007). The source split a group's work by
+  `hash % num_workers` per worker with a position per worker, so changing the
+  number of workers moved messages between positions and lost some; here a
+  fetch takes whichever slot has work under a lock on that slot's position.
 * `run` stops cooperatively, between batches, on a future the caller passes.
   A subscriber returns a `Result`; `run` returns the first error after
   stopping the other loops.
