@@ -7,7 +7,9 @@
 set -eu
 cd "$(dirname "$0")"
 TLA2TOOLS="${TLA2TOOLS:-$HOME/.local/share/tla/tla2tools.jar}"
-tlc() { java -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -workers auto -deadlock "$@"; }
+# Each run gets a state directory of its own: TLC names it from the clock to
+# the second, and two runs started within one second collide.
+tlc() { java -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -workers auto -deadlock -metadir "$(mktemp -d)" "$@"; }
 
 # Checks one recorded run against its model: trace2tla.py turns the JSON lines
 # into a module over TraceOutbox.tla, TraceInbox.tla or TraceBridge.tla, and
@@ -20,7 +22,7 @@ check_trace() {
   cp Outbox.tla TraceOutbox.tla Inbox.tla TraceInbox.tla Bridge.tla TraceBridge.tla "$work"
   name=$(python3 trace2tla.py "$1" "$work")
   log="$work/tlc.log"
-  if java -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -workers 1 -config "$work/$name.cfg" "$work/$name.tla" > "$log" 2>&1; then
+  if java -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -workers 1 -metadir "$work/states" -config "$work/$name.cfg" "$work/$name.tla" > "$log" 2>&1; then
     echo "   $1: TLC found nothing, which cannot happen; see $log"; return 1
   fi
   if grep -q "Invariant NotFinished is violated" "$log"; then
@@ -67,17 +69,17 @@ tlc -config InboxMissingDep.cfg MCInbox.tla
 echo "== inbox: with waits that run out, every received message ends up processed or parked"
 tlc -config InboxMissingDepExpires.cfg MCInbox.tla
 
-echo "== inbox: without setting a message aside for its dependency, TLC must find the partition held"
+echo "== inbox: without setting a message aside for its dependency, TLC must find the slot held"
 if tlc -config InboxNoWaiting.cfg MCInbox.tla > "${TMPDIR:-/tmp}/tlc-inbox-nowaiting.log" 2>&1; then
   echo "unexpected: no violation without waiting"; exit 1
 fi
 grep -q "Temporal properties were violated" "${TMPDIR:-/tmp}/tlc-inbox-nowaiting.log"
 echo "   violation found, as expected"
 
-echo "== inbox: a poison message is parked after its attempts and the partition flows"
+echo "== inbox: a poison message is parked after its attempts and the slot flows"
 tlc -config InboxPoison.cfg MCInbox.tla
 
-echo "== inbox: without parking, TLC must find the partition held for ever"
+echo "== inbox: without parking, TLC must find the slot held for ever"
 if tlc -config InboxPoisonNoParking.cfg MCInbox.tla > "${TMPDIR:-/tmp}/tlc-inbox-poison.log" 2>&1; then
   echo "unexpected: no violation without parking"; exit 1
 fi

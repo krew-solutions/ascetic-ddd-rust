@@ -173,22 +173,9 @@ impl InboxObserver for JsonTrace {
         self.record(json!({
             "observer": "inbox",
             "event": "waiting",
-            "worker": event.worker.id,
-            "of": event.worker.of,
-            "call": event.call,
+            "slot": event.slot,
             "id": inbox_id(event.message),
             "dependency": dependency_id(event.dependency),
-            "snapshot": snapshot_json(event.snapshot),
-        }));
-    }
-    fn on_deferred(&self, event: &inbox::Deferred<'_>) {
-        self.record(json!({
-            "observer": "inbox",
-            "event": "deferred",
-            "worker": event.worker.id,
-            "of": event.worker.of,
-            "call": event.call,
-            "id": inbox_id(event.message),
             "snapshot": snapshot_json(event.snapshot),
         }));
     }
@@ -196,9 +183,8 @@ impl InboxObserver for JsonTrace {
         self.record(json!({
             "observer": "inbox",
             "event": "fetched",
-            "worker": event.worker.id,
-            "of": event.worker.of,
-            "call": event.call,
+            "slot": event.slot,
+            "slots": event.slots,
             "id": event.message.map(inbox_id),
             "snapshot": snapshot_json(event.snapshot),
         }));
@@ -207,9 +193,7 @@ impl InboxObserver for JsonTrace {
         self.record(json!({
             "observer": "inbox",
             "event": "handled",
-            "worker": event.worker.id,
-            "of": event.worker.of,
-            "call": event.call,
+            "slot": event.slot,
             "id": inbox_id(event.message),
             "ok": event.outcome.is_ok(),
         }));
@@ -218,9 +202,7 @@ impl InboxObserver for JsonTrace {
         self.record(json!({
             "observer": "inbox",
             "event": "marked",
-            "worker": event.worker.id,
-            "of": event.worker.of,
-            "call": event.call,
+            "slot": event.slot,
             "id": inbox_id(event.message),
             "processed_position": event.processed_position,
             "woken": event.woken.iter().map(inbox_id).collect::<Vec<_>>(),
@@ -230,9 +212,6 @@ impl InboxObserver for JsonTrace {
         self.record(json!({
             "observer": "inbox",
             "event": "expired",
-            "worker": event.worker.id,
-            "of": event.worker.of,
-            "call": event.call,
             "ids": event.messages.iter().map(inbox_id).collect::<Vec<_>>(),
         }));
     }
@@ -240,9 +219,7 @@ impl InboxObserver for JsonTrace {
         self.record(json!({
             "observer": "inbox",
             "event": "failed",
-            "worker": event.worker.id,
-            "of": event.worker.of,
-            "call": event.call,
+            "slot": event.slot,
             "id": inbox_id(event.message),
             "attempts": event.attempts,
             "parked": event.parked,
@@ -254,9 +231,7 @@ impl InboxObserver for JsonTrace {
         self.record(json!({
             "observer": "inbox",
             "event": "dispatched",
-            "worker": event.worker.id,
-            "of": event.worker.of,
-            "call": event.call,
+            "slot": event.slot,
             "outcome": match event.outcome {
                 Ok(Outcome::Processed) => "processed",
                 Ok(Outcome::Failed { .. }) => "failed",

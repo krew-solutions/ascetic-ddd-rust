@@ -37,7 +37,7 @@ use tokio::sync::Notify;
 
 use crate::message::InboxMessage;
 use crate::observer::InboxObserver;
-use crate::pg::{PgInbox, Workers};
+use crate::pg::{Loops, PgInbox};
 use crate::port::Inbox;
 
 /// The scheme the inbox is registered under.
@@ -148,20 +148,20 @@ where
         let (inbox, stopped) = (Arc::clone(&self.0), Arc::clone(&stop));
         let runtime = Handle::try_current().map_err(transport)?;
         runtime.spawn(async move {
-            let workers = Workers {
+            let loops = Loops {
                 poll_interval: inbox.poll_interval(),
-                ..Workers::default()
+                ..Loops::default()
             };
             let subscriber =
                 |tx: &P::Session, row: &InboxMessage| handler(tx.clone(), wire_of(row));
             loop {
-                match inbox.run(&subscriber, workers, stopped.notified()).await {
+                match inbox.run(&subscriber, loops, stopped.notified()).await {
                     Ok(()) => break,
                     Err(error) => {
                         log::warn!("inbox: processing failed, retrying: {error}");
                         tokio::select! {
                             _ = stopped.notified() => break,
-                            _ = tokio::time::sleep(workers.poll_interval) => {}
+                            _ = tokio::time::sleep(loops.poll_interval) => {}
                         }
                     }
                 }

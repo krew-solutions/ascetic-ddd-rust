@@ -18,12 +18,18 @@
 //! as this database can see. A message whose dependencies are not yet
 //! processed is skipped for now and looked at again next time.
 //!
-//! # Workers
+//! # Slots
 //!
-//! Workers share the messages by the hash of a partition key — the URI, or
-//! the stream — with the sign bit of `hashtext` cleared, so that no key is
-//! left to nobody. With causal dependencies, partition by stream, so that a
-//! message and what it depends on land with one worker.
+//! A row carries its slot, `hashtext(<partition key>) % slots` with the sign
+//! bit cleared so that no key is left to nobody, computed once at insert and
+//! stored; the number of slots and the key are fixed for the life of the
+//! table (ADR-0008). A dispatcher has no identity: a call takes whichever
+//! slot has a due head and is held by nobody, least recently served first,
+//! locks that slot's row for the length of its transaction, and so one
+//! dispatcher at a time works a slot — the order of arrival within a slot
+//! is a guarantee, not a condition. A dispatcher that dies releases its
+//! slot with its transaction. With causal dependencies, cut by stream, so
+//! that a message and what it depends on land in one slot.
 //!
 //! # Dependencies
 //!
@@ -40,9 +46,9 @@
 //! The subscriber runs in a savepoint. When it fails, its writes roll back to
 //! the savepoint and the transaction goes on to record the attempt:
 //! `attempts`, `last_error`, `next_attempt_at`. Until that time the row is
-//! not taken, and it holds its partition, so that the order of arrival
-//! survives the failure; a row whose dependencies are not processed is
-//! stepped over instead, as before. After [`Retries::max_attempts`] failures
+//! not taken, and it holds its slot, so that the order of arrival survives
+//! the failure; a row whose dependencies are not processed is set aside
+//! instead. After [`Retries::max_attempts`] failures
 //! the row is parked, `parked_at`: out of the queue, in the table, so that a
 //! later arrival of the same message is still a duplicate. An operator lists
 //! the parked rows and either [`PgInbox::unpark`]s one or
@@ -66,48 +72,19 @@ use std::time::Duration;
 use crate::observer::InboxObserver;
 use crate::partition::{ByUri, PartitionKey};
 
-/// This worker among `of`: it takes the messages whose partition key hashes
-/// to `id`.
+/// How [`PgInbox::run`] runs: `concurrency` loops in this process, each
+/// taking whatever slot has work. Processes need no identity and no count.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Worker {
-    /// This worker, `0..of`.
-    pub id: u32,
-    /// How many workers share the inbox.
-    pub of: u32,
-}
-
-impl Worker {
-    /// The only worker.
-    pub const ALONE: Worker = Worker { id: 0, of: 1 };
-}
-
-impl Default for Worker {
-    fn default() -> Self {
-        Worker::ALONE
-    }
-}
-
-/// How [`PgInbox::run`] spreads the work: `concurrency` loops in this
-/// process, `num_processes` processes in all, so that worker
-/// `process_id * concurrency + local` of `num_processes * concurrency`
-/// runs each loop.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Workers {
-    /// This process, `0..num_processes`.
-    pub process_id: u32,
-    /// How many processes run the inbox.
-    pub num_processes: u32,
+pub struct Loops {
     /// How many loops this process runs.
     pub concurrency: u32,
     /// How long a loop waits when there was nothing to process.
     pub poll_interval: Duration,
 }
 
-impl Default for Workers {
+impl Default for Loops {
     fn default() -> Self {
-        Workers {
-            process_id: 0,
-            num_processes: 1,
+        Loops {
             concurrency: 1,
             poll_interval: Duration::from_secs(1),
         }
@@ -117,8 +94,8 @@ impl Default for Workers {
 /// What one `dispatch` call did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// Nothing was taken: the partition is empty, or its oldest row waits
-    /// for its backoff and holds it.
+    /// Nothing was taken: no slot had a due head, or the slot taken had its
+    /// head waiting for its backoff once what was ahead of it was set aside.
     Nothing,
     /// A message was processed and marked.
     Processed,
@@ -139,7 +116,7 @@ pub struct Retries {
     /// retried for ever.
     pub max_attempts: u32,
     /// How long the message waits after its `n`th failed attempt, `n` from 1.
-    /// While it waits it holds its partition.
+    /// While it waits it holds its slot.
     pub backoff: Arc<dyn Fn(u32) -> Duration + Send + Sync>,
 }
 
@@ -202,12 +179,13 @@ pub struct PgInbox<P, O = ()> {
     poll_interval: Duration,
     retries: Retries,
     max_wait: Option<Duration>,
+    slots: u32,
 }
 
 impl<P> PgInbox<P> {
-    /// An inbox in table `inbox`, partitioned by URI, observed by nobody,
-    /// retrying a failed message for ever and letting a message wait for its
-    /// dependencies for ever.
+    /// An inbox in table `inbox`, one slot partitioned by URI, observed by
+    /// nobody, retrying a failed message for ever and letting a message wait
+    /// for its dependencies for ever.
     pub fn new(pool: P) -> Self {
         PgInbox {
             pool,
@@ -218,6 +196,7 @@ impl<P> PgInbox<P> {
             poll_interval: Duration::from_secs(1),
             retries: Retries::default(),
             max_wait: None,
+            slots: 1,
         }
     }
 }
@@ -234,6 +213,7 @@ impl<P, O> PgInbox<P, O> {
             poll_interval: self.poll_interval,
             retries: self.retries,
             max_wait: self.max_wait,
+            slots: self.slots,
         }
     }
 
@@ -259,12 +239,29 @@ impl<P, O> PgInbox<P, O> {
         }
     }
 
-    /// The same inbox, sharing messages between workers by `key`.
+    /// The same inbox, sharing messages between slots by `key`. Read by
+    /// [`PgInbox::setup`] when it creates the table, and fixed with it.
     pub fn partitioned_by(self, key: impl PartitionKey + 'static) -> Self {
         PgInbox {
             partition: Box::new(key),
             ..self
         }
+    }
+
+    /// The same inbox cutting its table into `slots` slots, `1..=32767`.
+    /// Read by [`PgInbox::setup`] when it creates the table; a table already
+    /// cut otherwise is refused, because the rows carry their slot for good
+    /// (ADR-0008).
+    pub fn with_slots(self, slots: u32) -> Self {
+        PgInbox {
+            slots: slots.clamp(1, i16::MAX as u32),
+            ..self
+        }
+    }
+
+    /// How many slots this inbox cuts its table into.
+    pub fn slots(&self) -> u32 {
+        self.slots
     }
 
     /// The same inbox, treating a failed message as `retries` says.

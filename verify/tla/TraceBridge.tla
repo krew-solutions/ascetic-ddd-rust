@@ -39,7 +39,7 @@ Msgs == TO!Msgs
 SrcGroup == IF TO!Groups = {} THEN "bridge" ELSE CHOOSE g \in TO!Groups : TRUE
 
 B == INSTANCE Bridge WITH Msgs <- Msgs, Uris <- TO!Uris, SrcGroup <- SrcGroup, SrcSlots <- TO!Slots,
-                          DstWorkers <- TI!Workers, DstDispatchers <- TI!Dispatchers,
+                          DstSlots <- TI!Slots,
                           BatchSize <- 1, MaxCrashes <- TO!MaxCrashes + TI!MaxCrashes,
                           StoreBeforeAck <- TRUE, None <- TI!None
 
@@ -49,7 +49,7 @@ Step == Trace[i]
 \* Which inbox worker a message landed on, read off the inbox's fetches; a
 \* message nobody touched may go anywhere.  The inbox partitions by URI, and
 \* Bridge's Init requires the partitioning to respect that.
-Part == [m \in Msgs |-> IF TI!TouchedBy(m) = {} THEN CHOOSE w \in TI!Workers : TRUE
+Part == [m \in Msgs |-> IF TI!TouchedBy(m) = {} THEN CHOOSE w \in TI!Slots : TRUE
                                                 ELSE CHOOSE w \in TI!TouchedBy(m) : TRUE]
 
 (* ------------------------------------------------------------------------ *)

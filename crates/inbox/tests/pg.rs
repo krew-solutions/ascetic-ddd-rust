@@ -15,12 +15,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ascetic_ddd_inbox::observer::{
-    Deferred, Dispatched, Expired, Failed, Fetched, Handled, InboxObserver, Marked, Received,
-    Resolved, Unparked, Waiting,
+    Dispatched, Expired, Failed, Fetched, Handled, InboxObserver, Marked, Received, Resolved,
+    Unparked, Waiting,
 };
 use ascetic_ddd_inbox::{
-    BoxError, ByStream, CausalDependency, Error, Inbox, InboxMessage, Outcome, PgInbox, Receipt,
-    Retries, Worker, Workers,
+    BoxError, ByStream, CausalDependency, Error, Inbox, InboxMessage, Loops, Outcome, PgInbox,
+    Receipt, Retries,
 };
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use ascetic_ddd_session::pg::tokio_postgres::{Config, NoTls};
@@ -49,25 +49,36 @@ struct Fixture<O = ()> {
     sessions: PgSessionPool,
     inbox: PgInbox<PgSessionPool, (O, Arc<JsonTrace>)>,
     table: String,
-    /// Numbers the fixture's `dispatch` calls, which run one at a time.
-    calls: AtomicU64,
     /// Written when the fixture is dropped, if a trace directory is set.
     _trace: TraceFile,
 }
 
-/// A table of its own per test, so tests run in parallel.
+/// A table of its own per test, so tests run in parallel; one slot.
 async fn fixture(name: &str) -> Fixture {
     fixture_observed(name, ()).await
 }
 
 /// The same, watched by `observer`.
 async fn fixture_observed<O: InboxObserver>(name: &str, observer: O) -> Fixture<O> {
+    fixture_cut(name, observer, 1).await
+}
+
+/// A table cut into `slots` by stream, the cut that keeps causal order.
+async fn fixture_slotted(name: &str, slots: u32) -> Fixture {
+    fixture_cut(name, (), slots).await
+}
+
+/// The number of slots and the key are read at `setup`, so they are set
+/// before the table exists.
+async fn fixture_cut<O: InboxObserver>(name: &str, observer: O, slots: u32) -> Fixture<O> {
     let table = format!("inbox_{name}");
     let sequence = format!("inbox_{name}_seq");
     let sessions = PgSessionPool::new(pool());
     let trace = TraceFile::from_env(&format!("inbox-{name}"));
     let inbox = PgInbox::new(PgSessionPool::new(pool()))
         .with_table(&table, &sequence)
+        .with_slots(slots)
+        .partitioned_by(ByStream)
         .observed_by((observer, trace.recorder()));
     let drop = format!("DROP TABLE IF EXISTS {table}; DROP SEQUENCE IF EXISTS {sequence};");
     sessions
@@ -81,19 +92,11 @@ async fn fixture_observed<O: InboxObserver>(name: &str, observer: O) -> Fixture<
         sessions,
         inbox,
         table,
-        calls: AtomicU64::new(0),
         _trace: trace,
     }
 }
 
 impl<O: InboxObserver> Fixture<O> {
-    fn partitioned_by_stream(self) -> Self {
-        Fixture {
-            inbox: self.inbox.partitioned_by(ByStream),
-            ..self
-        }
-    }
-
     fn with_retries(self, retries: Retries) -> Self {
         Fixture {
             inbox: self.inbox.with_retries(retries),
@@ -108,17 +111,13 @@ impl<O: InboxObserver> Fixture<O> {
         }
     }
 
-    /// One `dispatch` call, as the only worker.
+    /// One `dispatch` call that must not fail on the database.
     async fn dispatch<F, Fut>(&self, subscriber: F) -> Outcome
     where
         F: Fn(&PgSession, &InboxMessage) -> Fut + Send + Sync,
         Fut: std::future::Future<Output = Result<(), BoxError>> + Send,
     {
-        let call = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
-        self.inbox
-            .dispatch(subscriber, Worker::ALONE, call)
-            .await
-            .unwrap()
+        self.inbox.dispatch(subscriber).await.unwrap()
     }
 
     async fn parked(&self) -> Vec<String> {
@@ -486,11 +485,12 @@ async fn a_resolved_message_releases_its_dependents() {
     assert!(f.parked().await.is_empty());
 }
 
-/// Two dispatchers at once: `SKIP LOCKED` gives each its own message, and
-/// nothing is processed twice.
+/// Two dispatchers at once on one slot: the slot's row is locked by the
+/// first, `SKIP LOCKED` passes the second by, and nothing is processed
+/// twice or out of order.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
-async fn concurrent_dispatchers_do_not_share_a_message() {
+async fn a_held_slot_is_passed_by() {
     let f = fixture("skip_locked").await;
     f.publish(&[message("a", 1), message("b", 1)]).await;
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -506,25 +506,28 @@ async fn concurrent_dispatchers_do_not_share_a_message() {
     };
 
     let (a, b) = tokio::join!(
-        f.inbox.dispatch(slow(Arc::clone(&seen)), Worker::ALONE, 1),
-        f.inbox.dispatch(slow(Arc::clone(&seen)), Worker::ALONE, 2),
+        f.inbox.dispatch(slow(Arc::clone(&seen))),
+        f.inbox.dispatch(slow(Arc::clone(&seen))),
     );
 
+    let mut outcomes = [a.unwrap(), b.unwrap()];
+    outcomes.sort_by_key(|outcome| *outcome == Outcome::Processed);
+    assert_eq!(outcomes, [Outcome::Nothing, Outcome::Processed]);
+    assert_eq!(*seen.lock().unwrap(), ["a@1"]);
     assert_eq!(
-        (a.unwrap(), b.unwrap()),
-        (Outcome::Processed, Outcome::Processed)
+        f.dispatch(slow(Arc::clone(&seen))).await,
+        Outcome::Processed
     );
-    let mut all = seen.lock().unwrap().clone();
-    all.sort();
-    assert_eq!(all, ["a@1", "b@1"]);
+    assert_eq!(*seen.lock().unwrap(), ["a@1", "b@1"]);
 }
 
-/// Every stream lands with exactly one of the workers — including the half
-/// whose `hashtext` is negative, which the Python source lost.
+/// Every stream lands in exactly one of the slots — including the half
+/// whose `hashtext` is negative, which the Python source lost — and a
+/// dispatcher without identity drains them all.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
-async fn workers_share_the_streams_without_gaps_or_overlap() {
-    let f = fixture("workers").await.partitioned_by_stream();
+async fn slots_share_the_streams_without_gaps_or_overlap() {
+    let f = fixture_slotted("slots", 3).await;
     f.publish(
         &(1..=40)
             .map(|i| message(&format!("stream-{i}"), 1))
@@ -533,14 +536,7 @@ async fn workers_share_the_streams_without_gaps_or_overlap() {
     .await;
     let (seen, subscriber) = collector();
 
-    for id in 0..3 {
-        let worker = Worker { id, of: 3 };
-        let mut call = 0;
-        while {
-            call += 1;
-            f.inbox.dispatch(&subscriber, worker, call).await.unwrap() != Outcome::Nothing
-        } {}
-    }
+    while f.dispatch(&subscriber).await != Outcome::Nothing {}
 
     let mut all = seen.lock().unwrap().clone();
     all.sort();
@@ -552,7 +548,7 @@ async fn workers_share_the_streams_without_gaps_or_overlap() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn run_processes_until_shutdown() {
-    let f = fixture("run").await;
+    let f = fixture_slotted("run", 4).await;
     f.publish(
         &(1..=6)
             .map(|i| message(&format!("s{i}"), 1))
@@ -572,16 +568,15 @@ async fn run_processes_until_shutdown() {
             std::future::ready(Ok::<(), BoxError>(()))
         }
     };
-    let workers = Workers {
+    let loops = Loops {
         concurrency: 2,
         poll_interval: Duration::from_millis(20),
-        ..Workers::default()
     };
 
     tokio::time::timeout(
         Duration::from_secs(10),
         f.inbox
-            .run(subscriber, workers, async { done.notified().await }),
+            .run(subscriber, loops, async { done.notified().await }),
     )
     .await
     .expect("run stops after shutdown")
@@ -694,9 +689,6 @@ impl InboxObserver for Recorder {
             event.attempts,
             if event.parked { " parked" } else { "" }
         ));
-    }
-    fn on_deferred(&self, event: &Deferred<'_>) {
-        self.note(format!("deferred {}", label(event.message)));
     }
     fn on_dispatched(&self, event: &Dispatched<'_>) {
         self.note(match event.outcome {

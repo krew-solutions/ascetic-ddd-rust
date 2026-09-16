@@ -1,4 +1,4 @@
-//! The table and the statements: what the inbox does to PostgreSQL. The
+//! The tables and the statements: what the inbox does to PostgreSQL. The
 //! loop that drives them is in `dispatch`.
 
 use std::time::Duration;
@@ -6,15 +6,34 @@ use std::time::Duration;
 use ascetic_ddd_session::{PgAccess, Session, SessionPool};
 use tokio_postgres::Row;
 
-use super::{PgInbox, Worker};
+use super::PgInbox;
 use crate::error::{BoxError, Error};
 use crate::message::{CausalDependency, InboxMessage};
 use crate::observer::{InboxObserver, Receipt, Received};
 use crate::port::Inbox;
 use crate::snapshot::Snapshot;
 
-/// What one walk statement returned: the row at the offset, with whether it
-/// still waits for its backoff, or no row; and the snapshot the statement
+/// The columns of a row, in the order `message_of` reads them.
+const COLUMNS: &str = "tenant_id, stream_type, stream_id, stream_position, uri, payload, metadata, \
+                       received_position, processed_position, attempts, last_error, waiting_for";
+/// How many columns `COLUMNS` names.
+const WIDTH: usize = 12;
+/// The rows a dispatcher may take: neither processed, parked nor waiting.
+const QUEUE: &str = "processed_position IS NULL AND parked_at IS NULL AND waiting_for IS NULL";
+
+/// What taking a slot returned, all in one statement: the slot whose row the
+/// statement locked, or none when no slot had a due head; that slot's head,
+/// locked too; the statement's snapshot; and how many slots the table is cut
+/// into.
+pub(super) struct Taken {
+    pub(super) slot: Option<u32>,
+    pub(super) head: Option<InboxMessage>,
+    pub(super) snapshot: Snapshot,
+    pub(super) slots: u32,
+}
+
+/// What one look at the head of a held slot returned: the row, with whether
+/// it still waits for its backoff, or no row; and the snapshot the statement
 /// ran under, read in the same statement because under `READ COMMITTED`
 /// every statement takes a snapshot of its own.
 pub(super) struct Step {
@@ -22,31 +41,54 @@ pub(super) struct Step {
     pub(super) snapshot: Snapshot,
 }
 
-/// The columns of a row, in the order `message_of` reads them.
-const COLUMNS: &str = "tenant_id, stream_type, stream_id, stream_position, uri, payload, metadata, \
-                       received_position, processed_position, attempts, last_error, waiting_for";
-/// How many columns `COLUMNS` names.
-const WIDTH: usize = 12;
-
 impl<P, O> PgInbox<P, O>
 where
     P: SessionPool + Send + Sync,
     P::Session: PgAccess + Sync,
     O: InboxObserver,
 {
-    /// Creates the sequence, the table and its indexes if they do not exist,
-    /// adds the columns of ADR-0005 to a table from before it, and replaces
-    /// the indexes of an earlier layout.
+    /// Creates the sequence, the tables and the indexes if they do not
+    /// exist, adds the columns of ADR-0005 and ADR-0006 to a table from
+    /// before them, and refuses to go on when the table is cut into another
+    /// number of slots or by another key, or predates slots: those are
+    /// migrations, not restarts.
     ///
-    /// The head index, `received_position` over the queue — the rows neither
-    /// processed, parked nor waiting — is the walk's order: the oldest such
-    /// row is its first entry whatever the backlog. The waiting rows have an
-    /// index by the dependency they wait for, which the mark uses to wake
-    /// them, and one by when they started waiting, which expiry uses. The
-    /// `UNIQUE` on `received_position` already indexes the column as a whole;
-    /// the dependency check goes by the primary key.
+    /// The head index, `(slot, received_position)` over the queue — the rows
+    /// neither processed, parked nor waiting — is the walk's order: the
+    /// oldest row of a slot is its first entry whatever the backlog. It is
+    /// the only index in `received_position` order on purpose: given a
+    /// second one over the whole column, the planner, taking the queue rows
+    /// for evenly spread, walks that one from the first row and finds the
+    /// head only past the whole processed history — 89 ms against 0.4 on
+    /// 200,000 rows a quarter of them processed, and worse the longer the
+    /// history. The sequence keeps `received_position` unique without a
+    /// constraint. The waiting rows have an index by the dependency they
+    /// wait for, which the mark uses to wake them, and one by when they
+    /// started waiting, which expiry uses; the dependency check goes by the
+    /// primary key. The slot is a stored column computed from the partition key, so the rows
+    /// carry their slot for good and no statement recomputes it;
+    /// `<table>_meta` holds the number of slots and the key the table was
+    /// cut by, and `<table>_slots` one row per slot, the row a dispatcher
+    /// locks to hold the slot.
     pub async fn setup(&self, session: &P::Session) -> Result<(), Error> {
-        let (table, sequence) = (&self.table, &self.sequence);
+        let (table, sequence, slots) = (&self.table, &self.sequence, self.slots);
+        let key = self.partition.sql_expression();
+        let predates = "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = $1) \
+                        AND NOT EXISTS (SELECT 1 FROM information_schema.columns \
+                                        WHERE table_name = $1 AND column_name = 'slot')";
+        let old: bool = session
+            .connection()
+            .query_one(predates, &[table])
+            .await?
+            .get(0);
+        if old {
+            return Err(Error::Subscriber(
+                format!(
+                    "table `{table}` predates slots; migrate it before starting (see the README)"
+                )
+                .into(),
+            ));
+        }
         let ddl = format!(
             r#"
             CREATE SEQUENCE IF NOT EXISTS {sequence};
@@ -58,7 +100,7 @@ where
                 uri varchar(255) NOT NULL,
                 payload bytea NOT NULL,
                 metadata jsonb NULL,
-                received_position bigint NOT NULL UNIQUE DEFAULT nextval('{sequence}'),
+                received_position bigint NOT NULL DEFAULT nextval('{sequence}'),
                 processed_position bigint NULL,
                 attempts integer NOT NULL DEFAULT 0,
                 last_error text NULL,
@@ -66,66 +108,132 @@ where
                 parked_at timestamptz NULL,
                 waiting_for jsonb NULL,
                 waiting_since timestamptz NULL,
+                slot smallint GENERATED ALWAYS AS ((hashtext({key}) & 2147483647) % {slots}) STORED,
                 CONSTRAINT {table}_pk PRIMARY KEY (tenant_id, stream_type, stream_id, stream_position)
             );
-            ALTER TABLE {table}
-                ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0,
-                ADD COLUMN IF NOT EXISTS last_error text NULL,
-                ADD COLUMN IF NOT EXISTS next_attempt_at timestamptz NULL,
-                ADD COLUMN IF NOT EXISTS parked_at timestamptz NULL,
-                ADD COLUMN IF NOT EXISTS waiting_for jsonb NULL,
-                ADD COLUMN IF NOT EXISTS waiting_since timestamptz NULL;
-            DROP INDEX IF EXISTS {table}__received_position_idx;
-            DROP INDEX IF EXISTS {table}__processed_position_idx;
-            DROP INDEX IF EXISTS {table}__queue_idx;
             CREATE INDEX IF NOT EXISTS {table}__head_idx
-                ON {table} (received_position)
-                WHERE processed_position IS NULL AND parked_at IS NULL AND waiting_for IS NULL;
+                ON {table} (slot, received_position) WHERE {QUEUE};
             CREATE INDEX IF NOT EXISTS {table}__waiting_idx
                 ON {table} (waiting_for) WHERE waiting_for IS NOT NULL;
             CREATE INDEX IF NOT EXISTS {table}__waiting_since_idx
                 ON {table} (waiting_since) WHERE waiting_for IS NOT NULL;
             CREATE UNIQUE INDEX IF NOT EXISTS {table}__message_id_uniq
                 ON {table} (((metadata->>'message_id')::uuid));
+            CREATE TABLE IF NOT EXISTS {table}_meta (slots integer NOT NULL, partition_key text NOT NULL);
+            CREATE TABLE IF NOT EXISTS {table}_slots (
+                slot smallint PRIMARY KEY,
+                served_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO {table}_slots (slot) SELECT s FROM generate_series(0, {slots} - 1) AS s
+                ON CONFLICT DO NOTHING;
             "#
         );
         session.connection().batch_execute(&ddl).await?;
+        session
+            .connection()
+            .execute(
+                &format!(
+                    "INSERT INTO {table}_meta (slots, partition_key) SELECT $1, $2 \
+                     WHERE NOT EXISTS (SELECT 1 FROM {table}_meta)"
+                ),
+                &[&(slots as i32), &key],
+            )
+            .await?;
+        let pinned = session
+            .connection()
+            .query_one(
+                &format!("SELECT slots, partition_key FROM {table}_meta"),
+                &[],
+            )
+            .await?;
+        let (pinned_slots, pinned_key): (i32, String) = (pinned.get(0), pinned.get(1));
+        if pinned_slots != slots as i32 || pinned_key != key {
+            return Err(Error::Subscriber(
+                format!(
+                    "table `{table}` is cut into {pinned_slots} slots by `{pinned_key}`, this inbox asks \
+                     for {slots} by `{key}`; both are fixed for the life of the table"
+                )
+                .into(),
+            ));
+        }
         Ok(())
     }
 
-    /// The head of the worker's queue: the oldest row neither processed,
-    /// parked nor waiting, locked for the transaction and stepped over by
-    /// every other: `FOR UPDATE SKIP LOCKED`. With it, whether the row still
-    /// waits for its backoff, and the statement's snapshot. The outer join
-    /// makes the statement return a row even when there is none, so that the
-    /// snapshot is always known.
-    pub(super) async fn head(&self, session: &P::Session, worker: Worker) -> Result<Step, Error> {
+    /// Takes a slot: the one least recently served among those whose head —
+    /// the oldest row of the queue in the slot — is due, locking its row in
+    /// `<table>_slots` for the length of the transaction, `FOR UPDATE SKIP
+    /// LOCKED`, so that a slot another dispatcher holds is passed by; then
+    /// locks the head itself. One statement, one snapshot. A slot whose head
+    /// waits for its backoff is not taken: the head holds the slot, and the
+    /// others go on.
+    pub(super) async fn take(&self, session: &P::Session) -> Result<Taken, Error> {
+        let sql = format!(
+            r#"
+            WITH taken AS (
+                SELECT s.slot FROM {table}_slots s
+                WHERE (SELECT r.next_attempt_at IS NULL OR r.next_attempt_at <= CURRENT_TIMESTAMP
+                       FROM {table} r
+                       WHERE r.slot = s.slot AND {QUEUE}
+                       ORDER BY r.received_position LIMIT 1) IS TRUE
+                ORDER BY s.served_at
+                LIMIT 1
+                FOR UPDATE OF s SKIP LOCKED
+            ), touched AS (
+                UPDATE {table}_slots SET served_at = CURRENT_TIMESTAMP WHERE slot IN (SELECT slot FROM taken)
+            ), head AS (
+                SELECT {COLUMNS} FROM {table}
+                WHERE slot = (SELECT slot FROM taken) AND {QUEUE}
+                ORDER BY received_position LIMIT 1
+                FOR UPDATE
+            )
+            SELECT t.slot, h.*, pg_current_snapshot()::text, (SELECT slots FROM {table}_meta)
+            FROM (SELECT 1) AS one
+            LEFT JOIN taken t ON true
+            LEFT JOIN head h ON true
+            "#,
+            table = self.table,
+        );
+        let row = session.connection().query_one(&sql, &[]).await?;
+        let snapshot = snapshot_of(&row, WIDTH + 1)?;
+        let slot = row.get::<_, Option<i16>>(0).map(|slot| slot as u32);
+        let head = row
+            .get::<_, Option<i64>>(8)
+            .is_some()
+            .then(|| message_of(&row, 1));
+        Ok(Taken {
+            slot,
+            head,
+            snapshot,
+            slots: row.get::<_, i32>(WIDTH + 2) as u32,
+        })
+    }
+
+    /// The head of a slot the dispatcher holds: the oldest row of its queue,
+    /// locked, with whether it still waits for its backoff, and the
+    /// statement's snapshot; no row when the slot's queue is empty.
+    pub(super) async fn head_of(&self, session: &P::Session, slot: u32) -> Result<Step, Error> {
         let sql = format!(
             r#"
             WITH r AS (
                 SELECT {COLUMNS},
                        next_attempt_at IS NOT NULL AND next_attempt_at > CURRENT_TIMESTAMP AS deferred
                 FROM {table}
-                WHERE processed_position IS NULL AND parked_at IS NULL AND waiting_for IS NULL
-                  AND ($1 <= 1 OR (hashtext({key}) & 2147483647) % $1 = $2)
+                WHERE slot = $1 AND {QUEUE}
                 ORDER BY received_position ASC
                 LIMIT 1
-                FOR UPDATE SKIP LOCKED
+                FOR UPDATE
             )
             SELECT r.*, pg_current_snapshot()::text AS snapshot
             FROM (SELECT 1) AS one
             LEFT JOIN r ON true
             "#,
             table = self.table,
-            key = self.partition.sql_expression(),
         );
         let row = session
             .connection()
-            .query_one(&sql, &[&(worker.of as i32), &(worker.id as i32)])
+            .query_one(&sql, &[&(slot as i16)])
             .await?;
-        let snapshot = row.get::<_, String>(WIDTH + 1).parse().map_err(
-            |error: crate::snapshot::MalformedSnapshot| Error::Subscriber(Box::new(error)),
-        )?;
+        let snapshot = snapshot_of(&row, WIDTH + 1)?;
         let found = row.get::<_, Option<i64>>(7).is_some();
         Ok(Step {
             row: found.then(|| (message_of(&row, 0), row.get::<_, bool>(WIDTH))),
@@ -436,6 +544,12 @@ where
 fn transaction_id(text: String) -> Result<u64, Error> {
     text.parse()
         .map_err(|_| Error::Subscriber(format!("not a transaction id: `{text}`").into()))
+}
+
+fn snapshot_of(row: &Row, at: usize) -> Result<Snapshot, Error> {
+    row.get::<_, String>(at)
+        .parse()
+        .map_err(|error: crate::snapshot::MalformedSnapshot| Error::Subscriber(Box::new(error)))
 }
 
 /// The primary key of `message`, as statement parameters `$1`..`$4`.

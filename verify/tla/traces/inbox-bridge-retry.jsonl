@@ -1,11 +1,13 @@
-{"deps":[],"event":"received","id":"t1/orders.Order/7/3","message_id":"00000000-0000-4000-8000-000000000003","observer":"inbox","received_position":1,"xid":2042061}
-{"call":1,"event":"fetched","id":"t1/orders.Order/7/3","observer":"inbox","of":1,"snapshot":{"xip":[],"xmax":2042062,"xmin":2042062},"worker":0}
-{"call":1,"event":"handled","id":"t1/orders.Order/7/3","observer":"inbox","of":1,"ok":false,"worker":0}
-{"attempts":1,"call":1,"error":"the first attempt fails on purpose","event":"failed","id":"t1/orders.Order/7/3","observer":"inbox","of":1,"parked":false,"retry_after_ms":0,"worker":0}
-{"call":1,"event":"dispatched","observer":"inbox","of":1,"outcome":"failed","worker":0}
-{"call":2,"event":"fetched","id":"t1/orders.Order/7/3","observer":"inbox","of":1,"snapshot":{"xip":[],"xmax":2042065,"xmin":2042065},"worker":0}
-{"call":2,"event":"handled","id":"t1/orders.Order/7/3","observer":"inbox","of":1,"ok":true,"worker":0}
-{"call":2,"event":"marked","id":"t1/orders.Order/7/3","observer":"inbox","of":1,"processed_position":2,"woken":[],"worker":0}
-{"call":2,"event":"dispatched","observer":"inbox","of":1,"outcome":"processed","worker":0}
-{"call":3,"event":"fetched","id":null,"observer":"inbox","of":1,"snapshot":{"xip":[],"xmax":2042067,"xmin":2042067},"worker":0}
-{"call":3,"event":"dispatched","observer":"inbox","of":1,"outcome":"nothing","worker":0}
+{"deps":[],"event":"received","id":"t1/orders.Order/7/3","message_id":"00000000-0000-4000-8000-000000000003","observer":"inbox","received_position":1,"xid":2043035}
+{"event":"fetched","id":null,"observer":"inbox","slot":null,"slots":1,"snapshot":{"xip":[2043033],"xmax":2043035,"xmin":2043033}}
+{"event":"dispatched","observer":"inbox","outcome":"nothing","slot":null}
+{"event":"fetched","id":"t1/orders.Order/7/3","observer":"inbox","slot":0,"slots":1,"snapshot":{"xip":[],"xmax":2043040,"xmin":2043040}}
+{"event":"handled","id":"t1/orders.Order/7/3","observer":"inbox","ok":false,"slot":0}
+{"attempts":1,"error":"the first attempt fails on purpose","event":"failed","id":"t1/orders.Order/7/3","observer":"inbox","parked":false,"retry_after_ms":0,"slot":0}
+{"event":"dispatched","observer":"inbox","outcome":"failed","slot":0}
+{"event":"fetched","id":"t1/orders.Order/7/3","observer":"inbox","slot":0,"slots":1,"snapshot":{"xip":[],"xmax":2043043,"xmin":2043043}}
+{"event":"handled","id":"t1/orders.Order/7/3","observer":"inbox","ok":true,"slot":0}
+{"event":"marked","id":"t1/orders.Order/7/3","observer":"inbox","processed_position":2,"slot":0,"woken":[]}
+{"event":"dispatched","observer":"inbox","outcome":"processed","slot":0}
+{"event":"fetched","id":null,"observer":"inbox","slot":null,"slots":1,"snapshot":{"xip":[],"xmax":2043045,"xmin":2043045}}
+{"event":"dispatched","observer":"inbox","outcome":"nothing","slot":null}

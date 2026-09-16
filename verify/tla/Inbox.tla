@@ -2,13 +2,15 @@
 (***************************************************************************)
 (* The Transactional Inbox of `crates/inbox`, as a protocol.               *)
 (*                                                                         *)
-(* Messages arrive, each under an identity; a dispatcher takes the oldest  *)
-(* unprocessed message of its partition, runs the subscriber inside its    *)
-(* own transaction, and marks the message processed in that transaction.   *)
-(* A message whose causal dependencies are not processed is not taken: it  *)
-(* is set aside to wait, out of the queue, and the transaction that marks  *)
-(* the dependency processed puts it back.  Several dispatchers may serve   *)
-(* one partition.  Dispatchers crash and subscribers fail at any point.    *)
+(* Messages arrive, each under an identity, and each in a slot, a share of *)
+(* the partition keys by hash stored with the row.  A dispatcher is the    *)
+(* holder of a slot's lock, one at a time per slot and with no other       *)
+(* identity: it takes the oldest unprocessed message of the slot, runs the *)
+(* subscriber inside its own transaction, and marks the message processed *)
+(* in that transaction.  A message whose causal dependencies are not       *)
+(* processed is not taken: it is set aside to wait, out of the queue, and  *)
+(* the transaction that marks the dependency processed puts it back.       *)
+(* Dispatchers crash and subscribers fail at any point.                    *)
 (*                                                                         *)
 (* PostgreSQL is abstracted to what the protocol relies on:                *)
 (*   - INSERT ... ON CONFLICT DO NOTHING: an identity is one row, however  *)
@@ -29,11 +31,11 @@
 (* but in nobody's way.  A subscriber that fails rolls its writes back to a *)
 (* savepoint; the attempt is recorded in the same transaction, and the     *)
 (* message is not due again until its backoff has passed, during which it  *)
-(* holds its partition: stepping over it would lose the order.  After      *)
+(* holds its slot: stepping over it would lose the order.  After           *)
 (* MaxAttempts failures the message is parked, taken out of the queue but  *)
-(* kept in the table, and the partition flows; with MaxAttempts = 0 it     *)
+(* kept in the table, and the slot flows; with MaxAttempts = 0 it          *)
 (* never is, and a message whose subscriber never succeeds blocks its      *)
-(* partition for ever, which InboxPoisonNoParking.cfg shows.  An operator  *)
+(* slot for ever, which InboxPoisonNoParking.cfg shows.  An operator       *)
 (* may unpark a message, to try again, or resolve it, to mark it processed *)
 (* without effects.  The model bounds failures and operator actions so     *)
 (* that liveness can be stated.                                            *)
@@ -44,20 +46,18 @@ CONSTANTS
   Msgs,           \* messages, by identity
   Deps,           \* [Msgs -> SUBSET Msgs], causal dependencies; acyclic
   Arrives,        \* SUBSET Msgs: the messages that ever arrive
-  Workers,        \* partitions, by the hash of the partition key
-  Dispatchers,    \* SUBSET (Workers \X Nat): several dispatchers may serve one worker
+  Slots,          \* shares of the partition keys by hash; a dispatcher per slot, at a time
   MaxCrashes,     \* crashes and subscriber failures, in all
-  WaitsOnDependencies, \* TRUE: a message whose dependencies are not processed is set aside to wait; FALSE: it holds its partition
+  WaitsOnDependencies, \* TRUE: a message whose dependencies are not processed is set aside to wait; FALSE: it holds its slot
   WaitExpires,    \* TRUE: a wait may run out and park the message
   Poison,         \* SUBSET Msgs: messages whose subscriber never succeeds
   MaxAttempts,    \* failed attempts after which a message is parked; 0: never, retry for ever
-  BlockOnBackoff, \* TRUE: a failed message not yet due holds its partition; FALSE: it is stepped over
+  BlockOnBackoff, \* TRUE: a failed message not yet due holds its slot; FALSE: it is stepped over
   MaxAdmin,       \* unpark and resolve actions, in all
   None            \* a model value: no row held
 
 ASSUME Deps \in [Msgs -> SUBSET Msgs]
 ASSUME Arrives \subseteq Msgs
-ASSUME Dispatchers \subseteq Workers \X Nat
 ASSUME MaxCrashes \in Nat
 ASSUME Poison \subseteq Msgs
 ASSUME MaxAttempts \in Nat
@@ -67,13 +67,13 @@ ASSUME WaitsOnDependencies \in BOOLEAN
 ASSUME WaitExpires \in BOOLEAN
 
 VARIABLES
-  part,       \* [Msgs -> Workers], fixed at the start: any partitioning is allowed
+  part,       \* [Msgs -> Slots], fixed at the start: any cut is allowed
   received,   \* SUBSET Msgs, the rows
   recvPos,    \* [Msgs -> Nat], arrival order, 0 until received
   nextRecv,
   processed,  \* SUBSET Msgs, the committed marks
   effects,    \* [Msgs -> Nat], the subscriber's committed writes, per message
-  holding,    \* [Dispatchers -> Msgs \cup {None}], the row a dispatcher's open transaction holds
+  holding,    \* [Slots -> Msgs \cup {None}], the row the slot's open transaction holds
   procOrder,  \* Seq(Msgs), the order marks were committed in: processed_position
   crashes,
   attempts,   \* [Msgs -> Nat], failed attempts recorded
@@ -87,16 +87,16 @@ VARIABLES
 vars == <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
           attempts, due, parked, resolved, admin, waiting, expired>>
 
-Locked == {holding[d] : d \in Dispatchers} \ {None}
+Locked == {holding[s] : s \in Slots} \ {None}
 
 Init ==
-  /\ part \in [Msgs -> Workers]
+  /\ part \in [Msgs -> Slots]
   /\ received = {}
   /\ recvPos = [m \in Msgs |-> 0]
   /\ nextRecv = 1
   /\ processed = {}
   /\ effects = [m \in Msgs |-> 0]
-  /\ holding = [d \in Dispatchers |-> None]
+  /\ holding = [s \in Slots |-> None]
   /\ procOrder = <<>>
   /\ crashes = 0
   /\ attempts = [m \in Msgs |-> 0]
@@ -140,7 +140,7 @@ DepsProcessed(m) == Deps[m] \subseteq processed
 \* logged horizon.
 CandidatesIn(d, rows) ==
   {m \in rows : /\ m \notin processed /\ m \notin parked /\ waiting[m] = None
-               /\ m \notin Locked /\ part[m] = d[1]
+               /\ m \notin Locked /\ part[m] = d
                /\ (BlockOnBackoff \/ due[m])}
 Candidates(d) == CandidatesIn(d, received)
 
@@ -275,14 +275,14 @@ Resolve(m) ==
 
 Next ==
   \/ \E m \in Msgs : Receive(m) \/ Elapse(m) \/ Expire(m) \/ Unpark(m) \/ Resolve(m)
-  \/ \E d \in Dispatchers : Fetch(d) \/ Wait(d) \/ Commit(d) \/ Fail(d) \/ Crash(d)
+  \/ \E d \in Slots : Fetch(d) \/ Wait(d) \/ Commit(d) \/ Fail(d) \/ Crash(d)
 
 \* Every message that arrives at all arrives eventually; every backoff
 \* passes, and every wait runs out where waits do; every dispatcher keeps
 \* walking its queue and finishes what it took, one way or the other.
 Fairness ==
   /\ \A m \in Msgs : WF_vars(Receive(m)) /\ WF_vars(Elapse(m)) /\ WF_vars(Expire(m))
-  /\ \A d \in Dispatchers : WF_vars(Fetch(d) \/ Wait(d)) /\ WF_vars(Commit(d) \/ Fail(d))
+  /\ \A d \in Slots : WF_vars(Fetch(d) \/ Wait(d)) /\ WF_vars(Commit(d) \/ Fail(d))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -290,13 +290,13 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 (* Properties                                                                 *)
 
 TypeOK ==
-  /\ part \in [Msgs -> Workers]
+  /\ part \in [Msgs -> Slots]
   /\ received \subseteq Msgs
   /\ recvPos \in [Msgs -> Nat]
   /\ nextRecv \in Nat
   /\ processed \subseteq Msgs
   /\ effects \in [Msgs -> Nat]
-  /\ holding \in [Dispatchers -> Msgs \cup {None}]
+  /\ holding \in [Slots -> Msgs \cup {None}]
   /\ procOrder \in Seq(Msgs)
   /\ crashes \in Nat
   /\ attempts \in [Msgs -> Nat]
@@ -333,20 +333,21 @@ WaitingIsAside ==
 \* A message is processed only after everything it depends on.
 CausalOrder == \A m \in processed : Deps[m] \subseteq processed
 
-\* Two dispatchers never hold the same row.
+\* Two slots never hold the same row.
 HeldOnce ==
-  \A d1, d2 \in Dispatchers :
+  \A d1, d2 \in Slots :
     (d1 # d2 /\ holding[d1] # None) => holding[d1] # holding[d2]
 
 ProcessedWasReceived == processed \subseteq received
 
 Index(m) == CHOOSE i \in 1..Len(procOrder) : procOrder[i] = m
 
-\* Messages of one partition without dependencies, processed by the
-\* subscriber rather than resolved by hand, are processed in order of
-\* arrival, given one dispatcher per partition.  A failed message waiting
-\* for its backoff holds the partition for this reason; stepping over it,
-\* BlockOnBackoff = FALSE, breaks the order, which InboxSkipNotDue.cfg shows.
+\* Messages of one slot without dependencies, processed by the subscriber
+\* rather than resolved by hand, are processed in order of arrival: one
+\* dispatcher per slot at a time is what makes this a guarantee rather than
+\* a condition.  A failed message waiting for its backoff holds the slot for
+\* this reason; stepping over it, BlockOnBackoff = FALSE, breaks the order,
+\* which InboxSkipNotDue.cfg shows.
 ArrivalOrder ==
   \A a, b \in processed \ resolved :
     (part[a] = part[b] /\ Deps[a] = {} /\ Deps[b] = {} /\ recvPos[a] < recvPos[b]) => Index(a) < Index(b)

@@ -1,17 +1,16 @@
-{"deps":[],"event":"received","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","message_id":"00000000-0000-4000-8000-000000000009","observer":"inbox","received_position":1,"xid":2042137}
-{"deps":[],"event":"received","id":"tenant-1/orders.Order/{\"id\":\"b\"}/1","message_id":"00000000-0000-4000-8000-00000000000a","observer":"inbox","received_position":2,"xid":2042138}
-{"call":1,"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","of":1,"snapshot":{"xip":[2042112],"xmax":2042139,"xmin":2042112},"worker":0}
-{"call":1,"event":"handled","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","of":1,"ok":false,"worker":0}
-{"attempts":1,"call":1,"error":"the first attempt fails on purpose","event":"failed","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","of":1,"parked":false,"retry_after_ms":300,"worker":0}
-{"call":1,"event":"dispatched","observer":"inbox","of":1,"outcome":"failed","worker":0}
-{"call":2,"event":"deferred","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","of":1,"snapshot":{"xip":[2042112],"xmax":2042143,"xmin":2042112},"worker":0}
-{"call":2,"event":"fetched","id":null,"observer":"inbox","of":1,"snapshot":{"xip":[2042112],"xmax":2042143,"xmin":2042112},"worker":0}
-{"call":2,"event":"dispatched","observer":"inbox","of":1,"outcome":"nothing","worker":0}
-{"call":3,"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","of":1,"snapshot":{"xip":[],"xmax":2042255,"xmin":2042255},"worker":0}
-{"call":3,"event":"handled","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","of":1,"ok":true,"worker":0}
-{"call":3,"event":"marked","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","of":1,"processed_position":3,"woken":[],"worker":0}
-{"call":3,"event":"dispatched","observer":"inbox","of":1,"outcome":"processed","worker":0}
-{"call":4,"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"b\"}/1","observer":"inbox","of":1,"snapshot":{"xip":[],"xmax":2042257,"xmin":2042257},"worker":0}
-{"call":4,"event":"handled","id":"tenant-1/orders.Order/{\"id\":\"b\"}/1","observer":"inbox","of":1,"ok":true,"worker":0}
-{"call":4,"event":"marked","id":"tenant-1/orders.Order/{\"id\":\"b\"}/1","observer":"inbox","of":1,"processed_position":4,"woken":[],"worker":0}
-{"call":4,"event":"dispatched","observer":"inbox","of":1,"outcome":"processed","worker":0}
+{"deps":[],"event":"received","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","message_id":"00000000-0000-4000-8000-000000000010","observer":"inbox","received_position":1,"xid":2043108}
+{"deps":[],"event":"received","id":"tenant-1/orders.Order/{\"id\":\"b\"}/1","message_id":"00000000-0000-4000-8000-000000000011","observer":"inbox","received_position":2,"xid":2043110}
+{"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","slot":0,"slots":1,"snapshot":{"xip":[],"xmax":2043111,"xmin":2043111}}
+{"event":"handled","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","ok":false,"slot":0}
+{"attempts":1,"error":"the first attempt fails on purpose","event":"failed","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","parked":false,"retry_after_ms":300,"slot":0}
+{"event":"dispatched","observer":"inbox","outcome":"failed","slot":0}
+{"event":"fetched","id":null,"observer":"inbox","slot":null,"slots":1,"snapshot":{"xip":[2043113],"xmax":2043115,"xmin":2043113}}
+{"event":"dispatched","observer":"inbox","outcome":"nothing","slot":null}
+{"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","slot":0,"slots":1,"snapshot":{"xip":[],"xmax":2043239,"xmin":2043239}}
+{"event":"handled","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","ok":true,"slot":0}
+{"event":"marked","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","processed_position":3,"slot":0,"woken":[]}
+{"event":"dispatched","observer":"inbox","outcome":"processed","slot":0}
+{"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"b\"}/1","observer":"inbox","slot":0,"slots":1,"snapshot":{"xip":[],"xmax":2043242,"xmin":2043242}}
+{"event":"handled","id":"tenant-1/orders.Order/{\"id\":\"b\"}/1","observer":"inbox","ok":true,"slot":0}
+{"event":"marked","id":"tenant-1/orders.Order/{\"id\":\"b\"}/1","observer":"inbox","processed_position":4,"slot":0,"woken":[]}
+{"event":"dispatched","observer":"inbox","outcome":"processed","slot":0}

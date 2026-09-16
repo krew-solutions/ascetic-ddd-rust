@@ -16,7 +16,7 @@
 //! // a processing loop
 //! inbox.run(
 //!     |tx, message| handle(tx, message),   // `tx` is the transaction the mark commits in
-//!     Workers::default(),
+//!     Loops::default(),
 //!     ctrl_c,
 //! ).await?;
 //! ```
@@ -32,8 +32,11 @@
 //! * A causal dependency is a type, [`CausalDependency`], not a dictionary
 //!   with agreed keys; entries in the metadata that are not dependencies are
 //!   ignored rather than raising.
-//! * The worker filter clears the sign bit of `hashtext`, as in the outbox:
-//!   in the source a negative hash matched no worker.
+//! * The slot of a row is `hashtext(<partition key>) % slots` with the sign
+//!   bit cleared, stored with the row, and a dispatcher takes whichever slot
+//!   has work under a lock on that slot (ADR-0008); in the source workers
+//!   were told their share at start-up, and a negative hash matched no
+//!   worker.
 //! * `run` stops cooperatively, between messages, on a future the caller
 //!   passes; a subscriber returns a `Result`. There is no async iterator.
 //! * `payload` is bytes, not JSONB, mirroring the outbox (ADR-0002).
@@ -58,6 +61,6 @@ pub use crate::error::{BoxError, Error};
 pub use crate::message::{CausalDependency, InboxMessage};
 pub use crate::observer::{InboxObserver, Receipt};
 pub use crate::partition::{ByStream, ByUri, PartitionKey};
-pub use crate::pg::{Outcome, PgInbox, Retries, Worker, Workers};
+pub use crate::pg::{Loops, Outcome, PgInbox, Retries};
 pub use crate::port::Inbox;
 pub use crate::snapshot::Snapshot;

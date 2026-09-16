@@ -9,14 +9,11 @@
 //! `verify/tla/Inbox.tla` — receive, wait, fetch, fail, expire, and the close
 //! of the dispatcher's transaction, plus the operator's unpark and resolve —
 //! with the steps the model folds into one made visible: the row that holds
-//! the partition while it waits for its backoff, the subscriber's outcome,
+//! the slot while it waits for its backoff, the subscriber's outcome,
 //! the mark and what it woke.
 //!
-//! A dispatcher's events name the worker and the number of the `dispatch`
-//! call, which the caller supplies: unlike the outbox, whose position lock
-//! allows one transaction per worker, the inbox runs several calls of one
-//! worker at once, kept apart by `FOR UPDATE SKIP LOCKED`, and the call
-//! number is what tells their events apart.
+//! A dispatcher's events name the slot it holds, and nothing else: one
+//! dispatcher at a time works a slot, so the slot is its identity.
 //!
 //! A receipt names the transaction that stored a row, and every step of a
 //! walk over the table carries the [`Snapshot`] its statement ran under, so
@@ -30,7 +27,7 @@ use std::time::Duration;
 
 use crate::error::{BoxError, Error};
 use crate::message::{CausalDependency, InboxMessage};
-use crate::pg::{Outcome, Worker};
+use crate::pg::Outcome;
 use crate::snapshot::Snapshot;
 
 /// What the inbox knows about a row once it is stored: the transaction that
@@ -56,10 +53,8 @@ pub struct Received<'a> {
 /// processed, and set it aside to wait for that one, out of the queue; the
 /// transaction that marks the dependency processed puts it back.
 pub struct Waiting<'a> {
-    /// The worker that set it aside.
-    pub worker: Worker,
-    /// The `dispatch` call, as its caller numbered it.
-    pub call: u64,
+    /// The slot the dispatcher holds.
+    pub slot: u32,
     /// The row.
     pub message: &'a InboxMessage,
     /// The first of its dependencies found unprocessed.
@@ -68,27 +63,16 @@ pub struct Waiting<'a> {
     pub snapshot: &'a Snapshot,
 }
 
-/// A dispatcher found the oldest row of its partition waiting for its
-/// backoff, and took nothing: the row holds the partition, so that the order
-/// survives the failure.
-pub struct Deferred<'a> {
-    /// The worker that found it.
-    pub worker: Worker,
-    /// The `dispatch` call, as its caller numbered it.
-    pub call: u64,
-    /// The row that waits.
-    pub message: &'a InboxMessage,
-    /// What the statement that returned the row could see.
-    pub snapshot: &'a Snapshot,
-}
-
-/// A dispatcher took a row, locked for the length of its transaction.
+/// A dispatcher took a row, locked for the length of its transaction; or
+/// took nothing.
 pub struct Fetched<'a> {
-    /// The worker that took it.
-    pub worker: Worker,
-    /// The `dispatch` call, as its caller numbered it.
-    pub call: u64,
-    /// The row; `None` when nothing was eligible.
+    /// The slot the dispatcher holds; `None` when no slot had a due head.
+    pub slot: Option<u32>,
+    /// How many slots the table is cut into.
+    pub slots: u32,
+    /// The row; `None` when nothing was eligible: no slot had a due head, or
+    /// the head of the slot held waits for its backoff after what was in
+    /// front of it was set aside.
     pub message: Option<&'a InboxMessage>,
     /// What the statement that returned the row, or found none, could see.
     pub snapshot: &'a Snapshot,
@@ -96,10 +80,8 @@ pub struct Fetched<'a> {
 
 /// The subscriber was given the message and the dispatcher's transaction.
 pub struct Handled<'a> {
-    /// The worker.
-    pub worker: Worker,
-    /// The `dispatch` call, as its caller numbered it.
-    pub call: u64,
+    /// The slot the dispatcher holds.
+    pub slot: u32,
     /// The message.
     pub message: &'a InboxMessage,
     /// What the subscriber returned.
@@ -109,10 +91,8 @@ pub struct Handled<'a> {
 /// The message was marked processed, inside the dispatcher's transaction:
 /// not durable until [`Dispatched`] reports a commit.
 pub struct Marked<'a> {
-    /// The worker.
-    pub worker: Worker,
-    /// The `dispatch` call, as its caller numbered it.
-    pub call: u64,
+    /// The slot the dispatcher holds.
+    pub slot: u32,
     /// The message.
     pub message: &'a InboxMessage,
     /// Its order of processing.
@@ -125,10 +105,6 @@ pub struct Marked<'a> {
 /// Rows whose wait for a dependency ran out were parked, with the dependency
 /// named in their `last_error`, inside the dispatcher's transaction.
 pub struct Expired<'a> {
-    /// The worker whose call found them.
-    pub worker: Worker,
-    /// The `dispatch` call, as its caller numbered it.
-    pub call: u64,
     /// The rows, oldest first.
     pub messages: &'a [InboxMessage],
 }
@@ -137,10 +113,8 @@ pub struct Expired<'a> {
 /// the attempt was recorded, inside the dispatcher's transaction. Not
 /// durable until [`Dispatched`] reports a commit.
 pub struct Failed<'a> {
-    /// The worker.
-    pub worker: Worker,
-    /// The `dispatch` call, as its caller numbered it.
-    pub call: u64,
+    /// The slot the dispatcher holds.
+    pub slot: u32,
     /// The message.
     pub message: &'a InboxMessage,
     /// What the subscriber returned.
@@ -156,10 +130,8 @@ pub struct Failed<'a> {
 /// The dispatcher's transaction closed: committed, with what it did, or
 /// rolled back, with the error.
 pub struct Dispatched<'a> {
-    /// The worker whose transaction closed.
-    pub worker: Worker,
-    /// The `dispatch` call, as its caller numbered it.
-    pub call: u64,
+    /// The slot the dispatcher held; `None` when it took none.
+    pub slot: Option<u32>,
     /// `Ok`: what was committed; `Err`: nothing was, and whatever row was
     /// held is free again.
     pub outcome: Result<Outcome, &'a Error>,
@@ -190,8 +162,6 @@ pub trait InboxObserver: Send + Sync {
     fn on_received(&self, _event: &Received<'_>) {}
     /// The head of the queue was set aside to wait for a dependency.
     fn on_waiting(&self, _event: &Waiting<'_>) {}
-    /// The oldest row waits for its backoff; nothing was taken.
-    fn on_deferred(&self, _event: &Deferred<'_>) {}
     /// A dispatcher took a row, or found none.
     fn on_fetched(&self, _event: &Fetched<'_>) {}
     /// The subscriber returned.
@@ -241,7 +211,6 @@ macro_rules! forward_to_each {
 forward_to_each! {
     on_received: Received,
     on_waiting: Waiting,
-    on_deferred: Deferred,
     on_fetched: Fetched,
     on_handled: Handled,
     on_marked: Marked,

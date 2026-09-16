@@ -10,7 +10,7 @@ of `ascetic_ddd.inbox` (Python), adapted to Rust rather than transliterated.
 inbox.publish(&message).await?;
 
 // a processing loop; `tx` is the transaction the mark commits in
-inbox.run(|tx, message| handle(tx, message), Workers::default(), ctrl_c).await?;
+inbox.run(|tx, message| handle(tx, message), Loops::default(), ctrl_c).await?;
 ```
 
 ## What it guarantees
@@ -25,9 +25,10 @@ inbox.run(|tx, message| handle(tx, message), Workers::default(), ctrl_c).await?;
 * **Causal order.** A message may name, in `metadata.causal_dependencies`,
   the messages that must be processed first. It is stepped over until they
   are, and looked at again next time.
-* **Concurrent dispatchers.** `FOR UPDATE SKIP LOCKED`: each takes a message
-  of its own. Workers share the messages by the hash of a partition key,
-  the URI or the stream; with causal dependencies, partition by stream.
+* **One dispatcher at a time per slot.** A row carries its slot, the hash of
+  a partition key, the URI or the stream, and a dispatcher is whoever holds
+  the lock on that slot's row for the length of a transaction. With causal
+  dependencies, cut by stream.
 
 ## The port and the adapter
 
@@ -112,7 +113,7 @@ let inbox = PgInbox::new(pool)
         Duration::from_secs(300),
     )));
 
-match inbox.dispatch(&subscriber, Worker::ALONE, call).await? {
+match inbox.dispatch(&subscriber).await? {
     Outcome::Processed => {}
     Outcome::Failed { attempts, parked } => {}
     Outcome::Nothing => {}
@@ -136,25 +137,65 @@ localhost, best of three runs: 1.39 ms per message before, 1.54 ms after;
 the other runs 1.69–1.74 ms before and 1.80–1.83 ms after. About 150 µs, a
 tenth with a subscriber that does nothing, less with one that does anything.
 
+## Slots
+
+A row carries its slot, `hashtext(<partition key>) % slots` with the sign bit
+cleared, stored at insert; the key, `ByUri` or `ByStream`, and the number of
+slots are fixed for the life of the table, `partitioned_by` and
+`with_slots(S)` before `setup` creates it, the URI and one slot by default.
+The table `<table>_slots` has one row per slot. A dispatcher has no identity:
+`dispatch(subscriber)` takes whichever slot has a due head and is held by
+nobody, least recently served first, locks that slot's row for the length of
+the transaction, `FOR UPDATE SKIP LOCKED`, and works the head of that slot.
+Any number of loops in any number of processes share the slots through the
+locks alone, `run(subscriber, Loops { concurrency, poll_interval },
+shutdown)`; a process that dies releases its slot with its transaction, and
+the next poll of a survivor takes it. One slot is the order of arrival over
+the whole table; more slots are parallelism, and order within a stream
+still, since a stream is in one slot. A head waiting for its backoff holds
+its slot, and the other slots flow. Changing the number of slots or the key
+moves rows between slots and is a migration, not a restart: `setup` refuses a
+table cut otherwise, or one from before slots (ADR-0008).
+
+The take is one statement. On 200,000 rows, a quarter of them processed:
+0.07 ms for one slot, 0.21 ms for sixteen, 0.43 ms for sixty-four; idle
+0.05–0.08 ms. The head index, `(slot, received_position)` over the rows
+neither processed, parked nor waiting, is the only index in
+`received_position` order on purpose: beside a second one over the whole
+column the planner walked that one from the first row, past the whole
+processed history, 89 ms at sixteen slots.
+
+A table from before slots is migrated by hand, with the inbox stopped; for a
+table `inbox` cut by URI into one slot:
+
+```sql
+ALTER TABLE inbox ADD COLUMN slot smallint
+    GENERATED ALWAYS AS ((hashtext(uri) & 2147483647) % 1) STORED;
+DROP INDEX inbox__head_idx;
+ALTER TABLE inbox DROP CONSTRAINT inbox_received_position_key;
+```
+
+By stream the key is `tenant_id || ':' || stream_type || ':' || stream_id::text`.
+The next `setup` adds the head index, `inbox_meta` and `inbox_slots`.
+
 ## Observing the inbox
 
 `PgInbox::observed_by(observer)` attaches an `InboxObserver`, in the shape of
 the session and outbox observers: a synchronous, infallible value, composed as
-a tuple, fixed when the inbox is built. It is told of six things — a message
+a tuple, fixed when the inbox is built. It is told of a message
 received, with its order of arrival or that the identity was already there; a
-row set aside to wait for a dependency; the head of the queue found waiting
-for its backoff; a row taken, or none; the subscriber's outcome; the mark,
-with its order of processing and the rows it woke; the attempt recorded after
-a failure, with whether it parked the message; rows whose wait ran out,
-parked; the dispatcher's transaction closed, committed or rolled back; a
-message unparked or resolved by an operator, with the rows the resolve woke. A dispatcher's events carry the worker and the number of the
-`dispatch` call, which the caller supplies and keeps unique among the calls
-of one worker open at once, because several of them run at once under
-`FOR UPDATE SKIP LOCKED`. A stored message comes with the id of the transaction that stored
-it, and every step of a walk over the table with the snapshot its statement
-ran under, so that a recorded run says which rows each walk could see
-whatever order two tasks' events were logged in. A dispatcher's
-events carry the worker and the number of the `dispatch` call. These
+row set aside to wait for a dependency; a slot taken and its head, or no
+slot, or a slot whose head waits for its backoff; the subscriber's outcome;
+the mark, with its order of processing and the rows it woke; the attempt
+recorded after a failure, with whether it parked the message; rows whose
+wait ran out, parked; the dispatcher's transaction closed, committed or
+rolled back; a message unparked or resolved by an operator, with the rows
+the resolve woke. A dispatcher's events name the slot it holds, which is
+what tells one dispatcher's events from another's when several run at once:
+a slot has one holder at a time. A stored message comes with the id of the
+transaction that stored it, and every step of a walk over the table with the
+snapshot its statement ran under, so that a recorded run says which rows
+each walk could see whatever order two tasks' events were logged in. These
 are the actions of the protocol model in `verify/tla/Inbox.tla`, with the
 steps the model folds into one made visible, so a recording observer yields a
 trace the model can be checked against. The tests do exactly that, through
@@ -172,10 +213,15 @@ through the model.
 
 * A causal dependency is a type, `CausalDependency`, with `serde`; entries
   in the metadata that are not dependencies are ignored.
-* The worker filter clears the sign bit of `hashtext`: in the source a
-  negative hash matched no worker, so about half of all keys were never
-  processed once `num_workers > 1`. A test spreads forty streams over three
-  workers and checks that each is processed exactly once.
+* The slot of a row is `hashtext(<partition key>) % slots` with the sign bit
+  cleared, stored with the row: in the source a negative hash matched no
+  worker, so about half of all keys were never processed once
+  `num_workers > 1`. A test spreads forty streams over three slots and checks
+  that each is processed exactly once.
+* Dispatchers have no identity (ADR-0008). The source told each worker its
+  share, `hash % num_workers`, at start-up, so a dead worker's share stood
+  still until it was restarted; here a dispatch takes whichever slot has
+  work under a lock on that slot's row, and a survivor takes over.
 * `run` stops cooperatively, between messages, on a future the caller
   passes. A subscriber returns a `Result`. There is no async iterator.
 * `payload` is bytes, not JSONB, mirroring the outbox (ADR-0002).

@@ -29,26 +29,29 @@ The inbox mapping:
 
     received, stored          -> receive   (msg, pos, xid, deps)
     received, duplicate       -> duplicate (msg)
-    waiting                   -> wait      (d, of, msg, dep, snap): set aside for the dependency
-    fetched, a row            -> fetch     (d, of, msg, snap)
-    fetched, none             -> nofetch   (d, of, snap)
-    deferred + fetched, none  -> blocked   (d, of, msg, snap): the oldest row waits for its backoff
-    handled ok                -> handle    (d, of, msg)
+    waiting                   -> wait      (slot, of, msg, dep, snap): set aside for the dependency
+    fetched, a row            -> fetch     (slot, of, msg, snap)
+    fetched, a slot, no row   -> nofetch   (slot, of, snap): the slot's head waits for its backoff
+    fetched, no slot          -> nofetch   (of, snap): no slot had a due head
+    handled ok                -> handle    (slot, of, msg)
     handled failed            -> nothing: the subscriber declined
     marked                    -> nothing: the mark commits with the transaction
     failed + dispatched failed
-                              -> fail      (d, of, msg, attempts, parked): the attempt commits
+                              -> fail      (slot, of, msg, attempts, parked): the attempt commits
     marked + dispatched processed
-                              -> commit    (d, of, woken): the mark and the rows it woke
+                              -> commit    (slot, of, woken): the mark and the rows it woke
     dispatched nothing        -> nothing: the nofetch already said it
-    dispatched rolled_back    -> crash     (d, of), if a row was fetched
+    dispatched rolled_back    -> crash     (slot, of), if a row was fetched
     expired                   -> expire    (msg), one per row parked
     unparked                  -> unpark    (msg)
     resolved                  -> resolve   (msg, woken)
 
 Messages are named in order of first mention, a dependency that never arrives
-included; a dispatcher is <<worker, slot>>, where each open `dispatch` call
-takes the lowest slot of its worker not held by another open call.
+included; a dispatcher is the slot it holds, whoever ran it. A slot has one
+holder at a time, so the events between a fetch naming a slot and the close
+of a transaction naming it are one dispatch; the close is logged after the
+COMMIT, so the next holder's fetch may be logged before it, and the closes of
+a slot are matched to its fetches in order.
 
 The bridge mapping is both of the above, with messages named by `message_id`
 on both sides and one step of its own:
@@ -163,11 +166,12 @@ def inbox_steps(events, names=None, by_message_id=False):
     the outbox does, so that a bridge trace names a message once."""
     names = names or Names()
     rows = {}     # row identity -> name
-    slots = {}    # (worker, call) -> slot
-    holding = {}  # (worker, call) -> the row fetched, if any
-    deferred = {} # (worker, call) -> the row found waiting for its backoff
-    failed = {}   # (worker, call) -> (attempts, parked) recorded, awaiting COMMIT
-    woken = {}    # (worker, call) -> the rows the mark woke, awaiting COMMIT
+    # how many slots the table is cut into: one number, logged with every fetch
+    slots = next((e["slots"] for e in events if e["event"] == "fetched"), 1)
+    # slot -> the dispatches that took it and have not been closed, oldest
+    # first: each is the row fetched (or None), the failure recorded and the
+    # rows the mark woke, all awaiting the close of the transaction
+    opened = {}
 
     def dependency(identity):
         if by_message_id:
@@ -179,12 +183,10 @@ def inbox_steps(events, names=None, by_message_id=False):
             raise SystemExit(f"{what} names a row never received: {identity}")
         return rows[identity]
 
-    def dispatcher(e):
-        key = (e["worker"], e["call"])
-        if key not in slots:
-            taken = {slot for (worker, _), slot in slots.items() if worker == e["worker"]}
-            slots[key] = min(s for s in range(len(taken) + 1) if s not in taken)
-        return key, (e["worker"], slots[key]), e["of"]
+    def current(slot, what):
+        if not opened.get(slot):
+            raise SystemExit(f"{what} names slot {slot}, which no open dispatch holds")
+        return opened[slot][-1]
 
     for e in events:
         kind = e["event"]
@@ -194,6 +196,10 @@ def inbox_steps(events, names=None, by_message_id=False):
         if kind == "resolved":
             yield record(side="inbox", event="resolve", msg=row(e["id"], "a resolve"),
                          woken=[row(w, "a waking") for w in e["woken"]])
+            continue
+        if kind == "expired":
+            for identity in e["ids"]:
+                yield record(side="inbox", event="expire", msg=row(identity, "an expiry"))
             continue
         if kind == "received":
             if by_message_id:
@@ -209,47 +215,46 @@ def inbox_steps(events, names=None, by_message_id=False):
             else:
                 yield record(side="inbox", event="receive", msg=msg, pos=e["received_position"], xid=e["xid"], deps=deps)
             continue
-        key, d, of = dispatcher(e)
-        if kind == "waiting":
-            yield record(side="inbox", event="wait", d=d, of=of, msg=row(e["id"], "a wait"),
-                         dep=dependency(e["dependency"]), snap=snapshot(e))
-        elif kind == "expired":
-            for identity in e["ids"]:
-                yield record(side="inbox", event="expire", msg=row(identity, "an expiry"))
-        elif kind == "deferred":
-            deferred[key] = (row(e["id"], "a deferral"), snapshot(e))
-        elif kind == "fetched":
-            if e["id"] is None and key in deferred:
-                msg, snap = deferred.pop(key)
-                yield record(side="inbox", event="blocked", d=d, of=of, msg=msg, snap=snap)
-            elif e["id"] is None:
-                yield record(side="inbox", event="nofetch", d=d, of=of, snap=snapshot(e))
+        slot = e["slot"]
+        if kind == "fetched":
+            if slot is None:
+                yield record(side="inbox", event="nofetch", of=slots, snap=snapshot(e))
+                continue
+            held = row(e["id"], "a fetch") if e["id"] is not None else None
+            opened.setdefault(slot, []).append({"holding": held, "failed": None, "woken": []})
+            if held is None:
+                yield record(side="inbox", event="nofetch", slot=slot, of=slots, snap=snapshot(e))
             else:
-                holding[key] = row(e["id"], "a fetch")
-                yield record(side="inbox", event="fetch", d=d, of=of, msg=holding[key], snap=snapshot(e))
+                yield record(side="inbox", event="fetch", slot=slot, of=slots, msg=held, snap=snapshot(e))
+        elif kind == "waiting":
+            # the wait is inside the dispatch that took the slot, before its fetch
+            yield record(side="inbox", event="wait", slot=slot, of=slots, msg=row(e["id"], "a wait"),
+                         dep=dependency(e["dependency"]), snap=snapshot(e))
         elif kind == "failed":
-            failed[key] = (e["attempts"], e["parked"])
+            current(slot, "a failure")["failed"] = (e["attempts"], e["parked"])
         elif kind == "handled":
             if e["ok"]:
-                yield record(side="inbox", event="handle", d=d, of=of, msg=row(e["id"], "a handling"))
+                yield record(side="inbox", event="handle", slot=slot, of=slots, msg=row(e["id"], "a handling"))
         elif kind == "marked":
-            if holding.get(key) != row(e["id"], "a mark"):
-                raise SystemExit(f"call {key} marked a row it did not fetch: {e['id']}")
-            woken[key] = [row(w, "a waking") for w in e["woken"]]
+            dispatch = current(slot, "a mark")
+            if dispatch["holding"] != row(e["id"], "a mark"):
+                raise SystemExit(f"slot {slot} marked a row it did not fetch: {e['id']}")
+            dispatch["woken"] = [row(w, "a waking") for w in e["woken"]]
         elif kind == "dispatched":
             outcome = e["outcome"]
+            if slot is None:
+                continue  # nothing taken: the nofetch said it, or a rollback before any slot was taken
+            if not opened.get(slot):
+                raise SystemExit(f"slot {slot} closed a dispatch that never opened")
+            dispatch = opened[slot].pop(0)
             if outcome == "processed":
-                yield record(side="inbox", event="commit", d=d, of=of, woken=woken.get(key, []))
+                yield record(side="inbox", event="commit", slot=slot, of=slots, woken=dispatch["woken"])
             elif outcome == "failed":
-                attempts, parked = failed.pop(key)
-                yield record(side="inbox", event="fail", d=d, of=of, msg=holding[key], attempts=attempts, parked=parked)
-            elif outcome == "rolled_back" and key in holding:
-                yield record(side="inbox", event="crash", d=d, of=of)
-            failed.pop(key, None)
-            woken.pop(key, None)
-            holding.pop(key, None)
-            deferred.pop(key, None)
-            del slots[key]
+                attempts, parked = dispatch["failed"]
+                yield record(side="inbox", event="fail", slot=slot, of=slots, msg=dispatch["holding"],
+                             attempts=attempts, parked=parked)
+            elif outcome == "rolled_back" and dispatch["holding"] is not None:
+                yield record(side="inbox", event="crash", slot=slot, of=slots)
         else:
             raise SystemExit(f"unknown inbox event: {kind}")
 
@@ -320,8 +325,8 @@ def main(trace, out):
     name = "Trace_" + re.sub(r"[^A-Za-z0-9_]", "_", trace.stem)
     produced = list(steps(events))
     body = ",\n  ".join(str(step) for step in produced)
-    # The order of arrival is a promise only with one dispatcher per partition.
-    if crate == "inbox" and all(step["fields"].get("d", (0, 0))[1] == 0 for step in produced):
+    # The order of arrival is a promise only with one slot.
+    if crate == "inbox" and all(step["fields"].get("of", 1) == 1 for step in produced):
         invariants = invariants[:-1] + ["ArrivalOrder", "NotFinished"]
     (out / f"{name}.tla").write_text(
         f"---- MODULE {name} ----\n"
