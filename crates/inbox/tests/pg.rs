@@ -925,6 +925,76 @@ async fn loops_over_slots_with_dependencies_across_them_lose_no_wake() {
     assert!(f.parked().await.is_empty());
 }
 
+/// Two streams in two slots, four messages each, two loops, a subscriber
+/// that takes its time and notes when it ran: the messages of one stream
+/// are never in the subscriber at the same time, while the two streams are
+/// — the run is shorter than the sum of the pauses, so the check could have
+/// seen an overlap. One partition key, one dispatcher at a time.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn messages_of_one_stream_are_never_processed_at_once() {
+    const PAUSE: Duration = Duration::from_millis(40);
+    let f = fixture_concurrent("serial_stream", 2).await;
+    let (first, second) = f.streams_in_different_slots().await;
+    let messages: Vec<InboxMessage> = (1..=4)
+        .flat_map(|i| [message(&first, i), message(&second, i)])
+        .collect();
+    f.publish(&messages).await;
+    // each run of the subscriber: the stream and the span it took
+    let spans: Arc<Mutex<Vec<(String, std::time::Instant, std::time::Instant)>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let done = Arc::new(tokio::sync::Notify::new());
+    let subscriber = {
+        let (spans, done) = (Arc::clone(&spans), Arc::clone(&done));
+        move |_: &PgSession, message: &InboxMessage| {
+            let (spans, done) = (Arc::clone(&spans), Arc::clone(&done));
+            let stream = message.stream_id["id"].as_str().unwrap().to_owned();
+            async move {
+                let started = std::time::Instant::now();
+                tokio::time::sleep(PAUSE).await;
+                let mut spans = spans.lock().unwrap();
+                spans.push((stream, started, std::time::Instant::now()));
+                if spans.len() == 8 {
+                    done.notify_one();
+                }
+                Ok::<(), BoxError>(())
+            }
+        }
+    };
+    let loops = Loops {
+        concurrency: 2,
+        poll_interval: Duration::from_millis(5),
+    };
+
+    let started = std::time::Instant::now();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        f.inbox
+            .run(subscriber, loops, async { done.notified().await }),
+    )
+    .await
+    .expect("run stops after shutdown")
+    .unwrap();
+    let elapsed = started.elapsed();
+
+    let spans = spans.lock().unwrap().clone();
+    for stream in [&first, &second] {
+        let mut own: Vec<_> = spans.iter().filter(|(s, _, _)| s == stream).collect();
+        own.sort_by_key(|(_, started, _)| *started);
+        assert_eq!(own.len(), 4);
+        for pair in own.windows(2) {
+            assert!(
+                pair[0].2 <= pair[1].1,
+                "two messages of stream {stream} were in the subscriber at once"
+            );
+        }
+    }
+    assert!(
+        elapsed < PAUSE * 7,
+        "the two streams did not run side by side: {elapsed:?} for 8 pauses of {PAUSE:?}"
+    );
+}
+
 /// The port is what the edge depends on; a fake collects what it received.
 #[tokio::test]
 async fn the_port_is_implementable_without_a_database() {

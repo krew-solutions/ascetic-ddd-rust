@@ -146,6 +146,59 @@ Attempts are counted in the model only where the count decides something:
 with `MaxAttempts = 0` an unbounded counter would make the state space
 infinite.
 
+## Inbox, statement by statement — `InboxPg.tla`
+
+`Inbox.tla` has one step per protocol action and assumes what the
+statements must deliver: that a slot has one holder, that a wait is set in
+the same step as the check that decided it. `InboxPg.tla` is the inbox one
+level down, the statements of `crates/inbox` against PostgreSQL under
+READ COMMITTED, and it earns those assumptions. A commit advances a clock
+and stamps the versions it publishes; a statement sees the versions stamped
+no later than its snapshot, and its own transaction's pending writes.
+Taking a slot is two steps, the snapshot and then the lock, because that is
+where the two come apart. The slot's row is locked `FOR UPDATE SKIP LOCKED`;
+the advisory lock on a dependency's identity is taken by the wait and by the
+mark, held to the end of the transaction, re-entrant for its holder. Left
+out, as matters `Inbox.tla` settles: failures, backoff, parking, expiring
+waits, operators. One abstraction is declared in the module: the dependency
+check is taken with the head's snapshot, where the implementation runs it
+one statement later — a mark committed in that window is then seen, and a
+head this model would set aside is processed instead.
+
+The module refines `Inbox.tla`: an `INSTANCE Inbox` with the protocol's
+variables replaced by what this state shows of them — `processed` the
+committed marks, `holding` the head of a dispatcher between its dependency
+check and its commit, `waiting` the committed waits and the one a dispatcher
+has set after its re-check and not yet committed — and `Refines`, every
+step of this module a step or a stutter of the protocol, checked by TLC as a
+property. The protocol's invariants are read through the same mapping.
+`MCInboxPg.tla` fixes the instance: three messages, the second depending on
+the first, every cut into two slots, two dispatchers, one rollback.
+
+Three switches name the designs the module was written to tell apart, and
+`check.sh` requires each to fail as it did:
+
+- `InboxPg.cfg`: as implemented. `Refines`, `EventuallyProcessed`, the
+  protocol's invariants, `NoDeadlock` and `NoDispatcherDied` all hold;
+  about a million states, two and a half minutes.
+- `InboxPgNoLock.cfg`: `WithLock = FALSE`, the wait of ADR-0006 as it was
+  implemented. TLC finds `WaitingIsAside` violated: a wait set in one
+  statement, the dependency marked and its waiters woken in another
+  transaction that could not see the wait, the wait committed — a message
+  waiting for a processed dependency, which nothing wakes. The lost wake
+  ADR-0009 fixed, found by the model rather than by a test.
+- `InboxPgHeadInTake.cfg`: `HeadInTake = TRUE`, the head read in the take's
+  statement, the take of ADR-0008 as it was implemented. TLC finds
+  `NoDispatcherDied` violated: the statement's snapshot predates its lock,
+  the previous holder commits in between, and the head the snapshot chose
+  fails the re-check the lock makes — a slot without a head, which the
+  implementation took for an error that stopped the loops.
+- `InboxPgWalkOn.cfg`: `WalkOn = TRUE`, a dispatcher that set a head aside
+  walks on in the same transaction with the lock held, the first design of
+  ADR-0009. Two slots of two messages each, every head depending on a
+  message that never arrives, crosswise: TLC finds `NoDeadlock` violated,
+  each dispatcher holding the lock the other wants.
+
 ## Bridge — `Bridge.tla`
 
 The composition: a source outbox, the bridge, a destination inbox, built with

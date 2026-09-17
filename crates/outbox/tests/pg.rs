@@ -505,6 +505,80 @@ async fn two_slots_are_dispatched_at_once() {
     );
 }
 
+/// Two URIs in two slots, four messages each, two loops, a subscriber that
+/// takes its time and notes when it ran: the messages of one URI are never
+/// in the subscriber at the same time, while the two URIs are — the run is
+/// shorter than the sum of the pauses, so the check could have seen an
+/// overlap. One partition key, one dispatcher at a time.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn messages_of_one_uri_are_never_dispatched_at_once() {
+    const PAUSE: Duration = Duration::from_millis(40);
+    let f = fixture_concurrent("serial_uri", 2).await;
+    let selection = Selection::group("broker");
+    // the selection's position rows first: their creation at first contact is
+    // one transaction's work, and the other loop would wait for its batch
+    let quick = |_: &OutboxMessage| async { Ok::<(), BoxError>(()) };
+    assert!(!f.outbox.dispatch(quick, &selection).await.unwrap());
+    let (first, second) = f.uris_in_different_slots().await;
+    let messages: Vec<OutboxMessage> = (1..=4)
+        .flat_map(|i| [message(&first, i), message(&second, 10 + i)])
+        .collect();
+    f.publish(&messages).await;
+    let spans: Arc<Mutex<Vec<(String, std::time::Instant, std::time::Instant)>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let done = Arc::new(tokio::sync::Notify::new());
+    let subscriber = {
+        let (spans, done) = (Arc::clone(&spans), Arc::clone(&done));
+        move |message: &OutboxMessage| {
+            let (spans, done) = (Arc::clone(&spans), Arc::clone(&done));
+            let uri = message.uri.clone();
+            async move {
+                let started = std::time::Instant::now();
+                tokio::time::sleep(PAUSE).await;
+                let mut spans = spans.lock().unwrap();
+                spans.push((uri, started, std::time::Instant::now()));
+                if spans.len() == 8 {
+                    done.notify_one();
+                }
+                Ok::<(), BoxError>(())
+            }
+        }
+    };
+    let loops = Loops {
+        concurrency: 2,
+        poll_interval: Duration::from_millis(5),
+    };
+
+    let started = std::time::Instant::now();
+    let shutdown = async { done.notified().await };
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        f.outbox.run(subscriber, &selection, loops, shutdown),
+    )
+    .await
+    .expect("run stops after shutdown")
+    .unwrap();
+    let elapsed = started.elapsed();
+
+    let spans = spans.lock().unwrap().clone();
+    for uri in [&first, &second] {
+        let mut own: Vec<_> = spans.iter().filter(|(u, _, _)| u == uri).collect();
+        own.sort_by_key(|(_, started, _)| *started);
+        assert_eq!(own.len(), 4);
+        for pair in own.windows(2) {
+            assert!(
+                pair[0].2 <= pair[1].1,
+                "two messages of {uri} were in the subscriber at once"
+            );
+        }
+    }
+    assert!(
+        elapsed < PAUSE * 7,
+        "the two URIs did not run side by side: {elapsed:?} for 8 pauses of {PAUSE:?}"
+    );
+}
+
 /// Every keyed URI lands in exactly one of the slots — including the half
 /// whose `hashtext` is negative, which the Python source lost — and a
 /// dispatcher with no identity drains them all, one slot per call.

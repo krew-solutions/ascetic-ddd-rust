@@ -100,6 +100,30 @@ fi
 grep -q "Invariant WaitingIsAside is violated" "${TMPDIR:-/tmp}/tlc-inbox-splitwait.log"
 echo "   violation found, as expected"
 
+echo "== inbox, statement by statement: as implemented, every step refines Inbox.tla and every property holds"
+tlc -config InboxPg.cfg MCInboxPg.tla
+
+echo "== inbox, statement by statement: without the advisory lock, TLC must find a message waiting for a processed dependency"
+if tlc -config InboxPgNoLock.cfg MCInboxPg.tla > "${TMPDIR:-/tmp}/tlc-inboxpg-nolock.log" 2>&1; then
+  echo "unexpected: no lost wake without the lock"; exit 1
+fi
+grep -q "Invariant WaitingIsAside is violated" "${TMPDIR:-/tmp}/tlc-inboxpg-nolock.log"
+echo "   violation found, as expected"
+
+echo "== inbox, statement by statement: with the head read in the take's statement, TLC must find a dispatcher stopped by a slot without a head"
+if tlc -config InboxPgHeadInTake.cfg MCInboxPg.tla > "${TMPDIR:-/tmp}/tlc-inboxpg-headintake.log" 2>&1; then
+  echo "unexpected: no stale head with the head read in the take"; exit 1
+fi
+grep -q "Invariant NoDispatcherDied is violated" "${TMPDIR:-/tmp}/tlc-inboxpg-headintake.log"
+echo "   violation found, as expected"
+
+echo "== inbox, statement by statement: walking on after a set-aside with the lock held, TLC must find two dispatchers waiting for each other"
+if tlc -config InboxPgWalkOn.cfg MCInboxPg.tla > "${TMPDIR:-/tmp}/tlc-inboxpg-walkon.log" 2>&1; then
+  echo "unexpected: no lock cycle when walking on"; exit 1
+fi
+grep -q "Invariant NoDeadlock is violated" "${TMPDIR:-/tmp}/tlc-inboxpg-walkon.log"
+echo "   violation found, as expected"
+
 echo "== inbox: recorded runs of the tests fit the model"
 for trace in traces/inbox-*.jsonl; do
   check_trace "$trace"

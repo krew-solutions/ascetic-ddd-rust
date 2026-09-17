@@ -142,6 +142,15 @@ signature could not move.
   for a processed dependency. The model records why the lock exists, as
   `InboxNoWaiting.cfg` records why waiting exists; with `TRUE` the state
   space is unchanged.
+- `verify/tla/InboxPg.tla`, the statements against PostgreSQL under READ
+  COMMITTED — snapshots per statement, versions stamped by commits, the
+  slot's lock, the advisory lock — refines `Inbox.tla` by a mapping TLC
+  checks, so the protocol model's two assumptions, one holder per slot and
+  an atomic wait, are earned rather than posited. Its switches replay the
+  designs this ADR weighed: without the lock, the lost wake; with the head
+  read in the take's statement, the stale head of ADR-0008; walking on
+  after a set-aside with the lock held, the lock cycle — each a required
+  violation in `check.sh`.
 - Tests, all in `crates/inbox/tests/pg.rs`:
   `a_wait_set_while_its_dependency_arrives_and_is_marked_elsewhere_is_woken`
   (dependency not yet arrived) and
