@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ascetic_ddd_kms::{
-    Algorithm, Ciphertext, Error, Key, KeyManagementService, PgKeyManagementService,
+    Algorithm, Error, Key, KeyManagementService, PgKeyManagementService, WrappedKey,
 };
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -179,8 +179,8 @@ async fn a_rewrap_moves_a_dek_to_the_current_version() {
         kms.rotate_kek(&tx, "1").await?;
         let wrapped_v2 = kms.rewrap_dek(&tx, "1", &wrapped_v1).await?;
         assert_ne!(wrapped_v1, wrapped_v2);
-        assert_eq!(Ciphertext::parse(&wrapped_v1)?.key_version(), 1);
-        assert_eq!(Ciphertext::parse(&wrapped_v2)?.key_version(), 2);
+        assert_eq!(WrappedKey::parse(&wrapped_v1)?.key_version(), 1);
+        assert_eq!(WrappedKey::parse(&wrapped_v2)?.key_version(), 2);
         assert_eq!(kms.decrypt_dek(&tx, "1", &wrapped_v2).await?, dek);
         Ok(())
     })
@@ -234,7 +234,7 @@ async fn the_first_contact_makes_the_key() {
     f.atomic(|tx, kms| async move {
         let dek = key();
         let wrapped = kms.encrypt_dek(&tx, "1", &dek).await?;
-        assert_eq!(Ciphertext::parse(&wrapped)?.key_version(), 1);
+        assert_eq!(WrappedKey::parse(&wrapped)?.key_version(), 1);
         assert_eq!(kms.decrypt_dek(&tx, "1", &wrapped).await?, dek);
         Ok(())
     })
@@ -301,8 +301,8 @@ async fn two_first_contacts_at_once_share_one_key() {
     release.notify_one();
     let first = first.await.unwrap().unwrap();
     let (dek, wrapped) = second.await.unwrap().unwrap();
-    assert_eq!(Ciphertext::parse(&first).unwrap().key_version(), 1);
-    assert_eq!(Ciphertext::parse(&wrapped).unwrap().key_version(), 1);
+    assert_eq!(WrappedKey::parse(&first).unwrap().key_version(), 1);
+    assert_eq!(WrappedKey::parse(&wrapped).unwrap().key_version(), 1);
     assert_eq!(f.versions_of("1").await, [1]);
     f.atomic(|tx, kms| async move {
         assert_eq!(kms.decrypt_dek(&tx, "1", &wrapped).await?, dek);
@@ -411,7 +411,7 @@ async fn a_key_the_python_port_wrote_is_read() {
         assert_eq!(dek.as_bytes(), (0x40..0x60).collect::<Vec<u8>>());
         // and the row is the current key: nothing new is made
         assert_eq!(
-            Ciphertext::parse(&kms.encrypt_dek(&tx, "tenant-1", &dek).await?)?.key_version(),
+            WrappedKey::parse(&kms.encrypt_dek(&tx, "tenant-1", &dek).await?)?.key_version(),
             1
         );
         Ok(())

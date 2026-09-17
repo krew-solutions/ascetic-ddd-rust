@@ -2,7 +2,7 @@
 
 use ascetic_ddd_session::Session;
 
-use crate::cipher::Key;
+use crate::domain::Key;
 use crate::error::Error;
 
 /// Envelope encryption for one tenant at a time: data-encryption keys are

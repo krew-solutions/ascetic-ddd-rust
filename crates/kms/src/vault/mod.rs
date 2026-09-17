@@ -21,7 +21,7 @@ use futures::future::BoxFuture;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
 
-use crate::cipher::Key;
+use crate::domain::Key;
 use crate::error::Error;
 use crate::port::KeyManagementService;
 

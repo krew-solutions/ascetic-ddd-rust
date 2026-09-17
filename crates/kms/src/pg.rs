@@ -7,7 +7,7 @@
 //! key_algorithm, created_at)`, primary key `(tenant_id, key_version)` — the
 //! table the Python and Go ports write, so a key made by one port is read by
 //! another; a test unwraps what the Python port wrapped. `encrypted_key` is a
-//! [`Ciphertext`] under master key version 1; `master_algorithm` is the
+//! [`WrappedKey`] under master key version 1; `master_algorithm` is the
 //! master key's algorithm when the row was written, and is what the row is
 //! read back with.
 //!
@@ -27,13 +27,9 @@ use ascetic_ddd_session::Session;
 use ascetic_ddd_session::pg::{Identifier, PgAccess};
 use tokio_postgres::Row;
 
-use crate::cipher::{Algorithm, Key};
+use crate::domain::{Algorithm, Kek, Key, MasterKey, WrappedKey};
 use crate::error::Error;
-use crate::key::{Ciphertext, Kek, MasterKey};
 use crate::port::KeyManagementService;
-
-/// The algorithm of every KEK this service makes.
-const KEY_ALGORITHM: Algorithm = Algorithm::Aes256Gcm;
 
 /// The key management service over a table of KEKs wrapped by one master key.
 pub struct PgKeyManagementService {
@@ -53,8 +49,9 @@ impl PgKeyManagementService {
         }
     }
 
-    /// The same service wrapping with `algorithm`. Rows already written keep
-    /// the algorithm they name.
+    /// The same service wrapping with `algorithm`, which every KEK it makes
+    /// from then on is of too. Rows already written keep the algorithms they
+    /// name.
     pub fn with_master_algorithm(self, algorithm: Algorithm) -> Self {
         PgKeyManagementService {
             master_algorithm: algorithm,
@@ -108,9 +105,10 @@ impl PgKeyManagementService {
             .await
     }
 
-    /// The master key as `tenant_id` sees it, for `algorithm`.
-    fn master_key(&self, tenant_id: &str, algorithm: Algorithm) -> Result<MasterKey, Error> {
-        MasterKey::new(tenant_id, &self.master_key, algorithm)
+    /// The master key for `algorithm`: the configured one for what is made
+    /// now, the row's for what is read back.
+    fn master_key(&self, algorithm: Algorithm) -> Result<MasterKey, Error> {
+        MasterKey::new(self.master_key.clone(), algorithm)
     }
 
     /// Serializes the making and rotating of one tenant's keys until the end
@@ -187,8 +185,8 @@ impl PgKeyManagementService {
         match self.current_kek(session, tenant_id).await {
             Err(Error::KekNotFound { .. }) => {
                 let kek = self
-                    .master_key(tenant_id, self.master_algorithm)?
-                    .generate_kek(KEY_ALGORITHM)?;
+                    .master_key(self.master_algorithm)?
+                    .generate_kek(tenant_id)?;
                 self.save_kek(session, &kek).await?;
                 Ok(kek)
             }
@@ -212,7 +210,7 @@ impl PgKeyManagementService {
                 &[
                     &kek.tenant_id(),
                     &stored_version(kek.version())?,
-                    &kek.encrypted_key().to_bytes(),
+                    &kek.wrapped().to_bytes(),
                     &self.master_algorithm.as_str(),
                     &kek.algorithm().as_str(),
                 ],
@@ -225,14 +223,11 @@ impl PgKeyManagementService {
     /// the row names.
     fn load_kek(&self, tenant_id: &str, row: &Row) -> Result<Kek, Error> {
         let version = read_version(row.try_get("key_version")?)?;
-        let encrypted_key = Ciphertext::parse(&row.try_get::<_, Vec<u8>>("encrypted_key")?)?;
+        let wrapped = WrappedKey::parse(&row.try_get::<_, Vec<u8>>("encrypted_key")?)?;
         let master_algorithm: Algorithm = row.try_get::<_, String>("master_algorithm")?.parse()?;
         let key_algorithm: Algorithm = row.try_get::<_, String>("key_algorithm")?.parse()?;
-        self.master_key(tenant_id, master_algorithm)?.load_kek(
-            encrypted_key,
-            version,
-            key_algorithm,
-        )
+        self.master_key(master_algorithm)?
+            .load_kek(tenant_id, wrapped, version, key_algorithm)
     }
 }
 
@@ -253,7 +248,7 @@ where
 {
     async fn encrypt_dek(&self, session: &S, tenant_id: &str, dek: &Key) -> Result<Vec<u8>, Error> {
         let kek = self.get_or_create_current_kek(session, tenant_id).await?;
-        Ok(kek.encrypt(dek.as_bytes())?.to_bytes())
+        Ok(kek.wrap(dek)?.to_bytes())
     }
 
     async fn decrypt_dek(
@@ -262,26 +257,23 @@ where
         tenant_id: &str,
         encrypted_dek: &[u8],
     ) -> Result<Key, Error> {
-        let ciphertext = Ciphertext::parse(encrypted_dek)?;
-        let kek = self
-            .kek(session, tenant_id, ciphertext.key_version())
-            .await?;
-        Ok(Key::new(kek.decrypt(&ciphertext)?))
+        let wrapped = WrappedKey::parse(encrypted_dek)?;
+        let kek = self.kek(session, tenant_id, wrapped.key_version()).await?;
+        kek.unwrap(&wrapped)
     }
 
     async fn generate_dek(&self, session: &S, tenant_id: &str) -> Result<(Key, Vec<u8>), Error> {
         let kek = self.get_or_create_current_kek(session, tenant_id).await?;
-        let dek = kek.algorithm().generate_key()?;
-        let encrypted_dek = kek.encrypt(dek.as_bytes())?.to_bytes();
-        Ok((dek, encrypted_dek))
+        let (dek, wrapped) = kek.generate_dek()?;
+        Ok((dek, wrapped.to_bytes()))
     }
 
     async fn rotate_kek(&self, session: &S, tenant_id: &str) -> Result<u32, Error> {
         self.lock_tenant(session, tenant_id).await?;
-        let master = self.master_key(tenant_id, self.master_algorithm)?;
+        let master = self.master_key(self.master_algorithm)?;
         let kek = match self.current_kek(session, tenant_id).await {
             Ok(current) => master.rotate_kek(&current)?,
-            Err(Error::KekNotFound { .. }) => master.generate_kek(KEY_ALGORITHM)?,
+            Err(Error::KekNotFound { .. }) => master.generate_kek(tenant_id)?,
             Err(error) => return Err(error),
         };
         self.save_kek(session, &kek).await?;
@@ -294,8 +286,10 @@ where
         tenant_id: &str,
         encrypted_dek: &[u8],
     ) -> Result<Vec<u8>, Error> {
-        let dek = self.decrypt_dek(session, tenant_id, encrypted_dek).await?;
-        self.encrypt_dek(session, tenant_id, &dek).await
+        let wrapped = WrappedKey::parse(encrypted_dek)?;
+        let from = self.kek(session, tenant_id, wrapped.key_version()).await?;
+        let current = self.get_or_create_current_kek(session, tenant_id).await?;
+        Ok(current.rewrap(&wrapped, &from)?.to_bytes())
     }
 
     async fn delete_kek(&self, session: &S, tenant_id: &str) -> Result<(), Error> {

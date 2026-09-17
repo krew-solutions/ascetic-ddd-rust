@@ -8,16 +8,19 @@ HashiCorp Vault Transit. A port of `ascetic_ddd.kms` (Python) and
 `asceticddd/kms` (Go); the encryption stage ADR-0002 places before the outbox.
 
 ```rust
-use ascetic_ddd_kms::{Algorithm, Key, MasterKey};
+use ascetic_ddd_kms::{Algorithm, MasterKey};
 # fn main() -> Result<(), ascetic_ddd_kms::Error> {
 let master_key = Algorithm::Aes256Gcm.generate_key()?;      // from configuration, in practice
-let master = MasterKey::new("tenant-1", &master_key, Algorithm::Aes256Gcm)?;
+let master = MasterKey::new(master_key, Algorithm::Aes256Gcm)?;
 
-let kek = master.generate_kek(Algorithm::Aes256Gcm)?;        // version 1, wrapped by the master
-let dek = Algorithm::Aes256Gcm.generate_key()?;
-let wrapped = kek.encrypt(dek.as_bytes())?;                  // names the KEK's version
+let kek = master.generate_kek("tenant-1")?;                  // version 1, wrapped by the master
+let (dek, wrapped) = kek.generate_dek()?;                    // wrapped names the KEK's version
 assert_eq!(wrapped.key_version(), 1);
-assert_eq!(kek.decrypt(&wrapped)?, dek.as_bytes());
+assert_eq!(kek.unwrap(&wrapped)?, dek);
+
+let rotated = master.rotate_kek(&kek)?;                      // version 2
+let rewrapped = rotated.rewrap(&wrapped, &kek)?;             // what a DEK goes through after a rotation
+assert_eq!(rotated.unwrap(&rewrapped)?, dek);
 # Ok(()) }
 ```
 
@@ -47,23 +50,30 @@ sessions.session(async |session| {
 # fn main() {}
 ```
 
-## The keys
+## The model
 
-A `Cipher` seals bytes under a key and associated data, and opens them again;
-`Algorithm` names the ciphers there are — AES-256-GCM — and chooses one, and
-a `Key` is bytes that are wiped when dropped and never printed. The
-associated data is the tenant's id at every level, so a ciphertext of one
-tenant does not open under another tenant's key, even one of the same bytes.
-Sealing draws a fresh nonce from the operating system; a `Nonce` is made
-only that way and moved into the one sealing it is for, so there is no way
-to seal twice under one nonce. `Aes256Gcm::seal` is the pure half, given the
-nonce, and is checked against what the Python port sealed.
+Three kinds of key and one operation between them, in `domain`. The
+`MasterKey` — the one key of the system, from configuration — wraps a
+tenant's key-encryption keys: it makes the first `Kek` of a tenant, loads one
+back from its wrapped form, and rotates one to the next version. A KEK wraps
+data-encryption keys: `wrap`, `unwrap`, `rewrap` after a rotation,
+`generate_dek`. A `WrappedKey` names the version of the key that wrapped it,
+four big-endian bytes in front on the wire, so the right version is reached
+for when it is unwrapped, and a key asked to unwrap another version's work
+says so before it tries. The tenant's id is the associated data of every
+wrapping, so a key wrapped for one tenant does not unwrap under another
+tenant's key, even one of the same bytes. A key made by a key is of its
+maker's kind: a KEK has the master key's algorithm, a DEK the KEK's.
 
-A `Ciphertext` is sealed bytes with the version of the key that sealed them,
-four big-endian bytes in front on the wire. The `MasterKey`, version 1, wraps
-a tenant's `Kek`s; a KEK is one version of the tenant's key — rotation makes
-the next — and wraps DEKs. A key refuses a ciphertext of another version
-before it tries to open it.
+Under the hierarchy sits the primitive. A `Cipher` seals bytes under a key
+and associated data, opens them again, and makes fresh keys for ciphers of
+its own kind; `Algorithm` names the ciphers there are — AES-256-GCM — and
+makes one from a key; what an algorithm knows, the sizes of its key, nonce
+and tag and how to draw a key, lives with its adapter, `Aes256Gcm`, which
+takes it from the library. A `Key` is bytes that are wiped when dropped and
+never printed. Sealing draws a fresh nonce from the operating system; the
+half that takes the nonce is not public, and is checked against what the
+Python port sealed.
 
 ## The port and the adapters
 
@@ -82,6 +92,14 @@ transactions meeting a new tenant at once make one key, and two rotations at
 once make versions two and three; reads take nothing. READ COMMITTED is
 assumed.
 
+The PostgreSQL adapter keeps KEKs in a general-purpose database, wrapped
+by a master key the process holds; it is the simple adapter, not key
+management hardware. The master key is thirty-two bytes and comes from a
+secret manager or the environment, never from source or configuration under
+version control; the session may belong to a database other than the
+data's. Where the requirements are higher, Vault Transit or a cloud KMS
+behind the same port is the answer.
+
 `VaultTransitService` (feature `vault`) leaves keys and cryptography to
 Vault; the wrapped DEK is Vault's ciphertext text as bytes. The HTTP client is
 the session's, `HttpAccess`, and every call goes through the session so its
@@ -98,10 +116,11 @@ port, `seedwork/infrastructure/repository/dek_store` in the sources.
 
 ## Deviations from the Python and Go sources
 
-* A ciphertext is a value, `Ciphertext`, parsed once; a key asked to open one
-  of another version says so, `WrongKeyVersion`, where the sources tried the
-  key and reported the tag failure — or, in Go, sliced short input and
-  panicked. Short input is `Malformed`.
+* A wrapped key is a value, `WrappedKey`, parsed once; a key asked to unwrap
+  another version's work says so, `WrongKeyVersion`, where the sources tried
+  the key and reported the tag failure — or, in Go, sliced short input and
+  panicked. Short input is `Malformed`. Keys `wrap` and `unwrap`; only a
+  `Cipher` encrypts.
 * A tenant's id is text. The sources take `Any` and format it for the
   associated data anyway; the table's column is `VARCHAR`.
 * Making a tenant's first key and rotating are under a per-tenant advisory
@@ -110,9 +129,13 @@ port, `seedwork/infrastructure/repository/dek_store` in the sources.
 * `setup` is the adapter's, as in the outbox and the inbox; `cleanup` did
   nothing in any port and is gone. A KEK carries no `created_at`: no port
   ever wrote it, the column's default does, and nothing read it.
-* The key-level `rewrap` and `generate_key` are gone: a rewrap under the same
-  key only changes the nonce, and generating is the service's `generate_dek`.
-  `MasterKey::generate_kek` takes no tenant: the master key is bound to one.
+* The master key is not bound to a tenant; the tenant is named at each
+  operation, as the associated data of the wrapping. `Kek::rewrap` takes the
+  earlier version it rewraps from, where the sources' `rewrap` under the same
+  key only changed the nonce. Nothing takes an algorithm: a key made by a
+  cipher is for a cipher of its kind, so a KEK is of the master key's
+  algorithm and a DEK of the KEK's, where the sources labelled both
+  `AES-256-GCM` by constant, whatever made the bytes.
 * Sealing can fail — the operating system may give no randomness — so
   `Cipher::encrypt` returns a `Result`, as Go's does; keys are wiped when
   dropped and print no bytes.
