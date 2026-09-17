@@ -51,6 +51,7 @@ others behind features, so that `ascetic_ddd::saga` keeps working as one import
 | --- | --- | --- |
 | [`ascetic-ddd-bus`](crates/bus) | `trading.bus` (OCaml) | Scheme-dispatched message bus with in-memory and Kafka adapters |
 | [`ascetic-ddd-inbox`](crates/inbox) | `ascetic_ddd/inbox` | Transactional Inbox on PostgreSQL |
+| [`ascetic-ddd-kms`](crates/kms) | `ascetic_ddd/kms` | Key management for envelope encryption: a KEK per tenant, versioned and rotated, in PostgreSQL under a master key or in Vault Transit |
 | [`ascetic-ddd-outbox`](crates/outbox) | `ascetic_ddd/outbox` | Transactional Outbox on PostgreSQL |
 | [`ascetic-ddd-rop`](crates/rop) | `trading.rop` (OCaml) | Railway-oriented programming: `Result` with accumulating, never-empty errors |
 | [`ascetic-ddd-saga`](crates/saga) | `ascetic_ddd/saga` | Saga pattern (routing slip) for distributed transactions |

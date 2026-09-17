@@ -1,0 +1,38 @@
+[package]
+name = "ascetic-ddd-kms"
+description = "Key management for envelope encryption: a key-encryption key per tenant, versioned and rotated, kept in PostgreSQL under a master key or in HashiCorp Vault Transit."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[features]
+# PostgreSQL adapter: key-encryption keys in a table, each wrapped by a master key.
+pg = ["ascetic-ddd-session/pg", "dep:tokio-postgres"]
+# HashiCorp Vault Transit adapter, over any HTTP client that implements `VaultTransport`.
+vault = ["dep:base64", "dep:futures", "dep:percent-encoding", "dep:serde_json"]
+# `VaultTransport` for `reqwest::Client`. TLS is the application's choice: enable a
+# `reqwest` TLS feature downstream.
+reqwest = ["vault", "dep:reqwest"]
+
+[dependencies]
+aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc", "zeroize"] }
+ascetic-ddd-session = { path = "../session" }
+base64 = { version = "0.22", optional = true }
+futures = { workspace = true, optional = true }
+getrandom = "0.4"
+percent-encoding = { version = "2.3", optional = true }
+reqwest = { version = "0.13", optional = true, default-features = false, features = ["json"] }
+serde_json = { workspace = true, optional = true }
+tokio-postgres = { version = "0.7.18", optional = true }
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
