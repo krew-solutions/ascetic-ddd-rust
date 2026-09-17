@@ -123,9 +123,12 @@ pub struct Failed<'a> {
     pub message: &'a InboxMessage,
     /// What the subscriber returned.
     pub error: &'a BoxError,
+    /// The subscriber's verdict that no retry will succeed (ADR-0010).
+    pub permanent: bool,
     /// Failed attempts so far, this one included.
     pub attempts: u32,
-    /// Whether this attempt was the last: the message is parked.
+    /// Whether this attempt was the last: the message is parked, its
+    /// attempts run out or the failure permanent.
     pub parked: bool,
     /// How long the message waits before it may be taken again.
     pub retry_after: Duration,

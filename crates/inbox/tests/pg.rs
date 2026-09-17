@@ -22,7 +22,7 @@ use ascetic_ddd_inbox::observer::{
     Unparked, Waiting,
 };
 use ascetic_ddd_inbox::{
-    BoxError, ByStream, CausalDependency, Error, Inbox, InboxMessage, Loops, Outcome, PartitionKey,
+    ByStream, CausalDependency, Error, Failure, Inbox, InboxMessage, Loops, Outcome, PartitionKey,
     PgInbox, Receipt, Retries,
 };
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -132,7 +132,7 @@ impl<O: InboxObserver> Fixture<O> {
     async fn dispatch<F, Fut>(&self, subscriber: F) -> Outcome
     where
         F: Fn(&PgSession, &InboxMessage) -> Fut + Send + Sync,
-        Fut: std::future::Future<Output = Result<(), BoxError>> + Send,
+        Fut: std::future::Future<Output = Result<(), Failure>> + Send,
     {
         self.inbox.dispatch(subscriber).await.unwrap()
     }
@@ -290,7 +290,7 @@ type Seen = Arc<Mutex<Vec<String>>>;
 /// A subscriber that collects what it was given.
 fn collector() -> (
     Seen,
-    impl Fn(&PgSession, &InboxMessage) -> std::future::Ready<Result<(), BoxError>>,
+    impl Fn(&PgSession, &InboxMessage) -> std::future::Ready<Result<(), Failure>>,
 ) {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&seen);
@@ -320,7 +320,7 @@ async fn a_received_message_is_processed_once_in_its_transaction() {
             let unprocessed: bool = tx.connection().query_one(&sql, &[&position]).await?.get(0);
             assert!(unprocessed);
             sink.lock().unwrap().push(label);
-            Ok::<(), BoxError>(())
+            Ok::<(), Failure>(())
         }
     };
 
@@ -406,7 +406,7 @@ async fn a_failing_subscriber_leaves_the_message_unprocessed() {
     f.publish(&[message("a", 1)]).await;
 
     let failing = |_: &PgSession, _: &InboxMessage| {
-        std::future::ready(Err::<(), BoxError>("handler down".into()))
+        std::future::ready(Err::<(), Failure>("handler down".into()))
     };
     assert_eq!(
         f.dispatch(&failing).await,
@@ -427,7 +427,7 @@ fn failing_on(
     poison: &str,
 ) -> (
     Seen,
-    impl Fn(&PgSession, &InboxMessage) -> std::future::Ready<Result<(), BoxError>>,
+    impl Fn(&PgSession, &InboxMessage) -> std::future::Ready<Result<(), Failure>>,
 ) {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let (sink, poison) = (Arc::clone(&seen), poison.to_owned());
@@ -444,7 +444,7 @@ fn failing_on(
 /// A subscriber that fails the first time it is called and succeeds after.
 fn failing_once() -> (
     Seen,
-    impl Fn(&PgSession, &InboxMessage) -> std::future::Ready<Result<(), BoxError>>,
+    impl Fn(&PgSession, &InboxMessage) -> std::future::Ready<Result<(), Failure>>,
 ) {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&seen);
@@ -611,7 +611,7 @@ async fn a_held_slot_is_passed_by() {
             async move {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 sink.lock().unwrap().push(label);
-                Ok::<(), BoxError>(())
+                Ok::<(), Failure>(())
             }
         }
     };
@@ -676,12 +676,13 @@ async fn run_processes_until_shutdown() {
             if seen.len() == 6 {
                 done.notify_one();
             }
-            std::future::ready(Ok::<(), BoxError>(()))
+            std::future::ready(Ok::<(), Failure>(()))
         }
     };
     let loops = Loops {
         concurrency: 2,
         poll_interval: Duration::from_millis(20),
+        ..Loops::default()
     };
 
     tokio::time::timeout(
@@ -707,7 +708,7 @@ async fn two_slots_are_worked_at_once() {
     f.publish(&[message(&first, 1), message(&second, 1)]).await;
     let slow = |_: &PgSession, _: &InboxMessage| async {
         tokio::time::sleep(Duration::from_millis(300)).await;
-        Ok::<(), BoxError>(())
+        Ok::<(), Failure>(())
     };
 
     let started = std::time::Instant::now();
@@ -874,6 +875,7 @@ async fn loops_over_slots_with_dependencies_across_them_lose_no_wake() {
     let loops = Loops {
         concurrency: 3,
         poll_interval: Duration::from_millis(5),
+        ..Loops::default()
     };
 
     let publishing = async {
@@ -957,13 +959,14 @@ async fn messages_of_one_stream_are_never_processed_at_once() {
                 if spans.len() == 8 {
                     done.notify_one();
                 }
-                Ok::<(), BoxError>(())
+                Ok::<(), Failure>(())
             }
         }
     };
     let loops = Loops {
         concurrency: 2,
         poll_interval: Duration::from_millis(5),
+        ..Loops::default()
     };
 
     let started = std::time::Instant::now();
@@ -993,6 +996,128 @@ async fn messages_of_one_stream_are_never_processed_at_once() {
         elapsed < PAUSE * 7,
         "the two streams did not run side by side: {elapsed:?} for 8 pauses of {PAUSE:?}"
     );
+}
+
+/// A subscriber's verdict that no retry will succeed parks the message at
+/// once, attempts left or not, and the slot flows (ADR-0010).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_permanent_failure_parks_the_message_at_once() {
+    let f = fixture("permanent").await;
+    f.publish(&[message("a", 1), message("b", 1)]).await;
+    let (seen, subscriber) = collector();
+    let judging = |tx: &PgSession, message: &InboxMessage| {
+        // the collector notes the message when called, so only the readable ones reach it
+        let handled = (label(message) != "a@1").then(|| subscriber(tx, message));
+        async move {
+            match handled {
+                Some(handled) => handled.await,
+                None => Err(Failure::permanent("the payload cannot be read")),
+            }
+        }
+    };
+
+    assert_eq!(
+        f.dispatch(&judging).await,
+        Outcome::Failed {
+            attempts: 1,
+            parked: true
+        }
+    );
+    assert_eq!(f.dispatch(&judging).await, Outcome::Processed, "b@1 flows");
+    assert_eq!(f.dispatch(&judging).await, Outcome::Nothing);
+
+    assert_eq!(*seen.lock().unwrap(), ["b@1"]);
+    assert_eq!(f.parked().await, ["a@1"]);
+    let parked = f.parked_messages().await;
+    assert_eq!(
+        parked[0].last_error.as_deref(),
+        Some("the payload cannot be read")
+    );
+}
+
+/// A loop that loses its connection — here the subscriber has the server
+/// terminate it — waits and goes on; the message comes back and is
+/// processed (ADR-0010).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_loop_outlives_a_lost_connection() {
+    let f = fixture("lost_connection").await;
+    f.publish(&[message("a", 1)]).await;
+    let (seen, subscriber) = collector();
+    let done = Arc::new(tokio::sync::Notify::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let cutting = {
+        let (calls, done) = (Arc::clone(&calls), Arc::clone(&done));
+        move |tx: &PgSession, message: &InboxMessage| {
+            let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
+            // the collector notes the message when called: only the call that will succeed reaches it
+            let handled = (!first).then(|| subscriber(tx, message));
+            let (connection, done) = (tx.connection().clone(), Arc::clone(&done));
+            async move {
+                match handled {
+                    None => {
+                        connection
+                            .execute("SELECT pg_terminate_backend(pg_backend_pid())", &[])
+                            .await?;
+                        Ok::<(), Failure>(())
+                    }
+                    Some(handled) => {
+                        handled.await?;
+                        done.notify_one();
+                        Ok(())
+                    }
+                }
+            }
+        }
+    };
+    let loops = Loops {
+        concurrency: 1,
+        poll_interval: Duration::from_millis(20),
+        max_pause: Duration::from_millis(100),
+    };
+
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        f.inbox
+            .run(&cutting, loops, async { done.notified().await }),
+    )
+    .await
+    .expect("the loop goes on after the lost connection")
+    .unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), ["a@1"]);
+    assert_eq!(f.processed().await, 1);
+}
+
+/// A defect — here the subscriber renames the table under the dispatcher, so
+/// the mark fails on an undefined table — stops the loops with the error;
+/// the transaction rolled back, the table is as it was (ADR-0010).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_defect_stops_the_loops() {
+    let f = fixture("defect").await;
+    f.publish(&[message("a", 1)]).await;
+    let table = f.table.clone();
+    let breaking = move |tx: &PgSession, _: &InboxMessage| {
+        let connection = tx.connection().clone();
+        let rename = format!("ALTER TABLE {table} RENAME TO {table}_gone");
+        async move {
+            connection.batch_execute(&rename).await?;
+            Ok::<(), Failure>(())
+        }
+    };
+
+    let stopped = f
+        .inbox
+        .run(&breaking, Loops::default(), std::future::pending())
+        .await;
+
+    assert!(
+        matches!(stopped, Err(Error::Database(_))),
+        "the loops stop on the undefined table: {stopped:?}"
+    );
+    assert_eq!(f.processed().await, 0, "the table is as it was");
 }
 
 /// The port is what the edge depends on; a fake collects what it received.
@@ -1152,7 +1277,7 @@ async fn the_observer_sees_the_protocol() {
     let flaky = |_: &PgSession, _: &InboxMessage| {
         let first = attempts.fetch_add(1, Ordering::SeqCst) == 0;
         std::future::ready(if first {
-            Err::<(), BoxError>("the first attempt fails on purpose".into())
+            Err::<(), Failure>("the first attempt fails on purpose".into())
         } else {
             Ok(())
         })

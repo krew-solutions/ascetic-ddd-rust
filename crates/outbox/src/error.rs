@@ -21,6 +21,21 @@ pub enum Error {
     Malformed(String),
 }
 
+impl Error {
+    /// Whether the error is of the moment — a lock cycle the server broke, a
+    /// connection lost, a server going down — so that a loop meeting it
+    /// waits and goes on, rather than a defect to stop on
+    /// (`ascetic_ddd_session::pg::transient`). A subscriber's error is
+    /// neither: the loop treats it on its own.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Error::Session(error) => ascetic_ddd_session::pg::transient_session(error),
+            Error::Database(error) => ascetic_ddd_session::pg::transient(error),
+            Error::Subscriber(_) | Error::Malformed(_) => false,
+        }
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

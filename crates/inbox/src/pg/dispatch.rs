@@ -6,7 +6,7 @@ use futures::future::join_all;
 use tokio::sync::watch;
 
 use super::{Loops, Outcome, PgInbox};
-use crate::error::{BoxError, Error};
+use crate::error::{Error, Failure};
 use crate::message::{CausalDependency, InboxMessage};
 use crate::observer::{
     Dispatched, Expired, Failed, Fetched, Handled, InboxObserver, Marked, Resolved, Unparked,
@@ -56,7 +56,7 @@ where
     pub async fn dispatch<F, Fut>(&self, subscriber: F) -> Result<Outcome, Error>
     where
         F: Fn(&P::Session, &InboxMessage) -> Fut + Send + Sync,
-        Fut: Future<Output = Result<(), BoxError>> + Send,
+        Fut: Future<Output = Result<(), Failure>> + Send,
     {
         if let Some(max_wait) = self.max_wait {
             // A statement of its own, outside the dispatch transaction: a
@@ -148,13 +148,13 @@ where
                             .await;
                         let failure = match attempt {
                             Ok(()) => None,
-                            Err(Error::Subscriber(error)) => Some(error),
+                            Err(Error::Subscriber(failure)) => Some(failure),
                             Err(other) => return Err(in_slot(other)),
                         };
                         self.observer.on_handled(&Handled {
                             slot,
                             message: &message,
-                            outcome: failure.as_ref().map_or(Ok(()), Err),
+                            outcome: failure.as_ref().map_or(Ok(()), |failure| Err(failure.error())),
                         });
                         match failure {
                             None => {
@@ -177,10 +177,10 @@ where
                                 });
                                 Ok((Some(slot), Outcome::Processed))
                             }
-                            Some(error) => {
+                            Some(failure) => {
                                 let retry_after = (self.retries.backoff)(message.attempts + 1);
                                 let (attempts, parked) = self
-                                    .record_failure(&tx, &message, &error, retry_after)
+                                    .record_failure(&tx, &message, &failure, retry_after)
                                     .await
                                     .map_err(in_slot)?;
                                 // The `log` facade is the observer everyone has: a
@@ -194,19 +194,24 @@ where
                                     message.stream_id,
                                     message.stream_position
                                 );
-                                if parked {
+                                if failure.is_permanent() {
                                     log::error!(
-                                        "inbox: {identity} parked after {attempts} failed attempts: {error}"
+                                        "inbox: {identity} parked, the subscriber's verdict is permanent: {failure}"
+                                    );
+                                } else if parked {
+                                    log::error!(
+                                        "inbox: {identity} parked after {attempts} failed attempts: {failure}"
                                     );
                                 } else {
                                     log::warn!(
-                                        "inbox: attempt {attempts} on {identity} failed, next in {retry_after:?}: {error}"
+                                        "inbox: attempt {attempts} on {identity} failed, next in {retry_after:?}: {failure}"
                                     );
                                 }
                                 self.observer.on_failed(&Failed {
                                     slot,
                                     message: &message,
-                                    error: &error,
+                                    error: failure.error(),
+                                    permanent: failure.is_permanent(),
                                     attempts,
                                     parked,
                                     retry_after,
@@ -237,8 +242,13 @@ where
     /// loops. A loop that finds nothing waits `loops.poll_interval`; one that
     /// processed, failed or set a message aside goes on at once. Shutdown is
     /// cooperative: a loop finishes its message, commits, and only then
-    /// stops. If a loop fails, the others are stopped the same way and its
-    /// error is returned; a failing subscriber is not such a failure.
+    /// stops. A loop that meets an error of the moment — a lock cycle the
+    /// server broke, a connection lost, a server going down — waits, longer
+    /// with each such error in a row up to `loops.max_pause`, and goes on:
+    /// its transaction was rolled back and the message comes back. On any
+    /// other error of the database, a defect, the loops are all stopped and
+    /// the error is returned (ADR-0010). A failing subscriber is neither: it
+    /// is an [`Outcome`].
     pub async fn run<F, Fut>(
         &self,
         subscriber: F,
@@ -247,7 +257,7 @@ where
     ) -> Result<(), Error>
     where
         F: Fn(&P::Session, &InboxMessage) -> Fut + Send + Sync,
-        Fut: Future<Output = Result<(), BoxError>> + Send,
+        Fut: Future<Output = Result<(), Failure>> + Send,
     {
         let (stop, _) = watch::channel(false);
         let futures = (0..loops.concurrency.max(1)).map(|_| {
@@ -255,22 +265,35 @@ where
             let stop = stop.clone();
             let subscriber = &subscriber;
             async move {
+                // errors of the moment met in a row, for the length of the pause
+                let mut passing: u32 = 0;
                 loop {
                     if *stopped.borrow() {
                         return Ok(());
                     }
-                    match self.dispatch(subscriber).await {
-                        Ok(Outcome::Processed | Outcome::Failed { .. } | Outcome::SetAside) => {}
+                    let pause = match self.dispatch(subscriber).await {
+                        Ok(Outcome::Processed | Outcome::Failed { .. } | Outcome::SetAside) => {
+                            passing = 0;
+                            continue;
+                        }
                         Ok(Outcome::Nothing) => {
-                            tokio::select! {
-                                _ = stopped.changed() => return Ok(()),
-                                _ = tokio::time::sleep(loops.poll_interval) => {}
-                            }
+                            passing = 0;
+                            loops.poll_interval
+                        }
+                        Err(error) if error.is_transient() => {
+                            passing += 1;
+                            let pause = loops.pause_after(passing);
+                            log::warn!("inbox: a loop met an error of the moment, waiting {pause:?}: {error}");
+                            pause
                         }
                         Err(error) => {
                             let _ = stop.send(true);
                             return Err(error);
                         }
+                    };
+                    tokio::select! {
+                        _ = stopped.changed() => return Ok(()),
+                        _ = tokio::time::sleep(pause) => {}
                     }
                 }
             }

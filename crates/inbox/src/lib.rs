@@ -57,7 +57,7 @@ mod port;
 mod snapshot;
 
 pub use crate::channel::{INBOX_SCHEME, InboxChannel};
-pub use crate::error::{BoxError, Error};
+pub use crate::error::{BoxError, Error, Failure};
 pub use crate::message::{CausalDependency, InboxMessage};
 pub use crate::observer::{InboxObserver, Receipt};
 pub use crate::partition::{ByStream, ByUri, PartitionKey};

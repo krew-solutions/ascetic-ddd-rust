@@ -125,8 +125,10 @@ group's position on.
   number of workers moved messages between positions and lost some; here a
   fetch takes whichever slot has work under a lock on that slot's position.
 * `run` stops cooperatively, between batches, on a future the caller passes.
-  A subscriber returns a `Result`; `run` returns the first error after
-  stopping the other loops.
+  A subscriber returns a `Result`; a batch whose subscriber failed is rolled
+  back and delivered again after a pause that grows with each failure in a
+  row, and so is one that met an error of the moment in the database; a
+  defect of the database stops the loops and `run` returns it (ADR-0010).
 * No async iterator: an iterator cannot know when the consumer is done with
   a message, and the acknowledgement must follow the processing.
 * The transaction id is a `u64`, which is exactly `xid8`.

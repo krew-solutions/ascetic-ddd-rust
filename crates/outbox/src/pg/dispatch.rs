@@ -129,8 +129,12 @@ where
     /// Dispatches `selection` until `shutdown` completes, with `loops.concurrency`
     /// loops. A loop that finds nothing waits `loops.poll_interval`. Shutdown
     /// is cooperative: a loop finishes its batch, commits, and only then
-    /// stops, so no transaction is cut in the middle. If a loop fails, the
-    /// others are stopped the same way and its error is returned.
+    /// stops. A loop whose subscriber failed — the batch rolled back, to be
+    /// delivered again — or that met an error of the moment in the database
+    /// — a connection lost, a server going down — waits, longer with each
+    /// failure in a row up to `loops.max_pause`, and goes on. On any other
+    /// error of the database, a defect, the loops are all stopped and the
+    /// error is returned (ADR-0010).
     pub async fn run<F, Fut>(
         &self,
         subscriber: F,
@@ -148,22 +152,37 @@ where
             let stop = stop.clone();
             let subscriber = &subscriber;
             async move {
+                // failures met in a row, for the length of the pause
+                let mut failures: u32 = 0;
                 loop {
                     if *stopped.borrow() {
                         return Ok(());
                     }
-                    match self.dispatch(subscriber, selection).await {
-                        Ok(true) => {}
+                    let pause = match self.dispatch(subscriber, selection).await {
+                        Ok(true) => {
+                            failures = 0;
+                            continue;
+                        }
                         Ok(false) => {
-                            tokio::select! {
-                                _ = stopped.changed() => return Ok(()),
-                                _ = tokio::time::sleep(loops.poll_interval) => {}
-                            }
+                            failures = 0;
+                            loops.poll_interval
+                        }
+                        Err(error)
+                            if matches!(error, Error::Subscriber(_)) || error.is_transient() =>
+                        {
+                            failures += 1;
+                            let pause = loops.pause_after(failures);
+                            log::warn!("outbox: a loop failed, waiting {pause:?}: {error}");
+                            pause
                         }
                         Err(error) => {
                             let _ = stop.send(true);
                             return Err(error);
                         }
+                    };
+                    tokio::select! {
+                        _ = stopped.changed() => return Ok(()),
+                        _ = tokio::time::sleep(pause) => {}
                     }
                 }
             }

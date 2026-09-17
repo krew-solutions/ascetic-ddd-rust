@@ -7,7 +7,7 @@ use ascetic_ddd_session::{PgAccess, Session, SessionPool};
 use tokio_postgres::Row;
 
 use super::PgInbox;
-use crate::error::{BoxError, Error};
+use crate::error::{Error, Failure};
 use crate::message::{CausalDependency, InboxMessage};
 use crate::observer::{InboxObserver, Receipt, Received};
 use crate::port::Inbox;
@@ -128,13 +128,10 @@ where
             .await?;
         let (pinned_slots, pinned_key): (i32, String) = (pinned.get(0), pinned.get(1));
         if pinned_slots != slots as i32 || pinned_key != key {
-            return Err(Error::Subscriber(
-                format!(
-                    "table `{table}` is cut into {pinned_slots} slots by `{pinned_key}`, this inbox asks \
+            return Err(Error::Malformed(format!(
+                "table `{table}` is cut into {pinned_slots} slots by `{pinned_key}`, this inbox asks \
                      for {slots} by `{key}`; both are fixed for the life of the table"
-                )
-                .into(),
-            ));
+            )));
         }
         Ok(())
     }
@@ -379,25 +376,26 @@ where
             )
             .await?;
         let Some(first) = rows.first() else {
-            return Err(Error::Subscriber("the row to mark is gone".into()));
+            return Err(Error::Malformed("the row to mark is gone".to_owned()));
         };
         Ok((first.get(0), woken_of(&rows, 1)))
     }
 
     /// Records a failed attempt: one more, the error, when the row is due
-    /// again, and whether that was the last attempt. Returns the attempts so
-    /// far and whether the row is now parked.
+    /// again, and whether that was the last attempt — or the failure was
+    /// permanent. Returns the attempts so far and whether the row is now
+    /// parked.
     pub(super) async fn record_failure(
         &self,
         session: &P::Session,
         message: &InboxMessage,
-        error: &BoxError,
+        failure: &Failure,
         retry_after: Duration,
     ) -> Result<(u32, bool), Error> {
         let sql = format!(
             "UPDATE {} SET attempts = attempts + 1, last_error = $5, \
                 next_attempt_at = CURRENT_TIMESTAMP + make_interval(secs => $6::double precision), \
-                parked_at = CASE WHEN $7::integer > 0 AND attempts + 1 >= $7::integer \
+                parked_at = CASE WHEN $8::boolean OR ($7::integer > 0 AND attempts + 1 >= $7::integer) \
                                  THEN CURRENT_TIMESTAMP END \
              WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4 \
              RETURNING attempts, parked_at IS NOT NULL",
@@ -413,9 +411,10 @@ where
                     stream_type,
                     stream_id,
                     position,
-                    &error.to_string(),
+                    &failure.to_string(),
                     &retry_after.as_secs_f64(),
                     &(self.retries.max_attempts as i32),
+                    &failure.is_permanent(),
                 ],
             )
             .await?;
@@ -548,13 +547,13 @@ where
 /// `xid8` has no driver type; it travels as decimal text and is unsigned.
 fn transaction_id(text: String) -> Result<u64, Error> {
     text.parse()
-        .map_err(|_| Error::Subscriber(format!("not a transaction id: `{text}`").into()))
+        .map_err(|_| Error::Malformed(format!("not a transaction id: `{text}`")))
 }
 
 fn snapshot_of(row: &Row, at: usize) -> Result<Snapshot, Error> {
     row.get::<_, String>(at)
         .parse()
-        .map_err(|error: crate::snapshot::MalformedSnapshot| Error::Subscriber(Box::new(error)))
+        .map_err(|error: crate::snapshot::MalformedSnapshot| Error::Malformed(error.to_string()))
 }
 
 /// The primary key of `message`, as statement parameters `$1`..`$4`.

@@ -17,6 +17,7 @@
 pub mod connection;
 pub mod observer;
 pub mod session;
+pub mod transient;
 
 // Re-exported so that a user of this crate does not have to match versions
 // with the driver and the pool independently.
@@ -26,3 +27,4 @@ pub use tokio_postgres;
 pub use self::connection::{PgConnection, PgError};
 pub use self::observer::{PgObserver, QueryEnded, QueryStarted};
 pub use self::session::{PgAccess, PgSession, PgSessionPool};
+pub use self::transient::{transient, transient_session};

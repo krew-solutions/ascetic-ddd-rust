@@ -35,6 +35,7 @@ use serde_json::{Map, Value};
 use tokio::runtime::Handle;
 use tokio::sync::Notify;
 
+use crate::error::Failure;
 use crate::message::InboxMessage;
 use crate::observer::InboxObserver;
 use crate::pg::{Loops, PgInbox};
@@ -152,8 +153,11 @@ where
                 poll_interval: inbox.poll_interval(),
                 ..Loops::default()
             };
-            let subscriber =
-                |tx: &P::Session, row: &InboxMessage| handler(tx.clone(), wire_of(row));
+            // a handler's error is a failure of the moment: the bus knows no verdicts
+            let subscriber = |tx: &P::Session, row: &InboxMessage| {
+                let handled = handler(tx.clone(), wire_of(row));
+                async move { handled.await.map_err(Failure::from) }
+            };
             loop {
                 match inbox.run(&subscriber, loops, stopped.notified()).await {
                     Ok(()) => break,

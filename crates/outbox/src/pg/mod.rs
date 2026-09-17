@@ -87,6 +87,20 @@ pub struct Loops {
     pub concurrency: u32,
     /// How long a loop waits when there was nothing to dispatch.
     pub poll_interval: Duration,
+    /// The longest a loop waits after a failure — the subscriber's, or an
+    /// error of the moment in the database, a connection lost — before it
+    /// tries again: the wait starts at `poll_interval` and doubles with each
+    /// failure in a row.
+    pub max_pause: Duration,
+}
+
+impl Loops {
+    /// The wait after the `n`th failure in a row, `n` from 1.
+    pub fn pause_after(&self, n: u32) -> Duration {
+        self.poll_interval
+            .checked_mul(1u32 << n.saturating_sub(1).min(31))
+            .map_or(self.max_pause, |pause| pause.min(self.max_pause))
+    }
 }
 
 impl Default for Loops {
@@ -94,6 +108,7 @@ impl Default for Loops {
         Loops {
             concurrency: 1,
             poll_interval: Duration::from_secs(1),
+            max_pause: Duration::from_secs(60),
         }
     }
 }

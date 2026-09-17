@@ -548,6 +548,7 @@ async fn messages_of_one_uri_are_never_dispatched_at_once() {
     let loops = Loops {
         concurrency: 2,
         poll_interval: Duration::from_millis(5),
+        ..Loops::default()
     };
 
     let started = std::time::Instant::now();
@@ -637,6 +638,7 @@ async fn run_dispatches_until_shutdown() {
     let loops = Loops {
         concurrency: 2,
         poll_interval: Duration::from_millis(20),
+        ..Loops::default()
     };
 
     let shutdown = async { done.notified().await };
@@ -652,6 +654,57 @@ async fn run_dispatches_until_shutdown() {
     let mut all = seen.lock().unwrap().clone();
     all.sort_unstable();
     assert_eq!(all, [1, 2, 3, 4, 5, 6]);
+}
+
+/// A subscriber that fails does not stop `run`: the batch rolls back, the
+/// loop waits and delivers it again (ADR-0010).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn run_outlives_a_failing_subscriber() {
+    let f = fixture("flaky_run").await;
+    f.publish(
+        &(1..=3)
+            .map(|i| message("kafka://orders", i))
+            .collect::<Vec<_>>(),
+    )
+    .await;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let done = Arc::new(tokio::sync::Notify::new());
+    let calls = AtomicUsize::new(0);
+    let subscriber = {
+        let (seen, done) = (Arc::clone(&seen), Arc::clone(&done));
+        move |message: &OutboxMessage| {
+            let call = calls.fetch_add(1, Ordering::SeqCst);
+            let mut seen = seen.lock().unwrap();
+            let outcome = if call < 2 {
+                Err::<(), BoxError>(format!("the broker is away, call {call}").into())
+            } else {
+                seen.push(id_of(message));
+                Ok(())
+            };
+            if seen.len() == 3 {
+                done.notify_one();
+            }
+            std::future::ready(outcome)
+        }
+    };
+    let loops = Loops {
+        concurrency: 1,
+        poll_interval: Duration::from_millis(20),
+        max_pause: Duration::from_millis(50),
+    };
+
+    let shutdown = async { done.notified().await };
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        f.outbox
+            .run(subscriber, &Selection::group("broker"), loops, shutdown),
+    )
+    .await
+    .expect("run goes on after the failures")
+    .unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), [1, 2, 3]);
 }
 
 /// The port is what a use case depends on; a fake collects what it would

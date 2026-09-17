@@ -142,6 +142,26 @@ would need a lease with a timeout, which the inbox does without. A message
 depending on a parked one waits, as it waits for a dependency that never
 arrived, until the parked one is unparked and processed or resolved.
 
+A subscriber's error is a `Failure`. Any error converts into
+`Failure::Transient`, so `?` works and the message is tried again as above;
+`Failure::Permanent` is the subscriber's verdict that no retry will ever
+succeed — a payload it cannot read, an invariant the message breaks — and
+the message is parked at once, attempts left or not. Errors of the database
+are the loop's business, not the subscriber's: a loop of `run` that meets an
+error of the moment — a lock cycle the server broke, a connection lost, a
+server going down, told by SQLSTATE in `ascetic_ddd_session::pg::transient`
+— waits, longer with each one in a row up to `Loops::max_pause`, and goes on;
+a defect stops every loop and `run` returns it (ADR-0010).
+
+```rust,ignore
+let subscriber = |tx: &PgSession, message: &InboxMessage| async move {
+    let order: OrderPlaced = decode(&message.payload)
+        .map_err(Failure::permanent)?;   // no retry will read it
+    place(tx, order).await?;             // any other error: tried again
+    Ok(())
+};
+```
+
 The savepoint costs two statements per message on the happy path. Draining
 200 messages with a subscriber that does nothing, on one PostgreSQL over
 localhost, best of three runs: 1.39 ms per message before, 1.54 ms after;

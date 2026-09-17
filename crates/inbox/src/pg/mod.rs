@@ -58,6 +58,14 @@
 //! [`PgInbox::resolve`]s it, marking it processed without the subscriber's
 //! effects. Off by default: unlimited attempts, no backoff (ADR-0005).
 //!
+//! A subscriber's error is a [`Failure`](crate::Failure): any error is `Transient`, so `?`
+//! works, and the message is tried again; `Permanent` is the verdict that no
+//! retry will ever succeed, and the message is parked at once. Errors of the
+//! database are the loop's business, not the subscriber's: a loop of
+//! [`PgInbox::run`] that meets an error of the moment — a lock cycle the
+//! server broke, a connection lost — waits and goes on, one that meets a
+//! defect stops every loop (ADR-0010).
+//!
 //! # Observing
 //!
 //! [`PgInbox::observed_by`] attaches an [`InboxObserver`]: it is told of
@@ -81,8 +89,21 @@ use crate::partition::{ByUri, PartitionKey};
 pub struct Loops {
     /// How many loops this process runs.
     pub concurrency: u32,
-    /// How long a loop waits when there was nothing to process.
+    /// How long a loop waits when there was nothing to take.
     pub poll_interval: Duration,
+    /// The longest a loop waits after an error of the moment — a lock cycle
+    /// the server broke, a connection lost — before it goes on: the wait
+    /// starts at `poll_interval` and doubles with each such error in a row.
+    pub max_pause: Duration,
+}
+
+impl Loops {
+    /// The wait after the `n`th error of the moment in a row, `n` from 1.
+    pub fn pause_after(&self, n: u32) -> Duration {
+        self.poll_interval
+            .checked_mul(1u32 << n.saturating_sub(1).min(31))
+            .map_or(self.max_pause, |pause| pause.min(self.max_pause))
+    }
 }
 
 impl Default for Loops {
@@ -90,6 +111,7 @@ impl Default for Loops {
         Loops {
             concurrency: 1,
             poll_interval: Duration::from_secs(1),
+            max_pause: Duration::from_secs(60),
         }
     }
 }
@@ -113,7 +135,8 @@ pub enum Outcome {
     Failed {
         /// Failed attempts so far, this one included.
         attempts: u32,
-        /// Whether the message was parked by this attempt.
+        /// Whether the message was parked by this attempt: its attempts ran
+        /// out, or the subscriber's verdict was permanent.
         parked: bool,
     },
 }
