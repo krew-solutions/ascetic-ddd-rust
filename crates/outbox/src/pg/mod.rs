@@ -45,6 +45,8 @@ mod store;
 
 use std::time::Duration;
 
+use ascetic_ddd_session::pg::Identifier;
+
 use crate::observer::OutboxObserver;
 
 /// Messages fetched per dispatch by default.
@@ -117,8 +119,8 @@ impl Default for Loops {
 pub struct PgOutbox<P, O = ()> {
     pool: P,
     observer: O,
-    outbox_table: String,
-    offsets_table: String,
+    outbox_table: Identifier,
+    offsets_table: Identifier,
     batch_size: i64,
     loops: Loops,
     slots: u32,
@@ -131,8 +133,8 @@ impl<P> PgOutbox<P> {
         PgOutbox {
             pool,
             observer: (),
-            outbox_table: "outbox".to_owned(),
-            offsets_table: "outbox_offsets".to_owned(),
+            outbox_table: Identifier::new("outbox").expect("a literal identifier"),
+            offsets_table: Identifier::new("outbox_offsets").expect("a literal identifier"),
             batch_size: DEFAULT_BATCH_SIZE as i64,
             loops: Loops::default(),
             slots: 1,
@@ -161,11 +163,12 @@ impl<P, O> PgOutbox<P, O> {
         PgOutbox { loops, ..self }
     }
 
-    /// The same outbox in other tables.
-    pub fn with_tables(self, outbox: impl Into<String>, offsets: impl Into<String>) -> Self {
+    /// The same outbox in other tables. The names go into SQL as text, so
+    /// they are [`Identifier`]s: parsed once, safe after.
+    pub fn with_tables(self, outbox: Identifier, offsets: Identifier) -> Self {
         PgOutbox {
-            outbox_table: outbox.into(),
-            offsets_table: offsets.into(),
+            outbox_table: outbox,
+            offsets_table: offsets,
             ..self
         }
     }

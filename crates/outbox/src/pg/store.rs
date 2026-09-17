@@ -1,7 +1,7 @@
 //! The tables and the statements: what the outbox does to PostgreSQL. The
 //! loop that drives them is in `dispatch`.
 
-use ascetic_ddd_session::{PgAccess, SessionPool};
+use ascetic_ddd_session::{PgAccess, Session, SessionPool};
 use tokio_postgres::Row;
 
 use super::PgOutbox;
@@ -32,9 +32,10 @@ where
     P::Session: PgAccess + Sync,
     O: OutboxObserver,
 {
-    /// Creates the tables and indexes if they do not exist, and refuses to go
-    /// on when the table exists with another number of slots: that is a
-    /// migration, not a restart.
+    /// Creates the tables and indexes if they do not exist, in one transaction
+    /// under an advisory lock on the table's name, so that two processes may
+    /// run it at once; and refuses to go on when the table exists with
+    /// another number of slots: that is a migration, not a restart.
     ///
     /// The primary key `(transaction_id, position)` is the order a fetch
     /// reads in. The index on `(slot, transaction_id, position)` serves a
@@ -76,19 +77,29 @@ where
             );
             "#
         );
-        session.connection().batch_execute(&ddl).await?;
-        let pinned: i32 = session
-            .connection()
-            .query_one(&format!("SELECT slots FROM {outbox}_meta"), &[])
-            .await?
-            .get(0);
-        if pinned != slots as i32 {
-            return Err(Error::Malformed(format!(
-                "table `{outbox}` is cut into {pinned} slots, this outbox asks for {slots}; \
-                 the number is fixed for the life of the table"
-            )));
-        }
-        Ok(())
+        // One transaction under an advisory lock on the table's name: two
+        // processes setting the table up at once would otherwise race in
+        // CREATE TABLE IF NOT EXISTS and both write the cut.
+        session
+            .atomic(async |tx| {
+                tx.connection()
+                    .execute("SELECT pg_advisory_xact_lock(hashtext($1))", &[&outbox.as_str()])
+                    .await?;
+                tx.connection().batch_execute(&ddl).await?;
+                let pinned: i32 = tx
+                    .connection()
+                    .query_one(&format!("SELECT slots FROM {outbox}_meta"), &[])
+                    .await?
+                    .get(0);
+                if pinned != slots as i32 {
+                    return Err(Error::Malformed(format!(
+                        "table `{outbox}` is cut into {pinned} slots, this outbox asks for {slots}; \
+                         the number is fixed for the life of the table"
+                    )));
+                }
+                Ok(())
+            })
+            .await
     }
 
     /// The position rows of a selection, one per slot, must exist before a

@@ -25,6 +25,7 @@ use ascetic_ddd_inbox::{
     ByStream, CausalDependency, Error, Failure, Inbox, InboxMessage, Loops, Outcome, PartitionKey,
     PgInbox, Receipt, Retries,
 };
+use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use ascetic_ddd_session::pg::tokio_postgres::{Config, NoTls};
 use ascetic_ddd_session::{PgAccess, PgSession, PgSessionPool, SessionPool};
@@ -93,7 +94,10 @@ async fn fixture_cut<O: InboxObserver>(
     let sequence = format!("inbox_{name}_seq");
     let sessions = PgSessionPool::new(pool());
     let inbox = PgInbox::new(PgSessionPool::new(pool()))
-        .with_table(&table, &sequence)
+        .with_table(
+            Identifier::new(&table).unwrap(),
+            Identifier::new(&sequence).unwrap(),
+        )
         .with_slots(slots)
         .partitioned_by(ByStream)
         .observed_by((observer, trace.recorder()));
@@ -1118,6 +1122,50 @@ async fn a_defect_stops_the_loops() {
         "the loops stop on the undefined table: {stopped:?}"
     );
     assert_eq!(f.processed().await, 0, "the table is as it was");
+}
+
+/// Two processes set the same table up at once: both succeed, and the cut
+/// is written once. Without the lock, both would see no cut and write theirs.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn two_setups_at_once_agree() {
+    let (table, sequence) = ("inbox_twice", "inbox_twice_seq");
+    let sessions = PgSessionPool::new(pool());
+    let build = || {
+        PgInbox::new(PgSessionPool::new(pool()))
+            .with_table(
+                Identifier::new(table).unwrap(),
+                Identifier::new(sequence).unwrap(),
+            )
+            .with_slots(2)
+    };
+    let (first, second) = (build(), build());
+    let drop = format!(
+        "DROP TABLE IF EXISTS {table}, {table}_meta, {table}_slots; DROP SEQUENCE IF EXISTS {sequence};"
+    );
+    sessions
+        .session(async |session| {
+            session.connection().batch_execute(&drop).await?;
+            Ok::<(), Error>(())
+        })
+        .await
+        .unwrap();
+
+    let (a, b) = tokio::join!(
+        sessions.session(async |session| first.setup(&session).await),
+        sessions.session(async |session| second.setup(&session).await),
+    );
+
+    a.unwrap();
+    b.unwrap();
+    let cuts: i64 = sessions
+        .session(async |session| {
+            let sql = format!("SELECT count(*) FROM {table}_meta");
+            Ok::<i64, Error>(session.connection().query_one(&sql, &[]).await?.get(0))
+        })
+        .await
+        .unwrap();
+    assert_eq!(cuts, 1);
 }
 
 /// The port is what the edge depends on; a fake collects what it received.

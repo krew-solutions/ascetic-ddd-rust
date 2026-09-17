@@ -15,6 +15,7 @@ use ascetic_ddd_bus::adapters::in_memory::InMemoryBroker;
 use ascetic_ddd_bus::{BoxError, Bridge, Bus, Message, Subscription, Target};
 use ascetic_ddd_inbox::{Error, INBOX_SCHEME, Loops, PgInbox};
 use ascetic_ddd_outbox::{OUTBOX_SCHEME, PgOutbox};
+use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use ascetic_ddd_session::pg::tokio_postgres::{Config, NoTls};
 use ascetic_ddd_session::{PgAccess, PgSession, PgSessionPool, Session, SessionPool};
@@ -57,7 +58,10 @@ async fn fixture(name: &str, stem: &str) -> Fixture {
     let trace = TraceFile::from_env(stem);
     let inbox = Arc::new(
         PgInbox::new(PgSessionPool::new(pool()))
-            .with_table(&table, &sequence)
+            .with_table(
+                Identifier::new(&table).unwrap(),
+                Identifier::new(&sequence).unwrap(),
+            )
             .with_loops(Loops {
                 poll_interval: Duration::from_millis(20),
                 ..Loops::default()
@@ -216,7 +220,10 @@ async fn the_outbox_feeds_the_inbox_without_a_broker() {
     let fixture = fixture("outbox", "bridge-outbox-to-inbox").await;
     let outbox = Arc::new(
         PgOutbox::new(PgSessionPool::new(pool()))
-            .with_tables("inbox_bridge_outbox_out", "inbox_bridge_outbox_out_offsets")
+            .with_tables(
+                Identifier::new("inbox_bridge_outbox_out").unwrap(),
+                Identifier::new("inbox_bridge_outbox_out_offsets").unwrap(),
+            )
             .with_loops(ascetic_ddd_outbox::Loops {
                 poll_interval: Duration::from_millis(20),
                 ..ascetic_ddd_outbox::Loops::default()

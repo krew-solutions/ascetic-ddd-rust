@@ -80,6 +80,8 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ascetic_ddd_session::pg::Identifier;
+
 use crate::observer::InboxObserver;
 use crate::partition::{ByUri, PartitionKey};
 
@@ -205,8 +207,8 @@ impl fmt::Debug for Retries {
 pub struct PgInbox<P, O = ()> {
     pool: P,
     observer: O,
-    table: String,
-    sequence: String,
+    table: Identifier,
+    sequence: Identifier,
     partition: Box<dyn PartitionKey>,
     loops: Loops,
     retries: Retries,
@@ -222,8 +224,8 @@ impl<P> PgInbox<P> {
         PgInbox {
             pool,
             observer: (),
-            table: "inbox".to_owned(),
-            sequence: "inbox_received_position_seq".to_owned(),
+            table: Identifier::new("inbox").expect("a literal identifier"),
+            sequence: Identifier::new("inbox_received_position_seq").expect("a literal identifier"),
             partition: Box::new(ByUri),
             loops: Loops::default(),
             retries: Retries::default(),
@@ -260,11 +262,13 @@ impl<P, O> PgInbox<P, O> {
         self.loops
     }
 
-    /// The same inbox in another table, with its own position sequence.
-    pub fn with_table(self, table: impl Into<String>, sequence: impl Into<String>) -> Self {
+    /// The same inbox in another table, with its own position sequence. The
+    /// names go into SQL as text, so they are [`Identifier`]s: parsed once,
+    /// safe after.
+    pub fn with_table(self, table: Identifier, sequence: Identifier) -> Self {
         PgInbox {
-            table: table.into(),
-            sequence: sequence.into(),
+            table,
+            sequence,
             ..self
         }
     }

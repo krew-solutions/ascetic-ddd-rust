@@ -15,6 +15,7 @@
 //! from the nesting depth: two sibling scopes may be open at once, and depth
 //! alone would give them the same name.
 pub mod connection;
+pub mod identifier;
 pub mod observer;
 pub mod session;
 pub mod transient;
@@ -25,6 +26,7 @@ pub use deadpool_postgres;
 pub use tokio_postgres;
 
 pub use self::connection::{PgConnection, PgError};
+pub use self::identifier::{Identifier, InvalidIdentifier, MAX_IDENTIFIER};
 pub use self::observer::{PgObserver, QueryEnded, QueryStarted};
 pub use self::session::{PgAccess, PgSession, PgSessionPool};
 pub use self::transient::{transient, transient_session};

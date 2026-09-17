@@ -289,6 +289,15 @@ out of the pool for good when its last handle drops, so the server ends the
 transaction with the socket. The observer sees the dropped scope end as failed.
 `MemorySession` behaves the same, minus the socket.
 
+Two small things the adapters built on this crate share. `pg::transient`
+tells an error of the moment — a lock cycle the server broke, a serialization
+failure, a connection lost, a server going down or out of resources, by
+SQLSTATE class — from a defect, so that a loop can wait on the first and stop
+on the second; `pg::transient_session` does the same for a `SessionError`.
+`pg::Identifier` is a table or sequence name parsed once and safe to splice
+into SQL after: lower-case letters, digits and underscores, at most forty
+characters, unqualified.
+
 ## Testing
 
 ```bash

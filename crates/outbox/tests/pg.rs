@@ -21,6 +21,7 @@ use ascetic_ddd_outbox::observer::{
 use ascetic_ddd_outbox::{
     BoxError, Error, Loops, Outbox, OutboxMessage, PgOutbox, Position, Selection,
 };
+use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use ascetic_ddd_session::pg::tokio_postgres::{Config, NoTls};
 use ascetic_ddd_session::{PgAccess, PgSessionPool, Session, SessionPool};
@@ -90,7 +91,10 @@ async fn fixture_built<O: OutboxObserver>(
     let tables = (format!("outbox_{name}"), format!("outbox_{name}_offsets"));
     let sessions = PgSessionPool::new(pool());
     let outbox = PgOutbox::new(PgSessionPool::new(pool()))
-        .with_tables(&tables.0, &tables.1)
+        .with_tables(
+            Identifier::new(&tables.0).unwrap(),
+            Identifier::new(&tables.1).unwrap(),
+        )
         .with_slots(slots)
         .observed_by((observer, trace.recorder()));
     let drop = format!(
@@ -705,6 +709,48 @@ async fn run_outlives_a_failing_subscriber() {
     .unwrap();
 
     assert_eq!(*seen.lock().unwrap(), [1, 2, 3]);
+}
+
+/// Two processes set the same tables up at once: both succeed, and the cut
+/// is written once.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn two_setups_at_once_agree() {
+    let (outbox, offsets) = ("outbox_twice", "outbox_twice_offsets");
+    let sessions = PgSessionPool::new(pool());
+    let build = || {
+        PgOutbox::new(PgSessionPool::new(pool()))
+            .with_tables(
+                Identifier::new(outbox).unwrap(),
+                Identifier::new(offsets).unwrap(),
+            )
+            .with_slots(2)
+    };
+    let (first, second) = (build(), build());
+    let drop = format!("DROP TABLE IF EXISTS {outbox}, {outbox}_meta, {offsets};");
+    sessions
+        .session(async |session| {
+            session.connection().batch_execute(&drop).await?;
+            Ok::<(), Error>(())
+        })
+        .await
+        .unwrap();
+
+    let (a, b) = tokio::join!(
+        sessions.session(async |session| first.setup(&session).await),
+        sessions.session(async |session| second.setup(&session).await),
+    );
+
+    a.unwrap();
+    b.unwrap();
+    let cuts: i64 = sessions
+        .session(async |session| {
+            let sql = format!("SELECT count(*) FROM {outbox}_meta");
+            Ok::<i64, Error>(session.connection().query_one(&sql, &[]).await?.get(0))
+        })
+        .await
+        .unwrap();
+    assert_eq!(cuts, 1);
 }
 
 /// The port is what a use case depends on; a fake collects what it would

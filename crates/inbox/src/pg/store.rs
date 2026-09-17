@@ -45,9 +45,11 @@ where
     O: InboxObserver,
 {
     /// Creates the sequence, the table, the indexes and the tables of the
-    /// cut and of the slots if they do not exist, and refuses to go on when
-    /// the table is cut into another number of slots or by another key: that
-    /// is a migration, not a restart.
+    /// cut and of the slots if they do not exist, in one transaction under
+    /// an advisory lock on the table's name, so that two processes may run
+    /// it at once; and refuses to go on when the table is cut into another
+    /// number of slots or by another key: that is a migration, not a
+    /// restart.
     ///
     /// The head index, `(slot, received_position)` over the queue — the rows
     /// neither processed, parked nor waiting — is the walk's order: the
@@ -108,32 +110,41 @@ where
                 ON CONFLICT DO NOTHING;
             "#
         );
-        session.connection().batch_execute(&ddl).await?;
+        // One transaction under an advisory lock on the table's name: two
+        // processes setting the table up at once would otherwise race in
+        // CREATE TABLE IF NOT EXISTS and both write the cut.
         session
-            .connection()
-            .execute(
-                &format!(
-                    "INSERT INTO {table}_meta (slots, partition_key) SELECT $1, $2 \
-                     WHERE NOT EXISTS (SELECT 1 FROM {table}_meta)"
-                ),
-                &[&(slots as i32), &key],
-            )
-            .await?;
-        let pinned = session
-            .connection()
-            .query_one(
-                &format!("SELECT slots, partition_key FROM {table}_meta"),
-                &[],
-            )
-            .await?;
-        let (pinned_slots, pinned_key): (i32, String) = (pinned.get(0), pinned.get(1));
-        if pinned_slots != slots as i32 || pinned_key != key {
-            return Err(Error::Malformed(format!(
-                "table `{table}` is cut into {pinned_slots} slots by `{pinned_key}`, this inbox asks \
-                     for {slots} by `{key}`; both are fixed for the life of the table"
-            )));
-        }
-        Ok(())
+            .atomic(async |tx| {
+                tx.connection()
+                    .execute("SELECT pg_advisory_xact_lock(hashtext($1))", &[&table.as_str()])
+                    .await?;
+                tx.connection().batch_execute(&ddl).await?;
+                tx.connection()
+                    .execute(
+                        &format!(
+                            "INSERT INTO {table}_meta (slots, partition_key) SELECT $1, $2 \
+                             WHERE NOT EXISTS (SELECT 1 FROM {table}_meta)"
+                        ),
+                        &[&(slots as i32), &key],
+                    )
+                    .await?;
+                let pinned = tx
+                    .connection()
+                    .query_one(
+                        &format!("SELECT slots, partition_key FROM {table}_meta"),
+                        &[],
+                    )
+                    .await?;
+                let (pinned_slots, pinned_key): (i32, String) = (pinned.get(0), pinned.get(1));
+                if pinned_slots != slots as i32 || pinned_key != key {
+                    return Err(Error::Malformed(format!(
+                        "table `{table}` is cut into {pinned_slots} slots by `{pinned_key}`, this inbox \
+                         asks for {slots} by `{key}`; both are fixed for the life of the table"
+                    )));
+                }
+                Ok(())
+            })
+            .await
     }
 
     /// Takes a slot: the one least recently served among those whose head —
@@ -241,7 +252,7 @@ where
             .connection()
             .execute(
                 "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2::jsonb::text))",
-                &[&self.table, &identity_json(identity)],
+                &[&self.table.as_str(), &identity_json(identity)],
             )
             .await?;
         Ok(())
