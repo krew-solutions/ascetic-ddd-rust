@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use ascetic_ddd_bus::adapters::in_memory::InMemoryBroker;
 use ascetic_ddd_bus::{BoxError, Bridge, Bus, Message, Subscription, Target};
-use ascetic_ddd_inbox::{Error, INBOX_SCHEME, PgInbox};
+use ascetic_ddd_inbox::{Error, INBOX_SCHEME, Loops, PgInbox};
 use ascetic_ddd_outbox::{OUTBOX_SCHEME, PgOutbox};
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use ascetic_ddd_session::pg::tokio_postgres::{Config, NoTls};
@@ -58,7 +58,10 @@ async fn fixture(name: &str, stem: &str) -> Fixture {
     let inbox = Arc::new(
         PgInbox::new(PgSessionPool::new(pool()))
             .with_table(&table, &sequence)
-            .with_poll_interval(Duration::from_millis(20))
+            .with_loops(Loops {
+                poll_interval: Duration::from_millis(20),
+                ..Loops::default()
+            })
             .observed_by(trace.recorder()),
     );
     let reset = format!(
@@ -214,7 +217,10 @@ async fn the_outbox_feeds_the_inbox_without_a_broker() {
     let outbox = Arc::new(
         PgOutbox::new(PgSessionPool::new(pool()))
             .with_tables("inbox_bridge_outbox_out", "inbox_bridge_outbox_out_offsets")
-            .with_poll_interval(Duration::from_millis(20))
+            .with_loops(ascetic_ddd_outbox::Loops {
+                poll_interval: Duration::from_millis(20),
+                ..ascetic_ddd_outbox::Loops::default()
+            })
             .observed_by(fixture.trace.recorder()),
     );
     fixture

@@ -65,7 +65,8 @@ let dispatcher = Bridge::new(bus).run("outbox://all", "dispatcher", Target::Head
 
 Headers travel as string fields of `metadata`, so `message_id` keeps its unique
 index. The dispatcher is a task on the tokio runtime; cancel the subscription
-to stop it.
+to stop it. `with_loops` on the outbox says how it runs — how many loops in
+this process, how long one waits — the same `Loops` that `run` takes.
 
 ## Observing the outbox
 

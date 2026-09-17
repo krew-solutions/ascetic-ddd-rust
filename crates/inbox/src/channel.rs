@@ -38,7 +38,7 @@ use tokio::sync::Notify;
 use crate::error::Failure;
 use crate::message::InboxMessage;
 use crate::observer::InboxObserver;
-use crate::pg::{Loops, PgInbox};
+use crate::pg::PgInbox;
 use crate::port::Inbox;
 
 /// The scheme the inbox is registered under.
@@ -149,10 +149,7 @@ where
         let (inbox, stopped) = (Arc::clone(&self.0), Arc::clone(&stop));
         let runtime = Handle::try_current().map_err(transport)?;
         runtime.spawn(async move {
-            let loops = Loops {
-                poll_interval: inbox.poll_interval(),
-                ..Loops::default()
-            };
+            let loops = inbox.loops();
             // a handler's error is a failure of the moment: the bus knows no verdicts
             let subscriber = |tx: &P::Session, row: &InboxMessage| {
                 let handled = handler(tx.clone(), wire_of(row));

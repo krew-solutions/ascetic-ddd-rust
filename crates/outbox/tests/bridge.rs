@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use ascetic_ddd_bus::adapters::in_memory::InMemoryBroker;
 use ascetic_ddd_bus::{Bridge, Bus, Message, Target};
-use ascetic_ddd_outbox::{OUTBOX_SCHEME, PgOutbox};
+use ascetic_ddd_outbox::{Loops, OUTBOX_SCHEME, PgOutbox};
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use ascetic_ddd_session::pg::tokio_postgres::{Config, NoTls};
 use ascetic_ddd_session::{PgAccess, PgSessionPool, Session, SessionPool};
@@ -39,7 +39,10 @@ async fn a_committed_message_crosses_the_bridge_and_a_rolled_back_one_does_not()
     let outbox = Arc::new(
         PgOutbox::new(PgSessionPool::new(pool()))
             .with_tables("outbox_bridge", "outbox_bridge_offsets")
-            .with_poll_interval(Duration::from_millis(20)),
+            .with_loops(Loops {
+                poll_interval: Duration::from_millis(20),
+                ..Loops::default()
+            }),
     );
     sessions
         .session(async |session| {
@@ -143,7 +146,10 @@ async fn a_failing_subscriber_gets_the_batch_again() {
     let outbox = Arc::new(
         PgOutbox::new(PgSessionPool::new(pool()))
             .with_tables("outbox_retry", "outbox_retry_offsets")
-            .with_poll_interval(Duration::from_millis(20)),
+            .with_loops(Loops {
+                poll_interval: Duration::from_millis(20),
+                ..Loops::default()
+            }),
     );
     sessions
         .session(async |session| {

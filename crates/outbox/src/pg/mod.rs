@@ -120,7 +120,7 @@ pub struct PgOutbox<P, O = ()> {
     outbox_table: String,
     offsets_table: String,
     batch_size: i64,
-    poll_interval: Duration,
+    loops: Loops,
     slots: u32,
 }
 
@@ -134,7 +134,7 @@ impl<P> PgOutbox<P> {
             outbox_table: "outbox".to_owned(),
             offsets_table: "outbox_offsets".to_owned(),
             batch_size: DEFAULT_BATCH_SIZE as i64,
-            poll_interval: Duration::from_secs(1),
+            loops: Loops::default(),
             slots: 1,
         }
     }
@@ -149,18 +149,16 @@ impl<P, O> PgOutbox<P, O> {
             outbox_table: self.outbox_table,
             offsets_table: self.offsets_table,
             batch_size: self.batch_size,
-            poll_interval: self.poll_interval,
+            loops: self.loops,
             slots: self.slots,
         }
     }
 
-    /// The same outbox whose channel consumer waits `interval` when there is
-    /// nothing to dispatch.
-    pub fn with_poll_interval(self, interval: Duration) -> Self {
-        PgOutbox {
-            poll_interval: interval,
-            ..self
-        }
+    /// The same outbox, whose dispatcher on the bus runs `loops`: how many
+    /// loops in this process, how long one waits with nothing to dispatch,
+    /// how long after a failure. [`PgOutbox::run`] takes its own.
+    pub fn with_loops(self, loops: Loops) -> Self {
+        PgOutbox { loops, ..self }
     }
 
     /// The same outbox in other tables.
@@ -196,7 +194,7 @@ impl<P, O> PgOutbox<P, O> {
         self.slots
     }
 
-    pub(crate) fn poll_interval(&self) -> Duration {
-        self.poll_interval
+    pub(crate) fn loops(&self) -> Loops {
+        self.loops
     }
 }

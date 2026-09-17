@@ -208,7 +208,7 @@ pub struct PgInbox<P, O = ()> {
     table: String,
     sequence: String,
     partition: Box<dyn PartitionKey>,
-    poll_interval: Duration,
+    loops: Loops,
     retries: Retries,
     max_wait: Option<Duration>,
     slots: u32,
@@ -225,7 +225,7 @@ impl<P> PgInbox<P> {
             table: "inbox".to_owned(),
             sequence: "inbox_received_position_seq".to_owned(),
             partition: Box::new(ByUri),
-            poll_interval: Duration::from_secs(1),
+            loops: Loops::default(),
             retries: Retries::default(),
             max_wait: None,
             slots: 1,
@@ -242,24 +242,22 @@ impl<P, O> PgInbox<P, O> {
             table: self.table,
             sequence: self.sequence,
             partition: self.partition,
-            poll_interval: self.poll_interval,
+            loops: self.loops,
             retries: self.retries,
             max_wait: self.max_wait,
             slots: self.slots,
         }
     }
 
-    /// The same inbox, whose channel consumer waits `poll_interval` when
-    /// there was nothing to process.
-    pub fn with_poll_interval(self, poll_interval: Duration) -> Self {
-        PgInbox {
-            poll_interval,
-            ..self
-        }
+    /// The same inbox, whose consumer on the bus runs `loops`: how many
+    /// loops in this process, how long one waits with nothing to take, how
+    /// long after an error of the moment. [`PgInbox::run`] takes its own.
+    pub fn with_loops(self, loops: Loops) -> Self {
+        PgInbox { loops, ..self }
     }
 
-    pub(crate) fn poll_interval(&self) -> Duration {
-        self.poll_interval
+    pub(crate) fn loops(&self) -> Loops {
+        self.loops
     }
 
     /// The same inbox in another table, with its own position sequence.

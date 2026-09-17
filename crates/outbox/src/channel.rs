@@ -29,7 +29,7 @@ use tokio::sync::Notify;
 
 use crate::message::OutboxMessage;
 use crate::observer::OutboxObserver;
-use crate::pg::{Loops, PgOutbox, Selection};
+use crate::pg::{PgOutbox, Selection};
 use crate::port::Outbox;
 
 /// The scheme the outbox is registered under.
@@ -151,10 +151,7 @@ where
             Handle::try_current().map_err(|error| BusError::Transport(Box::new(error)))?;
         runtime.spawn(async move {
             let selection = Selection::group(&group);
-            let loops = Loops {
-                poll_interval: outbox.poll_interval(),
-                ..Loops::default()
-            };
+            let loops = outbox.loops();
             let subscriber = |row: &OutboxMessage| {
                 let handler = Arc::clone(&handler);
                 let message = wire_of(row);

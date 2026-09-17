@@ -73,7 +73,8 @@ after-commit delivery and processing in the marking transaction, in one
 database.
 
 The processing loop is a task on the tokio runtime; cancel the subscription
-to stop it.
+to stop it. `with_loops` on the inbox says how it runs — how many loops in
+this process, how long one waits — the same `Loops` that `run` takes.
 
 ## Dependencies
 
