@@ -50,6 +50,7 @@ others behind features, so that `ascetic_ddd::saga` keeps working as one import
 | Crate | Python package | Description |
 | --- | --- | --- |
 | [`ascetic-ddd-bus`](crates/bus) | `trading.bus` (OCaml) | Scheme-dispatched message bus with in-memory and Kafka adapters |
+| [`ascetic-ddd-dek`](crates/dek) | `seedwork/infrastructure/repository/dek_store` | Data-encryption keys per resource, versioned, wrapped by the tenant's KEK; the ciphers a codec seals with |
 | [`ascetic-ddd-inbox`](crates/inbox) | `ascetic_ddd/inbox` | Transactional Inbox on PostgreSQL |
 | [`ascetic-ddd-kms`](crates/kms) | `ascetic_ddd/kms` | Key management for envelope encryption: a KEK per tenant, versioned and rotated, in PostgreSQL under a master key or in Vault Transit |
 | [`ascetic-ddd-outbox`](crates/outbox) | `ascetic_ddd/outbox` | Transactional Outbox on PostgreSQL |

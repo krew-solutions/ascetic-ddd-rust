@@ -50,6 +50,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ascetic-ddd-dek"
+version = "0.1.0"
+dependencies = [
+ "ascetic-ddd-kms",
+ "ascetic-ddd-session",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
 name = "ascetic-ddd-inbox"
 version = "0.1.0"
 dependencies = [

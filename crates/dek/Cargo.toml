@@ -1,0 +1,28 @@
+[package]
+name = "ascetic-ddd-dek"
+description = "Data-encryption keys, one per resource and versioned, wrapped by the tenant's key-encryption key: the store that keeps them, and the ciphers a codec seals with."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[features]
+# PostgreSQL adapter: DEKs in a table, each wrapped by the tenant's KEK through the KMS port.
+pg = ["ascetic-ddd-session/pg", "dep:tokio-postgres"]
+
+[dependencies]
+ascetic-ddd-kms = { path = "../kms" }
+ascetic-ddd-session = { path = "../session" }
+serde_json.workspace = true
+tokio-postgres = { version = "0.7.18", optional = true, features = ["with-serde_json-1"] }
+
+[dev-dependencies]
+ascetic-ddd-kms = { path = "../kms", features = ["pg"] }
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }

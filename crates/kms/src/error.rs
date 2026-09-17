@@ -30,6 +30,9 @@ pub enum Error {
         /// The version the ciphertext names.
         found: u32,
     },
+    /// The ciphertext names a version of the key that the holder does not
+    /// have: a keyring without that version.
+    NoKeyOfVersion(u32),
     /// An algorithm name this crate does not implement, read from storage.
     UnsupportedAlgorithm(String),
     /// Bytes that are not what they were taken for: a ciphertext too short to
@@ -82,6 +85,7 @@ impl fmt::Display for Error {
                 f,
                 "the ciphertext was sealed under key version {found}, this key is version {expected}"
             ),
+            Error::NoKeyOfVersion(version) => write!(f, "no key of version {version} at hand"),
             Error::UnsupportedAlgorithm(name) => write!(f, "unsupported algorithm `{name}`"),
             Error::Malformed(what) => write!(f, "malformed: {what}"),
             Error::Entropy(error) => write!(f, "no randomness from the operating system: {error}"),
