@@ -159,6 +159,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ascetic-ddd-specification"
+version = "0.1.0"
+dependencies = [
+ "ascetic-ddd-specification-macros",
+ "bytes",
+ "postgres-types",
+ "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
+name = "ascetic-ddd-specification-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "ascetic-ddd-trace"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,33 @@
+# ascetic-ddd-specification-macros
+
+The `#[specification]` attribute of
+[`ascetic-ddd-specification`](../specification), which re-exports it; depend
+on that crate, not on this one. A procedural macro has to live in a crate of
+its own kind, which is the only reason there are two.
+
+Put on a predicate function, the attribute leaves the function as it is and
+writes beside it `<name>_ast`, which returns the same predicate as a tree —
+to compile to SQL, or to evaluate against something that is not the Rust
+type. It is the port of the Python `lambda_filter`, which reads a lambda's
+source at run time, and of the Go `cmd/specgen`, which generates a file
+before compilation.
+
+```rust,ignore
+use ascetic_ddd_specification::specification;
+
+#[specification]
+fn adult(user: &User, age: i64) -> bool {
+    user.profile.age >= age && user.deleted_at.is_none()
+}
+
+// fn adult_ast(age: i64) -> Expr<Value>
+```
+
+The first parameter, or `self`, is the candidate; the others are constants
+of the specification, and `<name>_ast` takes the same. What the body may
+consist of is listed in the documentation of `ascetic-ddd-specification`.
+
+What has no meaning in a specification — a call, a cast, an `if`, a member
+by number, a comparison with `None` — is a compile error at the place it
+stands. The Go generator writes `spec.Value(nil)` and a `TODO` comment there
+and goes on.

@@ -57,6 +57,8 @@ others behind features, so that `ascetic_ddd::saga` keeps working as one import
 | [`ascetic-ddd-outbox`](crates/outbox) | `ascetic_ddd/outbox` | Transactional Outbox on PostgreSQL |
 | [`ascetic-ddd-rop`](crates/rop) | `trading.rop` (OCaml) | Railway-oriented programming: `Result` with accumulating, never-empty errors |
 | [`ascetic-ddd-saga`](crates/saga) | `ascetic_ddd/saga` | Saga pattern (routing slip) for distributed transactions |
+| [`ascetic-ddd-specification`](crates/specification) | `ascetic_ddd/specification`, Go `cmd/specgen` | Specification pattern: a predicate as a tree, built by hand, by typed terms, from a JSONPath template or from a Rust function; evaluated in memory or compiled to PostgreSQL |
+| [`ascetic-ddd-specification-macros`](crates/specification-macros) | `specification/domain/lambda_filter`, Go `cmd/specgen` | `#[specification]`: a predicate function and its tree from one source |
 | [`ascetic-ddd-session`](crates/session) | `ascetic_ddd/session` | Unit of Work: session scopes, savepoints, identity map, REST and composite sessions, PostgreSQL adapter *(in progress)* |
 | [`ascetic-ddd-trace`](crates/trace) | — | Recorders of what the outbox and the inbox report, for trace validation against the TLA+ models |
 
