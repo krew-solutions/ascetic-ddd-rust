@@ -78,11 +78,15 @@ message's tenant through the KMS, seals the payload; the DEK travels in the
 `dek_algorithm`. The receiving side needs no table of keys, only a KMS that
 holds the tenant's KEK — which is what lets a message cross to another
 bounded context. The stage reaches the KMS through a session pool of its
-own, since the KMS's session is not the data's. A message without a
-`tenant_id` header, or one whose key or payload does not open, or whose
-tenant's KEK is gone, is refused for good, `Permanent`, and the inbox parks
-it; a KMS out of reach is a failure of the moment, and the message is tried
-again.
+own, since the KMS's session is not the data's. The payload is bound to the
+message's identity: its associated data is the canonical text of the
+`tenant_id` and `message_id` headers, unless `bound_to` names others, so a
+payload moved under another message's headers does not open while the same
+message delivered again does; the names travel in `dek_bound_to`, and the
+opening side reads them from there. A message missing a header it is bound
+to, or one whose key or payload does not open, or whose tenant's KEK is
+gone, is refused for good, `Permanent`, and the inbox parks it; a KMS out of
+reach is a failure of the moment, and the message is tried again.
 
 ```rust,ignore
 let sealing = Arc::new(EnvelopeStage::new(kms_sessions, kms));

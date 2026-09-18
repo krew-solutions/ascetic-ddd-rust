@@ -4,6 +4,8 @@ use std::fmt;
 
 use serde_json::Value;
 
+use super::canonical;
+
 /// One thing of one tenant, named by its kind and its id: what a DEK is
 /// for. An event store names its aggregate's stream this way, a document
 /// store its document; the id is JSON, so a composite id fits.
@@ -49,52 +51,16 @@ impl Resource {
     /// resource's ciphers — what binds a ciphertext to its resource — and
     /// so must never change for a resource that has data.
     pub fn canonical(&self) -> String {
-        let mut text = String::new();
-        text.push('[');
-        write_json(&Value::String(self.tenant_id.clone()), &mut text);
-        text.push(',');
-        write_json(&Value::String(self.kind.clone()), &mut text);
-        text.push(',');
-        write_json(&self.id, &mut text);
-        text.push(']');
-        text
+        canonical::json(&Value::Array(vec![
+            Value::String(self.tenant_id.clone()),
+            Value::String(self.kind.clone()),
+            self.id.clone(),
+        ]))
     }
 }
 
 impl fmt::Display for Resource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.canonical())
-    }
-}
-
-/// Compact JSON with object keys in order, whatever order the map keeps.
-fn write_json(value: &Value, out: &mut String) {
-    match value {
-        Value::Object(fields) => {
-            let mut keys: Vec<&String> = fields.keys().collect();
-            keys.sort();
-            out.push('{');
-            for (i, key) in keys.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                write_json(&Value::String((*key).clone()), out);
-                out.push(':');
-                write_json(&fields[*key], out);
-            }
-            out.push('}');
-        }
-        Value::Array(items) => {
-            out.push('[');
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                write_json(item, out);
-            }
-            out.push(']');
-        }
-        // A scalar has one compact form.
-        scalar => out.push_str(&scalar.to_string()),
     }
 }

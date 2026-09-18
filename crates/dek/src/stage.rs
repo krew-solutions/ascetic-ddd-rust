@@ -17,12 +17,20 @@
 //! another database — and a key drawn for a message that is then rolled
 //! back rests nowhere.
 //!
-//! The tenant's id is the `tenant_id` header, and the associated data of
-//! the payload, as at every level of the key hierarchy. A message without
-//! one cannot be sealed, and one that arrives without one, or whose key or
-//! payload will not open, or whose tenant's KEK is gone, is refused for good:
-//! [`Permanent`], which the inbox parks at once. A KMS that cannot be
-//! reached is a failure of the moment, and the message is tried again.
+//! The payload is bound to the message's identity: its associated data is
+//! the canonical text of the headers the stage is bound to — the tenant and
+//! the `message_id` unless told otherwise — so a payload moved under another
+//! message's headers does not open, while the same message delivered again
+//! does. The names go along in the `dek_bound_to` header, and the opening
+//! side reads them from there, so the two sides cannot disagree; changing
+//! that header helps nobody, since the associated data was fixed at
+//! sealing. The tenant's id is the `tenant_id` header, and names the KEK.
+//!
+//! A message missing a header it is bound to cannot be sealed, and one that
+//! arrives without one, or whose key or payload will not open, or whose
+//! tenant's KEK is gone, is refused for good: [`Permanent`], which the inbox
+//! parks at once. A KMS that cannot be reached is a failure of the moment,
+//! and the message is tried again.
 
 use std::fmt;
 
@@ -32,6 +40,9 @@ use ascetic_ddd_session::SessionPool;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use futures::future::BoxFuture;
+use serde_json::Value;
+
+use crate::domain::canonical;
 
 /// The header naming the tenant, and the associated data of the payload.
 pub const TENANT_ID: &str = "tenant_id";
@@ -43,21 +54,30 @@ pub const DEK: &str = "dek";
 /// The header naming the cipher the payload is sealed with.
 pub const DEK_ALGORITHM: &str = "dek_algorithm";
 
+/// The header naming the headers the payload is bound to, comma-separated.
+pub const DEK_BOUND_TO: &str = "dek_bound_to";
+
+/// The header carrying the message's identity across the bus.
+pub const MESSAGE_ID: &str = "message_id";
+
 /// The envelope stage over the KMS `K`, reached through sessions of `P`.
 pub struct EnvelopeStage<P, K> {
     sessions: P,
     kms: K,
     algorithm: Algorithm,
+    bound_to: Vec<String>,
 }
 
 impl<P, K> EnvelopeStage<P, K> {
     /// A stage sealing with AES-256-GCM, drawing and unwrapping DEKs through
-    /// `kms` in sessions of `sessions`.
+    /// `kms` in sessions of `sessions`, binding every payload to the
+    /// message's `tenant_id` and `message_id`.
     pub fn new(sessions: P, kms: K) -> Self {
         EnvelopeStage {
             sessions,
             kms,
             algorithm: Algorithm::Aes256Gcm,
+            bound_to: vec![TENANT_ID.to_owned(), MESSAGE_ID.to_owned()],
         }
     }
 
@@ -65,6 +85,18 @@ impl<P, K> EnvelopeStage<P, K> {
     /// with the cipher its header names.
     pub fn with_algorithm(self, algorithm: Algorithm) -> Self {
         EnvelopeStage { algorithm, ..self }
+    }
+
+    /// The same stage binding every payload to these headers, in this order:
+    /// a message without one of them is not sealed. What was sealed before
+    /// opens under the binding its header names. A header's value is bound
+    /// as the text it travels as, so bind to headers whose text is stable
+    /// on the way, not to ones the channels structure and print again.
+    pub fn bound_to(self, headers: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        EnvelopeStage {
+            bound_to: headers.into_iter().map(Into::into).collect(),
+            ..self
+        }
     }
 }
 
@@ -77,20 +109,19 @@ where
     fn outbound(&self, message: Message) -> BoxFuture<'_, Result<Message, BoxError>> {
         Box::pin(async move {
             let tenant_id = tenant_of(&message)?;
+            let aad = associated_data(&message, &self.bound_to)?;
             let (dek, wrapped) = self
                 .sessions
                 .session(async |session| self.kms.generate_dek(&session, &tenant_id).await)
                 .await
                 .map_err(verdict)?;
-            let cipher = self
-                .algorithm
-                .cipher(&dek, tenant_id.as_bytes())
-                .map_err(verdict)?;
+            let cipher = self.algorithm.cipher(&dek, aad).map_err(verdict)?;
             let sealed = cipher.encrypt(message.payload()).map_err(verdict)?;
             Ok(message
                 .with_payload(sealed)
                 .with_header(DEK, BASE64.encode(wrapped))
-                .with_header(DEK_ALGORITHM, self.algorithm.as_str()))
+                .with_header(DEK_ALGORITHM, self.algorithm.as_str())
+                .with_header(DEK_BOUND_TO, self.bound_to.join(",")))
         })
     }
 
@@ -101,19 +132,23 @@ where
                 .decode(header(&message, DEK)?)
                 .map_err(|error| refused(format!("the `{DEK}` header is not base64: {error}")))?;
             let algorithm: Algorithm = header(&message, DEK_ALGORITHM)?.parse().map_err(verdict)?;
+            let bound_to: Vec<String> = header(&message, DEK_BOUND_TO)?
+                .split(',')
+                .map(str::to_owned)
+                .collect();
+            let aad = associated_data(&message, &bound_to)?;
             let dek = self
                 .sessions
                 .session(async |session| self.kms.decrypt_dek(&session, &tenant_id, &wrapped).await)
                 .await
                 .map_err(verdict)?;
-            let cipher = algorithm
-                .cipher(&dek, tenant_id.as_bytes())
-                .map_err(verdict)?;
+            let cipher = algorithm.cipher(&dek, aad).map_err(verdict)?;
             let opened = cipher.decrypt(message.payload()).map_err(verdict)?;
             Ok(message
                 .with_payload(opened)
                 .without_header(DEK)
-                .without_header(DEK_ALGORITHM))
+                .without_header(DEK_ALGORITHM)
+                .without_header(DEK_BOUND_TO))
         })
     }
 }
@@ -122,6 +157,7 @@ impl<P, K> fmt::Debug for EnvelopeStage<P, K> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EnvelopeStage")
             .field("algorithm", &self.algorithm)
+            .field("bound_to", &self.bound_to)
             .finish_non_exhaustive()
     }
 }
@@ -129,6 +165,22 @@ impl<P, K> fmt::Debug for EnvelopeStage<P, K> {
 /// The tenant the message names.
 fn tenant_of(message: &Message) -> Result<String, BoxError> {
     Ok(header(message, TENANT_ID)?.to_owned())
+}
+
+/// What the payload is bound to: the canonical text of the named headers
+/// as name-value pairs, in order — `[["tenant_id","t1"],["message_id","…"]]`.
+fn associated_data(message: &Message, names: &[String]) -> Result<String, BoxError> {
+    let pairs = names
+        .iter()
+        .map(|name| {
+            let value = header(message, name)?;
+            Ok(Value::Array(vec![
+                Value::String(name.clone()),
+                Value::String(value.to_owned()),
+            ]))
+        })
+        .collect::<Result<Vec<_>, BoxError>>()?;
+    Ok(canonical::json(&Value::Array(pairs)))
 }
 
 /// A header as text; a message without it, or with bytes that are not

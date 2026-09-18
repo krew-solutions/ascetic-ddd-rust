@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use ascetic_ddd_bus::{Bridge, Bus, Message, Permanent, Stage, Target};
 use ascetic_ddd_dek::EnvelopeStage;
-use ascetic_ddd_dek::stage::{DEK, DEK_ALGORITHM, TENANT_ID};
+use ascetic_ddd_dek::stage::{DEK, DEK_ALGORITHM, DEK_BOUND_TO, MESSAGE_ID, TENANT_ID};
 use ascetic_ddd_inbox::{INBOX_SCHEME, Loops as InboxLoops, PgInbox};
 use ascetic_ddd_kms::{Algorithm, KeyManagementService, PgKeyManagementService};
 use ascetic_ddd_outbox::{Loops as OutboxLoops, OUTBOX_SCHEME, PgOutbox};
@@ -69,7 +69,23 @@ async fn stage(name: &str) -> Arc<Sealing> {
 }
 
 fn message(tenant_id: &str, payload: &str) -> Message {
-    Message::new(payload.as_bytes()).with_header(TENANT_ID, tenant_id)
+    identified(tenant_id, "00000000-0000-4000-8000-000000000001", payload)
+}
+
+fn identified(tenant_id: &str, message_id: &str, payload: &str) -> Message {
+    Message::new(payload.as_bytes())
+        .with_header(TENANT_ID, tenant_id)
+        .with_header(MESSAGE_ID, message_id)
+}
+
+/// The sealed payload and its key headers of `from`, under the identity of
+/// `to`: what a substitution in a store or a broker looks like.
+fn moved(from: &Message, to: Message) -> Message {
+    let mut moved = to.with_payload(from.payload().to_vec());
+    for name in [DEK, DEK_ALGORITHM, DEK_BOUND_TO] {
+        moved = moved.with_header(name, from.header(name).unwrap().to_vec());
+    }
+    moved
 }
 
 fn text(bytes: &[u8]) -> &str {
@@ -90,13 +106,20 @@ async fn a_message_is_sealed_on_the_way_out_and_opened_on_the_way_in() {
         "no plaintext on the wire"
     );
     assert_eq!(text(sealed.header(DEK_ALGORITHM).unwrap()), "AES-256-GCM");
+    assert_eq!(
+        text(sealed.header(DEK_BOUND_TO).unwrap()),
+        "tenant_id,message_id"
+    );
     assert!(sealed.header(DEK).is_some());
     assert_eq!(text(sealed.header(TENANT_ID).unwrap()), "tenant-1");
 
     let opened = sealing.inbound(sealed.clone()).await.unwrap();
     assert_eq!(opened.payload(), b"the order's events");
-    assert!(opened.header(DEK).is_none() && opened.header(DEK_ALGORITHM).is_none());
+    for name in [DEK, DEK_ALGORITHM, DEK_BOUND_TO] {
+        assert!(opened.header(name).is_none(), "{name} is gone");
+    }
     assert_eq!(text(opened.header(TENANT_ID).unwrap()), "tenant-1");
+    assert!(opened.header(MESSAGE_ID).is_some());
 
     // Two messages of one tenant get two keys.
     let again = sealing
@@ -124,6 +147,74 @@ async fn another_tenant_does_not_open_it() {
         .with_header(TENANT_ID, "tenant-2");
     let error = sealing.inbound(relabelled).await.unwrap_err();
     assert!(error.is::<Permanent>(), "{error}");
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn a_payload_moved_under_another_message_does_not_open() {
+    let sealing = stage("moved").await;
+    let a = sealing
+        .outbound(identified(
+            "tenant-1",
+            "00000000-0000-4000-8000-00000000000a",
+            "shipped",
+        ))
+        .await
+        .unwrap();
+    let b = identified(
+        "tenant-1",
+        "00000000-0000-4000-8000-00000000000b",
+        "cancelled",
+    );
+    let error = sealing.inbound(moved(&a, b)).await.unwrap_err();
+    assert!(error.is::<Permanent>(), "{error}");
+    // The same message again, as at-least-once delivery brings it, opens.
+    assert_eq!(
+        sealing.inbound(a.clone()).await.unwrap().payload(),
+        b"shipped"
+    );
+    assert_eq!(sealing.inbound(a).await.unwrap().payload(), b"shipped");
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn the_binding_is_the_sealing_side_s_and_travels_with_the_message() {
+    // Two stages over one KMS: one bound to the tenant and the id, one to
+    // the tenant alone.
+    let master_key = Algorithm::Aes256Gcm.generate_key().unwrap();
+    let kms = || {
+        PgKeyManagementService::new(master_key.clone())
+            .with_table(Identifier::new("kms_keys_stage_binding").unwrap())
+    };
+    PgSessionPool::new(pool())
+        .session(async |session| {
+            session
+                .connection()
+                .batch_execute("DROP TABLE IF EXISTS kms_keys_stage_binding")
+                .await
+                .unwrap();
+            kms().setup(&session).await
+        })
+        .await
+        .unwrap();
+    let by_identity = EnvelopeStage::new(PgSessionPool::new(pool()), kms());
+    let by_tenant = EnvelopeStage::new(PgSessionPool::new(pool()), kms()).bound_to([TENANT_ID]);
+
+    // A message with no id is refused under the default binding …
+    let unidentified = Message::new(b"secret".to_vec()).with_header(TENANT_ID, "tenant-1");
+    let error = by_identity
+        .outbound(unidentified.clone())
+        .await
+        .unwrap_err();
+    assert!(error.is::<Permanent>(), "{error}");
+    // … and sealed by the stage bound to the tenant alone, which the other
+    // opens, reading the binding from the message.
+    let sealed = by_tenant.outbound(unidentified).await.unwrap();
+    assert_eq!(text(sealed.header(DEK_BOUND_TO).unwrap()), "tenant_id");
+    assert_eq!(
+        by_identity.inbound(sealed).await.unwrap().payload(),
+        b"secret"
+    );
 }
 
 #[tokio::test]
@@ -256,7 +347,7 @@ async fn the_outbox_and_the_inbox_hold_nothing_but_ciphertext() {
                 .with_header("stream_type", "Order")
                 .with_header("stream_id", "\"order-7\"")
                 .with_header("stream_position", "1")
-                .with_header("message_id", "00000000-0000-4000-8000-000000000007")
+                .with_header(MESSAGE_ID, "00000000-0000-4000-8000-000000000007")
         })
         .through(Arc::clone(&sealing) as Arc<dyn Stage>);
     sessions

@@ -12,6 +12,7 @@
 //! The counterpart of the `_VersionedCipher` and `_CompositeVersionedCipher`
 //! of the Python port's `dek_store.py`, with the resource named.
 
+pub(crate) mod canonical;
 mod resource;
 mod versioned;
 
