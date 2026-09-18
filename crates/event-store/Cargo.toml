@@ -1,0 +1,33 @@
+[package]
+name = "ascetic-ddd-event-store"
+description = "An event store on PostgreSQL: a stream of events per aggregate, appended with an expected position and read back in order, the payload sealed with the stream's data-encryption key."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[features]
+# PostgreSQL adapter: the `event_log` table.
+pg = ["ascetic-ddd-session/pg", "ascetic-ddd-dek/pg", "dep:tokio-postgres"]
+
+[dependencies]
+ascetic-ddd-dek = { path = "../dek" }
+ascetic-ddd-kms = { path = "../kms" }
+ascetic-ddd-session = { path = "../session" }
+flate2 = "1"
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio-postgres = { version = "0.7.18", optional = true, features = ["with-serde_json-1"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+ascetic-ddd-kms = { path = "../kms", features = ["pg"] }
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
