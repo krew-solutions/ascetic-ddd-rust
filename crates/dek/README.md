@@ -88,6 +88,13 @@ to, or one whose key or payload does not open, or whose tenant's KEK is
 gone, is refused for good, `Permanent`, and the inbox parks it; a KMS out of
 reach is a failure of the moment, and the message is tried again.
 
+A fresh DEK per message is one KMS call per message on each side. Where the
+KMS is a network away, `reusing(Reuse { messages, lifetime })` keeps a
+tenant's DEK at the sealing side for so many messages or so long — a
+thousand or a minute by default, far under what NIST allows a key with
+random nonces — and `Cached` from `ascetic-ddd-kms` in front of the opening
+side's KMS unwraps each key once. Both are off unless asked for.
+
 ```rust,ignore
 let sealing = Arc::new(EnvelopeStage::new(kms_sessions, kms));
 let placed = outbox.producer("kafka://orders", encode).through(Arc::clone(&sealing));

@@ -15,10 +15,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ascetic_ddd_bus::{Bridge, Bus, Message, Permanent, Stage, Target};
-use ascetic_ddd_dek::EnvelopeStage;
 use ascetic_ddd_dek::stage::{DEK, DEK_ALGORITHM, DEK_BOUND_TO, MESSAGE_ID, TENANT_ID};
+use ascetic_ddd_dek::{EnvelopeStage, Reuse};
 use ascetic_ddd_inbox::{INBOX_SCHEME, Loops as InboxLoops, PgInbox};
-use ascetic_ddd_kms::{Algorithm, KeyManagementService, PgKeyManagementService};
+use ascetic_ddd_kms::{Algorithm, Cached, KeyManagementService, PgKeyManagementService};
 use ascetic_ddd_outbox::{Loops as OutboxLoops, OUTBOX_SCHEME, PgOutbox};
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -215,6 +215,57 @@ async fn the_binding_is_the_sealing_side_s_and_travels_with_the_message() {
         by_identity.inbound(sealed).await.unwrap().payload(),
         b"secret"
     );
+}
+
+/// A stage that reuses a DEK seals so many messages under one key, then
+/// draws a fresh one; every one opens, through a cache that unwraps each
+/// key once.
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn a_reused_dek_serves_so_many_messages_and_each_opens() {
+    let master_key = Algorithm::Aes256Gcm.generate_key().unwrap();
+    let kms = || {
+        PgKeyManagementService::new(master_key.clone())
+            .with_table(Identifier::new("kms_keys_stage_reuse").unwrap())
+    };
+    PgSessionPool::new(pool())
+        .session(async |session| {
+            session
+                .connection()
+                .batch_execute("DROP TABLE IF EXISTS kms_keys_stage_reuse")
+                .await
+                .unwrap();
+            kms().setup(&session).await
+        })
+        .await
+        .unwrap();
+    let sealing = EnvelopeStage::new(PgSessionPool::new(pool()), kms()).reusing(Reuse {
+        messages: 2,
+        lifetime: Duration::from_secs(3600),
+    });
+    let opening = EnvelopeStage::new(PgSessionPool::new(pool()), Cached::new(kms()));
+
+    let mut sealed = Vec::new();
+    for i in 0..5u8 {
+        let id = format!("00000000-0000-4000-8000-0000000000{i:02}");
+        let tenant = if i < 4 { "tenant-1" } else { "tenant-2" };
+        sealed.push(
+            sealing
+                .outbound(identified(tenant, &id, &format!("message {i}")))
+                .await
+                .unwrap(),
+        );
+    }
+    let deks: Vec<&[u8]> = sealed.iter().map(|m| m.header(DEK).unwrap()).collect();
+    assert_eq!(deks[0], deks[1], "two messages under one key");
+    assert_ne!(deks[1], deks[2], "then a fresh one");
+    assert_eq!(deks[2], deks[3]);
+    assert_ne!(deks[3], deks[4], "another tenant, another key");
+
+    for (i, message) in sealed.into_iter().enumerate() {
+        let opened = opening.inbound(message).await.unwrap();
+        assert_eq!(opened.payload(), format!("message {i}").as_bytes());
+    }
 }
 
 #[tokio::test]

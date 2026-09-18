@@ -17,4 +17,4 @@ pub use crate::error::Error;
 pub use crate::pg::PgDekStore;
 pub use crate::port::DekStore;
 #[cfg(feature = "bus")]
-pub use crate::stage::EnvelopeStage;
+pub use crate::stage::{EnvelopeStage, Reuse};

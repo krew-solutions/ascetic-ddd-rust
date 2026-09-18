@@ -15,7 +15,11 @@
 //! The stage reaches the KMS through a session pool of its own: the KMS's
 //! session is not the data's — Vault's is HTTP, a PostgreSQL KMS may be in
 //! another database — and a key drawn for a message that is then rolled
-//! back rests nowhere.
+//! back rests nowhere. A fresh DEK per message is one KMS call per message;
+//! where that is a network round trip, [`EnvelopeStage::reusing`] keeps a
+//! tenant's DEK for so many messages or so long, as the AWS Encryption
+//! SDK's caching materials manager does, and the opening side keeps what it
+//! unwraps with [`Cached`][ascetic_ddd_kms::Cached] in front of its KMS.
 //!
 //! The payload is bound to the message's identity: its associated data is
 //! the canonical text of the headers the stage is bound to — the tenant and
@@ -32,10 +36,13 @@
 //! parks at once. A KMS that cannot be reached is a failure of the moment,
 //! and the message is tried again.
 
+use std::collections::HashMap;
 use std::fmt;
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use ascetic_ddd_bus::{BoxError, Message, Permanent, Stage};
-use ascetic_ddd_kms::{Algorithm, Error as KmsError, KeyManagementService};
+use ascetic_ddd_kms::{Algorithm, Error as KmsError, Key, KeyManagementService};
 use ascetic_ddd_session::SessionPool;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -60,12 +67,44 @@ pub const DEK_BOUND_TO: &str = "dek_bound_to";
 /// The header carrying the message's identity across the bus.
 pub const MESSAGE_ID: &str = "message_id";
 
+/// How long a tenant's DEK serves at the sealing side before a fresh one is
+/// drawn: so many messages, or so long, whichever comes first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reuse {
+    /// Messages sealed under one DEK, at most.
+    pub messages: u32,
+    /// How long one DEK serves, at most.
+    pub lifetime: Duration,
+}
+
+impl Default for Reuse {
+    /// A thousand messages, or a minute: far under the four billion
+    /// messages NIST SP 800-38D allows a key with random nonces, and a
+    /// thousandth of the KMS calls.
+    fn default() -> Self {
+        Reuse {
+            messages: 1_000,
+            lifetime: Duration::from_secs(60),
+        }
+    }
+}
+
+/// A tenant's DEK in service at the sealing side.
+struct Serving {
+    dek: Key,
+    wrapped: Vec<u8>,
+    since: Instant,
+    used: u32,
+}
+
 /// The envelope stage over the KMS `K`, reached through sessions of `P`.
 pub struct EnvelopeStage<P, K> {
     sessions: P,
     kms: K,
     algorithm: Algorithm,
     bound_to: Vec<String>,
+    reuse: Option<Reuse>,
+    serving: Mutex<HashMap<String, Serving>>,
 }
 
 impl<P, K> EnvelopeStage<P, K> {
@@ -78,6 +117,19 @@ impl<P, K> EnvelopeStage<P, K> {
             kms,
             algorithm: Algorithm::Aes256Gcm,
             bound_to: vec![TENANT_ID.to_owned(), MESSAGE_ID.to_owned()],
+            reuse: None,
+            serving: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The same stage sealing a tenant's messages under one DEK for as long
+    /// as `reuse` allows, instead of a fresh one per message. The wrapped
+    /// key travels in every message as before; the opening side needs no
+    /// change, and with a cache in front of its KMS unwraps it once.
+    pub fn reusing(self, reuse: Reuse) -> Self {
+        EnvelopeStage {
+            reuse: Some(reuse),
+            ..self
         }
     }
 
@@ -98,6 +150,38 @@ impl<P, K> EnvelopeStage<P, K> {
             ..self
         }
     }
+
+    /// The tenant's DEK in service, if one is and it may serve once more;
+    /// counted as used.
+    fn serving(&self, tenant_id: &str) -> Option<(Key, Vec<u8>)> {
+        let reuse = self.reuse?;
+        let mut serving = self.serving.lock().unwrap_or_else(PoisonError::into_inner);
+        let current = serving.get_mut(tenant_id)?;
+        if current.used >= reuse.messages || current.since.elapsed() >= reuse.lifetime {
+            return None;
+        }
+        current.used += 1;
+        Some((current.dek.clone(), current.wrapped.clone()))
+    }
+
+    /// Puts a fresh DEK in service for the tenant, used once.
+    fn serve(&self, tenant_id: &str, dek: &Key, wrapped: &[u8]) {
+        if self.reuse.is_none() {
+            return;
+        }
+        self.serving
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                tenant_id.to_owned(),
+                Serving {
+                    dek: dek.clone(),
+                    wrapped: wrapped.to_vec(),
+                    since: Instant::now(),
+                    used: 1,
+                },
+            );
+    }
 }
 
 impl<P, K> Stage for EnvelopeStage<P, K>
@@ -110,11 +194,18 @@ where
         Box::pin(async move {
             let tenant_id = tenant_of(&message)?;
             let aad = associated_data(&message, &self.bound_to)?;
-            let (dek, wrapped) = self
-                .sessions
-                .session(async |session| self.kms.generate_dek(&session, &tenant_id).await)
-                .await
-                .map_err(verdict)?;
+            let (dek, wrapped) = match self.serving(&tenant_id) {
+                Some(in_service) => in_service,
+                None => {
+                    let fresh = self
+                        .sessions
+                        .session(async |session| self.kms.generate_dek(&session, &tenant_id).await)
+                        .await
+                        .map_err(verdict)?;
+                    self.serve(&tenant_id, &fresh.0, &fresh.1);
+                    fresh
+                }
+            };
             let cipher = self.algorithm.cipher(&dek, aad).map_err(verdict)?;
             let sealed = cipher.encrypt(message.payload()).map_err(verdict)?;
             Ok(message
@@ -158,6 +249,7 @@ impl<P, K> fmt::Debug for EnvelopeStage<P, K> {
         f.debug_struct("EnvelopeStage")
             .field("algorithm", &self.algorithm)
             .field("bound_to", &self.bound_to)
+            .field("reuse", &self.reuse)
             .finish_non_exhaustive()
     }
 }

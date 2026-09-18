@@ -3,6 +3,7 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod cache;
 pub mod domain;
 mod error;
 #[cfg(feature = "pg")]
@@ -11,6 +12,7 @@ mod port;
 #[cfg(feature = "vault")]
 pub mod vault;
 
+pub use crate::cache::Cached;
 pub use crate::domain::{
     Aes256Gcm, Algorithm, Cipher, Kek, Key, MASTER_KEY_VERSION, MasterKey, WrappedKey,
 };

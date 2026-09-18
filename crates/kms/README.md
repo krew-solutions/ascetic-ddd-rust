@@ -100,6 +100,14 @@ version control; the session may belong to a database other than the
 data's. Where the requirements are higher, Vault Transit or a cloud KMS
 behind the same port is the answer.
 
+`Cached<K>` keeps what any service unwraps, a thousand keys for five minutes
+unless told otherwise, so a consumer opening a thousand messages sealed
+under one DEK, or a store loading every version of a stream's keys, asks the
+KMS once — what makes Vault, a network away, bearable on a hot path.
+Deleting a tenant's KEK forgets the tenant's keys held here; elsewhere the
+time to live is the bound, so a shredded tenant's keys open for that long at
+most, which is the price, with keys held in memory for that long.
+
 `VaultTransitService` (feature `vault`) leaves keys and cryptography to
 Vault; the wrapped DEK is Vault's ciphertext text as bytes. The HTTP client is
 the session's, `HttpAccess`, and every call goes through the session so its
