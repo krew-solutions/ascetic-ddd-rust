@@ -1,7 +1,9 @@
 //! Templates: what the Python `test_jsonpath_parser` and the Go
 //! `parser_test` check, and what this parser refuses that theirs let through.
 
-use ascetic_ddd_specification::ast::{and, any, equal, field, greater_than, less_than, not, or};
+use ascetic_ddd_specification::ast::{
+    and, any, equal, field, greater_than, is_not_null, is_null, less_than, not, or,
+};
 use ascetic_ddd_specification::jsonpath::{
     BindError, MatchError, Param, ParamKey, ParamKind, Params, Slot, SyntaxError, Template,
 };
@@ -240,6 +242,75 @@ fn literals() {
     assert_eq!(
         template("$[?@.a == 15]").expr(),
         &equal(field("a"), literal(15))
+    );
+}
+
+#[test]
+fn a_null_is_tested_not_compared() {
+    // In JSONPath null is a value, and `@.a == null` is how a null is found;
+    // in the tree `a = NULL` is null, as in SQL, and true of nothing. What the
+    // template means is IS NULL, spelled out or bound to a placeholder.
+    let record = |deleted_at: Value| {
+        Record::<Value>::object([
+            ("deleted_at", Record::Value(deleted_at)),
+            ("name", Record::value("x")),
+        ])
+    };
+    let (deleted, alive) = (record(Value::Null), record(Value::Int(5)));
+    for (source, params, of_deleted, of_alive) in [
+        ("$[?@.deleted_at == null]", Params::none(), true, false),
+        ("$[?null == @.deleted_at]", Params::none(), true, false),
+        ("$[?@.deleted_at != null]", Params::none(), false, true),
+        ("$[?!(@.deleted_at == null)]", Params::none(), false, true),
+        (
+            "$[?@.deleted_at == %s]",
+            Params::positional([Value::Null]),
+            true,
+            false,
+        ),
+        (
+            "$[?@.deleted_at != %(at)d]",
+            Params::named([("at", Value::Null)]),
+            false,
+            true,
+        ),
+        (
+            "$[?@.deleted_at == %d]",
+            Params::positional([5]),
+            false,
+            true,
+        ),
+        // An order with null is null, and so is its negation.
+        ("$[?@.deleted_at > 1]", Params::none(), false, true),
+        ("$[?!(@.deleted_at > 1)]", Params::none(), false, false),
+        ("$[?@.deleted_at != 5]", Params::none(), false, false),
+        ("$[?@.deleted_at < null]", Params::none(), false, false),
+    ] {
+        let template = template(source);
+        assert_eq!(
+            template.matches(&deleted, &params),
+            Ok(of_deleted),
+            "{source} of a null"
+        );
+        assert_eq!(
+            template.matches(&alive, &params),
+            Ok(of_alive),
+            "{source} of a value"
+        );
+    }
+    assert_eq!(
+        template("$[?@.deleted_at == null]").bind(&Params::none()),
+        Ok(is_null(field("deleted_at"))),
+    );
+    assert_eq!(
+        template("$.items[*][?@.price != %s]").bind(&Params::positional([Value::Null])),
+        Ok(any("items", is_not_null(field(Path::item("price"))))),
+    );
+    // The template itself is what was written: the rule is of the values,
+    // which a template has when it is bound.
+    assert_eq!(
+        template("$[?@.deleted_at == null]").expr(),
+        &equal(field("deleted_at"), literal(Value::Null)),
     );
 }
 

@@ -33,6 +33,7 @@ struct Store {
     rating: f64,
     active: bool,
     closed_at: Option<i64>,
+    alias: Option<String>,
     owner: Profile,
     items: Vec<Item>,
     categories: Vec<Category>,
@@ -106,6 +107,29 @@ fn has_an_item_named_as_the_store(s: &Store) -> bool {
 #[specification]
 pub(crate) fn older_than(s: &Store, age: i64, name: &str) -> bool {
     s.owner.age > age && s.owner.age < age + 100 && s.name == name
+}
+
+// `== None` is what `is_none()` is, and what clippy would rather have.
+#[specification]
+#[allow(clippy::partialeq_to_none)]
+fn closed(s: &Store) -> bool {
+    s.closed_at != None
+}
+
+#[specification]
+fn closed_on(s: &Store) -> bool {
+    s.closed_at == Some(1_700_000_000)
+}
+
+// A parameter that may be none: known only when the tree is asked for.
+#[specification]
+fn closed_at(s: &Store, at: Option<i64>) -> bool {
+    s.closed_at == at
+}
+
+#[specification]
+fn known_as(s: &Store, alias: Option<&str>) -> bool {
+    s.alias.as_deref() == alias
 }
 
 impl Store {
@@ -197,6 +221,19 @@ fn the_tree_of_a_predicate() {
             ),
         ),
         (Store::is_active_ast(), field("active")),
+        // A comparison with none is the null test, in the tree as in Rust.
+        (closed_ast(), is_not_null(field("closed_at"))),
+        (
+            closed_on_ast(),
+            equal(field("closed_at"), value(1_700_000_000)),
+        ),
+        (closed_at_ast(None), is_null(field("closed_at"))),
+        (closed_at_ast(Some(7)), equal(field("closed_at"), value(7))),
+        (known_as_ast(None), is_null(field("alias"))),
+        (
+            known_as_ast(Some("Pens")),
+            equal(field("alias"), value("Pens")),
+        ),
     ] {
         assert_eq!(tree, expected);
     }
@@ -267,6 +304,7 @@ impl Context<Value> for Store {
             "rating" => Ok(self.rating.into()),
             "active" => Ok(self.active.into()),
             "closed_at" => Ok(self.closed_at.into()),
+            "alias" => Ok(self.alias.as_deref().into()),
             _ => missing(name),
         }
     }
@@ -305,6 +343,7 @@ fn stores() -> Vec<Store> {
             rating: 4.0,
             active: true,
             closed_at: None,
+            alias: None,
             owner: Profile { age: 30 },
             items: vec![item("Laptop", 999, true), item("Mouse", 29, true)],
             categories: vec![Category {
@@ -316,6 +355,7 @@ fn stores() -> Vec<Store> {
             rating: 4.9,
             active: false,
             closed_at: Some(1_700_000_000),
+            alias: Some("Pens".to_owned()),
             owner: Profile { age: 17 },
             items: vec![item("Pen", 2, false), item("Ink", 900, false)],
             categories: vec![
@@ -330,6 +370,7 @@ fn stores() -> Vec<Store> {
             rating: 0.0,
             active: true,
             closed_at: None,
+            alias: Some("Inks".to_owned()),
             owner: Profile { age: 125 },
             items: vec![],
             categories: vec![],
@@ -340,7 +381,9 @@ fn stores() -> Vec<Store> {
 #[test]
 fn the_function_and_its_tree_agree() {
     type Predicate = fn(&Store) -> bool;
-    let predicates: [(&str, Predicate, Spec); 10] = [
+    let predicates: [(&str, Predicate, Spec); 12] = [
+        ("closed", closed, closed_ast()),
+        ("closed_on", closed_on, closed_on_ast()),
         ("adult_owner", adult_owner, adult_owner_ast()),
         ("premium", premium, premium_ast()),
         ("arithmetic", arithmetic, arithmetic_ast()),
@@ -373,6 +416,22 @@ fn the_function_and_its_tree_agree() {
             assert_eq!(
                 is_satisfied_by(&older_than_ast(age, "MyStore"), &store),
                 Ok(older_than(&store, age, "MyStore")),
+            );
+        }
+        for at in [None, Some(1_700_000_000), Some(5)] {
+            assert_eq!(
+                is_satisfied_by(&closed_at_ast(at), &store),
+                Ok(closed_at(&store, at)),
+                "closed_at({at:?}) of {:?}",
+                store.name,
+            );
+        }
+        for alias in [None, Some("Pens"), Some("Inks")] {
+            assert_eq!(
+                is_satisfied_by(&known_as_ast(alias), &store),
+                Ok(known_as(&store, alias)),
+                "known_as({alias:?}) of {:?}",
+                store.name,
             );
         }
     }

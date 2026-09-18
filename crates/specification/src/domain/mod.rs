@@ -5,6 +5,7 @@ pub mod ast;
 pub mod dsl;
 pub mod evaluate;
 pub mod jsonpath;
+pub mod null_test;
 pub mod operand;
 pub mod operator;
 pub mod record;

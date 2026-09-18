@@ -12,7 +12,7 @@ pub use crate::domain::operand::{Operand, OperandError};
 pub use crate::domain::operator::{Arithmetic, Comparison, Infix, Logical, Postfix, Prefix};
 pub use crate::domain::record::Record;
 pub use crate::domain::value::{Interval, Timestamp, Value};
-pub use crate::domain::{dsl, jsonpath};
+pub use crate::domain::{dsl, jsonpath, null_test};
 pub use crate::infrastructure::pg;
 pub use crate::infrastructure::transform::{Mapped, Mapping, TransformError, transform};
 

@@ -17,6 +17,7 @@ use ascetic_ddd_specification::ast::{
     is_null, left_shift, less_than, less_than_equal, modulo, mul, neg, not, not_equal, or,
     right_shift, sub, value,
 };
+use ascetic_ddd_specification::jsonpath::{Params, Template};
 use ascetic_ddd_specification::pg::{Compiler, Relation, Schema, compile};
 use ascetic_ddd_specification::{
     EvalError, Expr, Interval, OperandError, Path, Record, Timestamp, Value, evaluate,
@@ -377,6 +378,13 @@ async fn tables(client: &Client) {
     }
 }
 
+fn bound(source: &str, params: Params) -> Spec {
+    Template::parse(source)
+        .unwrap_or_else(|error| panic!("{error}"))
+        .bind(&params)
+        .unwrap_or_else(|error| panic!("{source}: {error}"))
+}
+
 fn specifications() -> Vec<Spec> {
     let item = |name: &str| field(Path::item(name));
     let dear = || greater_than(item("price"), value(500));
@@ -408,6 +416,24 @@ fn specifications() -> Vec<Spec> {
         all("items", greater_than(item("price"), value(5))),
         not(all("items", is_not_null(item("price")))),
         and(field("flag"), any("items", dear())),
+        // A null found the way a template finds it, spelled out and bound.
+        bound("$[?@.a == null]", Params::none()),
+        bound(
+            "$[?@.b != null && @.a == %s]",
+            Params::positional([Value::Null]),
+        ),
+        bound(
+            "$[?@.a == %d || @.name == %s]",
+            Params::positional([Value::Int(1), Value::Null]),
+        ),
+        bound(
+            "$.items[*][?@.price == %s]",
+            Params::positional([Value::Null]),
+        ),
+        bound(
+            "$.items[*][?@.active != null && @.price > 500]",
+            Params::none(),
+        ),
     ]
 }
 

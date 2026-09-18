@@ -40,6 +40,15 @@
 //! a filter selects among the children of what precedes it: a specification
 //! is a predicate, not a selection.
 //!
+//! `@.a == null` is how a template finds a null, and it does: bound, an
+//! equality with null — spelled out, or a placeholder given a null — is the
+//! null test, `IS NULL`, and `!=` is `IS NOT NULL` ([`null_test`]). In the
+//! tree, as in SQL, `a = NULL` would be true of nothing. The rule is of the
+//! template's constants, not of the candidate's data: `@.a == @.b` with both
+//! null is null, where RFC 9535 has true.
+//!
+//! [`null_test`]: crate::domain::null_test
+//!
 //! Operators, literals, escapes and numbers are RFC 9535's. Beyond the
 //! sources: either side of a comparison may be any operand, `$` may be used
 //! inside a filter, strings have escapes and numbers an exponent.

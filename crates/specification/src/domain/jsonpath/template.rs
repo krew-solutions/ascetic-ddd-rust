@@ -14,6 +14,7 @@ use super::error::{BindError, MatchError, SyntaxError};
 use super::{lexer, parser};
 use crate::domain::ast::Expr;
 use crate::domain::evaluate::{Context, is_satisfied_by};
+use crate::domain::null_test;
 use crate::domain::operand::Operand;
 use crate::domain::value::Value;
 
@@ -186,7 +187,9 @@ impl Template {
                     parameters: values.len(),
                 })
             }
-            Params::Positional(_) | Params::Named(_) => Ok(bound),
+            // `@.a == null` is how a template finds a null, spelled out or
+            // bound: now that the values are known, it is the null test.
+            Params::Positional(_) | Params::Named(_) => Ok(null_test::throughout(bound)),
         }
     }
 

@@ -45,6 +45,7 @@ use std::marker::PhantomData;
 use std::ops::{Add, BitAnd, BitOr, Div, Mul, Neg, Not, Rem, Shl, Shr, Sub};
 
 use super::ast::{self, Expr, Path};
+use super::null_test;
 use super::operator::Infix;
 use super::value::{Interval, Timestamp, Value};
 
@@ -227,14 +228,15 @@ impl<N> Term<sort::Boolean, N> {
 }
 
 impl<S: sort::Comparable, N> Term<S, N> {
-    /// `self = other`.
+    /// `self = other`; `self IS NULL` if `other` is the null constant — a
+    /// nullable [`value`](Term::value) of `None` — as [`null_test`] has it.
     pub fn eq<N2>(self, other: Term<S, N2>) -> Boolean {
-        self.infix(Infix::EQ, other)
+        Term::from_expr(null_test::equal(self.expr, other.expr))
     }
 
-    /// `self != other`.
+    /// `self != other`; `self IS NOT NULL` if `other` is the null constant.
     pub fn ne<N2>(self, other: Term<S, N2>) -> Boolean {
-        self.infix(Infix::NE, other)
+        Term::from_expr(null_test::not_equal(self.expr, other.expr))
     }
 
     /// `self > other`.

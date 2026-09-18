@@ -84,6 +84,27 @@ mod tests {
     }
 
     #[test]
+    fn an_option_is_its_value_or_the_null() {
+        let tree = expand(
+            quote!(),
+            quote!(
+                fn f(u: &U, at: Option<i64>) -> bool {
+                    u.a == None && u.b != Some(5) && u.c.as_deref() == at
+                }
+            ),
+        )
+        .expect("a specification")
+        .to_string();
+        // Equality goes through the rule, so that a none is tested.
+        assert_eq!(tree.matches("null_test :: equal").count(), 2, "{tree}");
+        assert_eq!(tree.matches("null_test :: not_equal").count(), 1, "{tree}");
+        assert!(!tree.contains("ast :: equal"), "{tree}");
+        assert!(tree.contains("Value :: Null"), "{tree}");
+        assert!(tree.contains("value (5)"), "{tree}");
+        assert!(tree.contains("Path :: global (\"c\")"), "{tree}");
+    }
+
+    #[test]
     fn what_is_not_a_predicate_is_refused_where_it_stands() {
         for (function, message) in [
             (
@@ -121,10 +142,10 @@ mod tests {
             (
                 quote!(
                     fn f(u: &U) -> bool {
-                        u.a == None
+                        u.a == Some(1, 2)
                     }
                 ),
-                "is_none",
+                "not expressible",
             ),
             (
                 quote!(

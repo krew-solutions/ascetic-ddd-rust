@@ -27,7 +27,11 @@ The first parameter, or `self`, is the candidate; the others are constants
 of the specification, and `<name>_ast` takes the same. What the body may
 consist of is listed in the documentation of `ascetic-ddd-specification`.
 
+An `Option` is its value or the null: `x == None` is `IS NULL`, as
+`x.is_none()` is; `Some(v)` is `v`; and a parameter of an `Option` type that
+is none when the tree is asked for makes the null test too, so that
+`closed_at == at` means the same in the function and in its tree.
+
 What has no meaning in a specification — a call, a cast, an `if`, a member
-by number, a comparison with `None` — is a compile error at the place it
-stands. The Go generator writes `spec.Value(nil)` and a `TODO` comment there
+by number — is a compile error at the place it stands. The Go generator writes `spec.Value(nil)` and a `TODO` comment there
 and goes on.

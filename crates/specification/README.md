@@ -7,8 +7,9 @@ object in memory satisfy it?* and *which rows of the table do?*
 The Rust port of `ascetic_ddd/specification` (Python) and
 `asceticddd/specification` with `cmd/specgen` (Go). The design, the
 requirements it answers and the alternatives rejected are in
-[ADR-0011](../../docs/src/adr/0011-what-a-specification-must-do.md) and
-[ADR-0012](../../docs/src/adr/0012-a-specification-is-a-tree-over-its-values-read-by-functions.md).
+[ADR-0011](../../docs/src/adr/0011-what-a-specification-must-do.md),
+[ADR-0012](../../docs/src/adr/0012-a-specification-is-a-tree-over-its-values-read-by-functions.md) and
+[ADR-0013](../../docs/src/adr/0013-a-null-is-tested-not-compared-where-null-is-a-value.md).
 
 ## Four ways to write a specification
 
@@ -95,11 +96,12 @@ assert_eq!(
 The body is one expression of: members of the candidate and of the item;
 literals, the other parameters of the function and constants, which become
 values; `== != < <= > >=`, `&& || !`, `+ - * / % << >>`, unary `-`;
-`.is_none()` and `.is_some()`; the comparison methods `.eq(&x)` … `.ge(&x)`
-a Value Object compares by; `.iter().any(|item| …)` and `.all(…)`, nested as
-deep as the collections are; `&`, `*`, `.clone()`, `.as_str()`, `.as_ref()`,
-which change how a value is held and not the value. Anything else is a
-compile error at the place it stands.
+`.is_none()` and `.is_some()`, and `== None`, which is the same; `Some(x)`,
+which is `x`; the comparison methods `.eq(&x)` … `.ge(&x)` a Value Object
+compares by; `.iter().any(|item| …)` and `.all(…)`, nested as deep as the
+collections are; `&`, `*`, `.clone()`, `.as_str()`, `.as_ref()`,
+`.as_deref()`, which change how a value is held and not the value. Anything
+else is a compile error at the place it stands.
 
 ## Two ways to read one
 
@@ -165,6 +167,13 @@ that correct a result are marked **fix**.
 * **fix** — a template's placeholders are bound in the order they stand;
   the sources list the named ones first and bind a mixed template wrongly.
   Mixing the styles is a syntax error here, as it is in Python's `%`.
+* A null is tested, not compared, where a notation has null for a value
+  (ADR-0013, [`null_test`]): `@.a == null` of a template, spelled out or
+  bound to a placeholder, `x == None` of a Rust function, a parameter of an
+  `Option` type that is none, `eq` of a typed term with a null constant are
+  `IS NULL`, and `!=` is `IS NOT NULL`. Written into the tree as they stand
+  they are `a = NULL`, true of nothing once nulls follow SQL — which is what
+  the tree built by hand still means.
 * The template grammar is closed: what the sources skip over "if present" is
   required or refused. See [`jsonpath`] for the grammar and the list.
 * A placeholder's letter is checked: `%d` takes an integer, `%f` a number,
@@ -205,6 +214,9 @@ that correct a result are marked **fix**.
 * `numeric` parameters are not written by the `pg` feature.
 * From the predicate of an inner collection the item of an outer one cannot
   be named: the tree has one `@`, the nearest. The macro says so.
+* The null test is of constants, not of data: `@.a == @.b` with both members
+  null is null, where RFC 9535 has true. The equality in which null is a
+  value is `IS`, which a template cannot spell.
 * A function and its tree agree on candidates without nulls. With them,
   Rust's `!(x == Some(5))` is true of a `None` and SQL's `NOT x = 5` is not.
 

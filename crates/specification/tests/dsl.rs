@@ -91,6 +91,24 @@ fn comparables_compare() {
 }
 
 #[test]
+fn a_null_is_tested_not_compared() {
+    // `email == maybe`, of an `Option` known when the term is built.
+    let email = || NullText::field("email");
+    assert_eq!(
+        email().eq(NullText::value(None::<&str>)).into_expr(),
+        is_null(field("email"))
+    );
+    assert_eq!(
+        email().ne(NullText::value(None::<&str>)).into_expr(),
+        is_not_null(field("email"))
+    );
+    assert_eq!(
+        email().eq(NullText::value(Some("a@b"))).into_expr(),
+        equal(field("email"), value("a@b")),
+    );
+}
+
+#[test]
 fn numbers_compute() {
     let (a, b) = (|| Number::field("a"), || NullNumber::field("b"));
     let (x, y): (Make, Make) = (|| field("a"), || field("b"));

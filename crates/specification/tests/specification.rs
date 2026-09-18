@@ -9,7 +9,7 @@ use ascetic_ddd_specification::ast::{
 };
 use ascetic_ddd_specification::{
     ContextError, EvalError, Expr, Infix, Interval, OperandError, Path, Record, Root, Timestamp,
-    Value, evaluate, is_satisfied_by,
+    Value, evaluate, is_satisfied_by, null_test,
 };
 
 type Spec = Expr<Value>;
@@ -454,6 +454,58 @@ fn a_candidate_satisfies_what_is_true_of_it() {
     assert_eq!(
         is_satisfied_by(&value(1), &store),
         Err(EvalError::NotBoolean("integer"))
+    );
+}
+
+#[test]
+fn equality_with_the_null_constant_is_the_null_test() {
+    let a = || field::<Value>("a");
+    for (built, expected) in [
+        (null_test::equal(a(), null()), is_null(a())),
+        (null_test::equal(null(), a()), is_null(a())),
+        (null_test::not_equal(a(), null()), is_not_null(a())),
+        (null_test::not_equal(null(), a()), is_not_null(a())),
+        // Of two nulls one is tested: true, as in the notations this is for.
+        (null_test::equal(null(), null()), is_null(null())),
+        // Anything else is the comparison it says.
+        (null_test::equal(a(), value(1)), equal(a(), value(1))),
+        (
+            null_test::not_equal(a(), field("b")),
+            not_equal(a(), field("b")),
+        ),
+    ] {
+        assert_eq!(built, expected);
+    }
+}
+
+#[test]
+fn the_null_test_is_found_throughout_a_tree() {
+    let a = || field::<Value>("a");
+    let item = || field::<Value>(Path::item("price"));
+    let tree = and(
+        not(equal(a(), null())),
+        any(
+            "items",
+            or(not_equal(null(), item()), less_than(item(), null())),
+        ),
+    );
+    assert_eq!(
+        null_test::throughout(tree),
+        and(
+            not(is_null(a())),
+            // An order with null is left what it is: null, true of nothing.
+            any("items", or(is_not_null(item()), less_than(item(), null()))),
+        ),
+    );
+    // The tree by itself keeps SQL's meaning: `a = NULL` is null.
+    let store = store();
+    assert_eq!(
+        evaluate(&equal(field("name"), null()), &store),
+        Ok(Value::Null)
+    );
+    assert_eq!(
+        evaluate(&null_test::equal(field("name"), null()), &store),
+        Ok(Value::Bool(false)),
     );
 }
 

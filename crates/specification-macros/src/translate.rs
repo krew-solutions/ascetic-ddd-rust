@@ -74,6 +74,13 @@ fn ast() -> Tokens {
     quote!(::ascetic_ddd_specification::ast)
 }
 
+/// Equality is built by `null_test`: `x == None` is what Rust writes for
+/// "x is none", and a parameter of an `Option` type may be none when the
+/// tree is asked for. In the tree a comparison with null is true of nothing.
+fn null_test() -> Tokens {
+    quote!(::ascetic_ddd_specification::null_test)
+}
+
 fn inexpressible(expr: &Expr) -> Error {
     Error::new_spanned(expr, "not expressible in a specification")
 }
@@ -117,8 +124,21 @@ pub(crate) fn expr(expr: &Expr, scope: &Scope<'_>) -> Result<Tokens, Error> {
             let make = infix(&binary.op).ok_or_else(|| inexpressible(expr))?;
             let left = self::expr(&binary.left, scope)?;
             let right = self::expr(&binary.right, scope)?;
-            Ok(quote!(#ast::#make(#left, #right)))
+            Ok(quote!(#make(#left, #right)))
         }
+        // An `Option` is its value or the null: `None` is the null constant,
+        // and `Some(x)` is `x`.
+        Expr::Path(path) if path.path.is_ident("None") => {
+            Ok(quote!(#ast::value(::ascetic_ddd_specification::Value::Null)))
+        }
+        Expr::Call(call) => match (call.func.as_ref(), call.args.first()) {
+            (Expr::Path(some), Some(value))
+                if some.path.is_ident("Some") && call.args.len() == 1 =>
+            {
+                self::expr(value, scope)
+            }
+            _ => Err(inexpressible(expr)),
+        },
         Expr::Path(_) | Expr::Field(_) => match member(expr, scope)? {
             Some(path) => Ok(quote!(#ast::field(#path))),
             None => Ok(quote!(#ast::value(::core::clone::Clone::clone(&#expr)))),
@@ -128,24 +148,25 @@ pub(crate) fn expr(expr: &Expr, scope: &Scope<'_>) -> Result<Tokens, Error> {
     }
 }
 
-/// The function of `ast` that makes the node of a binary operator.
+/// The function that makes the node of a binary operator.
 fn infix(op: &BinOp) -> Option<Tokens> {
+    let (ast, null_test) = (ast(), null_test());
     Some(match op {
-        BinOp::Eq(_) => quote!(equal),
-        BinOp::Ne(_) => quote!(not_equal),
-        BinOp::Lt(_) => quote!(less_than),
-        BinOp::Le(_) => quote!(less_than_equal),
-        BinOp::Gt(_) => quote!(greater_than),
-        BinOp::Ge(_) => quote!(greater_than_equal),
-        BinOp::And(_) => quote!(and),
-        BinOp::Or(_) => quote!(or),
-        BinOp::Add(_) => quote!(add),
-        BinOp::Sub(_) => quote!(sub),
-        BinOp::Mul(_) => quote!(mul),
-        BinOp::Div(_) => quote!(div),
-        BinOp::Rem(_) => quote!(modulo),
-        BinOp::Shl(_) => quote!(left_shift),
-        BinOp::Shr(_) => quote!(right_shift),
+        BinOp::Eq(_) => quote!(#null_test::equal),
+        BinOp::Ne(_) => quote!(#null_test::not_equal),
+        BinOp::Lt(_) => quote!(#ast::less_than),
+        BinOp::Le(_) => quote!(#ast::less_than_equal),
+        BinOp::Gt(_) => quote!(#ast::greater_than),
+        BinOp::Ge(_) => quote!(#ast::greater_than_equal),
+        BinOp::And(_) => quote!(#ast::and),
+        BinOp::Or(_) => quote!(#ast::or),
+        BinOp::Add(_) => quote!(#ast::add),
+        BinOp::Sub(_) => quote!(#ast::sub),
+        BinOp::Mul(_) => quote!(#ast::mul),
+        BinOp::Div(_) => quote!(#ast::div),
+        BinOp::Rem(_) => quote!(#ast::modulo),
+        BinOp::Shl(_) => quote!(#ast::left_shift),
+        BinOp::Shr(_) => quote!(#ast::right_shift),
         _ => return None,
     })
 }
@@ -181,10 +202,6 @@ fn chain(expr: &Expr) -> Result<Option<(&Ident, Vec<String>)>, Error> {
         Expr::Reference(inner) => chain(&inner.expr),
         Expr::Unary(unary) if matches!(unary.op, UnOp::Deref(_)) => chain(&unary.expr),
         Expr::Path(path) if path.qself.is_none() => match path.path.get_ident() {
-            Some(name) if name == "None" => Err(Error::new_spanned(
-                expr,
-                "a specification has no `None` to compare with: use `is_none()`",
-            )),
             Some(name) => Ok(Some((name, Vec::new()))),
             None => Ok(None),
         },
@@ -203,31 +220,31 @@ fn chain(expr: &Expr) -> Result<Option<(&Ident, Vec<String>)>, Error> {
 }
 
 fn method(call: &ExprMethodCall, scope: &Scope<'_>) -> Result<Tokens, Error> {
-    let ast = ast();
+    let (ast, null_test) = (ast(), null_test());
     let arguments: Vec<&Expr> = call.args.iter().collect();
     let unary = |make: Tokens| {
         let operand = expr(&call.receiver, scope)?;
-        Ok(quote!(#ast::#make(#operand)))
+        Ok(quote!(#make(#operand)))
     };
     let binary = |make: Tokens, right: &Expr| {
         let left = expr(&call.receiver, scope)?;
         let right = expr(right, scope)?;
-        Ok(quote!(#ast::#make(#left, #right)))
+        Ok(quote!(#make(#left, #right)))
     };
     match (call.method.to_string().as_str(), arguments.as_slice()) {
-        ("is_none", []) => unary(quote!(is_null)),
-        ("is_some", []) => unary(quote!(is_not_null)),
+        ("is_none", []) => unary(quote!(#ast::is_null)),
+        ("is_some", []) => unary(quote!(#ast::is_not_null)),
         // What a Value Object compares by, where Go's has `Equal`, `LessThan`.
-        ("eq", [right]) => binary(quote!(equal), right),
-        ("ne", [right]) => binary(quote!(not_equal), right),
-        ("lt", [right]) => binary(quote!(less_than), right),
-        ("le", [right]) => binary(quote!(less_than_equal), right),
-        ("gt", [right]) => binary(quote!(greater_than), right),
-        ("ge", [right]) => binary(quote!(greater_than_equal), right),
+        ("eq", [right]) => binary(quote!(#null_test::equal), right),
+        ("ne", [right]) => binary(quote!(#null_test::not_equal), right),
+        ("lt", [right]) => binary(quote!(#ast::less_than), right),
+        ("le", [right]) => binary(quote!(#ast::less_than_equal), right),
+        ("gt", [right]) => binary(quote!(#ast::greater_than), right),
+        ("ge", [right]) => binary(quote!(#ast::greater_than_equal), right),
         ("any", [Expr::Closure(predicate)]) => quantifier(quote!(any), call, predicate, scope),
         ("all", [Expr::Closure(predicate)]) => quantifier(quote!(all), call, predicate, scope),
         // A change of how the value is held, not of the value.
-        ("clone" | "as_str" | "as_ref", []) => expr(&call.receiver, scope),
+        ("clone" | "as_str" | "as_ref" | "as_deref", []) => expr(&call.receiver, scope),
         _ => Err(Error::new_spanned(
             &call.method,
             "this method has no meaning in a specification",
