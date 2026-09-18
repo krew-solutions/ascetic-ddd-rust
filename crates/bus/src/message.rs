@@ -43,6 +43,20 @@ impl Message {
         self
     }
 
+    /// The same message with another payload: what a stage makes.
+    pub fn with_payload(self, payload: impl Into<Vec<u8>>) -> Self {
+        Message {
+            payload: payload.into(),
+            ..self
+        }
+    }
+
+    /// The same message without the headers of that name.
+    pub fn without_header(mut self, name: &str) -> Self {
+        self.headers.retain(|(n, _)| n != name);
+        self
+    }
+
     /// The first header of that name.
     pub fn header(&self, name: &str) -> Option<&[u8]> {
         self.headers

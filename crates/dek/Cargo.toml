@@ -16,13 +16,21 @@ readme = "README.md"
 [features]
 # PostgreSQL adapter: DEKs in a table, each wrapped by the tenant's KEK through the KMS port.
 pg = ["ascetic-ddd-session/pg", "dep:tokio-postgres"]
+# The envelope stage of the bus: a DEK per message, wrapped through the KMS, carried in a header.
+bus = ["dep:ascetic-ddd-bus", "dep:base64", "dep:futures"]
 
 [dependencies]
+ascetic-ddd-bus = { path = "../bus", optional = true }
 ascetic-ddd-kms = { path = "../kms" }
 ascetic-ddd-session = { path = "../session" }
+base64 = { version = "0.22", optional = true }
+futures = { workspace = true, optional = true }
 serde_json.workspace = true
 tokio-postgres = { version = "0.7.18", optional = true, features = ["with-serde_json-1"] }
 
 [dev-dependencies]
+ascetic-ddd-bus = { path = "../bus" }
+ascetic-ddd-inbox = { path = "../inbox" }
 ascetic-ddd-kms = { path = "../kms", features = ["pg"] }
+ascetic-ddd-outbox = { path = "../outbox" }
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }

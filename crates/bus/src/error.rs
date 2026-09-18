@@ -22,6 +22,8 @@ pub enum Error {
     },
     /// The transport failed.
     Transport(BoxError),
+    /// A stage of the wire refused the message on its way out.
+    Stage(BoxError),
 }
 
 impl fmt::Display for Error {
@@ -37,6 +39,7 @@ impl fmt::Display for Error {
                 write!(f, "a consumer already exists in group `{group}` on `{uri}`")
             }
             Error::Transport(error) => write!(f, "transport: {error}"),
+            Error::Stage(error) => write!(f, "stage: {error}"),
         }
     }
 }
@@ -44,8 +47,40 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Error::Transport(error) => Some(error.as_ref()),
+            Error::Transport(error) | Error::Stage(error) => Some(error.as_ref()),
             _ => None,
         }
+    }
+}
+
+/// A failure of handling that no retry will mend — a message that cannot
+/// be opened, a key that is gone — as opposed to one of the moment. The bus
+/// knows no verdicts of its own; it carries this one from whoever can tell,
+/// a stage or a handler, to a transport that can act on it: the inbox parks
+/// such a message at once instead of retrying it (ADR-0010).
+#[derive(Debug)]
+pub struct Permanent(BoxError);
+
+impl Permanent {
+    /// Marks `error` as permanent.
+    pub fn new(error: impl Into<BoxError>) -> Self {
+        Permanent(error.into())
+    }
+
+    /// The error itself.
+    pub fn into_inner(self) -> BoxError {
+        self.0
+    }
+}
+
+impl fmt::Display for Permanent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "permanent: {}", self.0)
+    }
+}
+
+impl std::error::Error for Permanent {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
     }
 }

@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ascetic_ddd_bus::adapters::in_memory::InMemoryBroker;
-use ascetic_ddd_bus::{BoxError, Bridge, Bus, Message, Subscription, Target};
+use ascetic_ddd_bus::{BoxError, Bridge, Bus, Message, Permanent, Subscription, Target};
 use ascetic_ddd_inbox::{Error, INBOX_SCHEME, Loops, PgInbox};
 use ascetic_ddd_outbox::{OUTBOX_SCHEME, PgOutbox};
 use ascetic_ddd_session::pg::Identifier;
@@ -346,6 +346,64 @@ async fn a_failing_handler_is_retried_and_its_writes_are_rolled_back() {
         1,
         "the failed attempt's write was rolled back with it"
     );
+    intake.cancel();
+    processing.cancel();
+}
+
+/// A handler that says its failure is permanent — the one verdict the bus
+/// carries — has the message parked at once, with no second attempt.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_handler_s_permanent_verdict_parks_the_message_at_once() {
+    let fixture = fixture("permanent", "inbox-bridge-permanent").await;
+    let mut bus = Bus::new();
+    bus.register("in-memory", InMemoryBroker::new()).unwrap();
+    bus.register(INBOX_SCHEME, fixture.inbox.channel()).unwrap();
+    let bus = Arc::new(bus);
+    let intake = Bridge::new(Arc::clone(&bus))
+        .run(
+            "in-memory://orders",
+            "intake",
+            Target::Fixed("inbox://orders".into()),
+        )
+        .unwrap();
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let orders = fixture
+        .inbox
+        .consumer(|message: &Message| Ok(String::from_utf8(message.payload().to_vec())?));
+    let processing = orders
+        .subscribe({
+            let attempts = Arc::clone(&attempts);
+            move |_tx: PgSession, _order: String| {
+                let attempts = Arc::clone(&attempts);
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Err::<(), BoxError>(Permanent::new("this message will never open").into())
+                }
+            }
+        })
+        .unwrap();
+
+    bus.producer("in-memory://orders", |message: &Message| message.clone())
+        .unwrap()
+        .publish(&order("doomed", 4, "00000000-0000-4000-8000-000000000004"))
+        .await
+        .unwrap();
+
+    let parked_sql = format!(
+        "SELECT count(*) FROM {} WHERE parked_at IS NOT NULL",
+        fixture.table
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while fixture.one::<i64>(parked_sql.clone()).await == 0
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(fixture.one::<i64>(parked_sql).await, 1, "parked");
+    assert_eq!(fixture.processed().await, 0);
+    assert_eq!(attempts.load(Ordering::SeqCst), 1, "no second attempt");
     intake.cancel();
     processing.cancel();
 }

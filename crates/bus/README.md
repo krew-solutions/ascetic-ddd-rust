@@ -39,6 +39,17 @@ Two decisions taken in the port:
 A subscription is cancelled explicitly, never by dropping its handle: the
 composition root discards most handles. Errors are values.
 
+A message may go through *stages* between the typed layer and the
+transport: `producer.through(stage)` sends every message out through the
+stages in order, after encoding; `consumer.through(stage)` brings every
+message back through them in reverse, before decoding. Sealing goes here
+(ADR-0002), so that nothing between the two ends sees a payload in the
+clear; the bus does not know what a stage does. A stage that fails on the
+way out fails the publish; one that fails on the way in fails the handling,
+so the message is kept and tried again, never skipped. The one verdict the
+bus carries is `Permanent`: a failure no retry will mend, which the inbox
+parks at once.
+
 A producer or consumer that is transactional by nature — the outbox, the
 inbox — is obtained from its adapter rather than from the registry, and
 names the transaction at the call: `TransactionalProducer::publish(&session,

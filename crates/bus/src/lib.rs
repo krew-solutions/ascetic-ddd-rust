@@ -39,6 +39,13 @@
 //! # }
 //! ```
 //!
+//! # Stages
+//!
+//! A message may go through [`Stage`]s between the typed layer and the
+//! transport — out after encoding, back in before decoding — which is where
+//! sealing goes (ADR-0002): `producer.through(stage)`,
+//! `consumer.through(stage)`. The bus does not know what a stage does.
+//!
 //! # Adapters
 //!
 //! [`adapters::in_memory`] is the monolithic transport: topics in a
@@ -66,6 +73,7 @@ pub mod adapters;
 mod bridge;
 mod error;
 mod message;
+mod stage;
 pub mod uri;
 
 use std::collections::HashMap;
@@ -76,8 +84,9 @@ pub use crate::adapter::{
     TransactionalWireProducer, WireConsumer, WireProducer,
 };
 pub use crate::bridge::{Bridge, Target};
-pub use crate::error::{BoxError, Error};
+pub use crate::error::{BoxError, Error, Permanent};
 pub use crate::message::Message;
+pub use crate::stage::Stage;
 
 /// A registry of transports by URI scheme.
 ///
@@ -116,6 +125,7 @@ impl Bus {
             group: group.to_owned(),
             wire,
             decode: Arc::new(decode),
+            stages: Vec::new(),
         })
     }
 
@@ -128,6 +138,7 @@ impl Bus {
         Ok(Producer {
             wire,
             encode: Box::new(encode),
+            stages: Vec::new(),
         })
     }
 
@@ -149,15 +160,24 @@ pub struct Consumer<T> {
     group: String,
     wire: Box<dyn WireConsumer>,
     decode: Decoder<T>,
+    stages: stage::Stages,
 }
 
 impl<T: 'static> Consumer<T> {
+    /// The same consumer with one more [`Stage`] on the way in: messages
+    /// come back through the stages in the reverse of the order they are
+    /// given, before they are decoded.
+    pub fn through(mut self, stage: Arc<dyn Stage>) -> Self {
+        self.stages.push(stage);
+        self
+    }
+
     /// Runs `handler` for every message, in order, until the subscription is
     /// cancelled. Subscribing again replaces the handler.
     ///
     /// A handler that cannot fail returns `()`; one that can returns a
     /// `Result`, and an error means the message was not handled — a transport
-    /// that can, redelivers it.
+    /// that can, redelivers it. So does a stage that fails on the way in.
     pub fn subscribe<F, Fut, O>(&self, handler: F) -> Result<Subscription, Error>
     where
         F: Fn(T) -> Fut + Send + Sync + 'static,
@@ -165,16 +185,27 @@ impl<T: 'static> Consumer<T> {
         O: Outcome,
     {
         let decode = Arc::clone(&self.decode);
+        let stages = self.stages.clone();
+        let handler = Arc::new(handler);
         let (uri, group) = (self.uri.clone(), self.group.clone());
-        let handler: Handler = Arc::new(move |message: Message| match decode(&message) {
-            Ok(value) => {
-                let outcome = handler(value);
-                Box::pin(async move { outcome.await.into_result() })
-            }
-            Err(error) => {
-                log::warn!("bus[{uri}/{group}]: decoding failed: {error}");
-                Box::pin(async { Ok(()) })
-            }
+        let handler: Handler = Arc::new(move |message: Message| {
+            let (decode, stages, handler) =
+                (Arc::clone(&decode), stages.clone(), Arc::clone(&handler));
+            let (uri, group) = (uri.clone(), group.clone());
+            Box::pin(async move {
+                let message = stage::inbound(&stages, message).await?;
+                // The value is handed to the handler before the await, so
+                // that only the handler's future, which promises `Send`,
+                // lives across it.
+                let handling = match decode(&message) {
+                    Ok(value) => handler(value),
+                    Err(error) => {
+                        log::warn!("bus[{uri}/{group}]: decoding failed: {error}");
+                        return Ok(());
+                    }
+                };
+                handling.await.into_result()
+            })
         });
         self.wire.subscribe(handler)
     }
@@ -211,12 +242,24 @@ impl<E: Into<BoxError> + Send + 'static> Outcome for Result<(), E> {
 pub struct Producer<T> {
     wire: Box<dyn WireProducer>,
     encode: Box<dyn Fn(&T) -> Message + Send + Sync>,
+    stages: stage::Stages,
 }
 
 impl<T> Producer<T> {
-    /// Sends one value. Waits while the transport applies back-pressure.
+    /// The same producer with one more [`Stage`] on the way out: messages
+    /// go through the stages in the order they are given, after encoding.
+    pub fn through(mut self, stage: Arc<dyn Stage>) -> Self {
+        self.stages.push(stage);
+        self
+    }
+
+    /// Sends one value. Waits while the transport applies back-pressure. A
+    /// stage that fails on the way out fails the publish.
     pub async fn publish(&self, value: &T) -> Result<(), Error> {
-        self.wire.publish((self.encode)(value)).await
+        let message = stage::outbound(&self.stages, (self.encode)(value))
+            .await
+            .map_err(Error::Stage)?;
+        self.wire.publish(message).await
     }
 }
 
@@ -229,6 +272,7 @@ impl<T> Producer<T> {
 pub struct TransactionalProducer<T, S> {
     wire: Box<dyn TransactionalWireProducer<S>>,
     encode: Box<dyn Fn(&T) -> Message + Send + Sync>,
+    stages: stage::Stages,
 }
 
 impl<T, S> TransactionalProducer<T, S> {
@@ -240,12 +284,24 @@ impl<T, S> TransactionalProducer<T, S> {
         TransactionalProducer {
             wire,
             encode: Box::new(encode),
+            stages: Vec::new(),
         }
     }
 
-    /// Sends one value within `session`'s transaction.
+    /// The same producer with one more [`Stage`] on the way out, as
+    /// [`Producer::through`].
+    pub fn through(mut self, stage: Arc<dyn Stage>) -> Self {
+        self.stages.push(stage);
+        self
+    }
+
+    /// Sends one value within `session`'s transaction. A stage that fails on
+    /// the way out fails the publish, and so the transaction.
     pub async fn publish(&self, session: &S, value: &T) -> Result<(), Error> {
-        self.wire.publish(session, (self.encode)(value)).await
+        let message = stage::outbound(&self.stages, (self.encode)(value))
+            .await
+            .map_err(Error::Stage)?;
+        self.wire.publish(session, message).await
     }
 }
 
@@ -259,9 +315,12 @@ impl<T, S> TransactionalProducer<T, S> {
 pub struct TransactionalConsumer<T, S> {
     wire: Box<dyn TransactionalWireConsumer<S>>,
     decode: Decoder<T>,
+    stages: stage::Stages,
 }
 
-impl<T: 'static, S: 'static> TransactionalConsumer<T, S> {
+// The session crosses the stages' awaits on its way to the handler, so it
+// must be `Send`, which every session is (ADR-0004).
+impl<T: 'static, S: Send + 'static> TransactionalConsumer<T, S> {
     /// A typed consumer over a transactional wire consumer.
     pub fn new(
         wire: Box<dyn TransactionalWireConsumer<S>>,
@@ -270,7 +329,15 @@ impl<T: 'static, S: 'static> TransactionalConsumer<T, S> {
         TransactionalConsumer {
             wire,
             decode: Arc::new(decode),
+            stages: Vec::new(),
         }
+    }
+
+    /// The same consumer with one more [`Stage`] on the way in, as
+    /// [`Consumer::through`].
+    pub fn through(mut self, stage: Arc<dyn Stage>) -> Self {
+        self.stages.push(stage);
+        self
     }
 
     /// Runs `handler` for every message, with the transaction the message is
@@ -278,7 +345,8 @@ impl<T: 'static, S: 'static> TransactionalConsumer<T, S> {
     ///
     /// A message that `decode` rejects is reported and acknowledged without a
     /// handler, as [`Consumer::subscribe`] does: a poison message must not
-    /// stop the rest.
+    /// stop the rest. A stage that fails on the way in fails the handling
+    /// instead, so the message is kept and tried again.
     pub fn subscribe<F, Fut, O>(&self, handler: F) -> Result<Subscription, Error>
     where
         F: Fn(S, T) -> Fut + Send + Sync + 'static,
@@ -286,17 +354,23 @@ impl<T: 'static, S: 'static> TransactionalConsumer<T, S> {
         O: Outcome,
     {
         let decode = Arc::clone(&self.decode);
-        let handler: TransactionalHandler<S> =
-            Arc::new(move |session: S, message: Message| match decode(&message) {
-                Ok(value) => {
-                    let outcome = handler(session, value);
-                    Box::pin(async move { outcome.await.into_result() })
-                }
-                Err(error) => {
-                    log::warn!("bus[transactional]: decoding failed: {error}");
-                    Box::pin(async { Ok(()) })
-                }
-            });
+        let stages = self.stages.clone();
+        let handler = Arc::new(handler);
+        let handler: TransactionalHandler<S> = Arc::new(move |session: S, message: Message| {
+            let (decode, stages, handler) =
+                (Arc::clone(&decode), stages.clone(), Arc::clone(&handler));
+            Box::pin(async move {
+                let message = stage::inbound(&stages, message).await?;
+                let handling = match decode(&message) {
+                    Ok(value) => handler(session, value),
+                    Err(error) => {
+                        log::warn!("bus[transactional]: decoding failed: {error}");
+                        return Ok(());
+                    }
+                };
+                handling.await.into_result()
+            })
+        });
         self.wire.subscribe(handler)
     }
 }

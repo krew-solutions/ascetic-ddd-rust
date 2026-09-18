@@ -69,6 +69,27 @@ to the end of the caller's transaction, so two transactions meeting a new
 resource at once make one key. Reads take nothing. READ COMMITTED is
 assumed.
 
+## The envelope stage of the bus
+
+`EnvelopeStage` (feature `bus`) is the sealing stage ADR-0002 places before
+the outbox and after the inbox: a fresh DEK per message, drawn for the
+message's tenant through the KMS, seals the payload; the DEK travels in the
+`dek` header, wrapped by the tenant's KEK, base64, with the cipher's name in
+`dek_algorithm`. The receiving side needs no table of keys, only a KMS that
+holds the tenant's KEK — which is what lets a message cross to another
+bounded context. The stage reaches the KMS through a session pool of its
+own, since the KMS's session is not the data's. A message without a
+`tenant_id` header, or one whose key or payload does not open, or whose
+tenant's KEK is gone, is refused for good, `Permanent`, and the inbox parks
+it; a KMS out of reach is a failure of the moment, and the message is tried
+again.
+
+```rust,ignore
+let sealing = Arc::new(EnvelopeStage::new(kms_sessions, kms));
+let placed = outbox.producer("kafka://orders", encode).through(Arc::clone(&sealing));
+let orders = inbox.consumer(decode).through(sealing);
+```
+
 ## What is not here
 
 Nothing is cached: every call reads the resource's rows and unwraps them
@@ -105,5 +126,5 @@ repository that chains them.
 ```bash
 cargo test -p ascetic-ddd-dek                                    # the model, no database
 ASCETIC_DDD_TEST_PG_URL=postgresql://user:pass@localhost/db \
-    cargo test -p ascetic-ddd-dek --features pg -- --ignored    # the store on PostgreSQL
+    cargo test -p ascetic-ddd-dek --all-features -- --ignored   # the store and the stage on PostgreSQL
 ```

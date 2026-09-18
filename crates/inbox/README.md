@@ -153,6 +153,9 @@ error of the moment — a lock cycle the server broke, a connection lost, a
 server going down, told by SQLSTATE in `ascetic_ddd_session::pg::transient`
 — waits, longer with each one in a row up to `Loops::max_pause`, and goes on;
 a defect stops every loop and `run` returns it (ADR-0010).
+Through the bus, a handler or a stage says the same with the one verdict the
+bus carries, `ascetic_ddd_bus::Permanent`: the inbox's consumer reads it
+and parks the message; any other error of a handler is of the moment.
 
 ```rust,ignore
 let subscriber = |tx: &PgSession, message: &InboxMessage| async move {

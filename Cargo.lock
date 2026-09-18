@@ -53,8 +53,13 @@ dependencies = [
 name = "ascetic-ddd-dek"
 version = "0.1.0"
 dependencies = [
+ "ascetic-ddd-bus",
+ "ascetic-ddd-inbox",
  "ascetic-ddd-kms",
+ "ascetic-ddd-outbox",
  "ascetic-ddd-session",
+ "base64 0.22.1",
+ "futures",
  "serde_json",
  "tokio",
  "tokio-postgres",

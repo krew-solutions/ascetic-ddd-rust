@@ -26,7 +26,7 @@
 use std::sync::Arc;
 
 use ascetic_ddd_bus::{
-    Adapter, BoxError, Error as BusError, Message, Subscription, TransactionalConsumer,
+    Adapter, BoxError, Error as BusError, Message, Permanent, Subscription, TransactionalConsumer,
     TransactionalHandler, TransactionalWireConsumer, WireConsumer, WireProducer, uri,
 };
 use ascetic_ddd_session::{PgAccess, SessionPool};
@@ -150,10 +150,19 @@ where
         let runtime = Handle::try_current().map_err(transport)?;
         runtime.spawn(async move {
             let loops = inbox.loops();
-            // a handler's error is a failure of the moment: the bus knows no verdicts
+            // A handler's error is a failure of the moment, unless the bus
+            // carries the one verdict it knows: permanent, from a stage or a
+            // handler that can tell, and the message is parked at once.
             let subscriber = |tx: &P::Session, row: &InboxMessage| {
                 let handled = handler(tx.clone(), wire_of(row));
-                async move { handled.await.map_err(Failure::from) }
+                async move {
+                    handled
+                        .await
+                        .map_err(|error| match error.downcast::<Permanent>() {
+                            Ok(permanent) => Failure::permanent(permanent.into_inner()),
+                            Err(error) => Failure::from(error),
+                        })
+                }
             };
             loop {
                 match inbox.run(&subscriber, loops, stopped.notified()).await {
