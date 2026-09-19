@@ -84,8 +84,10 @@ assert!(has_dear_items(&store, 500));
 let query = pg::compile(&has_dear_items_ast(500)).unwrap();
 assert_eq!(
     query.sql,
-    "active AND EXISTS (SELECT 1 FROM unnest(items) AS item_1 \
-     WHERE item_1.price > $1 AND item_1.active)",
+    concat!(
+        r#""active" AND EXISTS (SELECT 1 FROM unnest("items") AS "item_1" "#,
+        r#"WHERE "item_1"."price" > $1 AND "item_1"."active")"#,
+    ),
 );
 # }
 # }
@@ -190,8 +192,10 @@ the sources as they were.
   integer division; booleans are ordered, false first.
 * A schema names a collection by its whole path, `categories.items`, not by
   its last name, so two collections of one name are two.
-* Names that are not identifiers are refused by the compiler. The sources
-  write any name into the query.
+* A name is written into the query between double quotes, as it is, and one
+  that is not of ASCII letters, digits and `_` is refused. The sources write
+  any name into the query as it stands, where `user` is the session's user
+  and not a column, and `order` does not parse.
 * Unary minus exists. Python's `NEG = "-"` is an alias of `SUB` in its
   `Enum`; Go's prints as `-neg`; Go's generator emits a `spec.Neg` that is
   not defined. Unary plus is dropped: nothing produced it.
@@ -209,7 +213,12 @@ the sources as they were.
 
 * Text is ordered by code point here and by the column's collation in the
   database; equality agrees, order may not.
-* A path from the candidate is written into the query as it is. Inside the
+* A name is the column's to the letter: `createdAt` is the column created as
+  `"createdAt"` and not `createdat`, which is what PostgreSQL makes of the
+  word without quotes. Where the domain's names are not the storage's, a
+  [`Mapping`] says what they are. A name with a space or a letter beyond
+  ASCII cannot be written.
+* A path from the candidate is written into the query unqualified. Inside the
   subquery of a relational collection an unqualified name can be captured by
   a column of the child table: qualify columns in the [`Mapping`].
 * An embedded collection is read with `unnest`, so it is an array of a

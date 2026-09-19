@@ -12,16 +12,18 @@
 //! let query = pg::compile(&specification)?;
 //! assert_eq!(
 //!     query.sql,
-//!     "active AND EXISTS (SELECT 1 FROM unnest(items) AS item_1 WHERE item_1.price > $1)",
+//!     r#""active" AND EXISTS (SELECT 1 FROM unnest("items") AS "item_1" WHERE "item_1"."price" > $1)"#,
 //! );
 //! assert_eq!(query.params, [Value::Int(500)]);
 //! # Ok::<(), pg::CompileError>(())
 //! ```
 //!
 //! Every constant becomes a numbered parameter; the text holds names and
-//! operators only, and a name that is not an identifier is refused rather
-//! than quoted, so that no tree, whatever it was built from, can put SQL of
-//! its own into the query.
+//! operators only. A name is written between double quotes, as it is: it is
+//! the column's name, to the letter, and nothing else PostgreSQL knows by
+//! that word. A name that is not of ASCII letters, digits and `_` is
+//! refused, and a quote inside one would be doubled, so that no tree,
+//! whatever it was built from, can put SQL of its own into the query.
 //!
 //! The sources number parameters and aliases with counters that every
 //! visitor shares and changes. Here the count so far goes into each step and
@@ -46,6 +48,7 @@
 //! `str`-and-`Enum` operators is `"OPERATOR.AND ASSOCIATIVITY.LEFT_ASSOCIATIVE"`
 //! and is in no table, so `(a OR b) AND c` comes out `a OR b AND c`.
 
+mod identifier;
 mod precedence;
 mod schema;
 mod singular;
@@ -54,6 +57,7 @@ mod to_sql;
 
 use std::fmt;
 
+use self::identifier::{identifier, plain, qualified, quoted};
 use self::precedence::{ATOM, Associativity};
 pub use self::schema::{Relation, Schema, Storage};
 use crate::domain::ast::{Expr, Path, Root};
@@ -74,8 +78,8 @@ pub struct Query<V> {
 pub enum CompileError {
     /// A path from the item under test, outside any collection.
     NoCurrentItem,
-    /// A name that cannot be written into a query as it is: anything but
-    /// ASCII letters, digits and `_`, not starting with a digit.
+    /// A name that is not one: anything but ASCII letters, digits and `_`,
+    /// not starting with a digit.
     InvalidIdentifier(String),
 }
 
@@ -216,8 +220,8 @@ impl<'s> Compiler<'s> {
             });
         let number = next.alias + 1;
         let name = match relation.and_then(|(relation, _)| relation.alias.as_deref()) {
-            Some(alias) => identifier(alias)?.to_owned(),
-            None => singular::singular(&identifier(source.name())?.to_lowercase()),
+            Some(alias) => plain(alias)?.to_owned(),
+            None => singular::singular(&plain(source.name())?.to_lowercase()),
         };
         let inner = Item {
             alias: format!("{name}_{number}"),
@@ -228,7 +232,7 @@ impl<'s> Compiler<'s> {
             ..next
         };
         let (predicate, next) = self.render(predicate, Some(&inner), next)?;
-        let alias = &inner.alias;
+        let alias = quoted(&inner.alias);
         let fragment = match relation {
             None => {
                 let sql = format!(
@@ -240,7 +244,7 @@ impl<'s> Compiler<'s> {
             }
             Some((relation, schema)) => {
                 let parent = match enclosing {
-                    Some(item) => item.alias.as_str(),
+                    Some(item) => quoted(&item.alias),
                     None => identifier(schema.parent())?,
                 };
                 let keys = relation
@@ -343,31 +347,11 @@ fn column(path: &Path, item: Option<&Item>) -> Result<String, CompileError> {
         Root::Item => Some(item.ok_or(CompileError::NoCurrentItem)?.alias.as_str()),
     };
     alias
-        .map(Ok)
+        .map(|alias| Ok(quoted(alias)))
         .into_iter()
         .chain(path.names().map(identifier))
         .collect::<Result<Vec<_>, _>>()
         .map(|names| names.join("."))
-}
-
-fn identifier(name: &str) -> Result<&str, CompileError> {
-    let mut chars = name.chars();
-    let valid = chars
-        .next()
-        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
-    if valid {
-        Ok(name)
-    } else {
-        Err(CompileError::InvalidIdentifier(name.to_owned()))
-    }
-}
-
-/// A table's name, which may carry its schema: `public.items`.
-fn qualified(name: &str) -> Result<&str, CompileError> {
-    name.split('.')
-        .try_for_each(|part| identifier(part).map(drop))?;
-    Ok(name)
 }
 
 fn spelling(op: Infix) -> String {

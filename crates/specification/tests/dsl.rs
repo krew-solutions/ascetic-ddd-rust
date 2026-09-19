@@ -203,6 +203,6 @@ fn what_is_built_is_a_specification() {
     assert_eq!(is_satisfied_by(&specification, &product), Ok(true));
     assert_eq!(
         pg::compile(&specification).expect("compiled").sql,
-        "price - discount < $1 AND deleted_at IS NULL",
+        r#""price" - "discount" < $1 AND "deleted_at" IS NULL"#,
     );
 }

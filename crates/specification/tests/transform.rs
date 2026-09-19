@@ -123,7 +123,7 @@ fn an_equality_of_composites_is_the_conjunction_of_the_equalities_of_their_parts
     let query = pg::compile(&transformed.expect("transformed")).expect("compiled");
     assert_eq!(
         query.sql,
-        "something.tenant_id = $1 AND something.member_id = $2 AND something.something_id = $3",
+        r#""something"."tenant_id" = $1 AND "something"."member_id" = $2 AND "something"."something_id" = $3"#,
     );
     assert_eq!(query.params, [Value::Int(10), Value::Int(3), Value::Int(5)]);
 }
@@ -135,7 +135,7 @@ fn composites_are_unequal_when_not_equal_in_every_part() {
     let transformed = transform(&specification, &Something).expect("transformed");
     assert_eq!(
         pg::compile(&transformed).expect("compiled").sql,
-        "NOT (something.tenant_id = $1 AND something.member_id = $2 AND something.something_id = $3)",
+        r#"NOT ("something"."tenant_id" = $1 AND "something"."member_id" = $2 AND "something"."something_id" = $3)"#,
     );
     // The sources have NOT (t != $1 AND m != $2 AND s != $3), by which an
     // identity is unequal to itself and equal to one that shares no part.

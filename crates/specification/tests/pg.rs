@@ -336,25 +336,32 @@ fn record(store: &Store) -> Record<Value> {
         ("flag", Record::value(store.flag)),
         ("name", Record::value(store.name)),
         ("items", Record::collection(items)),
+        // Members named as PostgreSQL names other things, under columns of
+        // those very names: `user` is the session's user if it is not quoted,
+        // `order` does not parse, `createdAt` is folded to `createdat`.
+        ("user", Record::value(store.name)),
+        ("order", Record::value(store.a)),
+        ("createdAt", Record::value(store.b)),
     ])
 }
 
 async fn tables(client: &Client) {
     client
         .batch_execute(
-            "CREATE TYPE pg_temp.spec_item AS (price int8, active bool);
+            r#"CREATE TYPE pg_temp.spec_item AS (price int8, active bool);
              CREATE TEMP TABLE spec_stores (
                  id int8 PRIMARY KEY, a int8, b int8, flag bool, name text,
-                 items pg_temp.spec_item[] NOT NULL
+                 items pg_temp.spec_item[] NOT NULL,
+                 "user" text, "order" int8, "createdAt" int8
              );
-             CREATE TEMP TABLE spec_items (store_id int8 NOT NULL, price int8, active bool);",
+             CREATE TEMP TABLE spec_items (store_id int8 NOT NULL, price int8, active bool);"#,
         )
         .await
         .expect("tables");
     for store in stores() {
         client
             .execute(
-                "INSERT INTO spec_stores VALUES ($1, $2, $3, $4, $5, '{}')",
+                "INSERT INTO spec_stores VALUES ($1, $2, $3, $4, $5, '{}', $5, $2, $3)",
                 &[&store.id, &store.a, &store.b, &store.flag, &store.name],
             )
             .await
@@ -416,6 +423,11 @@ fn specifications() -> Vec<Spec> {
         all("items", greater_than(item("price"), value(5))),
         not(all("items", is_not_null(item("price")))),
         and(field("flag"), any("items", dear())),
+        // A name is the column's, whatever else PostgreSQL knows by it.
+        equal(field("user"), value("one")),
+        greater_than(field("order"), value(0)),
+        equal(field("createdAt"), value(2)),
+        bound("$[?@.user == %s]", Params::positional([Value::from("two")])),
         // A null found the way a template finds it, spelled out and bound.
         bound("$[?@.a == null]", Params::none()),
         bound(

@@ -442,11 +442,11 @@ fn the_tree_compiles_to_a_query() {
     let query = pg::compile(&has_dear_items_ast()).expect("compiled");
     assert_eq!(
         query.sql,
-        "EXISTS (SELECT 1 FROM unnest(items) AS item_1 WHERE item_1.price > $1 AND item_1.active)",
+        r#"EXISTS (SELECT 1 FROM unnest("items") AS "item_1" WHERE "item_1"."price" > $1 AND "item_1"."active")"#,
     );
     assert_eq!(query.params, [Value::Int(500)]);
     assert_eq!(
         pg::compile(&all_items_active_ast()).expect("compiled").sql,
-        "NOT EXISTS (SELECT 1 FROM unnest(items) AS item_1 WHERE NOT item_1.active)",
+        r#"NOT EXISTS (SELECT 1 FROM unnest("items") AS "item_1" WHERE NOT "item_1"."active")"#,
     );
 }
