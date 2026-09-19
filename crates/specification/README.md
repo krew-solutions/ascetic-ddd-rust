@@ -134,15 +134,19 @@ one value in the domain and column by column in the query.
 | Go `OperatorRegistry`, `EqualOperand`, … | [`Operand`], implemented by [`Value`] and by a domain's own value type |
 | `DictContext`, `NestedDictContext`, `CollectionContext` | [`Record`] |
 | `public`: `Boolean`, `NullNumber`, … | [`dsl`] |
-| `jsonpath_parser`, and its two library-backed twins | [`jsonpath`]: one parser, no dependency |
+| `jsonpath_parser` (Python had two library-backed twins of it, since removed) | [`jsonpath`]: one parser, no dependency |
 | `lambda_filter`, Go `cmd/specgen` | `#[specification]` |
 | `TransformVisitor`, `ITransformContext`, `CompositeExpression` | [`transform`], [`Mapping`], [`Mapped`] |
 | `PostgresqlVisitor`, `compile_to_sql`, `SchemaRegistry` | [`pg::compile`], [`pg::Compiler`], [`pg::Schema`] |
 
 ## Deviations from the sources
 
-Each is a decision, to be carried back to the Python and Go sources; those
-that correct a result are marked **fix**.
+What this port does otherwise than the sources did when it was made. Each is
+a decision, and each has since been carried back to the Python and Go
+sources, which now hold a regression test of each and a test of their own
+against a live PostgreSQL; the list stays as the record of what was found.
+Those that corrected a result are marked **fix**, and "the sources" below are
+the sources as they were.
 
 * **fix** — `!=` of two composites is `NOT (a1 = b1 AND a2 = b2)`. The
   sources have `NOT (a1 != b1 AND a2 != b2)`, by which a composite is unequal

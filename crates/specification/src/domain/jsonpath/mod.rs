@@ -35,10 +35,11 @@
 //! `$[?p]` is `p` of the candidate, and `@` in it is the candidate.
 //! `$.a.items[*][?p]` is "some item of `a.items` satisfies `p`", and `@` in
 //! `p` is the item; `$` is the candidate everywhere. A query with `[*]`
-//! inside a filter nests the same. This is the language of the sources'
-//! three parsers, and it is not RFC 9535's reading of the same text, where
-//! a filter selects among the children of what precedes it: a specification
-//! is a predicate, not a selection.
+//! inside a filter nests the same. This is the language of the Python and Go
+//! ports as well - a template of one is a template of the others - and it is
+//! not RFC 9535's reading of the same text, where a filter selects among the
+//! children of what precedes it: a specification is a predicate, not a
+//! selection.
 //!
 //! `@.a == null` is how a template finds a null, and it does: bound, an
 //! equality with null — spelled out, or a placeholder given a null — is the
@@ -49,16 +50,15 @@
 //!
 //! [`null_test`]: crate::domain::null_test
 //!
-//! Operators, literals, escapes and numbers are RFC 9535's. Beyond the
-//! sources: either side of a comparison may be any operand, `$` may be used
-//! inside a filter, strings have escapes and numbers an exponent.
+//! Operators, literals, escapes and numbers are RFC 9535's. Either side of a
+//! comparison may be any operand, and `$` may be used inside a filter.
 //!
-//! What the sources accept and this does not, each because the sources read
-//! it as something other than what it says: a bracket or parenthesis left
-//! open or closed twice; a filter on a path without `[*]`, whose path was
-//! dropped and the filter applied to the candidate; a name without `@`;
-//! positional and named placeholders in one template, which bound the wrong
-//! parameters.
+//! What is refused, each because the sources this was ported from read it as
+//! something other than what it says, until the same was carried back to
+//! them: a bracket or parenthesis left open or closed twice; a filter on a
+//! path without `[*]`, whose path was dropped and the filter applied to the
+//! candidate; a name without `@`; positional and named placeholders in one
+//! template, which bound the wrong parameters.
 
 mod error;
 mod lexer;
