@@ -15,10 +15,34 @@ use super::template::{ParamKey, Slot};
 use crate::domain::ast::{self, Expr, Path, Root};
 use crate::domain::value::Value;
 
-/// How deep a template's tree may be. Every reader of a tree recurses, so
-/// an unbounded tree from a text that is not trusted is a stack overflow;
-/// no specification a person wrote comes near.
-const MAX_DEPTH: usize = 128;
+/// How tall a template's tree may be: the levels of the longest way down
+/// it. Every reader of a tree recurses, and so does dropping it, so an
+/// unbounded tree from a text that is not trusted is a stack overflow — an
+/// abort, which nothing catches; no specification a person wrote comes near.
+const MAX_HEIGHT: usize = 128;
+
+/// How deep the parser may go to read a template: through groups, `!` and
+/// the filters of collections, which is where it recurses.
+///
+/// The two are counted apart, for they are not one number. How deep the
+/// parser is comes down to a rule from the rule that called it. How tall a
+/// tree is comes up from the trees below it, and grows wherever a node is
+/// made — in the loop of a chain as well, where the parser does not recurse
+/// at all, and above a left operand, which was read before anything knew it
+/// would have an operator over it. One count used to stand for both, and was
+/// passed to the right operands alone: a group at the left of a chain was as
+/// deep as the parser was when it read it, however many operators came
+/// after, and groups so nested multiplied — sixteen thousand levels passed
+/// for a hundred and twenty-eight.
+///
+/// Nor do they cost the same. Measured on x86-64 with rustc 1.97, a level of
+/// the parser takes 11 to 16 KiB of stack in a build that is not optimised
+/// and 2 to 3 KiB in one that is; a level of a tree takes its readers up to
+/// 8 KiB and up to 1.5 KiB. At these bounds a template is parsed, and its
+/// tree read by everything that reads one, in under a megabyte of stack not
+/// optimised — half of what a thread of Rust is given — and in about an
+/// eighth of one optimised: `the_deepest_template_fits_a_megabyte_of_stack`.
+const MAX_NESTING: usize = 32;
 
 /// The tokens not yet read, and where the template ends — the position of
 /// an error met there.
@@ -72,6 +96,66 @@ impl<'t> Input<'t> {
 
 type Parsed<'t, T> = Result<(T, Input<'t>), SyntaxError>;
 
+/// A tree, and how tall it is: the levels of the longest way down it.
+struct Tree {
+    expr: Expr<Slot>,
+    height: usize,
+}
+
+impl Tree {
+    fn leaf(expr: Expr<Slot>) -> Self {
+        Tree { expr, height: 1 }
+    }
+
+    /// `make` of `operand`, a level taller than it. `at` is where the text
+    /// asks for the node, for the error to point at if it may not be made.
+    fn over(
+        at: Input<'_>,
+        make: impl FnOnce(Expr<Slot>) -> Expr<Slot>,
+        operand: Tree,
+    ) -> Result<Self, SyntaxError> {
+        Ok(Tree {
+            height: taller(at, operand.height)?,
+            expr: make(operand.expr),
+        })
+    }
+
+    /// `make` of `left` and `right`, a level taller than the taller of them.
+    fn over_both(
+        at: Input<'_>,
+        make: fn(Expr<Slot>, Expr<Slot>) -> Expr<Slot>,
+        left: Tree,
+        right: Tree,
+    ) -> Result<Self, SyntaxError> {
+        Ok(Tree {
+            height: taller(at, left.height.max(right.height))?,
+            expr: make(left.expr, right.expr),
+        })
+    }
+}
+
+/// A level above `height`, if a tree may be that tall.
+fn taller(at: Input<'_>, height: usize) -> Result<usize, SyntaxError> {
+    if height < MAX_HEIGHT {
+        Ok(height + 1)
+    } else {
+        Err(too_deep(at))
+    }
+}
+
+/// A level below `depth`, if the parser may go that deep.
+fn deeper(at: Input<'_>, depth: usize) -> Result<usize, SyntaxError> {
+    if depth < MAX_NESTING {
+        Ok(depth + 1)
+    } else {
+        Err(too_deep(at))
+    }
+}
+
+fn too_deep(at: Input<'_>) -> SyntaxError {
+    at.error("Expression is nested too deep", "a simpler expression")
+}
+
 /// `template = "$" ( filter | path "[*]" filter )`, and nothing after it.
 pub(super) fn template(tokens: &[Token], end: usize) -> Result<Expr<Slot>, SyntaxError> {
     one_style(tokens)?;
@@ -80,16 +164,17 @@ pub(super) fn template(tokens: &[Token], end: usize) -> Result<Expr<Slot>, Synta
         "Expected '$'",
         "a template starts at the root",
     )?;
-    let (names, input) = names(input)?;
-    let (expr, input) = match collection(Root::Global, names) {
-        None => filter(input, Root::Global, 0)?,
+    let (names, after) = names(input)?;
+    let (tree, input) = match collection(Root::Global, names) {
+        None => filter(after, Root::Global, 0)?,
         Some(source) => {
-            let (predicate, input) = filter(wildcard(input)?, Root::Item, 1)?;
-            (ast::any(source, predicate), input)
+            let (predicate, rest) = filter(wildcard(after)?, Root::Item, 1)?;
+            let any = Tree::over(after, |predicate| ast::any(source, predicate), predicate)?;
+            (any, rest)
         }
     };
     match input.kind() {
-        None => Ok(expr),
+        None => Ok(tree.expr),
         Some(_) => Err(input.unexpected("end of expression")),
     }
 }
@@ -141,8 +226,9 @@ fn wildcard(input: Input<'_>) -> Result<Input<'_>, SyntaxError> {
         .expect(&Kind::RightBracket, "Expected wildcard '[*]'", expected)
 }
 
-/// `filter = "[" "?" or "]"`. `scope` is what `@` means inside.
-fn filter(input: Input<'_>, scope: Root, depth: usize) -> Parsed<'_, Expr<Slot>> {
+/// `filter = "[" "?" or "]"`. `scope` is what `@` means inside, `depth` how
+/// deep the parser is.
+fn filter(input: Input<'_>, scope: Root, depth: usize) -> Parsed<'_, Tree> {
     let message = "Expected filter expression '[?...]'";
     let input = input.expect(&Kind::LeftBracket, message, "'['")?.expect(
         &Kind::Question,
@@ -159,53 +245,40 @@ fn filter(input: Input<'_>, scope: Root, depth: usize) -> Parsed<'_, Expr<Slot>>
 }
 
 /// `or = and ( "||" and )*`, nested to the left.
-fn or(input: Input<'_>, scope: Root, depth: usize) -> Parsed<'_, Expr<Slot>> {
-    chain(input, depth, &Kind::Or, ast::or, |input, depth| {
-        and(input, scope, depth)
-    })
+fn or(input: Input<'_>, scope: Root, depth: usize) -> Parsed<'_, Tree> {
+    chain(input, &Kind::Or, ast::or, |input| and(input, scope, depth))
 }
 
 /// `and = unary ( "&&" unary )*`, nested to the left.
-fn and(input: Input<'_>, scope: Root, depth: usize) -> Parsed<'_, Expr<Slot>> {
-    chain(input, depth, &Kind::And, ast::and, |input, depth| {
+fn and(input: Input<'_>, scope: Root, depth: usize) -> Parsed<'_, Tree> {
+    chain(input, &Kind::And, ast::and, |input| {
         unary(input, scope, depth)
     })
 }
 
 /// `operand ( separator operand )*`, nested to the left. A loop and not a
-/// recursion, as the nesting is: the tree gets a level deeper with each
-/// operand, and the levels count towards [`MAX_DEPTH`].
+/// recursion, as the nesting is: the parser gets no deeper, and the tree a
+/// level taller with each operand.
 fn chain<'t>(
     input: Input<'t>,
-    depth: usize,
     separator: &Kind,
     make: fn(Expr<Slot>, Expr<Slot>) -> Expr<Slot>,
-    operand: impl Fn(Input<'t>, usize) -> Parsed<'t, Expr<Slot>>,
-) -> Parsed<'t, Expr<Slot>> {
-    let (mut left, mut input) = operand(input, depth)?;
-    let mut depth = depth;
+    operand: impl Fn(Input<'t>) -> Parsed<'t, Tree>,
+) -> Parsed<'t, Tree> {
+    let (mut left, mut input) = operand(input)?;
     while input.kind() == Some(separator) {
-        depth = deeper(input, depth)?;
-        let (right, rest) = operand(input.advance(), depth)?;
-        left = make(left, right);
+        let (right, rest) = operand(input.advance())?;
+        left = Tree::over_both(input, make, left, right)?;
         input = rest;
     }
     Ok((left, input))
 }
 
-fn deeper(input: Input<'_>, depth: usize) -> Result<usize, SyntaxError> {
-    if depth < MAX_DEPTH {
-        Ok(depth + 1)
-    } else {
-        Err(input.error("Expression is nested too deep", "a simpler expression"))
-    }
-}
-
 /// `unary = "!" unary | comparison`
-fn unary(input: Input<'_>, scope: Root, depth: usize) -> Parsed<'_, Expr<Slot>> {
+fn unary(input: Input<'_>, scope: Root, depth: usize) -> Parsed<'_, Tree> {
     if input.kind() == Some(&Kind::Not) {
-        let (operand, input) = unary(input.advance(), scope, deeper(input, depth)?)?;
-        Ok((ast::not(operand), input))
+        let (operand, rest) = unary(input.advance(), scope, deeper(input, depth)?)?;
+        Ok((Tree::over(input, ast::not, operand)?, rest))
     } else {
         comparison(input, scope, depth)
     }
@@ -213,7 +286,7 @@ fn unary(input: Input<'_>, scope: Root, depth: usize) -> Parsed<'_, Expr<Slot>> 
 
 /// `comparison = operand ( ( "==" | "!=" | "<" | "<=" | ">" | ">=" ) operand )?`
 /// — at most one: a comparison does not associate.
-fn comparison(input: Input<'_>, scope: Root, depth: usize) -> Parsed<'_, Expr<Slot>> {
+fn comparison(input: Input<'_>, scope: Root, depth: usize) -> Parsed<'_, Tree> {
     let (left, input) = operand(input, scope, depth)?;
     let make: fn(Expr<Slot>, Expr<Slot>) -> Expr<Slot> = match input.kind() {
         Some(Kind::Eq) => ast::equal,
@@ -224,13 +297,16 @@ fn comparison(input: Input<'_>, scope: Root, depth: usize) -> Parsed<'_, Expr<Sl
         Some(Kind::Le) => ast::less_than_equal,
         _ => return Ok((left, input)),
     };
-    let (right, input) = operand(input.advance(), scope, deeper(input, depth)?)?;
-    Ok((make(left, right), input))
+    let (right, rest) = operand(input.advance(), scope, depth)?;
+    Ok((Tree::over_both(input, make, left, right)?, rest))
 }
 
 /// `operand = "(" or ")" | literal | placeholder | query`
-fn operand(input: Input<'_>, scope: Root, depth: usize) -> Parsed<'_, Expr<Slot>> {
-    let literal = |value: Value| Ok((Expr::Value(Slot::Literal(value)), input.advance()));
+fn operand(input: Input<'_>, scope: Root, depth: usize) -> Parsed<'_, Tree> {
+    let literal = |value: Value| {
+        let leaf = Tree::leaf(Expr::Value(Slot::Literal(value)));
+        Ok((leaf, input.advance()))
+    };
     match input.kind() {
         Some(Kind::LeftParen) => {
             let (inner, rest) = or(input.advance(), scope, deeper(input, depth)?)?;
@@ -244,7 +320,8 @@ fn operand(input: Input<'_>, scope: Root, depth: usize) -> Parsed<'_, Expr<Slot>
         Some(Kind::Name(name)) if name.eq_ignore_ascii_case("false") => literal(Value::Bool(false)),
         Some(Kind::Name(name)) if name.eq_ignore_ascii_case("null") => literal(Value::Null),
         Some(Kind::Placeholder(param)) => {
-            Ok((Expr::Value(Slot::Param(param.clone())), input.advance()))
+            let leaf = Tree::leaf(Expr::Value(Slot::Param(param.clone())));
+            Ok((leaf, input.advance()))
         }
         Some(Kind::At) => query(input.advance(), scope, depth),
         Some(Kind::Dollar) => query(input.advance(), Root::Global, depth),
@@ -254,15 +331,16 @@ fn operand(input: Input<'_>, scope: Root, depth: usize) -> Parsed<'_, Expr<Slot>
 
 /// `query = ( "@" | "$" ) path ( "[*]" filter )?`, after its first token:
 /// the value of a member, or a collection with a predicate on its items.
-fn query(input: Input<'_>, root: Root, depth: usize) -> Parsed<'_, Expr<Slot>> {
+fn query(input: Input<'_>, root: Root, depth: usize) -> Parsed<'_, Tree> {
     let (names, input) = names(input)?;
     let path = collection(root, names)
         .ok_or_else(|| input.error("Expected field name", "after '@' or '$'"))?;
     if input.kind() == Some(&Kind::LeftBracket) {
-        let (predicate, input) = filter(wildcard(input)?, Root::Item, deeper(input, depth)?)?;
-        Ok((ast::any(path, predicate), input))
+        let (predicate, rest) = filter(wildcard(input)?, Root::Item, deeper(input, depth)?)?;
+        let any = Tree::over(input, |predicate| ast::any(path, predicate), predicate)?;
+        Ok((any, rest))
     } else {
-        Ok((Expr::Field(path), input))
+        Ok((Tree::leaf(Expr::Field(path)), input))
     }
 }
 

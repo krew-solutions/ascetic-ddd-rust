@@ -214,6 +214,11 @@ the sources as they were.
 
 ## Limits
 
+* A template's tree has at most 128 levels, and a template nests at most 32
+  deep - groups, `!`, the filters of collections: a text that is not trusted
+  must not be a stack overflow, which is an abort. A chain of `&&` or `||`
+  nests to the left, so it has at most 128 operands. A tree built by hand or
+  by the macro is as deep as its author made it.
 * Text is ordered by code point here and by the column's collation in the
   database; equality agrees, order may not.
 * A name is the column's to the letter: `createdAt` is the column created as

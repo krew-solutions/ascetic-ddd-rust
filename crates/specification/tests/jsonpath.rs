@@ -7,7 +7,9 @@ use ascetic_ddd_specification::ast::{
 use ascetic_ddd_specification::jsonpath::{
     BindError, MatchError, Param, ParamKey, ParamKind, Params, Slot, SyntaxError, Template,
 };
-use ascetic_ddd_specification::{ContextError, EvalError, Expr, Path, Record, Value};
+use ascetic_ddd_specification::{
+    ContextError, EvalError, Expr, Mapped, Mapping, Path, Record, Value, pg, transform,
+};
 
 fn template(source: &str) -> Template {
     Template::parse(source).unwrap_or_else(|error| panic!("{error}"))
@@ -530,6 +532,188 @@ fn what_the_grammar_does_not_have_is_refused() {
             "{source}"
         );
     }
+}
+
+/// The levels of the longest way down a tree: what a reader of it recurses
+/// through, and what dropping it does.
+fn height<V>(expr: &Expr<V>) -> usize {
+    match expr {
+        Expr::Value(_) | Expr::Field(_) => 1,
+        Expr::Prefix(_, operand) | Expr::Postfix(operand, _) | Expr::Any(_, operand) => {
+            1 + height(operand)
+        }
+        Expr::Infix(left, _, right) => 1 + height(left).max(height(right)),
+    }
+}
+
+/// Groups nested on the left, `levels` of them, each the first operand of a
+/// chain of `&&` that is the first operand of a chain of `||`, `links` long
+/// each. How deep the parser is grows by one with a group; how tall the tree
+/// is, by two chains.
+fn groups_on_the_left(levels: usize, links: impl Fn(usize) -> usize) -> String {
+    let inner = (1..=levels).rev().fold("@.a".to_owned(), |inner, level| {
+        let n = links(level);
+        format!("({inner}{}{})", " && @.a".repeat(n), " || @.a".repeat(n))
+    });
+    format!("$[?{inner}]")
+}
+
+#[test]
+fn a_group_on_the_left_counts_towards_the_depth() {
+    // As long a chain after each group as a count of how deep the parser is
+    // lets through: the count was passed down to the right operands alone, so
+    // this was a tree of some sixteen thousand levels, and binding it - or
+    // dropping it - overflowed the stack: an abort, not a panic.
+    let hostile = groups_on_the_left(127, |level| 128 - level);
+    assert_eq!(error(&hostile).message, "Expression is nested too deep");
+}
+
+/// The bounds, to the level. A tree of 128 levels is a template and one of
+/// 129 is not, whether it grows by a chain or by a comparison above a chain.
+/// The parser goes 32 deep and no deeper, by groups - which add no level to
+/// the tree - by `!`, or by the filters of collections.
+#[test]
+fn the_bounds_are_held_to_the_level() {
+    let too_deep =
+        |source: &str| assert_eq!(error(source).message, "Expression is nested too deep");
+    let links = |operands: usize| format!("@.a{}", " && @.a".repeat(operands - 1));
+
+    assert_eq!(height(template(&format!("$[?{}]", links(128))).expr()), 128);
+    too_deep(&format!("$[?{}]", links(129)));
+
+    // The chain is the LEFT operand of the comparison: it was read before
+    // anything knew of an operator over it.
+    assert_eq!(
+        height(template(&format!("$[?({}) == true]", links(127))).expr()),
+        128
+    );
+    too_deep(&format!("$[?({}) == true]", links(128)));
+
+    let grouped = |groups: usize| format!("$[?{}@.a{}]", "(".repeat(groups), ")".repeat(groups));
+    assert_eq!(height(template(&grouped(32)).expr()), 1);
+    too_deep(&grouped(33));
+
+    let negated = |nots: usize| format!("$[?{}@.a]", "!".repeat(nots));
+    assert_eq!(height(template(&negated(32)).expr()), 33);
+    too_deep(&negated(33));
+
+    let filtered = |filters: usize| {
+        format!(
+            "$[?{}@.a{}]",
+            "@.items[*][?".repeat(filters),
+            "]".repeat(filters)
+        )
+    };
+    assert_eq!(height(template(&filtered(32)).expr()), 33);
+    too_deep(&filtered(33));
+}
+
+/// Whatever the shape, a template is refused or its tree is within the bound:
+/// groups at the left of chains and at the right, under `!`, as the
+/// predicates of collections, and chains of every length about the bound.
+#[test]
+fn no_tree_of_a_template_is_taller_than_the_bound() {
+    type Wrap = fn(&str, &str) -> String;
+    let shapes: [Wrap; 5] = [
+        |inner, links| format!("({inner}{links})"),
+        |inner, links| format!("(@.a{links} && {inner})"),
+        |inner, links| format!("!({inner}{links})"),
+        |inner, links| format!("@.items[*][?{inner}{links}]"),
+        |inner, links| format!("({inner}{links}) == ({inner})"),
+    ];
+    let mut accepted = 0;
+    for wrap in shapes {
+        for levels in [1, 2, 3, 7, 20, 60, 127] {
+            for length in [0, 1, 5, 40, 63, 64, 126, 127, 128] {
+                let links = " && @.a".repeat(length) + &" || @.a".repeat(length);
+                // The last shape doubles the text with each level.
+                let levels = if wrap("", "").contains("==") {
+                    levels.min(7)
+                } else {
+                    levels
+                };
+                let inner = (0..levels).fold("@.a".to_owned(), |inner, _| wrap(&inner, &links));
+                match Template::parse(&format!("$[?{inner}]")) {
+                    Ok(template) => {
+                        accepted += 1;
+                        assert!(
+                            height(template.expr()) <= 128,
+                            "{levels} levels of {length}"
+                        );
+                    }
+                    Err(error) => assert_eq!(error.message, "Expression is nested too deep"),
+                }
+            }
+        }
+    }
+    // Not all refused: the property is of trees that were made.
+    assert!(accepted > 50, "{accepted} accepted");
+}
+
+/// What the bounds are for: the deepest templates there can be are parsed,
+/// and their trees go through everything that reads a tree - bound,
+/// evaluated, compiled, transformed, cloned, compared, shown, dropped - on a
+/// megabyte of stack, half of what a thread of Rust is given, in whatever
+/// build the tests are: the numbers are in `jsonpath/parser.rs`.
+#[test]
+fn the_deepest_template_fits_a_megabyte_of_stack() {
+    struct Same;
+    impl Mapping<Value, Value> for Same {
+        type Error = String;
+        fn field(&self, path: &Path) -> Result<Mapped<Value>, String> {
+            Ok(Mapped::Scalar(Expr::Field(path.clone())))
+        }
+        fn value(&self, value: &Value) -> Result<Mapped<Value>, String> {
+            Ok(Mapped::Scalar(Expr::Value(value.clone())))
+        }
+    }
+
+    let deep = |open: &str, close: &str, times: usize| {
+        format!("$[?{}@.a == %d{}]", open.repeat(times), close.repeat(times))
+    };
+    // As deep as the parser goes and as tall as a tree gets, at once: 32
+    // filters, the inner one the first operand of a chain of three.
+    let both = (0..32).fold("@.a == %d".to_owned(), |inner, level| {
+        // A comparison is two levels; a filter over a chain of three, four.
+        let links = if level >= 30 { 2 } else { 3 };
+        format!("@.items[*][?{inner}{}]", " && @.a == %d".repeat(links))
+    });
+    let sources = [
+        (format!("$[?@.a == %d{}]", " && @.a == %d".repeat(126)), 128),
+        (deep("(", ")", 32), 2),
+        // A `!` and a group are a level of the parser each.
+        (deep("!(", ")", 16), 18),
+        (deep("@.items[*][?", "]", 32), 34),
+        (format!("$[?{both}]"), 128),
+    ];
+    let readers = move || {
+        for (source, tall) in &sources {
+            let template = template(source);
+            assert_eq!(height(template.expr()), *tall, "{source}");
+            let count = source.matches("%d").count();
+            let params = Params::positional(vec![1_i64; count]);
+            let item = Record::object([("a", Record::value(1_i64))]);
+            let record = (0..33).fold(item, |item, _| {
+                Record::object([
+                    ("a", Record::value(1_i64)),
+                    ("items", Record::collection([item])),
+                ])
+            });
+            template.matches(&record, &params).expect("evaluated");
+            let bound = template.bind(&params).expect("bound");
+            let query = pg::compile(&bound).expect("compiled");
+            assert_eq!(query.params.len(), count);
+            assert_eq!(transform(&bound, &Same).as_ref(), Ok(&bound));
+            assert_eq!(bound.clone(), bound);
+            assert!(!format!("{bound:?}").is_empty());
+        }
+    };
+    std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .spawn(readers)
+        .expect("a thread")
+        .join()
+        .expect("the readers returned");
 }
 
 /// A text is read in a time that grows as its length: a lexer that counted
