@@ -532,6 +532,15 @@ fn what_the_grammar_does_not_have_is_refused() {
     }
 }
 
+/// A text is read in a time that grows as its length: a lexer that counted
+/// its placeholders over again for each token took the square of it, and a
+/// text as long as this one took minutes to refuse.
+#[test]
+fn a_long_text_is_refused_in_the_time_it_takes_to_read_it() {
+    let long = format!("$[?@.a == %d{}]", " @.a %d".repeat(300_000));
+    assert_eq!(error(&long).message, "Expected ']'");
+}
+
 #[test]
 fn a_tree_has_a_bound_on_its_depth() {
     let nested = format!("$[?{}@.a{}]", "(".repeat(200), ")".repeat(200));

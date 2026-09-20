@@ -48,12 +48,17 @@ pub(super) fn tokenize(source: &str) -> Result<Vec<Token>, SyntaxError> {
     let chars: Vec<char> = source.chars().collect();
     let mut tokens = Vec::new();
     let mut position = 0;
+    // The place of the next positional placeholder: counted along, not over
+    // again for each token - which made a text of a hundred kilobytes a
+    // second of work to refuse, and the time grew as the square of the text.
+    let mut placeholders = 0;
     loop {
         position += blanks(&chars, position);
         let Some(first) = chars.get(position) else {
             return Ok(tokens);
         };
-        let (kind, next) = token(*first, &chars, position, positional(&tokens))?;
+        let (kind, next) = token(*first, &chars, position, placeholders)?;
+        placeholders += usize::from(is_positional(&kind));
         tokens.push(Token { kind, position });
         position = next;
     }
@@ -71,22 +76,23 @@ fn blanks(chars: &[char], from: usize) -> usize {
     run(chars, from, char::is_whitespace)
 }
 
-/// How many positional placeholders there are among `tokens`: while
-/// tokenizing, the place of the next one; afterwards, how many parameters
-/// the template takes.
+/// How many positional placeholders there are among `tokens`: how many
+/// parameters the template takes.
 pub(super) fn positional(tokens: &[Token]) -> usize {
     tokens
         .iter()
-        .filter(|token| {
-            matches!(
-                &token.kind,
-                Kind::Placeholder(Param {
-                    key: ParamKey::Position(_),
-                    ..
-                })
-            )
-        })
+        .filter(|token| is_positional(&token.kind))
         .count()
+}
+
+fn is_positional(kind: &Kind) -> bool {
+    matches!(
+        kind,
+        Kind::Placeholder(Param {
+            key: ParamKey::Position(_),
+            ..
+        })
+    )
 }
 
 /// The token that starts with `first` at `at`, and where the next one
