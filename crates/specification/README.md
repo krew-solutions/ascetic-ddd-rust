@@ -202,10 +202,13 @@ the sources as they were.
 * `<<` and `>>` shift the bits of an integer, as in the evaluator of Python
   and in PostgreSQL. The sources' `public` package types them as
   comparisons.
-* The macro generates `<name>_ast` and not `<name>_sql` as well, which is
-  `pg::compile(&<name>_ast())`. It takes the function's other parameters as
-  values, which neither source can: a specification with a parameter is the
-  usual kind.
+* The macro generates `<name>_ast` and no `<name>_sql`. A query cannot be
+  written without knowing the table, and what a member is called there is the
+  repository's to say: it applies `transform` with its [`Mapping`] and
+  compiles with its `Schema` (ADR-0014). Go's generated `...SQL()` compiled
+  the tree under the names of Go's fields. The macro takes the function's
+  other parameters as values, which neither source could: a specification
+  with a parameter is the usual kind.
 * Declared and never used, so not ported: `IN`, `BETWEEN`, `ASC`, `DESC`,
   `PERIOD` of Python's `OPERATOR`; the collection "slice" other than `*`.
 

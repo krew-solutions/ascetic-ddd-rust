@@ -184,6 +184,34 @@ fn the_predicate_of_a_collection_is_transformed_too() {
     );
 }
 
+/// What a repository does with a specification: the mapping says what the
+/// members are in the storage, the schema how the storage is laid out, and
+/// the schema names a collection as the mapping left it.
+#[test]
+fn a_mapping_and_a_schema_are_given_together() {
+    let specification: Expr<Domain> = any(
+        "something.parts",
+        greater_than(field(Path::item("weight")), value(100)),
+    );
+    let schema = pg::Schema::new("things").alias("t").relational(
+        "something_parts",
+        pg::Relation::new("parts", "thing_id", "id"),
+    );
+    let query = pg::Compiler::new()
+        .schema(&schema)
+        .compile(&transform(&specification, &Something).expect("transformed"))
+        .expect("compiled");
+    assert_eq!(
+        query.sql,
+        concat!(
+            r#"EXISTS (SELECT 1 FROM "parts" AS "something_part_1" "#,
+            r#"WHERE "something_part_1"."thing_id" = "t"."id" "#,
+            r#"AND "something_part_1"."weight_grams" > $1)"#,
+        ),
+    );
+    assert_eq!(query.params, [Value::Int(100)]);
+}
+
 #[test]
 fn composites_of_different_shapes_do_not_compare() {
     let member_id = Domain::MemberId(MemberId {
