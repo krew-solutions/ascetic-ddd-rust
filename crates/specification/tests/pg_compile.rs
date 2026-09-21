@@ -285,6 +285,15 @@ fn a_member_of_an_object_kept_in_a_table_of_its_own_is_read_through_the_key() {
             r#"WHERE "owner_3"."id" = "s"."owner_id"))"#,
         ),
     );
+    // The root row by its table, which carries its schema.
+    let qualified = Schema::new("public.stores").relational("owner", owner());
+    assert_eq!(
+        sql_with(&qualified, &equal(field("owner.name"), value("x"))),
+        concat!(
+            r#"(SELECT "owner_1"."name" FROM "owners" AS "owner_1" "#,
+            r#"WHERE "owner_1"."id" = "public"."stores"."owner_id") = $1"#,
+        ),
+    );
     // What the schema does not mention stays what the dots have meant.
     assert_eq!(
         sql_with(&of_both, &equal(field("s.name"), value("x"))),
@@ -334,6 +343,14 @@ fn a_relational_collection_is_joined_by_its_keys() {
                 .relational("Items", Relation::new("public.items", "store_id", "id")),
             dear.clone(),
             r#"EXISTS (SELECT 1 FROM "public"."items" AS "item_1" WHERE "item_1"."store_id" = "stores"."id" AND "item_1"."Price" > $1)"#,
+        ),
+        // And the table may carry its schema: `identifier` refused the dot,
+        // where the table of a collection went through `qualified`.
+        (
+            Schema::new("public.stores")
+                .relational("Items", Relation::new("public.items", "store_id", "id")),
+            dear.clone(),
+            r#"EXISTS (SELECT 1 FROM "public"."items" AS "item_1" WHERE "item_1"."store_id" = "public"."stores"."id" AND "item_1"."Price" > $1)"#,
         ),
         // What the schema says embedded, and what it does not mention, is.
         (

@@ -252,7 +252,7 @@ impl<'s> Compiler<'s> {
                 (Some(object), Some(schema))
                     if names.len() > 1 && self.relation(&[object]).is_some() =>
                 {
-                    self.member_of_row(identifier(schema.parent())?, Vec::new(), &names, next)
+                    self.member_of_row(qualified(schema.parent())?, Vec::new(), &names, next)
                 }
                 _ => Ok((column(path, item)?, next)),
             },
@@ -369,7 +369,7 @@ impl<'s> Compiler<'s> {
             Some((relation, schema)) => {
                 let parent = match enclosing {
                     Some(item) => quoted(&item.alias),
-                    None => identifier(schema.parent())?,
+                    None => qualified(schema.parent())?,
                 };
                 let keys = relation
                     .keys
