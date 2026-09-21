@@ -52,7 +52,7 @@ fn constants() -> Vec<Spec> {
         Timestamp::from_micros(1_700_000_000_000_000),
         Interval::from_micros(3_600_000_000),
     );
-    vec![
+    let written = vec![
         // Arithmetic, and the parentheses that keep its shape.
         sub(value(10), sub(value(4), value(3))),
         sub(sub(value(10), value(4)), value(3)),
@@ -154,7 +154,34 @@ fn constants() -> Vec<Spec> {
         neg(value(hour)),
         less_than(value(noon), add(value(noon), value(hour))),
         greater_than(value(hour), sub(value(hour), value(hour))),
-    ]
+    ];
+    // Floats at their edges, every pair under every operator. What the
+    // server makes of each - a value, "out of range" for a result too large
+    // or too small to be one, "division by zero" - is the server's to say,
+    // and the evaluator's to repeat: a zero from operands that are not zero
+    // is an underflow, a NaN divided by zero is a NaN, one divided by
+    // infinity is a zero and no underflow.
+    let edges = [
+        0.0,
+        1.0,
+        -1.0,
+        1e300,
+        1e-300,
+        f64::MAX,
+        f64::MIN_POSITIVE,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+    ];
+    let operators: [fn(Spec, Spec) -> Spec; 4] = [add, sub, mul, div];
+    let at_the_edges = edges.into_iter().flat_map(|left| {
+        edges.into_iter().flat_map(move |right| {
+            operators
+                .into_iter()
+                .map(move |operator| operator(value(left), value(right)))
+        })
+    });
+    written.into_iter().chain(at_the_edges).collect()
 }
 
 #[tokio::test]

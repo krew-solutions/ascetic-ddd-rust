@@ -189,7 +189,10 @@ the sources as they were.
   null logic, Go's has it everywhere but in collections. `AND`, `OR` and
   `any` stop as soon as they are decided.
 * Arithmetic is PostgreSQL's and checked: no wrapping, no `inf`, truncating
-  integer division; booleans are ordered, false first.
+  integer division; booleans are ordered, false first. A float result too
+  small to be one is out of range as one too large is - `1e-300 * 1e-300` is
+  an error, not the zero IEEE arithmetic rounds it to - and a NaN divided by
+  zero is a NaN. The sources had a zero and "division by zero".
 * A schema names a collection by its whole path, `categories.items`, not by
   its last name, so two collections of one name are two.
 * A name is written into the query between double quotes, as it is, and one

@@ -177,22 +177,36 @@ fn integer(op: Arithmetic, left: i64, right: i64) -> Result<i64, OperandError> {
 }
 
 /// `None` if the operator is not one of floats.
+///
+/// A result PostgreSQL has no float for is out of range, at either end: an
+/// infinity of operands that are finite, and a zero of operands that are
+/// not - an underflow, which IEEE arithmetic rounds to zero in silence. One
+/// divided by infinity is a zero, and right. A NaN divided by zero is a NaN,
+/// as it is divided by anything; any other number divided by zero is the
+/// error.
 fn float(op: Arithmetic, left: f64, right: f64) -> Option<Result<Value, OperandError>> {
     let result = match op {
         Arithmetic::Add => left + right,
         Arithmetic::Sub => left - right,
         Arithmetic::Mul => left * right,
-        Arithmetic::Div if right == 0.0 => return Some(Err(OperandError::DivisionByZero)),
+        Arithmetic::Div if right == 0.0 && !left.is_nan() => {
+            return Some(Err(OperandError::DivisionByZero));
+        }
         Arithmetic::Div => left / right,
         Arithmetic::Mod | Arithmetic::Shl | Arithmetic::Shr => return None,
     };
-    Some(
-        if result.is_infinite() && left.is_finite() && right.is_finite() {
-            Err(OperandError::OutOfRange)
-        } else {
-            Ok(Value::Float(result))
-        },
-    )
+    let overflow = result.is_infinite() && left.is_finite() && right.is_finite();
+    let underflow = result == 0.0
+        && match op {
+            Arithmetic::Mul => left != 0.0 && right != 0.0,
+            Arithmetic::Div => left != 0.0 && right.is_finite(),
+            _ => false,
+        };
+    Some(if overflow || underflow {
+        Err(OperandError::OutOfRange)
+    } else {
+        Ok(Value::Float(result))
+    })
 }
 
 /// `None` if the operator is not one of these two. A point less a point is
