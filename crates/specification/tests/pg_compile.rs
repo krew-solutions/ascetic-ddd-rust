@@ -172,6 +172,136 @@ fn an_embedded_collection_is_unnested() {
     }
 }
 
+/// A member of a Value Object inside an item is a member of a composite kept
+/// in the item's row. With dots alone PostgreSQL reads a schema, a table and
+/// a column, and says there is no such table; the sources, besides, drop the
+/// item's alias from such a path and write `"maker"."name"`, which is the
+/// column of another table if the query has one of that name.
+#[test]
+fn a_member_of_an_object_inside_an_item_is_a_member_of_a_composite() {
+    let maker = |names: &[&str]| {
+        let path = names
+            .iter()
+            .fold(Path::item("maker"), |path, name| path.child(*name));
+        equal(field(path), value("x"))
+    };
+    let schema = Schema::new("stores")
+        .alias("s")
+        .relational("items", Relation::new("store_items", "store_id", "id"));
+    for (specification, expected) in [
+        (
+            any("items", maker(&["name"])),
+            r#"EXISTS (SELECT 1 FROM unnest("items") AS "item_1" WHERE ("item_1"."maker")."name" = $1)"#,
+        ),
+        (
+            any("items", maker(&["country", "code"])),
+            r#"EXISTS (SELECT 1 FROM unnest("items") AS "item_1" WHERE (("item_1"."maker")."country")."code" = $1)"#,
+        ),
+        // The item of an inner collection, which is itself a member of the outer item.
+        (
+            any("items", any(Path::item("parts"), maker(&["name"]))),
+            r#"EXISTS (SELECT 1 FROM unnest("items") AS "item_1" WHERE EXISTS (SELECT 1 FROM unnest("item_1"."parts") AS "part_2" WHERE ("part_2"."maker")."name" = $1))"#,
+        ),
+    ] {
+        assert_eq!(sql(&specification), expected);
+    }
+    // In a table of its own an item is a row as well, and its column a composite.
+    assert_eq!(
+        sql_with(&schema, &any("items", maker(&["name"]))),
+        r#"EXISTS (SELECT 1 FROM "store_items" AS "item_1" WHERE "item_1"."store_id" = "s"."id" AND ("item_1"."maker")."name" = $1)"#,
+    );
+    // From the candidate the dots stay: a qualified name, `alias.column`.
+    assert_eq!(
+        sql(&equal(field("s.maker"), value("x"))),
+        r#""s"."maker" = $1"#
+    );
+}
+
+/// An object on the way to a member is looked up in the schema, as a
+/// collection is. Kept in a table of its own it is read through its key, by a
+/// subquery in the column's place: at most the one row the key names, and
+/// null if there is none.
+#[test]
+fn a_member_of_an_object_kept_in_a_table_of_its_own_is_read_through_the_key() {
+    let owner = || Relation::new("owners", "id", "owner_id");
+    let owner_name = || field(Path::item("owner").child("name"));
+    let named = |name: &str| equal(owner_name(), value(name));
+    // Whether the items are an array or a table, their owner is a table.
+    let embedded = Schema::new("stores")
+        .alias("s")
+        .relational("items.owner", owner());
+    assert_eq!(
+        sql_with(&embedded, &any("items", named("ann"))),
+        concat!(
+            r#"EXISTS (SELECT 1 FROM unnest("items") AS "item_1" WHERE "#,
+            r#"(SELECT "owner_2"."name" FROM "owners" AS "owner_2" "#,
+            r#"WHERE "owner_2"."id" = "item_1"."owner_id") = $1)"#,
+        ),
+    );
+    let relational = Schema::new("stores")
+        .alias("s")
+        .relational("items", Relation::new("store_items", "store_id", "id"))
+        .relational("items.owner", owner().alias("o"));
+    assert_eq!(
+        sql_with(&relational, &any("items", named("ann"))),
+        concat!(
+            r#"EXISTS (SELECT 1 FROM "store_items" AS "item_1" "#,
+            r#"WHERE "item_1"."store_id" = "s"."id" AND "#,
+            r#"(SELECT "o_2"."name" FROM "owners" AS "o_2" "#,
+            r#"WHERE "o_2"."id" = "item_1"."owner_id") = $1)"#,
+        ),
+    );
+    // A key of two columns; and what is inside the owner's row is a composite.
+    let composite_key = Schema::new("stores").alias("s").relational(
+        "items.owner",
+        Relation::new("public.owners", "tenant_id", "tenant_id").and("id", "owner_id"),
+    );
+    let city = field(Path::item("owner").child("address").child("city"));
+    assert_eq!(
+        sql_with(&composite_key, &any("items", is_null(city))),
+        concat!(
+            r#"EXISTS (SELECT 1 FROM unnest("items") AS "item_1" WHERE "#,
+            r#"(SELECT ("owner_2"."address")."city" FROM "public"."owners" AS "owner_2" "#,
+            r#"WHERE "owner_2"."tenant_id" = "item_1"."tenant_id" "#,
+            r#"AND "owner_2"."id" = "item_1"."owner_id") IS NULL)"#,
+        ),
+    );
+    // Of the candidate itself, the key is the root row's; and each object
+    // read so has an alias of its own.
+    let of_both = Schema::new("stores")
+        .alias("s")
+        .relational("owner", owner())
+        .relational("items.owner", owner());
+    assert_eq!(
+        sql_with(
+            &of_both,
+            &any("items", equal(owner_name(), field("owner.name")))
+        ),
+        concat!(
+            r#"EXISTS (SELECT 1 FROM unnest("items") AS "item_1" WHERE "#,
+            r#"(SELECT "owner_2"."name" FROM "owners" AS "owner_2" "#,
+            r#"WHERE "owner_2"."id" = "item_1"."owner_id") = "#,
+            r#"(SELECT "owner_3"."name" FROM "owners" AS "owner_3" "#,
+            r#"WHERE "owner_3"."id" = "s"."owner_id"))"#,
+        ),
+    );
+    // What the schema does not mention stays what the dots have meant.
+    assert_eq!(
+        sql_with(&of_both, &equal(field("s.name"), value("x"))),
+        r#""s"."name" = $1"#
+    );
+    assert_eq!(
+        sql_with(
+            &of_both,
+            &any(
+                "items",
+                equal(field(Path::item("maker").child("name")), value("x"))
+            )
+        ),
+        r#"EXISTS (SELECT 1 FROM unnest("items") AS "item_1" WHERE ("item_1"."maker")."name" = $1)"#,
+    );
+}
+
 #[test]
 fn a_relational_collection_is_joined_by_its_keys() {
     let stores = || Schema::new("stores").alias("s");

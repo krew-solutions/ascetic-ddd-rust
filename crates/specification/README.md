@@ -226,6 +226,24 @@ the sources as they were.
   word without quotes. Where the domain's names are not the storage's, a
   [`Mapping`] says what they are. A name with a space or a letter beyond
   ASCII cannot be written.
+* An object on the way to a member - `@.owner.name` - is looked up in the
+  `Schema` by the names that lead to it, as a collection is. Kept in a table
+  of its own, `Schema::relational("items.owner", Relation::new("owners",
+  "id", "owner_id"))`, it is read through the key, by a subquery in the
+  column's place. Not mentioned, it is a composite kept in the item's row,
+  `("item_1"."maker")."name"` - a Value Object; one kept as columns with a
+  prefix is for the [`Mapping`] to say. From the candidate an object not
+  mentioned is a qualifier, `"s"."price"`, so a composite column of the
+  candidate's own row cannot be reached.
+* An object kept by a key and not said to be is taken for a composite, and
+  PostgreSQL reads a member called like a type it can cast to - `name`,
+  `text` - of a column that is no composite as that cast:
+  `("item_1"."owner")."name"` of a key 10 is `'10'`, and the query selects
+  nothing, in silence. Any other member of such a column is an error.
+* An object that is null has no members for the evaluator,
+  `ContextError::NotAnObject`, where PostgreSQL has null for a member of a
+  null composite. And a composite is null to PostgreSQL if all its members
+  are, and not null only if none is.
 * A path from the candidate is written into the query unqualified. Inside the
   subquery of a relational collection an unqualified name can be captured by
   a column of the child table: qualify columns in the [`Mapping`].

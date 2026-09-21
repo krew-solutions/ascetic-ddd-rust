@@ -25,6 +25,15 @@
 //! refused, and a quote inside one would be doubled, so that no tree,
 //! whatever it was built from, can put SQL of its own into the query.
 //!
+//! A path of more than one name goes through objects. From the candidate an
+//! object is a qualifier of the name, `"s"."price"`. From the item of a
+//! collection it is a Value Object, a composite kept in the item's row:
+//! `("item_1"."maker")."name"`. Either is what it is unless the [`Schema`]
+//! says the object is kept in a table of its own, as it says of a
+//! collection: then its member is read through the key, by a subquery in the
+//! column's place. The sources write dots in every case, which PostgreSQL
+//! reads as a table and a column; and from an item they drop its alias.
+//!
 //! The sources number parameters and aliases with counters that every
 //! visitor shares and changes. Here the count so far goes into each step and
 //! the count after comes out of it, so compiling changes nothing anywhere.
@@ -158,7 +167,10 @@ impl<'s> Compiler<'s> {
                 };
                 Ok((fragment, Next { param, ..next }))
             }
-            Expr::Field(path) => Ok((Fragment::text(column(path, item)?), next)),
+            Expr::Field(path) => {
+                let (sql, next) = self.member(path, item, next)?;
+                Ok((Fragment::text(sql), next))
+            }
             Expr::Prefix(op, operand) => {
                 let precedence = precedence::prefix(*op);
                 let (operand, next) = self.render(operand, item, next)?;
@@ -189,6 +201,102 @@ impl<'s> Compiler<'s> {
                 Ok((left.with(sql, precedence).and(right.params), next))
             }
             Expr::Any(source, predicate) => self.exists(source, predicate, item, next),
+        }
+    }
+
+    /// The relation the schema has at `logical`, if it has one.
+    fn relation(&self, logical: &[&str]) -> Option<&'s Relation> {
+        match self.schema?.storage(&logical.join(".")) {
+            Storage::Relational(relation) => Some(relation),
+            Storage::Embedded => None,
+        }
+    }
+
+    /// The value of the member at `path`, as the storage has it.
+    ///
+    /// An object on the way to the member is looked up in the schema, as a
+    /// collection is, by the names that lead to it. Kept in a table of its
+    /// own, it is reached through its key. Not mentioned, it is what the
+    /// dots have meant so far: from the item under test a composite kept in
+    /// the item's row — a Value Object; from the candidate a qualifier of
+    /// the name, `"s"."price"`.
+    fn member(
+        &self,
+        path: &Path,
+        item: Option<&Item>,
+        next: Next,
+    ) -> Result<(String, Next), CompileError> {
+        let names: Vec<&str> = path.names().collect();
+        match path.root() {
+            Root::Item => {
+                let item = item.ok_or(CompileError::NoCurrentItem)?;
+                self.member_of_row(quoted(&item.alias), item.logical.clone(), &names, next)
+            }
+            Root::Global => match (names.first(), self.schema) {
+                (Some(object), Some(schema))
+                    if names.len() > 1 && self.relation(&[object]).is_some() =>
+                {
+                    self.member_of_row(identifier(schema.parent())?, Vec::new(), &names, next)
+                }
+                _ => Ok((column(path, item)?, next)),
+            },
+        }
+    }
+
+    /// The member at `names` of the row written `row`, whose object is named
+    /// by `logical` in the schema.
+    ///
+    /// An object kept in a table of its own is read by a subquery in the
+    /// column's place: it has at most the one row the key names, and is null
+    /// if there is none, as a member of a composite that is null is. An
+    /// object not mentioned is a composite in its row, and the parentheses
+    /// are what makes it that: with dots alone PostgreSQL reads a schema, a
+    /// table and a column, and there is no such table.
+    fn member_of_row<'a>(
+        &self,
+        row: String,
+        logical: Vec<&'a str>,
+        names: &[&'a str],
+        next: Next,
+    ) -> Result<(String, Next), CompileError> {
+        match names {
+            [] => Ok((row, next)),
+            [name] => Ok((format!("{row}.{}", identifier(name)?), next)),
+            [object, rest @ ..] => {
+                let logical: Vec<&str> = logical.into_iter().chain([*object]).collect();
+                let Some(relation) = self.relation(&logical) else {
+                    let composite = format!("({row}.{})", identifier(object)?);
+                    return self.member_of_row(composite, logical, rest, next);
+                };
+                let number = next.alias + 1;
+                let name = match relation.alias.as_deref() {
+                    Some(alias) => plain(alias)?.to_owned(),
+                    None => plain(object)?.to_lowercase(),
+                };
+                let alias = quoted(&format!("{name}_{number}"));
+                let keys = relation
+                    .keys
+                    .iter()
+                    .map(|(child, of_parent)| {
+                        Ok(format!(
+                            "{alias}.{} = {row}.{}",
+                            identifier(child)?,
+                            identifier(of_parent)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(" AND ");
+                let next = Next {
+                    alias: number,
+                    ..next
+                };
+                let (member, next) = self.member_of_row(alias.clone(), logical, rest, next)?;
+                let sql = format!(
+                    "(SELECT {member} FROM {} AS {alias} WHERE {keys})",
+                    qualified(&relation.table)?,
+                );
+                Ok((sql, next))
+            }
         }
     }
 
@@ -339,19 +447,30 @@ impl<V> Fragment<V> {
     }
 }
 
-/// The path as a column reference: from the item under test, under its
-/// alias.
+/// The path as a column reference, no object on its way looked up: the
+/// place of a collection, and a name from the candidate.
+///
+/// From the candidate the names are written with dots, which PostgreSQL
+/// reads as a qualified name: `"s"."price"` is the column `price` of `s`.
+/// From the item under test the first name is a column of the item's row,
+/// under its alias, and what follows a member of a composite kept there.
 fn column(path: &Path, item: Option<&Item>) -> Result<String, CompileError> {
-    let alias = match path.root() {
-        Root::Global => None,
-        Root::Item => Some(item.ok_or(CompileError::NoCurrentItem)?.alias.as_str()),
-    };
-    alias
-        .map(|alias| Ok(quoted(alias)))
-        .into_iter()
-        .chain(path.names().map(identifier))
-        .collect::<Result<Vec<_>, _>>()
-        .map(|names| names.join("."))
+    let names = path
+        .names()
+        .map(identifier)
+        .collect::<Result<Vec<_>, _>>()?;
+    match path.root() {
+        Root::Global => Ok(names.join(".")),
+        Root::Item => {
+            let alias = quoted(&item.ok_or(CompileError::NoCurrentItem)?.alias);
+            Ok(match names.split_first() {
+                Some((column, members)) if !members.is_empty() => {
+                    format!("({alias}.{column}).{}", members.join("."))
+                }
+                _ => format!("{alias}.{}", names.join(".")),
+            })
+        }
+    }
 }
 
 fn spelling(op: Infix) -> String {

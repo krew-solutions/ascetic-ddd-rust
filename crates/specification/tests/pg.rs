@@ -258,6 +258,26 @@ struct Item {
     active: Option<bool>,
 }
 
+impl Item {
+    /// The name of the item's maker: a Value Object inside the item, which
+    /// the storage keeps as a composite inside the item's row.
+    fn maker_name(&self) -> Option<&'static str> {
+        self.price
+            .map(|price| if price > 500 { "dear" } else { "cheap" })
+    }
+
+    /// The item's owner: an object of its own, which the storage keeps in a
+    /// table of its own and the item refers to by a key. The third owner has
+    /// no name.
+    fn owner(&self) -> (i64, Option<&'static str>) {
+        match self.active {
+            Some(true) => (1, Some("ann")),
+            Some(false) => (2, Some("bob")),
+            None => (3, None),
+        }
+    }
+}
+
 struct Store {
     id: i64,
     a: Option<i64>,
@@ -322,11 +342,31 @@ fn stores() -> Vec<Store> {
     ]
 }
 
+impl Store {
+    /// The store's owner, kept as the owners of items are: in the table of
+    /// owners, by a key.
+    fn owner(&self) -> (i64, Option<&'static str>) {
+        match self.flag {
+            Some(true) => (1, Some("ann")),
+            Some(false) => (2, Some("bob")),
+            None => (3, None),
+        }
+    }
+}
+
 fn record(store: &Store) -> Record<Value> {
     let items = store.items.iter().map(|item| {
         Record::object([
             ("price", Record::value(item.price)),
             ("active", Record::value(item.active)),
+            (
+                "maker",
+                Record::object([("name", Record::value(item.maker_name()))]),
+            ),
+            (
+                "owner",
+                Record::object([("name", Record::value(item.owner().1))]),
+            ),
         ])
     });
     Record::object([
@@ -336,6 +376,10 @@ fn record(store: &Store) -> Record<Value> {
         ("flag", Record::value(store.flag)),
         ("name", Record::value(store.name)),
         ("items", Record::collection(items)),
+        (
+            "owner",
+            Record::object([("name", Record::value(store.owner().1))]),
+        ),
         // Members named as PostgreSQL names other things, under columns of
         // those very names: `user` is the session's user if it is not quoted,
         // `order` does not parse, `createdAt` is folded to `createdat`.
@@ -348,36 +392,51 @@ fn record(store: &Store) -> Record<Value> {
 async fn tables(client: &Client) {
     client
         .batch_execute(
-            r#"CREATE TYPE pg_temp.spec_item AS (price int8, active bool);
+            r#"CREATE TYPE pg_temp.spec_maker AS (name text);
+             CREATE TYPE pg_temp.spec_item AS (
+                 price int8, active bool, maker pg_temp.spec_maker, owner_id int8
+             );
+             CREATE TEMP TABLE spec_owners (id int8 PRIMARY KEY, name text);
+             INSERT INTO spec_owners VALUES (1, 'ann'), (2, 'bob'), (3, NULL);
              CREATE TEMP TABLE spec_stores (
                  id int8 PRIMARY KEY, a int8, b int8, flag bool, name text,
                  items pg_temp.spec_item[] NOT NULL,
-                 "user" text, "order" int8, "createdAt" int8
+                 "user" text, "order" int8, "createdAt" int8, owner_id int8
              );
-             CREATE TEMP TABLE spec_items (store_id int8 NOT NULL, price int8, active bool);"#,
+             CREATE TEMP TABLE spec_items (
+                 store_id int8 NOT NULL, price int8, active bool, maker pg_temp.spec_maker,
+                 owner_id int8 REFERENCES spec_owners
+             );"#,
         )
         .await
         .expect("tables");
     for store in stores() {
         client
             .execute(
-                "INSERT INTO spec_stores VALUES ($1, $2, $3, $4, $5, '{}', $5, $2, $3)",
-                &[&store.id, &store.a, &store.b, &store.flag, &store.name],
+                "INSERT INTO spec_stores VALUES ($1, $2, $3, $4, $5, '{}', $5, $2, $3, $6)",
+                &[
+                    &store.id,
+                    &store.a,
+                    &store.b,
+                    &store.flag,
+                    &store.name,
+                    &store.owner().0,
+                ],
             )
             .await
             .expect("a store");
         for item in &store.items {
             client
                 .execute(
-                    "UPDATE spec_stores SET items = items || ROW($2::int8, $3::bool)::pg_temp.spec_item WHERE id = $1",
-                    &[&store.id, &item.price, &item.active],
+                    "UPDATE spec_stores SET items = items || ROW($2::int8, $3::bool, ROW($4::text), $5::int8)::pg_temp.spec_item WHERE id = $1",
+                    &[&store.id, &item.price, &item.active, &item.maker_name(), &item.owner().0],
                 )
                 .await
                 .expect("an embedded item");
             client
                 .execute(
-                    "INSERT INTO spec_items VALUES ($1, $2, $3)",
-                    &[&store.id, &item.price, &item.active],
+                    "INSERT INTO spec_items VALUES ($1, $2, $3, ROW($4::text)::pg_temp.spec_maker, $5)",
+                    &[&store.id, &item.price, &item.active, &item.maker_name(), &item.owner().0],
                 )
                 .await
                 .expect("an item");
@@ -395,6 +454,8 @@ fn bound(source: &str, params: Params) -> Spec {
 fn specifications() -> Vec<Spec> {
     let item = |name: &str| field(Path::item(name));
     let dear = || greater_than(item("price"), value(500));
+    let maker_name = || field(Path::item("maker").child("name"));
+    let owner_name = || field(Path::item("owner").child("name"));
     vec![
         equal(field("a"), field("b")),
         not(equal(field("a"), field("b"))),
@@ -423,6 +484,29 @@ fn specifications() -> Vec<Spec> {
         all("items", greater_than(item("price"), value(5))),
         not(all("items", is_not_null(item("price")))),
         and(field("flag"), any("items", dear())),
+        // A member of a Value Object inside the item: a composite inside the
+        // item's row, in the array and in the table alike.
+        any("items", equal(maker_name(), value("dear"))),
+        any("items", and(is_null(maker_name()), item("active"))),
+        all("items", not_equal(maker_name(), value("cheap"))),
+        bound(
+            "$.items[*][?@.maker.name == %s && @.price > 5]",
+            Params::positional([Value::from("cheap")]),
+        ),
+        // A member of an object the item refers to by a key: the schema says
+        // `items.owner` is kept in a table of its own.
+        any("items", equal(owner_name(), value("ann"))),
+        any("items", and(is_null(owner_name()), dear())),
+        all("items", not_equal(owner_name(), value("bob"))),
+        any("items", equal(owner_name(), maker_name())),
+        // The same of the candidate itself, and both in one predicate.
+        equal(field("owner.name"), value("bob")),
+        and(is_null(field("owner.name")), is_not_null(field("a"))),
+        any("items", equal(owner_name(), field("owner.name"))),
+        bound(
+            "$.items[*][?@.owner.name == %s && @.price > 5]",
+            Params::positional([Value::from("bob")]),
+        ),
         // A name is the column's, whatever else PostgreSQL knows by it.
         equal(field("user"), value("one")),
         greater_than(field("order"), value(0)),
@@ -453,9 +537,15 @@ fn specifications() -> Vec<Spec> {
 async fn a_specification_selects_the_rows_it_is_satisfied_by() {
     let client = client().await;
     tables(&client).await;
+    // The owner of an item is in a table of its own in either storage of the items.
+    let owner = || Relation::new("spec_owners", "id", "owner_id");
     let relational = Schema::new("spec_stores")
-        .relational("items", Relation::new("spec_items", "store_id", "id"));
-    let embedded = Schema::new("spec_stores");
+        .relational("items", Relation::new("spec_items", "store_id", "id"))
+        .relational("items.owner", owner())
+        .relational("owner", owner());
+    let embedded = Schema::new("spec_stores")
+        .relational("items.owner", owner())
+        .relational("owner", owner());
     for specification in specifications() {
         let satisfied: Vec<i64> = stores()
             .iter()
