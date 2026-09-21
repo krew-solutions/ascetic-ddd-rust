@@ -42,149 +42,118 @@ async fn client() -> Client {
     client
 }
 
-/// The type the server is told a parameter has. A constant expression gives
-/// it nothing to infer one from; a null takes the type of the case.
-fn type_of(value: &Value, null: &Type) -> Type {
-    match value {
-        Value::Null => null.clone(),
-        Value::Bool(_) => Type::BOOL,
-        Value::Int(_) => Type::INT8,
-        Value::Float(_) => Type::FLOAT8,
-        Value::Text(_) => Type::TEXT,
-        Value::Timestamp(_) => Type::TIMESTAMPTZ,
-        Value::Interval(_) => Type::INTERVAL,
-    }
-}
-
 fn null() -> Spec {
     Expr::Value(Value::Null)
 }
 
-/// A constant expression; the type of its nulls; and the types of its
-/// parameters where they are not what the values say.
-type Constant = (Spec, Type, Option<Vec<Type>>);
-
-fn constants() -> Vec<Constant> {
+fn constants() -> Vec<Spec> {
     let (t, f): (Make, Make) = (|| value(true), || value(false));
-    let int = |expr| (expr, Type::INT8, None);
-    let boolean = |expr| (expr, Type::BOOL, None);
-    let time = |expr| (expr, Type::INTERVAL, None);
-    // PostgreSQL shifts a `bigint` by an `integer`, and infers that of a
-    // parameter; this test names the types itself, so it must say so.
-    let shift = |expr| (expr, Type::INT8, Some(vec![Type::INT8, Type::INT4]));
-    let shift_in_sum = |expr| {
-        (
-            expr,
-            Type::INT8,
-            Some(vec![Type::INT8, Type::INT8, Type::INT4]),
-        )
-    };
     let (noon, hour) = (
         Timestamp::from_micros(1_700_000_000_000_000),
         Interval::from_micros(3_600_000_000),
     );
     vec![
         // Arithmetic, and the parentheses that keep its shape.
-        int(sub(value(10), sub(value(4), value(3)))),
-        int(sub(sub(value(10), value(4)), value(3))),
-        int(sub(value(10), add(value(4), value(3)))),
-        int(div(value(100), div(value(10), value(5)))),
-        int(div(mul(value(7), value(3)), value(2))),
-        int(mul(add(value(1), value(2)), value(3))),
-        int(add(value(1), mul(value(2), value(3)))),
-        int(div(value(7), value(2))),
-        int(div(value(-7), value(2))),
-        int(modulo(value(-7), value(2))),
-        int(modulo(value(7), value(-2))),
-        int(modulo(value(i64::MIN), value(-1))),
-        int(neg(neg(value(5)))),
-        int(sub(value(5), neg(value(3)))),
-        int(neg(add(value(1), value(2)))),
-        shift(left_shift(value(1), value(3))),
-        shift(left_shift(value(1), value(64))),
-        shift(left_shift(value(1), value(-1))),
-        shift(right_shift(value(8), value(65))),
-        shift(right_shift(value(-8), value(1))),
-        shift_in_sum(left_shift(add(value(1), value(2)), value(3))),
-        shift_in_sum(add(value(1), left_shift(value(2), value(3)))),
-        int(add(value(1), value(0.5))),
-        int(div(value(7.0), value(2))),
-        int(mul(value(2.5), value(4))),
+        sub(value(10), sub(value(4), value(3))),
+        sub(sub(value(10), value(4)), value(3)),
+        sub(value(10), add(value(4), value(3))),
+        div(value(100), div(value(10), value(5))),
+        div(mul(value(7), value(3)), value(2)),
+        mul(add(value(1), value(2)), value(3)),
+        add(value(1), mul(value(2), value(3))),
+        div(value(7), value(2)),
+        div(value(-7), value(2)),
+        modulo(value(-7), value(2)),
+        modulo(value(7), value(-2)),
+        modulo(value(i64::MIN), value(-1)),
+        neg(neg(value(5))),
+        sub(value(5), neg(value(3))),
+        neg(add(value(1), value(2))),
+        left_shift(value(1), value(3)),
+        left_shift(value(1), value(64)),
+        left_shift(value(1), value(-1)),
+        right_shift(value(8), value(65)),
+        right_shift(value(-8), value(1)),
+        left_shift(add(value(1), value(2)), value(3)),
+        add(value(1), left_shift(value(2), value(3))),
+        add(value(1), value(0.5)),
+        div(value(7.0), value(2)),
+        mul(value(2.5), value(4)),
         // Where it fails.
-        int(div(value(1), value(0))),
-        int(modulo(value(1), value(0))),
-        int(div(value(1.0), value(0.0))),
-        int(add(value(i64::MAX), value(1))),
-        int(mul(value(i64::MAX), value(2))),
-        int(div(value(i64::MIN), value(-1))),
-        int(neg(value(i64::MIN))),
-        int(mul(value(f64::MAX), value(2.0))),
+        div(value(1), value(0)),
+        modulo(value(1), value(0)),
+        div(value(1.0), value(0.0)),
+        add(value(i64::MAX), value(1)),
+        mul(value(i64::MAX), value(2)),
+        div(value(i64::MIN), value(-1)),
+        neg(value(i64::MIN)),
+        mul(value(f64::MAX), value(2.0)),
         // What is not defined here is not defined there.
-        int(add(value("a"), value("b"))),
-        int(modulo(value(5.5), value(2))),
-        int(neg(value("a"))),
-        int(less_than(value(1), value("b"))),
+        add(value("a"), value("b")),
+        modulo(value(5.5), value(2)),
+        neg(value("a")),
+        less_than(value(1), value("b")),
         // Comparisons.
-        boolean(greater_than(value(true), value(false))),
-        boolean(less_than_equal(value(true), value(true))),
-        int(equal(value(1), value(1.0))),
-        int(less_than(value(1), value(1.5))),
-        int(greater_than_equal(value(2), value(2))),
-        int(less_than_equal(value(3), value(2))),
-        int(not_equal(value("a"), value("b"))),
-        int(less_than(value("a"), value("b"))),
-        int(equal(value(f64::NAN), value(f64::NAN))),
-        int(greater_than(value(f64::NAN), value(f64::MAX))),
-        int(equal(value(-0.0), value(0.0))),
-        boolean(equal(equal(value(1), value(1)), value(true))),
-        boolean(equal(value(true), equal(value(1), value(2)))),
-        boolean(equal(is_null(null()), value(true))),
+        greater_than(value(true), value(false)),
+        less_than_equal(value(true), value(true)),
+        equal(value(1), value(1.0)),
+        less_than(value(1), value(1.5)),
+        greater_than_equal(value(2), value(2)),
+        less_than_equal(value(3), value(2)),
+        not_equal(value("a"), value("b")),
+        less_than(value("a"), value("b")),
+        equal(value(f64::NAN), value(f64::NAN)),
+        greater_than(value(f64::NAN), value(f64::MAX)),
+        equal(value(-0.0), value(0.0)),
+        equal(equal(value(1), value(1)), value(true)),
+        equal(value(true), equal(value(1), value(2))),
+        equal(is_null(null()), value(true)),
         // Nulls.
-        int(equal(null(), value(1))),
-        int(equal(null(), null())),
-        int(not_equal(value(1), null())),
-        int(add(value(1), null())),
-        int(neg(null())),
-        int(div(null(), value(0))),
-        boolean(not(null())),
-        boolean(and(null(), f())),
-        boolean(and(f(), null())),
-        boolean(and(null(), t())),
-        boolean(and(null(), null())),
-        boolean(or(null(), t())),
-        boolean(or(t(), null())),
-        boolean(or(null(), f())),
-        boolean(and(or(t(), f()), f())),
-        boolean(or(t(), and(f(), f()))),
-        boolean(and(t(), and(t(), f()))),
-        boolean(not(and(t(), f()))),
-        boolean(not(not(t()))),
-        boolean(is_null(or(null(), f()))),
-        boolean(is_null(is_null(null()))),
-        int(is_not_null(equal(value(1), null()))),
-        int(is_null(equal(value(1), value(1)))),
-        boolean(not(is_null(null()))),
+        equal(null(), value(1)),
+        equal(null(), null()),
+        not_equal(value(1), null()),
+        add(value(1), null()),
+        neg(null()),
+        div(null(), value(0)),
+        not(null()),
+        and(null(), f()),
+        and(f(), null()),
+        and(null(), t()),
+        and(null(), null()),
+        or(null(), t()),
+        or(t(), null()),
+        or(null(), f()),
+        and(or(t(), f()), f()),
+        or(t(), and(f(), f())),
+        and(t(), and(t(), f())),
+        not(and(t(), f())),
+        not(not(t())),
+        is_null(or(null(), f())),
+        is_null(is_null(null())),
+        is_not_null(equal(value(1), null())),
+        is_null(equal(value(1), value(1))),
+        not(is_null(null())),
         // `IS`.
-        boolean(is(t(), t())),
-        boolean(is(t(), f())),
-        boolean(is(null(), null())),
-        boolean(is(null(), t())),
-        int(is(value(1), null())),
-        int(is(value(1), value(1))),
-        boolean(equal(is(t(), null()), f())),
-        boolean(is(equal(value(1), value(1)), t())),
+        is(t(), t()),
+        is(t(), f()),
+        is(null(), null()),
+        is(null(), t()),
+        is(value(1), null()),
+        is(value(1), value(1)),
+        equal(is(t(), null()), f()),
+        is(equal(value(1), value(1)), t()),
         // Time.
-        time(sub(
+        sub(
             value(Timestamp::from_micros(noon.as_micros() + 5)),
             value(noon),
-        )),
-        time(add(value(noon), value(hour))),
-        time(add(value(hour), value(noon))),
-        time(sub(value(noon), value(hour))),
-        time(add(value(hour), value(hour))),
-        time(neg(value(hour))),
-        time(less_than(value(noon), add(value(noon), value(hour)))),
-        time(greater_than(value(hour), sub(value(hour), value(hour)))),
+        ),
+        add(value(noon), value(hour)),
+        add(value(hour), value(noon)),
+        sub(value(noon), value(hour)),
+        add(value(hour), value(hour)),
+        neg(value(hour)),
+        less_than(value(noon), add(value(noon), value(hour))),
+        greater_than(value(hour), sub(value(hour), value(hour))),
     ]
 }
 
@@ -192,7 +161,7 @@ fn constants() -> Vec<Constant> {
 async fn a_constant_expression_has_one_value_for_both_readers() {
     let client = client().await;
     let nothing = Record::<Value>::object::<&str>([]);
-    for (expr, null_type, types) in constants() {
+    for expr in constants() {
         let query = compile(&expr).expect("compiled");
         let evaluated = evaluate(&expr, &nothing);
         // The value the evaluator found goes in as one more parameter, of a
@@ -202,13 +171,6 @@ async fn a_constant_expression_has_one_value_for_both_readers() {
             query.sql,
             query.params.len() + 1,
         );
-        let types: Vec<Type> = types.unwrap_or_else(|| {
-            query
-                .params
-                .iter()
-                .map(|param| type_of(param, &null_type))
-                .collect()
-        });
         let expected = evaluated.clone().unwrap_or(Value::Null);
         let params: Vec<&(dyn ToSql + Sync)> = query
             .params
@@ -216,7 +178,10 @@ async fn a_constant_expression_has_one_value_for_both_readers() {
             .chain(std::iter::once(&expected))
             .map(|param| param as &(dyn ToSql + Sync))
             .collect();
-        let answered = match client.prepare_typed(&text, &types).await {
+        // Prepared as a user prepares it, the types the server's to find:
+        // this test used to name them itself, and so did not see that where
+        // every operand is a constant the server has nothing to find them by.
+        let answered = match client.prepare(&text).await {
             Ok(statement) => client.query_one(&statement, &params).await,
             Err(error) => Err(error),
         };
@@ -507,6 +472,15 @@ fn specifications() -> Vec<Spec> {
             "$.items[*][?@.owner.name == %s && @.price > 5]",
             Params::positional([Value::from("bob")]),
         ),
+        // Constants with nothing but constants beside them: their types are
+        // said in the text, for the server has nothing to find them by.
+        greater_than(field("a"), sub(value(4), value(3))),
+        any(
+            "items",
+            greater_than(item("price"), mul(value(100), value(5))),
+        ),
+        less_than(field("a"), neg(value(-2))),
+        or(is_null(null()), field("flag")),
         // A name is the column's, whatever else PostgreSQL knows by it.
         equal(field("user"), value("one")),
         greater_than(field("order"), value(0)),
@@ -572,6 +546,46 @@ async fn a_specification_selects_the_rows_it_is_satisfied_by() {
                 .collect();
             assert_eq!(selected, satisfied, "{storage}: {text}");
         }
+    }
+}
+
+/// Why a type is said only where nothing stands beside the constant. A point
+/// in time is written as a timestamp with zone or without, whichever the
+/// column is. Said to be `timestamptz` beside a column without zone, it would
+/// be compared in the session's time zone, and the row would not be found.
+#[tokio::test]
+async fn a_constant_beside_a_column_takes_the_columns_type() {
+    let client = client().await;
+    client
+        .batch_execute(
+            "SET TIME ZONE 'Asia/Tokyo';
+             CREATE TEMP TABLE spec_moments (id int8, at timestamp, zoned timestamptz, small int2);
+             INSERT INTO spec_moments VALUES
+                 (1, '2023-11-14 22:13:20', '2023-11-14 22:13:20+00', 7);",
+        )
+        .await
+        .expect("a table");
+    let noon = Timestamp::from_micros(1_700_000_000_000_000);
+    let specifications: [Spec; 4] = [
+        equal(field("at"), value(noon)),
+        equal(field("zoned"), value(noon)),
+        equal(field("small"), value(7)),
+        // And where nothing stands beside them, the constants say their own.
+        equal(field("small"), add(value(3), value(4))),
+    ];
+    for specification in specifications {
+        let query = compile(&specification).expect("compiled");
+        let text = format!("SELECT id FROM spec_moments WHERE {}", query.sql);
+        let params: Vec<&(dyn ToSql + Sync)> = query
+            .params
+            .iter()
+            .map(|param| param as &(dyn ToSql + Sync))
+            .collect();
+        let rows = client
+            .query(&text, &params)
+            .await
+            .unwrap_or_else(|error| panic!("{text}: {error}"));
+        assert_eq!(rows.len(), 1, "{text}");
     }
 }
 

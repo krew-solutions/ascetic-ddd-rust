@@ -40,6 +40,11 @@
 //!
 //! # Where the text differs from the sources'
 //!
+//! * A constant with nothing but constants beside it has its type said,
+//!   `$1::bigint + $2::bigint`: the server has nothing to find it by, and
+//!   the sources' `$1 + $2` is "operator is not unique: unknown + unknown"
+//!   to a driver that asks the server for the types. [`ParamType`] is how a
+//!   value says its kind.
 //! * Parentheses follow associativity as well as precedence. The sources
 //!   compare precedences alone and write `a - (b - c)` as `a - b - c`, and
 //!   `(a = b) = c` as `a = b = c`, which PostgreSQL does not parse.
@@ -58,6 +63,7 @@
 //! and is in no table, so `(a OR b) AND c` comes out `a OR b AND c`.
 
 mod identifier;
+mod param_type;
 mod precedence;
 mod schema;
 mod singular;
@@ -67,6 +73,7 @@ mod to_sql;
 use std::fmt;
 
 use self::identifier::{identifier, plain, qualified, quoted};
+pub use self::param_type::ParamType;
 use self::precedence::{ATOM, Associativity};
 pub use self::schema::{Relation, Schema, Storage};
 use crate::domain::ast::{Expr, Path, Root};
@@ -107,7 +114,7 @@ impl std::error::Error for CompileError {}
 
 /// `specification` as a condition, its collections embedded, its parameters
 /// numbered from `$1`: the sources' `compile_to_sql`.
-pub fn compile<V: Clone>(specification: &Expr<V>) -> Result<Query<V>, CompileError> {
+pub fn compile<V: Clone + ParamType>(specification: &Expr<V>) -> Result<Query<V>, CompileError> {
     Compiler::new().compile(specification)
 }
 
@@ -139,7 +146,10 @@ impl<'s> Compiler<'s> {
     }
 
     /// `specification` as a condition.
-    pub fn compile<V: Clone>(&self, specification: &Expr<V>) -> Result<Query<V>, CompileError> {
+    pub fn compile<V: Clone + ParamType>(
+        &self,
+        specification: &Expr<V>,
+    ) -> Result<Query<V>, CompileError> {
         let start = Next {
             param: self.offset,
             alias: 0,
@@ -151,7 +161,7 @@ impl<'s> Compiler<'s> {
         })
     }
 
-    fn render<V: Clone>(
+    fn render<V: Clone + ParamType>(
         &self,
         expr: &Expr<V>,
         item: Option<&Item>,
@@ -173,7 +183,9 @@ impl<'s> Compiler<'s> {
             }
             Expr::Prefix(op, operand) => {
                 let precedence = precedence::prefix(*op);
+                let alone = param_type::under_prefix(*op, operand);
                 let (operand, next) = self.render(operand, item, next)?;
+                let operand = operand.of_type(alone);
                 // `NOT NOT a` reads as it should; `--a` reads as a comment.
                 let doubled = *op == Prefix::Neg && operand.precedence == precedence;
                 let operand = operand.within(precedence, doubled);
@@ -185,7 +197,9 @@ impl<'s> Compiler<'s> {
             }
             Expr::Postfix(operand, op) => {
                 let precedence = precedence::postfix(*op);
+                let alone = param_type::under_postfix(operand);
                 let (operand, next) = self.render(operand, item, next)?;
+                let operand = operand.of_type(alone);
                 let operand = operand.within(precedence, true);
                 let sql = format!("{} {op}", operand.sql);
                 Ok((operand.with(sql, precedence), next))
@@ -193,8 +207,10 @@ impl<'s> Compiler<'s> {
             Expr::Infix(left, op, right) => {
                 let (precedence, associativity) = precedence::infix(*op);
                 let apart = |side| associativity != side && !precedence::regroups(*op);
+                let (of_left, of_right) = param_type::of_both(left, *op, right);
                 let (left, next) = self.render(left, item, next)?;
                 let (right, next) = self.render(right, item, next)?;
+                let (left, right) = (left.of_type(of_left), right.of_type(of_right));
                 let left = left.within(precedence, apart(Associativity::Left));
                 let right = right.within(precedence, apart(Associativity::Right));
                 let sql = format!("{} {} {}", left.sql, spelling(*op), right.sql);
@@ -302,7 +318,7 @@ impl<'s> Compiler<'s> {
 
     /// `EXISTS (SELECT 1 FROM … AS alias WHERE …)` over an array of the
     /// parent's row, or over the rows of a table that point at the parent.
-    fn exists<V: Clone>(
+    fn exists<V: Clone + ParamType>(
         &self,
         source: &Path,
         predicate: &Expr<V>,
@@ -424,6 +440,18 @@ impl<V> Fragment<V> {
             }
         } else {
             self
+        }
+    }
+
+    /// This, its type said if there is one to say: a cast binds tighter than
+    /// any operator, so what was an atom is one still.
+    fn of_type(self, param_type: Option<&'static str>) -> Self {
+        match param_type {
+            Some(param_type) => Fragment {
+                sql: format!("{}::{param_type}", self.sql),
+                ..self
+            },
+            None => self,
         }
     }
 

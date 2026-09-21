@@ -468,6 +468,55 @@ fn is_takes_a_parameter() {
     );
 }
 
+/// A constant is a parameter, and the server finds its type from what stands
+/// beside it. Where every operand of an operator is a constant there is
+/// nothing beside it - "operator is not unique: unknown + unknown" - so there
+/// the text says the type, by the kind of the value. Beside a column it does
+/// not: the value adapts to the column, which a type said would take away.
+#[test]
+fn a_constant_with_nothing_beside_it_has_its_type_said() {
+    let null = || Expr::Value(Value::Null);
+    for (specification, expected) in [
+        // Beside a column, or beside what has a type already: as it was.
+        (greater_than(field("price"), value(1)), r#""price" > $1"#),
+        (
+            greater_than(add(field("price"), value(1)), value(2)),
+            r#""price" + $1 > $2"#,
+        ),
+        // Both operands constants.
+        (
+            greater_than(field("price"), add(value(1), value(2))),
+            r#""price" > $1::bigint + $2::bigint"#,
+        ),
+        (
+            less_than(value(1), value(2.5)),
+            "$1::bigint < $2::double precision",
+        ),
+        (equal(value("a"), value("b")), "$1::text = $2::text"),
+        // What was typed so is a type for what stands beside it.
+        (
+            mul(add(value(1), value(2)), value(3)),
+            "($1::bigint + $2::bigint) * $3",
+        ),
+        // PostgreSQL shifts a bigint by an integer.
+        (left_shift(value(1), value(4)), "$1::bigint << $2::integer"),
+        // Alone under its operator.
+        (neg(value(5)), "-$1::bigint"),
+        (not(value(true)), "NOT $1::boolean"),
+        (is_null(value(7)), "$1::bigint IS NULL"),
+        // A null has no kind. Beside a constant it takes that one's type from
+        // the server; alone, what its operator is of.
+        (add(null(), value(1)), "$1 + $2::bigint"),
+        (add(null(), null()), "$1::bigint + $2::bigint"),
+        (equal(null(), null()), "$1 = $2"),
+        (is_null(null()), "$1::text IS NULL"),
+        (neg(null()), "-$1::bigint"),
+        (not(null()), "NOT $1"),
+    ] {
+        assert_eq!(sql(&specification), expected);
+    }
+}
+
 #[test]
 fn a_name_that_is_not_an_identifier_is_refused() {
     let invalid = |name: &str| Err(CompileError::InvalidIdentifier(name.to_owned()));

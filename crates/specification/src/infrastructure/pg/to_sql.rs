@@ -11,6 +11,10 @@
 //! among them: its wire format is a decimal expansion this crate has no
 //! other use for; compare a `numeric` column with `$1::bigint` or
 //! `$1::float8`, or map the value in the application.
+//!
+//! Where the query gives the server nothing to infer a type from — every
+//! operand of an operator a constant — the compiler says the type in the
+//! text, and the value is written as that: see `param_type`.
 
 use std::error::Error;
 

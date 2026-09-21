@@ -196,6 +196,16 @@ the sources as they were.
   that is not of ASCII letters, digits and `_` is refused. The sources write
   any name into the query as it stands, where `user` is the session's user
   and not a column, and `order` does not parse.
+* A constant with nothing but constants beside it has its type said in the
+  text, `$1::bigint + $2::bigint`, by the kind of its value; a null, which has
+  no kind, by what its operator is of. The server finds the type of a
+  parameter from what stands beside it, and there it has nothing to find it
+  by: "operator is not unique: unknown + unknown" to Rust's and Go's drivers,
+  which ask the server. Python's sends a type with each value, an integer's
+  by its size, so the server computed `1 << 63` in sixteen bits and answered
+  0. Beside a column the type is not said: the value adapts to the
+  column, and a type said would take that away - `"at" = $1::timestamptz` of
+  a column without zone is compared in the session's time zone.
 * Unary minus exists. Python's `NEG = "-"` is an alias of `SUB` in its
   `Enum`; Go's prints as `-neg`; Go's generator emits a `spec.Neg` that is
   not defined. Unary plus is dropped: nothing produced it.
