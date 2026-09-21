@@ -20,9 +20,10 @@ use ascetic_ddd_specification::ast::{
 use ascetic_ddd_specification::jsonpath::{Params, Template};
 use ascetic_ddd_specification::pg::{Compiler, Relation, Schema, compile};
 use ascetic_ddd_specification::{
-    EvalError, Expr, Interval, OperandError, Path, Record, Timestamp, Value, evaluate,
-    is_satisfied_by,
+    Arithmetic, EvalError, Expr, Interval, Mapped, Mapping, Operand, OperandError, Path, Record,
+    Root, Timestamp, Value, evaluate, is_satisfied_by, transform,
 };
+use std::cmp::Ordering;
 use tokio_postgres::error::SqlState;
 use tokio_postgres::types::{ToSql, Type};
 use tokio_postgres::{Client, NoTls};
@@ -573,6 +574,181 @@ async fn a_specification_selects_the_rows_it_is_satisfied_by() {
                 .collect();
             assert_eq!(selected, satisfied, "{storage}: {text}");
         }
+    }
+}
+
+/// The values of a domain whose items may have a discount. A discount is a
+/// Value Object, and a specification compares it as one: `@.discount >
+/// Discount(10)`, not a number found inside it. An item that has no discount
+/// has the special case of one - not a null in a discount's place, which a
+/// specification would have to step around.
+#[derive(Clone, Debug, PartialEq)]
+enum Priced {
+    Scalar(Value),
+    Discount(i64),
+    NoDiscount,
+}
+
+impl Operand for Priced {
+    fn null() -> Self {
+        Priced::Scalar(Value::null())
+    }
+
+    /// The special case is what is not known, to a comparison: as the column
+    /// it is kept in is null.
+    fn is_null(&self) -> bool {
+        match self {
+            Priced::Scalar(value) => value.is_null(),
+            Priced::Discount(_) => false,
+            Priced::NoDiscount => true,
+        }
+    }
+
+    fn from_bool(value: bool) -> Self {
+        Priced::Scalar(Value::from_bool(value))
+    }
+
+    fn as_bool(&self) -> Option<bool> {
+        match self {
+            Priced::Scalar(value) => value.as_bool(),
+            _ => None,
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            Priced::Scalar(value) => value.kind(),
+            Priced::Discount(_) | Priced::NoDiscount => "discount",
+        }
+    }
+
+    fn equals(&self, other: &Self) -> Result<bool, OperandError> {
+        self.compare(other).map(Ordering::is_eq)
+    }
+
+    fn compare(&self, other: &Self) -> Result<Ordering, OperandError> {
+        match (self, other) {
+            (Priced::Scalar(left), Priced::Scalar(right)) => left.compare(right),
+            (Priced::Discount(left), Priced::Discount(right)) => Ok(left.cmp(right)),
+            _ => Err(OperandError::unsupported("<", self.kind(), other.kind())),
+        }
+    }
+
+    fn negate(&self) -> Result<Self, OperandError> {
+        match self {
+            Priced::Scalar(value) => value.negate().map(Priced::Scalar),
+            _ => Err(OperandError::unsupported_unary("-", self.kind())),
+        }
+    }
+
+    fn compute(&self, op: Arithmetic, other: &Self) -> Result<Self, OperandError> {
+        match (self, other) {
+            (Priced::Scalar(left), Priced::Scalar(right)) => {
+                left.compute(op, right).map(Priced::Scalar)
+            }
+            _ => Err(OperandError::unsupported(op, self.kind(), other.kind())),
+        }
+    }
+}
+
+/// What the storage has for them: a discount is its percent in a column, and
+/// the special case is that column's null.
+struct Prices;
+
+impl Mapping<Priced, Value> for Prices {
+    type Error = String;
+
+    fn field(&self, path: &Path) -> Result<Mapped<Value>, String> {
+        let names: Vec<&str> = path.names().collect();
+        match (path.root(), names.as_slice()) {
+            (Root::Item, ["discount"]) => {
+                Ok(Mapped::Scalar(Expr::Field(Path::item("discount_percent"))))
+            }
+            (_, names) => Err(format!("no such member: {}", names.join("."))),
+        }
+    }
+
+    fn value(&self, value: &Priced) -> Result<Mapped<Value>, String> {
+        Ok(Mapped::Scalar(Expr::Value(match value {
+            Priced::Scalar(value) => value.clone(),
+            Priced::Discount(percent) => Value::Int(*percent),
+            Priced::NoDiscount => Value::Null,
+        })))
+    }
+}
+
+/// A Value Object is compared as a whole by the evaluator, and what is not
+/// there is a special case of it: no path into it, so no member of a null to
+/// ask for, and the answer does not hang on the order of the items. The
+/// mapping says what it is in the storage, and the two readers agree.
+#[tokio::test]
+async fn a_value_object_is_compared_as_a_whole_and_its_absence_is_a_special_case() {
+    let client = client().await;
+    client
+        .batch_execute(
+            "CREATE TYPE pg_temp.spec_priced AS (price int8, discount_percent int8);
+             CREATE TEMP TABLE spec_shops (id int8, items pg_temp.spec_priced[]);
+             INSERT INTO spec_shops VALUES
+                 (1, ARRAY[ROW(900, 15), ROW(100, NULL)]::pg_temp.spec_priced[]),
+                 (2, ARRAY[ROW(100, NULL), ROW(900, 15)]::pg_temp.spec_priced[]),
+                 (3, ARRAY[ROW(100, NULL)]::pg_temp.spec_priced[]);",
+        )
+        .await
+        .expect("the shops");
+    let item = |price: i64, discount: Priced| {
+        Record::object([
+            ("price", Record::value(Priced::Scalar(Value::Int(price)))),
+            ("discount", Record::value(discount)),
+        ])
+    };
+    let discounted = || item(900, Priced::Discount(15));
+    let plain = || item(100, Priced::NoDiscount);
+    let shops: [(i64, Record<Priced>); 3] = [
+        (1, vec![discounted(), plain()]),
+        (2, vec![plain(), discounted()]),
+        (3, vec![plain()]),
+    ]
+    .map(|(id, items)| (id, Record::object([("items", Record::collection(items))])));
+
+    let discount = || field(Path::item("discount"));
+    let over = |percent: i64| greater_than(discount(), Expr::Value(Priced::Discount(percent)));
+    let specifications: [(Expr<Priced>, Vec<i64>); 5] = [
+        (any("items", over(10)), vec![1, 2]),
+        (
+            any(
+                "items",
+                equal(discount(), Expr::Value(Priced::Discount(15))),
+            ),
+            vec![1, 2],
+        ),
+        (any("items", is_null(discount())), vec![1, 2, 3]),
+        (not(any("items", over(10))), vec![3]),
+        (any("items", over(20)), vec![]),
+    ];
+    for (specification, expected) in specifications {
+        let satisfied: Vec<i64> = shops
+            .iter()
+            .filter(|(_, shop)| is_satisfied_by(&specification, shop).expect("evaluated"))
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(satisfied, expected, "{specification:?}");
+
+        let query =
+            compile(&transform(&specification, &Prices).expect("transformed")).expect("compiled");
+        let text = format!("SELECT id FROM spec_shops WHERE {} ORDER BY id", query.sql);
+        let params: Vec<&(dyn ToSql + Sync)> = query
+            .params
+            .iter()
+            .map(|param| param as &(dyn ToSql + Sync))
+            .collect();
+        let selected: Vec<i64> = client
+            .query(&text, &params)
+            .await
+            .unwrap_or_else(|error| panic!("{text}: {error}"))
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert_eq!(selected, satisfied, "{text}");
     }
 }
 

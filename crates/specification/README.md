@@ -253,10 +253,14 @@ the sources as they were.
   `text` - of a column that is no composite as that cast:
   `("item_1"."owner")."name"` of a key 10 is `'10'`, and the query selects
   nothing, in silence. Any other member of such a column is an error.
-* An object that is null has no members for the evaluator,
-  `ContextError::NotAnObject`, where PostgreSQL has null for a member of a
-  null composite. And a composite is null to PostgreSQL if all its members
-  are, and not null only if none is.
+* A Value Object is compared as a whole, `@.discount > Discount(10)`, by the
+  [`Operand`] its type of values implements, and the [`Mapping`] says what
+  it is in the storage; a specification does not reach for a number inside
+  it. One that is not there is a special case of its type, null to a
+  comparison as its column is - not a null in the object's place: into that
+  the evaluator cannot go, `ContextError::NotAnObject`, where PostgreSQL has
+  null for a member of a null composite. And a composite is null to
+  PostgreSQL if all its members are, and not null only if none is.
 * A path from the candidate is written into the query unqualified. Inside the
   subquery of a relational collection an unqualified name can be captured by
   a column of the child table: qualify columns in the [`Mapping`].
