@@ -34,6 +34,18 @@ pub enum Mapped<S> {
     Scalar(Expr<S>),
     /// Several, compared part by part; a part may be composite itself.
     Composite(Vec<Mapped<S>>),
+    /// The storage's null, for a value of the domain that is one there: a
+    /// special case that answers for itself in the domain - "no discount",
+    /// equal to itself - and is a column's null in the storage. Compared for
+    /// equality it is tested for, `IS NULL`: `= $1` with a null is true of
+    /// nothing. Anywhere else it is the null it carries.
+    ///
+    /// A null that was one in the domain already is a [`Scalar`] like any
+    /// constant, and stays compared: it is the mapping that knows which of
+    /// the two a null is, so it is the mapping that says.
+    ///
+    /// [`Scalar`]: Mapped::Scalar
+    Null(S),
 }
 
 /// What the storage has for the domain's members and values: the sources'
@@ -122,21 +134,34 @@ fn lower<D, S, M: Mapping<D, S>>(
             *op,
         ))),
         Expr::Infix(left, op, right) => {
-            match (lower(left, mapping)?, lower(right, mapping)?) {
-                (Mapped::Scalar(left), Mapped::Scalar(right)) => {
-                    Ok(Mapped::Scalar(ast::infix(left, *op, right)))
+            let (left, right) = (lower(left, mapping)?, lower(right, mapping)?);
+            // Equality with what the mapping says is the storage's null is
+            // the null test of the other operand.
+            let test: Option<fn(Expr<S>) -> Expr<S>> = match op {
+                Infix::Comparison(Comparison::Eq) => Some(ast::is_null),
+                Infix::Comparison(Comparison::Ne) => Some(ast::is_not_null),
+                _ => None,
+            };
+            match (left, right, test) {
+                (tested, Mapped::Null(_), Some(test)) | (Mapped::Null(_), tested, Some(test)) => {
+                    Ok(Mapped::Scalar(test(scalar(tested)?)))
                 }
-                (Mapped::Composite(left), Mapped::Composite(right)) => match op {
-                    Infix::Comparison(Comparison::Eq) => equal(left, right).map(Mapped::Scalar),
-                    // Unequal is "not equal in every part", which is not
-                    // "unequal in every part": (1, 2) and (1, 3) differ.
-                    Infix::Comparison(Comparison::Ne) => {
-                        equal(left, right).map(ast::not).map(Mapped::Scalar)
+                (left, right, _) => match (written(left), written(right)) {
+                    (Written::One(left), Written::One(right)) => {
+                        Ok(Mapped::Scalar(ast::infix(left, *op, right)))
                     }
-                    _ => Err(TransformError::UnsupportedOperator(*op)),
+                    (Written::Several(left), Written::Several(right)) => match op {
+                        Infix::Comparison(Comparison::Eq) => equal(left, right).map(Mapped::Scalar),
+                        // Unequal is "not equal in every part", which is not
+                        // "unequal in every part": (1, 2) and (1, 3) differ.
+                        Infix::Comparison(Comparison::Ne) => {
+                            equal(left, right).map(ast::not).map(Mapped::Scalar)
+                        }
+                        _ => Err(TransformError::UnsupportedOperator(*op)),
+                    },
+                    (Written::Several(_), Written::One(_))
+                    | (Written::One(_), Written::Several(_)) => Err(TransformError::NotComposite),
                 },
-                (Mapped::Composite(_), Mapped::Scalar(_))
-                | (Mapped::Scalar(_), Mapped::Composite(_)) => Err(TransformError::NotComposite),
             }
         }
         Expr::Any(source, predicate) => Ok(Mapped::Scalar(ast::any(
@@ -151,7 +176,24 @@ fn lower<D, S, M: Mapping<D, S>>(
 fn scalar<S, E>(mapped: Mapped<S>) -> Result<Expr<S>, TransformError<E>> {
     match mapped {
         Mapped::Scalar(expr) => Ok(expr),
+        Mapped::Null(null) => Ok(Expr::Value(null)),
         Mapped::Composite(_) => Err(TransformError::UnexpectedComposite),
+    }
+}
+
+/// An operand where it is not tested for: one expression, or several. The
+/// storage's null is the constant it carries, under any operator but the
+/// equality that tests for it.
+enum Written<S> {
+    One(Expr<S>),
+    Several(Vec<Mapped<S>>),
+}
+
+fn written<S>(mapped: Mapped<S>) -> Written<S> {
+    match mapped {
+        Mapped::Scalar(expr) => Written::One(expr),
+        Mapped::Null(null) => Written::One(Expr::Value(null)),
+        Mapped::Composite(parts) => Written::Several(parts),
     }
 }
 
@@ -161,6 +203,8 @@ fn equal<S, E>(left: Vec<Mapped<S>>, right: Vec<Mapped<S>>) -> Result<Expr<S>, T
         return Err(TransformError::ShapeMismatch);
     }
     let mut parts = left.into_iter().zip(right).map(|pair| match pair {
+        // A part that is the storage's null is tested for, as a whole is.
+        (tested, Mapped::Null(_)) | (Mapped::Null(_), tested) => scalar(tested).map(ast::is_null),
         (Mapped::Scalar(left), Mapped::Scalar(right)) => Ok(ast::equal(left, right)),
         (Mapped::Composite(left), Mapped::Composite(right)) => equal(left, right),
         (Mapped::Composite(_), Mapped::Scalar(_)) | (Mapped::Scalar(_), Mapped::Composite(_)) => {

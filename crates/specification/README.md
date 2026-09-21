@@ -253,6 +253,14 @@ the sources as they were.
   `text` - of a column that is no composite as that cast:
   `("item_1"."owner")."name"` of a key 10 is `'10'`, and the query selects
   nothing, in silence. Any other member of such a column is an error.
+* A value of the domain that the storage keeps as a null - a special case
+  that answers for itself, `discount == NoDiscount()` - is tested for where
+  it is compared for equality: the [`Mapping`] says it is the storage's null,
+  `Mapped::Null`, and `transform` writes `IS NULL` and `IS NOT NULL`. What
+  stays PostgreSQL's own is a null compared with a value: `discount > 10` is
+  unknown to it of such a row, and so is `NOT discount > 10`, where the
+  special case answers false and true. A special case kept as a value, and
+  not as a null, has none of this.
 * A Value Object is compared as a whole, `@.discount > Discount(10)`, by the
   [`Operand`] its type of values implements, and the [`Mapping`] says what
   it is in the storage; a specification does not reach for a number inside

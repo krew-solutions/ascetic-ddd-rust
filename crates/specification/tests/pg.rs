@@ -752,6 +752,169 @@ async fn a_value_object_is_compared_as_a_whole_and_its_absence_is_a_special_case
     }
 }
 
+/// The same discount with a special case that answers for itself, as Fowler's
+/// Special Case does: it is equal to itself and to no discount, and less than
+/// any. Nothing of it is null to the evaluator.
+#[derive(Clone, Debug, PartialEq)]
+struct Answering(Priced);
+
+impl Operand for Answering {
+    fn null() -> Self {
+        Answering(Priced::null())
+    }
+
+    fn is_null(&self) -> bool {
+        matches!(&self.0, Priced::Scalar(value) if value.is_null())
+    }
+
+    fn from_bool(value: bool) -> Self {
+        Answering(Priced::from_bool(value))
+    }
+
+    fn as_bool(&self) -> Option<bool> {
+        self.0.as_bool()
+    }
+
+    fn kind(&self) -> &'static str {
+        self.0.kind()
+    }
+
+    fn equals(&self, other: &Self) -> Result<bool, OperandError> {
+        self.compare(other).map(Ordering::is_eq)
+    }
+
+    fn compare(&self, other: &Self) -> Result<Ordering, OperandError> {
+        match (&self.0, &other.0) {
+            (Priced::NoDiscount, Priced::NoDiscount) => Ok(Ordering::Equal),
+            (Priced::NoDiscount, Priced::Discount(_)) => Ok(Ordering::Less),
+            (Priced::Discount(_), Priced::NoDiscount) => Ok(Ordering::Greater),
+            (left, right) => left.compare(right),
+        }
+    }
+
+    fn negate(&self) -> Result<Self, OperandError> {
+        self.0.negate().map(Answering)
+    }
+
+    fn compute(&self, op: Arithmetic, other: &Self) -> Result<Self, OperandError> {
+        self.0.compute(op, &other.0).map(Answering)
+    }
+}
+
+/// The same storage: the special case is the column's null. That it is one
+/// the mapping says, which `transform` reads where the two are compared for
+/// equality.
+struct AnsweringPrices;
+
+impl Mapping<Answering, Value> for AnsweringPrices {
+    type Error = String;
+
+    fn field(&self, path: &Path) -> Result<Mapped<Value>, String> {
+        Prices.field(path)
+    }
+
+    fn value(&self, value: &Answering) -> Result<Mapped<Value>, String> {
+        match &value.0 {
+            Priced::NoDiscount => Ok(Mapped::Null(Value::Null)),
+            other => Prices.value(other),
+        }
+    }
+}
+
+/// A special case that answers for itself is equal to itself, and the storage
+/// has a null for it: `discount = $1` with a null is true of nothing, so the
+/// server found no shop where the evaluator found all three. Equality with
+/// what the mapping says is the storage's null is the null test.
+///
+/// What stays the server's own: a null compared with a value is unknown to
+/// it, and so is the negation of that, where the special case answers false
+/// and true. A special case kept as a value, and not as a null, has none of
+/// this.
+#[tokio::test]
+async fn equality_with_a_special_case_kept_as_a_null_is_the_null_test() {
+    let client = client().await;
+    client
+        .batch_execute(
+            "CREATE TYPE pg_temp.spec_answering AS (price int8, discount_percent int8);
+             CREATE TEMP TABLE spec_answering_shops (id int8, items pg_temp.spec_answering[]);
+             INSERT INTO spec_answering_shops VALUES
+                 (1, ARRAY[ROW(900, 15), ROW(100, NULL)]::pg_temp.spec_answering[]),
+                 (2, ARRAY[ROW(100, NULL), ROW(900, 15)]::pg_temp.spec_answering[]),
+                 (3, ARRAY[ROW(100, NULL)]::pg_temp.spec_answering[]);",
+        )
+        .await
+        .expect("the shops");
+    let of = |discount: Priced| Record::object([("discount", Record::value(Answering(discount)))]);
+    let shops: [(i64, Record<Answering>); 3] = [
+        (1, vec![of(Priced::Discount(15)), of(Priced::NoDiscount)]),
+        (2, vec![of(Priced::NoDiscount), of(Priced::Discount(15))]),
+        (3, vec![of(Priced::NoDiscount)]),
+    ]
+    .map(|(id, items)| (id, Record::object([("items", Record::collection(items))])));
+
+    let discount = || field(Path::item("discount"));
+    let constant = |discount: Priced| Expr::Value(Answering(discount));
+    let none = || constant(Priced::NoDiscount);
+    let over = |percent: i64| greater_than(discount(), constant(Priced::Discount(percent)));
+    // The specification; the shops it is satisfied by; the shops the server selects.
+    let specifications: [(Expr<Answering>, Vec<i64>, Vec<i64>); 6] = [
+        (
+            any("items", equal(discount(), none())),
+            vec![1, 2, 3],
+            vec![1, 2, 3],
+        ),
+        (
+            any("items", equal(none(), discount())),
+            vec![1, 2, 3],
+            vec![1, 2, 3],
+        ),
+        (
+            any("items", not_equal(discount(), none())),
+            vec![1, 2],
+            vec![1, 2],
+        ),
+        (any("items", over(10)), vec![1, 2], vec![1, 2]),
+        // The server's own logic of a null, which the null test does not reach.
+        (any("items", not(over(10))), vec![1, 2, 3], vec![]),
+        (
+            any(
+                "items",
+                not_equal(discount(), constant(Priced::Discount(15))),
+            ),
+            vec![1, 2, 3],
+            vec![],
+        ),
+    ];
+    for (specification, in_memory, on_the_server) in specifications {
+        let satisfied: Vec<i64> = shops
+            .iter()
+            .filter(|(_, shop)| is_satisfied_by(&specification, shop).expect("evaluated"))
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(satisfied, in_memory, "{specification:?}");
+
+        let query = compile(&transform(&specification, &AnsweringPrices).expect("transformed"))
+            .expect("compiled");
+        let text = format!(
+            "SELECT id FROM spec_answering_shops WHERE {} ORDER BY id",
+            query.sql
+        );
+        let params: Vec<&(dyn ToSql + Sync)> = query
+            .params
+            .iter()
+            .map(|param| param as &(dyn ToSql + Sync))
+            .collect();
+        let selected: Vec<i64> = client
+            .query(&text, &params)
+            .await
+            .unwrap_or_else(|error| panic!("{text}: {error}"))
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert_eq!(selected, on_the_server, "{text}");
+    }
+}
+
 /// Why a type is said only where nothing stands beside the constant. A point
 /// in time is written as a timestamp with zone or without, whichever the
 /// column is. Said to be `timestamptz` beside a column without zone, it would

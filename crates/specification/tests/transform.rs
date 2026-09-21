@@ -4,7 +4,7 @@
 //! columns in the table.
 
 use ascetic_ddd_specification::ast::{
-    and, any, equal, field, greater_than, is_null, less_than, not, not_equal, value,
+    and, any, equal, field, greater_than, is_not_null, is_null, less_than, not, not_equal, value,
 };
 use ascetic_ddd_specification::{
     Expr, Infix, Mapped, Mapping, Path, Record, Root, TransformError, Value, is_satisfied_by, pg,
@@ -315,4 +315,80 @@ fn the_mappings_refusal_is_the_transformations() {
             "unknown field: something.colour".to_owned()
         )),
     );
+}
+
+/// A value of the domain that the storage keeps as a null - a special case
+/// that answers for itself in the domain - is tested for where it is compared
+/// for equality: `owner = $1` with a null is true of nothing. It is the
+/// mapping that says a null is that, with [`Mapped::Null`]; a null that was
+/// one in the domain already stays compared.
+#[test]
+fn equality_with_what_the_mapping_says_is_the_storages_null_is_the_null_test() {
+    #[derive(Clone, Debug, PartialEq)]
+    enum Who {
+        Somebody(i64),
+        /// The special case: an owner that is nobody, equal to itself.
+        Nobody,
+        /// Not known, in the domain as in the storage.
+        Unknown,
+        /// Known by two numbers, of which the second may be nobody's.
+        Pair(i64, Option<i64>),
+    }
+    struct Owners;
+    impl Mapping<Who, Value> for Owners {
+        type Error = String;
+        fn field(&self, path: &Path) -> Result<Mapped<Value>, String> {
+            Ok(match path.name() {
+                "pair" => Mapped::Composite(vec![column(path, "a"), column(path, "b")]),
+                _ => Mapped::Scalar(Expr::Field(path.clone())),
+            })
+        }
+        fn value(&self, value: &Who) -> Result<Mapped<Value>, String> {
+            let known = |id: i64| Mapped::Scalar(int(id));
+            Ok(match value {
+                Who::Somebody(id) => known(*id),
+                Who::Nobody => Mapped::Null(Value::Null),
+                Who::Unknown => Mapped::Scalar(Expr::Value(Value::Null)),
+                Who::Pair(a, b) => {
+                    Mapped::Composite(vec![known(*a), b.map_or(Mapped::Null(Value::Null), known)])
+                }
+            })
+        }
+    }
+    let owner = || field("owner");
+    let nobody = || Expr::Value(Who::Nobody);
+    let null = || Expr::Value(Value::Null);
+    let cases: [(Expr<Who>, Expr<Value>); 8] = [
+        // Somebody is compared, as any value is.
+        (
+            equal(owner(), Expr::Value(Who::Somebody(7))),
+            equal(field("owner"), int(7)),
+        ),
+        (equal(owner(), nobody()), is_null(field("owner"))),
+        (equal(nobody(), owner()), is_null(field("owner"))),
+        (not_equal(owner(), nobody()), is_not_null(field("owner"))),
+        (equal(nobody(), nobody()), is_null(null())),
+        // Under any other operator it is the null it carries.
+        (
+            greater_than(owner(), nobody()),
+            greater_than(field("owner"), null()),
+        ),
+        // A null of the domain's own stays compared.
+        (
+            equal(owner(), Expr::Value(Who::Unknown)),
+            equal(field("owner"), null()),
+        ),
+        // A part of a composite is tested for as a whole is.
+        (
+            equal(field("pair"), Expr::Value(Who::Pair(1, None))),
+            and(equal(field("a"), int(1)), is_null(field("b"))),
+        ),
+    ];
+    for (specification, expected) in cases {
+        assert_eq!(
+            transform(&specification, &Owners),
+            Ok(expected),
+            "{specification:?}"
+        );
+    }
 }
