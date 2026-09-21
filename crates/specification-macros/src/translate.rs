@@ -23,6 +23,48 @@ pub(crate) struct Scope<'a> {
     /// The items of those further out. The tree has one `@`, the nearest;
     /// these can be named in Rust and not in the tree.
     outer: Vec<&'a Ident>,
+    /// What an `Option` holds, under the name the closure of `is_some_and` or
+    /// of `is_none_or` gives it. The latest is the nearest.
+    held: Vec<(&'a Ident, Held)>,
+    /// The parameters declared as an `Option`.
+    options: Vec<&'a Ident>,
+}
+
+/// What stands behind the name given to what an `Option` holds: the `Option`,
+/// which is its value or the null.
+#[derive(Clone)]
+enum Held {
+    /// A member of the candidate or of the item.
+    Member(Place),
+    /// A value from outside - a parameter - as the tree function writes it.
+    Outside(Tokens),
+}
+
+/// A member of the candidate or of the item: where its path starts, and the
+/// names along it.
+#[derive(Clone)]
+struct Place {
+    root: Root,
+    names: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+enum Root {
+    Candidate,
+    Item,
+}
+
+impl Place {
+    /// The code of the `Path`; none of the candidate or the item itself.
+    fn path(&self) -> Option<Tokens> {
+        let ast = ast();
+        let root = match self.root {
+            Root::Candidate => quote!(global),
+            Root::Item => quote!(item),
+        };
+        let (first, names) = self.names.split_first()?;
+        Some(quote!(#ast::Path::#root(#first) #(.child(#names))*))
+    }
 }
 
 impl<'a> Scope<'a> {
@@ -31,33 +73,77 @@ impl<'a> Scope<'a> {
             candidate: &predicate.candidate,
             item: None,
             outer: Vec::new(),
+            held: Vec::new(),
+            options: predicate.options(),
         }
     }
 
     /// The scope of the predicate of a collection whose items are `item`.
+    /// What the item so far holds goes out of reach with it; what the
+    /// candidate holds stays.
     fn inside(&self, item: &'a Ident) -> Self {
+        let (held, lost): (Vec<_>, Vec<_>) = self
+            .held
+            .iter()
+            .filter(|(name, _)| *name != item)
+            .cloned()
+            .partition(|(_, held)| match held {
+                Held::Member(place) => matches!(place.root, Root::Candidate),
+                Held::Outside(_) => true,
+            });
         Scope {
             candidate: self.candidate,
             item: Some(item),
-            outer: self.outer.iter().copied().chain(self.item).collect(),
+            outer: self
+                .outer
+                .iter()
+                .copied()
+                .chain(self.item)
+                .chain(lost.into_iter().map(|(name, _)| name))
+                .collect(),
+            held,
+            options: self.options.clone(),
+        }
+    }
+
+    /// The scope of a predicate of what an `Option` holds, which it calls
+    /// `name`.
+    fn holding(&self, name: &'a Ident, held: Held) -> Self {
+        Scope {
+            candidate: self.candidate,
+            item: self.item,
+            outer: self.outer.clone(),
+            held: self.held.iter().cloned().chain([(name, held)]).collect(),
+            options: self.options.clone(),
         }
     }
 }
 
 /// What a name at the start of a path is.
-enum Base {
+enum Base<'s> {
     Candidate,
     Item,
+    /// What an `Option` holds: the member that is the `Option`.
+    Held(&'s Place),
+    /// What an `Option` from outside holds: that value, as it is written.
+    Outside(&'s Tokens),
     /// Not a part of the candidate: a parameter, a constant. A value.
     Other,
 }
 
 impl Scope<'_> {
-    fn base(&self, name: &Ident) -> Result<Base, Error> {
-        if name == self.candidate {
-            Ok(Base::Candidate)
+    /// The nearest of that name, as Rust reads it: what is held is named
+    /// inside everything else, the item inside the candidate.
+    fn base(&self, name: &Ident) -> Result<Base<'_>, Error> {
+        if let Some((_, held)) = self.held.iter().rev().find(|(held, _)| *held == name) {
+            Ok(match held {
+                Held::Member(place) => Base::Held(place),
+                Held::Outside(option) => Base::Outside(option),
+            })
         } else if self.item == Some(name) {
             Ok(Base::Item)
+        } else if name == self.candidate {
+            Ok(Base::Candidate)
         } else if self.outer.contains(&name) {
             Err(Error::new_spanned(
                 name,
@@ -121,6 +207,9 @@ pub(crate) fn expr(expr: &Expr, scope: &Scope<'_>) -> Result<Tokens, Error> {
             _ => Err(inexpressible(expr)),
         },
         Expr::Binary(binary) => {
+            if is_order(&binary.op) {
+                ordered(expr, [&binary.left, &binary.right], scope)?;
+            }
             let make = infix(&binary.op).ok_or_else(|| inexpressible(expr))?;
             let left = self::expr(&binary.left, scope)?;
             let right = self::expr(&binary.right, scope)?;
@@ -141,10 +230,82 @@ pub(crate) fn expr(expr: &Expr, scope: &Scope<'_>) -> Result<Tokens, Error> {
         },
         Expr::Path(_) | Expr::Field(_) => match member(expr, scope)? {
             Some(path) => Ok(quote!(#ast::field(#path))),
-            None => Ok(quote!(#ast::value(::core::clone::Clone::clone(&#expr)))),
+            None => {
+                let outside = outside(expr, scope)?;
+                Ok(quote!(#ast::value(::core::clone::Clone::clone(&#outside))))
+            }
         },
         Expr::MethodCall(call) => method(call, scope),
         _ => Err(inexpressible(expr)),
+    }
+}
+
+fn is_order(op: &BinOp) -> bool {
+    matches!(
+        op,
+        BinOp::Lt(_) | BinOp::Le(_) | BinOp::Gt(_) | BinOp::Ge(_)
+    )
+}
+
+/// An `Option` is not ordered in a specification. Rust has a none below every
+/// `Some`, the storage has a null that is neither below nor above: of a none
+/// `closed_at < Some(5)` is true to the function and null to the tree, and a
+/// guard on one side does not make the other side a value. What is ordered is
+/// what an `Option` holds, where no none is left to compare.
+///
+/// Refused where an `Option` is seen: `Some(..)`, `None`, a parameter declared
+/// as one. A member that is an `Option` is not seen: the macro has no types.
+fn ordered(
+    comparison: &impl quote::ToTokens,
+    operands: [&Expr; 2],
+    scope: &Scope<'_>,
+) -> Result<(), Error> {
+    if operands.iter().any(|operand| is_option(operand, scope)) {
+        return Err(Error::new_spanned(
+            comparison,
+            "an `Option` has no order in a specification: order what it holds, \
+             `x.is_some_and(|x| x < 5)` or `x.is_none_or(|x| x < 5)`",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `expr` is seen to be an `Option`.
+fn is_option(expr: &Expr, scope: &Scope<'_>) -> bool {
+    match expr {
+        Expr::Paren(inner) => is_option(&inner.expr, scope),
+        Expr::Group(inner) => is_option(&inner.expr, scope),
+        Expr::Reference(inner) => is_option(&inner.expr, scope),
+        Expr::Unary(unary) if matches!(unary.op, UnOp::Deref(_)) => is_option(&unary.expr, scope),
+        Expr::MethodCall(call) if keeps_the_value(call) => is_option(&call.receiver, scope),
+        Expr::Call(call) => {
+            matches!(call.func.as_ref(), Expr::Path(some) if some.path.is_ident("Some"))
+        }
+        Expr::Path(path) => match path.path.get_ident() {
+            Some(name) if name == "None" => true,
+            Some(name) => {
+                matches!(scope.base(name), Ok(Base::Other)) && scope.options.contains(&name)
+            }
+            None => false,
+        },
+        _ => false,
+    }
+}
+
+/// A value from outside as the tree function can write it. The name a closure
+/// gives to what a parameter holds is not the tree function's: it stands for
+/// the parameter, which is its value or the null.
+fn outside(expr: &Expr, scope: &Scope<'_>) -> Result<Tokens, Error> {
+    let Some((base, names)) = chain(expr)? else {
+        return Ok(quote!(#expr));
+    };
+    match (scope.base(base)?, names.as_slice()) {
+        (Base::Outside(option), []) => Ok(quote!(#option)),
+        (Base::Outside(_), _) => Err(Error::new_spanned(
+            expr,
+            "a member of what a parameter holds is not a value the tree can name",
+        )),
+        _ => Ok(quote!(#expr)),
     }
 }
 
@@ -174,23 +335,34 @@ fn infix(op: &BinOp) -> Option<Tokens> {
 /// The code of the `Path` that `expr` is, if it is a member of the
 /// candidate or of the item; `None` if it is a value from elsewhere.
 fn member(expr: &Expr, scope: &Scope<'_>) -> Result<Option<Tokens>, Error> {
-    let Some((base, names)) = chain(expr)? else {
+    let Some(place) = place(expr, scope)? else {
         return Ok(None);
     };
-    let ast = ast();
-    let root = match scope.base(base)? {
-        Base::Candidate => quote!(global),
-        Base::Item => quote!(item),
-        Base::Other => return Ok(None),
-    };
-    let mut names = names.into_iter();
-    let first = names.next().ok_or_else(|| {
+    let path = place.path().ok_or_else(|| {
         Error::new_spanned(
             expr,
             "the candidate itself is not a value: name one of its members",
         )
     })?;
-    Ok(Some(quote!(#ast::Path::#root(#first) #(.child(#names))*)))
+    Ok(Some(path))
+}
+
+/// The member that `expr` is, if it is one of the candidate or of the item;
+/// `None` if it is a value from elsewhere.
+fn place(expr: &Expr, scope: &Scope<'_>) -> Result<Option<Place>, Error> {
+    let Some((base, names)) = chain(expr)? else {
+        return Ok(None);
+    };
+    let (root, held) = match scope.base(base)? {
+        Base::Candidate => (Root::Candidate, Vec::new()),
+        Base::Item => (Root::Item, Vec::new()),
+        Base::Held(place) => (place.root, place.names.clone()),
+        Base::Outside(_) | Base::Other => return Ok(None),
+    };
+    Ok(Some(Place {
+        root,
+        names: held.into_iter().chain(names).collect(),
+    }))
 }
 
 /// `a.b.c` as its first name and the names after it; `None` for a path of
@@ -231,25 +403,98 @@ fn method(call: &ExprMethodCall, scope: &Scope<'_>) -> Result<Tokens, Error> {
         let right = expr(right, scope)?;
         Ok(quote!(#make(#left, #right)))
     };
+    let order = |make: Tokens, right: &Expr| {
+        ordered(call, [&call.receiver, right], scope)?;
+        binary(make, right)
+    };
     match (call.method.to_string().as_str(), arguments.as_slice()) {
         ("is_none", []) => unary(quote!(#ast::is_null)),
         ("is_some", []) => unary(quote!(#ast::is_not_null)),
         // What a Value Object compares by, where Go's has `Equal`, `LessThan`.
         ("eq", [right]) => binary(quote!(#null_test::equal), right),
         ("ne", [right]) => binary(quote!(#null_test::not_equal), right),
-        ("lt", [right]) => binary(quote!(#ast::less_than), right),
-        ("le", [right]) => binary(quote!(#ast::less_than_equal), right),
-        ("gt", [right]) => binary(quote!(#ast::greater_than), right),
-        ("ge", [right]) => binary(quote!(#ast::greater_than_equal), right),
+        ("lt", [right]) => order(quote!(#ast::less_than), right),
+        ("le", [right]) => order(quote!(#ast::less_than_equal), right),
+        ("gt", [right]) => order(quote!(#ast::greater_than), right),
+        ("ge", [right]) => order(quote!(#ast::greater_than_equal), right),
         ("any", [Expr::Closure(predicate)]) => quantifier(quote!(any), call, predicate, scope),
         ("all", [Expr::Closure(predicate)]) => quantifier(quote!(all), call, predicate, scope),
-        // A change of how the value is held, not of the value.
-        ("clone" | "as_str" | "as_ref" | "as_deref", []) => expr(&call.receiver, scope),
+        ("is_some_and", [Expr::Closure(predicate)]) => {
+            held(quote!(and), quote!(is_not_null), call, predicate, scope)
+        }
+        ("is_none_or", [Expr::Closure(predicate)]) => {
+            held(quote!(or), quote!(is_null), call, predicate, scope)
+        }
+        _ if keeps_the_value(call) => expr(&call.receiver, scope),
         _ => Err(Error::new_spanned(
             &call.method,
             "this method has no meaning in a specification",
         )),
     }
+}
+
+/// A change of how the value is held, not of the value.
+fn keeps_the_value(call: &ExprMethodCall) -> bool {
+    call.args.is_empty()
+        && ["clone", "as_str", "as_ref", "as_deref"]
+            .iter()
+            .any(|method| call.method == method)
+}
+
+/// `option.is_some_and(|held| predicate)`: the `Option` is not null and the
+/// predicate is true of it; `option.is_none_or(..)`: it is null, or the
+/// predicate is. The name the closure gives to what is held stands for the
+/// `Option` - a member, or a parameter - which is its value or the null.
+///
+/// The null test beside the predicate is what Rust means, and it makes the
+/// whole of two values as Rust has it: of a none the predicate is null, and
+/// `false AND null` is false, `true OR null` true. So the function and its
+/// tree agree under a `!` too, which `member < Some(5)` does not.
+fn held(
+    join: Tokens,
+    test: Tokens,
+    call: &ExprMethodCall,
+    predicate: &ExprClosure,
+    scope: &Scope<'_>,
+) -> Result<Tokens, Error> {
+    let ast = ast();
+    let mut option = call.receiver.as_ref();
+    while let Expr::MethodCall(inner) = option {
+        if !keeps_the_value(inner) {
+            break;
+        }
+        option = inner.receiver.as_ref();
+    }
+    let nameless = || {
+        Error::new_spanned(
+            &call.receiver,
+            "an `Option` asked for what it holds is a member of the candidate or of the item, \
+             or a parameter",
+        )
+    };
+    let (held, option) = match place(option, scope)? {
+        Some(place) => {
+            let path = place.path().ok_or_else(nameless)?;
+            (Held::Member(place), quote!(#ast::field(#path)))
+        }
+        None => {
+            chain(option)?.ok_or_else(nameless)?;
+            let outside = outside(option, scope)?;
+            let value = quote!(#ast::value(::core::clone::Clone::clone(&#outside)));
+            (Held::Outside(outside), value)
+        }
+    };
+    let name = match predicate.inputs.iter().collect::<Vec<_>>().as_slice() {
+        [pattern] => name(pattern)?,
+        _ => {
+            return Err(Error::new_spanned(
+                &predicate.inputs,
+                "the predicate of an `Option` takes what it holds",
+            ));
+        }
+    };
+    let predicate = expr(&predicate.body, &scope.holding(name, held))?;
+    Ok(quote!(#ast::#join(#ast::#test(#option), #predicate)))
 }
 
 /// `collection.iter().any(|item| predicate)`, and the same with `all`.

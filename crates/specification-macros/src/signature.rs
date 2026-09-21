@@ -73,6 +73,34 @@ impl<'f> Predicate<'f> {
     }
 }
 
+impl Predicate<'_> {
+    /// The parameters declared as an `Option`, by name: what the body is
+    /// seen to compare when it compares one of them.
+    pub(crate) fn options(&self) -> Vec<&Ident> {
+        self.parameters
+            .iter()
+            .filter(|parameter| is_option(&parameter.ty))
+            .filter_map(|parameter| name(parameter).ok())
+            .collect()
+    }
+}
+
+/// Whether the type is written as an `Option`, borrowed or not, under
+/// whatever path: `Option<T>`, `&Option<T>`, `std::option::Option<T>`.
+fn is_option(ty: &Type) -> bool {
+    match ty {
+        Type::Reference(reference) => is_option(&reference.elem),
+        Type::Paren(inner) => is_option(&inner.elem),
+        Type::Group(inner) => is_option(&inner.elem),
+        Type::Path(path) => path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "Option"),
+        _ => false,
+    }
+}
+
 fn is_bool(ty: &Type) -> bool {
     matches!(ty, Type::Path(path) if path.qself.is_none() && path.path.is_ident("bool"))
 }

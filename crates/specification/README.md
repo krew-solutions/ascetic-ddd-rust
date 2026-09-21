@@ -99,7 +99,10 @@ The body is one expression of: members of the candidate and of the item;
 literals, the other parameters of the function and constants, which become
 values; `== != < <= > >=`, `&& || !`, `+ - * / % << >>`, unary `-`;
 `.is_none()` and `.is_some()`, and `== None`, which is the same; `Some(x)`,
-which is `x`; the comparison methods `.eq(&x)` … `.ge(&x)` a Value Object
+which is `x`; `.is_some_and(|held| …)` and `.is_none_or(|held| …)` of a member or a
+parameter that is an `Option`, where the name stands for it, and which are
+how what an `Option` holds is ordered - `<` with `Some(x)`, `None` or an
+`Option` parameter is refused; the comparison methods `.eq(&x)` … `.ge(&x)` a Value Object
 compares by; `.iter().any(|item| …)` and `.all(…)`, nested as deep as the
 collections are; `&`, `*`, `.clone()`, `.as_str()`, `.as_ref()`,
 `.as_deref()`, which change how a value is held and not the value. Anything

@@ -22,6 +22,7 @@ struct Item {
     name: String,
     price: i64,
     active: bool,
+    discount: Option<i64>,
 }
 
 struct Category {
@@ -132,6 +133,54 @@ fn known_as(s: &Store, alias: Option<&str>) -> bool {
     s.alias.as_deref() == alias
 }
 
+// What an `Option` holds is asked under a name. The null test beside the
+// predicate makes the whole of two values, so it holds under a `!` too.
+#[specification]
+fn closed_before(s: &Store, at: i64) -> bool {
+    s.closed_at.is_some_and(|closed| closed < at)
+}
+
+#[specification]
+fn not_closed_before(s: &Store, at: i64) -> bool {
+    !s.closed_at.is_some_and(|closed| closed < at)
+}
+
+#[specification]
+fn open_or_closed_after(s: &Store, at: i64) -> bool {
+    s.closed_at.is_none_or(|closed| closed > at)
+}
+
+#[specification]
+fn known_as_pens(s: &Store) -> bool {
+    s.alias.as_deref().is_some_and(|alias| alias == "Pens")
+}
+
+// A parameter that is an `Option` is asked the same way, and what it holds
+// is compared with what the member holds: an `Option` itself has no order.
+#[specification]
+fn closed_after(s: &Store, at: Option<i64>) -> bool {
+    at.is_some_and(|limit| s.closed_at.is_some_and(|closed| closed > limit))
+}
+
+#[specification]
+fn not_closed_after(s: &Store, at: Option<i64>) -> bool {
+    !at.is_some_and(|limit| s.closed_at.is_some_and(|closed| closed > limit))
+}
+
+#[specification]
+fn closed_before_if_asked(s: &Store, at: Option<i64>) -> bool {
+    at.is_none_or(|at| s.closed_at.is_some_and(|closed| closed < at))
+}
+
+// What the item holds, beside the item it is a member of.
+#[specification]
+fn has_a_well_discounted_item(s: &Store) -> bool {
+    s.items.iter().any(|item| {
+        item.discount
+            .is_some_and(|discount| discount * 10 > item.price - 10)
+    })
+}
+
 impl Store {
     #[specification]
     fn is_active(&self) -> bool {
@@ -234,6 +283,69 @@ fn the_tree_of_a_predicate() {
             known_as_ast(Some("Pens")),
             equal(field("alias"), value("Pens")),
         ),
+        // What an `Option` holds: the null test, and the predicate of the
+        // same member.
+        (
+            closed_before_ast(5),
+            and(
+                is_not_null(field("closed_at")),
+                less_than(field("closed_at"), value(5)),
+            ),
+        ),
+        (
+            not_closed_before_ast(5),
+            not(and(
+                is_not_null(field("closed_at")),
+                less_than(field("closed_at"), value(5)),
+            )),
+        ),
+        (
+            open_or_closed_after_ast(5),
+            or(
+                is_null(field("closed_at")),
+                greater_than(field("closed_at"), value(5)),
+            ),
+        ),
+        (
+            known_as_pens_ast(),
+            and(
+                is_not_null(field("alias")),
+                equal(field("alias"), value("Pens")),
+            ),
+        ),
+        (
+            closed_after_ast(Some(5)),
+            and(
+                is_not_null(value(5)),
+                and(
+                    is_not_null(field("closed_at")),
+                    greater_than(field("closed_at"), value(5)),
+                ),
+            ),
+        ),
+        (
+            closed_before_if_asked_ast(None),
+            or(
+                is_null(value(Value::Null)),
+                and(
+                    is_not_null(field("closed_at")),
+                    less_than(field("closed_at"), value(Value::Null)),
+                ),
+            ),
+        ),
+        (
+            has_a_well_discounted_item_ast(),
+            any(
+                "items",
+                and(
+                    is_not_null(item("discount")),
+                    greater_than(
+                        mul(item("discount"), value(10)),
+                        sub(item("price"), value(10)),
+                    ),
+                ),
+            ),
+        ),
     ] {
         assert_eq!(tree, expected);
     }
@@ -267,6 +379,7 @@ impl Context<Value> for Item {
             "name" => Ok((&self.name).into()),
             "price" => Ok(self.price.into()),
             "active" => Ok(self.active.into()),
+            "discount" => Ok(self.discount.into()),
             _ => missing(name),
         }
     }
@@ -332,10 +445,12 @@ impl Context<Value> for Store {
 }
 
 fn stores() -> Vec<Store> {
-    let item = |name: &str, price, active| Item {
+    // A dear item has a discount, of a tenth of its price.
+    let item = |name: &str, price: i64, active| Item {
         name: name.to_owned(),
         price,
         active,
+        discount: (price > 100).then_some(price / 10),
     };
     vec![
         Store {
@@ -381,7 +496,7 @@ fn stores() -> Vec<Store> {
 #[test]
 fn the_function_and_its_tree_agree() {
     type Predicate = fn(&Store) -> bool;
-    let predicates: [(&str, Predicate, Spec); 12] = [
+    let predicates: [(&str, Predicate, Spec); 14] = [
         ("closed", closed, closed_ast()),
         ("closed_on", closed_on, closed_on_ast()),
         ("adult_owner", adult_owner, adult_owner_ast()),
@@ -402,6 +517,12 @@ fn the_function_and_its_tree_agree() {
             has_an_item_named_as_the_store_ast(),
         ),
         ("is_active", Store::is_active, Store::is_active_ast()),
+        ("known_as_pens", known_as_pens, known_as_pens_ast()),
+        (
+            "has_a_well_discounted_item",
+            has_a_well_discounted_item,
+            has_a_well_discounted_item_ast(),
+        ),
     ];
     for store in stores() {
         for (name, function, tree) in &predicates {
@@ -426,6 +547,58 @@ fn the_function_and_its_tree_agree() {
                 store.name,
             );
         }
+        for at in [0, 1_700_000_000, 1_700_000_001] {
+            for (name, function, tree) in [
+                (
+                    "closed_before",
+                    closed_before as fn(&Store, i64) -> bool,
+                    closed_before_ast(at),
+                ),
+                (
+                    "not_closed_before",
+                    not_closed_before,
+                    not_closed_before_ast(at),
+                ),
+                (
+                    "open_or_closed_after",
+                    open_or_closed_after,
+                    open_or_closed_after_ast(at),
+                ),
+            ] {
+                assert_eq!(
+                    is_satisfied_by(&tree, &store),
+                    Ok(function(&store, at)),
+                    "{name}({at}) of {:?}",
+                    store.name,
+                );
+            }
+        }
+        for at in [None, Some(0), Some(1_700_000_000), Some(1_700_000_001)] {
+            for (name, function, tree) in [
+                (
+                    "closed_after",
+                    closed_after as fn(&Store, Option<i64>) -> bool,
+                    closed_after_ast(at),
+                ),
+                (
+                    "not_closed_after",
+                    not_closed_after,
+                    not_closed_after_ast(at),
+                ),
+                (
+                    "closed_before_if_asked",
+                    closed_before_if_asked,
+                    closed_before_if_asked_ast(at),
+                ),
+            ] {
+                assert_eq!(
+                    is_satisfied_by(&tree, &store),
+                    Ok(function(&store, at)),
+                    "{name}({at:?}) of {:?}",
+                    store.name,
+                );
+            }
+        }
         for alias in [None, Some("Pens"), Some("Inks")] {
             assert_eq!(
                 is_satisfied_by(&known_as_ast(alias), &store),
@@ -448,5 +621,19 @@ fn the_tree_compiles_to_a_query() {
     assert_eq!(
         pg::compile(&all_items_active_ast()).expect("compiled").sql,
         r#"NOT EXISTS (SELECT 1 FROM unnest("items") AS "item_1" WHERE NOT "item_1"."active")"#,
+    );
+    // What an `Option` holds, of a parameter and of a member: a none is a
+    // null constant, which has no neighbour to take its type from.
+    let query = pg::compile(&not_closed_after_ast(None)).expect("compiled");
+    assert_eq!(
+        query.sql,
+        r#"NOT ($1::text IS NOT NULL AND "closed_at" IS NOT NULL AND "closed_at" > $2)"#,
+    );
+    assert_eq!(query.params, [Value::Null, Value::Null]);
+    assert_eq!(
+        pg::compile(&closed_before_if_asked_ast(Some(5)))
+            .expect("compiled")
+            .sql,
+        r#"$1::bigint IS NULL OR "closed_at" IS NOT NULL AND "closed_at" < $2"#,
     );
 }
