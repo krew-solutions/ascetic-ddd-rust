@@ -168,7 +168,7 @@ pub(super) fn template(tokens: &[Token], end: usize) -> Result<Expr<Slot>, Synta
     let (tree, input) = match collection(Root::Global, names) {
         None => filter(after, Root::Global, 0)?,
         Some(source) => {
-            let (predicate, rest) = filter(wildcard(after)?, Root::Item, 1)?;
+            let (predicate, rest) = filter(wildcard(after)?, Root::Item(0), 1)?;
             let any = Tree::over(after, |predicate| ast::any(source, predicate), predicate)?;
             (any, rest)
         }
@@ -336,7 +336,7 @@ fn query(input: Input<'_>, root: Root, depth: usize) -> Parsed<'_, Tree> {
     let path = collection(root, names)
         .ok_or_else(|| input.error("Expected field name", "after '@' or '$'"))?;
     if input.kind() == Some(&Kind::LeftBracket) {
-        let (predicate, rest) = filter(wildcard(input)?, Root::Item, deeper(input, depth)?)?;
+        let (predicate, rest) = filter(wildcard(input)?, Root::Item(0), deeper(input, depth)?)?;
         let any = Tree::over(input, |predicate| ast::any(path, predicate), predicate)?;
         Ok((any, rest))
     } else {

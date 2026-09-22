@@ -23,9 +23,12 @@ use super::operator::{Infix, Postfix, Prefix};
 pub enum Root {
     /// The candidate itself: JSONPath's `$`.
     Global,
-    /// The item under test in the nearest enclosing [`Expr::Any`]:
-    /// JSONPath's `@`.
-    Item,
+    /// The item under test in an enclosing [`Expr::Any`], by how far out
+    /// that one is: `Item(0)` is the item of the nearest, JSONPath's `@`;
+    /// `Item(1)` the item of the collection enclosing that one, which the
+    /// text of JSONPath cannot name and a predicate written in the host
+    /// language can - the category, from the predicate of its products.
+    Item(usize),
 }
 
 /// A member reached from a root through nested objects:
@@ -54,7 +57,14 @@ impl Path {
 
     /// The member `name` of the item under test.
     pub fn item(name: impl Into<String>) -> Self {
-        Path::new(Root::Item, name)
+        Path::new(Root::Item(0), name)
+    }
+
+    /// The member `name` of the item `up` collections out: `outer(1, ..)` is
+    /// the item of the collection enclosing the nearest, `outer(0, ..)` is
+    /// [`Path::item`].
+    pub fn outer(up: usize, name: impl Into<String>) -> Self {
+        Path::new(Root::Item(up), name)
     }
 
     /// One step down: what this path named is an object, and the path now

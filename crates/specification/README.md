@@ -171,6 +171,17 @@ the sources as they were.
   its keys; `fk AND p OR q` selects rows of other parents.
 * **fix** — a collection of the candidate named inside another collection's
   predicate joins to the root row, not to the enclosing item.
+* **fix** — a column of the candidate inside a collection's predicate is
+  qualified with the candidate's row, which the [`pg::Schema`] names;
+  unqualified, PostgreSQL read it from the innermost row that has a column
+  of that name, and a category with a `limit` of its own hid the shop's.
+  Without a schema such a column is `CompileError::NoTable`.
+* **add** — the item of an enclosing collection is named from an inner
+  predicate by how far out it is, `Root::Item(1)`, `Path::outer(1, ..)`:
+  the category's limit beside the price of its product. The evaluator keeps
+  the items of the enclosing predicates, the compiler their aliases, which
+  SQL has in scope of the inner query; the macro reads the closure's names.
+  A mapping keeps the root of a path as it came, `Path::sibling`.
 * **fix** — `transform` rewrites the predicate of a collection, and tells a
   mapping whether a path starts at the candidate or at the item.
 * **fix** — a template's placeholders are bound in the order they stand;
@@ -272,15 +283,14 @@ the sources as they were.
   the evaluator cannot go, `ContextError::NotAnObject`, where PostgreSQL has
   null for a member of a null composite. And a composite is null to
   PostgreSQL if all its members are, and not null only if none is.
-* A path from the candidate is written into the query unqualified. Inside the
-  subquery of a relational collection an unqualified name can be captured by
-  a column of the child table: qualify columns in the [`Mapping`].
+* A path from the candidate of several parts is written into the query as it
+  is: `s.price` is `"s"."price"`, the author's qualifier.
 * An embedded collection is read with `unnest`, so it is an array of a
   composite type. A `jsonb` array is not supported, as it is not in the
   sources.
 * `numeric` parameters are not written by the `pg` feature.
-* From the predicate of an inner collection the item of an outer one cannot
-  be named: the tree has one `@`, the nearest. The macro says so.
+* The text of a template has one `@`, the nearest item, as RFC 9535 has it;
+  the item of an enclosing collection is named in the tree only.
 * The null test is of constants, not of data: `@.a == @.b` with both members
   null is null, where RFC 9535 has true. The equality in which null is a
   value is `IS`, which a template cannot spell.

@@ -18,11 +18,9 @@ use crate::signature::Predicate;
 pub(crate) struct Scope<'a> {
     /// The candidate: paths from it are from the root.
     candidate: &'a Ident,
-    /// The item of the nearest enclosing `any` or `all`.
-    item: Option<&'a Ident>,
-    /// The items of those further out. The tree has one `@`, the nearest;
-    /// these can be named in Rust and not in the tree.
-    outer: Vec<&'a Ident>,
+    /// The items of the enclosing `any`s and `all`s, the nearest last: the
+    /// tree names each by how far out it is, `Path::outer(up, ..)`.
+    items: Vec<&'a Ident>,
     /// What an `Option` holds, under the name the closure of `is_some_and` or
     /// of `is_none_or` gives it. The latest is the nearest.
     held: Vec<(&'a Ident, Held)>,
@@ -54,19 +52,32 @@ struct Place {
 #[derive(Clone, Copy)]
 enum Root {
     Candidate,
-    Item,
+    /// The item `up` collections out: 0 the nearest.
+    Item(usize),
 }
 
 impl Place {
     /// The code of the `Path`; none of the candidate or the item itself.
     fn path(&self) -> Option<Tokens> {
         let ast = ast();
-        let root = match self.root {
-            Root::Candidate => quote!(global),
-            Root::Item => quote!(item),
-        };
         let (first, names) = self.names.split_first()?;
-        Some(quote!(#ast::Path::#root(#first) #(.child(#names))*))
+        let root = match self.root {
+            Root::Candidate => quote!(global(#first)),
+            Root::Item(0) => quote!(item(#first)),
+            Root::Item(up) => quote!(outer(#up, #first)),
+        };
+        Some(quote!(#ast::Path::#root #(.child(#names))*))
+    }
+
+    /// The same place, seen from one collection further in.
+    fn further_in(self) -> Self {
+        Place {
+            root: match self.root {
+                Root::Candidate => Root::Candidate,
+                Root::Item(up) => Root::Item(up + 1),
+            },
+            names: self.names,
+        }
     }
 }
 
@@ -74,8 +85,7 @@ impl<'a> Scope<'a> {
     pub(crate) fn of(predicate: &'a Predicate<'_>) -> Self {
         Scope {
             candidate: &predicate.candidate,
-            item: None,
-            outer: Vec::new(),
+            items: Vec::new(),
             held: Vec::new(),
             options: predicate.options(),
             receiver: predicate.receiver.is_some(),
@@ -83,29 +93,21 @@ impl<'a> Scope<'a> {
     }
 
     /// The scope of the predicate of a collection whose items are `item`.
-    /// What the item so far holds goes out of reach with it; what the
-    /// candidate holds stays.
+    /// What is held so far is one collection further out from here.
     fn inside(&self, item: &'a Ident) -> Self {
-        let (held, lost): (Vec<_>, Vec<_>) = self
-            .held
-            .iter()
-            .filter(|(name, _)| *name != item)
-            .cloned()
-            .partition(|(_, held)| match held {
-                Held::Member(place) => matches!(place.root, Root::Candidate),
-                Held::Outside(_) => true,
-            });
         Scope {
             candidate: self.candidate,
-            item: Some(item),
-            outer: self
-                .outer
+            items: self.items.iter().copied().chain([item]).collect(),
+            held: self
+                .held
                 .iter()
-                .copied()
-                .chain(self.item)
-                .chain(lost.into_iter().map(|(name, _)| name))
+                .filter(|(name, _)| *name != item)
+                .cloned()
+                .map(|(name, held)| match held {
+                    Held::Member(place) => (name, Held::Member(place.further_in())),
+                    outside => (name, outside),
+                })
                 .collect(),
-            held,
             options: self.options.clone(),
             receiver: self.receiver,
         }
@@ -116,8 +118,7 @@ impl<'a> Scope<'a> {
     fn holding(&self, name: &'a Ident, held: Held) -> Self {
         Scope {
             candidate: self.candidate,
-            item: self.item,
-            outer: self.outer.clone(),
+            items: self.items.clone(),
             held: self.held.iter().cloned().chain([(name, held)]).collect(),
             options: self.options.clone(),
             receiver: self.receiver,
@@ -128,7 +129,8 @@ impl<'a> Scope<'a> {
 /// What a name at the start of a path is.
 enum Base<'s> {
     Candidate,
-    Item,
+    /// The item `up` collections out.
+    Item(usize),
     /// What an `Option` holds: the member that is the `Option`.
     Held(&'s Place),
     /// What an `Option` from outside holds: that value, as it is written.
@@ -139,23 +141,18 @@ enum Base<'s> {
 
 impl Scope<'_> {
     /// The nearest of that name, as Rust reads it: what is held is named
-    /// inside everything else, the item inside the candidate.
+    /// inside everything else, the items inside the candidate, the nearest
+    /// item inside the ones further out.
     fn base(&self, name: &Ident) -> Result<Base<'_>, Error> {
         if let Some((_, held)) = self.held.iter().rev().find(|(held, _)| *held == name) {
             Ok(match held {
                 Held::Member(place) => Base::Held(place),
                 Held::Outside(option) => Base::Outside(option),
             })
-        } else if self.item == Some(name) {
-            Ok(Base::Item)
+        } else if let Some(up) = self.items.iter().rev().position(|item| *item == name) {
+            Ok(Base::Item(up))
         } else if name == self.candidate {
             Ok(Base::Candidate)
-        } else if self.outer.contains(&name) {
-            Err(Error::new_spanned(
-                name,
-                "the item of an enclosing collection cannot be referred to from the predicate \
-                 of an inner one: a specification has only the nearest item",
-            ))
         } else {
             Ok(Base::Other)
         }
@@ -369,7 +366,7 @@ fn place(expr: &Expr, scope: &Scope<'_>) -> Result<Option<Place>, Error> {
     };
     let (root, held) = match scope.base(base)? {
         Base::Candidate => (Root::Candidate, Vec::new()),
-        Base::Item => (Root::Item, Vec::new()),
+        Base::Item(up) => (Root::Item(up), Vec::new()),
         Base::Held(place) => (place.root, place.names.clone()),
         Base::Outside(_) | Base::Other => return Ok(None),
     };

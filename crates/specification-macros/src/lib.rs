@@ -214,17 +214,6 @@ mod tests {
                 ),
                 "plain name",
             ),
-            (
-                // What the item of an outer collection holds is a member of it.
-                quote!(
-                    fn f(s: &S) -> bool {
-                        s.items
-                            .iter()
-                            .any(|i| i.d.is_some_and(|d| i.tags.iter().any(|t| t.weight > d)))
-                    }
-                ),
-                "enclosing",
-            ),
         ] {
             let error = error_of(function.clone());
             assert!(error.contains(message), "{function}: {error}");
@@ -539,14 +528,47 @@ mod tests {
         }
     }
 
+    // The item of an enclosing collection is named from an inner predicate
+    // by how far out it is: `Path::outer(1, ..)`. It used to be refused.
     #[test]
-    fn the_item_of_an_outer_collection_is_out_of_reach_of_an_inner_predicate() {
-        let error = error_of(quote! {
-            fn f(s: &Store) -> bool {
-                s.categories.iter().any(|c| c.items.iter().any(|i| i.price > c.limit))
-            }
-        });
-        assert!(error.contains("enclosing"), "{error}");
+    fn the_item_of_an_outer_collection_is_named_from_an_inner_predicate() {
+        let tree = expand(
+            quote!(),
+            quote!(
+                fn f(s: &Store) -> bool {
+                    s.categories.iter().any(|c| {
+                        c.items.iter().any(|i| {
+                            i.price > c.limit
+                                && c.limit < s.limit
+                                && c.discount.is_some_and(|d| i.price > d)
+                                && i.tags.iter().any(|t| t.weight > c.limits.max)
+                        })
+                    })
+                }
+            ),
+        )
+        .expect("a specification")
+        .to_string();
+        let ast = ":: ascetic_ddd_specification :: ast";
+        for want in [
+            format!("{ast} :: any ({ast} :: Path :: item (\"items\")"),
+            format!("{ast} :: field ({ast} :: Path :: item (\"price\"))"),
+            format!("{ast} :: field ({ast} :: Path :: outer (1usize , \"limit\"))"),
+            format!("{ast} :: field ({ast} :: Path :: global (\"limit\"))"),
+            // What the outer item holds is a member of it, one collection out.
+            format!(
+                "{ast} :: is_not_null ({ast} :: field ({ast} :: Path :: outer (1usize , \"discount\")))"
+            ),
+            format!(
+                "{ast} :: greater_than ({ast} :: field ({ast} :: Path :: item (\"price\")) , {ast} :: field ({ast} :: Path :: outer (1usize , \"discount\")))"
+            ),
+            // Two collections out, through a member.
+            format!(
+                "{ast} :: field ({ast} :: Path :: outer (2usize , \"limits\") . child (\"max\"))"
+            ),
+        ] {
+            assert!(tree.contains(&want), "lacks {want}:\n{tree}");
+        }
     }
 
     #[test]

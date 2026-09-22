@@ -74,7 +74,7 @@ impl Mapping<Domain, Value> for Something {
             ])),
             ["something", name @ ("rank" | "deleted_at")] => Ok(column(path, name)),
             // In a collection's predicate the names are the item's.
-            ["weight"] if path.root() == Root::Item => Ok(column(path, "weight_grams")),
+            ["weight"] if path.root() == Root::Item(0) => Ok(column(path, "weight_grams")),
             names => Err(format!("unknown field: {}", names.join("."))),
         }
     }

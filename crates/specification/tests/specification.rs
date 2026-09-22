@@ -60,7 +60,9 @@ fn a_path_is_never_empty_and_keeps_its_names_in_order() {
     assert_eq!(path.name(), "age");
     assert_eq!(path.names().collect::<Vec<_>>(), ["user", "profile", "age"]);
     assert_eq!(Path::from("user.profile.age"), path);
-    assert_eq!(Path::dotted(Root::Item, "price"), Path::item("price"));
+    assert_eq!(Path::dotted(Root::Item(0), "price"), Path::item("price"));
+    assert_eq!(Path::outer(0, "price"), Path::item("price"));
+    assert_eq!(Path::outer(1, "price").root(), Root::Item(1));
 }
 
 #[test]
@@ -434,6 +436,87 @@ fn the_item_is_only_inside_a_collection() {
         evaluate::<Value>(&field(Path::item("price")), &store()),
         Err(EvalError::NoCurrentItem),
     );
+    // As is the item a collection out: one collection deep, there is none.
+    assert_eq!(
+        evaluate::<Value>(
+            &any(
+                "items",
+                greater_than(field(Path::outer(1, "limit")), value(1))
+            ),
+            &store(),
+        ),
+        Err(EvalError::NoCurrentItem),
+    );
+}
+
+/// A shop with categories, each with a limit and products of its own.
+fn shop() -> Record<Value> {
+    let category = |limit: i64, prices: &[i64]| {
+        Record::object([
+            ("limit", Record::value(limit)),
+            (
+                "products",
+                Record::collection(
+                    prices
+                        .iter()
+                        .map(|price| Record::object([("price", Record::value(*price))])),
+                ),
+            ),
+        ])
+    };
+    Record::object([
+        ("limit", Record::value(50)),
+        (
+            "categories",
+            Record::collection([category(10, &[5, 20]), category(100, &[30])]),
+        ),
+    ])
+}
+
+// The item of an enclosing collection is named from an inner predicate:
+// `Root::Item(1)` is the item one collection out, as `Root::Item(0)` - the
+// item - is the nearest.
+#[test]
+fn the_item_of_an_enclosing_collection_is_named_by_how_far_out_it_is() {
+    let price = || field(Path::item("price"));
+    let category_limit = || field(Path::outer(1, "limit"));
+    let over_its_category = |predicate| any("categories", any(Path::item("products"), predicate));
+    for (specification, expected) in [
+        // 20 > 10 in the first category; 30 > 100 is not.
+        (
+            over_its_category(greater_than(price(), category_limit())),
+            true,
+        ),
+        // A product is priced over the shop's limit in neither.
+        (
+            over_its_category(greater_than(price(), field("limit"))),
+            false,
+        ),
+        // The limit of the category, from the inner predicate, beside the shop's.
+        (
+            over_its_category(and(
+                greater_than(price(), category_limit()),
+                less_than(category_limit(), field("limit")),
+            )),
+            true,
+        ),
+        // The nearest item is still the product.
+        (over_its_category(greater_than(price(), value(25))), true),
+        // From the outer predicate the category is the item, at depth 0.
+        (
+            any(
+                "categories",
+                greater_than(field(Path::item("limit")), value(50)),
+            ),
+            true,
+        ),
+    ] {
+        assert_eq!(
+            evaluate(&specification, &shop()),
+            Ok(Value::from(expected)),
+            "{specification:?}",
+        );
+    }
 }
 
 #[test]

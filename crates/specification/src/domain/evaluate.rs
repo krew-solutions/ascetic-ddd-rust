@@ -135,7 +135,16 @@ pub fn evaluate<V: Operand + Clone>(
 /// `_with_item`.
 struct Scope<'a, V> {
     global: &'a dyn Context<V>,
-    item: Option<&'a dyn Context<V>>,
+    /// The item under test, and behind it the items of the enclosing
+    /// collections: `Root::Item(up)` is the one `up` steps out.
+    item: Option<&'a Frame<'a, V>>,
+}
+
+/// The item of one collection's predicate, inside the item of the enclosing
+/// collection's.
+struct Frame<'a, V> {
+    context: &'a dyn Context<V>,
+    outer: Option<&'a Frame<'a, V>>,
 }
 
 impl<V> Clone for Scope<'_, V> {
@@ -197,8 +206,12 @@ fn eval<V: Operand + Clone>(expr: &Expr<V>, scope: Scope<'_, V>) -> Result<V, Ev
         }
         Expr::Any(source, predicate) => {
             let witness = |item| {
+                let frame = Frame {
+                    context: item,
+                    outer: scope.item,
+                };
                 let scope = Scope {
-                    item: Some(item),
+                    item: Some(&frame),
                     ..scope
                 };
                 Ok(truth(&eval(predicate, scope)?)? == Some(true))
@@ -218,7 +231,13 @@ fn eval<V: Operand + Clone>(expr: &Expr<V>, scope: Scope<'_, V>) -> Result<V, Ev
 fn owner<'a, V>(path: &Path, scope: Scope<'a, V>) -> Result<&'a dyn Context<V>, EvalError> {
     let root = match path.root() {
         Root::Global => scope.global,
-        Root::Item => scope.item.ok_or(EvalError::NoCurrentItem)?,
+        Root::Item(up) => {
+            let mut frame = scope.item;
+            for _ in 0..up {
+                frame = frame.and_then(|frame| frame.outer);
+            }
+            frame.ok_or(EvalError::NoCurrentItem)?.context
+        }
     };
     path.objects()
         .iter()

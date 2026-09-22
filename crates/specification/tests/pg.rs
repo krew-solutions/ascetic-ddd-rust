@@ -661,9 +661,11 @@ impl Mapping<Priced, Value> for Prices {
     fn field(&self, path: &Path) -> Result<Mapped<Value>, String> {
         let names: Vec<&str> = path.names().collect();
         match (path.root(), names.as_slice()) {
-            (Root::Item, ["discount"]) => {
-                Ok(Mapped::Scalar(Expr::Field(Path::item("discount_percent"))))
-            }
+            // The column beside the path as it came: the item's, however
+            // far out that item is.
+            (Root::Item(_), ["discount"]) => Ok(Mapped::Scalar(Expr::Field(
+                path.sibling("discount_percent"),
+            ))),
             (_, names) => Err(format!("no such member: {}", names.join("."))),
         }
     }
@@ -985,4 +987,120 @@ async fn a_value_is_written_as_the_type_the_server_asks_for_if_it_fits() {
         .await
         .expect("inferred");
     assert!(inferred.get::<_, bool>(0));
+}
+
+/// The item of an enclosing collection, named from an inner predicate by how
+/// far out it is: the category's limit beside the price of its product. In
+/// either storage - arrays nested in a composite, or tables that point at
+/// one another - the enclosing item's row is in scope of the inner query.
+#[tokio::test]
+async fn the_item_of_an_enclosing_collection_is_named_from_an_inner_predicate() {
+    let client = client().await;
+    client
+        .batch_execute(
+            r#"CREATE TYPE pg_temp.spec_product AS (price int8);
+             CREATE TYPE pg_temp.spec_category AS ("limit" int8, products pg_temp.spec_product[]);
+             CREATE TEMP TABLE spec_shops (id int8 PRIMARY KEY, "limit" int8, categories pg_temp.spec_category[]);
+             CREATE TEMP TABLE spec_categories (id int8 PRIMARY KEY, shop_id int8, "limit" int8);
+             CREATE TEMP TABLE spec_products (category_id int8, price int8);
+             INSERT INTO spec_shops VALUES
+                 (1, 50, ARRAY[ROW(10, ARRAY[ROW(5), ROW(20)]::pg_temp.spec_product[]),
+                               ROW(100, ARRAY[ROW(30)]::pg_temp.spec_product[])]::pg_temp.spec_category[]),
+                 (2, 50, ARRAY[ROW(100, ARRAY[ROW(30), ROW(NULL)]::pg_temp.spec_product[])]::pg_temp.spec_category[]),
+                 (3, 5, ARRAY[ROW(NULL, ARRAY[ROW(30)]::pg_temp.spec_product[])]::pg_temp.spec_category[]),
+                 (4, 50, '{}');
+             INSERT INTO spec_categories VALUES (11, 1, 10), (12, 1, 100), (21, 2, 100), (31, 3, NULL);
+             INSERT INTO spec_products VALUES (11, 5), (11, 20), (12, 30), (21, 30), (21, NULL), (31, 30);"#,
+        )
+        .await
+        .expect("tables");
+    let shop =
+        |limit: Option<i64>, categories: Vec<(Option<i64>, Vec<Option<i64>>)>| {
+            Record::object([
+                ("limit", Record::value(limit)),
+                (
+                    "categories",
+                    Record::collection(categories.into_iter().map(|(limit, prices)| {
+                        Record::object([
+                            ("limit", Record::value(limit)),
+                            (
+                                "products",
+                                Record::collection(prices.into_iter().map(|price| {
+                                    Record::object([("price", Record::value(price))])
+                                })),
+                            ),
+                        ])
+                    })),
+                ),
+            ])
+        };
+    let shops = [
+        (
+            1,
+            shop(
+                Some(50),
+                vec![
+                    (Some(10), vec![Some(5), Some(20)]),
+                    (Some(100), vec![Some(30)]),
+                ],
+            ),
+        ),
+        (2, shop(Some(50), vec![(Some(100), vec![Some(30), None])])),
+        (3, shop(Some(5), vec![(None, vec![Some(30)])])),
+        (4, shop(Some(50), vec![])),
+    ];
+    let price = || field(Path::item("price"));
+    let category_limit = || field(Path::outer(1, "limit"));
+    let over_its_category = |predicate| any("categories", any(Path::item("products"), predicate));
+    let specifications: [Spec; 6] = [
+        over_its_category(greater_than(price(), category_limit())),
+        over_its_category(less_than(price(), category_limit())),
+        over_its_category(greater_than(price(), field("limit"))),
+        over_its_category(and(
+            greater_than(price(), category_limit()),
+            less_than(category_limit(), field("limit")),
+        )),
+        over_its_category(is_null(category_limit())),
+        not(over_its_category(not(greater_than(
+            price(),
+            category_limit(),
+        )))),
+    ];
+    let relational = Schema::new("spec_shops")
+        .relational(
+            "categories",
+            Relation::new("spec_categories", "shop_id", "id"),
+        )
+        .relational(
+            "categories.products",
+            Relation::new("spec_products", "category_id", "id"),
+        );
+    let embedded = Schema::new("spec_shops");
+    for specification in &specifications {
+        let satisfied: Vec<i64> = shops
+            .iter()
+            .filter(|(_, shop)| is_satisfied_by(specification, shop).expect("evaluated"))
+            .map(|(id, _)| *id)
+            .collect();
+        for (storage, schema) in [("embedded", &embedded), ("relational", &relational)] {
+            let query = Compiler::new()
+                .schema(schema)
+                .compile(specification)
+                .expect("compiled");
+            let text = format!("SELECT id FROM spec_shops WHERE {} ORDER BY id", query.sql);
+            let params: Vec<&(dyn ToSql + Sync)> = query
+                .params
+                .iter()
+                .map(|param| param as &(dyn ToSql + Sync))
+                .collect();
+            let selected: Vec<i64> = client
+                .query(&text, &params)
+                .await
+                .unwrap_or_else(|error| panic!("{text}: {error}"))
+                .iter()
+                .map(|row| row.get(0))
+                .collect();
+            assert_eq!(selected, satisfied, "{storage}: {text}");
+        }
+    }
 }

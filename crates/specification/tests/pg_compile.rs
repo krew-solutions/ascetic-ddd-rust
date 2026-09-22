@@ -571,4 +571,96 @@ fn the_item_is_only_inside_a_collection() {
         compile::<Value>(&any(Path::item("items"), value(true))),
         Err(CompileError::NoCurrentItem),
     );
+    assert_eq!(
+        compile::<Value>(&any(
+            "items",
+            greater_than(item("price"), field(Path::outer(1, "limit")))
+        )),
+        Err(CompileError::NoCurrentItem),
+    );
+}
+
+// The item of an enclosing collection has an alias of its own, which the
+// inner query names as SQL lets it: `Root::Item(1)` is that alias.
+#[test]
+fn the_item_of_an_enclosing_collection_is_its_alias() {
+    let over_its_category = any(
+        "categories",
+        any(
+            Path::item("products"),
+            greater_than(item("price"), field(Path::outer(1, "limit"))),
+        ),
+    );
+    assert_eq!(
+        sql(&over_its_category),
+        r#"EXISTS (SELECT 1 FROM unnest("categories") AS "category_1" WHERE EXISTS (SELECT 1 FROM unnest("category_1"."products") AS "product_2" WHERE "product_2"."price" > "category_1"."limit"))"#,
+    );
+    // In tables of their own, the enclosing row is the one the keys point at,
+    // and its columns are named the same way.
+    let schema = Schema::new("shops")
+        .relational("categories", Relation::new("categories", "shop_id", "id"))
+        .relational(
+            "categories.products",
+            Relation::new("products", "category_id", "id"),
+        );
+    assert_eq!(
+        sql_with(&schema, &over_its_category),
+        r#"EXISTS (SELECT 1 FROM "categories" AS "category_1" WHERE "category_1"."shop_id" = "shops"."id" AND EXISTS (SELECT 1 FROM "products" AS "product_2" WHERE "product_2"."category_id" = "category_1"."id" AND "product_2"."price" > "category_1"."limit"))"#,
+    );
+    // Two collections out, the candidate's own row beside.
+    let three_deep = any(
+        "categories",
+        any(
+            Path::item("products"),
+            any(
+                Path::item("tags"),
+                and(
+                    greater_than(item("weight"), field(Path::outer(2, "limit"))),
+                    less_than(field(Path::outer(1, "price")), field("limit")),
+                ),
+            ),
+        ),
+    );
+    assert_eq!(
+        sql_with(&Schema::new("shops"), &three_deep),
+        r#"EXISTS (SELECT 1 FROM unnest("categories") AS "category_1" WHERE EXISTS (SELECT 1 FROM unnest("category_1"."products") AS "product_2" WHERE EXISTS (SELECT 1 FROM unnest("product_2"."tags") AS "tag_3" WHERE "tag_3"."weight" > "category_1"."limit" AND "product_2"."price" < "shops"."limit")))"#,
+    );
+}
+
+// Inside a collection's predicate the candidate's column is qualified with
+// its row. Unqualified, PostgreSQL read it from the innermost row that has a
+// column of that name: a category with a `limit` of its own hid the shop's,
+// and the query selected other rows than the evaluator was satisfied by. The
+// row is what the schema calls it, so without a schema there is no query.
+#[test]
+fn the_candidates_column_inside_a_predicate_is_qualified_with_its_row() {
+    let over_the_shops_limit = any("categories", greater_than(item("limit"), field("limit")));
+    assert_eq!(
+        sql_with(&Schema::new("shops"), &over_the_shops_limit),
+        r#"EXISTS (SELECT 1 FROM unnest("categories") AS "category_1" WHERE "category_1"."limit" > "shops"."limit")"#,
+    );
+    assert_eq!(
+        sql_with(
+            &Schema::new("public.shops").alias("s"),
+            &over_the_shops_limit
+        ),
+        r#"EXISTS (SELECT 1 FROM unnest("categories") AS "category_1" WHERE "category_1"."limit" > "s"."limit")"#,
+    );
+    assert_eq!(
+        compile::<Value>(&over_the_shops_limit),
+        Err(CompileError::NoTable),
+    );
+    // A name of several parts the author qualified, and it stays as written;
+    // outside a collection's predicate a name is unqualified, as it was.
+    assert_eq!(
+        sql(&any(
+            "categories",
+            greater_than(item("limit"), field("s.limit"))
+        )),
+        r#"EXISTS (SELECT 1 FROM unnest("categories") AS "category_1" WHERE "category_1"."limit" > "s"."limit")"#,
+    );
+    assert_eq!(
+        sql(&greater_than(field("limit"), value(1))),
+        r#""limit" > $1"#
+    );
 }

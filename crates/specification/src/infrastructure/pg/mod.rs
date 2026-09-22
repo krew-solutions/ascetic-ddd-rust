@@ -94,6 +94,9 @@ pub struct Query<V> {
 pub enum CompileError {
     /// A path from the item under test, outside any collection.
     NoCurrentItem,
+    /// A member of the candidate inside a collection's predicate, with no
+    /// [`Schema`] to say what the candidate's row is called there.
+    NoTable,
     /// A name that is not one: anything but ASCII letters, digits and `_`,
     /// not starting with a digit.
     InvalidIdentifier(String),
@@ -103,6 +106,10 @@ impl fmt::Display for CompileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CompileError::NoCurrentItem => f.write_str("no current item in context"),
+            CompileError::NoTable => f.write_str(
+                "a member of the candidate inside a collection's predicate needs the \
+                 candidate's table: compile with a schema",
+            ),
             CompileError::InvalidIdentifier(name) => {
                 write!(f, "'{name}' is not a valid identifier")
             }
@@ -244,8 +251,8 @@ impl<'s> Compiler<'s> {
     ) -> Result<(String, Next), CompileError> {
         let names: Vec<&str> = path.names().collect();
         match path.root() {
-            Root::Item => {
-                let item = item.ok_or(CompileError::NoCurrentItem)?;
+            Root::Item(up) => {
+                let item = item_out(item, up)?;
                 self.member_of_row(quoted(&item.alias), item.logical.clone(), &names, next)
             }
             Root::Global => match (names.first(), self.schema) {
@@ -254,7 +261,7 @@ impl<'s> Compiler<'s> {
                 {
                     self.member_of_row(qualified(schema.parent())?, Vec::new(), &names, next)
                 }
-                _ => Ok((column(path, item)?, next)),
+                _ => Ok((self.column(path, item)?, next)),
             },
         }
     }
@@ -327,7 +334,7 @@ impl<'s> Compiler<'s> {
     ) -> Result<(Fragment<V>, Next), CompileError> {
         let enclosing = match source.root() {
             Root::Global => None,
-            Root::Item => Some(item.ok_or(CompileError::NoCurrentItem)?),
+            Root::Item(up) => Some(item_out(item, up)?),
         };
         let logical: Vec<&str> = enclosing
             .map_or(&[][..], |item| &item.logical)
@@ -350,6 +357,7 @@ impl<'s> Compiler<'s> {
         let inner = Item {
             alias: format!("{name}_{number}"),
             logical,
+            outer: item,
         };
         let next = Next {
             alias: number,
@@ -361,7 +369,7 @@ impl<'s> Compiler<'s> {
             None => {
                 let sql = format!(
                     "EXISTS (SELECT 1 FROM unnest({}) AS {alias} WHERE {})",
-                    column(source, item)?,
+                    self.column(source, item)?,
                     predicate.sql,
                 );
                 predicate.with(sql, ATOM)
@@ -396,6 +404,41 @@ impl<'s> Compiler<'s> {
         };
         Ok((fragment, next))
     }
+
+    /// The path as a column reference, no object on its way looked up: the
+    /// place of a collection, and a name from the candidate.
+    ///
+    /// From the candidate the names are written with dots, which PostgreSQL
+    /// reads as a qualified name: `"s"."price"` is the column `price` of `s`.
+    /// From the item under test the first name is a column of the item's row,
+    /// under its alias, and what follows a member of a composite kept there.
+    fn column(&self, path: &Path, item: Option<&Item>) -> Result<String, CompileError> {
+        let names = path
+            .names()
+            .map(identifier)
+            .collect::<Result<Vec<_>, _>>()?;
+        match path.root() {
+            // Inside a collection's predicate the candidate's column is
+            // qualified with its row: unqualified, PostgreSQL reads it from
+            // the innermost row that has a column of that name, and a category
+            // with a `limit` of its own hid the shop's. A name of several parts
+            // the author qualified.
+            Root::Global if names.len() == 1 && item.is_some() => {
+                let schema = self.schema.ok_or(CompileError::NoTable)?;
+                Ok(format!("{}.{}", qualified(schema.parent())?, names[0]))
+            }
+            Root::Global => Ok(names.join(".")),
+            Root::Item(up) => {
+                let alias = quoted(&item_out(item, up)?.alias);
+                Ok(match names.split_first() {
+                    Some((column, members)) if !members.is_empty() => {
+                        format!("({alias}.{column}).{}", members.join("."))
+                    }
+                    _ => format!("{alias}.{}", names.join(".")),
+                })
+            }
+        }
+    }
 }
 
 /// How many parameters and aliases have been numbered so far.
@@ -406,10 +449,22 @@ struct Next {
 }
 
 /// The item under test, inside a collection's predicate: what its row is
-/// called, and the names that lead to its collection from the candidate.
+/// called, the names that lead to its collection from the candidate, and
+/// the item of the enclosing collection's predicate, if there is one.
 struct Item<'a> {
     alias: String,
     logical: Vec<&'a str>,
+    outer: Option<&'a Item<'a>>,
+}
+
+/// The item `up` collections out from the item under test: the aliases of
+/// the enclosing queries are in scope of the inner one, as SQL has it.
+fn item_out<'a>(item: Option<&'a Item<'a>>, up: usize) -> Result<&'a Item<'a>, CompileError> {
+    let mut item = item;
+    for _ in 0..up {
+        item = item.and_then(|item| item.outer);
+    }
+    item.ok_or(CompileError::NoCurrentItem)
 }
 
 /// A piece of the condition, and how tightly its outermost operator binds.
@@ -471,32 +526,6 @@ impl<V> Fragment<V> {
         Fragment {
             params: all,
             ..self
-        }
-    }
-}
-
-/// The path as a column reference, no object on its way looked up: the
-/// place of a collection, and a name from the candidate.
-///
-/// From the candidate the names are written with dots, which PostgreSQL
-/// reads as a qualified name: `"s"."price"` is the column `price` of `s`.
-/// From the item under test the first name is a column of the item's row,
-/// under its alias, and what follows a member of a composite kept there.
-fn column(path: &Path, item: Option<&Item>) -> Result<String, CompileError> {
-    let names = path
-        .names()
-        .map(identifier)
-        .collect::<Result<Vec<_>, _>>()?;
-    match path.root() {
-        Root::Global => Ok(names.join(".")),
-        Root::Item => {
-            let alias = quoted(&item.ok_or(CompileError::NoCurrentItem)?.alias);
-            Ok(match names.split_first() {
-                Some((column, members)) if !members.is_empty() => {
-                    format!("({alias}.{column}).{}", members.join("."))
-                }
-                _ => format!("{alias}.{}", names.join(".")),
-            })
         }
     }
 }
