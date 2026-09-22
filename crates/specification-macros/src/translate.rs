@@ -28,6 +28,9 @@ pub(crate) struct Scope<'a> {
     held: Vec<(&'a Ident, Held)>,
     /// The parameters declared as an `Option`.
     options: Vec<&'a Ident>,
+    /// Whether `self` is the specification, and not the candidate: a path
+    /// from it is a value, a constant of the specification.
+    receiver: bool,
 }
 
 /// What stands behind the name given to what an `Option` holds: the `Option`,
@@ -75,6 +78,7 @@ impl<'a> Scope<'a> {
             outer: Vec::new(),
             held: Vec::new(),
             options: predicate.options(),
+            receiver: predicate.receiver.is_some(),
         }
     }
 
@@ -103,6 +107,7 @@ impl<'a> Scope<'a> {
                 .collect(),
             held,
             options: self.options.clone(),
+            receiver: self.receiver,
         }
     }
 
@@ -115,6 +120,7 @@ impl<'a> Scope<'a> {
             outer: self.outer.clone(),
             held: self.held.iter().cloned().chain([(name, held)]).collect(),
             options: self.options.clone(),
+            receiver: self.receiver,
         }
     }
 }
@@ -231,6 +237,14 @@ pub(crate) fn expr(expr: &Expr, scope: &Scope<'_>) -> Result<Tokens, Error> {
         Expr::Path(_) | Expr::Field(_) => match member(expr, scope)? {
             Some(path) => Ok(quote!(#ast::field(#path))),
             None => {
+                if scope.receiver
+                    && matches!(chain(expr)?, Some((base, names)) if base == "self" && names.is_empty())
+                {
+                    return Err(Error::new_spanned(
+                        expr,
+                        "the specification itself is not a value: name a field of it",
+                    ));
+                }
                 let outside = outside(expr, scope)?;
                 Ok(quote!(#ast::value(::core::clone::Clone::clone(&#outside))))
             }

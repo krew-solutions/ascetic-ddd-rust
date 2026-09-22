@@ -2,13 +2,17 @@
 //! candidate, its parameters, and the one expression it returns.
 
 use syn::spanned::Spanned;
-use syn::{Error, Expr, FnArg, Ident, ItemFn, Pat, PatType, ReturnType, Stmt, Type};
+use syn::{Error, Expr, FnArg, Ident, ItemFn, Pat, PatType, Receiver, ReturnType, Stmt, Type};
 
 /// A predicate function, taken apart.
 pub(crate) struct Predicate<'f> {
     /// What the function calls the thing it is a predicate of: its first
-    /// parameter, or `self`.
+    /// parameter, or `self` when there is no other.
     pub candidate: Ident,
+    /// `self` of a method that takes a candidate beside it: the specification
+    /// itself, whose fields are the constants. The tree function takes it
+    /// as the method does.
+    pub receiver: Option<&'f Receiver>,
     /// The other parameters: the constants of the specification. The tree
     /// function takes the same.
     pub parameters: Vec<&'f PatType>,
@@ -44,7 +48,18 @@ impl<'f> Predicate<'f> {
                 ));
             }
         }
-        let mut inputs = signature.inputs.iter();
+        let mut inputs = signature.inputs.iter().peekable();
+        // A method of a specification type takes the candidate beside
+        // `self`, and nothing else: its constants are the fields of `self`.
+        // `self` used to be the candidate whatever followed, and the tree
+        // of such a method had the candidate's members for constants.
+        let receiver = match inputs.peek() {
+            Some(FnArg::Receiver(receiver)) if signature.inputs.len() > 1 => {
+                inputs.next();
+                Some(receiver)
+            }
+            _ => None,
+        };
         let candidate = match inputs.next() {
             Some(FnArg::Receiver(receiver)) => Ident::new("self", receiver.self_token.span),
             Some(FnArg::Typed(parameter)) => name(parameter)?.clone(),
@@ -55,6 +70,14 @@ impl<'f> Predicate<'f> {
                 ));
             }
         };
+        if receiver.is_some() {
+            if let Some(extra) = inputs.next() {
+                return Err(Error::new_spanned(
+                    extra,
+                    "a method of a specification takes the candidate alone: its constants are its fields",
+                ));
+            }
+        }
         let parameters = inputs
             .map(|input| match input {
                 // The tree function takes the parameter as it is declared
@@ -67,6 +90,7 @@ impl<'f> Predicate<'f> {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Predicate {
             candidate,
+            receiver,
             parameters,
             body: body(function)?,
         })

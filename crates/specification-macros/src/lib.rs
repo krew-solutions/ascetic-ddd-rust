@@ -38,7 +38,19 @@ fn expand(arguments: Tokens, item: Tokens) -> Result<Tokens, Error> {
     let tree = translate::expr(predicate.body, &Scope::of(&predicate))?;
     let visibility = &function.vis;
     let name = format_ident!("{}_ast", function.sig.ident);
-    let parameters = &predicate.parameters;
+    // The tree function takes what the predicate takes, less the candidate:
+    // `self` of a specification type, and the parameters.
+    let inputs: Vec<Tokens> = predicate
+        .receiver
+        .iter()
+        .map(|receiver| quote!(#receiver))
+        .chain(
+            predicate
+                .parameters
+                .iter()
+                .map(|parameter| quote!(#parameter)),
+        )
+        .collect();
     let doc = format!(
         "The predicate [`{}`] as a specification: a tree to evaluate or to compile.",
         function.sig.ident,
@@ -46,7 +58,7 @@ fn expand(arguments: Tokens, item: Tokens) -> Result<Tokens, Error> {
     Ok(quote! {
         #[doc = #doc]
         #[allow(unused_variables)]
-        #visibility fn #name(#(#parameters),*)
+        #visibility fn #name(#(#inputs),*)
             -> ::ascetic_ddd_specification::Expr<::ascetic_ddd_specification::Value>
         {
             #tree
@@ -347,6 +359,77 @@ mod tests {
         ] {
             expand(quote!(), function.clone())
                 .unwrap_or_else(|error| panic!("{function}: {error}"));
+        }
+    }
+
+    // A specification type: `self` is the specification, its fields are the
+    // constants, and the first typed parameter is the candidate. `self` alone
+    // stays the candidate.
+    #[test]
+    fn the_fields_of_the_specification_are_its_constants() {
+        let tree = expand(
+            quote!(),
+            quote!(
+                fn is_satisfied_by(&self, s: &Store) -> bool {
+                    s.price > self.min
+                        && s.owner == self.owner
+                        && self.limit.is_some_and(|limit| s.price < limit)
+                        && s.items.iter().any(|item| item.price > self.limits.min)
+                }
+            ),
+        )
+        .expect("a specification")
+        .to_string();
+        assert!(tree.contains("fn is_satisfied_by_ast (& self)"), "{tree}");
+        assert!(tree.contains("Path :: global (\"price\")"), "{tree}");
+        assert!(
+            tree.contains("value (:: core :: clone :: Clone :: clone (& self . min))"),
+            "{tree}"
+        );
+        assert!(tree.contains("null_test :: equal"), "{tree}");
+        assert!(tree.contains("is_not_null (:: ascetic_ddd_specification :: ast :: value (:: core :: clone :: Clone :: clone (& self . limit)))"), "{tree}");
+        assert!(tree.contains("clone (& self . limits . min)"), "{tree}");
+        assert!(!tree.contains("global (\"min\")"), "{tree}");
+    }
+
+    #[test]
+    fn the_specification_itself_is_not_a_value() {
+        for (function, message) in [
+            (
+                quote!(
+                    fn f(&self, s: &Store) -> bool {
+                        s.owner == self
+                    }
+                ),
+                "a field of it",
+            ),
+            (
+                quote!(
+                    fn f(&self, s: &Store) -> bool {
+                        s.owner == *self
+                    }
+                ),
+                "a field of it",
+            ),
+            (
+                quote!(
+                    fn f(&self, s: &Store) -> bool {
+                        self.items.iter().any(|i| i.price > 1)
+                    }
+                ),
+                "a member of the candidate",
+            ),
+            (
+                quote!(
+                    fn f(&self, s: &Store, min: i64) -> bool {
+                        s.price > min
+                    }
+                ),
+                "its fields",
+            ),
+        ] {
+            let error = error_of(function.clone());
+            assert!(error.contains(message), "{function}: {error}");
         }
     }
 

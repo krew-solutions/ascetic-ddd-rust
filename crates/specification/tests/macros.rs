@@ -181,6 +181,24 @@ fn has_a_well_discounted_item(s: &Store) -> bool {
     })
 }
 
+// A specification type: its fields are the constants, `self` is the
+// specification, and the candidate comes beside it. `self` alone, as in
+// `Store::is_active` below, stays the candidate.
+struct DearAndOpen {
+    min: i64,
+    closed_before: Option<i64>,
+}
+
+impl DearAndOpen {
+    #[specification]
+    fn is_satisfied_by(&self, s: &Store) -> bool {
+        s.items.iter().any(|item| item.price > self.min)
+            && self
+                .closed_before
+                .is_none_or(|at| s.closed_at.is_some_and(|closed| closed < at))
+    }
+}
+
 impl Store {
     #[specification]
     fn is_active(&self) -> bool {
@@ -270,6 +288,23 @@ fn the_tree_of_a_predicate() {
             ),
         ),
         (Store::is_active_ast(), field("active")),
+        (
+            DearAndOpen {
+                min: 500,
+                closed_before: Some(5),
+            }
+            .is_satisfied_by_ast(),
+            and(
+                any("items", greater_than(item("price"), value(500))),
+                or(
+                    is_null(value(5)),
+                    and(
+                        is_not_null(field("closed_at")),
+                        less_than(field("closed_at"), value(5)),
+                    ),
+                ),
+            ),
+        ),
         // A comparison with none is the null test, in the tree as in Rust.
         (closed_ast(), is_not_null(field("closed_at"))),
         (
@@ -599,6 +634,17 @@ fn the_function_and_its_tree_agree() {
                 );
             }
         }
+        for min in [2, 500] {
+            for closed_before in [None, Some(5), Some(1_700_000_001)] {
+                let specification = DearAndOpen { min, closed_before };
+                assert_eq!(
+                    is_satisfied_by(&specification.is_satisfied_by_ast(), &store),
+                    Ok(specification.is_satisfied_by(&store)),
+                    "DearAndOpen({min}, {closed_before:?}) of {:?}",
+                    store.name,
+                );
+            }
+        }
         for alias in [None, Some("Pens"), Some("Inks")] {
             assert_eq!(
                 is_satisfied_by(&known_as_ast(alias), &store),
@@ -636,4 +682,18 @@ fn the_tree_compiles_to_a_query() {
             .sql,
         r#"$1::bigint IS NULL OR "closed_at" IS NOT NULL AND "closed_at" < $2"#,
     );
+    // The tree of a specification type, with its fields as the constants.
+    let query = pg::compile(
+        &DearAndOpen {
+            min: 500,
+            closed_before: None,
+        }
+        .is_satisfied_by_ast(),
+    )
+    .expect("compiled");
+    assert_eq!(
+        query.sql,
+        r#"EXISTS (SELECT 1 FROM unnest("items") AS "item_1" WHERE "item_1"."price" > $1) AND ($2::text IS NULL OR "closed_at" IS NOT NULL AND "closed_at" < $3)"#,
+    );
+    assert_eq!(query.params, [Value::Int(500), Value::Null, Value::Null]);
 }

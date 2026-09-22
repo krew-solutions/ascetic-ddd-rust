@@ -23,9 +23,36 @@ fn adult(user: &User, age: i64) -> bool {
 // fn adult_ast(age: i64) -> Expr<Value>
 ```
 
-The first parameter, or `self`, is the candidate; the others are constants
-of the specification, and `<name>_ast` takes the same. What the body may
-consist of is listed in the documentation of `ascetic-ddd-specification`.
+The first parameter, or `self` alone, is the candidate; the others are
+constants of the specification, and `<name>_ast` takes the same. What the
+body may consist of is listed in the documentation of
+`ascetic-ddd-specification`.
+
+A specification with constants is a type: its fields are the constants, and
+its predicate a method that takes the candidate beside `self`.
+
+```rust,ignore
+struct DearSince {
+    since: i64,
+    min: i64,
+}
+
+impl DearSince {
+    #[specification]
+    fn is_satisfied_by(&self, s: &Store) -> bool {
+        s.price > self.min && s.created_at > self.since
+    }
+}
+
+// fn is_satisfied_by_ast(&self) -> Expr<Value>
+```
+
+A field of `self` is a value, as a parameter is, and may be reached by
+fields; `self` itself is not a value, nor is a collection of it. The method
+takes the candidate alone. `self` used to be the candidate whatever
+followed, and such a method had the candidate's members for constants, in
+silence. The macro has no types: a field of `self` that is an `Option` is not
+seen to be one, as a parameter is; ask it what it holds.
 
 An `Option` is its value or the null: `x == None` is `IS NULL`, as
 `x.is_none()` is; `Some(v)` is `v`; and a parameter of an `Option` type that
