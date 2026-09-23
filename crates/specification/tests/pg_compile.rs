@@ -6,7 +6,8 @@
 
 use ascetic_ddd_specification::ast::{
     add, all, and, and_all, any, div, equal, field, greater_than, greater_than_equal, is,
-    is_not_null, is_null, left_shift, less_than, mul, neg, not, not_equal, or, sub, value,
+    is_not_null, is_null, left_shift, less_than, mul, neg, not, not_equal, or, right_shift, sub,
+    value,
 };
 use ascetic_ddd_specification::pg::{CompileError, Compiler, ForeignKey, Query, Schema, compile};
 use ascetic_ddd_specification::{Expr, Path, Value};
@@ -433,8 +434,14 @@ fn parentheses_keep_the_shape_of_the_tree() {
         (not(equal(a(), b())), r#"NOT "a" = "b""#),
         (is_null(or(a(), b())), r#"("a" OR "b") IS NULL"#),
         (neg(add(a(), b())), r#"-("a" + "b")"#),
-        (left_shift(add(a(), b()), c()), r#""a" + "b" << "c""#),
-        (add(a(), left_shift(b(), c())), r#""a" + ("b" << "c")"#),
+        (
+            left_shift(add(a(), b()), c()),
+            r#""a" + "b" << "c"::integer"#,
+        ),
+        (
+            add(a(), left_shift(b(), c())),
+            r#""a" + ("b" << "c"::integer)"#,
+        ),
         // As tight: by the side the operator groups to.
         (sub(sub(a(), b()), c()), r#""a" - "b" - "c""#),
         (sub(a(), sub(b(), c())), r#""a" - ("b" - "c")"#),
@@ -480,6 +487,41 @@ fn is_takes_a_parameter() {
 /// nothing beside it - "operator is not unique: unknown + unknown" - so there
 /// the text says the type, by the kind of the value. Beside a column it does
 /// not: the value adapts to the column, which a type said would take away.
+/// PostgreSQL shifts by an `integer` and by nothing else: `bigint << bigint`
+/// is "operator does not exist", and a column is a `bigint` more often than
+/// not. A constant as the count is inferred by the server from the operator,
+/// and where nothing stands beside it was said an integer already; a column
+/// or an expression as the count has a type of its own, which the server will
+/// not convert, so it is cast. A cast binds tighter than any operator, so
+/// what is not an atom is parenthesised. The rows are in `tests/pg.rs`.
+#[test]
+fn the_count_of_a_shift_is_an_integer() {
+    let (a, b, c): (Make, Make, Make) = (|| field("a"), || field("b"), || field("c"));
+    for (specification, expected) in [
+        // A column or an expression is cast.
+        (left_shift(a(), b()), r#""a" << "b"::integer"#),
+        (
+            right_shift(a(), add(b(), value(1))),
+            r#""a" >> ("b" + $1)::integer"#,
+        ),
+        (
+            left_shift(a(), left_shift(b(), c())),
+            r#""a" << ("b" << "c"::integer)::integer"#,
+        ),
+        (left_shift(a(), neg(b())), r#""a" << (-"b")::integer"#),
+        (
+            left_shift(add(a(), b()), c()),
+            r#""a" + "b" << "c"::integer"#,
+        ),
+        // A constant is inferred, as it was.
+        (left_shift(a(), value(3)), r#""a" << $1"#),
+        (left_shift(value(1), value(4)), "$1::bigint << $2::integer"),
+        (right_shift(value(64), b()), r#"$1 >> "b"::integer"#),
+    ] {
+        assert_eq!(sql(&specification), expected);
+    }
+}
+
 #[test]
 fn a_constant_with_nothing_beside_it_has_its_type_said() {
     let null = || Expr::Value(Value::Null);

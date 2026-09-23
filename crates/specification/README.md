@@ -238,7 +238,10 @@ the sources as they were.
   by its size, so the server computed `1 << 63` in sixteen bits and answered
   0. Beside a column the type is not said: the value adapts to the
   column, and a type said would take that away - `"at" = $1::timestamptz` of
-  a column without zone is compared in the session's time zone.
+  a column without zone is compared in the session's time zone. The one
+  column that is cast is the count of a shift, `"a" << "b"::integer`:
+  PostgreSQL shifts by an `integer` and by nothing else, and a `bigint`
+  column there was "operator does not exist".
 * Unary minus exists. Python's `NEG = "-"` is an alias of `SUB` in its
   `Enum`; Go's prints as `-neg`; Go's generator emits a `spec.Neg` that is
   not defined. Unary plus is dropped: nothing produced it.

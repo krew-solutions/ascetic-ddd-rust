@@ -991,6 +991,76 @@ async fn a_constant_beside_a_column_takes_the_columns_type() {
     }
 }
 
+/// PostgreSQL shifts by an `integer` and by nothing else: a `bigint` column
+/// as the count was "operator does not exist: bigint << bigint". Both readers
+/// take the count modulo 64, a negative one included.
+#[tokio::test]
+async fn the_count_of_a_shift_is_an_integer_whatever_its_column_is() {
+    let client = client().await;
+    client
+        .batch_execute(
+            "CREATE TEMP TABLE spec_shifts (id int8, n int8, count int8, small int2);
+             INSERT INTO spec_shifts VALUES
+                 (1, 1, 3, 3), (2, 1, 64, 64), (3, 1, -1, -1), (4, 1, NULL, NULL), (5, 8, 62, NULL);",
+        )
+        .await
+        .expect("a table");
+    let row = |n: i64, count: Option<i64>, small: Option<i64>| {
+        Record::object([
+            ("n", Record::value(n)),
+            ("count", Record::value(count)),
+            ("small", Record::value(small)),
+        ])
+    };
+    let rows = [
+        (1, row(1, Some(3), Some(3))),
+        (2, row(1, Some(64), Some(64))),
+        (3, row(1, Some(-1), Some(-1))),
+        (4, row(1, None, None)),
+        (5, row(8, Some(62), None)),
+    ];
+    let (n, count, small): (Make, Make, Make) =
+        (|| field("n"), || field("count"), || field("small"));
+    let specifications: [(Spec, Vec<i64>); 8] = [
+        (equal(left_shift(n(), count()), value(8)), vec![1]),
+        // 64 is no shift at all, and -1 is one by 63.
+        (equal(left_shift(n(), count()), value(1)), vec![2]),
+        (equal(left_shift(n(), count()), value(i64::MIN)), vec![3]),
+        (is_null(left_shift(n(), count())), vec![4]),
+        (is_null(left_shift(n(), small())), vec![4, 5]),
+        (equal(left_shift(n(), small()), value(8)), vec![1]),
+        // An expression as the count, and a constant shifted by a column.
+        (
+            equal(left_shift(n(), add(count(), value(1))), value(16)),
+            vec![1],
+        ),
+        (equal(right_shift(value(64), count()), value(8)), vec![1]),
+    ];
+    for (specification, expected) in &specifications {
+        let satisfied: Vec<i64> = rows
+            .iter()
+            .filter(|(_, row)| is_satisfied_by(specification, row).expect("evaluated"))
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(&satisfied, expected);
+        let query = compile(specification).expect("compiled");
+        let text = format!("SELECT id FROM spec_shifts WHERE {} ORDER BY id", query.sql);
+        let params: Vec<&(dyn ToSql + Sync)> = query
+            .params
+            .iter()
+            .map(|param| param as &(dyn ToSql + Sync))
+            .collect();
+        let selected: Vec<i64> = client
+            .query(&text, &params)
+            .await
+            .unwrap_or_else(|error| panic!("{text}: {error}"))
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert_eq!(&selected, expected, "{text}");
+    }
+}
+
 #[tokio::test]
 async fn a_value_is_written_as_the_type_the_server_asks_for_if_it_fits() {
     let client = client().await;

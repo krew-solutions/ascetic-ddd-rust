@@ -22,6 +22,10 @@ pub(super) enum Associativity {
 /// `EXISTS (…)`.
 pub(super) const ATOM: u8 = u8::MAX;
 
+/// Of `::`, the row above every operator: what an operand is parenthesised
+/// against before its type is said.
+pub(super) const CAST: u8 = 160;
+
 pub(super) fn prefix(op: Prefix) -> u8 {
     match op {
         Prefix::Neg => 140,

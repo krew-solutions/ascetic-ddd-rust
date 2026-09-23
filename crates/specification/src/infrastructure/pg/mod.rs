@@ -225,9 +225,20 @@ impl<'s> Compiler<'s> {
                 let (precedence, associativity) = precedence::infix(*op);
                 let apart = |side| associativity != side && !precedence::regroups(*op);
                 let (of_left, of_right) = param_type::of_both(left, *op, right);
+                let count = param_type::is_a_count_to_cast(*op, right);
                 let (left, next) = self.render(left, item, next)?;
                 let (right, next) = self.render(right, item, next)?;
-                let (left, right) = (left.of_type(of_left), right.of_type(of_right));
+                let left = left.of_type(of_left);
+                // A cast binds tighter than any operator: the count of a
+                // shift is parenthesised against the cast, if it is not an
+                // atom, before its type is said: `("b" + $1)::integer`.
+                let right = if count {
+                    right
+                        .within(precedence::CAST, false)
+                        .of_type(Some("integer"))
+                } else {
+                    right.of_type(of_right)
+                };
                 let left = left.within(precedence, apart(Associativity::Left));
                 let right = right.within(precedence, apart(Associativity::Right));
                 let sql = format!("{} {} {}", left.sql, spelling(*op), right.sql);

@@ -15,6 +15,13 @@
 //! timestamp with or without zone — and a type said beside a column takes
 //! that away: `"at" = $1::timestamptz` of a column without zone is compared
 //! in the session's time zone, and selects other rows than `"at" = $1` does.
+//!
+//! The one column that is cast is the count of a shift, `"a" << "b"::integer`:
+//! PostgreSQL shifts by an `integer` and by nothing else, and a column there,
+//! a `bigint` more often than not, is "operator does not exist: bigint <<
+//! bigint". A cast of the count takes nothing away — the operator has it an
+//! integer already — and turns a column of any integer type into the one the
+//! operator has.
 
 use crate::domain::ast::Expr;
 use crate::domain::operator::{Arithmetic, Infix, Prefix};
@@ -52,6 +59,15 @@ pub(super) fn under_prefix<V: ParamType>(op: Prefix, operand: &Expr<V>) -> Optio
         Prefix::Neg => Some("bigint"),
         Prefix::Not => None,
     })
+}
+
+/// Whether `right` is the count of a shift that must be said an integer. A
+/// constant there is inferred, or was said an integer already where nothing
+/// stands beside it; a column or an expression has a type of its own, which
+/// the server will not convert, so it is cast.
+pub(super) fn is_a_count_to_cast<V>(op: Infix, right: &Expr<V>) -> bool {
+    matches!(op, Infix::Arithmetic(Arithmetic::Shl | Arithmetic::Shr))
+        && !matches!(right, Expr::Value(_))
 }
 
 /// The type to say of the operand of a null test, if it is a constant. Of
