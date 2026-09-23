@@ -18,10 +18,10 @@ use ascetic_ddd_specification::ast::{
     right_shift, sub, value,
 };
 use ascetic_ddd_specification::jsonpath::{Params, Template};
-use ascetic_ddd_specification::pg::{Compiler, Relation, Schema, compile};
+use ascetic_ddd_specification::pg::{Compiler, Schema, compile};
 use ascetic_ddd_specification::{
     Arithmetic, EvalError, Expr, Interval, Mapped, Mapping, Operand, OperandError, Path, Record,
-    Root, Timestamp, Value, evaluate, is_satisfied_by, transform,
+    Timestamp, Value, evaluate, is_satisfied_by, transform,
 };
 use std::cmp::Ordering;
 use tokio_postgres::error::SqlState;
@@ -47,6 +47,25 @@ fn null() -> Spec {
     Expr::Value(Value::Null)
 }
 
+/// A mapping that renames every name of a path by one rule, and leaves the
+/// values: the storage's name of a member, whatever leads to it.
+struct Renamed(fn(&str) -> &str);
+
+impl Mapping<Value, Value> for Renamed {
+    type Error = String;
+
+    fn field(&self, path: &Path) -> Result<Mapped<Value>, String> {
+        let mut names = path.names().map(self.0);
+        let first = names.next().ok_or("an empty path")?;
+        Ok(Mapped::Scalar(Expr::Field(
+            names.fold(Path::new(path.root(), first), Path::child),
+        )))
+    }
+
+    fn value(&self, value: &Value) -> Result<Mapped<Value>, String> {
+        Ok(Mapped::Scalar(Expr::Value(value.clone())))
+    }
+}
 fn constants() -> Vec<Spec> {
     let (t, f): (Make, Make) = (|| value(true), || value(false));
     let (noon, hour) = (
@@ -539,25 +558,39 @@ fn specifications() -> Vec<Spec> {
 async fn a_specification_selects_the_rows_it_is_satisfied_by() {
     let client = client().await;
     tables(&client).await;
-    // The owner of an item is in a table of its own in either storage of the items.
-    let owner = || Relation::new("spec_owners", "id", "owner_id");
+    // The owner of an item is in a table of its own in either storage of the items.    // The schema is the storage's keys; the tree reaches the compiler in the
+    // storage's names, which a mapping gives it: the items are a table of
+    // their own in one storage and an array in the other, and the owner is
+    // named by the key's column in both.
     let relational = Schema::new("spec_stores")
-        .relational("items", Relation::new("spec_items", "store_id", "id"))
-        .relational("items.owner", owner())
-        .relational("owner", owner());
+        .foreign_key("spec_items", "store_id", "spec_stores", "id")
+        .foreign_key("spec_items", "owner_id", "spec_owners", "id")
+        .foreign_key("spec_stores", "owner_id", "spec_owners", "id");
     let embedded = Schema::new("spec_stores")
-        .relational("items.owner", owner())
-        .relational("owner", owner());
+        .foreign_key("spec_stores.items", "owner_id", "spec_owners", "id")
+        .foreign_key("spec_stores", "owner_id", "spec_owners", "id");
+    let in_a_table = Renamed(|name| match name {
+        "items" => "spec_items",
+        "owner" => "owner_id",
+        name => name,
+    });
+    let in_the_row = Renamed(|name| match name {
+        "owner" => "owner_id",
+        name => name,
+    });
     for specification in specifications() {
         let satisfied: Vec<i64> = stores()
             .iter()
             .filter(|store| is_satisfied_by(&specification, &record(store)).expect("evaluated"))
             .map(|store| store.id)
             .collect();
-        for (storage, schema) in [("embedded", &embedded), ("relational", &relational)] {
+        for (storage, schema, mapping) in [
+            ("embedded", &embedded, &in_the_row),
+            ("relational", &relational, &in_a_table),
+        ] {
             let query = Compiler::new()
                 .schema(schema)
-                .compile(&specification)
+                .compile(&transform(&specification, mapping).expect("transformed"))
                 .expect("compiled");
             let text = format!("SELECT id FROM spec_stores WHERE {} ORDER BY id", query.sql);
             let params: Vec<&(dyn ToSql + Sync)> = query
@@ -659,14 +692,15 @@ impl Mapping<Priced, Value> for Prices {
     type Error = String;
 
     fn field(&self, path: &Path) -> Result<Mapped<Value>, String> {
+        // By the whole path from the candidate: the collection, and a
+        // member of its item under it. Where the item is, is the tree's.
         let names: Vec<&str> = path.names().collect();
-        match (path.root(), names.as_slice()) {
-            // The column beside the path as it came: the item's, however
-            // far out that item is.
-            (Root::Item(_), ["discount"]) => Ok(Mapped::Scalar(Expr::Field(
+        match names.as_slice() {
+            ["items"] => Ok(Mapped::Scalar(Expr::Field(path.clone()))),
+            ["items", "discount"] => Ok(Mapped::Scalar(Expr::Field(
                 path.sibling("discount_percent"),
             ))),
-            (_, names) => Err(format!("no such member: {}", names.join("."))),
+            names => Err(format!("no such member: {}", names.join("."))),
         }
     }
 
@@ -1067,25 +1101,28 @@ async fn the_item_of_an_enclosing_collection_is_named_from_an_inner_predicate() 
         )))),
     ];
     let relational = Schema::new("spec_shops")
-        .relational(
-            "categories",
-            Relation::new("spec_categories", "shop_id", "id"),
-        )
-        .relational(
-            "categories.products",
-            Relation::new("spec_products", "category_id", "id"),
-        );
+        .foreign_key("spec_categories", "shop_id", "spec_shops", "id")
+        .foreign_key("spec_products", "category_id", "spec_categories", "id");
     let embedded = Schema::new("spec_shops");
+    let in_tables = Renamed(|name| match name {
+        "categories" => "spec_categories",
+        "products" => "spec_products",
+        name => name,
+    });
+    let in_the_row = Renamed(|name| name);
     for specification in &specifications {
         let satisfied: Vec<i64> = shops
             .iter()
             .filter(|(_, shop)| is_satisfied_by(specification, shop).expect("evaluated"))
             .map(|(id, _)| *id)
             .collect();
-        for (storage, schema) in [("embedded", &embedded), ("relational", &relational)] {
+        for (storage, schema, mapping) in [
+            ("embedded", &embedded, &in_the_row),
+            ("relational", &relational, &in_tables),
+        ] {
             let query = Compiler::new()
                 .schema(schema)
-                .compile(specification)
+                .compile(&transform(specification, mapping).expect("transformed"))
                 .expect("compiled");
             let text = format!("SELECT id FROM spec_shops WHERE {} ORDER BY id", query.sql);
             let params: Vec<&(dyn ToSql + Sync)> = query

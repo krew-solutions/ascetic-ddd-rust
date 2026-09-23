@@ -13,8 +13,8 @@ pub use crate::domain::operator::{Arithmetic, Comparison, Infix, Logical, Postfi
 pub use crate::domain::record::Record;
 pub use crate::domain::value::{Interval, Timestamp, Value};
 pub use crate::domain::{dsl, jsonpath, null_test};
+pub use crate::infrastructure::mapping::{Mapped, Mapping, TransformError, transform};
 pub use crate::infrastructure::pg;
-pub use crate::infrastructure::transform::{Mapped, Mapping, TransformError, transform};
 
 #[cfg(feature = "macros")]
 pub use ascetic_ddd_specification_macros::specification;

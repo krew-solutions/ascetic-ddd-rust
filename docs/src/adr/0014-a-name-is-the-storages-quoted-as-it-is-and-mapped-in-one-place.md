@@ -42,7 +42,7 @@ mapping.
 
 Held by: `tests/pg.rs` (columns `"user"`, `"order"`, `"createdAt"` on a live
 server), the tests of `pg/identifier.rs`, and
-`tests/transform.rs::a_mapping_and_a_schema_are_given_together`; in the ports
+`tests/mapping.rs::a_mapping_and_a_schema_are_given_together`; in the ports
 by their agreement tests, and in Go by `TestOnlyTheTreeIsGenerated`.
 
 ## Consequences

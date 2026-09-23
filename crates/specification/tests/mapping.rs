@@ -73,8 +73,14 @@ impl Mapping<Domain, Value> for Something {
                 column(path, "member_id"),
             ])),
             ["something", name @ ("rank" | "deleted_at")] => Ok(column(path, name)),
-            // In a collection's predicate the names are the item's.
-            ["weight"] if path.root() == Root::Item(0) => Ok(column(path, "weight_grams")),
+            // A collection is a member: where it is, by a path from the
+            // candidate. And a member of its item by its whole path, which
+            // starts with the collection's, in the domain's names and in the
+            // storage's.
+            ["something", "parts"] => Ok(Mapped::Scalar(Expr::Field(Path::global("parts")))),
+            ["something", "parts", "weight"] => Ok(Mapped::Scalar(Expr::Field(
+                Path::global("parts").child("weight_grams"),
+            ))),
             names => Err(format!("unknown field: {}", names.join("."))),
         }
     }
@@ -90,13 +96,6 @@ impl Mapping<Domain, Value> for Something {
                 Mapped::Composite(vec![member(&id.member_id), scalar(id.something_id)])
             }
         })
-    }
-
-    fn collection(&self, path: &Path) -> Result<Path, String> {
-        match path.names().collect::<Vec<_>>().as_slice() {
-            ["something", "parts"] => Ok(Path::global("something_parts")),
-            names => Err(format!("unknown collection: {}", names.join("."))),
-        }
     }
 }
 
@@ -178,9 +177,131 @@ fn the_predicate_of_a_collection_is_transformed_too() {
     assert_eq!(
         transform(&specification, &Something),
         Ok(any(
-            "something_parts",
+            "parts",
             greater_than(field(Path::item("weight_grams")), int(100)),
         )),
+    );
+}
+
+/// A mapping is of the aggregate's members and knows nothing of any query:
+/// it is asked about a member of an item by the member's whole path from
+/// the candidate, and where the answer goes - from which item, how far out -
+/// is the tree's. The mapping's answer for a member of an item starts with
+/// its answer for the collection, and the rest is the member from the item.
+#[test]
+fn a_mapping_is_asked_by_the_whole_path_and_the_answer_is_put_where_the_member_was() {
+    struct Shops;
+    impl Mapping<Domain, Value> for Shops {
+        type Error = String;
+        fn field(&self, path: &Path) -> Result<Mapped<Value>, String> {
+            assert_eq!(path.root(), Root::Global, "asked from the candidate");
+            let names: Vec<&str> = path.names().collect();
+            let storage = match names.as_slice() {
+                ["limit"] => "max_price".to_owned(),
+                ["categories"] => "cats".to_owned(),
+                ["categories", "limit"] => "cats.max_price".to_owned(),
+                ["categories", "products"] => "cats.goods".to_owned(),
+                ["categories", "products", "price"] => "cats.goods.price_cents".to_owned(),
+                ["categories", "products", "id"] => {
+                    return Ok(Mapped::Composite(vec![
+                        column(&Path::from("cats.goods.id"), "tenant_id"),
+                        column(&Path::from("cats.goods.id"), "product_id"),
+                    ]));
+                }
+                names => return Err(format!("unknown field: {}", names.join("."))),
+            };
+            Ok(Mapped::Scalar(Expr::Field(Path::from(storage.as_str()))))
+        }
+        fn value(&self, value: &Domain) -> Result<Mapped<Value>, String> {
+            match value {
+                Domain::Scalar(value) => Ok(Mapped::Scalar(Expr::Value(value.clone()))),
+                _ => Err("not a scalar".to_owned()),
+            }
+        }
+    }
+    let specification: Expr<Domain> = any(
+        "categories",
+        any(
+            Path::item("products"),
+            and(
+                greater_than(field(Path::item("price")), field(Path::outer(1, "limit"))),
+                and(
+                    less_than(field(Path::outer(1, "limit")), field("limit")),
+                    equal(field(Path::item("id")), field(Path::item("id"))),
+                ),
+            ),
+        ),
+    );
+    assert_eq!(
+        transform(&specification, &Shops),
+        Ok(any(
+            "cats",
+            any(
+                Path::item("goods"),
+                and(
+                    greater_than(
+                        field(Path::item("price_cents")),
+                        field(Path::outer(1, "max_price")),
+                    ),
+                    and(
+                        less_than(field(Path::outer(1, "max_price")), field("max_price")),
+                        and(
+                            equal(
+                                field(Path::item("tenant_id")),
+                                field(Path::item("tenant_id"))
+                            ),
+                            equal(
+                                field(Path::item("product_id")),
+                                field(Path::item("product_id"))
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )),
+    );
+}
+
+#[test]
+fn what_the_mapping_puts_outside_its_collection_is_refused() {
+    struct Astray;
+    impl Mapping<Domain, Value> for Astray {
+        type Error = String;
+        fn field(&self, path: &Path) -> Result<Mapped<Value>, String> {
+            Ok(Mapped::Scalar(Expr::Field(match path.names().count() {
+                1 => path.clone(),
+                // A member of an item answered with a column of the candidate.
+                _ => Path::global("elsewhere"),
+            })))
+        }
+        fn value(&self, _: &Domain) -> Result<Mapped<Value>, String> {
+            Ok(Mapped::Scalar(int(1)))
+        }
+    }
+    struct Valued;
+    impl Mapping<Domain, Value> for Valued {
+        type Error = String;
+        fn field(&self, _: &Path) -> Result<Mapped<Value>, String> {
+            Ok(Mapped::Scalar(int(1)))
+        }
+        fn value(&self, _: &Domain) -> Result<Mapped<Value>, String> {
+            Ok(Mapped::Scalar(int(1)))
+        }
+    }
+    let specification: Expr<Domain> =
+        any("items", greater_than(field(Path::item("weight")), value(1)));
+    assert_eq!(
+        transform(&specification, &Astray),
+        Transformed::Err(TransformError::OutsideItsCollection),
+    );
+    assert_eq!(
+        transform(&specification, &Valued),
+        Transformed::Err(TransformError::CollectionNotAPlace),
+    );
+    let astray: Expr<Domain> = greater_than(field(Path::item("weight")), value(1));
+    assert_eq!(
+        transform(&astray, &Astray),
+        Transformed::Err(TransformError::NoCurrentItem),
     );
 }
 
@@ -193,10 +314,9 @@ fn a_mapping_and_a_schema_are_given_together() {
         "something.parts",
         greater_than(field(Path::item("weight")), value(100)),
     );
-    let schema = pg::Schema::new("things").alias("t").relational(
-        "something_parts",
-        pg::Relation::new("parts", "thing_id", "id"),
-    );
+    let schema = pg::Schema::new("things")
+        .alias("t")
+        .foreign_key("parts", "thing_id", "things", "id");
     let query = pg::Compiler::new()
         .schema(&schema)
         .compile(&transform(&specification, &Something).expect("transformed"))
@@ -204,9 +324,9 @@ fn a_mapping_and_a_schema_are_given_together() {
     assert_eq!(
         query.sql,
         concat!(
-            r#"EXISTS (SELECT 1 FROM "parts" AS "something_part_1" "#,
-            r#"WHERE "something_part_1"."thing_id" = "t"."id" "#,
-            r#"AND "something_part_1"."weight_grams" > $1)"#,
+            r#"EXISTS (SELECT 1 FROM "parts" AS "part_1" "#,
+            r#"WHERE "part_1"."thing_id" = "t"."id" "#,
+            r#"AND "part_1"."weight_grams" > $1)"#,
         ),
     );
     assert_eq!(query.params, [Value::Int(100)]);

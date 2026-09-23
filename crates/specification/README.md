@@ -207,8 +207,24 @@ the sources as they were.
   small to be one is out of range as one too large is - `1e-300 * 1e-300` is
   an error, not the zero IEEE arithmetic rounds it to - and a NaN divided by
   zero is a NaN. The sources had a zero and "division by zero".
-* A schema names a collection by its whole path, `categories.items`, not by
-  its last name, so two collections of one name are two.
+* A schema is the foreign keys of the storage, as `\d` shows them, and
+  nothing of any aggregate or query: `Schema::foreign_key("store_items",
+  "store_id", "stores", "id")`, a composite key by `ForeignKey::and`, a key
+  named as PostgreSQL names it - `store_items_store_id_fkey` - or as given.
+  A tree names a collection by its table, and where two keys of that table
+  reference the row it is named from, by the key's name; an object kept in
+  a table of its own by the key's column, `owner_id`; a row of an array,
+  which has no table, by the array's column, `"stores.items"`. What the
+  schema does not mention is an array or a composite in the row. The
+  sources key a collection by its path in the aggregate and carry an alias
+  for the subquery, which is the compiler's to make.
+* A mapping is of the aggregate's members and knows nothing of any query: it
+  is asked about a member by its whole path from the candidate,
+  `categories.products.price`, a collection being a member like any other,
+  and `transform` puts the answer where the member was - a member of an item
+  is the answer less the collection's, from the item, however far out. The
+  sources ask a mapping about "the item" by the names alone, `ItemAttrNode`,
+  so a mapping could not tell the items of one collection from another's.
 * A name is written into the query between double quotes, as it is, and one
   that is not of ASCII letters, digits and `_` is refused. The sources write
   any name into the query as it stands, where `user` is the session's user
@@ -253,10 +269,10 @@ the sources as they were.
   word without quotes. Where the domain's names are not the storage's, a
   [`Mapping`] says what they are. A name with a space or a letter beyond
   ASCII cannot be written.
-* An object on the way to a member - `@.owner.name` - is looked up in the
-  `Schema` by the names that lead to it, as a collection is. Kept in a table
-  of its own, `Schema::relational("items.owner", Relation::new("owners",
-  "id", "owner_id"))`, it is read through the key, by a subquery in the
+* An object on the way to a member - `@.owner_id.name` - is looked up in
+  the `Schema` as a collection is: by the key its name is a column of. Kept
+  in a table of its own, `Schema::foreign_key("store_items", "owner_id",
+  "owners", "id")`, it is read through the key, by a subquery in the
   column's place. Not mentioned, it is a composite kept in the item's row,
   `("item_1"."maker")."name"` - a Value Object; one kept as columns with a
   prefix is for the [`Mapping`] to say. From the candidate an object not

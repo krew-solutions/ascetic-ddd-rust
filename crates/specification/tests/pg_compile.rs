@@ -8,7 +8,7 @@ use ascetic_ddd_specification::ast::{
     add, all, and, and_all, any, div, equal, field, greater_than, greater_than_equal, is,
     is_not_null, is_null, left_shift, less_than, mul, neg, not, not_equal, or, sub, value,
 };
-use ascetic_ddd_specification::pg::{CompileError, Compiler, Query, Relation, Schema, compile};
+use ascetic_ddd_specification::pg::{CompileError, Compiler, ForeignKey, Query, Schema, compile};
 use ascetic_ddd_specification::{Expr, Path, Value};
 
 type Spec = Expr<Value>;
@@ -185,9 +185,10 @@ fn a_member_of_an_object_inside_an_item_is_a_member_of_a_composite() {
             .fold(Path::item("maker"), |path, name| path.child(*name));
         equal(field(path), value("x"))
     };
-    let schema = Schema::new("stores")
-        .alias("s")
-        .relational("items", Relation::new("store_items", "store_id", "id"));
+    let schema =
+        Schema::new("stores")
+            .alias("s")
+            .foreign_key("store_items", "store_id", "stores", "id");
     for (specification, expected) in [
         (
             any("items", maker(&["name"])),
@@ -204,11 +205,10 @@ fn a_member_of_an_object_inside_an_item_is_a_member_of_a_composite() {
         ),
     ] {
         assert_eq!(sql(&specification), expected);
-    }
-    // In a table of its own an item is a row as well, and its column a composite.
+    } // In a table of its own an item is a row as well, and its column a composite.
     assert_eq!(
-        sql_with(&schema, &any("items", maker(&["name"]))),
-        r#"EXISTS (SELECT 1 FROM "store_items" AS "item_1" WHERE "item_1"."store_id" = "s"."id" AND ("item_1"."maker")."name" = $1)"#,
+        sql_with(&schema, &any("store_items", maker(&["name"]))),
+        r#"EXISTS (SELECT 1 FROM "store_items" AS "store_item_1" WHERE "store_item_1"."store_id" = "s"."id" AND ("store_item_1"."maker")."name" = $1)"#,
     );
     // From the candidate the dots stay: a qualified name, `alias.column`.
     assert_eq!(
@@ -223,13 +223,14 @@ fn a_member_of_an_object_inside_an_item_is_a_member_of_a_composite() {
 /// null if there is none.
 #[test]
 fn a_member_of_an_object_kept_in_a_table_of_its_own_is_read_through_the_key() {
-    let owner = || Relation::new("owners", "id", "owner_id");
-    let owner_name = || field(Path::item("owner").child("name"));
+    let owner_name = || field(Path::item("owner_id").child("name"));
     let named = |name: &str| equal(owner_name(), value(name));
-    // Whether the items are an array or a table, their owner is a table.
-    let embedded = Schema::new("stores")
-        .alias("s")
-        .relational("items.owner", owner());
+    // Whether the items are an array or a table, their owner is a table. A
+    // row of an array has no table: it is named by the array's column.
+    let embedded =
+        Schema::new("stores")
+            .alias("s")
+            .foreign_key("stores.items", "owner_id", "owners", "id");
     assert_eq!(
         sql_with(&embedded, &any("items", named("ann"))),
         concat!(
@@ -240,23 +241,24 @@ fn a_member_of_an_object_kept_in_a_table_of_its_own_is_read_through_the_key() {
     );
     let relational = Schema::new("stores")
         .alias("s")
-        .relational("items", Relation::new("store_items", "store_id", "id"))
-        .relational("items.owner", owner().alias("o"));
+        .foreign_key("store_items", "store_id", "stores", "id")
+        .foreign_key("store_items", "owner_id", "owners", "id");
     assert_eq!(
-        sql_with(&relational, &any("items", named("ann"))),
+        sql_with(&relational, &any("store_items", named("ann"))),
         concat!(
-            r#"EXISTS (SELECT 1 FROM "store_items" AS "item_1" "#,
-            r#"WHERE "item_1"."store_id" = "s"."id" AND "#,
-            r#"(SELECT "o_2"."name" FROM "owners" AS "o_2" "#,
-            r#"WHERE "o_2"."id" = "item_1"."owner_id") = $1)"#,
+            r#"EXISTS (SELECT 1 FROM "store_items" AS "store_item_1" "#,
+            r#"WHERE "store_item_1"."store_id" = "s"."id" AND "#,
+            r#"(SELECT "owner_2"."name" FROM "owners" AS "owner_2" "#,
+            r#"WHERE "owner_2"."id" = "store_item_1"."owner_id") = $1)"#,
         ),
     );
-    // A key of two columns; and what is inside the owner's row is a composite.
-    let composite_key = Schema::new("stores").alias("s").relational(
-        "items.owner",
-        Relation::new("public.owners", "tenant_id", "tenant_id").and("id", "owner_id"),
+    // A key of two columns; and what is inside the owner's row is a composite.    // A key of two columns is named by either of them, unless another key
+    // has it too.
+    let composite_key = Schema::new("stores").alias("s").key(
+        ForeignKey::new("stores.items", "tenant_id", "public.owners", "tenant_id")
+            .and("owner_id", "id"),
     );
-    let city = field(Path::item("owner").child("address").child("city"));
+    let city = field(Path::item("owner_id").child("address").child("city"));
     assert_eq!(
         sql_with(&composite_key, &any("items", is_null(city))),
         concat!(
@@ -270,12 +272,12 @@ fn a_member_of_an_object_kept_in_a_table_of_its_own_is_read_through_the_key() {
     // read so has an alias of its own.
     let of_both = Schema::new("stores")
         .alias("s")
-        .relational("owner", owner())
-        .relational("items.owner", owner());
+        .foreign_key("stores", "owner_id", "owners", "id")
+        .foreign_key("stores.items", "owner_id", "owners", "id");
     assert_eq!(
         sql_with(
             &of_both,
-            &any("items", equal(owner_name(), field("owner.name")))
+            &any("items", equal(owner_name(), field("owner_id.name")))
         ),
         concat!(
             r#"EXISTS (SELECT 1 FROM unnest("items") AS "item_1" WHERE "#,
@@ -286,9 +288,10 @@ fn a_member_of_an_object_kept_in_a_table_of_its_own_is_read_through_the_key() {
         ),
     );
     // The root row by its table, which carries its schema.
-    let qualified = Schema::new("public.stores").relational("owner", owner());
+    let qualified =
+        Schema::new("public.stores").foreign_key("public.stores", "owner_id", "owners", "id");
     assert_eq!(
-        sql_with(&qualified, &equal(field("owner.name"), value("x"))),
+        sql_with(&qualified, &equal(field("owner_id.name"), value("x"))),
         concat!(
             r#"(SELECT "owner_1"."name" FROM "owners" AS "owner_1" "#,
             r#"WHERE "owner_1"."id" = "public"."stores"."owner_id") = $1"#,
@@ -314,67 +317,54 @@ fn a_member_of_an_object_kept_in_a_table_of_its_own_is_read_through_the_key() {
 #[test]
 fn a_relational_collection_is_joined_by_its_keys() {
     let stores = || Schema::new("stores").alias("s");
-    let dear: Spec = any("Items", greater_than(item("Price"), value(500)));
+    // The tree names a collection by its table.
+    let dear: Spec = any("items", greater_than(item("Price"), value(500)));
     for (schema, specification, expected) in [
         (
-            stores().relational("Items", Relation::new("items", "store_id", "id")),
+            stores().foreign_key("items", "store_id", "stores", "id"),
             dear.clone(),
             r#"EXISTS (SELECT 1 FROM "items" AS "item_1" WHERE "item_1"."store_id" = "s"."id" AND "item_1"."Price" > $1)"#,
         ),
         (
-            stores().relational(
-                "Items",
-                Relation::new("items", "tenant_id", "tenant_id").and("store_id", "id"),
+            stores().key(
+                ForeignKey::new("items", "tenant_id", "stores", "tenant_id").and("store_id", "id"),
             ),
             dear.clone(),
             r#"EXISTS (SELECT 1 FROM "items" AS "item_1" WHERE "item_1"."tenant_id" = "s"."tenant_id" AND "item_1"."store_id" = "s"."id" AND "item_1"."Price" > $1)"#,
         ),
+        // Without an alias the root row goes by its table; and a table may
+        // carry its schema, in the tree as in the key.
         (
-            stores().relational(
-                "Items",
-                Relation::new("store_items", "store_id", "id").alias("si"),
-            ),
-            dear.clone(),
-            r#"EXISTS (SELECT 1 FROM "store_items" AS "si_1" WHERE "si_1"."store_id" = "s"."id" AND "si_1"."Price" > $1)"#,
-        ),
-        // Without an alias the root row goes by its table.
-        (
-            Schema::new("stores")
-                .relational("Items", Relation::new("public.items", "store_id", "id")),
-            dear.clone(),
+            Schema::new("stores").foreign_key("public.items", "store_id", "stores", "id"),
+            any("public.items", greater_than(item("Price"), value(500))),
             r#"EXISTS (SELECT 1 FROM "public"."items" AS "item_1" WHERE "item_1"."store_id" = "stores"."id" AND "item_1"."Price" > $1)"#,
         ),
-        // And the table may carry its schema: `identifier` refused the dot,
-        // where the table of a collection went through `qualified`.
         (
-            Schema::new("public.stores")
-                .relational("Items", Relation::new("public.items", "store_id", "id")),
-            dear.clone(),
+            Schema::new("public.stores").foreign_key(
+                "public.items",
+                "store_id",
+                "public.stores",
+                "id",
+            ),
+            any("public.items", greater_than(item("Price"), value(500))),
             r#"EXISTS (SELECT 1 FROM "public"."items" AS "item_1" WHERE "item_1"."store_id" = "public"."stores"."id" AND "item_1"."Price" > $1)"#,
         ),
-        // What the schema says embedded, and what it does not mention, is.
+        // A name that is no key's, and no table's with a key to the row, is
+        // an array in the row.
         (
-            stores().embedded("Items"),
+            stores().foreign_key("orders", "store_id", "stores", "id"),
             dear.clone(),
-            r#"EXISTS (SELECT 1 FROM unnest("Items") AS "item_1" WHERE "item_1"."Price" > $1)"#,
+            r#"EXISTS (SELECT 1 FROM unnest("items") AS "item_1" WHERE "item_1"."Price" > $1)"#,
         ),
-        (
-            stores().relational("Orders", Relation::new("orders", "store_id", "id")),
-            dear.clone(),
-            r#"EXISTS (SELECT 1 FROM unnest("Items") AS "item_1" WHERE "item_1"."Price" > $1)"#,
-        ),
-        // A collection inside a collection joins to the row it is inside of,
-        // and is looked up by the whole of its path.
+        // A collection inside a collection joins to the row it is inside of:
+        // the key of its table that references that row's table.
         (
             stores()
-                .relational("Categories", Relation::new("categories", "store_id", "id"))
-                .relational(
-                    "Categories.Items",
-                    Relation::new("items", "category_id", "id"),
-                ),
+                .foreign_key("categories", "store_id", "stores", "id")
+                .foreign_key("items", "category_id", "categories", "id"),
             any(
-                "Categories",
-                any(Path::item("Items"), greater_than(item("Price"), value(500))),
+                "categories",
+                any(Path::item("items"), greater_than(item("Price"), value(500))),
             ),
             r#"EXISTS (SELECT 1 FROM "categories" AS "category_1" WHERE "category_1"."store_id" = "s"."id" AND EXISTS (SELECT 1 FROM "items" AS "item_2" WHERE "item_2"."category_id" = "category_1"."id" AND "item_2"."Price" > $1))"#,
         ),
@@ -387,18 +377,18 @@ fn a_relational_collection_is_joined_by_its_keys() {
 fn two_collections_of_one_name_are_two_collections() {
     let schema = Schema::new("stores")
         .alias("s")
-        .relational("Items", Relation::new("store_items", "store_id", "id"))
-        .relational("Categories", Relation::new("categories", "store_id", "id"));
-    let of_store: Spec = any("Items", item("Active"));
-    let of_category: Spec = any("Categories", any(Path::item("Items"), item("Active")));
+        .foreign_key("store_items", "store_id", "stores", "id")
+        .foreign_key("categories", "store_id", "stores", "id");
+    let of_store: Spec = any("store_items", item("Active"));
+    let of_category: Spec = any("categories", any(Path::item("items"), item("Active")));
     assert_eq!(
         sql_with(&schema, &of_store),
-        r#"EXISTS (SELECT 1 FROM "store_items" AS "item_1" WHERE "item_1"."store_id" = "s"."id" AND "item_1"."Active")"#,
+        r#"EXISTS (SELECT 1 FROM "store_items" AS "store_item_1" WHERE "store_item_1"."store_id" = "s"."id" AND "store_item_1"."Active")"#,
     );
-    // `Categories.Items` is not mentioned: embedded in the category's row.
+    // No key of a table `items` references categories: an array in the row.
     assert_eq!(
         sql_with(&schema, &of_category),
-        r#"EXISTS (SELECT 1 FROM "categories" AS "category_1" WHERE "category_1"."store_id" = "s"."id" AND EXISTS (SELECT 1 FROM unnest("category_1"."Items") AS "item_2" WHERE "item_2"."Active"))"#,
+        r#"EXISTS (SELECT 1 FROM "categories" AS "category_1" WHERE "category_1"."store_id" = "s"."id" AND EXISTS (SELECT 1 FROM unnest("category_1"."items") AS "item_2" WHERE "item_2"."Active"))"#,
     );
 }
 
@@ -406,9 +396,9 @@ fn two_collections_of_one_name_are_two_collections() {
 fn a_collection_of_the_candidate_inside_another_joins_to_the_root() {
     let schema = Schema::new("stores")
         .alias("s")
-        .relational("Items", Relation::new("items", "store_id", "id"))
-        .relational("Tags", Relation::new("tags", "store_id", "id"));
-    let specification: Spec = any("Items", any("Tags", equal(item("Name"), value("sale"))));
+        .foreign_key("items", "store_id", "stores", "id")
+        .foreign_key("tags", "store_id", "stores", "id");
+    let specification: Spec = any("items", any("tags", equal(item("Name"), value("sale"))));
     assert_eq!(
         sql_with(&schema, &specification),
         r#"EXISTS (SELECT 1 FROM "items" AS "item_1" WHERE "item_1"."store_id" = "s"."id" AND EXISTS (SELECT 1 FROM "tags" AS "tag_2" WHERE "tag_2"."store_id" = "s"."id" AND "tag_2"."Name" = $1))"#,
@@ -419,9 +409,9 @@ fn a_collection_of_the_candidate_inside_another_joins_to_the_root() {
 fn the_predicate_of_a_relational_collection_stays_inside_its_keys() {
     let schema = Schema::new("stores")
         .alias("s")
-        .relational("Items", Relation::new("items", "store_id", "id"));
+        .foreign_key("items", "store_id", "stores", "id");
     let specification: Spec = any(
-        "Items",
+        "items",
         or(item("Active"), greater_than(item("Price"), value(500))),
     );
     assert_eq!(
@@ -551,12 +541,11 @@ fn a_name_that_is_not_an_identifier_is_refused() {
         compile::<Value>(&any("items x", value(true))),
         invalid("items x")
     );
-    let schema =
-        Schema::new("stores").relational("items", Relation::new("items; --", "store_id", "id"));
+    let schema = Schema::new("stores").foreign_key("items; --", "store_id", "stores", "id");
     assert_eq!(
         Compiler::new()
             .schema(&schema)
-            .compile::<Value>(&any("items", value(true))),
+            .compile::<Value>(&any("items; --", value(true))),
         invalid("items; --"),
     );
 }
@@ -598,11 +587,8 @@ fn the_item_of_an_enclosing_collection_is_its_alias() {
     // In tables of their own, the enclosing row is the one the keys point at,
     // and its columns are named the same way.
     let schema = Schema::new("shops")
-        .relational("categories", Relation::new("categories", "shop_id", "id"))
-        .relational(
-            "categories.products",
-            Relation::new("products", "category_id", "id"),
-        );
+        .foreign_key("categories", "shop_id", "shops", "id")
+        .foreign_key("products", "category_id", "categories", "id");
     assert_eq!(
         sql_with(&schema, &over_its_category),
         r#"EXISTS (SELECT 1 FROM "categories" AS "category_1" WHERE "category_1"."shop_id" = "shops"."id" AND EXISTS (SELECT 1 FROM "products" AS "product_2" WHERE "product_2"."category_id" = "category_1"."id" AND "product_2"."price" > "category_1"."limit"))"#,
@@ -662,5 +648,86 @@ fn the_candidates_column_inside_a_predicate_is_qualified_with_its_row() {
     assert_eq!(
         sql(&greater_than(field("limit"), value(1))),
         r#""limit" > $1"#
+    );
+}
+
+/// A schema is the foreign keys of a storage and nothing of any query. A
+/// tree names a collection by its table, and where two keys of that table
+/// reference the row it is named from - the transfers from an account and
+/// the transfers to it - by the key's name, which is what PostgreSQL calls
+/// it. An object is named by the key's column. A row of an array, which has
+/// no table, is named by the array's column; and what the compiler calls a
+/// row in a query is its own.
+#[test]
+fn a_schema_is_the_foreign_keys_of_the_storage() {
+    let schema = Schema::new("accounts")
+        .alias("a")
+        .foreign_key("transfers", "from_account_id", "accounts", "id")
+        .foreign_key("transfers", "to_account_id", "accounts", "id")
+        .foreign_key("accounts", "owner_id", "owners", "id")
+        .foreign_key("accounts.cards", "issuer_id", "banks", "id");
+    let over = |what: &str| any(what, greater_than(item("amount"), value(100)));
+    assert_eq!(
+        sql_with(&schema, &over("transfers_from_account_id_fkey")),
+        r#"EXISTS (SELECT 1 FROM "transfers" AS "transfer_1" WHERE "transfer_1"."from_account_id" = "a"."id" AND "transfer_1"."amount" > $1)"#,
+    );
+    assert_eq!(
+        sql_with(&schema, &over("transfers_to_account_id_fkey")),
+        r#"EXISTS (SELECT 1 FROM "transfers" AS "transfer_1" WHERE "transfer_1"."to_account_id" = "a"."id" AND "transfer_1"."amount" > $1)"#,
+    );
+    // By the table alone, the name fits two keys.
+    assert_eq!(
+        Compiler::new().schema(&schema).compile(&over("transfers")),
+        Err(CompileError::AmbiguousKey(
+            "transfers has 2 keys to accounts: transfers_from_account_id_fkey, \
+             transfers_to_account_id_fkey; name the key"
+                .to_owned()
+        )),
+    );
+    // A key given a name goes by it.
+    let named = Schema::new("accounts")
+        .alias("a")
+        .key(ForeignKey::new("transfers", "from_account_id", "accounts", "id").named("outgoing"));
+    assert_eq!(
+        sql_with(&named, &over("outgoing")),
+        r#"EXISTS (SELECT 1 FROM "transfers" AS "transfer_1" WHERE "transfer_1"."from_account_id" = "a"."id" AND "transfer_1"."amount" > $1)"#,
+    );
+    // A key named where it does not go: the tree stands in the account's row.
+    assert_eq!(
+        Compiler::new()
+            .schema(&schema)
+            .compile(&any("accounts_owner_id_fkey", item("x"))),
+        Err(CompileError::WrongKey(
+            "the key accounts_owner_id_fkey references owners, not accounts".to_owned()
+        )),
+    );
+    // A key on a row of an array.
+    assert_eq!(
+        sql_with(
+            &schema,
+            &any(
+                "cards",
+                equal(field(Path::item("issuer_id").child("name")), value("x"))
+            )
+        ),
+        r#"EXISTS (SELECT 1 FROM unnest("cards") AS "card_1" WHERE (SELECT "bank_2"."name" FROM "banks" AS "bank_2" WHERE "bank_2"."id" = "card_1"."issuer_id") = $1)"#,
+    );
+    // A column of two keys.
+    let shared = Schema::new("stores")
+        .key(ForeignKey::new("stores", "tenant_id", "tenants", "id"))
+        .key(ForeignKey::new("stores", "tenant_id", "owners", "tenant_id").and("owner_id", "id"));
+    assert_eq!(
+        Compiler::new()
+            .schema(&shared)
+            .compile::<Value>(&equal(field("tenant_id.name"), value("x"))),
+        Err(CompileError::AmbiguousKey(
+            "tenant_id is a column of 2 keys of stores: stores_tenant_id_fkey, \
+             stores_tenant_id_owner_id_fkey; name the key"
+                .to_owned()
+        )),
+    );
+    assert_eq!(
+        sql_with(&shared, &equal(field("owner_id.name"), value("x"))),
+        r#"(SELECT "owner_1"."name" FROM "owners" AS "owner_1" WHERE "owner_1"."tenant_id" = "stores"."tenant_id" AND "owner_1"."id" = "stores"."owner_id") = $1"#,
     );
 }

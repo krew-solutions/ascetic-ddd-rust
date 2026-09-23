@@ -79,7 +79,7 @@ The crate must do the following. Each line names the test that holds it.
 12. What cannot be a tree is reported where it stands, not replaced by a
     null.
 
-**From the domain's terms to the storage's** (`tests/transform.rs`)
+**From the domain's terms to the storage's** (`tests/mapping.rs`)
 
 13. A mapping says what each member and each value becomes; one of either
     may become several, a composite, nested if need be. Equality of two

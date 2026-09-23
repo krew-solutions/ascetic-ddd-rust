@@ -75,7 +75,7 @@ use std::fmt;
 use self::identifier::{identifier, plain, qualified, quoted};
 pub use self::param_type::ParamType;
 use self::precedence::{ATOM, Associativity};
-pub use self::schema::{Relation, Schema, Storage};
+pub use self::schema::{ForeignKey, Schema};
 use crate::domain::ast::{Expr, Path, Root};
 use crate::domain::operator::{Infix, Logical, Prefix};
 
@@ -97,6 +97,13 @@ pub enum CompileError {
     /// A member of the candidate inside a collection's predicate, with no
     /// [`Schema`] to say what the candidate's row is called there.
     NoTable,
+    /// A name that fits more than one key: a table with two keys to the row
+    /// it is named from, or a column of two keys. The message names them;
+    /// the tree names the key it means.
+    AmbiguousKey(String),
+    /// A key named in the tree that does not go where the tree stands: a
+    /// collection's key not referencing the row, an object's key not on it.
+    WrongKey(String),
     /// A name that is not one: anything but ASCII letters, digits and `_`,
     /// not starting with a digit.
     InvalidIdentifier(String),
@@ -110,6 +117,9 @@ impl fmt::Display for CompileError {
                 "a member of the candidate inside a collection's predicate needs the \
                  candidate's table: compile with a schema",
             ),
+            CompileError::AmbiguousKey(message) | CompileError::WrongKey(message) => {
+                f.write_str(message)
+            }
             CompileError::InvalidIdentifier(name) => {
                 write!(f, "'{name}' is not a valid identifier")
             }
@@ -226,15 +236,70 @@ impl<'s> Compiler<'s> {
             Expr::Any(source, predicate) => self.exists(source, predicate, item, next),
         }
     }
-
-    /// The relation the schema has at `logical`, if it has one.
-    fn relation(&self, logical: &[&str]) -> Option<&'s Relation> {
-        match self.schema?.storage(&logical.join(".")) {
-            Storage::Relational(relation) => Some(relation),
-            Storage::Embedded => None,
+    /// The key a collection named `name` in a row of `row` is joined by:
+    /// the one of that name, if it references the row; else the one key on
+    /// the table `name` that does. None: the name is an array in the row.
+    fn key_of_collection(
+        &self,
+        row: &str,
+        name: &str,
+    ) -> Result<Option<&'s ForeignKey>, CompileError> {
+        let Some(schema) = self.schema else {
+            return Ok(None);
+        };
+        if let Some(key) = schema.key_named(name) {
+            if key.referenced_table != row {
+                return Err(CompileError::WrongKey(format!(
+                    "the key {name} references {}, not {row}",
+                    key.referenced_table
+                )));
+            }
+            return Ok(Some(key));
+        }
+        match schema.keys_referencing(name, row).as_slice() {
+            [] => Ok(None),
+            [key] => Ok(Some(key)),
+            keys => Err(CompileError::AmbiguousKey(format!(
+                "{name} has {} keys to {row}: {}; name the key",
+                keys.len(),
+                keys.iter()
+                    .map(|key| key.name())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ))),
         }
     }
 
+    /// The key an object named `name` in a row of `row` is read through:
+    /// the one of that name, if it is on the row; else the one key on the
+    /// row that `name` is a column of. None: the name is a composite in the
+    /// row.
+    fn key_of_object(&self, row: &str, name: &str) -> Result<Option<&'s ForeignKey>, CompileError> {
+        let Some(schema) = self.schema else {
+            return Ok(None);
+        };
+        if let Some(key) = schema.key_named(name) {
+            if key.table != row {
+                return Err(CompileError::WrongKey(format!(
+                    "the key {name} is on {}, not {row}",
+                    key.table
+                )));
+            }
+            return Ok(Some(key));
+        }
+        match schema.keys_on(row, name).as_slice() {
+            [] => Ok(None),
+            [key] => Ok(Some(key)),
+            keys => Err(CompileError::AmbiguousKey(format!(
+                "{name} is a column of {} keys of {row}: {}; name the key",
+                keys.len(),
+                keys.iter()
+                    .map(|key| key.name())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ))),
+        }
+    }
     /// The value of the member at `path`, as the storage has it.
     ///
     /// An object on the way to the member is looked up in the schema, as a
@@ -253,21 +318,26 @@ impl<'s> Compiler<'s> {
         match path.root() {
             Root::Item(up) => {
                 let item = item_out(item, up)?;
-                self.member_of_row(quoted(&item.alias), item.logical.clone(), &names, next)
+                self.member_of_row(quoted(&item.alias), item.row.clone(), &names, next)
             }
             Root::Global => match (names.first(), self.schema) {
                 (Some(object), Some(schema))
-                    if names.len() > 1 && self.relation(&[object]).is_some() =>
+                    if names.len() > 1 && self.key_of_object(schema.table(), object)?.is_some() =>
                 {
-                    self.member_of_row(qualified(schema.parent())?, Vec::new(), &names, next)
+                    self.member_of_row(
+                        qualified(schema.row())?,
+                        schema.table().to_owned(),
+                        &names,
+                        next,
+                    )
                 }
                 _ => Ok((self.column(path, item)?, next)),
             },
         }
     }
 
-    /// The member at `names` of the row written `row`, whose object is named
-    /// by `logical` in the schema.
+    /// The member at `names` of the row written `row`, which is a row of
+    /// `of` to the schema: a table, or the composite at a column of one.
     ///
     /// An object kept in a table of its own is read by a subquery in the
     /// column's place: it has at most the one row the key names, and is null
@@ -275,36 +345,34 @@ impl<'s> Compiler<'s> {
     /// object not mentioned is a composite in its row, and the parentheses
     /// are what makes it that: with dots alone PostgreSQL reads a schema, a
     /// table and a column, and there is no such table.
-    fn member_of_row<'a>(
+    fn member_of_row(
         &self,
         row: String,
-        logical: Vec<&'a str>,
-        names: &[&'a str],
+        of: String,
+        names: &[&str],
         next: Next,
     ) -> Result<(String, Next), CompileError> {
         match names {
             [] => Ok((row, next)),
             [name] => Ok((format!("{row}.{}", identifier(name)?), next)),
             [object, rest @ ..] => {
-                let logical: Vec<&str> = logical.into_iter().chain([*object]).collect();
-                let Some(relation) = self.relation(&logical) else {
+                let Some(key) = self.key_of_object(&of, object)? else {
                     let composite = format!("({row}.{})", identifier(object)?);
-                    return self.member_of_row(composite, logical, rest, next);
+                    return self.member_of_row(composite, format!("{of}.{object}"), rest, next);
                 };
+                // The row read is one of the referenced table, and its alias
+                // says so.
                 let number = next.alias + 1;
-                let name = match relation.alias.as_deref() {
-                    Some(alias) => plain(alias)?.to_owned(),
-                    None => plain(object)?.to_lowercase(),
-                };
-                let alias = quoted(&format!("{name}_{number}"));
-                let keys = relation
-                    .keys
+                let alias = quoted(&format!("{}_{number}", singular_of(&key.referenced_table)?));
+                let keys = key
+                    .columns
                     .iter()
-                    .map(|(child, of_parent)| {
+                    .zip(&key.referenced_columns)
+                    .map(|(column, referenced)| {
                         Ok(format!(
                             "{alias}.{} = {row}.{}",
-                            identifier(child)?,
-                            identifier(of_parent)?,
+                            identifier(referenced)?,
+                            identifier(column)?,
                         ))
                     })
                     .collect::<Result<Vec<_>, _>>()?
@@ -313,10 +381,11 @@ impl<'s> Compiler<'s> {
                     alias: number,
                     ..next
                 };
-                let (member, next) = self.member_of_row(alias.clone(), logical, rest, next)?;
+                let (member, next) =
+                    self.member_of_row(alias.clone(), key.referenced_table.clone(), rest, next)?;
                 let sql = format!(
                     "(SELECT {member} FROM {} AS {alias} WHERE {keys})",
-                    qualified(&relation.table)?,
+                    qualified(&key.referenced_table)?,
                 );
                 Ok((sql, next))
             }
@@ -336,27 +405,33 @@ impl<'s> Compiler<'s> {
             Root::Global => None,
             Root::Item(up) => Some(item_out(item, up)?),
         };
-        let logical: Vec<&str> = enclosing
-            .map_or(&[][..], |item| &item.logical)
-            .iter()
-            .copied()
-            .chain(source.names())
-            .collect();
-        // A relation is what a schema says, so it comes with its schema.
-        let relation = self
-            .schema
-            .and_then(|schema| match schema.storage(&logical.join(".")) {
-                Storage::Relational(relation) => Some((relation, schema)),
-                Storage::Embedded => None,
-            });
+        // The row the collection is of, to the schema: the enclosing item's,
+        // or the root's. Without a schema there is no relation to look for.
+        let of: Option<String> = match (enclosing, self.schema) {
+            (Some(item), _) => Some(item.row.clone()),
+            (None, Some(schema)) => Some(schema.table().to_owned()),
+            (None, None) => None,
+        };
+        let name: String = source.names().collect::<Vec<_>>().join(".");
+        // A key is what a schema says, so it comes with its schema.
+        let key = match of.as_deref() {
+            Some(of) => self.key_of_collection(of, &name)?,
+            None => None,
+        };
+        let relation = key.zip(self.schema);
         let number = next.alias + 1;
-        let name = match relation.and_then(|(relation, _)| relation.alias.as_deref()) {
-            Some(alias) => plain(alias)?.to_owned(),
-            None => singular::singular(&plain(source.name())?.to_lowercase()),
+        // The alias is the singular of the row's table, or of the array's
+        // name: the compiler's own.
+        let alias = match key {
+            Some(key) => singular_of(&key.table)?,
+            None => singular_of(source.name())?,
         };
         let inner = Item {
-            alias: format!("{name}_{number}"),
-            logical,
+            alias: format!("{alias}_{number}"),
+            row: match key {
+                Some(key) => key.table.clone(),
+                None => format!("{}.{name}", of.unwrap_or_default()),
+            },
             outer: item,
         };
         let next = Next {
@@ -374,19 +449,20 @@ impl<'s> Compiler<'s> {
                 );
                 predicate.with(sql, ATOM)
             }
-            Some((relation, schema)) => {
+            Some((key, schema)) => {
                 let parent = match enclosing {
                     Some(item) => quoted(&item.alias),
-                    None => qualified(schema.parent())?,
+                    None => qualified(schema.row())?,
                 };
-                let keys = relation
-                    .keys
+                let keys = key
+                    .columns
                     .iter()
-                    .map(|(child, of_parent)| {
+                    .zip(&key.referenced_columns)
+                    .map(|(column, referenced)| {
                         Ok(format!(
                             "{alias}.{} = {parent}.{}",
-                            identifier(child)?,
-                            identifier(of_parent)?,
+                            identifier(column)?,
+                            identifier(referenced)?,
                         ))
                     })
                     .collect::<Result<Vec<_>, _>>()?
@@ -396,7 +472,7 @@ impl<'s> Compiler<'s> {
                 let predicate = predicate.within(and, false);
                 let sql = format!(
                     "EXISTS (SELECT 1 FROM {} AS {alias} WHERE {keys} AND {})",
-                    qualified(&relation.table)?,
+                    qualified(&key.table)?,
                     predicate.sql,
                 );
                 predicate.with(sql, ATOM)
@@ -425,7 +501,7 @@ impl<'s> Compiler<'s> {
             // the author qualified.
             Root::Global if names.len() == 1 && item.is_some() => {
                 let schema = self.schema.ok_or(CompileError::NoTable)?;
-                Ok(format!("{}.{}", qualified(schema.parent())?, names[0]))
+                Ok(format!("{}.{}", qualified(schema.row())?, names[0]))
             }
             Root::Global => Ok(names.join(".")),
             Root::Item(up) => {
@@ -449,12 +525,20 @@ struct Next {
 }
 
 /// The item under test, inside a collection's predicate: what its row is
-/// called, the names that lead to its collection from the candidate, and
-/// the item of the enclosing collection's predicate, if there is one.
+/// called in the query, what it is a row of to the schema - a table, or the
+/// composite at a column of one - and the item of the enclosing collection's
+/// predicate, if there is one.
 struct Item<'a> {
     alias: String,
-    logical: Vec<&'a str>,
+    row: String,
     outer: Option<&'a Item<'a>>,
+}
+
+/// The singular of the last name of `table`, in lower case: what an alias
+/// is made of.
+fn singular_of(table: &str) -> Result<String, CompileError> {
+    let name = table.rsplit('.').next().unwrap_or(table);
+    Ok(singular::singular(&plain(name)?.to_lowercase()))
 }
 
 /// The item `up` collections out from the item under test: the aliases of
