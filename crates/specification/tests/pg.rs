@@ -1141,6 +1141,78 @@ async fn a_composite_column_of_the_candidate_is_a_member_where_the_schema_says()
     assert_eq!(refused.code(), Some(&SqlState::UNDEFINED_TABLE), "{text}");
 }
 
+/// An `Option` of a Value Object kept as a composite column is `Some` or
+/// `None` whatever the members hold; to `IS NOT NULL` of the column a row
+/// with a null member was neither null nor not. Declared a composite, the
+/// column is tested as a whole. The rows are the server's alone: a `Record`
+/// holds an object or has none, and cannot hold an `Option` of one.
+#[tokio::test]
+async fn a_null_test_of_a_declared_composite_is_of_the_value_as_a_whole() {
+    let client = client().await;
+    client
+        .batch_execute(
+            "CREATE TYPE pg_temp.spec_discount AS (percent int8, code text);
+             CREATE TEMP TABLE spec_deals (id int8, discount pg_temp.spec_discount);
+             INSERT INTO spec_deals VALUES
+                 (1, ROW(15, 'x')), (2, ROW(NULL, 'x')), (3, ROW(NULL, NULL)), (4, NULL);",
+        )
+        .await
+        .expect("a table");
+    let (discount, percent): (Make, Make) = (|| field("discount"), || field("discount.percent"));
+    let declared = Schema::new("spec_deals")
+        .alias("d")
+        .composite("spec_deals", "discount");
+    let undeclared = Schema::new("spec_deals").alias("d");
+    let cases: [(&Schema, Spec, Vec<i64>); 8] = [
+        (&declared, is_not_null(discount()), vec![1, 2, 3]),
+        (&declared, is_null(discount()), vec![4]),
+        (&declared, not(is_null(discount())), vec![1, 2, 3]),
+        // The guards a macro writes: `is_some_and`, `is_none_or`.
+        (
+            &declared,
+            and(is_not_null(discount()), greater_than(percent(), value(10))),
+            vec![1],
+        ),
+        (
+            &declared,
+            or(is_null(discount()), greater_than(percent(), value(10))),
+            vec![1, 4],
+        ),
+        (
+            &declared,
+            and(is_not_null(discount()), is_null(percent())),
+            vec![2, 3],
+        ),
+        // Undeclared, the test is of the members: a row with a null inside
+        // is neither null nor not.
+        (&undeclared, is_not_null(discount()), vec![1]),
+        (&undeclared, is_null(discount()), vec![3, 4]),
+    ];
+    for (schema, specification, expected) in &cases {
+        let query = Compiler::new()
+            .schema(schema)
+            .compile(specification)
+            .expect("compiled");
+        let text = format!(
+            "SELECT id FROM spec_deals d WHERE {} ORDER BY id",
+            query.sql
+        );
+        let params: Vec<&(dyn ToSql + Sync)> = query
+            .params
+            .iter()
+            .map(|param| param as &(dyn ToSql + Sync))
+            .collect();
+        let selected: Vec<i64> = client
+            .query(&text, &params)
+            .await
+            .unwrap_or_else(|error| panic!("{text}: {error}"))
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert_eq!(&selected, expected, "{text}");
+    }
+}
+
 #[tokio::test]
 async fn a_value_is_written_as_the_type_the_server_asks_for_if_it_fits() {
     let client = client().await;

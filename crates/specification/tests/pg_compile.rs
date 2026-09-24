@@ -365,6 +365,92 @@ fn a_composite_column_of_the_candidate_is_declared() {
     );
 }
 
+/// Of a composite `IS NULL` is true when all its members are null and
+/// `IS NOT NULL` when none is, so a row with a null member is neither: the
+/// SQL standard's null predicate over a row value, which PostgreSQL follows.
+/// An `Option` of a Value Object is `Some` or `None` whatever its members
+/// hold; `IS NOT NULL` of the column said otherwise of a `Some` with a null
+/// inside. A null test of a column the schema declares a composite is of the
+/// value as a whole, `IS DISTINCT FROM NULL`, as the manual advises; a `None`
+/// is a null column, not a row of nulls. The rows are in `tests/pg.rs`.
+#[test]
+fn a_null_test_of_a_declared_composite_is_of_the_value_as_a_whole() {
+    let schema = Schema::new("stores")
+        .alias("s")
+        .composite("stores", "discount");
+    let discount = || field("discount");
+    let percent = || field("discount.percent");
+    for (specification, expected) in [
+        (
+            is_not_null(discount()),
+            r#""discount" IS DISTINCT FROM NULL"#,
+        ),
+        (
+            is_null(discount()),
+            r#""discount" IS NOT DISTINCT FROM NULL"#,
+        ),
+        // The guard a macro writes, and its negation.
+        (
+            and(is_not_null(discount()), greater_than(percent(), value(10))),
+            r#""discount" IS DISTINCT FROM NULL AND ("s"."discount")."percent" > $1"#,
+        ),
+        (
+            not(is_null(discount())),
+            r#"NOT "discount" IS NOT DISTINCT FROM NULL"#,
+        ),
+        // Inside a collection's predicate, qualified as the candidate's columns are.
+        (
+            any("items", is_null(discount())),
+            r#"EXISTS (SELECT 1 FROM unnest("items") AS "item_1" WHERE "s"."discount" IS NOT DISTINCT FROM NULL)"#,
+        ),
+        // What is not declared is tested as it was: another column, a
+        // scalar member of the composite.
+        (is_null(field("price")), r#""price" IS NULL"#),
+        (is_null(percent()), r#"("s"."discount")."percent" IS NULL"#),
+    ] {
+        assert_eq!(sql_with(&schema, &specification), expected);
+    }
+    // A row of the items array is named by the array's column, as it is to
+    // a key; a row of a table by the table; a composite inside a composite
+    // by the column.
+    assert_eq!(
+        sql_with(
+            &Schema::new("stores").composite("stores.items", "maker"),
+            &any("items", is_not_null(item("maker")))
+        ),
+        r#"EXISTS (SELECT 1 FROM unnest("items") AS "item_1" WHERE "item_1"."maker" IS DISTINCT FROM NULL)"#
+    );
+    assert_eq!(
+        sql_with(
+            &Schema::new("stores")
+                .alias("s")
+                .foreign_key("store_items", "store_id", "stores", "id")
+                .composite("store_items", "maker"),
+            &any("store_items", is_not_null(item("maker")))
+        ),
+        r#"EXISTS (SELECT 1 FROM "store_items" AS "store_item_1" WHERE "store_item_1"."store_id" = "s"."id" AND "store_item_1"."maker" IS DISTINCT FROM NULL)"#
+    );
+    assert_eq!(
+        sql_with(
+            &Schema::new("stores")
+                .alias("s")
+                .composite("stores", "discount")
+                .composite("stores.discount", "country"),
+            &is_null(field("discount.country"))
+        ),
+        r#"("s"."discount")."country" IS NOT DISTINCT FROM NULL"#
+    );
+    // Without a schema, and with the composite declared on another table.
+    assert_eq!(sql(&is_null(discount())), r#""discount" IS NULL"#);
+    assert_eq!(
+        sql_with(
+            &Schema::new("stores").composite("items", "discount"),
+            &is_null(discount())
+        ),
+        r#""discount" IS NULL"#
+    );
+}
+
 #[test]
 fn a_relational_collection_is_joined_by_its_keys() {
     let stores = || Schema::new("stores").alias("s");

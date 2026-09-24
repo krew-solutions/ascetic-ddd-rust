@@ -77,7 +77,7 @@ pub use self::param_type::ParamType;
 use self::precedence::{ATOM, Associativity};
 pub use self::schema::{ForeignKey, Schema};
 use crate::domain::ast::{Expr, Path, Root};
-use crate::domain::operator::{Infix, Logical, Prefix};
+use crate::domain::operator::{Infix, Logical, Postfix, Prefix};
 
 /// A condition and its parameters: `$1` is `params[0]`, unless the
 /// compiler was given an [offset](Compiler::offset).
@@ -215,10 +215,11 @@ impl<'s> Compiler<'s> {
             Expr::Postfix(operand, op) => {
                 let precedence = precedence::postfix(*op);
                 let alone = param_type::under_postfix(operand);
+                let test = self.null_test(*op, operand, item)?;
                 let (operand, next) = self.render(operand, item, next)?;
                 let operand = operand.of_type(alone);
                 let operand = operand.within(precedence, true);
-                let sql = format!("{} {op}", operand.sql);
+                let sql = format!("{} {test}", operand.sql);
                 Ok((operand.with(sql, precedence), next))
             }
             Expr::Infix(left, op, right) => {
@@ -247,6 +248,59 @@ impl<'s> Compiler<'s> {
             Expr::Any(source, predicate) => self.exists(source, predicate, item, next),
         }
     }
+    /// The words of a null test: of the value as a whole, for a column the
+    /// schema declares a composite.
+    ///
+    /// Of a composite `IS NULL` is true when all its members are null and
+    /// `IS NOT NULL` when none is — the standard's null predicate over a row
+    /// value — so a row with a null member is neither. An `Option` of a
+    /// Value Object is `Some` or `None` whatever its members hold, and so is
+    /// the column: null, or a row. `IS DISTINCT FROM NULL` tests that, as
+    /// the manual advises; a `None` is written as a null column, not as a
+    /// row of nulls.
+    fn null_test<V>(
+        &self,
+        op: Postfix,
+        operand: &Expr<V>,
+        item: Option<&Item>,
+    ) -> Result<String, CompileError> {
+        if !self.is_composite_column(operand, item)? {
+            return Ok(op.to_string());
+        }
+        Ok(match op {
+            Postfix::IsNull => "IS NOT DISTINCT FROM NULL",
+            Postfix::IsNotNull => "IS DISTINCT FROM NULL",
+        }
+        .to_owned())
+    }
+
+    /// Whether `operand` is a column the schema declares a composite. The
+    /// column is named as a key names it: by its table, or by the array it
+    /// is a row of, `stores.items`; a composite inside a composite by the
+    /// column, `stores.discount`.
+    fn is_composite_column<V>(
+        &self,
+        operand: &Expr<V>,
+        item: Option<&Item>,
+    ) -> Result<bool, CompileError> {
+        let (Expr::Field(path), Some(schema)) = (operand, self.schema) else {
+            return Ok(false);
+        };
+        let names: Vec<&str> = path.names().collect();
+        let Some((column, owners)) = names.split_last() else {
+            return Ok(false);
+        };
+        let of = match path.root() {
+            Root::Item(up) => item_out(item, up)?.row.clone(),
+            Root::Global => schema.table().to_owned(),
+        };
+        let of = std::iter::once(of.as_str())
+            .chain(owners.iter().copied())
+            .collect::<Vec<_>>()
+            .join(".");
+        Ok(schema.is_composite(&of, column))
+    }
+
     /// The key a collection named `name` in a row of `row` is joined by:
     /// the one of that name, if it references the row; else the one key on
     /// the table `name` that does. None: the name is an array in the row.

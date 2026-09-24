@@ -282,7 +282,11 @@ the sources as they were.
   mentioned is a qualifier, `"s"."price"` - an object under the root is a
   table's alias - so a composite column of the candidate's own row is
   declared, `Schema::composite("stores", "address")`, and read as one,
-  `("s"."address")."city"`.
+  `("s"."address")."city"`. A null test of a declared composite is of the
+  value as a whole, `IS DISTINCT FROM NULL`: an `Option` of a Value Object
+  is `Some` or `None` whatever its members hold, where `IS NOT NULL` of a
+  composite asks that none of them is null. A `None` is written as a null
+  column, not as a row of nulls.
 * An object kept by a key and not said to be is taken for a composite, and
   PostgreSQL reads a member called like a type it can cast to - `name`,
   `text` - of a column that is no composite as that cast:
