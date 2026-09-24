@@ -1142,10 +1142,10 @@ async fn a_composite_column_of_the_candidate_is_a_member_where_the_schema_says()
 }
 
 /// An `Option` of a Value Object kept as a composite column is `Some` or
-/// `None` whatever the members hold; to `IS NOT NULL` of the column a row
-/// with a null member was neither null nor not. Declared a composite, the
-/// column is tested as a whole. The rows are the server's alone: a `Record`
-/// holds an object or has none, and cannot hold an `Option` of one.
+/// `None` whatever the members hold, and so it is to the evaluator; to
+/// `IS NOT NULL` of the column a row with a null member was neither null nor
+/// not. Declared a composite, the column is tested as a whole. A `None` is a
+/// null column in the storage and a null value in the record.
 #[tokio::test]
 async fn a_null_test_of_a_declared_composite_is_of_the_value_as_a_whole() {
     let client = client().await;
@@ -1158,11 +1158,31 @@ async fn a_null_test_of_a_declared_composite_is_of_the_value_as_a_whole() {
         )
         .await
         .expect("a table");
+    let some = |percent: Option<i64>, code: Option<&str>| {
+        Record::object([(
+            "discount",
+            Record::object([
+                ("percent", Record::value(percent)),
+                ("code", Record::value(code)),
+            ]),
+        )])
+    };
+    let rows = [
+        (1, some(Some(15), Some("x"))),
+        (2, some(None, Some("x"))),
+        (3, some(None, None)),
+        (
+            4,
+            Record::object([("discount", Record::value(Value::Null))]),
+        ),
+    ];
     let (discount, percent): (Make, Make) = (|| field("discount"), || field("discount.percent"));
     let declared = Schema::new("spec_deals")
         .alias("d")
         .composite("spec_deals", "discount");
     let undeclared = Schema::new("spec_deals").alias("d");
+    // Declared, both readers agree; undeclared, the server tests the members
+    // and the evaluator is not asked.
     let cases: [(&Schema, Spec, Vec<i64>); 8] = [
         (&declared, is_not_null(discount()), vec![1, 2, 3]),
         (&declared, is_null(discount()), vec![4]),
@@ -1189,6 +1209,14 @@ async fn a_null_test_of_a_declared_composite_is_of_the_value_as_a_whole() {
         (&undeclared, is_null(discount()), vec![3, 4]),
     ];
     for (schema, specification, expected) in &cases {
+        if std::ptr::eq(*schema, &declared) {
+            let satisfied: Vec<i64> = rows
+                .iter()
+                .filter(|(_, row)| is_satisfied_by(specification, row).expect("evaluated"))
+                .map(|(id, _)| *id)
+                .collect();
+            assert_eq!(&satisfied, expected, "the evaluator, {specification:?}");
+        }
         let query = Compiler::new()
             .schema(schema)
             .compile(specification)

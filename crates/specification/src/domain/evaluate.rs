@@ -170,12 +170,8 @@ fn eval<V: Operand + Clone>(expr: &Expr<V>, scope: Scope<'_, V>) -> Result<V, Ev
                 operand.negate().map_err(EvalError::Operand)
             }
         }
-        Expr::Postfix(operand, Postfix::IsNull) => {
-            Ok(V::from_bool(eval(operand, scope)?.is_null()))
-        }
-        Expr::Postfix(operand, Postfix::IsNotNull) => {
-            Ok(V::from_bool(!eval(operand, scope)?.is_null()))
-        }
+        Expr::Postfix(operand, Postfix::IsNull) => Ok(V::from_bool(is_null(operand, scope)?)),
+        Expr::Postfix(operand, Postfix::IsNotNull) => Ok(V::from_bool(!is_null(operand, scope)?)),
         Expr::Infix(left, Infix::Logical(op), right) => {
             connective(*op, truth(&eval(left, scope)?)?, || {
                 truth(&eval(right, scope)?)
@@ -228,6 +224,26 @@ fn eval<V: Operand + Clone>(expr: &Expr<V>, scope: Scope<'_, V>) -> Result<V, Ev
 }
 
 /// The context that has the member the path names.
+/// Whether `operand` is null. A member is asked about whatever it is: an
+/// object that is there is not null, though it is no value — the guard the
+/// macro writes for `is_some_and` over a Value Object, `discount IS NOT NULL`,
+/// asks that of an object. An object that is not there is a null value in the
+/// context, and null. Anything else is evaluated, and is null or is not.
+fn is_null<V: Operand + Clone>(operand: &Expr<V>, scope: Scope<'_, V>) -> Result<bool, EvalError> {
+    let Expr::Field(path) = operand else {
+        return Ok(eval(operand, scope)?.is_null());
+    };
+    let owner = owner(path, scope)?;
+    match owner.field(path.name()) {
+        Ok(value) => Ok(value.is_null()),
+        Err(ContextError::NotAValue(_)) => owner
+            .object(path.name())
+            .map(|_| false)
+            .map_err(EvalError::Context),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn owner<'a, V>(path: &Path, scope: Scope<'a, V>) -> Result<&'a dyn Context<V>, EvalError> {
     let root = match path.root() {
         Root::Global => scope.global,

@@ -360,6 +360,59 @@ fn a_member_that_is_not_there_is_an_error() {
     );
 }
 
+/// The guard the macro writes for `is_some_and` over a Value Object,
+/// `discount IS NOT NULL AND discount.percent > 10`, asks whether an object is
+/// null. An object that is there is no value, and was `NotAValue` to the
+/// test; it is not null. An object that is not there is a null value,
+/// `Record::value(Value::Null)`: null to the test, and no object to go into,
+/// as the domain's `unwrap()` of a `None` has none. A member left out is
+/// another thing, missing.
+#[test]
+fn a_null_test_of_an_object_asks_whether_it_is_there() {
+    let present = Record::object([("discount", Record::object([("percent", Record::value(15))]))]);
+    let absent = Record::object([("discount", Record::value(Value::Null))]);
+    let guarded = || {
+        and(
+            is_not_null(field("discount")),
+            greater_than(field("discount.percent"), value(10)),
+        )
+    };
+    assert_eq!(
+        is_satisfied_by(&is_not_null(field("discount")), &present),
+        Ok(true)
+    );
+    assert_eq!(
+        is_satisfied_by(&is_null(field("discount")), &present),
+        Ok(false)
+    );
+    assert_eq!(is_satisfied_by(&guarded(), &present), Ok(true));
+    assert_eq!(
+        is_satisfied_by(&is_null(field("discount")), &absent),
+        Ok(true)
+    );
+    assert_eq!(is_satisfied_by(&guarded(), &absent), Ok(false));
+    assert_eq!(
+        evaluate::<Value>(&field("discount.percent"), &absent),
+        Err(EvalError::Context(ContextError::NotAnObject(
+            "discount".to_owned()
+        ))),
+    );
+    // Under any other operator an object is no value, as it was; and a
+    // member left out is missing, under a null test as anywhere.
+    assert_eq!(
+        evaluate::<Value>(&equal(field("discount"), value(1)), &present),
+        Err(EvalError::Context(ContextError::NotAValue(
+            "discount".to_owned()
+        ))),
+    );
+    assert_eq!(
+        evaluate::<Value>(&is_null(field("discount")), &nothing()),
+        Err(EvalError::Context(ContextError::Missing(
+            "discount".to_owned()
+        ))),
+    );
+}
+
 #[test]
 fn some_item_satisfies_the_predicate() {
     let store = store();

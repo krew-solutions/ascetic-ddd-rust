@@ -2,6 +2,11 @@
 //! `NestedDictContext` and `CollectionContext` are between them. For tests,
 //! for documents, and for a candidate that arrives as data rather than as a
 //! domain object; a domain object implements [`Context`] itself.
+//!
+//! An object that may be absent — an `Option` of a Value Object — is a null
+//! value where it is absent, `Record::value(Value::Null)`: null to a null
+//! test, and no object to go into. A member left out is missing, which is
+//! another thing.
 
 use std::collections::BTreeMap;
 
