@@ -315,6 +315,56 @@ fn a_member_of_an_object_kept_in_a_table_of_its_own_is_read_through_the_key() {
     );
 }
 
+/// From the candidate a path of two names is a qualified name, `"s"."price"`:
+/// an object under the root is a table's alias. So a Value Object kept in
+/// the candidate's row as a composite column could not be reached:
+/// `"address"."city"` is a table PostgreSQL does not have. The schema says
+/// which columns are composites, as it says which are keys, and a path
+/// through one is a member of it; an undeclared name stays a qualifier. The
+/// rows are in `tests/pg.rs`.
+#[test]
+fn a_composite_column_of_the_candidate_is_declared() {
+    let city = || field("address.city");
+    let schema = Schema::new("stores")
+        .alias("s")
+        .composite("stores", "address");
+    assert_eq!(
+        sql_with(&schema, &equal(city(), value("x"))),
+        r#"("s"."address")."city" = $1"#
+    );
+    assert_eq!(
+        sql_with(&schema, &is_null(field("address.country.code"))),
+        r#"(("s"."address")."country")."code" IS NULL"#
+    );
+    // Inside a collection's predicate the candidate's, beside the item's.
+    assert_eq!(
+        sql_with(&schema, &any("items", equal(item("city"), city()))),
+        r#"EXISTS (SELECT 1 FROM unnest("items") AS "item_1" WHERE "item_1"."city" = ("s"."address")."city")"#
+    );
+    // An undeclared name stays a qualifier; without an alias, the table's.
+    assert_eq!(
+        sql_with(&schema, &equal(field("owner.name"), value("x"))),
+        r#""owner"."name" = $1"#
+    );
+    assert_eq!(
+        sql_with(
+            &Schema::new("stores").composite("stores", "address"),
+            &equal(city(), value("x"))
+        ),
+        r#"("stores"."address")."city" = $1"#
+    );
+    // Without a schema there is no row to read a composite of; and a
+    // composite column of another table is not the candidate's.
+    assert_eq!(sql(&equal(city(), value("x"))), r#""address"."city" = $1"#);
+    assert_eq!(
+        sql_with(
+            &Schema::new("stores").composite("items", "address"),
+            &equal(city(), value("x"))
+        ),
+        r#""address"."city" = $1"#
+    );
+}
+
 #[test]
 fn a_relational_collection_is_joined_by_its_keys() {
     let stores = || Schema::new("stores").alias("s");

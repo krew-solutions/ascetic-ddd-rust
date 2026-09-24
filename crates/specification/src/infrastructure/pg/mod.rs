@@ -331,9 +331,14 @@ impl<'s> Compiler<'s> {
                 let item = item_out(item, up)?;
                 self.member_of_row(quoted(&item.alias), item.row.clone(), &names, next)
             }
+            // An object of the candidate kept in a table of its own, or a
+            // composite column of its row - a Value Object - that the schema
+            // says is one: the dots of an undeclared name are a qualifier.
             Root::Global => match (names.first(), self.schema) {
                 (Some(object), Some(schema))
-                    if names.len() > 1 && self.key_of_object(schema.table(), object)?.is_some() =>
+                    if names.len() > 1
+                        && (self.key_of_object(schema.table(), object)?.is_some()
+                            || schema.is_composite(schema.table(), object)) =>
                 {
                     self.member_of_row(
                         qualified(schema.row())?,

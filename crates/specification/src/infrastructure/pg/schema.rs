@@ -12,7 +12,11 @@
 //! or, where two keys of that table reference the same row, by the key's
 //! name; and an object kept in a table of its own by the key's column,
 //! `owner_id`. A key has a name as it has in PostgreSQL: the one it is given,
-//! or `<table>_<columns>_fkey`.
+//! or `<table>_<columns>_fkey`. A Value Object kept in the query's row as a
+//! column of a composite type is declared as one, `composite("stores",
+//! "address")`, and a path through it from the candidate is a member of it,
+//! `("s"."address")."city"`: from the candidate an undeclared name is a
+//! table's alias, `"s"."price"`.
 
 /// A foreign key: `table (columns) REFERENCES referenced_table
 /// (referenced_columns)`.
@@ -84,6 +88,7 @@ pub struct Schema {
     table: String,
     alias: Option<String>,
     keys: Vec<ForeignKey>,
+    composites: Vec<(String, String)>,
 }
 
 impl Schema {
@@ -93,6 +98,7 @@ impl Schema {
             table: table.into(),
             alias: None,
             keys: Vec::new(),
+            composites: Vec::new(),
         }
     }
 
@@ -125,6 +131,23 @@ impl Schema {
         let mut keys = self.keys;
         keys.push(key);
         Schema { keys, ..self }
+    }
+
+    /// The column `column` of `table` is of a composite type: a Value Object
+    /// kept in the row. From the candidate a path through it is a member of
+    /// the composite, `("s"."address")."city"`, where a name not declared is
+    /// a table's alias, `"s"."price"`.
+    pub fn composite(self, table: impl Into<String>, column: impl Into<String>) -> Self {
+        let mut composites = self.composites;
+        composites.push((table.into(), column.into()));
+        Schema { composites, ..self }
+    }
+
+    /// Whether `column` of `table` is declared a composite.
+    pub(super) fn is_composite(&self, table: &str, column: &str) -> bool {
+        self.composites
+            .iter()
+            .any(|(of, name)| of == table && name == column)
     }
 
     /// The key called `name`, if there is one.

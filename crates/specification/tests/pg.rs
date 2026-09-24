@@ -1061,6 +1061,86 @@ async fn the_count_of_a_shift_is_an_integer_whatever_its_column_is() {
     }
 }
 
+/// A Value Object kept in the candidate's row as a composite column:
+/// `"address"."city"` was a table PostgreSQL does not have. Declared in the
+/// schema, the column is read as a composite, `("t"."address")."city"`,
+/// whose member of a null is null.
+#[tokio::test]
+async fn a_composite_column_of_the_candidate_is_a_member_where_the_schema_says() {
+    let client = client().await;
+    client
+        .batch_execute(
+            "CREATE TYPE pg_temp.spec_address AS (city text, zip int8);
+             CREATE TEMP TABLE spec_addressed (id int8, address pg_temp.spec_address);
+             INSERT INTO spec_addressed VALUES
+                 (1, ROW('Minsk', 220000)), (2, ROW('Riga', NULL)), (3, ROW(NULL, 1000));",
+        )
+        .await
+        .expect("a table");
+    let row = |city: Option<&str>, zip: Option<i64>| {
+        Record::object([(
+            "address",
+            Record::object([("city", Record::value(city)), ("zip", Record::value(zip))]),
+        )])
+    };
+    let rows = [
+        (1, row(Some("Minsk"), Some(220_000))),
+        (2, row(Some("Riga"), None)),
+        (3, row(None, Some(1000))),
+    ];
+    let (city, zip): (Make, Make) = (|| field("address.city"), || field("address.zip"));
+    let specifications: [(Spec, Vec<i64>); 4] = [
+        (equal(city(), value("Minsk")), vec![1]),
+        (not_equal(city(), value("Minsk")), vec![2]),
+        (is_null(city()), vec![3]),
+        (
+            and(is_not_null(zip()), greater_than(zip(), value(5000))),
+            vec![1],
+        ),
+    ];
+    let schema = Schema::new("spec_addressed")
+        .alias("t")
+        .composite("spec_addressed", "address");
+    for (specification, expected) in &specifications {
+        let satisfied: Vec<i64> = rows
+            .iter()
+            .filter(|(_, row)| is_satisfied_by(specification, row).expect("evaluated"))
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(&satisfied, expected);
+        let query = Compiler::new()
+            .schema(&schema)
+            .compile(specification)
+            .expect("compiled");
+        let text = format!(
+            "SELECT id FROM spec_addressed t WHERE {} ORDER BY id",
+            query.sql
+        );
+        let params: Vec<&(dyn ToSql + Sync)> = query
+            .params
+            .iter()
+            .map(|param| param as &(dyn ToSql + Sync))
+            .collect();
+        let selected: Vec<i64> = client
+            .query(&text, &params)
+            .await
+            .unwrap_or_else(|error| panic!("{text}: {error}"))
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert_eq!(&selected, expected, "{text}");
+    }
+    // Undeclared, the same path is a table the query does not have.
+    let query = compile(&equal(city(), value("Minsk"))).expect("compiled");
+    assert_eq!(query.sql, r#""address"."city" = $1"#);
+    let text = format!("SELECT id FROM spec_addressed t WHERE {}", query.sql);
+    let refused = client
+        .query(&text, &[&query.params[0]])
+        .await
+        .expect_err("a table the query does not have");
+    assert_eq!(refused.code(), Some(&SqlState::UNDEFINED_TABLE), "{text}");
+}
+
 #[tokio::test]
 async fn a_value_is_written_as_the_type_the_server_asks_for_if_it_fits() {
     let client = client().await;
