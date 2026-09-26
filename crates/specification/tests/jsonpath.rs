@@ -5,7 +5,8 @@ use ascetic_ddd_specification::ast::{
     and, any, equal, field, greater_than, is_not_null, is_null, less_than, not, or,
 };
 use ascetic_ddd_specification::jsonpath::{
-    BindError, MatchError, Param, ParamKey, ParamKind, Params, Slot, SyntaxError, Template,
+    BindError, MAX_LENGTH, MatchError, Param, ParamKey, ParamKind, Params, Slot, SyntaxError,
+    Template,
 };
 use ascetic_ddd_specification::{
     ContextError, EvalError, Expr, Mapped, Mapping, Path, Record, Value, pg, transform,
@@ -747,8 +748,31 @@ fn the_deepest_template_fits_a_megabyte_of_stack() {
 /// text as long as this one took minutes to refuse.
 #[test]
 fn a_long_text_is_refused_in_the_time_it_takes_to_read_it() {
-    let long = format!("$[?@.a == %d{}]", " @.a %d".repeat(300_000));
+    let long = format!("$[?@.a == %d{}]", " @.a %d".repeat(30_000));
     assert_eq!(error(&long).message, "Expected ']'");
+}
+
+/// The bounds on height and nesting bound the shape of a tree and not the
+/// size of a text: a text of megabytes was lexed whole before the parser
+/// could refuse it, or accepted with a literal of megabytes. The length is
+/// the first thing looked at, in bytes of UTF-8, so a template is one in
+/// every port or in none.
+#[test]
+fn a_template_longer_than_the_bound_is_refused_before_it_is_read() {
+    let room = "$[?@.a == 1]";
+    let at_the_bound = format!("$[?@.a == 1{}]", " ".repeat(MAX_LENGTH - room.len()));
+    assert_eq!(at_the_bound.len(), MAX_LENGTH);
+    assert!(Template::parse(&at_the_bound).is_ok());
+    let over = error(&format!("{at_the_bound} "));
+    assert_eq!(
+        over.to_string(),
+        "Template too long at position 262144 (expected at most 262144 bytes of UTF-8)"
+    );
+    assert!(Template::parse(&format!("$[?@.a == '{}']", "\u{e9}".repeat(131_072))).is_err());
+    let started = std::time::Instant::now();
+    let chain = format!("$[?{}]", vec!["@.a == 1"; 400_000].join(" && "));
+    assert_eq!(error(&chain).message, "Template too long");
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
 }
 
 #[test]

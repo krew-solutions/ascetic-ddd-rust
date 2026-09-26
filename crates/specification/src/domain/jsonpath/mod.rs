@@ -66,4 +66,4 @@ mod parser;
 mod template;
 
 pub use error::{BindError, MatchError, SyntaxError};
-pub use template::{Param, ParamKey, ParamKind, Params, Slot, Template};
+pub use template::{MAX_LENGTH, Param, ParamKey, ParamKind, Params, Slot, Template};

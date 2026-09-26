@@ -47,6 +47,14 @@ impl SyntaxError {
 
 impl fmt::Display for SyntaxError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // A template too long to read is not echoed.
+        if self.expression.is_empty() {
+            return write!(
+                f,
+                "{} at position {} (expected {})",
+                self.message, self.position, self.expected
+            );
+        }
         // The template is echoed with a control character shown by its
         // escape, so that the message has none in it; the caret moves by
         // what the escapes add before the position.

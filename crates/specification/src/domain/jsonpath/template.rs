@@ -138,9 +138,26 @@ pub struct Template {
     positional: usize,
 }
 
+/// How long a template may be, in bytes of UTF-8. The bounds on a tree's
+/// height and the parser's nesting bound the shape of a tree and not the size
+/// of a text: a string literal is as long as it is written, and a text of
+/// megabytes was read to its end — lexed whole before the parser could refuse
+/// it at its thirty-fifth character, or accepted and sent to the server as a
+/// parameter of megabytes. The length is checked before anything is read. A
+/// template of realistic operands within the bounds is a few kilobytes; a
+/// long value belongs in a parameter.
+pub const MAX_LENGTH: usize = 262_144;
+
 impl Template {
     /// Reads `source`. See the [module](super) for the grammar.
     pub fn parse(source: &str) -> Result<Self, SyntaxError> {
+        if source.len() > MAX_LENGTH {
+            return Err(SyntaxError::new(
+                "Template too long",
+                MAX_LENGTH,
+                "at most 262144 bytes of UTF-8",
+            ));
+        }
         let tokens = lexer::tokenize(source).map_err(|error| error.within(source))?;
         let expr = parser::template(&tokens, source.chars().count())
             .map_err(|error| error.within(source))?;
