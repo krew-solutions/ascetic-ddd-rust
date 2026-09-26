@@ -47,15 +47,37 @@ impl SyntaxError {
 
 impl fmt::Display for SyntaxError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The template is echoed with a control character shown by its
+        // escape, so that the message has none in it; the caret moves by
+        // what the escapes add before the position.
+        let echoed: String = self.expression.chars().map(shown).collect();
+        let pointer: usize = self
+            .expression
+            .chars()
+            .take(self.position)
+            .map(|c| shown(c).chars().count())
+            .sum();
         write!(
             f,
             "{} at position {} (expected {})\n  {}\n  {}^",
             self.message,
             self.position,
             self.expected,
-            self.expression,
-            " ".repeat(self.position),
+            echoed,
+            " ".repeat(pointer),
         )
+    }
+}
+
+/// A character as an error shows it: a control character by its escape -
+/// `\n`, `\t`, `\r`, or `\x00` and the like - not as it is.
+pub(super) fn shown(c: char) -> String {
+    match c {
+        '\n' => "\\n".to_owned(),
+        '\t' => "\\t".to_owned(),
+        '\r' => "\\r".to_owned(),
+        c if c.is_control() => format!("\\x{:02x}", c as u32),
+        c => c.to_string(),
     }
 }
 

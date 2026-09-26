@@ -107,6 +107,8 @@ pub enum CompileError {
     /// A name that is not one: anything but ASCII letters, digits and `_`,
     /// not starting with a digit.
     InvalidIdentifier(String),
+    /// A text with a NUL in it: no text PostgreSQL has, so no query.
+    NulInText,
 }
 
 impl fmt::Display for CompileError {
@@ -119,6 +121,9 @@ impl fmt::Display for CompileError {
             ),
             CompileError::AmbiguousKey(message) | CompileError::WrongKey(message) => {
                 f.write_str(message)
+            }
+            CompileError::NulInText => {
+                f.write_str("a text with a NUL (U+0000) in it is no text PostgreSQL has")
             }
             CompileError::InvalidIdentifier(name) => {
                 write!(f, "'{name}' is not a valid identifier")
@@ -186,6 +191,11 @@ impl<'s> Compiler<'s> {
     ) -> Result<(Fragment<V>, Next), CompileError> {
         match expr {
             Expr::Value(value) => {
+                // In memory such a text is a string like any other; here it
+                // meets the server, which has no such text.
+                if value.nul_in_text() {
+                    return Err(CompileError::NulInText);
+                }
                 let param = next.param + 1;
                 let fragment = Fragment {
                     sql: format!("${param}"),

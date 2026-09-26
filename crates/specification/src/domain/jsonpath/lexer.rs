@@ -134,7 +134,7 @@ fn token(
             Ok((Kind::Name(name), at + length))
         }
         (c, _) => Err(SyntaxError::new(
-            format!("Unexpected character '{c}'"),
+            format!("Unexpected character '{}'", super::error::shown(c)),
             at,
             EXPECTED,
         )),
@@ -207,7 +207,10 @@ fn number(chars: &[char], at: usize) -> Result<(Kind, usize), SyntaxError> {
     Ok((kind, exponent_end))
 }
 
-/// A string in either quote, with the escapes of RFC 9535.
+/// A string in either quote, with the escapes of RFC 9535. Unescaped, a
+/// character of a string is `%x20` and up (RFC 9535, 2.3.5.1): a control
+/// character is written as its escape, and a NUL that arrives raw does not
+/// get as far as a query.
 fn text(chars: &[char], at: usize, quote: char) -> Result<(Kind, usize), SyntaxError> {
     let unterminated = || SyntaxError::new("Unterminated string", at, "closing quote");
     let mut text = String::new();
@@ -219,6 +222,13 @@ fn text(chars: &[char], at: usize, quote: char) -> Result<(Kind, usize), SyntaxE
                 let (c, next) = escape(chars, position)?;
                 text.push(c);
                 position = next;
+            }
+            c if (*c as u32) < 0x20 => {
+                return Err(SyntaxError::new(
+                    "Control character in a string",
+                    position,
+                    "its escape, \\n or \\uXXXX",
+                ));
             }
             c => {
                 text.push(*c);

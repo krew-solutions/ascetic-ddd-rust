@@ -1241,6 +1241,25 @@ async fn a_null_test_of_a_declared_composite_is_of_the_value_as_a_whole() {
     }
 }
 
+/// Why the compiler refuses a text with a NUL in it: the server has no such
+/// text. In memory it is a string like any other.
+#[tokio::test]
+async fn a_text_with_a_nul_is_no_text_of_the_server() {
+    let client = client().await;
+    let refused = client
+        .query("SELECT $1::text", &[&Value::from("a\u{0}b")])
+        .await
+        .expect_err("no such text");
+    assert_eq!(refused.code(), Some(&SqlState::CHARACTER_NOT_IN_REPERTOIRE));
+    let bound = Template::parse("$[?@.name == %s]")
+        .expect("parsed")
+        .bind(&Params::positional(["a\u{0}b"]))
+        .expect("bound");
+    assert!(compile(&bound).is_err());
+    let row = Record::object([("name", Record::value("a\u{0}b"))]);
+    assert_eq!(is_satisfied_by(&bound, &row), Ok(true));
+}
+
 #[tokio::test]
 async fn a_value_is_written_as_the_type_the_server_asks_for_if_it_fits() {
     let client = client().await;

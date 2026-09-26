@@ -702,6 +702,28 @@ fn a_constant_with_nothing_beside_it_has_its_type_said() {
     }
 }
 
+/// PostgreSQL's `text` holds no NUL: a parameter with one in it is "invalid
+/// byte sequence for encoding UTF8: 0x00" from the server, at execution - a
+/// failure of the query where the application expects one of the data. A
+/// text with a NUL is refused where every value meets the server, by the
+/// compiler; in memory it is a string like any other. The server's refusal
+/// is in `tests/pg.rs`.
+#[test]
+fn a_text_with_a_nul_is_no_text_postgresql_has() {
+    let nul: Spec = equal(field("name"), value("a\u{0}b"));
+    assert_eq!(compile(&nul).unwrap_err(), CompileError::NulInText);
+    assert_eq!(
+        compile(&nul).unwrap_err().to_string(),
+        "a text with a NUL (U+0000) in it is no text PostgreSQL has"
+    );
+    assert_eq!(
+        compile(&any("items", equal(item("name"), value("\u{0}")))).unwrap_err(),
+        CompileError::NulInText
+    );
+    let plain: Spec = equal(field("name"), value("ab"));
+    assert!(compile(&plain).is_ok());
+}
+
 #[test]
 fn a_name_that_is_not_an_identifier_is_refused() {
     let invalid = |name: &str| Err(CompileError::InvalidIdentifier(name.to_owned()));

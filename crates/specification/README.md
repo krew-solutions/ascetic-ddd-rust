@@ -319,6 +319,11 @@ the sources as they were.
 * The null test is of constants, not of data: `@.a == @.b` with both members
   null is null, where RFC 9535 has true. The equality in which null is a
   value is `IS`, which a template cannot spell.
+* A control character stands in a string literal only as its escape, as RFC
+  9535 has it; raw, it is a syntax error. A text with a NUL in it, `\u0000`
+  or a parameter, is no text PostgreSQL has, and the compiler refuses it,
+  `CompileError::NulInText`, rather than let the query fail at the server;
+  in memory it is a string like any other.
 * A function and its tree agree on candidates without nulls. With them,
   Rust's `!(x == Some(5))` is true of a `None` and SQL's `NOT x = 5` is not.
 

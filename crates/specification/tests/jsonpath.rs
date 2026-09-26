@@ -483,6 +483,22 @@ fn an_error_says_what_where_and_shows_it() {
     assert_eq!(error("$[?@.a == 'é' # 1]").position, 14);
 }
 
+/// An error shows a control character by its escape, not as it is: in the
+/// message, and in the line that echoes the template, whose caret moves by
+/// what the escape adds.
+#[test]
+fn a_control_character_is_shown_by_its_escape() {
+    assert_eq!(
+        error("$[?@.na\u{0}me == 1]").to_string(),
+        "Unexpected character '\\x00' at position 7 (expected valid token)\n  $[?@.na\\x00me == 1]\n         ^",
+    );
+    let in_a_string = error("$[?@.name == 'a\u{0}b' # 1]");
+    assert_eq!(
+        in_a_string.to_string(),
+        "Control character in a string at position 15 (expected its escape, \\n or \\uXXXX)\n  $[?@.name == 'a\\x00b' # 1]\n                 ^",
+    );
+}
+
 #[test]
 fn what_the_grammar_does_not_have_is_refused() {
     for (source, message, position) in [
@@ -498,6 +514,16 @@ fn what_the_grammar_does_not_have_is_refused() {
         ("$[?@.age > %(age]", "Malformed placeholder", 11),
         ("$[?@.name == 'open]", "Unterminated string", 13),
         ("$[?@.name == 'a\\qb']", "Invalid escape", 15),
+        // RFC 9535, 2.3.5.1: unescaped, a character of a string is %x20 and
+        // up. A raw one was taken into the string - a NUL among them, which
+        // went as far as the server and failed there.
+        (
+            "$[?@.name == 'a\u{0}b']",
+            "Control character in a string",
+            15,
+        ),
+        ("$[?@.name == 'a\tb']", "Control character in a string", 15),
+        ("$[?@.name == 'a\nb']", "Control character in a string", 15),
         (
             "$[?@.age > 99999999999999999999]",
             "Number out of range",

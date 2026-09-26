@@ -31,9 +31,20 @@ use crate::domain::value::Value;
 pub trait ParamType {
     /// The name of the type, or none for a value of no kind: the null.
     fn param_type(&self) -> Option<&'static str>;
+
+    /// Whether the value is a text with a NUL in it: no text PostgreSQL has,
+    /// `text` holds none. The compiler refuses such a value where it meets
+    /// the server, rather than let the driver or the server fail the query.
+    fn nul_in_text(&self) -> bool {
+        false
+    }
 }
 
 impl ParamType for Value {
+    fn nul_in_text(&self) -> bool {
+        matches!(self, Value::Text(text) if text.contains('\0'))
+    }
+
     fn param_type(&self) -> Option<&'static str> {
         match self {
             Value::Null => None,
