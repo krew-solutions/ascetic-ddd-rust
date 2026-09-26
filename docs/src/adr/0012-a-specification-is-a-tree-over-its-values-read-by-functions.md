@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted (2026-09-18).
+Accepted (2026-09-18). Amended 2026-09-23: the item of an enclosing
+collection is named, `Root::Item(up)`.
 
 ## Context
 
@@ -83,9 +84,14 @@ per operator, a reader per implementation (tagless final).
   table's key, never of the decision where a parenthesis goes).
 - The tree is recursive and so are its readers. A template is refused beyond
   128 levels; a tree built by hand is as deep as its author made it.
-- `Root::Item` is the nearest item only, as JSONPath's `@` and the sources'
-  `Item()`. Naming an outer item would take an index or a name on `Item` and
-  on `Any`; no source can express it, and the macro refuses it by name.
+- `Root::Item(up)` is the item of the collection `up` levels out: `Item(0)`
+  the nearest, as JSONPath's `@` and the sources' `Item()`; `Path::outer(1,
+  ..)` the item of the collection around it. The evaluator keeps the items of
+  the enclosing predicates and the compiler their aliases, which SQL has in
+  scope of the inner query; the macro reads a closure's names. A template has
+  one `@`, so an outer item is named in a tree only. (This ADR first held the
+  nearest item alone, since no source could express more; the macro's nested
+  closures can, and were read as the nearest item - amended 2026-09-23.)
 
 ## Alternatives rejected
 
