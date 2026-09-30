@@ -54,6 +54,7 @@ impl ParamType for Value {
             Value::Text(_) => Some("text"),
             Value::Timestamp(_) => Some("timestamptz"),
             Value::Interval(_) => Some("interval"),
+            Value::Uuid(_) => Some("uuid"),
         }
     }
 }

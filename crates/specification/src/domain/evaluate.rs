@@ -179,7 +179,9 @@ fn eval<V: Operand + Clone>(expr: &Expr<V>, scope: Scope<'_, V>) -> Result<V, Ev
             .map(from_truth)
         }
         Expr::Infix(left, Infix::Is, right) => {
-            let (left, right) = (eval(left, scope)?, eval(right, scope)?);
+            let (left, right) =
+                read_constants(left, right, eval(left, scope)?, eval(right, scope)?)
+                    .map_err(|error| named(error, Infix::Is))?;
             if left.is_null() || right.is_null() {
                 Ok(V::from_bool(left.is_null() && right.is_null()))
             } else {
@@ -189,7 +191,9 @@ fn eval<V: Operand + Clone>(expr: &Expr<V>, scope: Scope<'_, V>) -> Result<V, Ev
             }
         }
         Expr::Infix(left, Infix::Comparison(op), right) => {
-            strict(eval(left, scope)?, eval(right, scope)?, |left, right| {
+            let (l, r) = read_constants(left, right, eval(left, scope)?, eval(right, scope)?)
+                .map_err(|error| named(error, op))?;
+            strict(l, r, |left, right| {
                 compare(left, *op, right).map(V::from_bool)
             })
             .map_err(|error| named(error, op))
@@ -242,6 +246,29 @@ fn is_null<V: Operand + Clone>(operand: &Expr<V>, scope: Scope<'_, V>) -> Result
             .map_err(EvalError::Context),
         Err(error) => Err(error.into()),
     }
+}
+
+/// The operands of a comparison, a string constant among them read as the
+/// kind of the other: a constant's, not a member's, since the server refuses
+/// two columns of those kinds; under a comparison, not `+`, under which the
+/// server reads the string as an interval — another reading. ADR-0015.
+fn read_constants<V: Operand>(
+    left_expr: &Expr<V>,
+    right_expr: &Expr<V>,
+    left: V,
+    right: V,
+) -> Result<(V, V), OperandError> {
+    if matches!(left_expr, Expr::Value(_)) {
+        if let Some(read) = left.read_beside(&right)? {
+            return Ok((read, right));
+        }
+    }
+    if matches!(right_expr, Expr::Value(_)) {
+        if let Some(read) = right.read_beside(&left)? {
+            return Ok((left, read));
+        }
+    }
+    Ok((left, right))
 }
 
 fn owner<'a, V>(path: &Path, scope: Scope<'a, V>) -> Result<&'a dyn Context<V>, EvalError> {

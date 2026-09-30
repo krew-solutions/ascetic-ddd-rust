@@ -8,5 +8,6 @@ pub mod jsonpath;
 pub mod null_test;
 pub mod operand;
 pub mod operator;
+pub(crate) mod reading;
 pub mod record;
 pub mod value;

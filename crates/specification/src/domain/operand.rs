@@ -50,6 +50,18 @@ pub trait Operand: Sized {
 
     /// `self op other`.
     fn compute(&self, op: Arithmetic, other: &Self) -> Result<Self, OperandError>;
+
+    /// This, read as the kind of `other`, where this is a text and `other`
+    /// is of a kind that has no literal of its own — a point in time, a
+    /// UUID — as the server reads an untyped parameter by the column beside
+    /// it; `None` where there is nothing to read, and an error where the text
+    /// is not of the form the kind is read in. The evaluator asks this of a
+    /// constant of the tree under a comparison, and of nothing else. A type
+    /// of values with no such kinds leaves the default. ADR-0015.
+    fn read_beside(&self, other: &Self) -> Result<Option<Self>, OperandError> {
+        let _ = other;
+        Ok(None)
+    }
 }
 
 /// An operator could not be applied.
@@ -68,6 +80,16 @@ pub enum OperandError {
     DivisionByZero,
     /// The result does not fit the type.
     OutOfRange,
+    /// A text beside a value of `kind` that is not of the `form` the kind is
+    /// read in.
+    Unreadable {
+        /// The text as it stands.
+        text: String,
+        /// The kind it was to be read as.
+        kind: &'static str,
+        /// The form the kind is read in.
+        form: &'static str,
+    },
 }
 
 impl OperandError {
@@ -112,6 +134,9 @@ impl fmt::Display for OperandError {
             } => write!(f, "operator \"{operator}\" is not supported for {left}"),
             OperandError::DivisionByZero => f.write_str("division by zero"),
             OperandError::OutOfRange => f.write_str("the result is out of range"),
+            OperandError::Unreadable { text, kind, form } => {
+                write!(f, "'{text}' is not a {kind}: {form}")
+            }
         }
     }
 }

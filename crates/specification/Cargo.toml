@@ -23,7 +23,11 @@ pg = ["dep:bytes", "dep:postgres-types"]
 [dependencies]
 ascetic-ddd-specification-macros = { path = "../specification-macros", version = "0.1.0", optional = true }
 bytes = { version = "1", optional = true }
+# The calendar, for a string read as a point in time; no clock: the domain
+# takes the time as an argument.
+chrono = { version = "0.4", default-features = false }
 postgres-types = { version = "0.2.14", optional = true }
+uuid = { version = "1", default-features = false }
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }

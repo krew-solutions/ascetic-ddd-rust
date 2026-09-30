@@ -330,6 +330,17 @@ the sources as they were.
   in memory it is a string like any other.
 * A function and its tree agree on candidates without nulls. With them,
   Rust's `!(x == Some(5))` is true of a `None` and SQL's `NOT x = 5` is not.
+* A string constant compared with a point in time or a UUID is read as one,
+  as the server reads an untyped parameter by the column (ADR-0015): ISO
+  8601 - a date, or that with a time, a fraction and `Z` or an offset, UTC
+  without one - and the canonical UUID in either case. `tokio-postgres` asks
+  a value to write itself in the type the server inferred, so a text beside
+  such a column is read the same way on its way to the server: what the
+  server would read beyond the subset, `'yesterday'`, is an error on both
+  sides. A `Timestamp` has no zone and no date of its own: in memory a `date`
+  column is a midnight and agrees on a string that is a date alone, and a
+  `timestamp` without zone is read as one with; on the way to the server the
+  text is read as the column is, the date of it or with the offset dropped.
 
 ## Tests
 

@@ -16,6 +16,7 @@ use std::cmp::Ordering;
 
 use super::operand::{Operand, OperandError};
 use super::operator::{Arithmetic, Comparison, Prefix};
+use super::reading;
 
 /// A point in time: microseconds since the Unix epoch, PostgreSQL's
 /// resolution. A type of the crate's own, so that the core depends on no
@@ -72,6 +73,8 @@ pub enum Value {
     Timestamp(Timestamp),
     /// A span of time.
     Interval(Interval),
+    /// A UUID.
+    Uuid(uuid::Uuid),
 }
 
 impl Operand for Value {
@@ -103,6 +106,7 @@ impl Operand for Value {
             Value::Text(_) => "text",
             Value::Timestamp(_) => "timestamp",
             Value::Interval(_) => "interval",
+            Value::Uuid(_) => "uuid",
         }
     }
 
@@ -122,6 +126,8 @@ impl Operand for Value {
             (Value::Text(left), Value::Text(right)) => Ok(left.cmp(right)),
             (Value::Timestamp(left), Value::Timestamp(right)) => Ok(left.cmp(right)),
             (Value::Interval(left), Value::Interval(right)) => Ok(left.cmp(right)),
+            // By its bytes, as PostgreSQL orders a uuid.
+            (Value::Uuid(left), Value::Uuid(right)) => Ok(left.cmp(right)),
             _ => Err(OperandError::unsupported(
                 Comparison::Lt,
                 self.kind(),
@@ -156,6 +162,26 @@ impl Operand for Value {
             _ => temporal(op, self, other),
         };
         defined.unwrap_or_else(|| Err(OperandError::unsupported(op, self.kind(), other.kind())))
+    }
+
+    fn read_beside(&self, other: &Self) -> Result<Option<Self>, OperandError> {
+        let Value::Text(text) = self else {
+            return Ok(None);
+        };
+        let unreadable = |form: &'static str| OperandError::Unreadable {
+            text: text.clone(),
+            kind: other.kind(),
+            form,
+        };
+        match other {
+            Value::Timestamp(_) => reading::point_in_time(text)
+                .map(|moment| Some(Value::Timestamp(moment)))
+                .ok_or_else(|| unreadable(reading::POINT_IN_TIME)),
+            Value::Uuid(_) => reading::uuid(text)
+                .map(|id| Some(Value::Uuid(id)))
+                .ok_or_else(|| unreadable(reading::UUID)),
+            _ => Ok(None),
+        }
     }
 }
 
@@ -296,6 +322,12 @@ impl From<&String> for Value {
 impl From<Timestamp> for Value {
     fn from(value: Timestamp) -> Self {
         Value::Timestamp(value)
+    }
+}
+
+impl From<uuid::Uuid> for Value {
+    fn from(value: uuid::Uuid) -> Self {
+        Value::Uuid(value)
     }
 }
 

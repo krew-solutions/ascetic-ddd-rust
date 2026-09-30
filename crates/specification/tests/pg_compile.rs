@@ -685,6 +685,15 @@ fn a_constant_with_nothing_beside_it_has_its_type_said() {
         ),
         // PostgreSQL shifts a bigint by an integer.
         (left_shift(value(1), value(4)), "$1::bigint << $2::integer"),
+        // A UUID, which a template writes as a string and a constant of the
+        // domain has as itself.
+        (
+            equal(
+                value(uuid::Uuid::from_u128(1)),
+                value(uuid::Uuid::from_u128(2)),
+            ),
+            "$1::uuid = $2::uuid",
+        ),
         // Alone under its operator.
         (neg(value(5)), "-$1::bigint"),
         (not(value(true)), "NOT $1::boolean"),

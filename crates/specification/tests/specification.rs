@@ -413,6 +413,127 @@ fn a_null_test_of_an_object_asks_whether_it_is_there() {
     );
 }
 
+/// A template has the literals of RFC 9535 and no others, so a point in time
+/// or a UUID in it is a string. The server reads an untyped parameter by the
+/// column; the evaluator compared a string with a point in time and refused,
+/// and the two readers parted on `@.created_at > '2026-09-01'`. A string
+/// constant beside a value of a kind that has no literal of its own is read
+/// as that kind, within a subset of what the server reads (ADR-0015). The
+/// rows are in `tests/pg.rs`.
+#[test]
+fn a_string_constant_is_read_as_the_kind_of_the_member_beside_it() {
+    let at = |hour: u32| {
+        let moment = chrono::NaiveDate::from_ymd_opt(2026, 9, 1)
+            .unwrap()
+            .and_hms_opt(hour, 0, 0)
+            .unwrap()
+            .and_utc();
+        Timestamp::from_micros(moment.timestamp_micros())
+    };
+    let uid = uuid::Uuid::parse_str("3f2a0c1e-5b7d-4e8a-9f01-23456789abcd").unwrap();
+    let row: Record<Value> = Record::object([
+        ("at", Record::value(at(12))),
+        ("day", Record::value(at(0))),
+        ("uid", Record::value(uid)),
+        ("price", Record::value(100)),
+        ("name", Record::value("2026-09-01")),
+    ]);
+    for (specification, expected) in [
+        // Midnight, UTC without an offset; the forms of the subset.
+        (greater_than(field("at"), value("2026-09-01")), true),
+        (
+            greater_than(field("at"), value("2026-09-01T12:00:00Z")),
+            false,
+        ),
+        (
+            greater_than(field("at"), value("2026-09-01 12:00:00")),
+            false,
+        ),
+        (
+            greater_than(field("at"), value("2026-09-01T15:00:00+03:00")),
+            false,
+        ),
+        (greater_than(field("at"), value("2026-09-01T12:00")), false),
+        (
+            greater_than(field("at"), value("2026-09-01T11:59:59.999999Z")),
+            true,
+        ),
+        // On either side, and under IS.
+        (equal(value("2026-09-01T15:00:00+03:00"), field("at")), true),
+        (is(field("at"), value("2026-09-01T12:00:00Z")), true),
+        // A date column is a midnight here.
+        (equal(field("day"), value("2026-09-01")), true),
+        (less_than(field("day"), value("2026-09-02")), true),
+        // A UUID in either case.
+        (
+            equal(field("uid"), value("3F2A0C1E-5B7D-4E8A-9F01-23456789ABCD")),
+            true,
+        ),
+        (
+            not_equal(field("uid"), value("00000000-0000-0000-0000-000000000000")),
+            true,
+        ),
+        // Two strings are two strings.
+        (equal(field("name"), value("2026-09-01")), true),
+    ] {
+        assert_eq!(
+            is_satisfied_by(&specification, &row),
+            Ok(expected),
+            "{specification:?}"
+        );
+    }
+    // What the server reads beyond the subset, and what nothing reads: loud
+    // here, and never the other way round.
+    for text in [
+        "yesterday",
+        "20260901",
+        "Sep 1 2026",
+        "2026-13-01",
+        "2026-09-01T25:00:00Z",
+        "",
+    ] {
+        let unread = is_satisfied_by(&greater_than(field("at"), value(text)), &row);
+        assert!(
+            matches!(
+                unread,
+                Err(EvalError::Operand(OperandError::Unreadable { .. }))
+            ),
+            "{text:?}: {unread:?}"
+        );
+    }
+    for text in [
+        "{3f2a0c1e-5b7d-4e8a-9f01-23456789abcd}",
+        "3f2a0c1e5b7d4e8a9f0123456789abcd",
+        "not-a-uuid",
+    ] {
+        let unread = is_satisfied_by(&equal(field("uid"), value(text)), &row);
+        assert!(
+            matches!(
+                unread,
+                Err(EvalError::Operand(OperandError::Unreadable { .. }))
+            ),
+            "{text:?}: {unread:?}"
+        );
+    }
+    // A number has a literal: a string beside it is meant, and does not
+    // compare. A member holding a string is the candidate's data, not a
+    // constant. And `at + '1 day'` is an interval to the server, another
+    // reading: here it is the error it was.
+    for specification in [
+        greater_than(field("price"), value("100")),
+        greater_than(field("name"), field("day")),
+        add(field("at"), value("1 day")),
+    ] {
+        assert!(
+            matches!(
+                evaluate(&specification, &row),
+                Err(EvalError::Operand(OperandError::Unsupported { .. }))
+            ),
+            "{specification:?}"
+        );
+    }
+}
+
 #[test]
 fn some_item_satisfies_the_predicate() {
     let store = store();

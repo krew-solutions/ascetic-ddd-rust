@@ -246,6 +246,12 @@ async fn a_constant_expression_has_one_value_for_both_readers() {
                     OperandError::DivisionByZero => SqlState::DIVISION_BY_ZERO,
                     OperandError::OutOfRange => SqlState::NUMERIC_VALUE_OUT_OF_RANGE,
                     OperandError::Unsupported { .. } => SqlState::UNDEFINED_FUNCTION,
+                    // A string read as a point in time or a UUID that is not
+                    // one: the server's words for the same.
+                    OperandError::Unreadable {
+                        kind: "timestamp", ..
+                    } => SqlState::INVALID_DATETIME_FORMAT,
+                    OperandError::Unreadable { .. } => SqlState::INVALID_TEXT_REPRESENTATION,
                 };
                 assert_eq!(error.code(), Some(&expected), "{}: {error:?}", query.sql);
             }
@@ -1258,6 +1264,121 @@ async fn a_text_with_a_nul_is_no_text_of_the_server() {
     assert!(compile(&bound).is_err());
     let row = Record::object([("name", Record::value("a\u{0}b"))]);
     assert_eq!(is_satisfied_by(&bound, &row), Ok(true));
+}
+
+/// A point in time or a UUID in a template is a string; the server reads it
+/// by the column, and so does the evaluator now (ADR-0015). A `Timestamp` has
+/// no zone to drop and no date to keep, so a `date` column is a midnight to
+/// it and agrees on a string that is a date alone; a `timestamp` without zone
+/// would be read as one with. A UUID constant of the domain goes to the
+/// server as a uuid.
+#[tokio::test]
+async fn a_string_constant_is_read_as_the_kind_of_the_column_beside_it() {
+    let client = client().await;
+    client
+        .batch_execute(
+            "SET TIME ZONE 'UTC';
+             CREATE TEMP TABLE spec_kinds (id int8, at timestamptz, day date, uid uuid);
+             INSERT INTO spec_kinds VALUES
+                 (1, '2026-09-01 12:00:00+00', '2026-09-01', '3f2a0c1e-5b7d-4e8a-9f01-23456789abcd'),
+                 (2, '2026-09-02 12:00:00+00', '2026-09-02', '00000000-0000-0000-0000-000000000001');",
+        )
+        .await
+        .expect("a table");
+    let at = |day: u32, hour: u32| {
+        let moment = chrono::NaiveDate::from_ymd_opt(2026, 9, day)
+            .unwrap()
+            .and_hms_opt(hour, 0, 0)
+            .unwrap()
+            .and_utc();
+        Timestamp::from_micros(moment.timestamp_micros())
+    };
+    let ann = uuid::Uuid::parse_str("3f2a0c1e-5b7d-4e8a-9f01-23456789abcd").unwrap();
+    let rows: [(i64, Record<Value>); 2] = [
+        (
+            1,
+            Record::object([
+                ("at", Record::value(at(1, 12))),
+                ("day", Record::value(at(1, 0))),
+                ("uid", Record::value(ann)),
+            ]),
+        ),
+        (
+            2,
+            Record::object([
+                ("at", Record::value(at(2, 12))),
+                ("day", Record::value(at(2, 0))),
+                ("uid", Record::value(uuid::Uuid::from_u128(1))),
+            ]),
+        ),
+    ];
+    let specifications: [(Spec, Vec<i64>); 10] = [
+        (greater_than(field("at"), value("2026-09-01")), vec![1, 2]),
+        (
+            greater_than(field("at"), value("2026-09-01T12:00:00Z")),
+            vec![2],
+        ),
+        (
+            equal(field("at"), value("2026-09-01T15:00:00+03:00")),
+            vec![1],
+        ),
+        (equal(field("at"), value("2026-09-01 12:00:00")), vec![1]),
+        (
+            equal(field("at"), value("2026-09-01T12:00:00.000000Z")),
+            vec![1],
+        ),
+        (equal(field("day"), value("2026-09-01")), vec![1]),
+        (less_than(field("day"), value("2026-09-02")), vec![1]),
+        (
+            equal(field("uid"), value("3F2A0C1E-5B7D-4E8A-9F01-23456789ABCD")),
+            vec![1],
+        ),
+        (equal(value("2026-09-02"), field("day")), vec![2]),
+        // A UUID of the domain, written as a uuid.
+        (equal(field("uid"), value(ann)), vec![1]),
+    ];
+    for (specification, expected) in &specifications {
+        let satisfied: Vec<i64> = rows
+            .iter()
+            .filter(|(_, row)| is_satisfied_by(specification, row).expect("evaluated"))
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(&satisfied, expected, "the evaluator, {specification:?}");
+        let query = compile(specification).expect("compiled");
+        let text = format!("SELECT id FROM spec_kinds WHERE {} ORDER BY id", query.sql);
+        let params: Vec<&(dyn ToSql + Sync)> = query
+            .params
+            .iter()
+            .map(|param| param as &(dyn ToSql + Sync))
+            .collect();
+        let selected: Vec<i64> = client
+            .query(&text, &params)
+            .await
+            .unwrap_or_else(|error| panic!("{text}: {error}"))
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert_eq!(&selected, expected, "{text}");
+    }
+    // Beyond the subset the evaluator is loud. So is the way to the server:
+    // the driver asks the value to write itself as the timestamptz the
+    // server inferred, and the value reads the text as the evaluator does -
+    // where Python's and Go's drivers hand the text over and the server
+    // reads `'yesterday'`.
+    let beyond = greater_than(field("at"), value("yesterday"));
+    assert!(is_satisfied_by(&beyond, &rows[0].1).is_err());
+    let query = compile(&beyond).expect("compiled");
+    let refused = client
+        .query(
+            &format!("SELECT id FROM spec_kinds WHERE {}", query.sql),
+            &[&query.params[0]],
+        )
+        .await
+        .expect_err("not read on the way to the server either");
+    assert!(
+        refused.to_string().contains("error serializing parameter"),
+        "{refused}"
+    );
 }
 
 #[tokio::test]

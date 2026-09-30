@@ -2,8 +2,7 @@
 
 ## Status
 
-Proposed (2026-09-30). Accepted when the tests named below hold in the three
-ports.
+Accepted (2026-09-30): the tests named below hold in the three ports.
 
 ## Context
 
@@ -71,10 +70,15 @@ evaluator, with the session's time zone set.
 - A member holding a string compared with a member of another kind is still
   an error: the reading is of constants, which are the author's, not of the
   candidate's data - and the server refuses two columns of those types.
-- Only Python has a kind for a date. Rust's `Value` and Go's `time.Time`
-  hold a `date` column as a midnight, so "a date takes the date of a full
-  timestamp" is read there as the server reads a `timestamp` beside a
-  `date`: to be settled when a date kind is added, or held as a limit.
+- Rust's driver asks a value to write itself in the type the server
+  inferred, where Python's and Go's hand a text to the server: so in Rust
+  the text is read on its way to the server as well, in the same subset, and
+  what the server would read beyond it is an error on both sides there.
+- Only Python has a kind for a date, and a time without a zone. Rust's
+  `Timestamp` and Go's `time.Time` hold a `date` column as a midnight and a
+  `timestamp` as a `timestamptz`, so there a date agrees on a string that is
+  a date alone, and an offset is applied where the server would drop it: a
+  limit of those ports until a date kind is added.
 
 ## Alternatives rejected
 
