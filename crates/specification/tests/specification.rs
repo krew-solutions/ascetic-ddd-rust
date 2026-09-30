@@ -8,8 +8,8 @@ use ascetic_ddd_specification::ast::{
     or, or_all, right_shift, sub, value,
 };
 use ascetic_ddd_specification::{
-    ContextError, EvalError, Expr, Infix, Interval, OperandError, Path, Record, Root, Timestamp,
-    Value, evaluate, is_satisfied_by, null_test,
+    ContextError, Date, EvalError, Expr, Infix, Interval, OperandError, Path, Record, Root,
+    Timestamp, Value, evaluate, is_satisfied_by, null_test,
 };
 
 type Spec = Expr<Value>;
@@ -430,10 +430,11 @@ fn a_string_constant_is_read_as_the_kind_of_the_member_beside_it() {
             .and_utc();
         Timestamp::from_micros(moment.timestamp_micros())
     };
+    let day = Date::from(chrono::NaiveDate::from_ymd_opt(2026, 9, 1).unwrap());
     let uid = uuid::Uuid::parse_str("3f2a0c1e-5b7d-4e8a-9f01-23456789abcd").unwrap();
     let row: Record<Value> = Record::object([
         ("at", Record::value(at(12))),
-        ("day", Record::value(at(0))),
+        ("day", Record::value(day)),
         ("uid", Record::value(uid)),
         ("price", Record::value(100)),
         ("name", Record::value("2026-09-01")),
@@ -461,9 +462,18 @@ fn a_string_constant_is_read_as_the_kind_of_the_member_beside_it() {
         // On either side, and under IS.
         (equal(value("2026-09-01T15:00:00+03:00"), field("at")), true),
         (is(field("at"), value("2026-09-01T12:00:00Z")), true),
-        // A date column is a midnight here.
+        // A date takes the date of a full timestamp, as the server does: the
+        // time and the offset are not looked at.
         (equal(field("day"), value("2026-09-01")), true),
         (less_than(field("day"), value("2026-09-02")), true),
+        (
+            less_than(field("day"), value("2026-09-01T12:00:00Z")),
+            false,
+        ),
+        (
+            equal(field("day"), value("2026-09-01T23:59:59+03:00")),
+            true,
+        ),
         // A UUID in either case.
         (
             equal(field("uid"), value("3F2A0C1E-5B7D-4E8A-9F01-23456789ABCD")),
@@ -492,14 +502,16 @@ fn a_string_constant_is_read_as_the_kind_of_the_member_beside_it() {
         "2026-09-01T25:00:00Z",
         "",
     ] {
-        let unread = is_satisfied_by(&greater_than(field("at"), value(text)), &row);
-        assert!(
-            matches!(
-                unread,
-                Err(EvalError::Operand(OperandError::Unreadable { .. }))
-            ),
-            "{text:?}: {unread:?}"
-        );
+        for member in ["at", "day"] {
+            let unread = is_satisfied_by(&greater_than(field(member), value(text)), &row);
+            assert!(
+                matches!(
+                    unread,
+                    Err(EvalError::Operand(OperandError::Unreadable { .. }))
+                ),
+                "{member} {text:?}: {unread:?}"
+            );
+        }
     }
     for text in [
         "{3f2a0c1e-5b7d-4e8a-9f01-23456789abcd}",
@@ -532,6 +544,19 @@ fn a_string_constant_is_read_as_the_kind_of_the_member_beside_it() {
             "{specification:?}"
         );
     }
+}
+
+/// A date is days since the Unix epoch, as a point in time is microseconds:
+/// a date of `chrono` converts to it, and the count is the one PostgreSQL's
+/// is taken from.
+#[test]
+fn a_date_is_days_since_the_unix_epoch() {
+    let date =
+        |year, month, day| Date::from(chrono::NaiveDate::from_ymd_opt(year, month, day).unwrap());
+    assert_eq!(date(1970, 1, 1), Date::from_days(0));
+    assert_eq!(date(2000, 1, 1), Date::from_days(10_957));
+    assert_eq!(date(1969, 12, 31), Date::from_days(-1));
+    assert!(date(2026, 9, 1) < date(2026, 9, 2));
 }
 
 #[test]

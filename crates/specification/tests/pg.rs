@@ -20,8 +20,8 @@ use ascetic_ddd_specification::ast::{
 use ascetic_ddd_specification::jsonpath::{Params, Template};
 use ascetic_ddd_specification::pg::{Compiler, Schema, compile};
 use ascetic_ddd_specification::{
-    Arithmetic, EvalError, Expr, Interval, Mapped, Mapping, Operand, OperandError, Path, Record,
-    Timestamp, Value, evaluate, is_satisfied_by, transform,
+    Arithmetic, Date, EvalError, Expr, Interval, Mapped, Mapping, Operand, OperandError, Path,
+    Record, Timestamp, Value, evaluate, is_satisfied_by, transform,
 };
 use std::cmp::Ordering;
 use tokio_postgres::error::SqlState;
@@ -246,10 +246,11 @@ async fn a_constant_expression_has_one_value_for_both_readers() {
                     OperandError::DivisionByZero => SqlState::DIVISION_BY_ZERO,
                     OperandError::OutOfRange => SqlState::NUMERIC_VALUE_OUT_OF_RANGE,
                     OperandError::Unsupported { .. } => SqlState::UNDEFINED_FUNCTION,
-                    // A string read as a point in time or a UUID that is not
-                    // one: the server's words for the same.
+                    // A string read as a point in time, a date or a UUID that
+                    // is not one: the server's words for the same.
                     OperandError::Unreadable {
-                        kind: "timestamp", ..
+                        kind: "timestamp" | "date",
+                        ..
                     } => SqlState::INVALID_DATETIME_FORMAT,
                     OperandError::Unreadable { .. } => SqlState::INVALID_TEXT_REPRESENTATION,
                 };
@@ -1266,12 +1267,11 @@ async fn a_text_with_a_nul_is_no_text_of_the_server() {
     assert_eq!(is_satisfied_by(&bound, &row), Ok(true));
 }
 
-/// A point in time or a UUID in a template is a string; the server reads it
-/// by the column, and so does the evaluator now (ADR-0015). A `Timestamp` has
-/// no zone to drop and no date to keep, so a `date` column is a midnight to
-/// it and agrees on a string that is a date alone; a `timestamp` without zone
-/// would be read as one with. A UUID constant of the domain goes to the
-/// server as a uuid.
+/// A point in time, a date or a UUID in a template is a string; the server
+/// reads it by the column, and so does the evaluator now (ADR-0015). A `Date`
+/// takes the date of a full timestamp, as the server does; a `Timestamp` has
+/// no zone to drop, so a `timestamp` without zone would be read as one with.
+/// A date or a UUID constant of the domain goes to the server as its type.
 #[tokio::test]
 async fn a_string_constant_is_read_as_the_kind_of_the_column_beside_it() {
     let client = client().await;
@@ -1293,13 +1293,14 @@ async fn a_string_constant_is_read_as_the_kind_of_the_column_beside_it() {
             .and_utc();
         Timestamp::from_micros(moment.timestamp_micros())
     };
+    let day = |day: u32| Date::from(chrono::NaiveDate::from_ymd_opt(2026, 9, day).unwrap());
     let ann = uuid::Uuid::parse_str("3f2a0c1e-5b7d-4e8a-9f01-23456789abcd").unwrap();
     let rows: [(i64, Record<Value>); 2] = [
         (
             1,
             Record::object([
                 ("at", Record::value(at(1, 12))),
-                ("day", Record::value(at(1, 0))),
+                ("day", Record::value(day(1))),
                 ("uid", Record::value(ann)),
             ]),
         ),
@@ -1307,12 +1308,12 @@ async fn a_string_constant_is_read_as_the_kind_of_the_column_beside_it() {
             2,
             Record::object([
                 ("at", Record::value(at(2, 12))),
-                ("day", Record::value(at(2, 0))),
+                ("day", Record::value(day(2))),
                 ("uid", Record::value(uuid::Uuid::from_u128(1))),
             ]),
         ),
     ];
-    let specifications: [(Spec, Vec<i64>); 10] = [
+    let specifications: [(Spec, Vec<i64>); 13] = [
         (greater_than(field("at"), value("2026-09-01")), vec![1, 2]),
         (
             greater_than(field("at"), value("2026-09-01T12:00:00Z")),
@@ -1329,12 +1330,22 @@ async fn a_string_constant_is_read_as_the_kind_of_the_column_beside_it() {
         ),
         (equal(field("day"), value("2026-09-01")), vec![1]),
         (less_than(field("day"), value("2026-09-02")), vec![1]),
+        // The date of a full timestamp: a midnight would be less than noon.
+        (
+            less_than(field("day"), value("2026-09-02T12:00:00Z")),
+            vec![1],
+        ),
+        (
+            equal(field("day"), value("2026-09-01T23:59:59+03:00")),
+            vec![1],
+        ),
         (
             equal(field("uid"), value("3F2A0C1E-5B7D-4E8A-9F01-23456789ABCD")),
             vec![1],
         ),
         (equal(value("2026-09-02"), field("day")), vec![2]),
-        // A UUID of the domain, written as a uuid.
+        // A date and a UUID of the domain, written as their types.
+        (equal(field("day"), value(day(2))), vec![2]),
         (equal(field("uid"), value(ann)), vec![1]),
     ];
     for (specification, expected) in &specifications {

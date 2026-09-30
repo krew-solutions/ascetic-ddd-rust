@@ -74,11 +74,14 @@ evaluator, with the session's time zone set.
   inferred, where Python's and Go's hand a text to the server: so in Rust
   the text is read on its way to the server as well, in the same subset, and
   what the server would read beyond it is an error on both sides there.
-- Only Python has a kind for a date, and a time without a zone. Rust's
-  `Timestamp` and Go's `time.Time` hold a `date` column as a midnight and a
-  `timestamp` as a `timestamptz`, so there a date agrees on a string that is
-  a date alone, and an offset is applied where the server would drop it: a
-  limit of those ports until a date kind is added.
+- A date is a kind of its own where a midnight would agree with the server
+  on a string that is a date alone and part from it on `< '2026-09-02T12:00'`
+  in silence: Python's `datetime.date`, and Rust's `Value::Date`, days since
+  the Unix epoch as `Timestamp` is microseconds, so that a date of any
+  calendar library converts into it. Go's `time.Time` holds a `date` column
+  as a midnight: a limit of that port until a date kind is added. Only Python
+  has a time without a zone; Rust and Go apply an offset where the server
+  would drop it.
 
 ## Alternatives rejected
 

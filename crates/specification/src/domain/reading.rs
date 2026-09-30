@@ -13,7 +13,7 @@
 
 use chrono::{FixedOffset, NaiveDate, NaiveDateTime, TimeZone};
 
-use super::value::Timestamp;
+use super::value::{Date, Timestamp};
 
 /// The form a point in time is read in: ISO 8601, a date, or a date followed
 /// by `T` or a space and a time of hours and minutes, seconds, a fraction of
@@ -44,8 +44,8 @@ pub(crate) fn without_zone(text: &str) -> Option<Timestamp> {
 
 /// The date `text` starts with, whatever time and offset follow: what the
 /// server makes of it for a `date`.
-pub(crate) fn calendar_date(text: &str) -> Option<NaiveDate> {
-    parse(text).map(|(moment, _)| moment.date())
+pub(crate) fn calendar_date(text: &str) -> Option<Date> {
+    parse(text).map(|(moment, _)| Date::from(moment.date()))
 }
 
 /// The date and time of day `text` spells, and its offset in seconds - zero

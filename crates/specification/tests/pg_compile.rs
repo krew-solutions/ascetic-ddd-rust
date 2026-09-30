@@ -10,7 +10,7 @@ use ascetic_ddd_specification::ast::{
     value,
 };
 use ascetic_ddd_specification::pg::{CompileError, Compiler, ForeignKey, Query, Schema, compile};
-use ascetic_ddd_specification::{Expr, Path, Value};
+use ascetic_ddd_specification::{Date, Expr, Path, Value};
 
 type Spec = Expr<Value>;
 /// What makes a fresh copy of a tree: a tree is moved into the one built of it.
@@ -693,6 +693,10 @@ fn a_constant_with_nothing_beside_it_has_its_type_said() {
                 value(uuid::Uuid::from_u128(2)),
             ),
             "$1::uuid = $2::uuid",
+        ),
+        (
+            equal(value(Date::from_days(0)), value(Date::from_days(1))),
+            "$1::date = $2::date",
         ),
         // Alone under its operator.
         (neg(value(5)), "-$1::bigint"),

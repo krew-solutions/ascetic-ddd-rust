@@ -11,7 +11,7 @@ pub use crate::domain::evaluate::{Context, ContextError, EvalError, evaluate, is
 pub use crate::domain::operand::{Operand, OperandError};
 pub use crate::domain::operator::{Arithmetic, Comparison, Infix, Logical, Postfix, Prefix};
 pub use crate::domain::record::Record;
-pub use crate::domain::value::{Interval, Timestamp, Value};
+pub use crate::domain::value::{Date, Interval, Timestamp, Value};
 pub use crate::domain::{dsl, jsonpath, null_test};
 pub use crate::infrastructure::mapping::{Mapped, Mapping, TransformError, transform};
 pub use crate::infrastructure::pg;

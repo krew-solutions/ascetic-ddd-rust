@@ -14,6 +14,8 @@
 
 use std::cmp::Ordering;
 
+use chrono::Datelike;
+
 use super::operand::{Operand, OperandError};
 use super::operator::{Arithmetic, Comparison, Prefix};
 use super::reading;
@@ -33,6 +35,34 @@ impl Timestamp {
     /// Microseconds since the Unix epoch.
     pub const fn as_micros(self) -> i64 {
         self.0
+    }
+}
+
+/// A calendar date: days since the Unix epoch, PostgreSQL's `date`. As
+/// [`Timestamp`], a type of the crate's own: a date of `chrono`, of `time` or
+/// of the domain converts into it without loss, and a `date` column is a date
+/// to the evaluator, not a midnight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Date(i32);
+
+impl Date {
+    /// The date `days` days after the Unix epoch.
+    pub const fn from_days(days: i32) -> Self {
+        Date(days)
+    }
+
+    /// Days since the Unix epoch.
+    pub const fn as_days(self) -> i32 {
+        self.0
+    }
+}
+
+/// Days from 0001-01-01, the day `chrono` counts from, to the Unix epoch.
+const UNIX_EPOCH_FROM_CE: i32 = 719_163;
+
+impl From<chrono::NaiveDate> for Date {
+    fn from(date: chrono::NaiveDate) -> Self {
+        Date(date.num_days_from_ce() - UNIX_EPOCH_FROM_CE)
     }
 }
 
@@ -71,6 +101,8 @@ pub enum Value {
     Text(String),
     /// A point in time.
     Timestamp(Timestamp),
+    /// A calendar date.
+    Date(Date),
     /// A span of time.
     Interval(Interval),
     /// A UUID.
@@ -105,6 +137,7 @@ impl Operand for Value {
             Value::Float(_) => "float",
             Value::Text(_) => "text",
             Value::Timestamp(_) => "timestamp",
+            Value::Date(_) => "date",
             Value::Interval(_) => "interval",
             Value::Uuid(_) => "uuid",
         }
@@ -125,6 +158,7 @@ impl Operand for Value {
             (Value::Float(left), Value::Int(right)) => Ok(float_order(*left, *right as f64)),
             (Value::Text(left), Value::Text(right)) => Ok(left.cmp(right)),
             (Value::Timestamp(left), Value::Timestamp(right)) => Ok(left.cmp(right)),
+            (Value::Date(left), Value::Date(right)) => Ok(left.cmp(right)),
             (Value::Interval(left), Value::Interval(right)) => Ok(left.cmp(right)),
             // By its bytes, as PostgreSQL orders a uuid.
             (Value::Uuid(left), Value::Uuid(right)) => Ok(left.cmp(right)),
@@ -176,6 +210,9 @@ impl Operand for Value {
         match other {
             Value::Timestamp(_) => reading::point_in_time(text)
                 .map(|moment| Some(Value::Timestamp(moment)))
+                .ok_or_else(|| unreadable(reading::POINT_IN_TIME)),
+            Value::Date(_) => reading::calendar_date(text)
+                .map(|date| Some(Value::Date(date)))
                 .ok_or_else(|| unreadable(reading::POINT_IN_TIME)),
             Value::Uuid(_) => reading::uuid(text)
                 .map(|id| Some(Value::Uuid(id)))
@@ -322,6 +359,12 @@ impl From<&String> for Value {
 impl From<Timestamp> for Value {
     fn from(value: Timestamp) -> Self {
         Value::Timestamp(value)
+    }
+}
+
+impl From<Date> for Value {
+    fn from(value: Date) -> Self {
+        Value::Date(value)
     }
 }
 

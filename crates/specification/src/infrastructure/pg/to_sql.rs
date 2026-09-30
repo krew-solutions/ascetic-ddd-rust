@@ -7,7 +7,8 @@
 //! makes `$1` whatever `age` is — and the value is written as that type if
 //! it is of a kind that can be: an integer as any integer or float type it
 //! fits, a float as a float, a text as any text type, a point in time as a
-//! timestamp with or without zone, a span as an interval. `numeric` is not
+//! timestamp with or without zone, a date as a date, a span as an interval.
+//! `numeric` is not
 //! among them: its wire format is a decimal expansion this crate has no
 //! other use for; compare a `numeric` column with `$1::bigint` or
 //! `$1::float8`, or map the value in the application.
@@ -30,10 +31,13 @@ use postgres_types::{IsNull, ToSql, Type, to_sql_checked};
 
 use crate::domain::operand::Operand;
 use crate::domain::reading;
-use crate::domain::value::Value;
+use crate::domain::value::{Date, Value};
 
 /// Microseconds from the Unix epoch to PostgreSQL's, 2000-01-01.
 const EPOCH: i64 = 946_684_800_000_000;
+
+/// Days from the Unix epoch to PostgreSQL's.
+const EPOCH_DAYS: i32 = 10_957;
 
 type Written = Result<IsNull, Box<dyn Error + Sync + Send>>;
 
@@ -43,6 +47,16 @@ fn micros(since_unix: i64, out: &mut BytesMut) -> Written {
         .checked_sub(EPOCH)
         .ok_or_else(|| -> Box<dyn Error + Sync + Send> { "a timestamp out of range".into() })?;
     out.extend_from_slice(&micros.to_be_bytes());
+    Ok(IsNull::No)
+}
+
+/// Days from PostgreSQL's epoch, as a date is written.
+fn days(date: Date, out: &mut BytesMut) -> Written {
+    let days = date
+        .as_days()
+        .checked_sub(EPOCH_DAYS)
+        .ok_or_else(|| -> Box<dyn Error + Sync + Send> { "a date out of range".into() })?;
+    out.extend_from_slice(&days.to_be_bytes());
     Ok(IsNull::No)
 }
 
@@ -74,6 +88,7 @@ impl ToSql for Value {
             Value::Timestamp(value) if *ty == Type::TIMESTAMP || *ty == Type::TIMESTAMPTZ => {
                 micros(value.as_micros(), out)
             }
+            Value::Date(value) if *ty == Type::DATE => days(*value, out),
             Value::Text(text) if *ty == Type::TIMESTAMPTZ => {
                 let moment = reading::point_in_time(text)
                     .ok_or_else(|| unreadable(text, "timestamptz", reading::POINT_IN_TIME))?;
@@ -87,12 +102,7 @@ impl ToSql for Value {
             Value::Text(text) if *ty == Type::DATE => {
                 let date = reading::calendar_date(text)
                     .ok_or_else(|| unreadable(text, "date", reading::POINT_IN_TIME))?;
-                // Days from PostgreSQL's epoch.
-                let epoch = chrono::NaiveDate::from_ymd_opt(2000, 1, 1).expect("a date");
-                let days = i32::try_from(date.signed_duration_since(epoch).num_days())
-                    .map_err(|_| mismatch())?;
-                out.extend_from_slice(&days.to_be_bytes());
-                Ok(IsNull::No)
+                days(date, out)
             }
             Value::Text(text) if *ty == Type::UUID => {
                 let id =
