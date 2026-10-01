@@ -64,10 +64,10 @@ tenant at once.
 through the `KeyManagementService` it is built with, and labelled with the
 DEK's algorithm, AES-256-GCM unless `with_algorithm` says otherwise. `setup`
 creates the table in one transaction under an advisory lock on its name;
-making a resource's first DEK takes an advisory lock on the resource, held
-to the end of the caller's transaction, so two transactions meeting a new
-resource at once make one key. Reads take nothing. READ COMMITTED is
-assumed.
+making a resource's first DEK takes an advisory lock on the resource in a
+scope the adapter opens itself, as the KMS does, so two transactions meeting
+a new resource at once make one key, inside a transaction or not. Reads take
+nothing. READ COMMITTED is assumed.
 
 ## The envelope stage of the bus
 

@@ -453,3 +453,54 @@ async fn the_outbox_and_the_inbox_hold_nothing_but_ciphertext() {
     dispatcher.cancel();
     processing.cancel();
 }
+
+/// Eight messages of a new tenant sealed at once through the stage, which
+/// reaches the KMS outside any transaction: one KEK must come of it, not a
+/// unique violation for the losers. The pool is warmed first, or the race
+/// is lost to connection setup and the test proves nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a live PostgreSQL"]
+async fn eight_first_contacts_at_once_through_the_stage_make_one_kek() {
+    let sealing = stage("eight_at_once").await;
+    let warm = PgSessionPool::new(pool());
+    let warming = (0..8).map(|_| {
+        warm.session(async |session| {
+            session
+                .connection()
+                .batch_execute("SELECT 1")
+                .await
+                .unwrap();
+            Ok::<_, SessionError>(())
+        })
+    });
+    for outcome in futures::future::join_all(warming).await {
+        outcome.unwrap();
+    }
+    let sealings = (0..8).map(|i| {
+        let sealing = Arc::clone(&sealing);
+        tokio::spawn(async move {
+            let id = format!("00000000-0000-4000-8000-0000000000e{i}");
+            sealing
+                .outbound(identified("tenant-9", &id, "at once"))
+                .await
+        })
+    });
+    let outcomes = futures::future::join_all(sealings).await;
+    let failures: Vec<String> = outcomes
+        .iter()
+        .filter_map(|o| o.as_ref().unwrap().as_ref().err().map(|e| e.to_string()))
+        .collect();
+    assert!(failures.is_empty(), "{failures:?}");
+    let keks: i64 = warm
+        .session(async |session| {
+            let row = session
+                .connection()
+                .query_one("SELECT count(*) FROM kms_keys_stage_eight_at_once WHERE tenant_id = 'tenant-9'", &[])
+                .await
+                .unwrap();
+            Ok::<_, SessionError>(row.get(0))
+        })
+        .await
+        .unwrap();
+    assert_eq!(keks, 1);
+}

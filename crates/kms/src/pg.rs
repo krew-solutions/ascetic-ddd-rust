@@ -14,14 +14,17 @@
 //! # Locks
 //!
 //! Making a tenant's first key, and rotating, take
-//! `pg_advisory_xact_lock(hashtext(table), hashtext(tenant_id))`, held to the
-//! end of the caller's transaction. Two transactions meeting a new tenant at
-//! once thus make one key, the second reading what the first committed,
-//! instead of both making version 1 and one failing on the primary key; two
-//! rotations at once make versions two and three, not one and an error.
-//! Reads take nothing. READ COMMITTED is assumed: the read after the lock is
-//! in a snapshot of its own, so it sees what the lock's previous holder
-//! committed.
+//! `pg_advisory_xact_lock(hashtext(table), hashtext(tenant_id))` in a scope
+//! the adapter opens itself — a savepoint inside the caller's transaction,
+//! where the lock lives to the end of that transaction; a transaction of its
+//! own outside one, where the lock would otherwise end with its own
+//! statement, before the read it guards. Two transactions meeting a new
+//! tenant at once thus make one key, the second reading what the first
+//! committed, instead of both making version 1 and one failing on the
+//! primary key; two rotations at once make versions two and three, not one
+//! and an error. Reads take nothing. READ COMMITTED is assumed: the read
+//! after the lock is in a snapshot of its own, so it sees what the lock's
+//! previous holder committed.
 
 use ascetic_ddd_session::Session;
 use ascetic_ddd_session::pg::{Identifier, PgAccess};
@@ -181,17 +184,23 @@ impl PgKeyManagementService {
             Err(Error::KekNotFound { .. }) => {}
             found => return found,
         }
-        self.lock_tenant(session, tenant_id).await?;
-        match self.current_kek(session, tenant_id).await {
-            Err(Error::KekNotFound { .. }) => {
-                let kek = self
-                    .master_key(self.master_algorithm)?
-                    .generate_kek(tenant_id)?;
-                self.save_kek(session, &kek).await?;
-                Ok(kek)
-            }
-            found => found,
-        }
+        // A scope of the adapter's own: the lock is a transaction's, and
+        // outside one it would end with its own statement, before the read.
+        session
+            .atomic(async |tx| {
+                self.lock_tenant(&tx, tenant_id).await?;
+                match self.current_kek(&tx, tenant_id).await {
+                    Err(Error::KekNotFound { .. }) => {
+                        let kek = self
+                            .master_key(self.master_algorithm)?
+                            .generate_kek(tenant_id)?;
+                        self.save_kek(&tx, &kek).await?;
+                        Ok(kek)
+                    }
+                    found => found,
+                }
+            })
+            .await
     }
 
     async fn save_kek<S>(&self, session: &S, kek: &Kek) -> Result<(), Error>
@@ -269,15 +278,19 @@ where
     }
 
     async fn rotate_kek(&self, session: &S, tenant_id: &str) -> Result<u32, Error> {
-        self.lock_tenant(session, tenant_id).await?;
-        let master = self.master_key(self.master_algorithm)?;
-        let kek = match self.current_kek(session, tenant_id).await {
-            Ok(current) => master.rotate_kek(&current)?,
-            Err(Error::KekNotFound { .. }) => master.generate_kek(tenant_id)?,
-            Err(error) => return Err(error),
-        };
-        self.save_kek(session, &kek).await?;
-        Ok(kek.version())
+        session
+            .atomic(async |tx| {
+                self.lock_tenant(&tx, tenant_id).await?;
+                let master = self.master_key(self.master_algorithm)?;
+                let kek = match self.current_kek(&tx, tenant_id).await {
+                    Ok(current) => master.rotate_kek(&current)?,
+                    Err(Error::KekNotFound { .. }) => master.generate_kek(tenant_id)?,
+                    Err(error) => return Err(error),
+                };
+                self.save_kek(&tx, &kek).await?;
+                Ok(kek.version())
+            })
+            .await
     }
 
     async fn rewrap_dek(

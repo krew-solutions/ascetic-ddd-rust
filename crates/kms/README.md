@@ -87,10 +87,11 @@ Go ports write, so a key made by one port is read by another; a test unwraps
 what the Python port wrapped — each wrapped by the master key the service was
 built with. `setup` creates the table in one transaction under an advisory
 lock on its name. Making a tenant's first key and rotating take an advisory
-lock on the tenant, held to the end of the caller's transaction, so two
-transactions meeting a new tenant at once make one key, and two rotations at
-once make versions two and three; reads take nothing. READ COMMITTED is
-assumed.
+lock on the tenant in a scope the adapter opens itself — a savepoint inside
+the caller's transaction, a transaction of its own outside one, where the
+lock would otherwise end with its own statement — so two transactions
+meeting a new tenant at once make one key, and two rotations at once make
+versions two and three; reads take nothing. READ COMMITTED is assumed.
 
 The PostgreSQL adapter keeps KEKs in a general-purpose database, wrapped
 by a master key the process holds; it is the simple adapter, not key

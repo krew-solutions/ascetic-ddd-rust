@@ -12,10 +12,11 @@
 //! # Locks
 //!
 //! Making a resource's first DEK takes
-//! `pg_advisory_xact_lock(hashtext(table), hashtext(resource))`, held to the
-//! end of the caller's transaction, so two transactions meeting a new
-//! resource at once make one key, the second reading what the first
-//! committed, instead of both making version 1 and one failing on the
+//! `pg_advisory_xact_lock(hashtext(table), hashtext(resource))` in a scope
+//! the adapter opens itself — a savepoint inside the caller's transaction,
+//! a transaction of its own outside one, as in the KMS — so two transactions
+//! meeting a new resource at once make one key, the second reading what the
+//! first committed, instead of both making version 1 and one failing on the
 //! primary key. Reads take nothing. READ COMMITTED is assumed, as in the
 //! KMS.
 
@@ -229,14 +230,20 @@ where
             return self.unwrap(session, resource, &stored).await;
         }
         // Another transaction may make the key while this one waits for
-        // the lock: read again after taking it.
-        self.lock_resource(session, resource).await?;
-        if let Some(stored) = self.latest(session, resource).await? {
-            return self.unwrap(session, resource, &stored).await;
-        }
-        let (dek, encrypted_dek) = self.kms.generate_dek(session, resource.tenant_id()).await?;
-        self.insert(session, resource, 1, &encrypted_dek).await?;
-        self.cipher(&dek, resource, 1, self.algorithm)
+        // the lock: read again after taking it, in a scope of the adapter's
+        // own, since outside a transaction the lock would end with its own
+        // statement.
+        session
+            .atomic(async |tx| {
+                self.lock_resource(&tx, resource).await?;
+                if let Some(stored) = self.latest(&tx, resource).await? {
+                    return self.unwrap(&tx, resource, &stored).await;
+                }
+                let (dek, encrypted_dek) = self.kms.generate_dek(&tx, resource.tenant_id()).await?;
+                self.insert(&tx, resource, 1, &encrypted_dek).await?;
+                self.cipher(&dek, resource, 1, self.algorithm)
+            })
+            .await
     }
 
     async fn get(
