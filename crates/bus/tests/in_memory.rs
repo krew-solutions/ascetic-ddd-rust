@@ -164,8 +164,8 @@ async fn cancelling_twice_is_harmless() {
     let consumer = consumer(&bus, "in-memory://test.t1", "g");
     let subscription = consumer.subscribe(|_| async {}).unwrap();
 
-    subscription.cancel();
-    subscription.cancel();
+    subscription.cancel().await;
+    subscription.cancel().await;
 }
 
 // ------------------------- beyond the OCaml suite -------------------------
@@ -188,7 +188,7 @@ async fn a_cancelled_subscription_receives_nothing_more() {
     producer.publish(&"before".to_owned()).await.unwrap();
     assert_eq!(next(&mut inbox).await.as_deref(), Some("before"));
 
-    subscription.cancel();
+    subscription.cancel().await;
     producer.publish(&"after".to_owned()).await.unwrap();
     assert!(nothing_arrives(&mut inbox).await);
 }

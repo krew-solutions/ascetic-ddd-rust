@@ -28,10 +28,12 @@ use rdkafka::consumer::{Consumer as _, StreamConsumer};
 use rdkafka::message::{Header, Headers as _, OwnedHeaders};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::util::Timeout;
-use tokio::task::AbortHandle;
+use tokio::runtime::Handle;
+use tokio::sync::Notify;
 
 use crate::adapter::{Adapter, Handler, Subscription, WireConsumer, WireProducer};
 use crate::error::Error;
+use crate::handling;
 use crate::message::Message;
 use crate::uri;
 
@@ -115,19 +117,28 @@ struct KafkaConsumer {
     consumer: Arc<StreamConsumer>,
     uri: String,
     group: String,
-    /// The delivery task, while a handler is attached.
-    delivery: Mutex<Option<AbortHandle>>,
+    /// The order to stop the delivery task, while a handler is attached.
+    delivery: Mutex<Option<Arc<Notify>>>,
 }
 
 impl WireConsumer for KafkaConsumer {
-    /// Starts a delivery task; a previous one is stopped first.
+    /// Starts a delivery task; a previous one is told to stop first. The
+    /// task stops between messages, never inside the handler: the receive
+    /// races with the order to stop, and so does the pause between two
+    /// tries of a handler that fails.
     fn subscribe(&self, handler: Handler) -> Result<Subscription, Error> {
         let consumer = Arc::clone(&self.consumer);
         let uri = self.uri.clone();
         let group = self.group.clone();
-        let task = tokio::spawn(async move {
-            loop {
-                match consumer.recv().await {
+        let stop = Arc::new(Notify::new());
+        let stopped = Arc::clone(&stop);
+        let task = async move {
+            'messages: loop {
+                let received = tokio::select! {
+                    _ = stopped.notified() => break 'messages,
+                    received = consumer.recv() => received,
+                };
+                match received {
                     Ok(received) => {
                         let message = Message::new(received.payload().unwrap_or_default());
                         let message = match received.key() {
@@ -145,7 +156,7 @@ impl WireConsumer for KafkaConsumer {
                         // A handler that fails is retried until it succeeds: the
                         // partition waits, which is what keeps its order.
                         loop {
-                            match AssertUnwindSafe(handler(message.clone()))
+                            match AssertUnwindSafe(handling::within(handler(message.clone())))
                                 .catch_unwind()
                                 .await
                             {
@@ -154,7 +165,10 @@ impl WireConsumer for KafkaConsumer {
                                     log::warn!(
                                         "kafka[{uri}/{group}]: handler failed, retrying: {error}"
                                     );
-                                    tokio::time::sleep(RETRY_AFTER).await;
+                                    tokio::select! {
+                                        _ = stopped.notified() => break 'messages,
+                                        _ = tokio::time::sleep(RETRY_AFTER) => {}
+                                    }
                                 }
                                 Err(_) => {
                                     log::warn!("kafka[{uri}/{group}]: handler panicked, skipping");
@@ -169,12 +183,12 @@ impl WireConsumer for KafkaConsumer {
                     Err(error) => log::warn!("kafka[{uri}/{group}]: receiving failed: {error}"),
                 }
             }
-        });
-        let handle = task.abort_handle();
-        if let Some(previous) = lock(&self.delivery).replace(handle.clone()) {
-            previous.abort();
+        };
+        let runtime = Handle::try_current().map_err(|error| Error::Transport(Box::new(error)))?;
+        if let Some(previous) = lock(&self.delivery).replace(Arc::clone(&stop)) {
+            previous.notify_one();
         }
-        Ok(Subscription::new(move || handle.abort()))
+        Ok(handling::serve(&runtime, stop, task))
     }
 }
 

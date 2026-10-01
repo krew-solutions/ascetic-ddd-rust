@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use ascetic_ddd_bus::{
     Adapter, Error as BusError, Handler, Message, Subscription, TransactionalProducer,
-    TransactionalWireProducer, WireConsumer, WireProducer, uri,
+    TransactionalWireProducer, WireConsumer, WireProducer, handling, uri,
 };
 use ascetic_ddd_session::{PgAccess, SessionPool};
 use futures::future::BoxFuture;
@@ -149,13 +149,13 @@ where
         );
         let runtime =
             Handle::try_current().map_err(|error| BusError::Transport(Box::new(error)))?;
-        runtime.spawn(async move {
+        let task = async move {
             let selection = Selection::group(&group);
             let loops = outbox.loops();
             let subscriber = |row: &OutboxMessage| {
                 let handler = Arc::clone(&handler);
                 let message = wire_of(row);
-                async move { handler(message).await }
+                async move { handling::within(handler(message)).await }
             };
             loop {
                 let outcome = outbox
@@ -172,8 +172,10 @@ where
                     }
                 }
             }
-        });
-        Ok(Subscription::new(move || stop.notify_one()))
+        };
+        // Cancelling waits for the loop: the batch in hand acknowledged and
+        // committed, the connection given back (ADR-0016 of the OCaml port).
+        Ok(handling::serve(&runtime, stop, task))
     }
 }
 

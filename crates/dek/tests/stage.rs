@@ -450,8 +450,8 @@ async fn the_outbox_and_the_inbox_hold_nothing_but_ciphertext() {
         );
         assert_eq!(metadata[DEK_ALGORITHM], "AES-256-GCM");
     }
-    dispatcher.cancel();
-    processing.cancel();
+    dispatcher.cancel().await;
+    processing.cancel().await;
 }
 
 /// Eight messages of a new tenant sealed at once through the stage, which

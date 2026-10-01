@@ -138,7 +138,7 @@ async fn a_committed_message_crosses_the_bridge_and_a_rolled_back_one_does_not()
             .is_err(),
         "the rolled-back message never arrives"
     );
-    dispatcher.cancel();
+    dispatcher.cancel().await;
 }
 
 /// A subscriber of the outbox channel that fails leaves the batch
@@ -223,5 +223,5 @@ async fn a_failing_subscriber_gets_the_batch_again() {
         .unwrap();
     assert_eq!(delivered, "placed");
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
-    subscription.cancel();
+    subscription.cancel().await;
 }

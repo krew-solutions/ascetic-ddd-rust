@@ -25,13 +25,20 @@ use tokio::sync::mpsc;
 
 use crate::adapter::{Adapter, Handler, Subscription, WireConsumer, WireProducer};
 use crate::error::Error;
+use crate::handling::{self, InFlight};
 use crate::message::Message;
 use crate::uri;
 
 /// Messages a topic queues before producers wait.
 pub const DEFAULT_CAPACITY: usize = 1024;
 
-type Groups = Arc<Mutex<HashMap<String, Option<Handler>>>>;
+/// A group's handler, with the calls of it in flight.
+struct Attached {
+    handler: Handler,
+    in_flight: InFlight,
+}
+
+type Groups = Arc<Mutex<HashMap<String, Option<Attached>>>>;
 
 /// A process-local broker: a registry of topics with a delivery task each.
 ///
@@ -94,12 +101,18 @@ impl Default for InMemoryBroker {
 /// broker are gone, because the queue closes.
 async fn deliver(uri: String, mut inbox: mpsc::Receiver<Message>, groups: Groups) {
     while let Some(message) = inbox.recv().await {
-        let handlers: Vec<(String, Handler)> = lock(&groups)
+        // Admitted under the lock handlers are detached under: a call is
+        // either waited for by a cancel, or not made.
+        let calls: Vec<_> = lock(&groups)
             .iter()
-            .filter_map(|(group, handler)| handler.clone().map(|h| (group.clone(), h)))
+            .filter_map(|(group, attached)| {
+                attached
+                    .as_ref()
+                    .map(|a| (group.clone(), a.handler.clone(), a.in_flight.admit()))
+            })
             .collect();
-        for (group, handler) in handlers {
-            match AssertUnwindSafe(handler(message.clone()))
+        for (group, handler, admitted) in calls {
+            match AssertUnwindSafe(handling::within(handler(message.clone())))
                 .catch_unwind()
                 .await
             {
@@ -107,6 +120,7 @@ async fn deliver(uri: String, mut inbox: mpsc::Receiver<Message>, groups: Groups
                 Ok(Err(error)) => log::warn!("in-memory[{uri}/{group}]: handler failed: {error}"),
                 Err(_) => log::warn!("in-memory[{uri}/{group}]: handler panicked"),
             }
+            drop(admitted);
         }
     }
 }
@@ -147,14 +161,31 @@ struct InMemoryConsumer {
 
 impl WireConsumer for InMemoryConsumer {
     fn subscribe(&self, handler: Handler) -> Result<Subscription, Error> {
-        lock(&self.groups).insert(self.group.clone(), Some(handler));
+        let in_flight = InFlight::new();
+        lock(&self.groups).insert(
+            self.group.clone(),
+            Some(Attached {
+                handler,
+                in_flight: in_flight.clone(),
+            }),
+        );
         let groups = Arc::clone(&self.groups);
         let group = self.group.clone();
-        Ok(Subscription::new(move || {
-            if let Some(slot) = lock(&groups).get_mut(&group) {
-                *slot = None;
-            }
-        }))
+        let mine = in_flight.clone();
+        Ok(Subscription::with_quiesce(
+            // Only this subscription's handler: a later one of the group stays.
+            move || {
+                if let Some(slot) = lock(&groups).get_mut(&group)
+                    && slot.as_ref().is_some_and(|a| a.in_flight.same(&mine))
+                {
+                    *slot = None;
+                }
+            },
+            move || {
+                let in_flight = in_flight.clone();
+                Box::pin(async move { in_flight.quiesce().await })
+            },
+        ))
     }
 }
 

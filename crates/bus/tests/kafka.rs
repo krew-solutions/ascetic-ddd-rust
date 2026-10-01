@@ -150,7 +150,7 @@ async fn a_cancelled_subscription_receives_nothing_more() {
         .unwrap();
     assert_eq!(next(&mut inbox).await.as_deref(), Some("before"));
 
-    subscription.cancel();
+    subscription.cancel().await;
     producer
         .publish(&("k".to_owned(), "after".to_owned()))
         .await

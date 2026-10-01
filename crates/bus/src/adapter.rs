@@ -63,25 +63,64 @@ pub trait TransactionalWireConsumer<S>: Send + Sync {
 }
 
 /// A handle on a subscription. [`cancel`][Subscription::cancel] detaches the
-/// handler; a second `cancel` does nothing. Dropping the handle does *not*
+/// handler and waits until no call of it is in flight; a second `cancel`
+/// detaches nothing and waits like the first. Dropping the handle does *not*
 /// cancel — a subscription made at the composition root lives with the
 /// process, and its handle is usually discarded.
+///
+/// A subscription cancelled is a handler that is not running and will not
+/// be run: once `cancel` has returned, what the handler uses — a pool, a
+/// connection, a broker — may be taken down. The adapters of this crate
+/// keep that through [`handling`][crate::handling]; a channel over a
+/// database ends its cancel on the batch in hand committed and its
+/// connection given back.
 pub struct Subscription {
-    cancel: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    detach: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    quiesce: Option<Box<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
 }
 
 impl Subscription {
-    /// A subscription that `cancel` detaches by running `detach` once.
+    /// A subscription that `cancel` detaches by running `detach` once, with
+    /// nothing to wait for after: for a handler that is never in flight when
+    /// it is detached.
     pub fn new(detach: impl FnOnce() + Send + 'static) -> Self {
         Subscription {
-            cancel: Mutex::new(Some(Box::new(detach))),
+            detach: Mutex::new(Some(Box::new(detach))),
+            quiesce: None,
         }
     }
 
-    /// Detaches the handler. Idempotent.
-    pub fn cancel(&self) {
+    /// A subscription that `cancel` detaches by running `detach` once, and
+    /// then, every time it is called, waits on with the future `quiesce`
+    /// makes, which must complete when no call of the handler is in flight.
+    pub fn with_quiesce(
+        detach: impl FnOnce() + Send + 'static,
+        quiesce: impl Fn() -> BoxFuture<'static, ()> + Send + Sync + 'static,
+    ) -> Self {
+        Subscription {
+            detach: Mutex::new(Some(Box::new(detach))),
+            quiesce: Some(Box::new(quiesce)),
+        }
+    }
+
+    /// Detaches the handler and returns when no call of it is in flight: it
+    /// waits for a handler that is running, for as long as that takes.
+    /// Called from inside the handler — a handler cancelling itself — it
+    /// detaches and returns: the message in hand is the last. Idempotent.
+    pub async fn cancel(&self) {
+        self.detach();
+        if crate::handling::inside() {
+            return;
+        }
+        if let Some(quiesce) = &self.quiesce {
+            quiesce().await;
+        }
+    }
+
+    /// Detaches once, under the lock, so a second canceller finds it done.
+    fn detach(&self) {
         let detach = self
-            .cancel
+            .detach
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();

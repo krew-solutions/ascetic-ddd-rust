@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use ascetic_ddd_bus::{
     Adapter, BoxError, Error as BusError, Message, Permanent, Subscription, TransactionalConsumer,
-    TransactionalHandler, TransactionalWireConsumer, WireConsumer, WireProducer, uri,
+    TransactionalHandler, TransactionalWireConsumer, WireConsumer, WireProducer, handling, uri,
 };
 use ascetic_ddd_session::{PgAccess, SessionPool};
 use futures::future::BoxFuture;
@@ -148,7 +148,7 @@ where
         let stop = Arc::new(Notify::new());
         let (inbox, stopped) = (Arc::clone(&self.0), Arc::clone(&stop));
         let runtime = Handle::try_current().map_err(transport)?;
-        runtime.spawn(async move {
+        let task = async move {
             let loops = inbox.loops();
             // A handler's error is a failure of the moment, unless the bus
             // carries the one verdict it knows: permanent, from a stage or a
@@ -156,12 +156,12 @@ where
             let subscriber = |tx: &P::Session, row: &InboxMessage| {
                 let handled = handler(tx.clone(), wire_of(row));
                 async move {
-                    handled
-                        .await
-                        .map_err(|error| match error.downcast::<Permanent>() {
+                    handling::within(handled).await.map_err(|error| {
+                        match error.downcast::<Permanent>() {
                             Ok(permanent) => Failure::permanent(permanent.into_inner()),
                             Err(error) => Failure::from(error),
-                        })
+                        }
+                    })
                 }
             };
             loop {
@@ -176,8 +176,10 @@ where
                     }
                 }
             }
-        });
-        Ok(Subscription::new(move || stop.notify_one()))
+        };
+        // Cancelling waits for the loop: the message in hand marked and
+        // committed, the connection given back (ADR-0016 of the OCaml port).
+        Ok(handling::serve(&runtime, stop, task))
     }
 }
 

@@ -72,6 +72,7 @@ mod adapter;
 pub mod adapters;
 mod bridge;
 mod error;
+pub mod handling;
 mod message;
 mod stage;
 pub mod uri;

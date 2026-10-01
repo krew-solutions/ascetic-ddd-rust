@@ -37,7 +37,16 @@ Two decisions taken in the port:
   to the message, not to the URI, because a producer serves many aggregates.
 
 A subscription is cancelled explicitly, never by dropping its handle: the
-composition root discards most handles. Errors are values.
+composition root discards most handles. A subscription cancelled is a
+handler that is not running and will not be run: `cancel` detaches once and
+waits until no call of the handler is in flight — for a channel over a
+database, until the loop has finished the batch in hand, committed, and
+given its connection back — so once it has returned, what the handler uses
+may be taken down. From inside a call, a handler cancelling itself, it
+returns at once. Every adapter keeps this through `handling`: calls counted
+in flight, admitted under the lock handlers are detached under, and loops
+served so that cancelling waits for them. Carried back from the OCaml
+port's ADR-0016. Errors are values.
 
 A message may go through *stages* between the typed layer and the
 transport: `producer.through(stage)` sends every message out through the

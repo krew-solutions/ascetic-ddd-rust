@@ -22,7 +22,7 @@ kafka = ["dep:rdkafka"]
 futures.workspace = true
 log = "0.4"
 rdkafka = { version = "0.39", optional = true }
-tokio = { version = "1.53.1", features = ["rt", "sync"] }
+tokio = { version = "1.53.1", features = ["macros", "rt", "sync", "time"] }
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "time"] }

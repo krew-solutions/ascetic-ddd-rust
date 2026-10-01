@@ -210,8 +210,8 @@ async fn a_message_from_a_broker_is_processed_once_in_the_marking_transaction() 
         "the handler's write committed with the mark"
     );
     assert_eq!(fixture.uri().await, "inbox://orders/order-7");
-    intake.cancel();
-    processing.cancel();
+    intake.cancel().await;
+    processing.cancel().await;
 }
 
 #[tokio::test]
@@ -282,8 +282,8 @@ async fn the_outbox_feeds_the_inbox_without_a_broker() {
         "inbox://orders/order-7",
         "the destination the outbox stamped"
     );
-    dispatcher.cancel();
-    processing.cancel();
+    dispatcher.cancel().await;
+    processing.cancel().await;
 }
 
 /// A handler that fails leaves the message unprocessed and its own writes
@@ -346,8 +346,8 @@ async fn a_failing_handler_is_retried_and_its_writes_are_rolled_back() {
         1,
         "the failed attempt's write was rolled back with it"
     );
-    intake.cancel();
-    processing.cancel();
+    intake.cancel().await;
+    processing.cancel().await;
 }
 
 /// A handler that says its failure is permanent — the one verdict the bus
@@ -404,6 +404,80 @@ async fn a_handler_s_permanent_verdict_parks_the_message_at_once() {
     assert_eq!(fixture.one::<i64>(parked_sql).await, 1, "parked");
     assert_eq!(fixture.processed().await, 0);
     assert_eq!(attempts.load(Ordering::SeqCst), 1, "no second attempt");
-    intake.cancel();
-    processing.cancel();
+    intake.cancel().await;
+    processing.cancel().await;
+}
+
+/// A cancel returns only when the loop has finished the message in hand:
+/// the handler's write and the mark are committed when it does, read at
+/// once, without polling.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_cancel_waits_for_the_message_in_hand_to_be_committed() {
+    let fixture = fixture("cancel", "inbox-bridge-cancel").await;
+    let mut bus = Bus::new();
+    bus.register("in-memory", InMemoryBroker::new()).unwrap();
+    bus.register(INBOX_SCHEME, fixture.inbox.channel()).unwrap();
+    let bus = Arc::new(bus);
+    let intake = Bridge::new(Arc::clone(&bus))
+        .run(
+            "in-memory://orders",
+            "intake",
+            Target::Fixed("inbox://orders".into()),
+        )
+        .unwrap();
+
+    let (started, release) = (
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    );
+    let handled = format!(
+        "INSERT INTO {}_handled (payload) VALUES ($1)",
+        fixture.table
+    );
+    let orders = fixture
+        .inbox
+        .consumer(|message: &Message| Ok(String::from_utf8(message.payload().to_vec())?));
+    let processing = orders
+        .subscribe({
+            let (started, release) = (Arc::clone(&started), Arc::clone(&release));
+            move |tx: PgSession, order: String| {
+                let (started, release, handled) =
+                    (Arc::clone(&started), Arc::clone(&release), handled.clone());
+                async move {
+                    tx.connection().execute(&handled, &[&order]).await?;
+                    started.notify_one();
+                    release.notified().await;
+                    Ok::<(), BoxError>(())
+                }
+            }
+        })
+        .unwrap();
+
+    bus.producer("in-memory://orders", |message: &Message| message.clone())
+        .unwrap()
+        .publish(&order("in hand", 5, "00000000-0000-4000-8000-000000000005"))
+        .await
+        .unwrap();
+    started.notified().await;
+
+    let cancel = processing.cancel();
+    tokio::pin!(cancel);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut cancel)
+            .await
+            .is_err(),
+        "the cancel waits while the handler runs"
+    );
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), &mut cancel)
+        .await
+        .expect("the cancel returns once the loop has");
+    assert_eq!(
+        fixture.processed().await,
+        1,
+        "marked and committed before the cancel returned"
+    );
+    assert_eq!(fixture.handled().await, 1);
+    intake.cancel().await;
 }
