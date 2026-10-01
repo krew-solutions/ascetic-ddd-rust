@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted (2026-09-30): the tests named below hold in the three ports.
+Accepted (2026-09-30): the tests named below hold in the Rust, Python, Go and
+OCaml ports.
 
 ## Context
 
@@ -76,16 +77,16 @@ evaluator, with the session's time zone set.
   what the server would read beyond it is an error on both sides there.
 - A date is a kind of its own where a midnight would agree with the server
   on a string that is a date alone and part from it on `< '2026-09-02T12:00'`
-  in silence: Python's `datetime.date`, and Rust's `Value::Date`, days since
-  the Unix epoch as `Timestamp` is microseconds, so that a date of any
-  calendar library converts into it. Go has no date type of its own and
-  does not choose one for the domain: the reader is registered by the type
-  it reads, `operators.RegisterReader`, as an operator is by the types it
-  applies to, and the default registry reads `time.Time` and `uuid.UUID`
-  that way; the domain registers a reader, and the order, of the type it
-  holds a date in. A date held as a `time.Time` midnight agrees on a string
-  that is a date alone. Only Python has a time without a zone; Rust and Go
-  apply an offset where the server would drop it.
+  in silence: Python's `datetime.date`, and Rust's `Value::Date` and OCaml's
+  `Value.Date`, days since the Unix epoch as `Timestamp` is microseconds, so
+  that a date of any calendar library converts into it. Go has no date type
+  of its own and does not choose one for the domain: the reader is registered
+  by the type it reads, `operators.RegisterReader`, as an operator is by the
+  types it applies to, and the default registry reads `time.Time` and
+  `uuid.UUID` that way; the domain registers a reader, and the order, of the
+  type it holds a date in. A date held as a `time.Time` midnight agrees on a
+  string that is a date alone. Only Python has a time without a zone; the
+  other ports apply an offset where the server would drop it.
 
 ## Alternatives rejected
 
