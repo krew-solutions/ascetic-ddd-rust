@@ -362,11 +362,15 @@ impl<T: 'static, S: Send + 'static> TransactionalConsumer<T, S> {
                 (Arc::clone(&decode), stages.clone(), Arc::clone(&handler));
             Box::pin(async move {
                 let message = stage::inbound(&stages, message).await?;
+                // A message the decoder cannot read will not be read on a
+                // retry either: the verdict is permanent, and the inbox
+                // parks it where an operator can see it, instead of marking
+                // it processed as if it had been handled.
                 let handling = match decode(&message) {
                     Ok(value) => handler(session, value),
                     Err(error) => {
-                        log::warn!("bus[transactional]: decoding failed: {error}");
-                        return Ok(());
+                        log::warn!("bus[transactional]: decoding failed, parking: {error}");
+                        return Err(Permanent::new(error).into());
                     }
                 };
                 handling.await.into_result()

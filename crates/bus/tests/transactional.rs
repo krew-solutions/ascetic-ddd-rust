@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use ascetic_ddd_bus::{
+use ascetic_ddd_bus::{Permanent, 
     Error, Message, Subscription, TransactionalConsumer, TransactionalHandler,
     TransactionalProducer, TransactionalWireConsumer, TransactionalWireProducer,
 };
@@ -65,10 +65,12 @@ async fn the_handler_gets_the_transaction_with_the_decoded_value() {
     let handler = slot.lock().unwrap().clone().unwrap();
 
     handler(Tx("tx-1"), Message::new("7")).await.unwrap();
-    // undecodable: reported and acknowledged, not an error of the transport
-    handler(Tx("tx-2"), Message::new("not a number"))
+    // undecodable: a permanent verdict, for the inbox to park it, never an
+    // acknowledgement of a message no handler saw
+    let refused = handler(Tx("tx-2"), Message::new("not a number"))
         .await
-        .unwrap();
+        .unwrap_err();
+    assert!(refused.downcast_ref::<Permanent>().is_some(), "{refused}");
     handler(Tx("tx-3"), Message::new("8")).await.unwrap();
 
     assert_eq!(*seen.lock().unwrap(), [("tx-1", 7), ("tx-3", 8)]);
