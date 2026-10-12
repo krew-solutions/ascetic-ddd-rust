@@ -1,6 +1,6 @@
 [package]
 name = "ascetic-ddd-kms"
-description = "Key management for envelope encryption: a key-encryption key per tenant, versioned and rotated, kept in PostgreSQL under a master key or in HashiCorp Vault Transit."
+description = "Key management for a tenant's keys: a key-encryption key per tenant, versioned and rotated, kept in PostgreSQL under a master key or in HashiCorp Vault Transit; signatures and MACs under the tenant's keys in Vault Transit."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -21,16 +21,21 @@ vault = ["dep:base64", "dep:futures", "dep:percent-encoding", "dep:serde_json"]
 # `VaultTransport` for `reqwest::Client`. TLS is the application's choice: enable a
 # `reqwest` TLS feature downstream.
 reqwest = ["vault", "dep:reqwest"]
+# In-memory signing and MAC keys for the tests of what consumes the ports.
+testing = ["dep:ed25519-dalek", "dep:hmac", "dep:sha2"]
 
 [dependencies]
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc", "zeroize"] }
 ascetic-ddd-session = { path = "../session" }
 base64 = { version = "0.22", optional = true }
+ed25519-dalek = { version = "3", optional = true }
 futures = { workspace = true, optional = true }
 getrandom = "0.4"
+hmac = { version = "0.12", optional = true }
 percent-encoding = { version = "2.3", optional = true }
 reqwest = { version = "0.13", optional = true, default-features = false, features = ["json"] }
 serde_json = { workspace = true, optional = true }
+sha2 = { version = "0.10", optional = true }
 tokio-postgres = { version = "0.7.18", optional = true }
 zeroize = { version = "1", features = ["derive"] }
 

@@ -4,6 +4,8 @@ use std::fmt;
 
 use ascetic_ddd_session::SessionError;
 
+use crate::domain::SignatureAlgorithm;
+
 /// An error of a transport this crate does not know the inside of, boxed.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -30,9 +32,27 @@ pub enum Error {
         /// The version the ciphertext names.
         found: u32,
     },
-    /// The ciphertext names a version of the key that the holder does not
-    /// have: a keyring without that version.
+    /// The ciphertext or signature names a version of the key that the
+    /// holder does not have, or no longer serves: a keyring without that
+    /// version, a version an operator retired.
     NoKeyOfVersion(u32),
+    /// The tenant has no signing key of the algorithm.
+    SigningKeyNotFound {
+        /// The tenant asked for.
+        tenant_id: String,
+        /// The algorithm asked for.
+        algorithm: SignatureAlgorithm,
+    },
+    /// The tenant has no MAC key for the purpose.
+    MacKeyNotFound {
+        /// The tenant asked for.
+        tenant_id: String,
+        /// The purpose asked for.
+        purpose: String,
+    },
+    /// The signature is not the key's over these bytes: tampering, another
+    /// message, or another key of the same version.
+    InvalidSignature,
     /// An algorithm name this crate does not implement, read from storage.
     UnsupportedAlgorithm(String),
     /// Bytes that are not what they were taken for: a ciphertext too short to
@@ -86,6 +106,16 @@ impl fmt::Display for Error {
                 "the ciphertext was sealed under key version {found}, this key is version {expected}"
             ),
             Error::NoKeyOfVersion(version) => write!(f, "no key of version {version} at hand"),
+            Error::SigningKeyNotFound {
+                tenant_id,
+                algorithm,
+            } => write!(f, "tenant `{tenant_id}` has no {algorithm} signing key"),
+            Error::MacKeyNotFound { tenant_id, purpose } => {
+                write!(f, "tenant `{tenant_id}` has no MAC key for `{purpose}`")
+            }
+            Error::InvalidSignature => {
+                write!(f, "the signature is not the key's over these bytes")
+            }
             Error::UnsupportedAlgorithm(name) => write!(f, "unsupported algorithm `{name}`"),
             Error::Malformed(what) => write!(f, "malformed: {what}"),
             Error::Entropy(error) => write!(f, "no randomness from the operating system: {error}"),

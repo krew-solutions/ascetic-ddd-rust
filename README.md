@@ -53,7 +53,7 @@ others behind features, so that `ascetic_ddd::saga` keeps working as one import
 | [`ascetic-ddd-dek`](crates/dek) | `seedwork/infrastructure/repository/dek_store` | Data-encryption keys per resource, versioned, wrapped by the tenant's KEK; the ciphers a codec seals with |
 | [`ascetic-ddd-event-store`](crates/event-store) | `seedwork/infrastructure/repository/event_store` | Event store on PostgreSQL: streams appended with an expected position, payloads sealed with the stream's DEK |
 | [`ascetic-ddd-inbox`](crates/inbox) | `ascetic_ddd/inbox` | Transactional Inbox on PostgreSQL |
-| [`ascetic-ddd-kms`](crates/kms) | `ascetic_ddd/kms` | Key management for envelope encryption: a KEK per tenant, versioned and rotated, in PostgreSQL under a master key or in Vault Transit |
+| [`ascetic-ddd-kms`](crates/kms) | `ascetic_ddd/kms` | Key management for a tenant's keys: a KEK per tenant, versioned and rotated, in PostgreSQL under a master key or in Vault Transit; signatures and MACs under the tenant's keys in Vault Transit |
 | [`ascetic-ddd-outbox`](crates/outbox) | `ascetic_ddd/outbox` | Transactional Outbox on PostgreSQL |
 | [`ascetic-ddd-rop`](crates/rop) | `trading.rop` (OCaml) | Railway-oriented programming: `Result` with accumulating, never-empty errors |
 | [`ascetic-ddd-saga`](crates/saga) | `ascetic_ddd/saga` | Saga pattern (routing slip) for distributed transactions |

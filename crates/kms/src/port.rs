@@ -2,7 +2,7 @@
 
 use ascetic_ddd_session::Session;
 
-use crate::domain::Key;
+use crate::domain::{Key, KeyLabel, Mac, Signature, SignatureAlgorithm};
 use crate::error::Error;
 
 /// Envelope encryption for one tenant at a time: data-encryption keys are
@@ -61,5 +61,81 @@ pub trait KeyManagementService<S: Session>: Send + Sync {
         &self,
         session: &S,
         tenant_id: &str,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
+}
+
+/// Digital signatures under a tenant's keys: one key per tenant and
+/// algorithm, made on first signing, versioned by rotation. The latest
+/// version signs; every version verifies, until an operator retires it.
+/// The algorithm is an input of signing and a property of the signature,
+/// so a tenant moves to another algorithm by signing with it — a new key,
+/// not a rotation — while what the old key signed keeps verifying.
+///
+/// Deleting a key ends the verifiability of everything it ever signed: the
+/// tenant's off-boarding, never a rotation.
+pub trait SigningService<S: Session>: Send + Sync {
+    /// Signs `message` with the latest version of the tenant's key of
+    /// `algorithm`, making the key if the tenant has none.
+    fn sign(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+        message: &[u8],
+    ) -> impl Future<Output = Result<Signature, Error>> + Send;
+
+    /// Verifies `signature` over `message` under the key version it names.
+    /// `Ok(())` when it verifies, [`Error::InvalidSignature`] when it does
+    /// not; never makes a key — a signature by a key the tenant has not got
+    /// is [`Error::SigningKeyNotFound`], by a version the key has not got,
+    /// or no longer serves, [`Error::NoKeyOfVersion`].
+    fn verify(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        message: &[u8],
+        signature: &Signature,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
+
+    /// Makes the next version of the tenant's key of `algorithm`, or its
+    /// first; answers the version. Earlier versions keep verifying.
+    fn rotate_signing_key(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+    ) -> impl Future<Output = Result<u32, Error>> + Send;
+
+    /// Deletes every version of the tenant's key of `algorithm`; nothing to
+    /// delete is not an error.
+    fn delete_signing_key(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
+}
+
+/// Message authentication under a tenant's keys: one key per tenant and
+/// purpose, made on first use, versioned by rotation outside this port.
+/// A MAC is checked by recomputation, so the port only makes them.
+pub trait MacService<S: Session>: Send + Sync {
+    /// HMAC-SHA-256 of `message` under the latest version of the tenant's
+    /// key for `purpose`, making the key if the tenant has none.
+    fn mac(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        purpose: &KeyLabel,
+        message: &[u8],
+    ) -> impl Future<Output = Result<Mac, Error>> + Send;
+
+    /// Deletes every version of the tenant's key for `purpose`; nothing to
+    /// delete is not an error.
+    fn delete_mac_key(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        purpose: &KeyLabel,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 }

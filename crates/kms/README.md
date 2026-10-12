@@ -1,11 +1,16 @@
 # ascetic-ddd-kms
 
-Key management for envelope encryption. A tenant has a key-encryption key,
-versioned and rotated, that wraps the data-encryption keys its data is sealed
-with; deleting the tenant's key-encryption keys is crypto-shredding. One port
-and two adapters: keys in a PostgreSQL table under a master key, or in
-HashiCorp Vault Transit. A port of `ascetic_ddd.kms` (Python) and
-`asceticddd/kms` (Go); the encryption stage ADR-0002 places before the outbox.
+Key management for a tenant's keys. For envelope encryption: a tenant has a
+key-encryption key, versioned and rotated, that wraps the data-encryption keys
+its data is sealed with; deleting the tenant's key-encryption keys is
+crypto-shredding. One port and two adapters: keys in a PostgreSQL table under
+a master key, or in HashiCorp Vault Transit. For what a tenant signs and
+authenticates: two more ports — digital signatures under the tenant's key of
+an algorithm, MACs under the tenant's key for a purpose — served by Vault
+Transit, where the keys stay, and by in-memory keys for the tests of what
+consumes them. A port of `ascetic_ddd.kms` (Python) and `asceticddd/kms` (Go),
+which have the first port only; the encryption stage ADR-0002 places before
+the outbox.
 
 ```rust
 use ascetic_ddd_kms::{Algorithm, MasterKey};
@@ -101,6 +106,28 @@ version control; the session may belong to a database other than the
 data's. Where the requirements are higher, Vault Transit or a cloud KMS
 behind the same port is the answer.
 
+`SigningService<S>` is signatures under the tenant's key of one algorithm —
+`sign`, `verify`, `rotate_signing_key`, `delete_signing_key` — one key per
+tenant and algorithm (`SignatureAlgorithm`: Ed25519, ECDSA P-256 with
+SHA-256), made on first signing; the latest version signs, every version
+verifies until an operator retires it. The algorithm is an input of signing
+and a property of the `Signature`, which carries it, the version of the key
+that made it, and the bytes in the one form the crate fixes per algorithm —
+Ed25519's sixty-four, ECDSA's `r || s`, never DER — so a tenant moves to
+another algorithm by signing with it, a new key rather than a rotation, while
+what the old key signed keeps verifying. Verifying answers `Ok(())` or
+`InvalidSignature`; a key the tenant has not got is `SigningKeyNotFound`, a
+version the key has not got or no longer serves `NoKeyOfVersion`; verifying
+never makes a key. Deleting a signing key ends the verifiability of
+everything it signed: the tenant's off-boarding, never a rotation.
+
+`MacService<S>` is HMAC-SHA-256 under the tenant's key for one purpose, a
+`KeyLabel` such as `draft-etag` — `mac`, `delete_mac_key` — one key per tenant
+and purpose, made on first use; a `Mac` carries the version of the key that
+made it, and is checked by recomputation, so the port only makes them. Keeping
+MAC keys apart from signing keys by name keeps their lifecycles apart: a
+signing rotation does not change what a MAC key makes.
+
 `Cached<K>` keeps what any service unwraps, a thousand keys for five minutes
 unless told otherwise, so a consumer opening a thousand messages sealed
 under one DEK, or a store loading every version of a stream's keys, asks the
@@ -115,13 +142,40 @@ the session's, `HttpAccess`, and every call goes through the session so its
 observer times it; the client speaks to Vault through `VaultTransport`,
 implemented for `reqwest::Client` under the `reqwest` feature (TLS is the
 application's choice of `reqwest` feature) and for any other client by the
-application.
+application. The same struct serves all three ports, over one mount, telling
+a tenant's keys apart by name: the KEK is the tenant's id (what the Python and
+Go ports name), a signing key `{tenant}.sign.{algorithm}` (Transit types
+`ed25519`, `ecdsa-p256`), a MAC key `{tenant}.mac.{purpose}` (type `hmac`).
+The dot is the separator Transit allows that the parts cannot contain, so for
+the dotted names the tenant's id is checked to be letters, digits, `_` and `-`
+rather than encoded: a `/` is "unsupported path" to Transit even encoded.
+Signatures are asked for and verified in JWS marshaling, which is what makes
+ECDSA's bytes `r || s`. Transit answers `400` both for a key it has not got
+and for a version a key does not serve; the adapter reads the key once, on
+that path only, to tell `SigningKeyNotFound` and `NoKeyOfVersion` apart,
+rather than matching Vault's text.
+
+`testing::InMemoryKeys` (feature `testing`) serves the signing and MAC ports
+from memory — Ed25519 only, a key registered from a seed so that a test's
+signatures are the same from run to run, or made on first signing as Vault
+would; MAC keys made on first use — so that the adapter a consumer writes over
+the ports is exercised as it is in production, with the network behind the
+port and nothing else replaced.
 
 ## What is not here
 
-Nothing is cached: every call reads the tenant's key from the table and
-unwraps it. A DEK store — a key per stream, wrapped by these — is the next
-port, `seedwork/infrastructure/repository/dek_store` in the sources.
+The data-encryption keys themselves — one per resource, versioned, wrapped
+by these — are the lower half of envelope encryption and live in
+`ascetic-ddd-dek`: the store that keeps them and the stage that seals with
+them, over any `KeyManagementService`. Caching is `Cached<K>` above, in
+front of whichever service a consumer unwraps through.
+
+The signing and MAC ports have no PostgreSQL adapter: a private key wrapped
+by a master key in a general-purpose table is what a KMS is there to avoid,
+and nothing asked for one. `Cached<K>` does not pass them through, a public
+key is not served (a verifier elsewhere would need `GET keys/{name}`, whose
+`data.keys.{n}.public_key` is the key), a MAC is not verified by the port, and
+ML-DSA waits for a Vault build that has it. Each comes with its first user.
 
 ## Deviations from the Python and Go sources
 
@@ -160,4 +214,8 @@ ASCETIC_DDD_TEST_PG_URL=postgresql://user:pass@localhost/db \
     cargo test -p ascetic-ddd-kms --features pg -- --ignored    # PostgreSQL
 ASCETIC_DDD_TEST_VAULT_ADDR=http://localhost:8200 ASCETIC_DDD_TEST_VAULT_TOKEN=test-root-token \
     cargo test -p ascetic-ddd-kms --features reqwest -- --ignored   # Vault Transit, a dev server
+cargo test -p ascetic-ddd-kms --features testing,vault                # in-memory keys; the Vault
+                                                                      # adapter's mapping, no server
 ```
+
+The Vault tests need the `transit` engine enabled on the dev server.
