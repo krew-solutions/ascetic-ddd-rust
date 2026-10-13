@@ -1,8 +1,6 @@
 //! The in-memory keys behave as the Vault adapter does, where the tests of
 //! a consumer would notice a difference.
 
-#![cfg(feature = "testing")]
-
 use ascetic_ddd_kms::testing::InMemoryKeys;
 use ascetic_ddd_kms::{Error, KeyLabel, MacService, Signature, SignatureAlgorithm, SigningService};
 use ascetic_ddd_session::testing::{MemorySession, MemorySessionPool};

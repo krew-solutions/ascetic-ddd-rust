@@ -111,14 +111,20 @@ type.
    validated module gets that only there. The public key of a version is
    available from `GET keys/{name}` for a verifier elsewhere, and is not a
    method of the port until one is needed.
-8. **The in-memory keys live in the seedwork, feature `testing`.** A
-   consumer writes one adapter over the ports and runs it in its tests over
-   `testing::InMemoryKeys` and in production over Vault, so what the tests
-   exercise is the mapping that runs — the form of a key id, how the
-   adapter's errors become the consumer's, the text of a tag — with
-   nothing but the network behind the port replaced. Ed25519 only, from a
-   seed so that a test's signatures are the same from run to run. The cost
-   is `ed25519-dalek`, `hmac` and `sha2` behind a feature.
+8. **The keys are the model's; the in-memory keys live in the seedwork.**
+   A `SigningKey` and a `MacKey` stand in `domain` beside the `Kek`, one
+   version of a keyring each, taking Ed25519, ECDSA P-256 and HMAC-SHA-256
+   from the libraries as the cipher takes AES-GCM: what a signing key is
+   and does is the crate's model, not a helper of one adapter, so the
+   PostgreSQL adapter and `testing::InMemoryKeys` hold the same type and
+   cannot drift apart in a byte form. A consumer writes one adapter over
+   the ports and runs it in its tests over the in-memory keys and in
+   production over Vault, so what the tests exercise is the mapping that
+   runs — the form of a key id, how the adapter's errors become the
+   consumer's, the text of a tag — with nothing but the network behind the
+   port replaced; a key registered from a seed signs the same from run to
+   run. The cost is the libraries as dependencies of the crate, as
+   `aes-gcm` already is.
 
 ## Consequences
 
@@ -172,7 +178,13 @@ signing key's or the data's rotation.
 **Local verification with the fetched public key, on the Vault adapter.**
 Cheaper per verification, and not the validated module a regulated tenant
 verifies in. The PostgreSQL adapter verifies locally by nature — the keys
-are its — with the same libraries, under `software`.
+are its — with the model's `PublicKey`.
+
+**The primitives as a helper module beside the adapters** (the first
+draft, `software.rs`, behind a feature). Answered what the crate does with
+a signing key without being part of its model, so the model had the
+signature and not the key that makes it; moved into `domain` as `Kek`'s
+peers.
 
 **Telling the `400`s apart by Vault's text.** Works on this release, and
 breaks silently on the next.

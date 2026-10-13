@@ -9,17 +9,14 @@ mod error;
 #[cfg(feature = "pg")]
 pub mod pg;
 mod port;
-#[cfg(feature = "software")]
-mod software;
-#[cfg(feature = "testing")]
 pub mod testing;
 #[cfg(feature = "vault")]
 pub mod vault;
 
 pub use crate::cache::Cached;
 pub use crate::domain::{
-    Aes256Gcm, Algorithm, Cipher, Kek, Key, KeyLabel, MASTER_KEY_VERSION, Mac, MasterKey,
-    Signature, SignatureAlgorithm, WrappedKey,
+    Aes256Gcm, Algorithm, Cipher, Kek, Key, KeyLabel, MASTER_KEY_VERSION, Mac, MacKey, MasterKey,
+    PublicKey, Signature, SignatureAlgorithm, SigningKey, WrappedKey,
 };
 pub use crate::error::{BoxError, Error};
 #[cfg(feature = "pg")]

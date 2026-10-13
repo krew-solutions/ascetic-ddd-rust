@@ -58,7 +58,8 @@ sessions.session(async |session| {
 
 ## The model
 
-Three kinds of key and one operation between them, in `domain`. The
+Three kinds of key and one operation between them, in `domain`, and beside
+them a tenant's other keys. The
 `MasterKey` — the one key of the system, from configuration — wraps a
 tenant's key-encryption keys: it makes the first `Kek` of a tenant, loads one
 back from its wrapped form, and rotates one to the next version. A KEK wraps
@@ -80,6 +81,16 @@ takes it from the library. A `Key` is bytes that are wiped when dropped and
 never printed. Sealing draws a fresh nonce from the operating system; the
 half that takes the nonce is not public, and is checked against what the
 Python port sealed.
+
+A tenant's other keys are one version of a keyring each, as the `Kek` is: a
+`SigningKey` of a `SignatureAlgorithm` — its private half thirty-two bytes
+wiped when dropped, its `PublicKey` derived from it — makes a `Signature`
+of its algorithm and version, and the public half verifies one; a `MacKey`
+for a purpose makes a `Mac`. They take the primitives from the libraries
+as the cipher does — Ed25519, ECDSA P-256 with SHA-256, HMAC-SHA-256 — in
+the forms the algorithm fixes, and each knows its name, `{tenant}.sign.
+{algorithm}` or `{tenant}.mac.{purpose}`, which is Transit's key name on
+one adapter and the associated data of the wrapping on the other.
 
 ## The port and the adapters
 
@@ -112,8 +123,8 @@ The same adapter serves the signing and MAC ports: signing keys in
 wrapped by the master key under the name `{tenant}.sign.{algorithm}` as its
 associated data, the public half beside it — and MAC keys in `kms_mac_keys`
 by tenant, purpose and version, wrapped under `{tenant}.mac.{purpose}`; the
-signing, verifying and MACs are done in this process (`software`: Ed25519,
-ECDSA P-256, HMAC-SHA-256), in the byte forms the ports fix, the same the
+signing, verifying and MACs are the model's `SigningKey`, `PublicKey` and
+`MacKey`, in this process, in the byte forms the ports fix, the same the
 Vault adapter asks Transit for. A keyring's first key and its rotations are
 under an advisory lock on the key's name, as a tenant's KEK is; `setup`
 makes the three tables under a lock on each name, since two services may
@@ -171,12 +182,12 @@ and for a version a key does not serve; the adapter reads the key once, on
 that path only, to tell `SigningKeyNotFound` and `NoKeyOfVersion` apart,
 rather than matching Vault's text.
 
-`testing::InMemoryKeys` (feature `testing`) serves the signing and MAC ports
-from memory, with the PostgreSQL adapter's cryptography — a key registered
-from a seed so that a test's signatures are the same from run to run
-(Ed25519), or made on first signing as Vault would; MAC keys made on first
-use — so that the adapter a consumer writes over the ports is exercised as it
-is in production, with the network behind the port and nothing else replaced.
+`testing::InMemoryKeys` serves the signing and MAC ports from memory, with
+the model's keys — a key registered from a seed so that a test's signatures
+are the same from run to run (Ed25519), or made on first signing as Vault
+would; MAC keys made on first use — so that the adapter a consumer writes
+over the ports is exercised as it is in production, with the network behind
+the port and nothing else replaced.
 
 `Cached<K>` passes the signing and MAC ports through to `K` uncached: a
 signature and a verification are not functions of the cache's key. One
@@ -236,7 +247,7 @@ ASCETIC_DDD_TEST_PG_URL=postgresql://user:pass@localhost/db \
     cargo test -p ascetic-ddd-kms --features pg -- --ignored    # PostgreSQL: KEKs, signing, MACs
 ASCETIC_DDD_TEST_VAULT_ADDR=http://localhost:8200 ASCETIC_DDD_TEST_VAULT_TOKEN=test-root-token \
     cargo test -p ascetic-ddd-kms --features reqwest -- --ignored   # Vault Transit, a dev server
-cargo test -p ascetic-ddd-kms --features testing,vault                # in-memory keys; the Vault
+cargo test -p ascetic-ddd-kms --features vault                        # in-memory keys; the Vault
                                                                       # adapter's mapping, no server
 ```
 

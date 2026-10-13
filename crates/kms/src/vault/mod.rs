@@ -36,7 +36,9 @@ use futures::future::BoxFuture;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
 
-use crate::domain::{Key, KeyLabel, Mac, Signature, SignatureAlgorithm, is_key_part};
+use crate::domain::{
+    Key, KeyLabel, Mac, MacKey, Signature, SignatureAlgorithm, SigningKey, is_key_part,
+};
 use crate::error::Error;
 use crate::port::{KeyManagementService, MacService, SigningService};
 
@@ -103,17 +105,18 @@ impl VaultTransitService {
         }
     }
 
-    /// The Transit key a tenant signs with, per algorithm.
+    /// The Transit key a tenant signs with, per algorithm: the model's name
+    /// for it, once the tenant's id is known to fit a Transit key name.
     fn signing_key_name(tenant_id: &str, algorithm: SignatureAlgorithm) -> Result<String, Error> {
-        Ok(format!(
-            "{}.sign.{algorithm}",
-            Self::tenant_part(tenant_id)?
+        Ok(SigningKey::name_of(
+            Self::tenant_part(tenant_id)?,
+            algorithm,
         ))
     }
 
-    /// The Transit key a tenant makes MACs with, per purpose.
+    /// The Transit key a tenant makes MACs with, per purpose, likewise.
     fn mac_key_name(tenant_id: &str, purpose: &KeyLabel) -> Result<String, Error> {
-        Ok(format!("{}.mac.{purpose}", Self::tenant_part(tenant_id)?))
+        Ok(MacKey::name_of(Self::tenant_part(tenant_id)?, purpose))
     }
 
     /// One call under the mount; `404` is [`Error::KekNotFound`], any other

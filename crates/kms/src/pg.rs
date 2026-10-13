@@ -31,11 +31,11 @@ use ascetic_ddd_session::pg::{Identifier, PgAccess};
 use tokio_postgres::Row;
 
 use crate::domain::{
-    Algorithm, Kek, Key, KeyLabel, Mac, MasterKey, Signature, SignatureAlgorithm, WrappedKey,
+    Algorithm, Kek, Key, KeyLabel, Mac, MacKey, MasterKey, PublicKey, Signature,
+    SignatureAlgorithm, SigningKey, WrappedKey,
 };
 use crate::error::Error;
 use crate::port::{KeyManagementService, MacService, SigningService};
-use crate::software::{self, KeyPair};
 
 /// The key management service over a table of KEKs wrapped by one master key.
 pub struct PgKeyManagementService {
@@ -200,25 +200,13 @@ impl PgKeyManagementService {
         Ok(())
     }
 
-    /// The name a signing key is wrapped under: the tenant and the
-    /// algorithm, as the associated data, so that a key wrapped for one
-    /// does not unwrap as another's.
-    fn signing_key_name(tenant_id: &str, algorithm: SignatureAlgorithm) -> String {
-        format!("{tenant_id}.sign.{algorithm}")
-    }
-
-    /// The name a MAC key is wrapped under, likewise.
-    fn mac_key_name(tenant_id: &str, purpose: &KeyLabel) -> String {
-        format!("{tenant_id}.mac.{purpose}")
-    }
-
     /// The latest signing key of the tenant and algorithm, `None` for none.
     async fn current_signing_key<S>(
         &self,
         session: &S,
         tenant_id: &str,
         algorithm: SignatureAlgorithm,
-    ) -> Result<Option<(u32, KeyPair)>, Error>
+    ) -> Result<Option<SigningKey>, Error>
     where
         S: Session + PgAccess + Sync,
     {
@@ -236,14 +224,14 @@ impl PgKeyManagementService {
     }
 
     /// The signing key of the tenant, algorithm and version: the public
-    /// half, which is all verifying needs.
+    /// half, which is all verifying needs, so nothing is unwrapped.
     async fn public_signing_key<S>(
         &self,
         session: &S,
         tenant_id: &str,
         algorithm: SignatureAlgorithm,
         version: u32,
-    ) -> Result<Vec<u8>, Error>
+    ) -> Result<PublicKey, Error>
     where
         S: Session + PgAccess + Sync,
     {
@@ -262,7 +250,7 @@ impl PgKeyManagementService {
             .await?;
         match row {
             Some(row) if read_version(row.try_get("key_version")?)? == version => {
-                Ok(row.try_get::<_, Vec<u8>>("public_key")?)
+                PublicKey::new(algorithm, row.try_get::<_, Vec<u8>>("public_key")?)
             }
             // A key the tenant has: the version named is not one of its.
             Some(_) => Err(Error::NoKeyOfVersion(version)),
@@ -295,7 +283,7 @@ impl PgKeyManagementService {
         session: &S,
         tenant_id: &str,
         algorithm: SignatureAlgorithm,
-    ) -> Result<(u32, KeyPair), Error>
+    ) -> Result<SigningKey, Error>
     where
         S: Session + PgAccess + Sync,
     {
@@ -307,35 +295,29 @@ impl PgKeyManagementService {
         }
         session
             .atomic(async |tx| {
-                let name = Self::signing_key_name(tenant_id, algorithm);
+                let name = SigningKey::name_of(tenant_id, algorithm);
                 Self::lock(&tx, &self.signing_table, &name).await?;
                 match self.current_signing_key(&tx, tenant_id, algorithm).await? {
                     Some(found) => Ok(found),
                     None => {
-                        let pair = software::generate(algorithm)?;
-                        self.save_signing_key(&tx, tenant_id, algorithm, 1, &pair)
-                            .await?;
-                        Ok((1, pair))
+                        let key = SigningKey::generate(tenant_id, algorithm, 1)?;
+                        self.save_signing_key(&tx, &key).await?;
+                        Ok(key)
                     }
                 }
             })
             .await
     }
 
-    async fn save_signing_key<S>(
-        &self,
-        session: &S,
-        tenant_id: &str,
-        algorithm: SignatureAlgorithm,
-        version: u32,
-        pair: &KeyPair,
-    ) -> Result<(), Error>
+    /// Saves the key: the private half wrapped by the master key under the
+    /// key's name, the public half beside it.
+    async fn save_signing_key<S>(&self, session: &S, key: &SigningKey) -> Result<(), Error>
     where
         S: Session + PgAccess + Sync,
     {
         let wrapped = self
             .master_key(self.master_algorithm)?
-            .wrap(&Self::signing_key_name(tenant_id, algorithm), &pair.private)?;
+            .wrap(&key.name(), key.private())?;
         let sql = format!(
             "INSERT INTO {} (tenant_id, algorithm, key_version, encrypted_key, public_key, master_algorithm) \
              VALUES ($1, $2, $3, $4, $5, $6)",
@@ -346,11 +328,11 @@ impl PgKeyManagementService {
             .execute(
                 &sql,
                 &[
-                    &tenant_id,
-                    &algorithm.as_str(),
-                    &stored_version(version)?,
+                    &key.tenant_id(),
+                    &key.algorithm().as_str(),
+                    &stored_version(key.version())?,
                     &wrapped.to_bytes(),
-                    &pair.public,
+                    &key.public().as_bytes(),
                     &self.master_algorithm.as_str(),
                 ],
             )
@@ -358,25 +340,21 @@ impl PgKeyManagementService {
         Ok(())
     }
 
+    /// The key from its row: the private half unwrapped, the public half
+    /// derived from it rather than read.
     fn load_signing_key(
         &self,
         tenant_id: &str,
         algorithm: SignatureAlgorithm,
         row: &Row,
-    ) -> Result<(u32, KeyPair), Error> {
+    ) -> Result<SigningKey, Error> {
         let version = read_version(row.try_get("key_version")?)?;
         let wrapped = WrappedKey::parse(&row.try_get::<_, Vec<u8>>("encrypted_key")?)?;
         let master_algorithm: Algorithm = row.try_get::<_, String>("master_algorithm")?.parse()?;
         let private = self
             .master_key(master_algorithm)?
-            .unwrap(&Self::signing_key_name(tenant_id, algorithm), &wrapped)?;
-        Ok((
-            version,
-            KeyPair {
-                private,
-                public: row.try_get::<_, Vec<u8>>("public_key")?,
-            },
-        ))
+            .unwrap(&SigningKey::name_of(tenant_id, algorithm), &wrapped)?;
+        SigningKey::load(tenant_id, algorithm, version, private)
     }
 
     /// The latest MAC key of the tenant and purpose, `None` for none.
@@ -385,7 +363,7 @@ impl PgKeyManagementService {
         session: &S,
         tenant_id: &str,
         purpose: &KeyLabel,
-    ) -> Result<Option<(u32, Key)>, Error>
+    ) -> Result<Option<MacKey>, Error>
     where
         S: Session + PgAccess + Sync,
     {
@@ -405,8 +383,8 @@ impl PgKeyManagementService {
                 row.try_get::<_, String>("master_algorithm")?.parse()?;
             let key = self
                 .master_key(master_algorithm)?
-                .unwrap(&Self::mac_key_name(tenant_id, purpose), &wrapped)?;
-            Ok((version, key))
+                .unwrap(&MacKey::name_of(tenant_id, purpose), &wrapped)?;
+            Ok(MacKey::load(tenant_id, purpose, version, key))
         })
         .transpose()
     }
@@ -418,7 +396,7 @@ impl PgKeyManagementService {
         session: &S,
         tenant_id: &str,
         purpose: &KeyLabel,
-    ) -> Result<(u32, Key), Error>
+    ) -> Result<MacKey, Error>
     where
         S: Session + PgAccess + Sync,
     {
@@ -427,13 +405,15 @@ impl PgKeyManagementService {
         }
         session
             .atomic(async |tx| {
-                let name = Self::mac_key_name(tenant_id, purpose);
+                let name = MacKey::name_of(tenant_id, purpose);
                 Self::lock(&tx, &self.mac_table, &name).await?;
                 match self.current_mac_key(&tx, tenant_id, purpose).await? {
                     Some(found) => Ok(found),
                     None => {
-                        let key = software::generate_mac_key()?;
-                        let wrapped = self.master_key(self.master_algorithm)?.wrap(&name, &key)?;
+                        let key = MacKey::generate(tenant_id, purpose, 1)?;
+                        let wrapped = self
+                            .master_key(self.master_algorithm)?
+                            .wrap(&name, key.key())?;
                         let sql = format!(
                             "INSERT INTO {} (tenant_id, purpose, key_version, encrypted_key, master_algorithm) \
                              VALUES ($1, $2, 1, $3, $4)",
@@ -450,7 +430,7 @@ impl PgKeyManagementService {
                                 ],
                             )
                             .await?;
-                        Ok((1, key))
+                        Ok(key)
                     }
                 }
             })
@@ -650,14 +630,9 @@ where
         algorithm: SignatureAlgorithm,
         message: &[u8],
     ) -> Result<Signature, Error> {
-        let (version, pair) = self
-            .get_or_create_signing_key(session, tenant_id, algorithm)
-            .await?;
-        Ok(Signature::new(
-            algorithm,
-            version,
-            software::sign(algorithm, &pair.private, message)?,
-        ))
+        self.get_or_create_signing_key(session, tenant_id, algorithm)
+            .await?
+            .sign(message)
     }
 
     async fn verify(
@@ -667,11 +642,14 @@ where
         message: &[u8],
         signature: &Signature,
     ) -> Result<(), Error> {
-        let algorithm = signature.algorithm();
-        let public = self
-            .public_signing_key(session, tenant_id, algorithm, signature.key_version())
-            .await?;
-        software::verify(algorithm, &public, message, signature.as_bytes())
+        self.public_signing_key(
+            session,
+            tenant_id,
+            signature.algorithm(),
+            signature.key_version(),
+        )
+        .await?
+        .verify(message, signature)
     }
 
     async fn rotate_signing_key(
@@ -682,15 +660,14 @@ where
     ) -> Result<u32, Error> {
         session
             .atomic(async |tx| {
-                let name = Self::signing_key_name(tenant_id, algorithm);
+                let name = SigningKey::name_of(tenant_id, algorithm);
                 Self::lock(&tx, &self.signing_table, &name).await?;
-                let version = match self.current_signing_key(&tx, tenant_id, algorithm).await? {
-                    Some((current, _)) => current + 1,
-                    None => 1,
-                };
-                let pair = software::generate(algorithm)?;
-                self.save_signing_key(&tx, tenant_id, algorithm, version, &pair)
-                    .await?;
+                let version = self
+                    .current_signing_key(&tx, tenant_id, algorithm)
+                    .await?
+                    .map_or(1, |current| current.version() + 1);
+                let key = SigningKey::generate(tenant_id, algorithm, version)?;
+                self.save_signing_key(&tx, &key).await?;
                 Ok(version)
             })
             .await
@@ -725,10 +702,9 @@ where
         purpose: &KeyLabel,
         message: &[u8],
     ) -> Result<Mac, Error> {
-        let (version, key) = self
-            .get_or_create_mac_key(session, tenant_id, purpose)
-            .await?;
-        Ok(Mac::new(version, software::mac(&key, message)?))
+        self.get_or_create_mac_key(session, tenant_id, purpose)
+            .await?
+            .mac(message)
     }
 
     async fn delete_mac_key(
