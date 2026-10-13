@@ -17,9 +17,9 @@ use std::time::{Duration, Instant};
 
 use ascetic_ddd_session::Session;
 
-use crate::domain::Key;
+use crate::domain::{Key, KeyLabel, Mac, Signature, SignatureAlgorithm};
 use crate::error::Error;
-use crate::port::KeyManagementService;
+use crate::port::{KeyManagementService, MacService, SigningService};
 
 /// A key management service that keeps what it unwraps, for a while.
 pub struct Cached<K> {
@@ -175,5 +175,84 @@ impl<K> std::fmt::Debug for Cached<K> {
             .field("ttl", &self.ttl)
             .field("held", &self.len())
             .finish_non_exhaustive()
+    }
+}
+
+/// The signing port passed through: a signature and a verification are not
+/// functions of the cache's key, so nothing is cached — the wrapper serves
+/// the port so that one `Cached<K>` stands for every port `K` serves.
+impl<S, K> SigningService<S> for Cached<K>
+where
+    S: Session,
+    K: SigningService<S>,
+{
+    async fn sign(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+        message: &[u8],
+    ) -> Result<Signature, Error> {
+        self.kms.sign(session, tenant_id, algorithm, message).await
+    }
+
+    async fn verify(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        message: &[u8],
+        signature: &Signature,
+    ) -> Result<(), Error> {
+        self.kms
+            .verify(session, tenant_id, message, signature)
+            .await
+    }
+
+    async fn rotate_signing_key(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+    ) -> Result<u32, Error> {
+        self.kms
+            .rotate_signing_key(session, tenant_id, algorithm)
+            .await
+    }
+
+    async fn delete_signing_key(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+    ) -> Result<(), Error> {
+        self.kms
+            .delete_signing_key(session, tenant_id, algorithm)
+            .await
+    }
+}
+
+/// The MAC port passed through, likewise.
+impl<S, K> MacService<S> for Cached<K>
+where
+    S: Session,
+    K: MacService<S>,
+{
+    async fn mac(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        purpose: &KeyLabel,
+        message: &[u8],
+    ) -> Result<Mac, Error> {
+        self.kms.mac(session, tenant_id, purpose, message).await
+    }
+
+    async fn delete_mac_key(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        purpose: &KeyLabel,
+    ) -> Result<(), Error> {
+        self.kms.delete_mac_key(session, tenant_id, purpose).await
     }
 }

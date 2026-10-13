@@ -5,8 +5,19 @@
 Accepted (2026-10-13): held by `tests/vault_signing.rs` and
 `tests/vault_mapping.rs` of `ascetic-ddd-kms` (the ports on a Vault dev
 server; the adapter's reading of Transit's answers against a scripted
-transport), and `tests/in_memory_keys.rs` (the in-memory keys behave as the
-adapter does where a consumer's tests would notice).
+transport), `tests/pg_signing.rs` (the same properties on the PostgreSQL
+adapter), and `tests/in_memory_keys.rs` (the in-memory keys behave as the
+adapters do where a consumer's tests would notice).
+
+Amended the same day: the PostgreSQL adapter serves the signing and MAC
+ports too, so that the two adapters of the crate serve the same three
+ports. The first draft left it out — a private key under a master key in a
+general-purpose table is not the posture the ports were made for — but the
+KEK port already takes that posture as its simple adapter and says where
+the requirements are higher Vault is the answer; an adapter that serves one
+port and refuses two would have had the consumer choose its KMS per port.
+What the amendment changes is in point 1 and in the consequences; the
+separation of the keys, and everything that rests on it, is as it was.
 
 ## Context
 
@@ -44,14 +55,16 @@ type.
 1. **Two more ports beside `KeyManagementService`, not methods on it.**
    `SigningService` — `sign`, `verify`, `rotate_signing_key`,
    `delete_signing_key` — and `MacService` — `mac`, `delete_mac_key`. The
-   KEK port has consumers that cannot and need not sign: `ascetic-ddd-dek`
-   is bound by `K: KeyManagementService<S>` and nothing more; the
-   PostgreSQL adapter keeps keys under a master key in a table, which a
-   signing key must not be; `Cached<K>` caches unwraps, and a verification
-   is not a function of its key. A method on the shared port would have
-   made each of them implement what it must refuse. A signature and a MAC
-   are apart too: they share no value type and no consumer, and a MAC is
-   checked by recomputation, so its port only makes them.
+   KEK port has consumers that need no signing: `ascetic-ddd-dek` is bound
+   by `K: KeyManagementService<S>` and nothing more, and must not grow a
+   bound it does not use; `Cached<K>` caches unwraps, and a verification is
+   not a function of its key, so it passes the other ports through
+   uncached rather than caching them wrongly. A signature and a MAC are
+   apart too: they share no value type and no consumer, and a MAC is
+   checked by recomputation, so its port only makes them. Both adapters
+   serve all three ports: Vault with the keys in Transit, PostgreSQL with
+   the keys under its master key and the cryptography in process, the same
+   byte forms on either.
 2. **One key per use, three keys per tenant, in one mount, told apart by
    name.** The KEK stays the tenant's id, what the Python and Go ports
    name; a signing key is `{tenant}.sign.{algorithm}`, a MAC key
@@ -120,6 +133,14 @@ type.
 - One `VaultTransitService` serves all three ports over one mount and one
   token; a deployment that wants a mount per tenant composes one service
   per mount, the ports do not change.
+- One `PgKeyManagementService` serves all three ports over three tables
+  and one master key: the signing key's private half and the MAC key are
+  wrapped by the master key under the key's name as associated data, so a
+  key wrapped for one tenant, algorithm or purpose does not open as
+  another's, and a key wrapped under one master key does not open under
+  another. A keyring's first key and its rotations are under the same
+  advisory lock a tenant's KEK is. The posture is the KEK's: the simple
+  adapter, for where it is enough.
 - The failure path costs one extra call; the success path none.
 - The signature's byte form is part of the contract: a consumer that
   stores or transmits a `Signature` stores the algorithm and the version
@@ -148,15 +169,18 @@ consumer; a MAC is recomputed, a signature is verified.
 Transit allows it and it saves a key; it ties the open drafts to the
 signing key's or the data's rotation.
 
-**Local verification with the fetched public key.** Cheaper per
-verification, and not the validated module a regulated tenant verifies in;
-a signature library per algorithm in the seedwork.
+**Local verification with the fetched public key, on the Vault adapter.**
+Cheaper per verification, and not the validated module a regulated tenant
+verifies in. The PostgreSQL adapter verifies locally by nature — the keys
+are its — with the same libraries, under `software`.
 
 **Telling the `400`s apart by Vault's text.** Works on this release, and
 breaks silently on the next.
 
-**A PostgreSQL adapter for signing.** A private key under a master key in
-a table is what the ports are there to avoid, and nothing asked for one.
+**No PostgreSQL adapter for signing** (the first draft). The posture is
+lower than Vault's; so is the KEK's in the same adapter, by the same
+choice, and an adapter serving one port of three would have the consumer
+choose its KMS per port. Withdrawn by the amendment.
 
 **`verify` answering `bool`.** A `bool` is droppable; an error rides `?`,
 as `Decrypt` already does.

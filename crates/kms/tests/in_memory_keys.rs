@@ -89,17 +89,19 @@ async fn a_rotation_is_the_next_version_and_the_earlier_one_still_verifies() {
 }
 
 #[tokio::test]
-async fn only_ed25519_is_at_hand() {
+async fn an_ecdsa_signature_is_raw_r_and_s_under_a_key_of_its_own() {
     let keys = InMemoryKeys::new();
-    let outcome = try_in_scope(async |tx| {
-        keys.sign(&tx, "t", SignatureAlgorithm::EcdsaP256, b"hello")
-            .await
-    })
-    .await;
-    assert!(
-        matches!(outcome, Err(Error::UnsupportedAlgorithm(ref name)) if name == "ecdsa-p256"),
-        "{outcome:?}"
+    keys.register("t", &[1u8; 32]);
+    let p256 = SignatureAlgorithm::EcdsaP256;
+    let signature = in_scope(async |tx| keys.sign(&tx, "t", p256, b"hello").await).await;
+    assert_eq!(signature.algorithm(), p256);
+    assert_eq!(
+        signature.key_version(),
+        1,
+        "the Ed25519 ring is another key"
     );
+    assert_eq!(signature.as_bytes().len(), 64, "not DER");
+    in_scope(async |tx| keys.verify(&tx, "t", b"hello", &signature).await).await;
 }
 
 #[tokio::test]

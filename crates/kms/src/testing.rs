@@ -2,22 +2,21 @@
 //! ports: the adapter over them is exercised as it is in production, with
 //! the network behind the port and nothing else replaced.
 //!
-//! Ed25519 only: a key per tenant, registered from a seed so that a test's
-//! signatures are the same from run to run, or made from the operating
-//! system's randomness on first signing, as Vault would. MAC keys are made
-//! on first use. Nothing persists past the process.
+//! A key per tenant and algorithm, registered from a seed so that a test's
+//! signatures are the same from run to run (Ed25519), or made from the
+//! operating system's randomness on first signing, as Vault would; MAC keys
+//! are made on first use. The cryptography is the PostgreSQL adapter's,
+//! `software`. Nothing persists past the process.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
 use ascetic_ddd_session::Session;
-use ed25519_dalek::{Signer as _, SigningKey, Verifier as _};
-use hmac::{Hmac, Mac as _};
-use sha2::Sha256;
 
-use crate::domain::{KeyLabel, Mac, Signature, SignatureAlgorithm};
+use crate::domain::{Key, KeyLabel, Mac, Signature, SignatureAlgorithm};
 use crate::error::Error;
 use crate::port::{MacService, SigningService};
+use crate::software::{self, KeyPair};
 
 /// Keyrings by tenant and `By`: the versions of each key, counted from one.
 type Keyrings<K, By> = Mutex<HashMap<(String, By), Vec<K>>>;
@@ -26,8 +25,8 @@ type Keyrings<K, By> = Mutex<HashMap<(String, By), Vec<K>>>;
 /// tenant and purpose, each a keyring whose versions count from one.
 #[derive(Default)]
 pub struct InMemoryKeys {
-    signing: Keyrings<SigningKey, SignatureAlgorithm>,
-    mac: Keyrings<[u8; 32], String>,
+    signing: Keyrings<KeyPair, SignatureAlgorithm>,
+    mac: Keyrings<Key, String>,
 }
 
 impl std::fmt::Debug for InMemoryKeys {
@@ -46,18 +45,18 @@ impl InMemoryKeys {
     /// Registers the next version of the tenant's Ed25519 key, derived from
     /// `seed`; answers the version (one for the first).
     pub fn register(&self, tenant_id: &str, seed: &[u8; 32]) -> u32 {
-        let mut keys = self.signing.lock().unwrap_or_else(PoisonError::into_inner);
-        let ring = keys
-            .entry((tenant_id.to_owned(), SignatureAlgorithm::Ed25519))
-            .or_default();
-        ring.push(SigningKey::from_bytes(seed));
-        version_of(ring.len())
+        self.push(
+            tenant_id,
+            SignatureAlgorithm::Ed25519,
+            software::from_seed(SignatureAlgorithm::Ed25519, seed),
+        )
     }
 
-    fn random_seed() -> Result<[u8; 32], Error> {
-        let mut seed = [0u8; 32];
-        getrandom::fill(&mut seed).map_err(Error::Entropy)?;
-        Ok(seed)
+    fn push(&self, tenant_id: &str, algorithm: SignatureAlgorithm, pair: KeyPair) -> u32 {
+        let mut keys = self.signing.lock().unwrap_or_else(PoisonError::into_inner);
+        let ring = keys.entry((tenant_id.to_owned(), algorithm)).or_default();
+        ring.push(pair);
+        version_of(ring.len())
     }
 }
 
@@ -74,20 +73,17 @@ impl<S: Session> SigningService<S> for InMemoryKeys {
         algorithm: SignatureAlgorithm,
         message: &[u8],
     ) -> Result<Signature, Error> {
-        if algorithm != SignatureAlgorithm::Ed25519 {
-            return Err(Error::UnsupportedAlgorithm(algorithm.as_str().to_owned()));
-        }
-        let seed = Self::random_seed()?;
+        let fresh = software::generate(algorithm)?;
         let mut keys = self.signing.lock().unwrap_or_else(PoisonError::into_inner);
         let ring = keys.entry((tenant_id.to_owned(), algorithm)).or_default();
         if ring.is_empty() {
-            ring.push(SigningKey::from_bytes(&seed));
+            ring.push(fresh);
         }
-        let key = ring.last().ok_or(Error::NoKeyOfVersion(1))?;
+        let pair = ring.last().ok_or(Error::NoKeyOfVersion(1))?;
         Ok(Signature::new(
             algorithm,
             version_of(ring.len()),
-            key.sign(message).to_bytes().to_vec(),
+            software::sign(algorithm, &pair.private, message)?,
         ))
     }
 
@@ -99,9 +95,6 @@ impl<S: Session> SigningService<S> for InMemoryKeys {
         signature: &Signature,
     ) -> Result<(), Error> {
         let algorithm = signature.algorithm();
-        if algorithm != SignatureAlgorithm::Ed25519 {
-            return Err(Error::UnsupportedAlgorithm(algorithm.as_str().to_owned()));
-        }
         let keys = self.signing.lock().unwrap_or_else(PoisonError::into_inner);
         let ring = keys
             .get(&(tenant_id.to_owned(), algorithm))
@@ -110,18 +103,12 @@ impl<S: Session> SigningService<S> for InMemoryKeys {
                 algorithm,
             })?;
         let version = signature.key_version();
-        let key = usize::try_from(version)
+        let pair = usize::try_from(version)
             .ok()
             .and_then(|v| v.checked_sub(1))
             .and_then(|index| ring.get(index))
             .ok_or(Error::NoKeyOfVersion(version))?;
-        let bytes: [u8; 64] = signature
-            .as_bytes()
-            .try_into()
-            .map_err(|_| Error::InvalidSignature)?;
-        key.verifying_key()
-            .verify(message, &ed25519_dalek::Signature::from_bytes(&bytes))
-            .map_err(|_| Error::InvalidSignature)
+        software::verify(algorithm, &pair.public, message, signature.as_bytes())
     }
 
     async fn rotate_signing_key(
@@ -130,11 +117,8 @@ impl<S: Session> SigningService<S> for InMemoryKeys {
         tenant_id: &str,
         algorithm: SignatureAlgorithm,
     ) -> Result<u32, Error> {
-        if algorithm != SignatureAlgorithm::Ed25519 {
-            return Err(Error::UnsupportedAlgorithm(algorithm.as_str().to_owned()));
-        }
-        let seed = Self::random_seed()?;
-        Ok(self.register(tenant_id, &seed))
+        let pair = software::generate(algorithm)?;
+        Ok(self.push(tenant_id, algorithm, pair))
     }
 
     async fn delete_signing_key(
@@ -159,7 +143,7 @@ impl<S: Session> MacService<S> for InMemoryKeys {
         purpose: &KeyLabel,
         message: &[u8],
     ) -> Result<Mac, Error> {
-        let fresh = Self::random_seed()?;
+        let fresh = software::generate_mac_key()?;
         let mut keys = self.mac.lock().unwrap_or_else(PoisonError::into_inner);
         let ring = keys
             .entry((tenant_id.to_owned(), purpose.as_str().to_owned()))
@@ -168,12 +152,9 @@ impl<S: Session> MacService<S> for InMemoryKeys {
             ring.push(fresh);
         }
         let key = ring.last().ok_or(Error::NoKeyOfVersion(1))?;
-        let mut mac = Hmac::<Sha256>::new_from_slice(key)
-            .map_err(|error| Error::Malformed(error.to_string()))?;
-        mac.update(message);
         Ok(Mac::new(
             version_of(ring.len()),
-            mac.finalize().into_bytes().to_vec(),
+            software::mac(key, message)?,
         ))
     }
 

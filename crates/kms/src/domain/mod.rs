@@ -25,5 +25,6 @@ pub use self::cipher::{Aes256Gcm, Algorithm, Cipher};
 pub use self::kek::Kek;
 pub use self::key::{Key, VERSION_SIZE, WrappedKey};
 pub use self::master_key::{MASTER_KEY_VERSION, MasterKey};
+#[cfg(feature = "vault")]
 pub(crate) use self::signature::is_key_part;
 pub use self::signature::{KeyLabel, Mac, Signature, SignatureAlgorithm};

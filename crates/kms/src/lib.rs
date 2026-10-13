@@ -9,6 +9,8 @@ mod error;
 #[cfg(feature = "pg")]
 pub mod pg;
 mod port;
+#[cfg(feature = "software")]
+mod software;
 #[cfg(feature = "testing")]
 pub mod testing;
 #[cfg(feature = "vault")]

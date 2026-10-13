@@ -1,6 +1,6 @@
 [package]
 name = "ascetic-ddd-kms"
-description = "Key management for a tenant's keys: a key-encryption key per tenant, versioned and rotated, kept in PostgreSQL under a master key or in HashiCorp Vault Transit; signatures and MACs under the tenant's keys in Vault Transit."
+description = "Key management for a tenant's keys: a key-encryption key per tenant, versioned and rotated, and signatures and MACs under the tenant's keys, kept in PostgreSQL under a master key or in HashiCorp Vault Transit."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,15 +14,18 @@ categories.workspace = true
 readme = "README.md"
 
 [features]
-# PostgreSQL adapter: key-encryption keys in a table, each wrapped by a master key.
-pg = ["ascetic-ddd-session/pg", "dep:tokio-postgres"]
+# PostgreSQL adapter: key-encryption keys in a table, each wrapped by a master key;
+# signing and MAC keys likewise, the signing and MACs done in process (`software`).
+pg = ["ascetic-ddd-session/pg", "dep:tokio-postgres", "software"]
+# Signatures and MACs in this process, for the adapters that hold the key bytes.
+software = ["dep:ed25519-dalek", "dep:p256", "dep:hmac", "dep:sha2"]
 # HashiCorp Vault Transit adapter, over any HTTP client that implements `VaultTransport`.
 vault = ["dep:base64", "dep:futures", "dep:percent-encoding", "dep:serde_json"]
 # `VaultTransport` for `reqwest::Client`. TLS is the application's choice: enable a
 # `reqwest` TLS feature downstream.
 reqwest = ["vault", "dep:reqwest"]
 # In-memory signing and MAC keys for the tests of what consumes the ports.
-testing = ["dep:ed25519-dalek", "dep:hmac", "dep:sha2"]
+testing = ["software"]
 
 [dependencies]
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc", "zeroize"] }
@@ -32,6 +35,7 @@ ed25519-dalek = { version = "3", optional = true }
 futures = { workspace = true, optional = true }
 getrandom = "0.4"
 hmac = { version = "0.12", optional = true }
+p256 = { version = "0.14", optional = true, default-features = false, features = ["ecdsa", "std"] }
 percent-encoding = { version = "2.3", optional = true }
 reqwest = { version = "0.13", optional = true, default-features = false, features = ["json"] }
 serde_json = { workspace = true, optional = true }

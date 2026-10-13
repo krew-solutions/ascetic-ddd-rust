@@ -3,14 +3,15 @@
 Key management for a tenant's keys. For envelope encryption: a tenant has a
 key-encryption key, versioned and rotated, that wraps the data-encryption keys
 its data is sealed with; deleting the tenant's key-encryption keys is
-crypto-shredding. One port and two adapters: keys in a PostgreSQL table under
-a master key, or in HashiCorp Vault Transit. For what a tenant signs and
-authenticates: two more ports — digital signatures under the tenant's key of
-an algorithm, MACs under the tenant's key for a purpose — served by Vault
-Transit, where the keys stay, and by in-memory keys for the tests of what
-consumes them. A port of `ascetic_ddd.kms` (Python) and `asceticddd/kms` (Go),
-which have the first port only; the encryption stage ADR-0002 places before
-the outbox.
+crypto-shredding. For what a tenant signs and authenticates: two more ports —
+digital signatures under the tenant's key of an algorithm, MACs under the
+tenant's key for a purpose. Three ports, two adapters serving all three: keys
+in PostgreSQL tables under a master key, the signing and the MACs done in
+this process; or in HashiCorp Vault Transit, where the keys stay and the
+cryptography is Vault's. In-memory keys serve the signing and MAC ports for
+the tests of what consumes them. A port of `ascetic_ddd.kms` (Python) and
+`asceticddd/kms` (Go), which have the first port only; the encryption stage
+ADR-0002 places before the outbox.
 
 ```rust
 use ascetic_ddd_kms::{Algorithm, MasterKey};
@@ -106,6 +107,19 @@ version control; the session may belong to a database other than the
 data's. Where the requirements are higher, Vault Transit or a cloud KMS
 behind the same port is the answer.
 
+The same adapter serves the signing and MAC ports: signing keys in
+`kms_signing_keys` by tenant, algorithm and version — the private half
+wrapped by the master key under the name `{tenant}.sign.{algorithm}` as its
+associated data, the public half beside it — and MAC keys in `kms_mac_keys`
+by tenant, purpose and version, wrapped under `{tenant}.mac.{purpose}`; the
+signing, verifying and MACs are done in this process (`software`: Ed25519,
+ECDSA P-256, HMAC-SHA-256), in the byte forms the ports fix, the same the
+Vault adapter asks Transit for. A keyring's first key and its rotations are
+under an advisory lock on the key's name, as a tenant's KEK is; `setup`
+makes the three tables under a lock on each name, since two services may
+share one of the tables and not the others. A key wrapped under one master
+key does not open under another: `Decrypt`.
+
 `SigningService<S>` is signatures under the tenant's key of one algorithm —
 `sign`, `verify`, `rotate_signing_key`, `delete_signing_key` — one key per
 tenant and algorithm (`SignatureAlgorithm`: Ed25519, ECDSA P-256 with
@@ -158,11 +172,15 @@ that path only, to tell `SigningKeyNotFound` and `NoKeyOfVersion` apart,
 rather than matching Vault's text.
 
 `testing::InMemoryKeys` (feature `testing`) serves the signing and MAC ports
-from memory — Ed25519 only, a key registered from a seed so that a test's
-signatures are the same from run to run, or made on first signing as Vault
-would; MAC keys made on first use — so that the adapter a consumer writes over
-the ports is exercised as it is in production, with the network behind the
-port and nothing else replaced.
+from memory, with the PostgreSQL adapter's cryptography — a key registered
+from a seed so that a test's signatures are the same from run to run
+(Ed25519), or made on first signing as Vault would; MAC keys made on first
+use — so that the adapter a consumer writes over the ports is exercised as it
+is in production, with the network behind the port and nothing else replaced.
+
+`Cached<K>` passes the signing and MAC ports through to `K` uncached: a
+signature and a verification are not functions of the cache's key. One
+`Cached<K>` then stands for every port `K` serves.
 
 ## What is not here
 
@@ -172,12 +190,11 @@ by these — are the lower half of envelope encryption and live in
 them, over any `KeyManagementService`. Caching is `Cached<K>` above, in
 front of whichever service a consumer unwraps through.
 
-The signing and MAC ports have no PostgreSQL adapter: a private key wrapped
-by a master key in a general-purpose table is what a KMS is there to avoid,
-and nothing asked for one. `Cached<K>` does not pass them through, a public
-key is not served (a verifier elsewhere would need `GET keys/{name}`, whose
-`data.keys.{n}.public_key` is the key), a MAC is not verified by the port, and
-ML-DSA waits for a Vault build that has it. Each comes with its first user.
+A public key is not served by the port (a verifier elsewhere reads it from
+`GET keys/{name}`, `data.keys.{n}.public_key`, or from the `public_key`
+column), a MAC is not verified by the port, an operator retires a version
+outside it, and ML-DSA waits for a Vault build and a library that have it.
+Each comes with its first user.
 
 ## Deviations from the Python and Go sources
 
@@ -207,13 +224,16 @@ ML-DSA waits for a Vault build that has it. Each comes with its first user.
 * The Vault adapter fixes no HTTP library: the session carries the client,
   and `VaultTransport` is what the adapter needs of it. Vault's error text is
   kept in `Error::Vault`.
+* The signing and MAC ports, their tables `kms_signing_keys` and
+  `kms_mac_keys`, and the Transit key names beside the KEK's are this
+  port's; the sources have the KEK port only.
 
 ## Testing
 
 ```bash
 cargo test -p ascetic-ddd-kms                                    # keys and ciphers, no services
 ASCETIC_DDD_TEST_PG_URL=postgresql://user:pass@localhost/db \
-    cargo test -p ascetic-ddd-kms --features pg -- --ignored    # PostgreSQL
+    cargo test -p ascetic-ddd-kms --features pg -- --ignored    # PostgreSQL: KEKs, signing, MACs
 ASCETIC_DDD_TEST_VAULT_ADDR=http://localhost:8200 ASCETIC_DDD_TEST_VAULT_TOKEN=test-root-token \
     cargo test -p ascetic-ddd-kms --features reqwest -- --ignored   # Vault Transit, a dev server
 cargo test -p ascetic-ddd-kms --features testing,vault                # in-memory keys; the Vault
