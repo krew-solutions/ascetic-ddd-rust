@@ -147,6 +147,12 @@ crate did not say or did wrongly, measured on Vault 1.21.4 OSS:
    and the custody's tests run on the PostgreSQL adapter, the consumer's on
    Vault.
 
+Amended 2026-10-14 (ADR-0018): at an inbox that receives several channels
+— one subscriber for every row, one stage per `through` — the stage is
+chosen per row by its `destination`, the intake's name for the channel
+received on: `Sealing::by_destination`, built up front from the received
+channels, refusing a row it has no stage for before any KMS is asked.
+
 Amended 2026-10-13, after the first consumer composed the stages by hand:
 the composition — one stage per channel, built from the channel list, over
 a KMS instance per channel — is the rule's own and lives beside it as

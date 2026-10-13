@@ -116,6 +116,24 @@ let producer = outbox.producer("kafka://policy.lifecycle", encode)
     .through(sealing.of("policy.lifecycle").expect("a channel of the contract"));
 ```
 
+An inbox that receives several channels has one subscriber for every row
+and `through` takes one stage: `by_destination` gives it. A row's
+`destination` is the inbox channel the intake published it to, key
+included — the receiver's own name for the channel it received on
+(ADR-0018) — and the stage maps that name, key left aside, to the channel
+the row was sealed under at the producer's end. Built up front: a channel
+the sealing lacks is refused at construction; a row whose destination is
+not mapped, or that has none, is refused for good before any KMS is
+asked.
+
+```rust,ignore
+let stage = sealing.by_destination([
+    ("inbox://policy-commands", "inbox://policy-commands"),
+    ("inbox://device.lifecycle", "device.lifecycle"),
+])?;
+let intake = inbox.consumer(decode).through(Arc::new(stage));
+```
+
 One stage over one KMS, by hand:
 
 ```rust,ignore

@@ -19,6 +19,6 @@ pub use crate::error::Error;
 pub use crate::pg::PgDekStore;
 pub use crate::port::DekStore;
 #[cfg(feature = "bus")]
-pub use crate::sealing::{Sealing, SealingParameters};
+pub use crate::sealing::{ByDestination, Sealing, SealingParameters, UnsealedChannel};
 #[cfg(feature = "bus")]
 pub use crate::stage::{EnvelopeStage, Reuse};

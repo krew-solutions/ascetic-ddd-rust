@@ -17,16 +17,27 @@
 //! context, both making no key, which is custody's. The stage's parameters
 //! are the deployment's: how many messages and how long one data key serves
 //! at the sealing end, how long an unwrapped key is kept at the opening end.
+//!
+//! An inbox that receives several channels has one subscriber for every
+//! row, and `through` takes one stage: [`Sealing::by_destination`] gives
+//! that stage — [`ByDestination`], which reads the row's `destination`,
+//! the intake's name for the channel it received on, and delegates to the
+//! stage of the channel the row was sealed under (ADR-0018).
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ascetic_ddd_bus::Stage;
+use ascetic_ddd_bus::{BoxError, Message, Permanent, Stage, uri};
 use ascetic_ddd_kms::{Cached, KeyManagementService};
 use ascetic_ddd_session::SessionPool;
+use futures::future::BoxFuture;
 
 use crate::stage::{EnvelopeStage, Reuse};
+
+/// The header an inbox row goes out with: the channel it was received on.
+const DESTINATION: &str = "destination";
 
 /// The stage's parameters: deployment configuration, bounded from the
 /// security side — the window after an off-boarding in which a key already
@@ -105,5 +116,112 @@ impl Sealing {
     /// The channels the sealing was built for.
     pub fn channels(&self) -> impl Iterator<Item = &str> {
         self.stages.keys().map(String::as_str)
+    }
+
+    /// The stage of an inbox that receives several channels: for each
+    /// `(destination, channel)` of `map`, a row whose `destination` is the
+    /// first, key or no key, opens with the stage of the second — the
+    /// channel it was sealed under at the producer's end. Built up front,
+    /// like the sealing itself.
+    ///
+    /// # Errors
+    /// [`UnsealedChannel`] for a channel the sealing was not built for: a
+    /// composition root refuses to start rather than route a destination to
+    /// nothing.
+    pub fn by_destination<D, C>(
+        &self,
+        map: impl IntoIterator<Item = (D, C)>,
+    ) -> Result<ByDestination, UnsealedChannel>
+    where
+        D: Into<String>,
+        C: Into<String>,
+    {
+        let mut stages: HashMap<String, Arc<dyn Stage>> = HashMap::new();
+        for (destination, channel) in map {
+            let (destination, channel) = (destination.into(), channel.into());
+            let stage = self.of(&channel).ok_or_else(|| UnsealedChannel {
+                destination: destination.clone(),
+                channel: channel.clone(),
+            })?;
+            stages.insert(uri::without_key(&destination).to_owned(), stage);
+        }
+        Ok(ByDestination { stages })
+    }
+}
+
+/// A channel the sealing was not built for, named by a destination.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnsealedChannel {
+    /// The destination that named the channel.
+    pub destination: String,
+    /// The channel.
+    pub channel: String,
+}
+
+impl fmt::Display for UnsealedChannel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the sealing was not built for the channel `{}`, which the destination `{}` names",
+            self.channel, self.destination
+        )
+    }
+}
+
+impl std::error::Error for UnsealedChannel {}
+
+/// The stage of an inbox that receives several channels: one of the
+/// sealing's stages per destination, chosen per message by its
+/// `destination` header, the key left aside. A message without the header,
+/// or with a destination the stage was not built for, is refused for good
+/// without a call to any KMS: it is not opened under a guessed context.
+pub struct ByDestination {
+    stages: HashMap<String, Arc<dyn Stage>>,
+}
+
+impl fmt::Debug for ByDestination {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ByDestination")
+            .field("destinations", &self.stages.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl ByDestination {
+    /// The destinations the stage was built for, keys left aside.
+    pub fn destinations(&self) -> impl Iterator<Item = &str> {
+        self.stages.keys().map(String::as_str)
+    }
+
+    fn stage_of(&self, message: &Message) -> Result<Arc<dyn Stage>, BoxError> {
+        let destination = message
+            .header(DESTINATION)
+            .ok_or_else(|| refused(format!("the message has no `{DESTINATION}` header")))?;
+        let destination = std::str::from_utf8(destination)
+            .map_err(|_| refused(format!("the `{DESTINATION}` header is not text")))?;
+        self.stages
+            .get(uri::without_key(destination))
+            .cloned()
+            .ok_or_else(|| refused(format!("no stage for the destination `{destination}`")))
+    }
+}
+
+fn refused(what: String) -> BoxError {
+    Permanent::new(what).into()
+}
+
+impl Stage for ByDestination {
+    fn outbound(&self, message: Message) -> BoxFuture<'_, Result<Message, BoxError>> {
+        Box::pin(async move {
+            let stage = self.stage_of(&message)?;
+            stage.outbound(message).await
+        })
+    }
+
+    fn inbound(&self, message: Message) -> BoxFuture<'_, Result<Message, BoxError>> {
+        Box::pin(async move {
+            let stage = self.stage_of(&message)?;
+            stage.inbound(message).await
+        })
     }
 }

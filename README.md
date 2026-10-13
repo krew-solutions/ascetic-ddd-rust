@@ -104,6 +104,10 @@ others behind features, so that `ascetic_ddd::saga` keeps working as one import
   the bus's key is one per tenant on a mount of its own, derived per channel;
   the adapter makes no key, custody is a port beside, and a refusal is read
   once.
+- [ADR-0018](docs/src/adr/0018-the-intake-names-the-row-and-the-stage-is-chosen-by-it.md) —
+  the intake names the row, and at an inbox that receives several channels
+  the stage is chosen by the row; one subscriber, no filter by address, and
+  why.
 
 ## Specifications
 

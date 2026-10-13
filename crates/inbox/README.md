@@ -29,6 +29,14 @@ inbox.run(|tx, message| handle(tx, message), Loops::default(), ctrl_c).await?;
   a partition key, the URI or the stream, and a dispatcher is whoever holds
   the lock on that slot's row for the length of a transaction. With causal
   dependencies, cut by stream.
+* **One subscriber, every channel.** The inbox takes no filter by address:
+  a consumer that saw one address would wait for ever on a causal
+  dependency published under another, and the wait is resumed by the
+  transaction that marks the dependency, which needs one loop over every
+  row. The subscriber routes by the row's `destination` — the inbox channel
+  the intake published it to, key included, the receiver's own name for it
+  — and by `stream_type` (ADR-0018; the Python source dropped its
+  `subscribe(uri)` for the same reason).
 
 ## The port and the adapter
 

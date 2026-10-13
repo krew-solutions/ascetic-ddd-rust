@@ -636,3 +636,188 @@ async fn the_sealing_of_the_channels_is_built_up_front_and_answers_for_those_alo
         .unwrap_err();
     assert!(error.is::<Permanent>(), "{error}");
 }
+
+/// A key for `tenant-1` in a table of its own, by custody, for the tests
+/// of the stage chosen by destination.
+async fn tenant_with_a_key(table: &str) -> ascetic_ddd_kms::Key {
+    use ascetic_ddd_kms::{KekOptions, KeyCustody as _};
+    let master = Algorithm::Aes256Gcm.generate_key().unwrap();
+    let custody =
+        PgKeyManagementService::new(master.clone()).with_table(Identifier::new(table).unwrap());
+    PgSessionPool::new(pool())
+        .session(async |session| {
+            session
+                .connection()
+                .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+                .await
+                .unwrap();
+            custody.setup(&session).await?;
+            session
+                .atomic(async |tx| {
+                    custody
+                        .create_kek(&tx, "tenant-1", &KekOptions::default())
+                        .await
+                })
+                .await
+        })
+        .await
+        .unwrap();
+    master
+}
+
+/// A row of an inbox that receives several channels: sealed at the
+/// producer's end under its channel, bridged under the intake's name for
+/// that channel, key and all.
+fn row_of(sealed: Message, destination: &str) -> Message {
+    sealed.with_header("destination", destination)
+}
+
+/// One inbox receives two channels; one stage, chosen by the row's
+/// destination, opens each row with the stage of the channel it was sealed
+/// under — and the key after the destination is left aside.
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn one_stage_opens_the_rows_of_two_channels_by_their_destination() {
+    let table = "kms_keys_stage_by_destination";
+    let master = tenant_with_a_key(table).await;
+    let channels = ["device.lifecycle", "inbox://policy-commands"];
+    let producers = sealing_of(table, &master, &channels);
+    let consumer = sealing_of(table, &master, &channels)
+        .by_destination([
+            ("inbox://device.lifecycle", "device.lifecycle"),
+            ("inbox://policy-commands", "inbox://policy-commands"),
+        ])
+        .unwrap();
+    let mut destinations: Vec<&str> = consumer.destinations().collect();
+    destinations.sort_unstable();
+    assert_eq!(
+        destinations,
+        ["inbox://device.lifecycle", "inbox://policy-commands"]
+    );
+
+    let managed = producers
+        .of("device.lifecycle")
+        .unwrap()
+        .outbound(identified(
+            "tenant-1",
+            "00000000-0000-4000-8000-000000000011",
+            "device managed",
+        ))
+        .await
+        .unwrap();
+    let resolve = producers
+        .of("inbox://policy-commands")
+        .unwrap()
+        .outbound(identified(
+            "tenant-1",
+            "00000000-0000-4000-8000-000000000012",
+            "resolve bundle",
+        ))
+        .await
+        .unwrap();
+
+    let opened = consumer
+        .inbound(row_of(managed, "inbox://device.lifecycle/tenant-1"))
+        .await
+        .unwrap();
+    assert_eq!(text(opened.payload()), "device managed");
+    let opened = consumer
+        .inbound(row_of(resolve, "inbox://policy-commands/tenant-1"))
+        .await
+        .unwrap();
+    assert_eq!(text(opened.payload()), "resolve bundle");
+}
+
+/// A row sealed under one channel but named for another's destination is
+/// opened with the other's stage and does not open: the binding is the
+/// channel's, and the verdict is for good.
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn a_row_under_another_channel_s_destination_does_not_open() {
+    let table = "kms_keys_stage_by_destination_other";
+    let master = tenant_with_a_key(table).await;
+    let channels = ["device.lifecycle", "inbox://policy-commands"];
+    let producers = sealing_of(table, &master, &channels);
+    let consumer = sealing_of(table, &master, &channels)
+        .by_destination([
+            ("inbox://device.lifecycle", "device.lifecycle"),
+            ("inbox://policy-commands", "inbox://policy-commands"),
+        ])
+        .unwrap();
+    let managed = producers
+        .of("device.lifecycle")
+        .unwrap()
+        .outbound(identified(
+            "tenant-1",
+            "00000000-0000-4000-8000-000000000013",
+            "device managed",
+        ))
+        .await
+        .unwrap();
+
+    let error = consumer
+        .inbound(row_of(managed, "inbox://policy-commands/tenant-1"))
+        .await
+        .unwrap_err();
+    assert!(
+        error.downcast_ref::<Permanent>().is_some(),
+        "another channel's stage refuses for good: {error}"
+    );
+}
+
+/// A row whose destination the stage was not built for, or without one, is
+/// refused for good before any stage, and so before any KMS, is asked.
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn a_destination_outside_the_map_is_refused_for_good() {
+    let table = "kms_keys_stage_by_destination_outside";
+    let master = tenant_with_a_key(table).await;
+    let sealing = sealing_of(table, &master, &["device.lifecycle"]);
+    let consumer = sealing
+        .by_destination([("inbox://device.lifecycle", "device.lifecycle")])
+        .unwrap();
+    let sealed = sealing
+        .of("device.lifecycle")
+        .unwrap()
+        .outbound(identified(
+            "tenant-1",
+            "00000000-0000-4000-8000-000000000014",
+            "device managed",
+        ))
+        .await
+        .unwrap();
+
+    let error = consumer
+        .inbound(row_of(
+            sealed.clone(),
+            "inbox://telemetry.semantic/tenant-1",
+        ))
+        .await
+        .unwrap_err();
+    assert!(error.downcast_ref::<Permanent>().is_some(), "{error}");
+    assert!(
+        error.to_string().contains("no stage for the destination"),
+        "{error}"
+    );
+    let error = consumer.inbound(sealed).await.unwrap_err();
+    assert!(error.downcast_ref::<Permanent>().is_some(), "{error}");
+    assert!(
+        error.to_string().contains("no `destination` header"),
+        "{error}"
+    );
+}
+
+/// A map naming a channel the sealing was not built for is refused at
+/// construction, before any row arrives.
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn a_map_naming_a_channel_the_sealing_lacks_is_refused_up_front() {
+    let table = "kms_keys_stage_by_destination_lacking";
+    let master = tenant_with_a_key(table).await;
+    let sealing = sealing_of(table, &master, &["device.lifecycle"]);
+    let error = sealing
+        .by_destination([("inbox://telemetry.semantic", "telemetry.semantic")])
+        .expect_err("refused");
+    assert_eq!(error.channel, "telemetry.semantic");
+    assert_eq!(error.destination, "inbox://telemetry.semantic");
+}

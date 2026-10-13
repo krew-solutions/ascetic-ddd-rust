@@ -286,6 +286,48 @@ async fn the_outbox_feeds_the_inbox_without_a_broker() {
     processing.cancel().await;
 }
 
+/// A message from a broker that carries a `destination` header — a
+/// producer on this seedwork stamps its topic on it, and the broker
+/// forwards headers — lands under the intake's name all the same: the
+/// row's uri is the inbox channel the bridge published to, with the key,
+/// and the producer's address is not kept (ADR-0018).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_message_with_a_foreign_destination_lands_under_the_intake_s_uri() {
+    let fixture = fixture("foreign_destination", "inbox-bridge-foreign-destination").await;
+    let mut bus = Bus::new();
+    bus.register("in-memory", InMemoryBroker::new()).unwrap();
+    bus.register(INBOX_SCHEME, fixture.inbox.channel()).unwrap();
+    let bus = Arc::new(bus);
+    let intake = Bridge::new(Arc::clone(&bus))
+        .run(
+            "in-memory://orders",
+            "intake",
+            Target::Fixed("inbox://orders".into()),
+        )
+        .unwrap();
+    let (mut received, processing) = fixture.consume();
+
+    bus.producer("in-memory://orders", |message: &Message| message.clone())
+        .unwrap()
+        .publish(
+            &order("stamped", 4, "00000000-0000-4000-8000-000000000004")
+                .with_header("destination", "kafka://orders/order-7"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(next(&mut received).await, "stamped");
+    assert_eq!(fixture.processed_soon(1).await, 1);
+    assert_eq!(
+        fixture.uri().await,
+        "inbox://orders/order-7",
+        "the intake's name, not the producer's"
+    );
+    intake.cancel().await;
+    processing.cancel().await;
+}
+
 /// A handler that fails leaves the message unprocessed and its own writes
 /// rolled back; the loop retries after the poll interval, and the second
 /// attempt goes through.

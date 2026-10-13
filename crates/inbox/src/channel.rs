@@ -12,12 +12,20 @@
 //!
 //! Headers become columns: `tenant_id`, `stream_type`, `stream_id` — the
 //! JSON text of the id, or the id as a string when it is not JSON —
-//! `stream_position`, and `destination` for `uri`: the channel the message
-//! was sent to, as the outbox stamps it; without one, the inbox channel it
-//! was published to, key included. Every other header is a field of
-//! `metadata`, as text, or structured again when the text is a JSON array
-//! or object, so `causal_dependencies` come back as they left. The channel
-//! name after `inbox://` is not read yet: the whole inbox is one channel.
+//! `stream_position`; `uri` is the inbox channel the message was published
+//! to, key included — the intake's name for what it received, and the
+//! `destination` header the row goes out with (ADR-0018). A `destination`
+//! header on the way in is the producer's address and is not kept: for the
+//! relay out of an outbox it equals the channel anyway, since the bridge
+//! builds the producer for it; from a broker it would name the producer's
+//! topic, and two producers of one topic would name one row two ways. Every
+//! other header is a field of `metadata`, as text, or structured again when
+//! the text is a JSON array or object, so `causal_dependencies` come back
+//! as they left. The channel name after `inbox://` is not a filter: the
+//! whole inbox is one channel with one subscriber, which routes by the
+//! row's `destination` and `stream_type` — a consumer that saw one address
+//! would wait for ever on a causal dependency published under another
+//! (ADR-0006, ADR-0018).
 //!
 //! The consumer's loop is a task on the current tokio runtime; cancel the
 //! subscription to stop it. Both it and the producer are ordinary `Send`
@@ -197,18 +205,16 @@ fn inbox_message_of(channel: &str, message: &Message) -> Result<InboxMessage, Bu
     let stream_position = column(STREAM_POSITION)?
         .parse::<i32>()
         .map_err(|error| malformed(format!("`{STREAM_POSITION}` is not an integer: {error}")))?;
-    let uri = match message.header(DESTINATION) {
-        Some(destination) => text(destination)?.to_owned(),
-        None => {
-            let key = match message.key() {
-                Some(key) => Some(text(key)?),
-                None => uri::key(channel),
-            };
-            match key {
-                Some(key) => format!("{}/{key}", uri::without_key(channel)),
-                None => channel.to_owned(),
-            }
-        }
+    // The intake's name for the row: the channel this producer was built
+    // for, with the message's key, or the channel's own (ADR-0018). A
+    // `destination` header the producer stamped is its address, not ours.
+    let key = match message.key() {
+        Some(key) => Some(text(key)?),
+        None => uri::key(channel),
+    };
+    let uri = match key {
+        Some(key) => format!("{}/{key}", uri::without_key(channel)),
+        None => channel.to_owned(),
     };
     let metadata = message
         .headers()

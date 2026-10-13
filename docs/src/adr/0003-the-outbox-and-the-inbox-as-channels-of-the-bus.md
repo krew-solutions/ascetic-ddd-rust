@@ -75,6 +75,12 @@ inside the message, so one table serves every topic.
   made it; a borrow would need a lifetime the object cannot name on stable
   Rust, and a clone of a handle costs reference counts.
 
+Refined 2026-10-14 by ADR-0018: the destination header is the only source
+for the relay out of an outbox; at the intake into an inbox the row is
+named by the channel the intake published it to, and a `destination` a
+foreign producer stamped is not kept — the Kafka adapter forwards headers,
+so a row would otherwise be named by its sender's stack.
+
 ## Consequences
 
 - `Message` carries headers: `destination`, stamped by the outbox and read
