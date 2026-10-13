@@ -126,7 +126,9 @@ everything it signed: the tenant's off-boarding, never a rotation.
 and purpose, made on first use; a `Mac` carries the version of the key that
 made it, and is checked by recomputation, so the port only makes them. Keeping
 MAC keys apart from signing keys by name keeps their lifecycles apart: a
-signing rotation does not change what a MAC key makes.
+signing rotation does not change what a MAC key makes. Why the ports are
+three and the keys one per use, and what that costs at off-boarding, is
+ADR-0016.
 
 `Cached<K>` keeps what any service unwraps, a thousand keys for five minutes
 unless told otherwise, so a consumer opening a thousand messages sealed
