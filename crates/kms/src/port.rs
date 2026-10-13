@@ -1,5 +1,7 @@
 //! The port: what the application layer sees.
 
+use std::time::Duration;
+
 use ascetic_ddd_session::Session;
 
 use crate::domain::{Key, KeyLabel, Mac, Signature, SignatureAlgorithm};
@@ -61,6 +63,48 @@ pub trait KeyManagementService<S: Session>: Send + Sync {
         &self,
         session: &S,
         tenant_id: &str,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
+}
+
+/// What a tenant's KEK is made with, by whoever has custody of it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct KekOptions {
+    /// Every operation on the key takes a derivation context, and what is
+    /// wrapped under one context does not unwrap under another; the
+    /// context is a channel's name on the bus (ADR-0017). Fixed at
+    /// creation: a key that exists otherwise is a conflict.
+    pub derived: bool,
+    /// The KMS rotates the key itself, this often; an adapter without a
+    /// scheduler refuses it rather than ignore it.
+    pub auto_rotate_period: Option<Duration>,
+}
+
+/// Custody of a tenant's KEK: what makes it, with its options, and what
+/// retires its versions — the tenant-management context's, held by nobody
+/// who merely wraps and unwraps (ADR-0017). Beside
+/// [`KeyManagementService`], not on it: a producer or a consumer of the bus
+/// is bound by that port and must not hold this one.
+pub trait KeyCustody<S: Session>: Send + Sync {
+    /// Makes the tenant's KEK with `options`, version 1, and answers its
+    /// latest version; a key that exists with the same options is left as
+    /// it is and its latest version answered, one that exists with other
+    /// options is [`Error::Conflict`].
+    fn create_kek(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        options: &KekOptions,
+    ) -> impl Future<Output = Result<u32, Error>> + Send;
+
+    /// Retires every version of the tenant's KEK below `version`: what they
+    /// wrapped never unwraps again, [`Error::NoKeyOfVersion`] from then on.
+    /// The bound of a message's life on the bus, applied once the channel's
+    /// retention has passed (ADR-0017).
+    fn retire_kek_versions_before(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        version: u32,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 }
 

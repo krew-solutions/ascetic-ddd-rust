@@ -3,8 +3,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use ascetic_ddd_bus::{Permanent, 
-    Error, Message, Subscription, TransactionalConsumer, TransactionalHandler,
+use ascetic_ddd_bus::{
+    Error, Message, Permanent, Subscription, TransactionalConsumer, TransactionalHandler,
     TransactionalProducer, TransactionalWireConsumer, TransactionalWireProducer,
 };
 use futures::future::BoxFuture;

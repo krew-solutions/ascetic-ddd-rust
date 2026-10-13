@@ -22,7 +22,23 @@
 //! marshaling, so an ECDSA signature is `r || s` and never DER. Transit
 //! answers `400` both for a key it has not got and for a version a key has
 //! not got or no longer serves; the adapter tells them apart by reading the
-//! key once, on that path only, rather than by Vault's text.
+//! key once, on that path only, rather than by Vault's text. A `403` on a
+//! KEK operation is read the same way: the key there, it is
+//! [`Error::Forbidden`] — the policy does not allow the operation, or the
+//! context is not one it admits — and no retry mends it; the key not
+//! there, [`Error::KekNotFound`]; the read itself refused, the `403` as it
+//! came, for the operator.
+//!
+//! Built [`with_derivation_context`](VaultTransitService::with_derivation_context),
+//! the service serves a derived key (Transit's `derived`): every operation
+//! carries the context, base64, and a KEK it makes is made `derived`; what
+//! was wrapped under one context does not unwrap under another, and a
+//! policy may pin the context a caller passes (ADR-0017). Built
+//! [`managed_keys`](VaultTransitService::managed_keys), it makes no KEK on
+//! first contact — Transit's `encrypt` would, under a token that may
+//! create or update keys — and a tenant without one is
+//! [`Error::KekNotFound`] on every wrap; the key is made by whoever has
+//! custody, [`KeyCustody`].
 
 #[cfg(feature = "reqwest")]
 mod reqwest;
@@ -40,7 +56,7 @@ use crate::domain::{
     Key, KeyLabel, Mac, MacKey, Signature, SignatureAlgorithm, SigningKey, is_key_part,
 };
 use crate::error::Error;
-use crate::port::{KeyManagementService, MacService, SigningService};
+use crate::port::{KekOptions, KeyCustody, KeyManagementService, MacService, SigningService};
 
 pub use self::transport::{VaultRequest, VaultResponse, VaultTransport};
 
@@ -58,6 +74,8 @@ pub struct VaultTransitService {
     token: String,
     mount: String,
     key_type: String,
+    context: Option<String>,
+    managed_keys: bool,
 }
 
 impl VaultTransitService {
@@ -70,7 +88,49 @@ impl VaultTransitService {
             token: token.into(),
             mount: "transit".to_owned(),
             key_type: "aes256-gcm96".to_owned(),
+            context: None,
+            managed_keys: false,
         }
+    }
+
+    /// The same service on a derived key, passing `context` with every
+    /// KEK operation and making its KEKs `derived`: one instance per
+    /// channel of the bus, built in the composition root from the
+    /// channel's name (ADR-0017).
+    pub fn with_derivation_context(self, context: impl Into<String>) -> Self {
+        VaultTransitService {
+            context: Some(context.into()),
+            ..self
+        }
+    }
+
+    /// The same service making no KEK on first contact: a tenant without
+    /// one is [`Error::KekNotFound`] on every wrap. For a producer or a
+    /// consumer of the bus, under a token that may neither create nor
+    /// update keys.
+    pub fn managed_keys(self) -> Self {
+        VaultTransitService {
+            managed_keys: true,
+            ..self
+        }
+    }
+
+    /// What a KEK this service makes is made with: its type, and `derived`
+    /// when the service serves a context.
+    fn kek_body(&self) -> Value {
+        json!({ "type": self.key_type, "derived": self.context.is_some() })
+    }
+
+    /// `body` with the derivation context, base64, when the service serves
+    /// one.
+    fn in_context(&self, mut body: Value) -> Value {
+        if let (Some(context), Some(object)) = (&self.context, body.as_object_mut()) {
+            object.insert(
+                "context".to_owned(),
+                Value::String(BASE64.encode(context.as_bytes())),
+            );
+        }
+        body
     }
 
     /// The same service on another mount.
@@ -309,21 +369,79 @@ impl VaultTransitService {
         }
     }
 
+    /// Makes the tenant's KEK unless the keys are managed elsewhere.
     async fn ensure_key<S>(&self, session: &S, tenant_id: &str) -> Result<(), Error>
     where
         S: Session + HttpAccess + Sync,
         S::Client: VaultTransport,
     {
+        if self.managed_keys {
+            return Ok(());
+        }
         let path = format!("/keys/{}", Self::key_name(tenant_id));
-        self.request(
-            session,
-            tenant_id,
-            "POST",
-            &path,
-            Some(json!({ "type": self.key_type })),
-        )
-        .await?;
+        self.request(session, tenant_id, "POST", &path, Some(self.kek_body()))
+            .await?;
         Ok(())
+    }
+
+    /// What a refusal of a KEK operation means, by one read of the key: a
+    /// `400` as [`VaultTransitService::explain`] reads it, with the tenant's
+    /// KEK as the key that may be missing — and, the key there and the
+    /// version served, the request's own fault, which no retry mends: on
+    /// `decrypt` and `rewrap` [`Error::Decrypt`] (a wrong context, bytes
+    /// changed since they were sealed), elsewhere [`Error::Malformed`] with
+    /// Vault's words; a `403` with the key there is [`Error::Forbidden`],
+    /// with the key not there [`Error::KekNotFound`], with the read refused
+    /// too the `403` as it came.
+    async fn explain_kek<S>(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        key_version: Option<u32>,
+        operation: &'static str,
+        error: Error,
+    ) -> Error
+    where
+        S: Session + HttpAccess + Sync,
+        S::Client: VaultTransport,
+    {
+        let name = Self::key_name(tenant_id);
+        let missing = || Error::KekNotFound {
+            tenant_id: tenant_id.to_owned(),
+            key_version: None,
+        };
+        match error {
+            Error::Vault { status: 400, .. } => {
+                match self
+                    .explain(session, &name, key_version, missing, error)
+                    .await
+                {
+                    Error::Vault {
+                        status: 400,
+                        message,
+                        ..
+                    } if matches!(operation, "decrypt" | "rewrap") => {
+                        let _ = message;
+                        Error::Decrypt
+                    }
+                    Error::Vault {
+                        status: 400,
+                        message,
+                        ..
+                    } => Error::Malformed(format!("vault refused {operation}: {message}")),
+                    explained => explained,
+                }
+            }
+            Error::Vault { status: 403, .. } => match self.read_named(session, &name).await {
+                Ok(Some(_)) => Error::Forbidden {
+                    tenant_id: tenant_id.to_owned(),
+                    operation,
+                },
+                Ok(None) => missing(),
+                Err(_) => error,
+            },
+            error => error,
+        }
     }
 }
 
@@ -426,10 +544,18 @@ where
     async fn encrypt_dek(&self, session: &S, tenant_id: &str, dek: &Key) -> Result<Vec<u8>, Error> {
         self.ensure_key(session, tenant_id).await?;
         let path = format!("/encrypt/{}", Self::key_name(tenant_id));
-        let body = json!({ "plaintext": BASE64.encode(dek.as_bytes()) });
-        let answer = self
+        let body = self.in_context(json!({ "plaintext": BASE64.encode(dek.as_bytes()) }));
+        let answer = match self
             .request(session, tenant_id, "POST", &path, Some(body))
-            .await?;
+            .await
+        {
+            Ok(answer) => answer,
+            Err(error) => {
+                return Err(self
+                    .explain_kek(session, tenant_id, None, "encrypt", error)
+                    .await);
+            }
+        };
         Ok(text_field(&answer, "ciphertext")?.as_bytes().to_vec())
     }
 
@@ -439,38 +565,47 @@ where
         tenant_id: &str,
         encrypted_dek: &[u8],
     ) -> Result<Key, Error> {
+        let text = ciphertext_text(encrypted_dek)?;
+        let (key_version, _) = versioned(text, "ciphertext")?;
         let path = format!("/decrypt/{}", Self::key_name(tenant_id));
-        let body = json!({ "ciphertext": ciphertext_text(encrypted_dek)? });
-        let answer = self
+        let body = self.in_context(json!({ "ciphertext": text }));
+        let answer = match self
             .request(session, tenant_id, "POST", &path, Some(body))
-            .await?;
+            .await
+        {
+            Ok(answer) => answer,
+            Err(error) => {
+                return Err(self
+                    .explain_kek(session, tenant_id, Some(key_version), "decrypt", error)
+                    .await);
+            }
+        };
         Ok(Key::new(base64_field(&answer, "plaintext")?))
     }
 
     async fn generate_dek(&self, session: &S, tenant_id: &str) -> Result<(Key, Vec<u8>), Error> {
         self.ensure_key(session, tenant_id).await?;
         let path = format!("/datakey/plaintext/{}", Self::key_name(tenant_id));
-        let answer = self
-            .request(
-                session,
-                tenant_id,
-                "POST",
-                &path,
-                Some(json!({ "bits": 256 })),
-            )
-            .await?;
+        let body = self.in_context(json!({ "bits": 256 }));
+        let answer = match self
+            .request(session, tenant_id, "POST", &path, Some(body))
+            .await
+        {
+            Ok(answer) => answer,
+            Err(error) => {
+                return Err(self
+                    .explain_kek(session, tenant_id, None, "datakey", error)
+                    .await);
+            }
+        };
         let dek = Key::new(base64_field(&answer, "plaintext")?);
         let encrypted_dek = text_field(&answer, "ciphertext")?.as_bytes().to_vec();
         Ok((dek, encrypted_dek))
     }
 
     async fn rotate_kek(&self, session: &S, tenant_id: &str) -> Result<u32, Error> {
-        self.rotate_named(
-            session,
-            &Self::key_name(tenant_id),
-            json!({ "type": self.key_type }),
-        )
-        .await
+        self.rotate_named(session, &Self::key_name(tenant_id), self.kek_body())
+            .await
     }
 
     async fn rewrap_dek(
@@ -479,16 +614,109 @@ where
         tenant_id: &str,
         encrypted_dek: &[u8],
     ) -> Result<Vec<u8>, Error> {
+        let text = ciphertext_text(encrypted_dek)?;
+        let (key_version, _) = versioned(text, "ciphertext")?;
         let path = format!("/rewrap/{}", Self::key_name(tenant_id));
-        let body = json!({ "ciphertext": ciphertext_text(encrypted_dek)? });
-        let answer = self
+        let body = self.in_context(json!({ "ciphertext": text }));
+        let answer = match self
             .request(session, tenant_id, "POST", &path, Some(body))
-            .await?;
+            .await
+        {
+            Ok(answer) => answer,
+            Err(error) => {
+                return Err(self
+                    .explain_kek(session, tenant_id, Some(key_version), "rewrap", error)
+                    .await);
+            }
+        };
         Ok(text_field(&answer, "ciphertext")?.as_bytes().to_vec())
     }
 
     async fn delete_kek(&self, session: &S, tenant_id: &str) -> Result<(), Error> {
         self.delete_named(session, &Self::key_name(tenant_id)).await
+    }
+}
+
+impl<S> KeyCustody<S> for VaultTransitService
+where
+    S: Session + HttpAccess + Sync,
+    S::Client: VaultTransport,
+{
+    /// `POST keys/{name}` with the type and `derived` — idempotent on
+    /// Transit, which leaves a key that exists as it is and says nothing —
+    /// then one read: a `derived` other than asked is [`Error::Conflict`],
+    /// since it cannot be changed; the rotation period, which can, is set
+    /// by `config` when asked.
+    async fn create_kek(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        options: &KekOptions,
+    ) -> Result<u32, Error> {
+        let name = Self::key_name(tenant_id);
+        let path = format!("/keys/{name}");
+        let mut body = json!({ "type": self.key_type, "derived": options.derived });
+        if let (Some(period), Some(object)) = (options.auto_rotate_period, body.as_object_mut()) {
+            object.insert("auto_rotate_period".to_owned(), json!(period.as_secs()));
+        }
+        self.request(session, tenant_id, "POST", &path, Some(body))
+            .await?;
+        let answer = self
+            .read_named(session, &name)
+            .await?
+            .ok_or_else(|| Error::Malformed(format!("key `{name}` vanished while being made")))?;
+        let derived = answer
+            .get("data")
+            .and_then(|data| data.get("derived"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if derived != options.derived {
+            return Err(Error::Conflict {
+                tenant_id: tenant_id.to_owned(),
+                detail: format!(
+                    "the key is {}, a {} one was asked",
+                    if derived { "derived" } else { "not derived" },
+                    if options.derived { "derived" } else { "plain" }
+                ),
+            });
+        }
+        if let Some(period) = options.auto_rotate_period {
+            let path = format!("/keys/{name}/config");
+            self.request(
+                session,
+                tenant_id,
+                "POST",
+                &path,
+                Some(json!({ "auto_rotate_period": period.as_secs() })),
+            )
+            .await?;
+        }
+        version_field(&answer, "latest_version")
+    }
+
+    /// `min_decryption_version` of the key raised to `version`.
+    async fn retire_kek_versions_before(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        version: u32,
+    ) -> Result<(), Error> {
+        let path = format!("/keys/{}/config", Self::key_name(tenant_id));
+        match self
+            .request(
+                session,
+                tenant_id,
+                "POST",
+                &path,
+                Some(json!({ "min_decryption_version": version })),
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) => Err(self
+                .explain_kek(session, tenant_id, None, "retire", error)
+                .await),
+        }
     }
 }
 

@@ -97,6 +97,9 @@ side's KMS unwraps each key once. Both are off unless asked for.
 
 ```rust,ignore
 let sealing = Arc::new(EnvelopeStage::new(kms_sessions, kms));
+// One stage per channel: the KMS it is built over serves the channel as its
+// derivation context (`with_derivation_context`, ADR-0017), so a DEK drawn
+// for the channel unwraps there and nowhere else, at either end.
 let placed = outbox.producer("kafka://orders", encode).through(Arc::clone(&sealing));
 let orders = inbox.consumer(decode).through(sealing);
 ```

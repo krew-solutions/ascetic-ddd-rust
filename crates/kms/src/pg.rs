@@ -1,6 +1,18 @@
 //! The PostgreSQL key management service: a tenant's KEKs in a table, each
 //! wrapped by the master key.
 //!
+//! # A derivation context, and keys made elsewhere
+//!
+//! Built [`with_derivation_context`](PgKeyManagementService::with_derivation_context),
+//! the service wraps and unwraps under associated data that binds the
+//! wrap to the context beside the tenant: what was wrapped for one channel
+//! of the bus does not unwrap for another, as under a derived key of
+//! Vault's (ADR-0017). The rows are the same; the binding is the wrap's.
+//! Built [`managed_keys`](PgKeyManagementService::managed_keys), the
+//! service makes no KEK on first contact: a tenant without one is
+//! [`Error::KekNotFound`] on every wrap, and the key is made by whoever
+//! has custody ([`KeyCustody`]), under the same lock.
+//!
 //! # The table
 //!
 //! `kms_keys (tenant_id, key_version, encrypted_key, master_algorithm,
@@ -35,7 +47,7 @@ use crate::domain::{
     SignatureAlgorithm, SigningKey, WrappedKey,
 };
 use crate::error::Error;
-use crate::port::{KeyManagementService, MacService, SigningService};
+use crate::port::{KekOptions, KeyCustody, KeyManagementService, MacService, SigningService};
 
 /// The key management service over a table of KEKs wrapped by one master key.
 pub struct PgKeyManagementService {
@@ -44,6 +56,8 @@ pub struct PgKeyManagementService {
     table: Identifier,
     signing_table: Identifier,
     mac_table: Identifier,
+    context: Option<String>,
+    managed_keys: bool,
 }
 
 impl PgKeyManagementService {
@@ -56,6 +70,29 @@ impl PgKeyManagementService {
             table: Identifier::new("kms_keys").expect("a literal identifier"),
             signing_table: Identifier::new("kms_signing_keys").expect("a literal identifier"),
             mac_table: Identifier::new("kms_mac_keys").expect("a literal identifier"),
+            context: None,
+            managed_keys: false,
+        }
+    }
+
+    /// The same service wrapping and unwrapping under `context`, bound into
+    /// the wrap's associated data beside the tenant: one instance per
+    /// channel of the bus, built in the composition root from the channel's
+    /// name (ADR-0017).
+    pub fn with_derivation_context(self, context: impl Into<String>) -> Self {
+        PgKeyManagementService {
+            context: Some(context.into()),
+            ..self
+        }
+    }
+
+    /// The same service making no KEK on first contact: a tenant without
+    /// one is [`Error::KekNotFound`] on every wrap. For a producer or a
+    /// consumer of the bus, whose keys are made by whoever has custody.
+    pub fn managed_keys(self) -> Self {
+        PgKeyManagementService {
+            managed_keys: true,
+            ..self
         }
     }
 
@@ -480,15 +517,16 @@ impl PgKeyManagementService {
         }
     }
 
-    /// The tenant's current KEK, made if there is none: under the tenant's
-    /// lock, and read again after taking it, in case another transaction
-    /// made it meanwhile.
+    /// The tenant's current KEK, made if there is none — unless the keys
+    /// are managed elsewhere, when none is [`Error::KekNotFound`]: under
+    /// the tenant's lock, and read again after taking it, in case another
+    /// transaction made it meanwhile.
     async fn get_or_create_current_kek<S>(&self, session: &S, tenant_id: &str) -> Result<Kek, Error>
     where
         S: Session + PgAccess + Sync,
     {
         match self.current_kek(session, tenant_id).await {
-            Err(Error::KekNotFound { .. }) => {}
+            Err(Error::KekNotFound { .. }) if !self.managed_keys => {}
             found => return found,
         }
         // A scope of the adapter's own: the lock is a transaction's, and
@@ -500,7 +538,7 @@ impl PgKeyManagementService {
                     Err(Error::KekNotFound { .. }) => {
                         let kek = self
                             .master_key(self.master_algorithm)?
-                            .generate_kek(tenant_id)?;
+                            .generate_kek(tenant_id, self.context.as_deref())?;
                         self.save_kek(&tx, &kek).await?;
                         Ok(kek)
                     }
@@ -542,8 +580,13 @@ impl PgKeyManagementService {
         let wrapped = WrappedKey::parse(&row.try_get::<_, Vec<u8>>("encrypted_key")?)?;
         let master_algorithm: Algorithm = row.try_get::<_, String>("master_algorithm")?.parse()?;
         let key_algorithm: Algorithm = row.try_get::<_, String>("key_algorithm")?.parse()?;
-        self.master_key(master_algorithm)?
-            .load_kek(tenant_id, wrapped, version, key_algorithm)
+        self.master_key(master_algorithm)?.load_kek(
+            tenant_id,
+            self.context.as_deref(),
+            wrapped,
+            version,
+            key_algorithm,
+        )
     }
 }
 
@@ -591,7 +634,9 @@ where
                 let master = self.master_key(self.master_algorithm)?;
                 let kek = match self.current_kek(&tx, tenant_id).await {
                     Ok(current) => master.rotate_kek(&current)?,
-                    Err(Error::KekNotFound { .. }) => master.generate_kek(tenant_id)?,
+                    Err(Error::KekNotFound { .. }) => {
+                        master.generate_kek(tenant_id, self.context.as_deref())?
+                    }
                     Err(error) => return Err(error),
                 };
                 self.save_kek(&tx, &kek).await?;
@@ -615,6 +660,65 @@ where
     async fn delete_kek(&self, session: &S, tenant_id: &str) -> Result<(), Error> {
         let sql = format!("DELETE FROM {} WHERE tenant_id = $1", self.table);
         session.connection().execute(&sql, &[&tenant_id]).await?;
+        Ok(())
+    }
+}
+
+impl<S> KeyCustody<S> for PgKeyManagementService
+where
+    S: Session + PgAccess + Sync,
+{
+    /// Makes the tenant's first KEK under the tenant's lock, or answers the
+    /// version of the one there is. `derived` has nothing to enforce here —
+    /// this adapter has no policy to pin a context by; the binding to a
+    /// context is the wrap's — and a key that exists is taken as made with
+    /// the options asked. Automatic rotation is refused: there is no
+    /// scheduler in a table.
+    async fn create_kek(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        options: &KekOptions,
+    ) -> Result<u32, Error> {
+        if options.auto_rotate_period.is_some() {
+            return Err(Error::Unsupported(
+                "automatic rotation: the PostgreSQL KMS rotates on request only",
+            ));
+        }
+        session
+            .atomic(async |tx| {
+                self.lock_tenant(&tx, tenant_id).await?;
+                match self.current_kek(&tx, tenant_id).await {
+                    Ok(current) => Ok(current.version()),
+                    Err(Error::KekNotFound { .. }) => {
+                        let kek = self
+                            .master_key(self.master_algorithm)?
+                            .generate_kek(tenant_id, self.context.as_deref())?;
+                        self.save_kek(&tx, &kek).await?;
+                        Ok(kek.version())
+                    }
+                    Err(error) => Err(error),
+                }
+            })
+            .await
+    }
+
+    /// Deletes the rows of the versions below `version`: what they wrapped
+    /// is [`Error::KekNotFound`] of that version from then on.
+    async fn retire_kek_versions_before(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        version: u32,
+    ) -> Result<(), Error> {
+        let sql = format!(
+            "DELETE FROM {} WHERE tenant_id = $1 AND key_version < $2",
+            self.table
+        );
+        session
+            .connection()
+            .execute(&sql, &[&tenant_id, &stored_version(version)?])
+            .await?;
         Ok(())
     }
 }

@@ -19,7 +19,7 @@ use ascetic_ddd_kms::{Algorithm, MasterKey};
 let master_key = Algorithm::Aes256Gcm.generate_key()?;      // from configuration, in practice
 let master = MasterKey::new(master_key, Algorithm::Aes256Gcm)?;
 
-let kek = master.generate_kek("tenant-1")?;                  // version 1, wrapped by the master
+let kek = master.generate_kek("tenant-1", None)?;            // version 1, wrapped by the master; no derivation context
 let (dek, wrapped) = kek.generate_dek()?;                    // wrapped names the KEK's version
 assert_eq!(wrapped.key_version(), 1);
 assert_eq!(kek.unwrap(&wrapped)?, dek);
@@ -130,6 +130,28 @@ under an advisory lock on the key's name, as a tenant's KEK is; `setup`
 makes the three tables under a lock on each name, since two services may
 share one of the tables and not the others. A key wrapped under one master
 key does not open under another: `Decrypt`.
+
+Two settings of either adapter serve the bus (ADR-0017). Built
+`with_derivation_context(channel)`, the service serves a derived key: on
+Vault every KEK operation carries the context, base64, and a KEK the service
+makes is `derived`; on PostgreSQL the context is bound into the wrap's
+associated data beside the tenant. Either way a DEK wrapped for one channel
+does not unwrap for another, and the composition root builds one instance,
+one `Cached` and one stage per channel, from the channel's name in the
+contract. Built `managed_keys()`, the service makes no KEK on first contact:
+a tenant without one is `KekNotFound` on every wrap, and the key is made by
+whoever has custody through `KeyCustody<S>` — `create_kek` with
+`KekOptions` (`derived`, `auto_rotate_period`, which the PostgreSQL adapter
+refuses as `Unsupported`, having no scheduler) and
+`retire_kek_versions_before` (Transit's `min_decryption_version`; a
+deletion of the rows on PostgreSQL) — a port beside `KeyManagementService`,
+held by the tenant-management context and by nobody who merely wraps.
+On Vault a refusal of a KEK operation is read once: a `400` is the key
+missing (`KekNotFound`), a version retired (`NoKeyOfVersion`), or — the key
+there and the version served — the request's own fault, `Decrypt` on
+`decrypt` and `rewrap` (a wrong context, bytes changed), `Malformed`
+elsewhere; a `403` with the key there is `Forbidden`, which no retry under
+the same identity and context mends.
 
 `SigningService<S>` is signatures under the tenant's key of one algorithm —
 `sign`, `verify`, `rotate_signing_key`, `delete_signing_key` — one key per

@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ascetic_ddd_kms::{
-    Algorithm, Error, Key, KeyManagementService, PgKeyManagementService, WrappedKey,
+    Algorithm, Error, KekOptions, Key, KeyCustody, KeyManagementService, PgKeyManagementService,
+    WrappedKey,
 };
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -46,6 +47,7 @@ struct Fixture {
     sessions: PgSessionPool,
     kms: Arc<PgKeyManagementService>,
     table: String,
+    master: Key,
 }
 
 /// A table of its own per test, so tests run in parallel; a fresh master key.
@@ -56,6 +58,7 @@ async fn fixture(name: &str) -> Fixture {
 async fn fixture_with_master(name: &str, master_key: Key) -> Fixture {
     let table = format!("kms_keys_{name}");
     let sessions = PgSessionPool::new(pool());
+    let master = master_key.clone();
     let kms = PgKeyManagementService::new(master_key).with_table(Identifier::new(&table).unwrap());
     sessions
         .session(async |session| {
@@ -72,6 +75,7 @@ async fn fixture_with_master(name: &str, master_key: Key) -> Fixture {
         sessions,
         kms: Arc::new(kms),
         table,
+        master,
     }
 }
 
@@ -419,4 +423,89 @@ async fn a_key_the_python_port_wrote_is_read() {
     .await
     .unwrap();
     assert_eq!(f.versions_of("tenant-1").await, [1]);
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn managed_keys_are_not_made_on_first_contact() {
+    let f = fixture("managed_keys").await;
+    let managed = Arc::new(
+        PgKeyManagementService::new(f.master.clone())
+            .with_table(Identifier::new(&f.table).unwrap())
+            .managed_keys(),
+    );
+    let outcome = f
+        .sessions
+        .session(async |session| {
+            session
+                .atomic(async |tx| managed.generate_dek(&tx, "1").await)
+                .await
+        })
+        .await;
+    assert!(
+        matches!(outcome, Err(Error::KekNotFound { ref tenant_id, key_version: None }) if tenant_id == "1"),
+        "{outcome:?}"
+    );
+    assert!(f.versions_of("1").await.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn a_context_binds_the_wrap_to_its_channel() {
+    let f = fixture("context").await;
+    let lifecycle = PgKeyManagementService::new(f.master.clone())
+        .with_table(Identifier::new(&f.table).unwrap())
+        .with_derivation_context("policy.lifecycle");
+    let command = PgKeyManagementService::new(f.master.clone())
+        .with_table(Identifier::new(&f.table).unwrap())
+        .with_derivation_context("integration.command");
+    f.sessions
+        .session(async |session| {
+            session
+                .atomic(async |tx| {
+                    let (dek, wrapped) = lifecycle.generate_dek(&tx, "1").await?;
+                    assert!(matches!(
+                        command.decrypt_dek(&tx, "1", &wrapped).await,
+                        Err(Error::Decrypt)
+                    ));
+                    assert_eq!(lifecycle.decrypt_dek(&tx, "1", &wrapped).await?, dek);
+                    Ok::<_, Error>(())
+                })
+                .await
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn custody_makes_the_key_once_and_retires_its_versions() {
+    let f = fixture("custody").await;
+    f.atomic(|tx, kms| async move {
+        let options = KekOptions::default();
+        assert_eq!(kms.create_kek(&tx, "1", &options).await?, 1);
+        assert_eq!(kms.create_kek(&tx, "1", &options).await?, 1);
+        let scheduled = KekOptions {
+            derived: false,
+            auto_rotate_period: Some(Duration::from_secs(3600)),
+        };
+        assert!(matches!(
+            kms.create_kek(&tx, "1", &scheduled).await,
+            Err(Error::Unsupported(_))
+        ));
+        let wrapped_v1 = kms.encrypt_dek(&tx, "1", &key()).await?;
+        assert_eq!(kms.rotate_kek(&tx, "1").await?, 2);
+        kms.retire_kek_versions_before(&tx, "1", 2).await?;
+        assert!(matches!(
+            kms.decrypt_dek(&tx, "1", &wrapped_v1).await,
+            Err(Error::KekNotFound {
+                key_version: Some(1),
+                ..
+            })
+        ));
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(f.versions_of("1").await, vec![2]);
 }

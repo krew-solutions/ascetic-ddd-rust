@@ -19,7 +19,7 @@ use ascetic_ddd_session::Session;
 
 use crate::domain::{Key, KeyLabel, Mac, Signature, SignatureAlgorithm};
 use crate::error::Error;
-use crate::port::{KeyManagementService, MacService, SigningService};
+use crate::port::{KekOptions, KeyCustody, KeyManagementService, MacService, SigningService};
 
 /// A key management service that keeps what it unwraps, for a while.
 pub struct Cached<K> {
@@ -254,5 +254,35 @@ where
         purpose: &KeyLabel,
     ) -> Result<(), Error> {
         self.kms.delete_mac_key(session, tenant_id, purpose).await
+    }
+}
+
+impl<S, K> KeyCustody<S> for Cached<K>
+where
+    S: Session,
+    K: KeyCustody<S>,
+{
+    async fn create_kek(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        options: &KekOptions,
+    ) -> Result<u32, Error> {
+        self.kms.create_kek(session, tenant_id, options).await
+    }
+
+    async fn retire_kek_versions_before(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        version: u32,
+    ) -> Result<(), Error> {
+        self.kms
+            .retire_kek_versions_before(session, tenant_id, version)
+            .await?;
+        // What was unwrapped under a retired version is forgotten here as
+        // on a deletion: the cache's time to live would bound it otherwise.
+        self.forget(tenant_id);
+        Ok(())
     }
 }

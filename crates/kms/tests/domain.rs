@@ -51,7 +51,7 @@ fn another_tenant_does_not_unwrap_it() {
 #[test]
 fn the_first_kek_is_version_one() {
     let master = master(&key());
-    let kek = master.generate_kek("tenant-1").unwrap();
+    let kek = master.generate_kek("tenant-1", None).unwrap();
     assert_eq!(kek.tenant_id(), "tenant-1");
     assert_eq!(kek.version(), 1);
     assert_eq!(kek.algorithm(), master.algorithm());
@@ -69,13 +69,14 @@ fn the_first_kek_is_version_one() {
 #[test]
 fn a_kek_loads_back_from_its_wrapped_form() {
     let master = master(&key());
-    let kek = master.generate_kek("tenant-1").unwrap();
+    let kek = master.generate_kek("tenant-1", None).unwrap();
     let dek = key();
     let wrapped = kek.wrap(&dek).unwrap();
 
     let loaded = master
         .load_kek(
             "tenant-1",
+            None,
             kek.wrapped().clone(),
             kek.version(),
             kek.algorithm(),
@@ -90,18 +91,18 @@ fn a_kek_loads_back_from_its_wrapped_form() {
 #[test]
 fn a_kek_does_not_load_under_another_tenant() {
     let master = master(&key());
-    let kek = master.generate_kek("t1").unwrap();
+    let kek = master.generate_kek("t1", None).unwrap();
     assert!(matches!(
-        master.load_kek("t2", kek.wrapped().clone(), 1, Algorithm::Aes256Gcm),
+        master.load_kek("t2", None, kek.wrapped().clone(), 1, Algorithm::Aes256Gcm),
         Err(Error::Decrypt)
     ));
 }
 
 #[test]
 fn a_kek_does_not_load_under_another_master_key() {
-    let kek = master(&key()).generate_kek("t1").unwrap();
+    let kek = master(&key()).generate_kek("t1", None).unwrap();
     assert!(matches!(
-        master(&key()).load_kek("t1", kek.wrapped().clone(), 1, Algorithm::Aes256Gcm),
+        master(&key()).load_kek("t1", None, kek.wrapped().clone(), 1, Algorithm::Aes256Gcm),
         Err(Error::Decrypt)
     ));
 }
@@ -109,7 +110,7 @@ fn a_kek_does_not_load_under_another_master_key() {
 #[test]
 fn rotation_makes_the_next_version() {
     let master = master(&key());
-    let kek = master.generate_kek("tenant-1").unwrap();
+    let kek = master.generate_kek("tenant-1", None).unwrap();
     let rotated = master.rotate_kek(&kek).unwrap();
     assert_eq!(rotated.version(), kek.version() + 1);
     assert_eq!(rotated.tenant_id(), kek.tenant_id());
@@ -121,7 +122,7 @@ fn rotation_makes_the_next_version() {
 
 #[test]
 fn a_kek_wraps_a_dek_and_unwraps_it() {
-    let kek = master(&key()).generate_kek("tenant-1").unwrap();
+    let kek = master(&key()).generate_kek("tenant-1", None).unwrap();
     let dek = key();
     let wrapped = kek.wrap(&dek).unwrap();
     assert_eq!(kek.unwrap(&wrapped).unwrap(), dek);
@@ -129,7 +130,7 @@ fn a_kek_wraps_a_dek_and_unwraps_it() {
 
 #[test]
 fn a_kek_makes_a_dek_of_its_kind_and_wraps_it() {
-    let kek = master(&key()).generate_kek("tenant-1").unwrap();
+    let kek = master(&key()).generate_kek("tenant-1", None).unwrap();
     let (dek, wrapped) = kek.generate_dek().unwrap();
     assert_eq!(dek.as_bytes().len(), 32);
     assert_eq!(wrapped.key_version(), kek.version());
@@ -140,7 +141,7 @@ fn a_kek_makes_a_dek_of_its_kind_and_wraps_it() {
 fn the_wrapped_key_names_the_kek_version_on_the_wire() {
     let master = master(&key());
     let kek = master
-        .rotate_kek(&master.generate_kek("tenant-1").unwrap())
+        .rotate_kek(&master.generate_kek("tenant-1", None).unwrap())
         .unwrap();
     let wrapped = kek.wrap(&key()).unwrap();
     let bytes = wrapped.to_bytes();
@@ -151,7 +152,7 @@ fn the_wrapped_key_names_the_kek_version_on_the_wire() {
 #[test]
 fn a_rotated_kek_refuses_what_the_old_one_wrapped_and_rewraps_it() {
     let master = master(&key());
-    let kek = master.generate_kek("tenant-1").unwrap();
+    let kek = master.generate_kek("tenant-1", None).unwrap();
     let dek = key();
     let wrapped = kek.wrap(&dek).unwrap();
     let rotated = master.rotate_kek(&kek).unwrap();
@@ -171,8 +172,8 @@ fn a_rotated_kek_refuses_what_the_old_one_wrapped_and_rewraps_it() {
 #[test]
 fn keks_of_two_tenants_do_not_unwrap_each_other_s() {
     let master = master(&key());
-    let kek1 = master.generate_kek("tenant-1").unwrap();
-    let kek2 = master.generate_kek("t2").unwrap();
+    let kek1 = master.generate_kek("tenant-1", None).unwrap();
+    let kek2 = master.generate_kek("t2", None).unwrap();
     let wrapped = kek1.wrap(&key()).unwrap();
     assert!(matches!(kek2.unwrap(&wrapped), Err(Error::Decrypt)));
 }
@@ -224,7 +225,13 @@ mod wrapped_by_the_python_port {
         let dek = Key::new((0x40..0x60).collect::<Vec<u8>>());
         for (version, kek, dek_wrapped) in [(1, KEK_V1, DEK_UNDER_V1), (2, KEK_V2, DEK_UNDER_V2)] {
             let kek = master
-                .load_kek("tenant-1", wrapped(kek), version, Algorithm::Aes256Gcm)
+                .load_kek(
+                    "tenant-1",
+                    None,
+                    wrapped(kek),
+                    version,
+                    Algorithm::Aes256Gcm,
+                )
                 .unwrap();
             assert_eq!(wrapped(dek_wrapped).key_version(), version);
             assert_eq!(
@@ -238,7 +245,7 @@ mod wrapped_by_the_python_port {
     #[test]
     fn its_second_kek_refuses_what_its_first_wrapped() {
         let kek2 = python_master()
-            .load_kek("tenant-1", wrapped(KEK_V2), 2, Algorithm::Aes256Gcm)
+            .load_kek("tenant-1", None, wrapped(KEK_V2), 2, Algorithm::Aes256Gcm)
             .unwrap();
         assert!(matches!(
             kek2.unwrap(&wrapped(DEK_UNDER_V1)),
@@ -248,4 +255,38 @@ mod wrapped_by_the_python_port {
             })
         ));
     }
+}
+
+#[test]
+fn a_kek_serving_a_context_binds_what_it_wraps_to_it() {
+    let master = MasterKey::new(key(), Algorithm::Aes256Gcm).unwrap();
+    let lifecycle = master
+        .generate_kek("tenant-1", Some("policy.lifecycle"))
+        .unwrap();
+    assert_eq!(lifecycle.context(), Some("policy.lifecycle"));
+    let dek = key();
+    let wrapped = lifecycle.wrap(&dek).unwrap();
+    assert_eq!(lifecycle.unwrap(&wrapped).unwrap(), dek);
+    // The same key bytes, loaded for another context or for none, do not
+    // open it: the binding is the wrap's associated data.
+    let command = master
+        .load_kek(
+            "tenant-1",
+            Some("integration.command"),
+            lifecycle.wrapped().clone(),
+            1,
+            Algorithm::Aes256Gcm,
+        )
+        .unwrap();
+    assert!(matches!(command.unwrap(&wrapped), Err(Error::Decrypt)));
+    let plain = master
+        .load_kek(
+            "tenant-1",
+            None,
+            lifecycle.wrapped().clone(),
+            1,
+            Algorithm::Aes256Gcm,
+        )
+        .unwrap();
+    assert!(matches!(plain.unwrap(&wrapped), Err(Error::Decrypt)));
 }

@@ -100,6 +100,10 @@ others behind features, so that `ascetic_ddd::saga` keeps working as one import
 - [ADR-0016](docs/src/adr/0016-a-tenants-keys-are-one-per-use.md) — a tenant's
   keys are one per use: the KEK, a signing key per algorithm, a MAC key per
   purpose.
+- [ADR-0017](docs/src/adr/0017-the-bus-key-is-derived-per-channel-on-a-mount-of-its-own.md) —
+  the bus's key is one per tenant on a mount of its own, derived per channel;
+  the adapter makes no key, custody is a port beside, and a refusal is read
+  once.
 
 ## Specifications
 

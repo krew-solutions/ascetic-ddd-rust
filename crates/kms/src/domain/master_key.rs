@@ -40,21 +40,22 @@ impl MasterKey {
     }
 
     /// The tenant's first KEK: a fresh key of this master key's algorithm,
-    /// wrapped by it, version 1.
-    pub fn generate_kek(&self, tenant_id: &str) -> Result<Kek, Error> {
-        self.make_kek(tenant_id, 1)
+    /// wrapped by it, version 1; serving `context` when one is given.
+    pub fn generate_kek(&self, tenant_id: &str, context: Option<&str>) -> Result<Kek, Error> {
+        self.make_kek(tenant_id, context, 1)
     }
 
     /// A KEK read back from storage: `wrapped` unwrapped by this master key.
     pub fn load_kek(
         &self,
         tenant_id: &str,
+        context: Option<&str>,
         wrapped: WrappedKey,
         version: u32,
         algorithm: Algorithm,
     ) -> Result<Kek, Error> {
         let key = self.unwrap(tenant_id, &wrapped)?;
-        Kek::new(tenant_id, version, algorithm, &key, wrapped)
+        Kek::new(tenant_id, context, version, algorithm, &key, wrapped)
     }
 
     /// The next version of `kek`: a fresh key of this master key's
@@ -64,7 +65,7 @@ impl MasterKey {
             .version()
             .checked_add(1)
             .ok_or_else(|| Error::Malformed(format!("no key version after {}", kek.version())))?;
-        self.make_kek(kek.tenant_id(), version)
+        self.make_kek(kek.tenant_id(), kek.context(), version)
     }
 
     /// The master key as `tenant_id` sees it: bound to the tenant as
@@ -75,11 +76,11 @@ impl MasterKey {
 
     /// A fresh key of this master key's algorithm — made by its cipher, so
     /// of its kind — wrapped for the tenant, as KEK version `version`.
-    fn make_kek(&self, tenant_id: &str, version: u32) -> Result<Kek, Error> {
+    fn make_kek(&self, tenant_id: &str, context: Option<&str>, version: u32) -> Result<Kek, Error> {
         let cipher = self.cipher_for(tenant_id)?;
         let key = cipher.generate_key()?;
         let wrapped = WrappedKey::wrap(MASTER_KEY_VERSION, &*cipher, &key)?;
-        Kek::new(tenant_id, version, self.algorithm, &key, wrapped)
+        Kek::new(tenant_id, context, version, self.algorithm, &key, wrapped)
     }
 }
 

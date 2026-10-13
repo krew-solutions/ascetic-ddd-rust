@@ -59,6 +59,28 @@ pub enum Error {
     /// carry its version, a nonce and a tag; a key of the wrong length for
     /// its algorithm; a version that is not a count.
     Malformed(String),
+    /// The key exists with other options than the ones asked for — derived
+    /// where a plain one was asked, or the reverse — and an option that is
+    /// fixed at creation cannot be changed on it.
+    Conflict {
+        /// The tenant whose key it is.
+        tenant_id: String,
+        /// What differs.
+        detail: String,
+    },
+    /// The KMS refused the operation under this identity: the policy does
+    /// not allow it on this key, or the derivation context is not one the
+    /// policy admits. The key exists; no retry under the same identity and
+    /// context will mend it.
+    Forbidden {
+        /// The tenant whose key it is.
+        tenant_id: String,
+        /// The operation refused.
+        operation: &'static str,
+    },
+    /// An option this adapter cannot execute: it has no scheduler for
+    /// automatic rotation, say. Named so that it is refused, not ignored.
+    Unsupported(&'static str),
     /// The operating system gave no randomness.
     Entropy(getrandom::Error),
     /// The session could not be opened or closed.
@@ -117,6 +139,17 @@ impl fmt::Display for Error {
                 write!(f, "the signature is not the key's over these bytes")
             }
             Error::UnsupportedAlgorithm(name) => write!(f, "unsupported algorithm `{name}`"),
+            Error::Conflict { tenant_id, detail } => {
+                write!(f, "tenant `{tenant_id}`'s key exists otherwise: {detail}")
+            }
+            Error::Forbidden {
+                tenant_id,
+                operation,
+            } => write!(
+                f,
+                "the KMS refused {operation} on tenant `{tenant_id}`'s key under this identity or context"
+            ),
+            Error::Unsupported(what) => write!(f, "unsupported here: {what}"),
             Error::Malformed(what) => write!(f, "malformed: {what}"),
             Error::Entropy(error) => write!(f, "no randomness from the operating system: {error}"),
             Error::Session(error) => write!(f, "session: {error}"),

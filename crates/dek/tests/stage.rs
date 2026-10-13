@@ -504,3 +504,55 @@ async fn eight_first_contacts_at_once_through_the_stage_make_one_kek() {
         .unwrap();
     assert_eq!(keks, 1);
 }
+
+/// The channel both ends are built from: the contract's constant.
+const CHANNEL: &str = "policy.lifecycle";
+
+/// A stage over the KMS of `table` under `master`, serving `context`: what
+/// the composition root builds per channel, at either end.
+async fn stage_of(table: &str, master: &ascetic_ddd_kms::Key, context: &str) -> Arc<Sealing> {
+    let kms = PgKeyManagementService::new(master.clone())
+        .with_table(Identifier::new(table).unwrap())
+        .with_derivation_context(context);
+    let sessions = PgSessionPool::new(pool());
+    sessions
+        .session(async |session| kms.setup(&session).await)
+        .await
+        .unwrap();
+    Arc::new(EnvelopeStage::new(sessions, kms))
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn the_channel_s_other_end_opens_what_was_sealed_for_it_and_no_other_channel_does() {
+    let table = "kms_keys_stage_channel";
+    let master = Algorithm::Aes256Gcm.generate_key().unwrap();
+    PgSessionPool::new(pool())
+        .session(async |session| {
+            session
+                .connection()
+                .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+                .await
+                .unwrap();
+            Ok::<_, SessionError>(())
+        })
+        .await
+        .unwrap();
+    // The producer's stage and the consumer's: two instances, built apart,
+    // from one constant.
+    let producer = stage_of(table, &master, CHANNEL).await;
+    let consumer = stage_of(table, &master, CHANNEL).await;
+    let sealed = producer
+        .outbound(message("tenant-1", "a policy was created"))
+        .await
+        .unwrap();
+    assert_eq!(
+        consumer.inbound(sealed.clone()).await.unwrap().payload(),
+        b"a policy was created"
+    );
+    // Another channel's consumer, over the same key, is refused for good:
+    // the DEK was drawn for the channel, and unwraps there and nowhere else.
+    let other = stage_of(table, &master, "integration.command").await;
+    let error = other.inbound(sealed).await.unwrap_err();
+    assert!(error.is::<Permanent>(), "{error}");
+}

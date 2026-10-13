@@ -7,11 +7,12 @@ use std::sync::{Arc, Mutex};
 
 use ascetic_ddd_kms::vault::{VaultRequest, VaultResponse, VaultTransport};
 use ascetic_ddd_kms::{
-    BoxError, Error, KeyLabel, MacService, Signature, SignatureAlgorithm, SigningService,
-    VaultTransitService,
+    BoxError, Error, KekOptions, KeyCustody, KeyLabel, KeyManagementService, MacService, Signature,
+    SignatureAlgorithm, SigningService, VaultTransitService,
 };
 use ascetic_ddd_session::rest::RestSession;
 use ascetic_ddd_session::{RestSessionPool, Session, SessionPool};
+use base64::Engine as _;
 use serde_json::{Value, json};
 
 /// Answers each call from a script of `(method, path under the mount)` →
@@ -69,6 +70,21 @@ where
 {
     let pool = RestSessionPool::from_shared(Arc::clone(transport));
     let kms = VaultTransitService::new("http://vault", "t");
+    pool.session(async |session| session.atomic(async |tx| scope(tx, kms).await).await)
+        .await
+}
+
+/// The same, with a service built by the test.
+async fn with_service<T, Fut>(
+    transport: &Arc<Scripted>,
+    kms: VaultTransitService,
+    scope: impl FnOnce(RestSession<Scripted>, VaultTransitService) -> Fut + Send,
+) -> Result<T, Error>
+where
+    Fut: Future<Output = Result<T, Error>> + Send,
+    T: Send,
+{
+    let pool = RestSessionPool::from_shared(Arc::clone(transport));
     pool.session(async |session| session.atomic(async |tx| scope(tx, kms).await).await)
         .await
 }
@@ -270,4 +286,255 @@ async fn a_tenant_id_that_is_not_a_key_part_is_refused_before_any_call() {
     .await;
     assert!(matches!(outcome, Err(Error::Malformed(_))), "{outcome:?}");
     assert!(transport.asked().is_empty());
+}
+
+fn key_description(latest: u32, oldest: u32, derived: bool) -> Value {
+    json!({ "data": { "latest_version": latest, "min_decryption_version": oldest, "derived": derived } })
+}
+
+#[tokio::test]
+async fn managed_keys_are_made_by_nobody_here_and_a_missing_one_is_said_so() {
+    // A producer under managed keys asks for a data key and nothing else;
+    // Transit's 400 for a missing key is read as such.
+    let transport = Scripted::answering(vec![
+        (
+            "POST",
+            "/datakey/plaintext/t",
+            400,
+            json!({ "errors": ["encryption key not found"] }),
+        ),
+        ("GET", "/keys/t", 404, json!({ "errors": [] })),
+    ]);
+    let kms = VaultTransitService::new("http://vault", "t").managed_keys();
+    let outcome = with_service(&transport, kms, |tx, kms| async move {
+        kms.generate_dek(&tx, "t").await
+    })
+    .await;
+    assert!(
+        matches!(outcome, Err(Error::KekNotFound { ref tenant_id, key_version: None }) if tenant_id == "t"),
+        "{outcome:?}"
+    );
+    let asked = transport.asked();
+    assert!(
+        asked
+            .iter()
+            .all(|(method, path, _)| !(method == "POST" && path == "/keys/t")),
+        "no key was made: {asked:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_context_travels_with_every_kek_operation_and_a_key_made_is_derived() {
+    let context = base64::engine::general_purpose::STANDARD.encode("policy.lifecycle");
+    let transport = Scripted::answering(vec![
+        ("POST", "/keys/t", 204, json!({})),
+        (
+            "POST",
+            "/datakey/plaintext/t",
+            200,
+            json!({ "data": { "plaintext": base64::engine::general_purpose::STANDARD.encode([7u8; 32]), "ciphertext": "vault:v1:abc" } }),
+        ),
+        (
+            "POST",
+            "/decrypt/t",
+            200,
+            json!({ "data": { "plaintext": base64::engine::general_purpose::STANDARD.encode([7u8; 32]) } }),
+        ),
+    ]);
+    let kms =
+        VaultTransitService::new("http://vault", "t").with_derivation_context("policy.lifecycle");
+    with_service(&transport, kms, |tx, kms| async move {
+        let (_, wrapped) = kms.generate_dek(&tx, "t").await?;
+        kms.decrypt_dek(&tx, "t", &wrapped).await?;
+        Ok::<_, Error>(())
+    })
+    .await
+    .unwrap();
+    let asked = transport.asked();
+    let body_of = |path: &str| {
+        asked
+            .iter()
+            .find(|(_, asked, _)| asked == path)
+            .and_then(|(_, _, body)| body.clone())
+            .unwrap_or_else(|| panic!("{path} was not asked: {asked:?}"))
+    };
+    assert_eq!(body_of("/keys/t")["derived"], json!(true));
+    assert_eq!(body_of("/datakey/plaintext/t")["context"], json!(context));
+    assert_eq!(body_of("/decrypt/t")["context"], json!(context));
+}
+
+#[tokio::test]
+async fn a_400_on_decrypt_is_explained_by_one_read_of_the_key() {
+    // The key is gone.
+    let transport = Scripted::answering(vec![
+        (
+            "POST",
+            "/decrypt/t",
+            400,
+            json!({ "errors": ["encryption key not found"] }),
+        ),
+        ("GET", "/keys/t", 404, json!({ "errors": [] })),
+    ]);
+    let outcome = with(&transport, |tx, kms| async move {
+        kms.decrypt_dek(&tx, "t", b"vault:v1:abc").await
+    })
+    .await;
+    assert!(
+        matches!(outcome, Err(Error::KekNotFound { ref tenant_id, .. }) if tenant_id == "t"),
+        "{outcome:?}"
+    );
+    // The version was retired.
+    let transport = Scripted::answering(vec![
+        ("POST", "/decrypt/t", 400, json!({ "errors": ["too old"] })),
+        ("GET", "/keys/t", 200, key_description(3, 2, false)),
+    ]);
+    let outcome = with(&transport, |tx, kms| async move {
+        kms.decrypt_dek(&tx, "t", b"vault:v1:abc").await
+    })
+    .await;
+    assert!(
+        matches!(outcome, Err(Error::NoKeyOfVersion(1))),
+        "{outcome:?}"
+    );
+    // The key is there and serves the version: the request's own fault —
+    // a wrong context, bytes changed — which no retry mends.
+    let transport = Scripted::answering(vec![
+        (
+            "POST",
+            "/decrypt/t",
+            400,
+            json!({ "errors": ["cipher: message authentication failed"] }),
+        ),
+        ("GET", "/keys/t", 200, key_description(3, 1, true)),
+    ]);
+    let outcome = with(&transport, |tx, kms| async move {
+        kms.decrypt_dek(&tx, "t", b"vault:v1:abc").await
+    })
+    .await;
+    assert!(matches!(outcome, Err(Error::Decrypt)), "{outcome:?}");
+}
+
+#[tokio::test]
+async fn a_403_on_decrypt_is_forbidden_when_the_key_is_there() {
+    let transport = Scripted::answering(vec![
+        (
+            "POST",
+            "/decrypt/t",
+            403,
+            json!({ "errors": ["permission denied"] }),
+        ),
+        ("GET", "/keys/t", 200, key_description(1, 1, true)),
+    ]);
+    let outcome = with(&transport, |tx, kms| async move {
+        kms.decrypt_dek(&tx, "t", b"vault:v1:abc").await
+    })
+    .await;
+    assert!(
+        matches!(outcome, Err(Error::Forbidden { ref tenant_id, operation: "decrypt" }) if tenant_id == "t"),
+        "{outcome:?}"
+    );
+    // The key is not there: not found, whatever the policy says.
+    let transport = Scripted::answering(vec![
+        (
+            "POST",
+            "/decrypt/t",
+            403,
+            json!({ "errors": ["permission denied"] }),
+        ),
+        ("GET", "/keys/t", 404, json!({ "errors": [] })),
+    ]);
+    let outcome = with(&transport, |tx, kms| async move {
+        kms.decrypt_dek(&tx, "t", b"vault:v1:abc").await
+    })
+    .await;
+    assert!(
+        matches!(outcome, Err(Error::KekNotFound { .. })),
+        "{outcome:?}"
+    );
+    // The read is refused too: the 403 as it came, for the operator.
+    let transport = Scripted::answering(vec![
+        (
+            "POST",
+            "/decrypt/t",
+            403,
+            json!({ "errors": ["permission denied"] }),
+        ),
+        (
+            "GET",
+            "/keys/t",
+            403,
+            json!({ "errors": ["permission denied"] }),
+        ),
+    ]);
+    let outcome = with(&transport, |tx, kms| async move {
+        kms.decrypt_dek(&tx, "t", b"vault:v1:abc").await
+    })
+    .await;
+    assert!(
+        matches!(outcome, Err(Error::Vault { status: 403, .. })),
+        "{outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn custody_makes_a_derived_key_with_its_rotation_and_refuses_one_that_exists_otherwise() {
+    let options = KekOptions {
+        derived: true,
+        auto_rotate_period: Some(std::time::Duration::from_secs(30 * 24 * 3600)),
+    };
+    let transport = Scripted::answering(vec![
+        ("POST", "/keys/t", 204, json!({})),
+        ("GET", "/keys/t", 200, key_description(1, 1, true)),
+        ("POST", "/keys/t/config", 204, json!({})),
+    ]);
+    let made = {
+        let options = options.clone();
+        with(&transport, |tx, kms| async move {
+            kms.create_kek(&tx, "t", &options).await
+        })
+        .await
+        .unwrap()
+    };
+    assert_eq!(made, 1);
+    let asked = transport.asked();
+    let (_, _, creation) = &asked[0];
+    assert_eq!(creation.as_ref().unwrap()["derived"], json!(true));
+    assert_eq!(
+        creation.as_ref().unwrap()["auto_rotate_period"],
+        json!(2_592_000)
+    );
+    let (_, _, config) = &asked[2];
+    assert_eq!(
+        config.as_ref().unwrap()["auto_rotate_period"],
+        json!(2_592_000)
+    );
+    // Transit leaves a key that exists as it is and says nothing: the read
+    // tells that it is not derived, and that cannot be changed.
+    let transport = Scripted::answering(vec![
+        ("POST", "/keys/t", 204, json!({})),
+        ("GET", "/keys/t", 200, key_description(4, 1, false)),
+    ]);
+    let outcome = with(&transport, |tx, kms| async move {
+        kms.create_kek(&tx, "t", &options).await
+    })
+    .await;
+    assert!(
+        matches!(outcome, Err(Error::Conflict { ref tenant_id, .. }) if tenant_id == "t"),
+        "{outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn retiring_versions_raises_the_key_s_minimum_decryption_version() {
+    let transport = Scripted::answering(vec![("POST", "/keys/t/config", 204, json!({}))]);
+    with(&transport, |tx, kms| async move {
+        kms.retire_kek_versions_before(&tx, "t", 3).await
+    })
+    .await
+    .unwrap();
+    let asked = transport.asked();
+    assert_eq!(
+        asked[0].2.as_ref().unwrap()["min_decryption_version"],
+        json!(3)
+    );
 }

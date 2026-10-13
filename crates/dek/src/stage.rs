@@ -32,9 +32,16 @@
 //!
 //! A message missing a header it is bound to cannot be sealed, and one that
 //! arrives without one, or whose key or payload will not open, or whose
-//! tenant's KEK is gone, is refused for good: [`Permanent`], which the inbox
-//! parks at once. A KMS that cannot be reached is a failure of the moment,
-//! and the message is tried again.
+//! tenant's KEK is gone or retired, or which the KMS refuses to open under
+//! this identity or context, is refused for good: [`Permanent`], which the
+//! inbox parks at once. A KMS that cannot be reached is a failure of the
+//! moment, and the message is tried again.
+//!
+//! One stage serves one channel: the KMS it is built over carries the
+//! channel as its derivation context, taken from the contract both ends
+//! are built from, so a DEK drawn for the channel unwraps there and
+//! nowhere else, and the DEK in service ([`Reuse`]) is the channel's
+//! (ADR-0017).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -288,16 +295,20 @@ fn refused(what: String) -> BoxError {
     Permanent::new(what).into()
 }
 
-/// Which failures of the KMS no retry will mend: a key that is gone, a
-/// ciphertext that does not open, bytes that are not what they should be.
-/// The rest — the session, the database, Vault out of reach — are of the
-/// moment.
+/// Which failures of the KMS no retry will mend: a key that is gone or
+/// retired, a ciphertext that does not open, an operation the KMS refuses
+/// under this identity or context, bytes that are not what they should
+/// be. The rest — the session, the database, Vault out of reach — are of
+/// the moment.
 fn verdict(error: KmsError) -> BoxError {
     match error {
         KmsError::KekNotFound { .. }
         | KmsError::Decrypt
         | KmsError::WrongKeyVersion { .. }
         | KmsError::NoKeyOfVersion(_)
+        | KmsError::Forbidden { .. }
+        | KmsError::Conflict { .. }
+        | KmsError::Unsupported(_)
         | KmsError::UnsupportedAlgorithm(_)
         | KmsError::Malformed(_) => Permanent::new(error).into(),
         _ => error.into(),
