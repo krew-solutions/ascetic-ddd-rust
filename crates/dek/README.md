@@ -95,6 +95,29 @@ thousand or a minute by default, far under what NIST allows a key with
 random nonces — and `Cached` from `ascetic-ddd-kms` in front of the opening
 side's KMS unwraps each key once. Both are off unless asked for.
 
+`Sealing` (feature `bus`) is the stages of a bus's channels, one per
+channel, built up front from the channels a service's contracts name
+(ADR-0017 decision 2): each over a KMS instance the caller makes for the
+channel — serving it as the derivation context, making no key — behind a
+`Cached` of its own, with `SealingParameters` (the reuse at the sealing
+end, the cache at the opening end) the deployment's. `of(channel)` answers
+`None` for a channel the sealing was not built for, so a composition root
+refuses to start rather than seal under a typo. A pool shared by `Arc` is
+a pool, so the service's own pool serves the stages.
+
+```rust,ignore
+let sealing = Sealing::over(
+    Arc::clone(&pool),
+    ["policy.lifecycle", "inbox://policy-commands"],
+    SealingParameters::default(),
+    |channel| vault.clone().with_mount("transit-bus").with_derivation_context(channel).managed_keys(),
+);
+let producer = outbox.producer("kafka://policy.lifecycle", encode)
+    .through(sealing.of("policy.lifecycle").expect("a channel of the contract"));
+```
+
+One stage over one KMS, by hand:
+
 ```rust,ignore
 let sealing = Arc::new(EnvelopeStage::new(kms_sessions, kms));
 // One stage per channel: the KMS it is built over serves the channel as its

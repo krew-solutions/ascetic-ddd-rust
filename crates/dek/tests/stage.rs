@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use ascetic_ddd_bus::{Bridge, Bus, Message, Permanent, Stage, Target};
 use ascetic_ddd_dek::stage::{DEK, DEK_ALGORITHM, DEK_BOUND_TO, MESSAGE_ID, TENANT_ID};
-use ascetic_ddd_dek::{EnvelopeStage, Reuse};
+use ascetic_ddd_dek::{EnvelopeStage, Reuse, Sealing, SealingParameters};
 use ascetic_ddd_inbox::{INBOX_SCHEME, Loops as InboxLoops, PgInbox};
 use ascetic_ddd_kms::{Algorithm, Cached, KeyManagementService, PgKeyManagementService};
 use ascetic_ddd_outbox::{Loops as OutboxLoops, OUTBOX_SCHEME, PgOutbox};
@@ -46,10 +46,10 @@ fn pool() -> Pool {
     pool_at(&std::env::var("ASCETIC_DDD_TEST_PG_URL").unwrap_or_else(|_| DEFAULT_URL.to_owned()))
 }
 
-type Sealing = EnvelopeStage<PgSessionPool, PgKeyManagementService>;
+type PgStage = EnvelopeStage<PgSessionPool, PgKeyManagementService>;
 
 /// A KMS in a table of its own per test, and the stage over it.
-async fn stage(name: &str) -> Arc<Sealing> {
+async fn stage(name: &str) -> Arc<PgStage> {
     let table = format!("kms_keys_stage_{name}");
     let kms = PgKeyManagementService::new(Algorithm::Aes256Gcm.generate_key().unwrap())
         .with_table(Identifier::new(&table).unwrap());
@@ -510,7 +510,7 @@ const CHANNEL: &str = "policy.lifecycle";
 
 /// A stage over the KMS of `table` under `master`, serving `context`: what
 /// the composition root builds per channel, at either end.
-async fn stage_of(table: &str, master: &ascetic_ddd_kms::Key, context: &str) -> Arc<Sealing> {
+async fn stage_of(table: &str, master: &ascetic_ddd_kms::Key, context: &str) -> Arc<PgStage> {
     let kms = PgKeyManagementService::new(master.clone())
         .with_table(Identifier::new(table).unwrap())
         .with_derivation_context(context);
@@ -554,5 +554,85 @@ async fn the_channel_s_other_end_opens_what_was_sealed_for_it_and_no_other_chann
     // the DEK was drawn for the channel, and unwraps there and nowhere else.
     let other = stage_of(table, &master, "integration.command").await;
     let error = other.inbound(sealed).await.unwrap_err();
+    assert!(error.is::<Permanent>(), "{error}");
+}
+
+/// The sealing of the channels, as a composition root builds it: the KMS
+/// of `table` under `master`, an instance per channel serving the channel
+/// as its context, making no key.
+fn sealing_of(table: &str, master: &ascetic_ddd_kms::Key, channels: &[&str]) -> Sealing {
+    let master = master.clone();
+    let table = Identifier::new(table).unwrap();
+    Sealing::over(
+        Arc::new(PgSessionPool::new(pool())),
+        channels.iter().copied(),
+        SealingParameters::default(),
+        move |channel| {
+            PgKeyManagementService::new(master.clone())
+                .with_table(table.clone())
+                .with_derivation_context(channel)
+                .managed_keys()
+        },
+    )
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn the_sealing_of_the_channels_is_built_up_front_and_answers_for_those_alone() {
+    use ascetic_ddd_kms::{KekOptions, KeyCustody as _};
+    let table = "kms_keys_stage_sealing";
+    let master = Algorithm::Aes256Gcm.generate_key().unwrap();
+    let custody =
+        PgKeyManagementService::new(master.clone()).with_table(Identifier::new(table).unwrap());
+    PgSessionPool::new(pool())
+        .session(async |session| {
+            session
+                .connection()
+                .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+                .await
+                .unwrap();
+            custody.setup(&session).await?;
+            session
+                .atomic(async |tx| {
+                    custody
+                        .create_kek(&tx, "tenant-1", &KekOptions::default())
+                        .await
+                })
+                .await
+        })
+        .await
+        .unwrap();
+    // The producer's sealing and the consumer's, built apart from one list.
+    let channels = ["policy.lifecycle", "integration.command"];
+    let producer = sealing_of(table, &master, &channels);
+    let consumer = sealing_of(table, &master, &channels);
+    assert_eq!(producer.channels().count(), 2);
+    assert!(
+        producer.of("policy.lifecycl").is_none(),
+        "a typo is no channel"
+    );
+    let sealed = producer
+        .of("policy.lifecycle")
+        .unwrap()
+        .outbound(message("tenant-1", "a policy was created"))
+        .await
+        .unwrap();
+    assert_eq!(
+        consumer
+            .of("policy.lifecycle")
+            .unwrap()
+            .inbound(sealed.clone())
+            .await
+            .unwrap()
+            .payload(),
+        b"a policy was created"
+    );
+    // The other channel's stage, over the same key, is refused for good.
+    let error = consumer
+        .of("integration.command")
+        .unwrap()
+        .inbound(sealed)
+        .await
+        .unwrap_err();
     assert!(error.is::<Permanent>(), "{error}");
 }

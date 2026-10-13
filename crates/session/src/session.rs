@@ -147,6 +147,26 @@ pub trait SessionPool: Send + Sync {
     }
 }
 
+/// A pool shared by `Arc` is the pool: what holds the `Arc` hands out the
+/// same sessions, runs the same hooks. So a component that takes a pool by
+/// value — a stage of the bus, say — takes the service's shared pool
+/// without a wrapper of the service's own.
+impl<P: SessionPool> SessionPool for Arc<P> {
+    type Session = P::Session;
+
+    async fn acquire(&self) -> Result<Self::Session, SessionError> {
+        (**self).acquire().await
+    }
+
+    fn scope_opened(&self) {
+        (**self).scope_opened();
+    }
+
+    fn scope_closed(&self, succeeded: bool) {
+        (**self).scope_closed(succeeded);
+    }
+}
+
 /// Marks a session while a scope opened on it is running.
 ///
 /// `&mut self` would let the compiler refuse a second scope, at the price of an

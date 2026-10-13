@@ -9,6 +9,8 @@ mod error;
 pub mod pg;
 mod port;
 #[cfg(feature = "bus")]
+pub mod sealing;
+#[cfg(feature = "bus")]
 pub mod stage;
 
 pub use crate::domain::{Keyring, Resource, VersionedCipher};
@@ -16,5 +18,7 @@ pub use crate::error::Error;
 #[cfg(feature = "pg")]
 pub use crate::pg::PgDekStore;
 pub use crate::port::DekStore;
+#[cfg(feature = "bus")]
+pub use crate::sealing::{Sealing, SealingParameters};
 #[cfg(feature = "bus")]
 pub use crate::stage::{EnvelopeStage, Reuse};

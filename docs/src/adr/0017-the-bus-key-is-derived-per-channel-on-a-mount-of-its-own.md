@@ -92,7 +92,15 @@ crate did not say or did wrongly, measured on Vault 1.21.4 OSS:
    stage per channel also keeps `Reuse` sound as it is: the DEK in service
    is keyed by the tenant, and would otherwise be drawn under one channel
    and reused for another's message, which the other's consumer could not
-   open.
+   open. The mechanism is the crate's, beside the rule
+   (`ascetic-ddd-dek::Sealing`, amended 2026-10-13): the stages of a
+   service's channels built up front from the list its contracts name,
+   each over the KMS instance the caller makes for the channel, behind a
+   `Cached` of its own, with the parameters the deployment's; `of` answers
+   `None` for a channel the sealing was not built for, so a composition
+   root refuses to start rather than seal under a typo. A pool shared by
+   `Arc` is a pool (`ascetic-ddd-session`), so the service's own pool
+   serves the stages without a wrapper.
 3. **The adapter makes no key for whoever wraps.** `managed_keys()` on
    either adapter: no `POST keys/{name}` before a wrap; a tenant without a
    KEK is `KekNotFound` on every wrap, parked at once by the stage. A
@@ -138,6 +146,14 @@ crate did not say or did wrongly, measured on Vault 1.21.4 OSS:
 6. **The in-memory keys do not serve the KEK port**, as before: the stage's
    and the custody's tests run on the PostgreSQL adapter, the consumer's on
    Vault.
+
+Amended 2026-10-13, after the first consumer composed the stages by hand:
+the composition — one stage per channel, built from the channel list, over
+a KMS instance per channel — is the rule's own and lives beside it as
+`Sealing`; the consumer keeps the KMS recipe and the list. The consumer's
+first form, a lazily built map keyed by whatever text was asked, would
+have sealed a mistyped channel under a context nobody admits; built up
+front, a typo is a refusal at boot.
 
 ## Consequences
 
