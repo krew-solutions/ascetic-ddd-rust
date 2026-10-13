@@ -72,6 +72,34 @@ others behind features, so that `ascetic_ddd::saga` keeps working as one import
   outbox and the inbox as channels of the bus, joined by bridges.
 - [ADR-0004](docs/src/adr/0004-the-scope-receives-its-session-by-value.md) — the scope
   receives its session by value, and the session promises `Send`.
+- [ADR-0005](docs/src/adr/0005-a-failed-message-holds-its-partition-and-is-parked-after-its-attempts.md) — a
+  failed message holds its partition, and is parked after its attempts.
+- [ADR-0006](docs/src/adr/0006-a-message-ahead-of-its-dependency-waits-out-of-the-queue.md) — a
+  message ahead of its dependency waits out of the queue, and is woken by the
+  dependency's mark *(the wait's transaction is amended by ADR-0009)*.
+- [ADR-0007](docs/src/adr/0007-a-dispatcher-owns-a-slot-by-locking-its-position.md) — a
+  dispatcher owns a slot by locking its position, and has no identity.
+- [ADR-0008](docs/src/adr/0008-the-inbox-takes-a-slot-by-locking-its-row.md) — the
+  inbox takes a slot by locking its row, and its dispatcher has no identity
+  *(the head's read is amended by ADR-0009)*.
+- [ADR-0009](docs/src/adr/0009-a-wait-is-a-transaction-of-its-own-under-a-lock-on-the-dependency.md) — a
+  wait is a transaction of its own, serialized with the dependency's mark by a
+  lock on its identity.
+- [ADR-0010](docs/src/adr/0010-which-failures-stop-the-loops-which-wait-and-which-park-at-once.md) — which
+  failures stop the loops, which wait, and which park at once.
+- [ADR-0011](docs/src/adr/0011-what-a-specification-must-do.md) — what a
+  specification must do.
+- [ADR-0012](docs/src/adr/0012-a-specification-is-a-tree-over-its-values-read-by-functions.md) — a
+  specification is a tree over its values, read by functions.
+- [ADR-0013](docs/src/adr/0013-a-null-is-tested-not-compared-where-null-is-a-value.md) — a
+  null is tested, not compared, where null is a value.
+- [ADR-0014](docs/src/adr/0014-a-name-is-the-storages-quoted-as-it-is-and-mapped-in-one-place.md) — a
+  name is the storage's, quoted as it is, and mapped in one place.
+- [ADR-0015](docs/src/adr/0015-a-string-constant-is-read-as-the-kind-of-the-member-beside-it.md) — a
+  string constant is read as the kind of the member beside it.
+- [ADR-0016](docs/src/adr/0016-a-tenants-keys-are-one-per-use.md) — a tenant's
+  keys are one per use: the KEK, a signing key per algorithm, a MAC key per
+  purpose.
 
 ## Specifications
 
