@@ -7,7 +7,14 @@ Accepted (2026-10-13): held by `tests/vault_signing.rs` and
 server; the adapter's reading of Transit's answers against a scripted
 transport), `tests/pg_signing.rs` (the same properties on the PostgreSQL
 adapter), and `tests/in_memory_keys.rs` (the in-memory keys behave as the
-adapters do where a consumer's tests would notice).
+adapters do where a consumer's tests would notice). Since 2026-10-15 also
+by the cross-adapter check in `tests/vault_signing.rs`: a signature Vault
+made verifies under the public key Transit publishes, read into the
+model's `PublicKey`, for both algorithms, so the byte forms of point 4 are
+one on either adapter; the other direction, a key this process made
+verified by Vault, needs the key imported into Transit, BYOK, owed with
+the first tenant that brings a key. The check was written first in the
+OCaml port.
 
 Amended the same day: the PostgreSQL adapter serves the signing and MAC
 ports too, so that the two adapters of the crate serve the same three

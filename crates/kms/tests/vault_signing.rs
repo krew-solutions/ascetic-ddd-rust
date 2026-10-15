@@ -6,10 +6,14 @@
 use std::sync::Arc;
 
 use ascetic_ddd_kms::{
-    Error, KeyLabel, MacService, Signature, SignatureAlgorithm, SigningService, VaultTransitService,
+    Error, KeyLabel, MacService, PublicKey, Signature, SignatureAlgorithm, SigningKey,
+    SigningService, VaultTransitService,
 };
 use ascetic_ddd_session::rest::RestSession;
 use ascetic_ddd_session::{RestSessionPool, Session, SessionPool};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use p256::pkcs8::DecodePublicKey as _;
 
 const ED25519: SignatureAlgorithm = SignatureAlgorithm::Ed25519;
 const P256: SignatureAlgorithm = SignatureAlgorithm::EcdsaP256;
@@ -18,6 +22,8 @@ struct Fixture {
     sessions: RestSessionPool<reqwest::Client>,
     kms: Arc<VaultTransitService>,
     tenant: String,
+    addr: String,
+    token: String,
 }
 
 /// A tenant named after the test, so tests run in parallel; its keys are
@@ -29,9 +35,55 @@ fn fixture(name: &str) -> Fixture {
         .unwrap_or_else(|_| "test-root-token".to_owned());
     Fixture {
         sessions: RestSessionPool::new(reqwest::Client::new()),
-        kms: Arc::new(VaultTransitService::new(addr, token)),
+        kms: Arc::new(VaultTransitService::new(addr.clone(), token.clone())),
         tenant: format!("test-sign-{name}"),
+        addr,
+        token,
     }
+}
+
+/// The public key of the tenant's key of the algorithm, as Transit
+/// publishes it, read as the model's: the raw bytes in base64 for Ed25519,
+/// a PEM SubjectPublicKeyInfo for P-256.
+async fn public_key_transit_publishes(
+    f: &Fixture,
+    algorithm: SignatureAlgorithm,
+    version: u32,
+) -> PublicKey {
+    let name = SigningKey::name_of(&f.tenant, algorithm);
+    let answer: serde_json::Value = reqwest::Client::new()
+        .get(format!("{}/v1/transit/keys/{name}", f.addr))
+        .header("X-Vault-Token", &f.token)
+        .send()
+        .await
+        .expect("vault answers")
+        .json()
+        .await
+        .expect("vault answers json");
+    let text = answer["data"]["keys"][version.to_string().as_str()]["public_key"]
+        .as_str()
+        .expect("a public key")
+        .to_owned();
+    let bytes = match algorithm {
+        SignatureAlgorithm::Ed25519 => BASE64.decode(text).expect("the public key is base64"),
+        SignatureAlgorithm::EcdsaP256 => {
+            // The PEM without its armor is the DER of a SubjectPublicKeyInfo,
+            // base64; the key inside is the SEC1 point the model holds.
+            let body: String = text
+                .lines()
+                .filter(|line| !line.starts_with("-----"))
+                .collect();
+            let der = BASE64.decode(body).expect("the PEM body is base64");
+            p256::ecdsa::VerifyingKey::from_public_key_der(&der)
+                .expect("a P-256 key")
+                .to_sec1_bytes()
+                .to_vec()
+        }
+        // The enum is open: an algorithm this test does not know how to
+        // read is not one it signs with.
+        other => panic!("no reading of a {other} public key here"),
+    };
+    PublicKey::new(algorithm, bytes).expect("the model's key")
 }
 
 impl Fixture {
@@ -189,5 +241,33 @@ async fn a_mac_is_the_same_twice_and_another_message_s_differs() {
 #[ignore = "needs a Vault dev server"]
 async fn deleting_what_is_not_there_is_nothing() {
     let f = fixture("delete-nothing");
+    f.cleanup().await;
+}
+
+/// A signature Vault made, in the byte form the port fixes, verifies in this
+/// process under the public key Transit publishes, read as the model's: the
+/// two adapters' forms are one, for both algorithms.
+#[tokio::test]
+#[ignore = "needs a Vault dev server"]
+async fn a_signature_vault_made_verifies_under_the_public_key_it_publishes() {
+    let f = fixture("cross-adapter");
+    for algorithm in [ED25519, P256] {
+        let tenant = f.tenant.clone();
+        let signature = f
+            .atomic(|tx, kms| async move { kms.sign(&tx, &tenant, algorithm, b"hello").await })
+            .await
+            .unwrap();
+        let public = public_key_transit_publishes(&f, algorithm, signature.key_version()).await;
+        public
+            .verify(b"hello", &signature)
+            .unwrap_or_else(|error| panic!("{algorithm}: {error}"));
+        assert!(
+            matches!(
+                public.verify(b"hellp", &signature),
+                Err(Error::InvalidSignature)
+            ),
+            "{algorithm}: another message"
+        );
+    }
     f.cleanup().await;
 }

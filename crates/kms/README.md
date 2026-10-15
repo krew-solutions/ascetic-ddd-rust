@@ -199,7 +199,9 @@ The dot is the separator Transit allows that the parts cannot contain, so for
 the dotted names the tenant's id is checked to be letters, digits, `_` and `-`
 rather than encoded: a `/` is "unsupported path" to Transit even encoded.
 Signatures are asked for and verified in JWS marshaling, which is what makes
-ECDSA's bytes `r || s`. Transit answers `400` both for a key it has not got
+ECDSA's bytes `r || s`; a test verifies a signature Vault made under the
+public key Transit publishes, read into the model's `PublicKey`, so the two
+adapters' byte forms are one. Transit answers `400` both for a key it has not got
 and for a version a key does not serve; the adapter reads the key once, on
 that path only, to tell `SigningKeyNotFound` and `NoKeyOfVersion` apart,
 rather than matching Vault's text.

@@ -40,4 +40,7 @@ tokio-postgres = { version = "0.7.18", optional = true }
 zeroize = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
+# `pkcs8`: the test that reads the public key Transit publishes for a P-256 key, a PEM
+# SubjectPublicKeyInfo, into the model's `PublicKey`.
+p256 = { version = "0.14", default-features = false, features = ["pkcs8"] }
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
