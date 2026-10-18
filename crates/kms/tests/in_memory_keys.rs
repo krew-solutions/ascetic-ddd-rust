@@ -1,8 +1,13 @@
 //! The in-memory keys behave as the Vault adapter does, where the tests of
 //! a consumer would notice a difference.
 
+use std::num::NonZeroU32;
+
 use ascetic_ddd_kms::testing::InMemoryKeys;
-use ascetic_ddd_kms::{Error, KeyLabel, MacService, Signature, SignatureAlgorithm, SigningService};
+use ascetic_ddd_kms::{
+    Error, KeyLabel, MacService, PublicKeyService, Signature, SignatureAlgorithm, SigningKey,
+    SigningService,
+};
 use ascetic_ddd_session::testing::{MemorySession, MemorySessionPool};
 use ascetic_ddd_session::{AsyncScope, Session, SessionPool};
 
@@ -125,4 +130,89 @@ async fn a_mac_repeats_and_differs_by_message_tenant_and_purpose() {
         first.as_bytes(),
         "a new key after deletion"
     );
+}
+
+fn version(n: u32) -> NonZeroU32 {
+    NonZeroU32::new(n).unwrap()
+}
+
+#[tokio::test]
+async fn a_refused_pinned_signature_leaves_no_key_behind() {
+    let keys = InMemoryKeys::new();
+    let outcome = try_in_scope(async |tx| {
+        keys.sign_with_version(&tx, "t", ED25519, version(1), b"hello")
+            .await
+    })
+    .await;
+    assert!(
+        matches!(
+            outcome,
+            Err(Error::SigningKeyNotFound {
+                algorithm: ED25519,
+                ..
+            })
+        ),
+        "{outcome:?}"
+    );
+    let outcome = try_in_scope(async |tx| keys.public_keys(&tx, "t", ED25519).await).await;
+    assert!(
+        matches!(outcome, Err(Error::SigningKeyNotFound { .. })),
+        "{outcome:?}"
+    );
+}
+
+/// A version retired as an operator retires it neither signs, verifies nor
+/// is published, and its number is not given again.
+#[tokio::test]
+async fn a_retired_version_neither_signs_verifies_nor_is_published() {
+    let keys = InMemoryKeys::new();
+    let first = in_scope(async |tx| keys.sign(&tx, "t", ED25519, b"hello").await).await;
+    in_scope(async |tx| {
+        keys.rotate_signing_key(&tx, "t", ED25519).await?;
+        keys.rotate_signing_key(&tx, "t", ED25519).await
+    })
+    .await;
+    let pinned = in_scope(async |tx| {
+        keys.sign_with_version(&tx, "t", ED25519, version(1), b"hello")
+            .await
+    })
+    .await;
+    assert_eq!(pinned, first);
+    keys.retire_signing_versions_before("t", ED25519, 2)
+        .unwrap();
+    let signed = try_in_scope(async |tx| {
+        keys.sign_with_version(&tx, "t", ED25519, version(1), b"hello")
+            .await
+    })
+    .await;
+    assert!(
+        matches!(signed, Err(Error::NoKeyOfVersion(1))),
+        "{signed:?}"
+    );
+    let verified = try_in_scope(async |tx| keys.verify(&tx, "t", b"hello", &first).await).await;
+    assert!(
+        matches!(verified, Err(Error::NoKeyOfVersion(1))),
+        "{verified:?}"
+    );
+    let keyring = in_scope(async |tx| keys.public_keys(&tx, "t", ED25519).await).await;
+    assert_eq!(keyring.iter().map(|(v, _)| v).collect::<Vec<_>>(), [2, 3]);
+    let next = in_scope(async |tx| keys.rotate_signing_key(&tx, "t", ED25519).await).await;
+    assert_eq!(next, 4);
+    assert!(matches!(
+        keys.retire_signing_versions_before("t", ED25519, 9),
+        Err(Error::NoKeyOfVersion(9))
+    ));
+    assert!(matches!(
+        keys.retire_signing_versions_before("u", ED25519, 1),
+        Err(Error::SigningKeyNotFound { .. })
+    ));
+}
+
+#[tokio::test]
+async fn a_registered_seed_publishes_its_key() {
+    let keys = InMemoryKeys::new();
+    keys.register("t", &[7u8; 32]);
+    let keyring = in_scope(async |tx| keys.public_keys(&tx, "t", ED25519).await).await;
+    let expected = SigningKey::from_seed("t", ED25519, 1, &[7u8; 32]).unwrap();
+    assert_eq!(keyring.get(1), Some(expected.public()));
 }

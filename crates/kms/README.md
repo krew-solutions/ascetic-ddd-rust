@@ -3,13 +3,14 @@
 Key management for a tenant's keys. For envelope encryption: a tenant has a
 key-encryption key, versioned and rotated, that wraps the data-encryption keys
 its data is sealed with; deleting the tenant's key-encryption keys is
-crypto-shredding. For what a tenant signs and authenticates: two more ports —
-digital signatures under the tenant's key of an algorithm, MACs under the
-tenant's key for a purpose. Three ports, two adapters serving all three: keys
+crypto-shredding. For what a tenant signs and authenticates: three more ports —
+digital signatures under the tenant's key of an algorithm, a read of the
+public halves of those keys for verifiers that hold them, MACs under the
+tenant's key for a purpose. Four ports, two adapters serving all four: keys
 in PostgreSQL tables under a master key, the signing and the MACs done in
 this process; or in HashiCorp Vault Transit, where the keys stay and the
-cryptography is Vault's. In-memory keys serve the signing and MAC ports for
-the tests of what consumes them. A port of `ascetic_ddd.kms` (Python) and
+cryptography is Vault's. In-memory keys serve the signing, public-key and MAC
+ports for the tests of what consumes them. A port of `ascetic_ddd.kms` (Python) and
 `asceticddd/kms` (Go), which have the first port only; the encryption stage
 ADR-0002 places before the outbox.
 
@@ -90,7 +91,13 @@ for a purpose makes a `Mac`. They take the primitives from the libraries
 as the cipher does — Ed25519, ECDSA P-256 with SHA-256, HMAC-SHA-256 — in
 the forms the algorithm fixes, and each knows its name, `{tenant}.sign.
 {algorithm}` or `{tenant}.mac.{purpose}`, which is Transit's key name on
-one adapter and the associated data of the wrapping on the other.
+one adapter and the associated data of the wrapping on the other. A public
+key is one form per algorithm, as a signature is: a P-256 key is held
+uncompressed, `0x04 || x || y`, whatever SEC1 form it was made from. The
+public halves of the versions of a key that verify, by version, are a
+`PublicKeyring` — never empty, of one algorithm: what a JWKS or a device's
+key directory holds; it names no version as the signing one, answers no
+newest and does not verify (ADR-0019).
 
 ## The port and the adapters
 
@@ -121,7 +128,8 @@ behind the same port is the answer.
 The same adapter serves the signing and MAC ports: signing keys in
 `kms_signing_keys` by tenant, algorithm and version — the private half
 wrapped by the master key under the name `{tenant}.sign.{algorithm}` as its
-associated data, the public half beside it — and MAC keys in `kms_mac_keys`
+associated data, the public half beside it, which verifying and publishing
+check against the private half rather than trust — and MAC keys in `kms_mac_keys`
 by tenant, purpose and version, wrapped under `{tenant}.mac.{purpose}`; the
 signing, verifying and MACs are the model's `SigningKey`, `PublicKey` and
 `MacKey`, in this process, in the byte forms the ports fix, the same the
@@ -154,10 +162,18 @@ elsewhere; a `403` with the key there is `Forbidden`, which no retry under
 the same identity and context mends.
 
 `SigningService<S>` is signatures under the tenant's key of one algorithm —
-`sign`, `verify`, `rotate_signing_key`, `delete_signing_key` — one key per
-tenant and algorithm (`SignatureAlgorithm`: Ed25519, ECDSA P-256 with
-SHA-256), made on first signing; the latest version signs, every version
-verifies until an operator retires it. The algorithm is an input of signing
+`sign`, `sign_with_version`, `verify`, `rotate_signing_key`,
+`delete_signing_key` — one key per tenant and algorithm (`SignatureAlgorithm`:
+Ed25519, ECDSA P-256 with SHA-256); every version verifies until an operator
+retires it. Which version signs is the caller's, by the method it calls:
+`sign` takes the latest and makes the key on first signing, right where the
+signed bytes do not name the version and the verifier is the KMS;
+`sign_with_version` takes the version named — a `NonZeroU32`, Transit
+reading `0` as the latest — and makes nothing, for a message that names its
+key's version inside what is signed (a JWS's `kid`) and for a verifier that
+holds the public keys itself and refuses a version until it is given it
+(ADR-0019). It is also the one signing that runs under an identity that may
+not make keys. The algorithm is an input of signing
 and a property of the `Signature`, which carries it, the version of the key
 that made it, and the bytes in the one form the crate fixes per algorithm —
 Ed25519's sixty-four, ECDSA's `r || s`, never DER — so a tenant moves to
@@ -176,6 +192,16 @@ MAC keys apart from signing keys by name keeps their lifecycles apart: a
 signing rotation does not change what a MAC key makes. Why the ports are
 three and the keys one per use, and what that costs at off-boarding, is
 ADR-0016.
+
+`PublicKeyService<S>` is the read of the public halves: `public_keys`
+answers the tenant's `PublicKeyring` of an algorithm, the versions that
+verify — a version that verifies and no longer signs among them — and never
+makes a key. Beside `SigningService` rather than on it, so that an adapter
+that only publishes keys is bound by reading them. On PostgreSQL each public
+half is derived from its wrapped private half and the stored one checked
+against it: a writer of the table without the master key can change the
+column, never the wrapped half, and a mismatch is `Malformed`, never a
+forged key published.
 
 `Cached<K>` keeps what any service unwraps, a thousand keys for five minutes
 unless told otherwise, so a consumer opening a thousand messages sealed
@@ -204,18 +230,30 @@ public key Transit publishes, read into the model's `PublicKey`, so the two
 adapters' byte forms are one. Transit answers `400` both for a key it has not got
 and for a version a key does not serve; the adapter reads the key once, on
 that path only, to tell `SigningKeyNotFound` and `NoKeyOfVersion` apart,
-rather than matching Vault's text.
+rather than matching Vault's text. A signature at a named version asks
+`key_version`, makes no `POST keys`, and checks the version Transit reports;
+Transit refuses a version above the latest, retired or below the key's
+`min_encryption_version` with a `500` and a missing key with a `400`, so a
+refusal of it is read once whether `400`, `403` or `500`: the key missing
+`SigningKeyNotFound`, the key there and a `403` `Forbidden`, a version
+outside what the key signs with `NoKeyOfVersion`, an unexplained `400`
+`Malformed`, an unexplained `500` Vault's. The public keys are `GET
+keys/{name}`'s `data.keys.{n}.public_key` of the versions served — base64 of
+the raw bytes for Ed25519, a PEM SubjectPublicKeyInfo for P-256, read through
+`p256`'s `pkcs8`.
 
-`testing::InMemoryKeys` serves the signing and MAC ports from memory, with
-the model's keys — a key registered from a seed so that a test's signatures
-are the same from run to run (Ed25519), or made on first signing as Vault
-would; MAC keys made on first use — so that the adapter a consumer writes
+`testing::InMemoryKeys` serves the signing, public-key and MAC ports from
+memory, with the model's keys — a key registered from a seed so that a test's
+signatures are the same from run to run (Ed25519), or made on first signing as
+Vault would; versions retired as an operator retires them, never numbered
+again; MAC keys made on first use — so that the adapter a consumer writes
 over the ports is exercised as it is in production, with the network behind
 the port and nothing else replaced.
 
-`Cached<K>` passes the signing and MAC ports through to `K` uncached: a
-signature and a verification are not functions of the cache's key. One
-`Cached<K>` then stands for every port `K` serves.
+`Cached<K>` passes the signing, public-key and MAC ports through to `K`
+uncached: a signature and a verification are not functions of the cache's
+key, and a keyring held across a rotation would be a JWKS without the
+version about to sign. One `Cached<K>` then stands for every port `K` serves.
 
 ## What is not here
 
@@ -225,11 +263,10 @@ by these — are the lower half of envelope encryption and live in
 them, over any `KeyManagementService`. Caching is `Cached<K>` above, in
 front of whichever service a consumer unwraps through.
 
-A public key is not served by the port (a verifier elsewhere reads it from
-`GET keys/{name}`, `data.keys.{n}.public_key`, or from the `public_key`
-column), a MAC is not verified by the port, an operator retires a version
-outside it, and ML-DSA waits for a Vault build and a library that have it.
-Each comes with its first user.
+A MAC is not verified by the port; an operator rotates and retires a
+signing key and sets the version it signs from outside the port, and the
+in-memory keys do not model that floor; ML-DSA waits for a Vault build and
+a library that have it. Each comes with its first user.
 
 ## Deviations from the Python and Go sources
 
@@ -275,4 +312,6 @@ cargo test -p ascetic-ddd-kms --features vault                        # in-memor
                                                                       # adapter's mapping, no server
 ```
 
-The Vault tests need the `transit` engine enabled on the dev server.
+The Vault tests need the `transit` engine enabled on the dev server; the
+least-privilege test writes a policy and a token under the dev server's root
+token, and removes them.

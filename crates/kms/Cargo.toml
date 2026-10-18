@@ -18,7 +18,10 @@ readme = "README.md"
 # by a master key; the signing and MACs are the model's, in this process.
 pg = ["ascetic-ddd-session/pg", "dep:tokio-postgres"]
 # HashiCorp Vault Transit adapter, over any HTTP client that implements `VaultTransport`.
-vault = ["dep:base64", "dep:futures", "dep:percent-encoding", "dep:serde_json"]
+# `p256/pkcs8`: the P-256 public keys Transit publishes are PEM SubjectPublicKeyInfo,
+# read into the model's SEC1 point (ADR-0019); it pulls `der` and `spki`, already in a
+# `vault` build, where `pem` would pull a crate that is not in the lock.
+vault = ["dep:base64", "dep:futures", "dep:percent-encoding", "dep:serde_json", "p256/pkcs8"]
 # `VaultTransport` for `reqwest::Client`. TLS is the application's choice: enable a
 # `reqwest` TLS feature downstream.
 reqwest = ["vault", "dep:reqwest"]
@@ -40,7 +43,4 @@ tokio-postgres = { version = "0.7.18", optional = true }
 zeroize = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
-# `pkcs8`: the test that reads the public key Transit publishes for a P-256 key, a PEM
-# SubjectPublicKeyInfo, into the model's `PublicKey`.
-p256 = { version = "0.14", default-features = false, features = ["pkcs8"] }
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }

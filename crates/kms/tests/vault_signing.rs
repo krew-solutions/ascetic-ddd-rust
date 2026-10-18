@@ -5,9 +5,11 @@
 
 use std::sync::Arc;
 
+use std::num::NonZeroU32;
+
 use ascetic_ddd_kms::{
-    Error, KeyLabel, MacService, PublicKey, Signature, SignatureAlgorithm, SigningKey,
-    SigningService, VaultTransitService,
+    Error, KeyLabel, MacService, PublicKey, PublicKeyService, Signature, SignatureAlgorithm,
+    SigningKey, SigningService, VaultTransitService,
 };
 use ascetic_ddd_session::rest::RestSession;
 use ascetic_ddd_session::{RestSessionPool, Session, SessionPool};
@@ -268,6 +270,330 @@ async fn a_signature_vault_made_verifies_under_the_public_key_it_publishes() {
             ),
             "{algorithm}: another message"
         );
+    }
+    f.cleanup().await;
+}
+
+fn version(n: u32) -> NonZeroU32 {
+    NonZeroU32::new(n).unwrap()
+}
+
+impl Fixture {
+    /// One call to Vault under the fixture's (root) token, as an operator
+    /// makes it outside the port; the answer's body, `null` for none.
+    async fn operator(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: serde_json::Value,
+    ) -> serde_json::Value {
+        let response = reqwest::Client::new()
+            .request(method, format!("{}/v1/{path}", self.addr))
+            .header("X-Vault-Token", &self.token)
+            .json(&body)
+            .send()
+            .await
+            .expect("vault answers");
+        assert!(
+            response.status().is_success(),
+            "{path}: {}",
+            response.status()
+        );
+        response.json().await.unwrap_or(serde_json::Value::Null)
+    }
+
+    /// A token under `policy` alone, for ten minutes.
+    async fn token_under(&self, policy: &str) -> String {
+        self.operator(
+            reqwest::Method::POST,
+            "auth/token/create",
+            serde_json::json!({ "policies": [policy], "ttl": "10m", "no_default_policy": true }),
+        )
+        .await["auth"]["client_token"]
+            .as_str()
+            .expect("a token")
+            .to_owned()
+    }
+
+    /// The same service under another token.
+    fn under(&self, token: &str) -> Arc<VaultTransitService> {
+        Arc::new(VaultTransitService::new(
+            self.addr.clone(),
+            token.to_owned(),
+        ))
+    }
+
+    async fn atomic_as<T, Fut>(
+        &self,
+        kms: Arc<VaultTransitService>,
+        scope: impl FnOnce(RestSession<reqwest::Client>, Arc<VaultTransitService>) -> Fut + Send,
+    ) -> Result<T, Error>
+    where
+        Fut: Future<Output = Result<T, Error>> + Send,
+        T: Send,
+    {
+        self.sessions
+            .session(async |session| session.atomic(async |tx| scope(tx, kms).await).await)
+            .await
+    }
+}
+
+/// After a rotation the earlier version signs when it is named, and what
+/// it signs verifies through the port and under its public half; `sign`
+/// takes the newer.
+#[tokio::test]
+#[ignore = "needs a Vault dev server"]
+async fn after_a_rotation_the_earlier_version_signs_when_it_is_named() {
+    let f = fixture("pinned");
+    let tenant = f.tenant.clone();
+    f.atomic(|tx, kms| async move {
+        kms.rotate_signing_key(&tx, &tenant, P256).await?;
+        kms.rotate_signing_key(&tx, &tenant, P256).await
+    })
+    .await
+    .unwrap();
+    let tenant = f.tenant.clone();
+    let (pinned, latest, keyring) = f
+        .atomic(|tx, kms| async move {
+            let pinned = kms
+                .sign_with_version(&tx, &tenant, P256, version(1), b"hello")
+                .await?;
+            kms.verify(&tx, &tenant, b"hello", &pinned).await?;
+            let latest = kms.sign(&tx, &tenant, P256, b"hello").await?;
+            let keyring = kms.public_keys(&tx, &tenant, P256).await?;
+            Ok((pinned, latest, keyring))
+        })
+        .await
+        .unwrap();
+    assert_eq!(pinned.key_version(), 1);
+    assert_eq!(latest.key_version(), 2);
+    keyring.get(1).unwrap().verify(b"hello", &pinned).unwrap();
+    keyring.get(2).unwrap().verify(b"hello", &latest).unwrap();
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "needs a Vault dev server"]
+async fn a_pinned_signature_makes_no_key() {
+    let f = fixture("pinned-nothing");
+    let tenant = f.tenant.clone();
+    let outcome = f
+        .atomic(|tx, kms| async move {
+            kms.sign_with_version(&tx, &tenant, ED25519, version(1), b"hello")
+                .await
+        })
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            Err(Error::SigningKeyNotFound {
+                algorithm: ED25519,
+                ..
+            })
+        ),
+        "{outcome:?}"
+    );
+    let tenant = f.tenant.clone();
+    let outcome = f
+        .atomic(|tx, kms| async move { kms.public_keys(&tx, &tenant, ED25519).await })
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            Err(Error::SigningKeyNotFound {
+                algorithm: ED25519,
+                ..
+            })
+        ),
+        "the key is still not there: {outcome:?}"
+    );
+    f.cleanup().await;
+}
+
+/// A version beyond the latest, one retired, and one below the floor the
+/// key signs from are each `NoKeyOfVersion`; what the newer version signed
+/// before still verifies; the keyring is the versions that verify.
+#[tokio::test]
+#[ignore = "needs a Vault dev server"]
+async fn a_version_the_key_does_not_sign_with_is_named() {
+    let f = fixture("pinned-refused");
+    let name = SigningKey::name_of(&f.tenant, ED25519);
+    let tenant = f.tenant.clone();
+    let earlier = f
+        .atomic(|tx, kms| async move {
+            kms.rotate_signing_key(&tx, &tenant, ED25519).await?;
+            kms.rotate_signing_key(&tx, &tenant, ED25519).await?;
+            kms.rotate_signing_key(&tx, &tenant, ED25519).await?;
+            kms.sign_with_version(&tx, &tenant, ED25519, version(2), b"hello")
+                .await
+        })
+        .await
+        .unwrap();
+    let refused = |n: u32| {
+        let tenant = f.tenant.clone();
+        f.atomic(move |tx, kms| async move {
+            kms.sign_with_version(&tx, &tenant, ED25519, version(n), b"hello")
+                .await
+        })
+    };
+    let outcome = refused(4).await;
+    assert!(
+        matches!(outcome, Err(Error::NoKeyOfVersion(4))),
+        "{outcome:?}"
+    );
+    f.operator(
+        reqwest::Method::POST,
+        &format!("transit/keys/{name}/config"),
+        serde_json::json!({ "min_decryption_version": 2 }),
+    )
+    .await;
+    let outcome = refused(1).await;
+    assert!(
+        matches!(outcome, Err(Error::NoKeyOfVersion(1))),
+        "{outcome:?}"
+    );
+    f.operator(
+        reqwest::Method::POST,
+        &format!("transit/keys/{name}/config"),
+        serde_json::json!({ "min_encryption_version": 3 }),
+    )
+    .await;
+    let outcome = refused(2).await;
+    assert!(
+        matches!(outcome, Err(Error::NoKeyOfVersion(2))),
+        "{outcome:?}"
+    );
+    let tenant = f.tenant.clone();
+    let keyring = f
+        .atomic(|tx, kms| async move {
+            kms.verify(&tx, &tenant, b"hello", &earlier).await?;
+            kms.public_keys(&tx, &tenant, ED25519).await
+        })
+        .await
+        .unwrap();
+    assert_eq!(keyring.iter().map(|(v, _)| v).collect::<Vec<_>>(), [2, 3]);
+    f.cleanup().await;
+}
+
+/// The keyring is Transit's own publication, read into the model's form,
+/// for both algorithms, and verifies what Vault signed.
+#[tokio::test]
+#[ignore = "needs a Vault dev server"]
+async fn the_keyring_is_what_transit_publishes_for_both_algorithms() {
+    let f = fixture("keyring");
+    for algorithm in [ED25519, P256] {
+        let tenant = f.tenant.clone();
+        let (signature, keyring) = f
+            .atomic(|tx, kms| async move {
+                let signature = kms.sign(&tx, &tenant, algorithm, b"hello").await?;
+                let keyring = kms.public_keys(&tx, &tenant, algorithm).await?;
+                Ok((signature, keyring))
+            })
+            .await
+            .unwrap();
+        let published = public_key_transit_publishes(&f, algorithm, 1).await;
+        assert_eq!(keyring.get(1), Some(&published), "{algorithm}");
+        published.verify(b"hello", &signature).unwrap();
+    }
+    f.cleanup().await;
+}
+
+/// ADR-0010's grant — `update` on the key's `sign` path and `read` on the
+/// key, nothing else: the pinned signature and the keyring are served, the
+/// latest-signing's ensure and a rotation are refused; a token that may
+/// only read is `Forbidden` to sign.
+#[tokio::test]
+#[ignore = "needs a Vault dev server"]
+async fn a_token_that_may_only_sign_and_read_signs_at_the_version_named() {
+    let f = fixture("least-privilege");
+    let name = SigningKey::name_of(&f.tenant, P256);
+    let tenant = f.tenant.clone();
+    f.atomic(|tx, kms| async move { kms.rotate_signing_key(&tx, &tenant, P256).await })
+        .await
+        .unwrap();
+    let mint = format!("{}-mint", f.tenant);
+    let read = format!("{}-read", f.tenant);
+    f.operator(
+        reqwest::Method::PUT,
+        &format!("sys/policies/acl/{mint}"),
+        serde_json::json!({ "policy": format!(
+            "path \"transit/sign/{name}\" {{ capabilities = [\"update\"] }}\npath \"transit/keys/{name}\" {{ capabilities = [\"read\"] }}\n"
+        ) }),
+    )
+    .await;
+    f.operator(
+        reqwest::Method::PUT,
+        &format!("sys/policies/acl/{read}"),
+        serde_json::json!({ "policy": format!(
+            "path \"transit/keys/{name}\" {{ capabilities = [\"read\"] }}\n"
+        ) }),
+    )
+    .await;
+    let minting = f.token_under(&mint).await;
+    let reading = f.token_under(&read).await;
+
+    let tenant = f.tenant.clone();
+    let (pinned, keyring) = f
+        .atomic_as(f.under(&minting), |tx, kms| async move {
+            let pinned = kms
+                .sign_with_version(&tx, &tenant, P256, version(1), b"hello")
+                .await?;
+            let keyring = kms.public_keys(&tx, &tenant, P256).await?;
+            Ok((pinned, keyring))
+        })
+        .await
+        .unwrap();
+    keyring.get(1).unwrap().verify(b"hello", &pinned).unwrap();
+    let tenant = f.tenant.clone();
+    let latest = f
+        .atomic_as(f.under(&minting), |tx, kms| async move {
+            kms.sign(&tx, &tenant, P256, b"hello").await
+        })
+        .await;
+    assert!(
+        matches!(latest, Err(Error::Vault { status: 403, .. })),
+        "the ensure of `sign` is refused: {latest:?}"
+    );
+    let tenant = f.tenant.clone();
+    let rotation = f
+        .atomic_as(f.under(&minting), |tx, kms| async move {
+            kms.rotate_signing_key(&tx, &tenant, P256).await
+        })
+        .await;
+    assert!(rotation.is_err(), "{rotation:?}");
+    let tenant = f.tenant.clone();
+    let reader = f
+        .atomic_as(f.under(&reading), |tx, kms| async move {
+            kms.sign_with_version(&tx, &tenant, P256, version(1), b"hello")
+                .await
+        })
+        .await;
+    assert!(
+        matches!(
+            reader,
+            Err(Error::Forbidden {
+                operation: "sign",
+                ..
+            })
+        ),
+        "{reader:?}"
+    );
+
+    for token in [minting, reading] {
+        f.operator(
+            reqwest::Method::POST,
+            "auth/token/revoke",
+            serde_json::json!({ "token": token }),
+        )
+        .await;
+    }
+    for policy in [mint, read] {
+        f.operator(
+            reqwest::Method::DELETE,
+            &format!("sys/policies/acl/{policy}"),
+            serde_json::Value::Null,
+        )
+        .await;
     }
     f.cleanup().await;
 }

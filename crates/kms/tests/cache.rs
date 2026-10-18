@@ -4,7 +4,10 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use ascetic_ddd_kms::{Cached, Error, Key, KeyManagementService};
+use ascetic_ddd_kms::testing::InMemoryKeys;
+use ascetic_ddd_kms::{
+    Cached, Error, Key, KeyManagementService, PublicKeyService, SignatureAlgorithm, SigningService,
+};
 use ascetic_ddd_session::testing::{MemorySession, MemorySessionPool};
 use ascetic_ddd_session::{Session, SessionPool};
 
@@ -199,4 +202,24 @@ async fn a_refusal_is_not_kept() {
         assert!(cached.is_empty());
     })
     .await;
+}
+
+/// The keyring is read through every time: a rotation the cache did not
+/// see is in the next read, as a JWKS must be.
+#[tokio::test]
+async fn the_public_keys_are_read_through() {
+    let cached = std::sync::Arc::new(Cached::new(InMemoryKeys::new()));
+    let ed25519 = SignatureAlgorithm::Ed25519;
+    let held = std::sync::Arc::clone(&cached);
+    let (before, after) = with_session(|session: MemorySession| async move {
+        held.sign(&session, "t", ed25519, b"hello").await?;
+        let before = held.public_keys(&session, "t", ed25519).await?;
+        held.rotate_signing_key(&session, "t", ed25519).await?;
+        let after = held.public_keys(&session, "t", ed25519).await?;
+        Ok::<_, Error>((before, after))
+    })
+    .await
+    .unwrap();
+    assert_eq!(before.iter().map(|(v, _)| v).collect::<Vec<_>>(), [1]);
+    assert_eq!(after.iter().map(|(v, _)| v).collect::<Vec<_>>(), [1, 2]);
 }

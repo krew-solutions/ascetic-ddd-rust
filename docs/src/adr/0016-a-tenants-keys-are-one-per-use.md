@@ -16,6 +16,11 @@ verified by Vault, needs the key imported into Transit, BYOK, owed with
 the first tenant that brings a key. The check was written first in the
 OCaml port.
 
+Amended 2026-10-18 by ADR-0019: point 7 superseded — the public keys of
+the versions that verify are a port of their own; point 5 holds for `sign`,
+and `sign_with_version`, signing at a version something outside the KMS
+already holds, never makes a key.
+
 Amended the same day: the PostgreSQL adapter serves the signing and MAC
 ports too, so that the two adapters of the crate serve the same three
 ports. The first draft left it out — a private key under a master key in a
@@ -117,7 +122,8 @@ type.
    library for the Vault adapter, and a tenant that must verify in a
    validated module gets that only there. The public key of a version is
    available from `GET keys/{name}` for a verifier elsewhere, and is not a
-   method of the port until one is needed.
+   method of the port until one is needed. (Superseded by ADR-0019: the
+   first users came, and the read is a port of its own.)
 8. **The keys are the model's; the in-memory keys live in the seedwork.**
    A `SigningKey` and a `MacKey` stand in `domain` beside the `Kek`, one
    version of a keyring each, taking Ed25519, ECDSA P-256 and HMAC-SHA-256

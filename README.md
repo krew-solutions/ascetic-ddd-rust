@@ -108,6 +108,11 @@ others behind features, so that `ascetic_ddd::saga` keeps working as one import
   the intake names the row, and at an inbox that receives several channels
   the stage is chosen by the row; one subscriber, no filter by address, and
   why.
+- [ADR-0019](docs/src/adr/0019-a-signature-at-a-version-held-elsewhere-makes-no-key-and-the-public-keys-are-a-port.md) —
+  a signature whose version something outside the KMS already holds is made
+  at that version and makes no key; the public keys of the versions that
+  verify are a port of their own, derived where the adapter holds the
+  private halves *(Proposed)*.
 
 ## Specifications
 

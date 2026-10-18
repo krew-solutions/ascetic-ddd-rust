@@ -22,7 +22,13 @@
 //! marshaling, so an ECDSA signature is `r || s` and never DER. Transit
 //! answers `400` both for a key it has not got and for a version a key has
 //! not got or no longer serves; the adapter tells them apart by reading the
-//! key once, on that path only, rather than by Vault's text. A `403` on a
+//! key once, on that path only, rather than by Vault's text. Signing at a
+//! named version is refused with a `500` for a version above the latest,
+//! retired, or below the key's `min_encryption_version` (measured, Vault
+//! 1.21), so a refusal of it is read the same way whether `400`, `403` or
+//! `500` (ADR-0019). The public keys are `GET keys/{name}`'s
+//! `data.keys.{n}.public_key` of the versions served: base64 of the raw
+//! bytes for Ed25519, a PEM SubjectPublicKeyInfo for P-256. A `403` on a
 //! KEK operation is read the same way: the key there, it is
 //! [`Error::Forbidden`] — the policy does not allow the operation, or the
 //! context is not one it admits — and no retry mends it; the key not
@@ -44,19 +50,25 @@
 mod reqwest;
 pub mod transport;
 
+use std::num::NonZeroU32;
+
 use ascetic_ddd_session::Session;
 use ascetic_ddd_session::rest::HttpAccess;
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as BASE64_URL};
 use futures::future::BoxFuture;
+use p256::pkcs8::DecodePublicKey as _;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
 
 use crate::domain::{
-    Key, KeyLabel, Mac, MacKey, Signature, SignatureAlgorithm, SigningKey, is_key_part,
+    Key, KeyLabel, Mac, MacKey, PublicKey, PublicKeyring, Signature, SignatureAlgorithm,
+    SigningKey, is_key_part,
 };
 use crate::error::Error;
-use crate::port::{KekOptions, KeyCustody, KeyManagementService, MacService, SigningService};
+use crate::port::{
+    KekOptions, KeyCustody, KeyManagementService, MacService, PublicKeyService, SigningService,
+};
 
 pub use self::transport::{VaultRequest, VaultResponse, VaultTransport};
 
@@ -445,6 +457,60 @@ impl VaultTransitService {
     }
 }
 
+impl VaultTransitService {
+    /// What a refusal of signing at a named version means, by one read of
+    /// the key — on a `400`, a `403` or a `500`, since Transit answers `400`
+    /// for a key it has not got and `500` for a version above the latest,
+    /// retired, or below the one the key signs from (measured, Vault 1.21):
+    /// the key not there, [`Error::SigningKeyNotFound`]; a `403` with the
+    /// key there, [`Error::Forbidden`]; a `400` or a `500` for a version
+    /// outside what the key signs with, [`Error::NoKeyOfVersion`]; a `400`
+    /// the read does not explain, the request's own fault,
+    /// [`Error::Malformed`] (the rule ADR-0017 point 5 set for the KEK); a
+    /// `500` it does not explain stays Vault's, of the moment; the read
+    /// refused, the refusal as it came. Any other status — `429`, `502`,
+    /// `503`, `504` — is left as it came, unread: a read would add to the
+    /// load a rate limit protects, or meet the same sealed or standby node.
+    /// Vault's texts are not matched.
+    async fn explain_signing<S>(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+        name: &str,
+        version: u32,
+        error: Error,
+    ) -> Error
+    where
+        S: Session + HttpAccess + Sync,
+        S::Client: VaultTransport,
+    {
+        let Error::Vault {
+            status: status @ (400 | 403 | 500),
+            ref message,
+            ..
+        } = error
+        else {
+            return error;
+        };
+        match self.read_named(session, name).await {
+            Ok(None) => Error::SigningKeyNotFound {
+                tenant_id: tenant_id.to_owned(),
+                algorithm,
+            },
+            Ok(Some(_)) if status == 403 => Error::Forbidden {
+                tenant_id: tenant_id.to_owned(),
+                operation: "sign",
+            },
+            Ok(Some(answer)) if !signs(&answer, version) => Error::NoKeyOfVersion(version),
+            Ok(Some(_)) if status == 400 => {
+                Error::Malformed(format!("vault refused sign: {message}"))
+            }
+            Ok(Some(_)) | Err(_) => error,
+        }
+    }
+}
+
 /// What Vault said in `{"errors": [...]}`, joined.
 fn errors_of(body: Option<&Value>) -> String {
     body.and_then(|body| body.get("errors"))
@@ -497,6 +563,96 @@ fn serves(answer: &Value, version: u32) -> bool {
     let latest = version_field(answer, "latest_version").unwrap_or(0);
     let oldest = version_field(answer, "min_decryption_version").unwrap_or(1);
     (oldest..=latest).contains(&version)
+}
+
+/// Whether the key, as Vault describes it, signs with `version`: made, not
+/// retired, and not below `min_encryption_version` — which Transit holds as
+/// a floor of signing too, `0` or absent meaning no floor of its own
+/// (measured, Vault 1.21: a retirement does not raise it).
+fn signs(answer: &Value, version: u32) -> bool {
+    let latest = version_field(answer, "latest_version").unwrap_or(0);
+    let floor = version_field(answer, "min_decryption_version")
+        .unwrap_or(1)
+        .max(version_field(answer, "min_encryption_version").unwrap_or(0))
+        .max(1);
+    (floor..=latest).contains(&version)
+}
+
+/// The signature of `algorithm` in a `sign` answer: the version Vault
+/// names, and the JWS bytes.
+fn signature_of(algorithm: SignatureAlgorithm, answer: &Value) -> Result<Signature, Error> {
+    let (key_version, payload) = versioned(text_field(answer, "signature")?, "signature")?;
+    let bytes = BASE64_URL.decode(payload).map_err(|error| {
+        Error::Malformed(format!("vault's signature is not JWS base64: {error}"))
+    })?;
+    Ok(Signature::new(algorithm, key_version, bytes))
+}
+
+/// The public halves of the versions a key described by `answer` serves:
+/// `data.keys.{n}.public_key`, base64 of the raw bytes for Ed25519, a PEM
+/// SubjectPublicKeyInfo for P-256, each read into the model's form. The key
+/// must be of the algorithm's Transit type.
+fn public_keyring(algorithm: SignatureAlgorithm, answer: &Value) -> Result<PublicKeyring, Error> {
+    let kind = text_field(answer, "type")?;
+    if kind != transit_key_type(algorithm) {
+        return Err(Error::Malformed(format!(
+            "vault describes the key as `{kind}`, not as a {algorithm} key"
+        )));
+    }
+    let keys = answer
+        .get("data")
+        .and_then(|data| data.get("keys"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| Error::Malformed("vault answered without `data.keys`".into()))?;
+    let mut ring = Vec::with_capacity(keys.len());
+    for (version, entry) in keys {
+        let version: u32 = version
+            .parse()
+            .map_err(|_| Error::Malformed(format!("vault names a key version `{version}`")))?;
+        if !serves(answer, version) {
+            continue;
+        }
+        let text = entry
+            .get("public_key")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                Error::Malformed(format!("vault answered no public key for v{version}"))
+            })?;
+        ring.push((version, public_key_of(algorithm, text)?));
+    }
+    PublicKeyring::new(algorithm, ring)
+}
+
+/// A public key as Transit publishes it, in the model's form.
+fn public_key_of(algorithm: SignatureAlgorithm, text: &str) -> Result<PublicKey, Error> {
+    let malformed =
+        |what: &str| Error::Malformed(format!("vault's {algorithm} public key: {what}"));
+    match algorithm {
+        SignatureAlgorithm::Ed25519 => {
+            let bytes = BASE64
+                .decode(text.trim())
+                .map_err(|_| malformed("not base64"))?;
+            PublicKey::new(algorithm, bytes)
+        }
+        SignatureAlgorithm::EcdsaP256 => {
+            // The PEM without its armor is the DER of a SubjectPublicKeyInfo,
+            // base64; the key inside is the SEC1 point the model holds.
+            let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+            if lines.next() != Some("-----BEGIN PUBLIC KEY-----") {
+                return Err(malformed("not a PEM public key"));
+            }
+            let body: String = lines
+                .take_while(|line| !line.starts_with("-----"))
+                .collect();
+            if !text.contains("-----END PUBLIC KEY-----") {
+                return Err(malformed("not a PEM public key"));
+            }
+            let der = BASE64.decode(body).map_err(|_| malformed("not base64"))?;
+            let key = p256::ecdsa::VerifyingKey::from_public_key_der(&der)
+                .map_err(|_| malformed("not a P-256 SubjectPublicKeyInfo"))?;
+            PublicKey::new(algorithm, key.to_sec1_bytes())
+        }
+    }
 }
 
 /// The version and the payload of a `vault:v{n}:{payload}` text.
@@ -742,11 +898,47 @@ where
         let path = format!("/sign/{name}");
         let body = with_input(signing_parameters(algorithm), message);
         let answer = self.transit(session, "POST", &path, Some(body)).await?;
-        let (key_version, payload) = versioned(text_field(&answer, "signature")?, "signature")?;
-        let bytes = BASE64_URL.decode(payload).map_err(|error| {
-            Error::Malformed(format!("vault's signature is not JWS base64: {error}"))
-        })?;
-        Ok(Signature::new(algorithm, key_version, bytes))
+        signature_of(algorithm, &answer)
+    }
+
+    async fn sign_with_version(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+        key_version: NonZeroU32,
+        message: &[u8],
+    ) -> Result<Signature, Error> {
+        let name = Self::signing_key_name(tenant_id, algorithm)?;
+        let path = format!("/sign/{name}");
+        let mut body = with_input(signing_parameters(algorithm), message);
+        if let Some(object) = body.as_object_mut() {
+            object.insert("key_version".to_owned(), json!(key_version.get()));
+        }
+        let answer = match self.transit(session, "POST", &path, Some(body)).await {
+            Ok(answer) => answer,
+            Err(error) => {
+                return Err(self
+                    .explain_signing(
+                        session,
+                        tenant_id,
+                        algorithm,
+                        &name,
+                        key_version.get(),
+                        error,
+                    )
+                    .await);
+            }
+        };
+        let signature = signature_of(algorithm, &answer)?;
+        if signature.key_version() == key_version.get() {
+            Ok(signature)
+        } else {
+            Err(Error::Malformed(format!(
+                "vault signed with v{}, v{key_version} was asked",
+                signature.key_version()
+            )))
+        }
     }
 
     async fn verify(
@@ -823,6 +1015,31 @@ where
     ) -> Result<(), Error> {
         let name = Self::signing_key_name(tenant_id, algorithm)?;
         self.delete_named(session, &name).await
+    }
+}
+
+/// The public keys from `GET keys/{name}`: the versions the key serves,
+/// read into the model's form. Never makes a key.
+impl<S> PublicKeyService<S> for VaultTransitService
+where
+    S: Session + HttpAccess + Sync,
+    S::Client: VaultTransport,
+{
+    async fn public_keys(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+    ) -> Result<PublicKeyring, Error> {
+        let name = Self::signing_key_name(tenant_id, algorithm)?;
+        let answer =
+            self.read_named(session, &name)
+                .await?
+                .ok_or_else(|| Error::SigningKeyNotFound {
+                    tenant_id: tenant_id.to_owned(),
+                    algorithm,
+                })?;
+        public_keyring(algorithm, &answer)
     }
 }
 
@@ -922,6 +1139,22 @@ mod tests {
         assert!(serves(&key, 2));
         assert!(serves(&key, 3));
         assert!(!serves(&key, 4));
+    }
+
+    #[test]
+    fn a_key_signs_from_the_higher_of_its_two_floors_to_the_latest() {
+        let no_floor = json!({ "data": { "latest_version": 3, "min_decryption_version": 2, "min_encryption_version": 0 } });
+        assert!(!signs(&no_floor, 1));
+        assert!(signs(&no_floor, 2));
+        assert!(signs(&no_floor, 3));
+        assert!(!signs(&no_floor, 4));
+        let absent = json!({ "data": { "latest_version": 3, "min_decryption_version": 1 } });
+        assert!(signs(&absent, 1));
+        let raised = json!({ "data": { "latest_version": 3, "min_decryption_version": 1, "min_encryption_version": 3 } });
+        assert!(!signs(&raised, 2));
+        assert!(signs(&raised, 3));
+        // Verifies, no longer signs.
+        assert!(serves(&raised, 2));
     }
 
     #[test]

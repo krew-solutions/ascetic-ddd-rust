@@ -1,10 +1,11 @@
 //! The port: what the application layer sees.
 
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use ascetic_ddd_session::Session;
 
-use crate::domain::{Key, KeyLabel, Mac, Signature, SignatureAlgorithm};
+use crate::domain::{Key, KeyLabel, Mac, PublicKeyring, Signature, SignatureAlgorithm};
 use crate::error::Error;
 
 /// Envelope encryption for one tenant at a time: data-encryption keys are
@@ -109,8 +110,20 @@ pub trait KeyCustody<S: Session>: Send + Sync {
 }
 
 /// Digital signatures under a tenant's keys: one key per tenant and
-/// algorithm, made on first signing, versioned by rotation. The latest
-/// version signs; every version verifies, until an operator retires it.
+/// algorithm, versioned by rotation; every version verifies until an
+/// operator retires it.
+///
+/// Which version signs is the caller's, by the method it calls.
+/// [`sign`](Self::sign) takes the latest and makes the key on first
+/// signing; [`sign_with_version`](Self::sign_with_version) takes the version
+/// named and makes nothing. The latest is right only where the signed bytes
+/// do not name the version and every verifier learns of a version when the
+/// KMS makes it — verification through this port. A message that names its
+/// key's version inside what is signed — a JWS's `kid` — must have the
+/// version before it is signed; a verifier that holds the public keys itself
+/// — a gateway's JWKS, a device's key directory — refuses a version until it
+/// is given it. Both sign with the version named (ADR-0019).
+///
 /// The algorithm is an input of signing and a property of the signature,
 /// so a tenant moves to another algorithm by signing with it — a new key,
 /// not a rotation — while what the old key signed keeps verifying.
@@ -119,12 +132,38 @@ pub trait KeyCustody<S: Session>: Send + Sync {
 /// tenant's off-boarding, never a rotation.
 pub trait SigningService<S: Session>: Send + Sync {
     /// Signs `message` with the latest version of the tenant's key of
-    /// `algorithm`, making the key if the tenant has none.
+    /// `algorithm`, making the key if the tenant has none. A rotation makes
+    /// the new version sign at once.
     fn sign(
         &self,
         session: &S,
         tenant_id: &str,
         algorithm: SignatureAlgorithm,
+        message: &[u8],
+    ) -> impl Future<Output = Result<Signature, Error>> + Send;
+
+    /// Signs `message` with version `key_version` of the tenant's key of
+    /// `algorithm`, and with no other: the signature names `key_version`
+    /// whatever the latest is. Never makes a key — a version is named
+    /// because something outside the KMS already holds it, and a key made
+    /// here would be a version nobody holds, or one numbered as a deleted
+    /// key's was. It also signs under an identity that may not make keys.
+    ///
+    /// The version is not zero by its type: Transit reads zero as the
+    /// latest, which is what this method exists not to do.
+    ///
+    /// # Errors
+    /// [`Error::SigningKeyNotFound`] when the tenant has no key of the
+    /// algorithm; [`Error::NoKeyOfVersion`] for a version the key has not
+    /// got yet, has retired, or no longer signs with — one that still
+    /// verifies included; [`Error::Forbidden`] when the KMS refuses to sign
+    /// under this identity and the key is there.
+    fn sign_with_version(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+        key_version: NonZeroU32,
         message: &[u8],
     ) -> impl Future<Output = Result<Signature, Error>> + Send;
 
@@ -158,6 +197,32 @@ pub trait SigningService<S: Session>: Send + Sync {
         tenant_id: &str,
         algorithm: SignatureAlgorithm,
     ) -> impl Future<Output = Result<(), Error>> + Send;
+}
+
+/// The public halves of a tenant's signing keys, for verifiers outside the
+/// KMS — a JWKS, a gateway's configuration, a device's key directory. A
+/// query, beside [`SigningService`] rather than on it, so that an adapter
+/// that only publishes keys is bound by reading them, and a holder of
+/// public keys that cannot sign can serve it (ADR-0019).
+pub trait PublicKeyService<S: Session>: Send + Sync {
+    /// The public halves of the versions of the tenant's key of
+    /// `algorithm` that verify — from the oldest an operator has not
+    /// retired to the latest, a version that verifies and no longer signs
+    /// among them. Never makes a key. Where the adapter holds the private
+    /// halves, each public half is derived from its private half, never
+    /// taken from beside it.
+    ///
+    /// # Errors
+    /// [`Error::SigningKeyNotFound`] when the tenant has no key of the
+    /// algorithm; [`Error::Malformed`] when the KMS describes the key as
+    /// another algorithm's, or a stored public half is not its private
+    /// half's.
+    fn public_keys(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+    ) -> impl Future<Output = Result<PublicKeyring, Error>> + Send;
 }
 
 /// Message authentication under a tenant's keys: one key per tenant and

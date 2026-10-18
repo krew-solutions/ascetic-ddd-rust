@@ -16,11 +16,13 @@ pub mod vault;
 pub use crate::cache::Cached;
 pub use crate::domain::{
     Aes256Gcm, Algorithm, Cipher, Kek, Key, KeyLabel, MASTER_KEY_VERSION, Mac, MacKey, MasterKey,
-    PublicKey, Signature, SignatureAlgorithm, SigningKey, WrappedKey,
+    PublicKey, PublicKeyring, Signature, SignatureAlgorithm, SigningKey, WrappedKey,
 };
 pub use crate::error::{BoxError, Error};
 #[cfg(feature = "pg")]
 pub use crate::pg::PgKeyManagementService;
-pub use crate::port::{KekOptions, KeyCustody, KeyManagementService, MacService, SigningService};
+pub use crate::port::{
+    KekOptions, KeyCustody, KeyManagementService, MacService, PublicKeyService, SigningService,
+};
 #[cfg(feature = "vault")]
 pub use crate::vault::VaultTransitService;

@@ -8,9 +8,11 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::num::NonZeroU32;
+
 use ascetic_ddd_kms::{
-    Algorithm, Error, Key, KeyLabel, MacService, PgKeyManagementService, Signature,
-    SignatureAlgorithm, SigningService,
+    Algorithm, Error, Key, KeyLabel, MacService, PgKeyManagementService, PublicKeyService,
+    Signature, SignatureAlgorithm, SigningKey, SigningService,
 };
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -323,4 +325,193 @@ async fn two_first_signings_at_once_share_one_key() {
     assert_eq!(second.key_version(), 1);
     assert_eq!(first, second, "one key, one deterministic signature");
     assert_eq!(f.signing_versions_of("1").await, [1]);
+}
+
+fn version(n: u32) -> NonZeroU32 {
+    NonZeroU32::new(n).unwrap()
+}
+
+impl Fixture {
+    /// One statement as an operator, or an attacker, runs it on the table.
+    async fn execute(&self, sql: &str, params: &[&(dyn tokio_postgres::types::ToSql + Sync)]) {
+        self.sessions
+            .session(async |session| {
+                session.connection().execute(sql, params).await?;
+                Ok::<_, Error>(())
+            })
+            .await
+            .unwrap();
+    }
+}
+
+/// After a rotation the earlier version signs when it is named — byte for
+/// byte what it signed as the latest, Ed25519 being deterministic.
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn the_earlier_version_signs_when_it_is_named() {
+    let f = fixture("pinned").await;
+    f.atomic(|tx, kms| async move {
+        let first = kms.sign(&tx, "1", ED25519, b"hello").await?;
+        kms.rotate_signing_key(&tx, "1", ED25519).await?;
+        let pinned = kms
+            .sign_with_version(&tx, "1", ED25519, version(1), b"hello")
+            .await?;
+        assert_eq!(pinned, first);
+        assert_eq!(
+            kms.sign(&tx, "1", ED25519, b"hello").await?.key_version(),
+            2
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn a_pinned_signature_makes_nothing() {
+    let f = fixture("pinned_nothing").await;
+    let outcome = f
+        .atomic(|tx, kms| async move {
+            kms.sign_with_version(&tx, "1", P256, version(1), b"hello")
+                .await
+        })
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            Err(Error::SigningKeyNotFound {
+                algorithm: P256,
+                ..
+            })
+        ),
+        "{outcome:?}"
+    );
+    assert!(f.signing_versions_of("1").await.is_empty());
+    f.atomic(|tx, kms| async move { kms.sign(&tx, "1", P256, b"hello").await })
+        .await
+        .unwrap();
+    // A refusal rolls back what its transaction did; the key was made in
+    // one of its own, and the refusal adds nothing to it.
+    let outcome = f
+        .atomic(|tx, kms| async move {
+            kms.sign_with_version(&tx, "1", P256, version(5), b"hello")
+                .await
+        })
+        .await;
+    assert!(
+        matches!(outcome, Err(Error::NoKeyOfVersion(5))),
+        "{outcome:?}"
+    );
+    assert_eq!(f.signing_versions_of("1").await, [1]);
+}
+
+/// The keyring is the versions there are; a version an operator deleted
+/// neither signs, verifies nor is published.
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn the_keyring_is_the_versions_there_are() {
+    let f = fixture("keyring").await;
+    let (first, keyring) = f
+        .atomic(|tx, kms| async move {
+            let first = kms.sign(&tx, "1", P256, b"hello").await?;
+            kms.rotate_signing_key(&tx, "1", P256).await?;
+            kms.rotate_signing_key(&tx, "1", P256).await?;
+            let keyring = kms.public_keys(&tx, "1", P256).await?;
+            Ok((first, keyring))
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        keyring.iter().map(|(v, _)| v).collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    keyring.get(1).unwrap().verify(b"hello", &first).unwrap();
+    f.execute(
+        &format!(
+            "DELETE FROM {} WHERE tenant_id = '1' AND key_version < 2",
+            f.signing_table
+        ),
+        &[],
+    )
+    .await;
+    f.atomic(|tx, kms| async move {
+        let keyring = kms.public_keys(&tx, "1", P256).await?;
+        assert_eq!(keyring.iter().map(|(v, _)| v).collect::<Vec<_>>(), [2, 3]);
+        let signed = kms
+            .sign_with_version(&tx, "1", P256, version(1), b"hello")
+            .await;
+        assert!(
+            matches!(signed, Err(Error::NoKeyOfVersion(1))),
+            "{signed:?}"
+        );
+        let verified = kms.verify(&tx, "1", b"hello", &first).await;
+        assert!(
+            matches!(verified, Err(Error::NoKeyOfVersion(1))),
+            "{verified:?}"
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn the_keyring_does_not_open_under_another_master_key() {
+    let f = fixture("keyring_master").await;
+    f.atomic(|tx, kms| async move { kms.sign(&tx, "1", ED25519, b"hello").await })
+        .await
+        .unwrap();
+    let other = PgKeyManagementService::new(master_key())
+        .with_table(Identifier::new("ks_keyring_master").unwrap())
+        .with_signing_table(Identifier::new("ks_keyring_master_sign").unwrap())
+        .with_mac_table(Identifier::new("ks_keyring_master_mac").unwrap());
+    let outcome = f
+        .sessions
+        .session(async |session| {
+            session
+                .atomic(async |tx| other.public_keys(&tx, "1", ED25519).await)
+                .await
+        })
+        .await;
+    assert!(matches!(outcome, Err(Error::Decrypt)), "{outcome:?}");
+}
+
+/// A writer of the table who has not the master key can replace the stored
+/// public half, never the wrapped private one: the replacement is refused,
+/// neither published nor verified under.
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn a_public_half_replaced_in_the_table_is_refused() {
+    let f = fixture("tampered").await;
+    let signed = f
+        .atomic(|tx, kms| async move {
+            kms.sign(&tx, "1", ED25519, b"hello").await?;
+            kms.rotate_signing_key(&tx, "1", ED25519).await?;
+            kms.sign(&tx, "1", ED25519, b"hello").await
+        })
+        .await
+        .unwrap();
+    let forged = SigningKey::generate("1", ED25519, 2).unwrap();
+    let forged_signature = forged.sign(b"hello").unwrap();
+    f.execute(
+        &format!(
+            "UPDATE {} SET public_key = $1 WHERE tenant_id = '1' AND key_version = 2",
+            f.signing_table
+        ),
+        &[&forged.public().as_bytes()],
+    )
+    .await;
+    f.atomic(|tx, kms| async move {
+        let keyring = kms.public_keys(&tx, "1", ED25519).await;
+        assert!(matches!(keyring, Err(Error::Malformed(_))), "{keyring:?}");
+        for signature in [&signed, &forged_signature] {
+            let verified = kms.verify(&tx, "1", b"hello", signature).await;
+            assert!(matches!(verified, Err(Error::Malformed(_))), "{verified:?}");
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
 }

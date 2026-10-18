@@ -38,16 +38,20 @@
 //! after the lock is in a snapshot of its own, so it sees what the lock's
 //! previous holder committed.
 
+use std::num::NonZeroU32;
+
 use ascetic_ddd_session::Session;
 use ascetic_ddd_session::pg::{Identifier, PgAccess};
 use tokio_postgres::Row;
 
 use crate::domain::{
-    Algorithm, Kek, Key, KeyLabel, Mac, MacKey, MasterKey, PublicKey, Signature,
+    Algorithm, Kek, Key, KeyLabel, Mac, MacKey, MasterKey, PublicKeyring, Signature,
     SignatureAlgorithm, SigningKey, WrappedKey,
 };
 use crate::error::Error;
-use crate::port::{KekOptions, KeyCustody, KeyManagementService, MacService, SigningService};
+use crate::port::{
+    KekOptions, KeyCustody, KeyManagementService, MacService, PublicKeyService, SigningService,
+};
 
 /// The key management service over a table of KEKs wrapped by one master key.
 pub struct PgKeyManagementService {
@@ -260,22 +264,29 @@ impl PgKeyManagementService {
             .transpose()
     }
 
-    /// The signing key of the tenant, algorithm and version: the public
-    /// half, which is all verifying needs, so nothing is unwrapped.
-    async fn public_signing_key<S>(
+    /// Version `version` of the tenant's signing key of `algorithm`, its
+    /// public half derived from the private half and checked against the
+    /// one stored beside it (ADR-0019): what signs at a named version and
+    /// what verifies. Nothing is made.
+    ///
+    /// # Errors
+    /// [`Error::SigningKeyNotFound`] when the tenant has no key of the
+    /// algorithm; [`Error::NoKeyOfVersion`] when it has the key and not that
+    /// version; [`Error::Malformed`] when the stored public half is not the
+    /// private half's; [`Error::Decrypt`] under another master key.
+    async fn signing_key_of_version<S>(
         &self,
         session: &S,
         tenant_id: &str,
         algorithm: SignatureAlgorithm,
         version: u32,
-    ) -> Result<PublicKey, Error>
+    ) -> Result<SigningKey, Error>
     where
         S: Session + PgAccess + Sync,
     {
         let sql = format!(
-            "SELECT key_version, public_key FROM {} \
-             WHERE tenant_id = $1 AND algorithm = $2 AND key_version <= $3 \
-             ORDER BY key_version DESC LIMIT 1",
+            "SELECT key_version, encrypted_key, public_key, master_algorithm FROM {} \
+             WHERE tenant_id = $1 AND algorithm = $2 AND key_version = $3",
             self.signing_table
         );
         let row = session
@@ -285,31 +296,48 @@ impl PgKeyManagementService {
                 &[&tenant_id, &algorithm.as_str(), &stored_version(version)?],
             )
             .await?;
-        match row {
-            Some(row) if read_version(row.try_get("key_version")?)? == version => {
-                PublicKey::new(algorithm, row.try_get::<_, Vec<u8>>("public_key")?)
-            }
-            // A key the tenant has: the version named is not one of its.
+        if let Some(row) = row {
+            return self.checked_signing_key(tenant_id, algorithm, &row);
+        }
+        // No such version: the tenant may still have the key, at others.
+        let any = format!(
+            "SELECT 1 FROM {} WHERE tenant_id = $1 AND algorithm = $2 LIMIT 1",
+            self.signing_table
+        );
+        match session
+            .connection()
+            .query_opt(&any, &[&tenant_id, &algorithm.as_str()])
+            .await?
+        {
             Some(_) => Err(Error::NoKeyOfVersion(version)),
-            // No version at or below the one named: the tenant may still
-            // have the key, at newer versions only.
-            None => {
-                let newer = format!(
-                    "SELECT 1 FROM {} WHERE tenant_id = $1 AND algorithm = $2 LIMIT 1",
-                    self.signing_table
-                );
-                let any = session
-                    .connection()
-                    .query_opt(&newer, &[&tenant_id, &algorithm.as_str()])
-                    .await?;
-                match any {
-                    Some(_) => Err(Error::NoKeyOfVersion(version)),
-                    None => Err(Error::SigningKeyNotFound {
-                        tenant_id: tenant_id.to_owned(),
-                        algorithm,
-                    }),
-                }
-            }
+            None => Err(Error::SigningKeyNotFound {
+                tenant_id: tenant_id.to_owned(),
+                algorithm,
+            }),
+        }
+    }
+
+    /// The key of a row with its public half derived, and the stored public
+    /// half checked against it: a writer of the table without the master
+    /// key can change the column, never the wrapped private half, so a
+    /// mismatch is a tamper — refused rather than published or verified
+    /// under (ADR-0019).
+    fn checked_signing_key(
+        &self,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+        row: &Row,
+    ) -> Result<SigningKey, Error> {
+        let key = self.load_signing_key(tenant_id, algorithm, row)?;
+        let stored: Vec<u8> = row.try_get("public_key")?;
+        if stored.as_slice() == key.public().as_bytes() {
+            Ok(key)
+        } else {
+            Err(Error::Malformed(format!(
+                "the stored public half of `{}` v{} is not its private half's",
+                key.name(),
+                key.version()
+            )))
         }
     }
 
@@ -739,6 +767,19 @@ where
             .sign(message)
     }
 
+    async fn sign_with_version(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+        key_version: NonZeroU32,
+        message: &[u8],
+    ) -> Result<Signature, Error> {
+        self.signing_key_of_version(session, tenant_id, algorithm, key_version.get())
+            .await?
+            .sign(message)
+    }
+
     async fn verify(
         &self,
         session: &S,
@@ -746,13 +787,14 @@ where
         message: &[u8],
         signature: &Signature,
     ) -> Result<(), Error> {
-        self.public_signing_key(
+        self.signing_key_of_version(
             session,
             tenant_id,
             signature.algorithm(),
             signature.key_version(),
         )
         .await?
+        .public()
         .verify(message, signature)
     }
 
@@ -792,6 +834,46 @@ where
             .execute(&sql, &[&tenant_id, &algorithm.as_str()])
             .await?;
         Ok(())
+    }
+}
+
+/// The public halves of the keyring's versions there are — those an
+/// operator has not deleted — each derived from its wrapped private half
+/// and checked against the stored one, so that what is published is what
+/// the master key's holder made (ADR-0019).
+impl<S> PublicKeyService<S> for PgKeyManagementService
+where
+    S: Session + PgAccess + Sync,
+{
+    async fn public_keys(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+    ) -> Result<PublicKeyring, Error> {
+        let sql = format!(
+            "SELECT key_version, encrypted_key, public_key, master_algorithm FROM {} \
+             WHERE tenant_id = $1 AND algorithm = $2 ORDER BY key_version",
+            self.signing_table
+        );
+        let rows = session
+            .connection()
+            .query(&sql, &[&tenant_id, &algorithm.as_str()])
+            .await?;
+        if rows.is_empty() {
+            return Err(Error::SigningKeyNotFound {
+                tenant_id: tenant_id.to_owned(),
+                algorithm,
+            });
+        }
+        let keys = rows
+            .iter()
+            .map(|row| {
+                let key = self.checked_signing_key(tenant_id, algorithm, row)?;
+                Ok((key.version(), key.public().clone()))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        PublicKeyring::new(algorithm, keys)
     }
 }
 

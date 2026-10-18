@@ -32,9 +32,11 @@ pub enum Error {
         /// The version the ciphertext names.
         found: u32,
     },
-    /// The ciphertext or signature names a version of the key that the
-    /// holder does not have, or no longer serves: a keyring without that
-    /// version, a version an operator retired.
+    /// A version of the key named — by a ciphertext, a signature, or a
+    /// request to sign with it — that the holder does not have, or no
+    /// longer serves for that operation: a keyring without that version, a
+    /// version an operator retired, a version below the one the key signs
+    /// from (Transit's `min_encryption_version`), which may still verify.
     NoKeyOfVersion(u32),
     /// The tenant has no signing key of the algorithm.
     SigningKeyNotFound {
@@ -69,9 +71,9 @@ pub enum Error {
         detail: String,
     },
     /// The KMS refused the operation under this identity: the policy does
-    /// not allow it on this key, or the derivation context is not one the
-    /// policy admits. The key exists; no retry under the same identity and
-    /// context will mend it.
+    /// not allow it on this key — wrapping, unwrapping, signing — or the
+    /// derivation context is not one the policy admits. The key exists; no
+    /// retry under the same identity and context will mend it.
     Forbidden {
         /// The tenant whose key it is.
         tenant_id: String,

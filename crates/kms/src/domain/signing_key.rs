@@ -9,10 +9,10 @@ use super::key::Key;
 use super::signature::{Signature, SignatureAlgorithm};
 use crate::error::Error;
 
-/// The public half of a signing key, in the algorithm's form — Ed25519's
-/// thirty-two bytes, P-256's SEC1 uncompressed point of sixty-five: what
-/// a verifier holds, and what storage keeps beside the wrapped private
-/// half so that verifying unwraps nothing.
+/// The public half of a signing key, in the algorithm's one form —
+/// Ed25519's thirty-two bytes, P-256's SEC1 uncompressed point of
+/// sixty-five: what a verifier holds, and what storage keeps beside the
+/// wrapped private half.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublicKey {
     algorithm: SignatureAlgorithm,
@@ -20,20 +20,23 @@ pub struct PublicKey {
 }
 
 impl PublicKey {
-    /// A public key from its bytes, checked to be one of the algorithm's.
+    /// A public key from its bytes, checked to be one of the algorithm's,
+    /// and held in the algorithm's one form: Ed25519's thirty-two bytes;
+    /// P-256's uncompressed SEC1 point, `0x04 || x || y`, sixty-five bytes,
+    /// whichever SEC1 form it was given in — so that a key's bytes are one
+    /// form per algorithm, as a signature's are.
     ///
     /// # Errors
     /// [`Error::Malformed`] when the bytes are not a key of the algorithm.
     pub fn new(algorithm: SignatureAlgorithm, bytes: impl Into<Vec<u8>>) -> Result<Self, Error> {
         let bytes = bytes.into();
-        match algorithm {
+        let bytes = match algorithm {
             SignatureAlgorithm::Ed25519 => {
                 ed25519_verifying_key(&bytes)?;
+                bytes
             }
-            SignatureAlgorithm::EcdsaP256 => {
-                p256_verifying_key(&bytes)?;
-            }
-        }
+            SignatureAlgorithm::EcdsaP256 => p256_verifying_key(&bytes)?.to_sec1_bytes().into_vec(),
+        };
         Ok(PublicKey { algorithm, bytes })
     }
 
@@ -43,7 +46,9 @@ impl PublicKey {
         self.algorithm
     }
 
-    /// The bytes, in the algorithm's form.
+    /// The bytes, in the algorithm's form: Ed25519's thirty-two; P-256's
+    /// sixty-five, `0x04` then the coordinates `x` and `y`, big-endian,
+    /// thirty-two bytes each — what a JWK's `x` and `y` are cut from.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
@@ -330,5 +335,20 @@ mod tests {
         ));
         let again = PublicKey::new(SignatureAlgorithm::EcdsaP256, p.public().as_bytes()).unwrap();
         again.verify(b"hello", &signature).unwrap();
+    }
+
+    #[test]
+    fn a_compressed_p256_key_is_held_as_the_same_sixty_five_bytes() {
+        let key = SigningKey::generate("t", SignatureAlgorithm::EcdsaP256, 1).unwrap();
+        let compressed = p256::ecdsa::VerifyingKey::from_sec1_bytes(key.public().as_bytes())
+            .unwrap()
+            .to_sec1_point(true)
+            .as_bytes()
+            .to_vec();
+        assert_eq!(compressed.len(), 33);
+        let held = PublicKey::new(SignatureAlgorithm::EcdsaP256, compressed).unwrap();
+        assert_eq!(held.as_bytes(), key.public().as_bytes());
+        assert_eq!(held.as_bytes().len(), 65);
+        assert_eq!(held.as_bytes()[0], 0x04);
     }
 }

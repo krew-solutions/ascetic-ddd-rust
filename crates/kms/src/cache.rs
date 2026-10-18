@@ -12,14 +12,17 @@
 //! is wiped.
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use ascetic_ddd_session::Session;
 
-use crate::domain::{Key, KeyLabel, Mac, Signature, SignatureAlgorithm};
+use crate::domain::{Key, KeyLabel, Mac, PublicKeyring, Signature, SignatureAlgorithm};
 use crate::error::Error;
-use crate::port::{KekOptions, KeyCustody, KeyManagementService, MacService, SigningService};
+use crate::port::{
+    KekOptions, KeyCustody, KeyManagementService, MacService, PublicKeyService, SigningService,
+};
 
 /// A key management service that keeps what it unwraps, for a while.
 pub struct Cached<K> {
@@ -196,6 +199,19 @@ where
         self.kms.sign(session, tenant_id, algorithm, message).await
     }
 
+    async fn sign_with_version(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+        key_version: NonZeroU32,
+        message: &[u8],
+    ) -> Result<Signature, Error> {
+        self.kms
+            .sign_with_version(session, tenant_id, algorithm, key_version, message)
+            .await
+    }
+
     async fn verify(
         &self,
         session: &S,
@@ -228,6 +244,24 @@ where
         self.kms
             .delete_signing_key(session, tenant_id, algorithm)
             .await
+    }
+}
+
+/// The public keys passed through, uncached: a keyring held across a
+/// rotation would be a JWKS without the version about to sign, and nothing
+/// tells this cache a signing key rotated — rotations happen outside it.
+impl<S, K> PublicKeyService<S> for Cached<K>
+where
+    S: Session,
+    K: PublicKeyService<S>,
+{
+    async fn public_keys(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+    ) -> Result<PublicKeyring, Error> {
+        self.kms.public_keys(session, tenant_id, algorithm).await
     }
 }
 
