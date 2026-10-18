@@ -10,9 +10,10 @@ use crate::error::Error;
 
 /// Envelope encryption for one tenant at a time: data-encryption keys are
 /// wrapped and unwrapped by the tenant's current key-encryption key, which
-/// the service makes on first contact, rotates on request, and deletes for
-/// crypto-shredding. The surface of Vault Transit; the PostgreSQL adapter
-/// keeps the same surface.
+/// the service makes on first contact unless its keys are managed
+/// elsewhere. The use of the KEK only; making, rotating, retiring and
+/// deleting it is its custody, [`KeyCustody`] (ADR-0020). The surface of
+/// Vault Transit; the PostgreSQL adapter keeps the same surface.
 ///
 /// A wrapped key is bytes opaque to the caller, in the adapter's own form:
 /// only the adapter that wrapped it unwraps it.
@@ -42,14 +43,6 @@ pub trait KeyManagementService<S: Session>: Send + Sync {
         tenant_id: &str,
     ) -> impl Future<Output = Result<(Key, Vec<u8>), Error>> + Send;
 
-    /// The next version of the tenant's KEK, or the first; returns the new
-    /// version. Earlier versions stay, so what they wrapped still unwraps.
-    fn rotate_kek(
-        &self,
-        session: &S,
-        tenant_id: &str,
-    ) -> impl Future<Output = Result<u32, Error>> + Send;
-
     /// `encrypted_dek` wrapped again under the current KEK, after a rotation.
     fn rewrap_dek(
         &self,
@@ -57,14 +50,6 @@ pub trait KeyManagementService<S: Session>: Send + Sync {
         tenant_id: &str,
         encrypted_dek: &[u8],
     ) -> impl Future<Output = Result<Vec<u8>, Error>> + Send;
-
-    /// Deletes every version of the tenant's KEK: nothing wrapped under them
-    /// unwraps again. Nothing to delete is not an error.
-    fn delete_kek(
-        &self,
-        session: &S,
-        tenant_id: &str,
-    ) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// What a tenant's KEK is made with, by whoever has custody of it.
@@ -80,11 +65,28 @@ pub struct KekOptions {
     pub auto_rotate_period: Option<Duration>,
 }
 
-/// Custody of a tenant's KEK: what makes it, with its options, and what
-/// retires its versions — the tenant-management context's, held by nobody
-/// who merely wraps and unwraps (ADR-0017). Beside
+/// What a tenant's signing or MAC key is made with, by whoever has custody
+/// of it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct KeyOptions {
+    /// The KMS rotates the key itself, this often; an adapter without a
+    /// scheduler refuses it rather than ignore it. `None` asks nothing of a
+    /// key that exists: it keeps the period it has.
+    pub auto_rotate_period: Option<Duration>,
+}
+
+/// Custody of a tenant's KEK: what makes it, with its options, rotates it,
+/// retires its versions and deletes it — the tenant-management context's,
+/// held by nobody who merely wraps and unwraps (ADR-0017, ADR-0020). Beside
 /// [`KeyManagementService`], not on it: a producer or a consumer of the bus
 /// is bound by that port and must not hold this one.
+///
+/// The rules of every custody port (ADR-0020): making is idempotent and
+/// typed; a rotation never makes the first version and is not idempotent —
+/// a retried one makes one version more, which serves as well; a
+/// retirement keeps the latest version and never lowers the floor, so a
+/// retried or a stale one does nothing; a deletion of nothing is not an
+/// error.
 pub trait KeyCustody<S: Session>: Send + Sync {
     /// Makes the tenant's KEK with `options`, version 1, and answers its
     /// latest version; a key that exists with the same options is left as
@@ -97,26 +99,55 @@ pub trait KeyCustody<S: Session>: Send + Sync {
         options: &KekOptions,
     ) -> impl Future<Output = Result<u32, Error>> + Send;
 
+    /// The next version of the tenant's KEK; answers it. Earlier versions
+    /// stay, so what they wrapped still unwraps.
+    ///
+    /// # Errors
+    /// [`Error::KekNotFound`] when the tenant has none: a rotation never
+    /// makes the first version, so a scheduled one that meets an off-boarded
+    /// tenant does not bring its key back.
+    fn rotate_kek(
+        &self,
+        session: &S,
+        tenant_id: &str,
+    ) -> impl Future<Output = Result<u32, Error>> + Send;
+
     /// Retires every version of the tenant's KEK below `version`: what they
     /// wrapped never unwraps again, [`Error::NoKeyOfVersion`] from then on.
     /// The bound of a message's life on the bus, applied once the channel's
-    /// retention has passed (ADR-0017).
+    /// retention has passed (ADR-0017). A bound at or below the oldest
+    /// version kept does nothing: the floor is never lowered.
+    ///
+    /// # Errors
+    /// [`Error::KekNotFound`] when the tenant has none;
+    /// [`Error::NoKeyOfVersion`] for a bound above the latest version, which
+    /// would retire the key whole, and nothing is retired.
     fn retire_kek_versions_before(
         &self,
         session: &S,
         tenant_id: &str,
         version: u32,
     ) -> impl Future<Output = Result<(), Error>> + Send;
+
+    /// Deletes every version of the tenant's KEK: nothing wrapped under them
+    /// unwraps again — crypto-shredding. Nothing to delete is not an error.
+    fn delete_kek(
+        &self,
+        session: &S,
+        tenant_id: &str,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// Digital signatures under a tenant's keys: one key per tenant and
-/// algorithm, versioned by rotation; every version verifies until an
-/// operator retires it.
+/// algorithm, versioned by rotation; every version verifies until it is
+/// retired. The use of the key only; its custody is [`SigningKeyCustody`]
+/// (ADR-0020).
 ///
 /// Which version signs is the caller's, by the method it calls.
 /// [`sign`](Self::sign) takes the latest and makes the key on first
-/// signing; [`sign_with_version`](Self::sign_with_version) takes the version
-/// named and makes nothing. The latest is right only where the signed bytes
+/// signing, unless the adapter's keys are managed elsewhere;
+/// [`sign_with_version`](Self::sign_with_version) takes the version named
+/// and makes nothing. The latest is right only where the signed bytes
 /// do not name the version and every verifier learns of a version when the
 /// KMS makes it — verification through this port. A message that names its
 /// key's version inside what is signed — a JWS's `kid` — must have the
@@ -132,8 +163,10 @@ pub trait KeyCustody<S: Session>: Send + Sync {
 /// tenant's off-boarding, never a rotation.
 pub trait SigningService<S: Session>: Send + Sync {
     /// Signs `message` with the latest version of the tenant's key of
-    /// `algorithm`, making the key if the tenant has none. A rotation makes
-    /// the new version sign at once.
+    /// `algorithm`, making the key if the tenant has none — unless the
+    /// adapter's keys are managed elsewhere, when none is
+    /// [`Error::SigningKeyNotFound`]. A rotation makes the new version sign
+    /// at once.
     fn sign(
         &self,
         session: &S,
@@ -179,9 +212,37 @@ pub trait SigningService<S: Session>: Send + Sync {
         message: &[u8],
         signature: &Signature,
     ) -> impl Future<Output = Result<(), Error>> + Send;
+}
 
-    /// Makes the next version of the tenant's key of `algorithm`, or its
-    /// first; answers the version. Earlier versions keep verifying.
+/// Custody of a tenant's signing keys: what makes, rotates, retires and
+/// deletes them — the tenant-management context's, or an operator's
+/// procedure for a key of the platform's own, and never what signs
+/// (ADR-0020). Beside [`SigningService`], not on it, as [`KeyCustody`] is
+/// beside [`KeyManagementService`]; the rules are [`KeyCustody`]'s.
+pub trait SigningKeyCustody<S: Session>: Send + Sync {
+    /// Makes the tenant's key of `algorithm` with `options`, version 1, and
+    /// answers its latest version; a key that exists is left as it is and
+    /// its latest version answered, its rotation period set when `options`
+    /// asks for another.
+    ///
+    /// # Errors
+    /// [`Error::Conflict`] when the name holds a key of another type, or a
+    /// derived one; [`Error::Unsupported`] for a rotation period an adapter
+    /// without a scheduler cannot keep.
+    fn create_signing_key(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+        options: &KeyOptions,
+    ) -> impl Future<Output = Result<u32, Error>> + Send;
+
+    /// Makes the next version of the tenant's key of `algorithm`; answers
+    /// it. Earlier versions keep verifying until they are retired.
+    ///
+    /// # Errors
+    /// [`Error::SigningKeyNotFound`] when the tenant has none: a rotation
+    /// never makes the first version.
     fn rotate_signing_key(
         &self,
         session: &S,
@@ -189,8 +250,27 @@ pub trait SigningService<S: Session>: Send + Sync {
         algorithm: SignatureAlgorithm,
     ) -> impl Future<Output = Result<u32, Error>> + Send;
 
-    /// Deletes every version of the tenant's key of `algorithm`; nothing to
-    /// delete is not an error.
+    /// Retires every version of the tenant's key of `algorithm` below
+    /// `version`: they neither sign, verify nor are published again —
+    /// [`Error::NoKeyOfVersion`] from then on. A version that still signs
+    /// may be retired: that is how a compromised one is answered; the
+    /// latest never is. A bound at or below the oldest version kept does
+    /// nothing.
+    ///
+    /// # Errors
+    /// [`Error::SigningKeyNotFound`] when the tenant has none;
+    /// [`Error::NoKeyOfVersion`] for a bound above the latest version, and
+    /// nothing is retired.
+    fn retire_signing_versions_before(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+        version: u32,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
+
+    /// Deletes every version of the tenant's key of `algorithm`: what it
+    /// signed never verifies again. Nothing to delete is not an error.
     fn delete_signing_key(
         &self,
         session: &S,
@@ -226,11 +306,14 @@ pub trait PublicKeyService<S: Session>: Send + Sync {
 }
 
 /// Message authentication under a tenant's keys: one key per tenant and
-/// purpose, made on first use, versioned by rotation outside this port.
-/// A MAC is checked by recomputation, so the port only makes them.
+/// purpose, versioned by rotation. A MAC is checked by recomputation, so
+/// the port only makes them. The use of the key only; its custody is
+/// [`MacKeyCustody`] (ADR-0020).
 pub trait MacService<S: Session>: Send + Sync {
     /// HMAC-SHA-256 of `message` under the latest version of the tenant's
-    /// key for `purpose`, making the key if the tenant has none.
+    /// key for `purpose`, making the key if the tenant has none — unless
+    /// the adapter's keys are managed elsewhere, when none is
+    /// [`Error::MacKeyNotFound`].
     fn mac(
         &self,
         session: &S,
@@ -238,6 +321,59 @@ pub trait MacService<S: Session>: Send + Sync {
         purpose: &KeyLabel,
         message: &[u8],
     ) -> impl Future<Output = Result<Mac, Error>> + Send;
+}
+
+/// Custody of a tenant's MAC keys: what makes, rotates, retires and deletes
+/// them, never what makes MACs (ADR-0020). The rules are [`KeyCustody`]'s.
+/// Since a MAC is made with the latest version alone, a retirement changes
+/// nothing a holder of [`MacService`] sees: it bounds the key material
+/// kept at rest.
+pub trait MacKeyCustody<S: Session>: Send + Sync {
+    /// Makes the tenant's key for `purpose` with `options`, version 1, and
+    /// answers its latest version; a key that exists is left as it is and
+    /// its latest version answered, its rotation period set when `options`
+    /// asks for another.
+    ///
+    /// # Errors
+    /// [`Error::Conflict`] when the name holds a key of another type, or a
+    /// derived one; [`Error::Unsupported`] for a rotation period an adapter
+    /// without a scheduler cannot keep.
+    fn create_mac_key(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        purpose: &KeyLabel,
+        options: &KeyOptions,
+    ) -> impl Future<Output = Result<u32, Error>> + Send;
+
+    /// Makes the next version of the tenant's key for `purpose`; answers
+    /// it. What the earlier version made no longer matches what the key
+    /// makes: a consumer that checks by recomputation sees it as stale.
+    ///
+    /// # Errors
+    /// [`Error::MacKeyNotFound`] when the tenant has none.
+    fn rotate_mac_key(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        purpose: &KeyLabel,
+    ) -> impl Future<Output = Result<u32, Error>> + Send;
+
+    /// Retires every version of the tenant's key for `purpose` below
+    /// `version`; the latest never is. A bound at or below the oldest
+    /// version kept does nothing.
+    ///
+    /// # Errors
+    /// [`Error::MacKeyNotFound`] when the tenant has none;
+    /// [`Error::NoKeyOfVersion`] for a bound above the latest version, and
+    /// nothing is retired.
+    fn retire_mac_versions_before(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        purpose: &KeyLabel,
+        version: u32,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Deletes every version of the tenant's key for `purpose`; nothing to
     /// delete is not an error.

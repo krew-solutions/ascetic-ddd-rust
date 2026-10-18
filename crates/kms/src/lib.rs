@@ -22,7 +22,8 @@ pub use crate::error::{BoxError, Error};
 #[cfg(feature = "pg")]
 pub use crate::pg::PgKeyManagementService;
 pub use crate::port::{
-    KekOptions, KeyCustody, KeyManagementService, MacService, PublicKeyService, SigningService,
+    KekOptions, KeyCustody, KeyManagementService, KeyOptions, MacKeyCustody, MacService,
+    PublicKeyService, SigningKeyCustody, SigningService,
 };
 #[cfg(feature = "vault")]
 pub use crate::vault::VaultTransitService;

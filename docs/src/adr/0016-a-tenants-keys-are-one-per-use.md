@@ -16,6 +16,13 @@ verified by Vault, needs the key imported into Transit, BYOK, owed with
 the first tenant that brings a key. The check was written first in the
 OCaml port.
 
+Amended 2026-10-18 by ADR-0020: point 1 — the custody of each key is a
+port beside its use, so `rotate_signing_key` and `delete_signing_key` leave
+`SigningService` for `SigningKeyCustody`, `delete_mac_key` leaves
+`MacService` for `MacKeyCustody`, which also makes, rotates and retires;
+point 5 — `sign` and `mac` make the key on first use only without managed
+keys; built `managed_keys()`, nothing that signs or MACs makes one.
+
 Amended 2026-10-18 by ADR-0019: point 7 superseded — the public keys of
 the versions that verify are a port of their own; point 5 holds for `sign`,
 and `sign_with_version`, signing at a version something outside the KMS

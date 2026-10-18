@@ -15,7 +15,9 @@ use std::time::Duration;
 
 use ascetic_ddd_dek::{DekStore, Error, PgDekStore, Resource};
 use ascetic_ddd_kms::domain::VERSION_SIZE;
-use ascetic_ddd_kms::{Algorithm, Cipher, KeyManagementService, PgKeyManagementService};
+use ascetic_ddd_kms::{
+    Algorithm, Cipher, KeyCustody, KeyManagementService, PgKeyManagementService,
+};
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use ascetic_ddd_session::pg::tokio_postgres::{Config, NoTls};

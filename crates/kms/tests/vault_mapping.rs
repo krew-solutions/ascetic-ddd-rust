@@ -9,8 +9,9 @@ use ascetic_ddd_kms::vault::{VaultRequest, VaultResponse, VaultTransport};
 use std::num::NonZeroU32;
 
 use ascetic_ddd_kms::{
-    BoxError, Error, KekOptions, KeyCustody, KeyLabel, KeyManagementService, MacService,
-    PublicKeyService, Signature, SignatureAlgorithm, SigningService, VaultTransitService,
+    BoxError, Error, KekOptions, KeyCustody, KeyLabel, KeyManagementService, KeyOptions,
+    MacKeyCustody, MacService, PublicKeyService, Signature, SignatureAlgorithm, SigningKeyCustody,
+    SigningService, VaultTransitService,
 };
 use ascetic_ddd_session::rest::RestSession;
 use ascetic_ddd_session::{RestSessionPool, Session, SessionPool};
@@ -591,7 +592,19 @@ async fn the_public_keys_of_a_missing_key_of_another_type_or_another_armor_are_r
 }
 
 fn key_description(latest: u32, oldest: u32, derived: bool) -> Value {
-    json!({ "data": { "latest_version": latest, "min_decryption_version": oldest, "derived": derived } })
+    key_of_type("aes256-gcm96", latest, oldest, derived)
+}
+
+/// A key as `GET keys/{name}` describes it — and, on Vault 1.21, as the
+/// answer to `POST keys/{name}` does.
+fn key_of_type(key_type: &str, latest: u32, oldest: u32, derived: bool) -> Value {
+    json!({ "data": {
+        "type": key_type,
+        "latest_version": latest,
+        "min_decryption_version": oldest,
+        "min_encryption_version": 0,
+        "derived": derived,
+    } })
 }
 
 #[tokio::test]
@@ -826,17 +839,231 @@ async fn custody_makes_a_derived_key_with_its_rotation_and_refuses_one_that_exis
     );
 }
 
+/// A retirement reads the key once: a bound at or below the floor writes
+/// nothing — Transit would lower the floor when asked — one above the
+/// latest is refused, and a signing floor of the key's own below the bound
+/// is raised with it in the one write.
 #[tokio::test]
-async fn retiring_versions_raises_the_key_s_minimum_decryption_version() {
-    let transport = Scripted::answering(vec![("POST", "/keys/t/config", 204, json!({}))]);
+async fn a_retirement_reads_once_and_never_lowers_the_floor() {
+    for stale in [2, 3] {
+        let transport =
+            Scripted::answering(vec![("GET", "/keys/t", 200, key_description(5, 3, false))]);
+        with(&transport, |tx, kms| async move {
+            kms.retire_kek_versions_before(&tx, "t", stale).await
+        })
+        .await
+        .unwrap();
+        assert_eq!(transport.asked().len(), 1, "a read, and no write");
+    }
+    let transport = Scripted::answering(vec![
+        ("GET", "/keys/t", 200, key_description(5, 3, false)),
+        ("POST", "/keys/t/config", 204, json!({})),
+    ]);
     with(&transport, |tx, kms| async move {
-        kms.retire_kek_versions_before(&tx, "t", 3).await
+        kms.retire_kek_versions_before(&tx, "t", 4).await
     })
     .await
     .unwrap();
-    let asked = transport.asked();
     assert_eq!(
-        asked[0].2.as_ref().unwrap()["min_decryption_version"],
-        json!(3)
+        transport.asked()[1].2.as_ref().unwrap(),
+        &json!({ "min_decryption_version": 4 })
+    );
+    let mut floored = key_description(5, 3, false);
+    floored["data"]["min_encryption_version"] = json!(2);
+    let transport = Scripted::answering(vec![
+        ("GET", "/keys/t", 200, floored),
+        ("POST", "/keys/t/config", 204, json!({})),
+    ]);
+    with(&transport, |tx, kms| async move {
+        kms.retire_kek_versions_before(&tx, "t", 4).await
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        transport.asked()[1].2.as_ref().unwrap(),
+        &json!({ "min_decryption_version": 4, "min_encryption_version": 4 })
+    );
+    let transport =
+        Scripted::answering(vec![("GET", "/keys/t", 200, key_description(5, 3, false))]);
+    let above = with(&transport, |tx, kms| async move {
+        kms.retire_kek_versions_before(&tx, "t", 6).await
+    })
+    .await;
+    assert!(matches!(above, Err(Error::NoKeyOfVersion(6))), "{above:?}");
+    assert_eq!(transport.asked().len(), 1);
+    let transport = Scripted::answering(vec![("GET", "/keys/t", 404, json!({ "errors": [] }))]);
+    let missing = with(&transport, |tx, kms| async move {
+        kms.retire_kek_versions_before(&tx, "t", 2).await
+    })
+    .await;
+    assert!(
+        matches!(missing, Err(Error::KekNotFound { .. })),
+        "{missing:?}"
+    );
+}
+
+/// Under managed keys `sign` and `mac` ask Transit nothing but the
+/// operation, and a key that is not there is named by one read.
+#[tokio::test]
+async fn managed_signing_and_macs_make_no_key_and_a_missing_one_is_said_so() {
+    let transport = Scripted::answering(vec![
+        (
+            "POST",
+            "/sign/t.sign.ed25519",
+            400,
+            json!({ "errors": ["signing key not found"] }),
+        ),
+        ("GET", "/keys/t.sign.ed25519", 404, json!({ "errors": [] })),
+        (
+            "POST",
+            "/hmac/t.mac.etag",
+            400,
+            json!({ "errors": ["encryption key not found"] }),
+        ),
+        ("GET", "/keys/t.mac.etag", 404, json!({ "errors": [] })),
+    ]);
+    let kms = VaultTransitService::new("http://vault", "t").managed_keys();
+    let (signed, maced) = with_service(&transport, kms, |tx, kms| async move {
+        let signed = kms
+            .sign(&tx, "t", SignatureAlgorithm::Ed25519, b"hello")
+            .await;
+        let maced = kms
+            .mac(&tx, "t", &KeyLabel::new("etag").unwrap(), b"hello")
+            .await;
+        Ok((signed, maced))
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(signed, Err(Error::SigningKeyNotFound { .. })),
+        "{signed:?}"
+    );
+    assert!(
+        matches!(maced, Err(Error::MacKeyNotFound { ref purpose, .. }) if purpose == "etag"),
+        "{maced:?}"
+    );
+    assert!(
+        transport
+            .asked()
+            .iter()
+            .all(|(method, path, _)| !(method == "POST" && path.starts_with("/keys/"))),
+        "nothing was made: {:?}",
+        transport.asked()
+    );
+}
+
+/// A rotation asks Transit to rotate and nothing else — it makes no first
+/// version — and takes the new version from the answer.
+#[tokio::test]
+async fn a_rotation_never_makes_the_first_version() {
+    let transport = Scripted::answering(vec![
+        (
+            "POST",
+            "/keys/t.sign.ed25519/rotate",
+            400,
+            json!({ "errors": ["key not found"] }),
+        ),
+        ("GET", "/keys/t.sign.ed25519", 404, json!({ "errors": [] })),
+    ]);
+    let outcome = with(&transport, |tx, kms| async move {
+        kms.rotate_signing_key(&tx, "t", SignatureAlgorithm::Ed25519)
+            .await
+    })
+    .await;
+    assert!(
+        matches!(outcome, Err(Error::SigningKeyNotFound { .. })),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        transport.asked().len(),
+        2,
+        "no making: {:?}",
+        transport.asked()
+    );
+    let transport = Scripted::answering(vec![(
+        "POST",
+        "/keys/t.mac.etag/rotate",
+        200,
+        key_of_type("hmac", 3, 1, false),
+    )]);
+    let rotated = with(&transport, |tx, kms| async move {
+        kms.rotate_mac_key(&tx, "t", &KeyLabel::new("etag").unwrap())
+            .await
+    })
+    .await
+    .unwrap();
+    assert_eq!(rotated, 3);
+    assert_eq!(transport.asked().len(), 1, "the version is the answer's");
+}
+
+/// The making of a key reads the answer Transit gives — its description —
+/// and holds what is there to what was asked, with no read of its own.
+#[tokio::test]
+async fn custody_makes_a_key_of_its_type_and_refuses_another() {
+    let transport = Scripted::answering(vec![(
+        "POST",
+        "/keys/t.sign.ed25519",
+        200,
+        key_of_type("ed25519", 2, 1, false),
+    )]);
+    let made = with(&transport, |tx, kms| async move {
+        kms.create_signing_key(
+            &tx,
+            "t",
+            SignatureAlgorithm::Ed25519,
+            &KeyOptions::default(),
+        )
+        .await
+    })
+    .await
+    .unwrap();
+    assert_eq!(made, 2);
+    assert_eq!(
+        transport.asked()[0].2.as_ref().unwrap(),
+        &json!({ "type": "ed25519" })
+    );
+    let transport = Scripted::answering(vec![(
+        "POST",
+        "/keys/t.sign.ed25519",
+        200,
+        key_of_type("ecdsa-p256", 1, 1, false),
+    )]);
+    let outcome = with(&transport, |tx, kms| async move {
+        kms.create_signing_key(
+            &tx,
+            "t",
+            SignatureAlgorithm::Ed25519,
+            &KeyOptions::default(),
+        )
+        .await
+    })
+    .await;
+    assert!(
+        matches!(outcome, Err(Error::Conflict { .. })),
+        "{outcome:?}"
+    );
+    let transport = Scripted::answering(vec![(
+        "POST",
+        "/keys/t.mac.etag",
+        200,
+        key_of_type("hmac", 1, 1, true),
+    )]);
+    let outcome = with(&transport, |tx, kms| async move {
+        kms.create_mac_key(
+            &tx,
+            "t",
+            &KeyLabel::new("etag").unwrap(),
+            &KeyOptions::default(),
+        )
+        .await
+    })
+    .await;
+    assert!(
+        matches!(outcome, Err(Error::Conflict { .. })),
+        "a derived MAC key: {outcome:?}"
+    );
+    assert_eq!(
+        transport.asked()[0].2.as_ref().unwrap(),
+        &json!({ "type": "hmac", "key_size": 32 })
     );
 }

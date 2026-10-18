@@ -18,7 +18,7 @@ use ascetic_ddd_bus::{Bridge, Bus, Message, Permanent, Stage, Target};
 use ascetic_ddd_dek::stage::{DEK, DEK_ALGORITHM, DEK_BOUND_TO, MESSAGE_ID, TENANT_ID};
 use ascetic_ddd_dek::{EnvelopeStage, Reuse, Sealing, SealingParameters};
 use ascetic_ddd_inbox::{INBOX_SCHEME, Loops as InboxLoops, PgInbox};
-use ascetic_ddd_kms::{Algorithm, Cached, KeyManagementService, PgKeyManagementService};
+use ascetic_ddd_kms::{Algorithm, Cached, KeyCustody, PgKeyManagementService};
 use ascetic_ddd_outbox::{Loops as OutboxLoops, OUTBOX_SCHEME, PgOutbox};
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};

@@ -1,6 +1,7 @@
 //! The signing and MAC ports on the PostgreSQL adapter, against a live
 //! database, as `tests/pg.rs`; the same properties `tests/vault_signing.rs`
-//! holds on Vault, so that the two adapters do not drift apart.
+//! holds on Vault, so that the two adapters do not drift apart, and the
+//! custody's rules in the body every adapter runs (`common/custody.rs`).
 
 #![cfg(feature = "pg")]
 
@@ -11,8 +12,8 @@ use std::time::Duration;
 use std::num::NonZeroU32;
 
 use ascetic_ddd_kms::{
-    Algorithm, Error, Key, KeyLabel, MacService, PgKeyManagementService, PublicKeyService,
-    Signature, SignatureAlgorithm, SigningKey, SigningService,
+    Algorithm, Error, Key, KeyLabel, KeyOptions, MacKeyCustody, MacService, PgKeyManagementService,
+    PublicKeyService, Signature, SignatureAlgorithm, SigningKey, SigningKeyCustody, SigningService,
 };
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -37,6 +38,79 @@ fn pool() -> Pool {
         .max_size(8)
         .build()
         .expect("the pool can be built")
+}
+
+#[path = "common/custody.rs"]
+mod custody;
+
+impl custody::Scopes for Fixture {
+    type Session = PgSession;
+    type Keys = PgKeyManagementService;
+
+    async fn atomic<T, Fut>(
+        &self,
+        scope: impl FnOnce(PgSession, Arc<PgKeyManagementService>) -> Fut + Send,
+    ) -> Result<T, Error>
+    where
+        Fut: Future<Output = Result<T, Error>> + Send,
+        T: Send,
+    {
+        Fixture::atomic(self, scope).await
+    }
+}
+
+/// The fixture's tables under an adapter built `managed_keys()`.
+async fn managed(name: &str) -> Fixture {
+    let f = fixture(name).await;
+    let kms = Arc::try_unwrap(f.kms).unwrap_or_else(|_| unreachable!("held once"));
+    Fixture {
+        kms: Arc::new(kms.managed_keys()),
+        ..f
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn the_custody_of_signing_keys_keeps_the_rules() {
+    custody::signing_custody(&managed("custody_sign").await, "1").await;
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn the_custody_of_mac_keys_keeps_the_rules() {
+    custody::mac_custody(&managed("custody_mac").await, "1").await;
+}
+
+/// Two custodians making one tenant's key at once make one key.
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn two_makings_at_once_make_one_key() {
+    let f = managed("custody_race").await;
+    let make = || {
+        f.atomic(|tx, kms| async move {
+            kms.create_signing_key(&tx, "1", ED25519, &KeyOptions::default())
+                .await
+        })
+    };
+    let (a, b) = tokio::join!(make(), make());
+    assert_eq!((a.unwrap(), b.unwrap()), (1, 1));
+    assert_eq!(f.signing_versions_of("1").await, [1]);
+}
+
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn a_rotation_period_is_refused_by_a_table() {
+    let f = fixture("custody_period").await;
+    let options = KeyOptions {
+        auto_rotate_period: Some(Duration::from_secs(3600)),
+    };
+    let outcome = f
+        .atomic(|tx, kms| async move {
+            kms.create_mac_key(&tx, "1", &KeyLabel::new("etag").unwrap(), &options)
+                .await
+        })
+        .await;
+    assert!(matches!(outcome, Err(Error::Unsupported(_))), "{outcome:?}");
 }
 
 fn master_key() -> Key {

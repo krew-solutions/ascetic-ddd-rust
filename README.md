@@ -113,6 +113,11 @@ others behind features, so that `ascetic_ddd::saga` keeps working as one import
   at that version and makes no key; the public keys of the versions that
   verify are a port of their own, derived where the adapter holds the
   private halves *(Proposed)*.
+- [ADR-0020](docs/src/adr/0020-custody-of-a-tenants-keys-is-a-port-per-kind-and-nothing-that-uses-a-key-makes-one.md) —
+  custody of a tenant's keys is a port per kind, beside its use; under
+  managed keys nothing that uses a key makes one; a rotation never makes the
+  first version, and a retirement keeps the latest and never lowers the
+  floor *(Proposed)*.
 
 ## Specifications
 

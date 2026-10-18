@@ -147,6 +147,14 @@ crate did not say or did wrongly, measured on Vault 1.21.4 OSS:
    and the custody's tests run on the PostgreSQL adapter, the consumer's on
    Vault.
 
+Amended 2026-10-18 (ADR-0020): `managed_keys()` (point 3) covers every
+kind of key — `sign` and `mac` make none either; `KeyCustody` (point 4)
+takes `rotate_kek` and `delete_kek` from `KeyManagementService`, so that
+what wraps and unwraps names no custody; a rotation of a tenant without a
+KEK is `KekNotFound` rather than its first version; a retirement reads the
+key and never lowers the floor, and a bound above the latest is
+`NoKeyOfVersion` — on PostgreSQL it deleted every row before.
+
 Amended 2026-10-14 (ADR-0018): at an inbox that receives several channels
 — one subscriber for every row, one stage per `through` — the stage is
 chosen per row by its `destination`, the intake's name for the channel

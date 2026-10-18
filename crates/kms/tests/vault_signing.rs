@@ -1,5 +1,7 @@
 //! The signing and MAC ports on Vault Transit, against a dev server with the
-//! `transit` engine enabled, as `tests/vault.rs`.
+//! `transit` engine enabled, as `tests/vault.rs`; the custody's rules in the
+//! body every adapter runs (`common/custody.rs`), and a holder's token that
+//! signs and MACs and holds no custody.
 
 #![cfg(feature = "reqwest")]
 
@@ -8,8 +10,8 @@ use std::sync::Arc;
 use std::num::NonZeroU32;
 
 use ascetic_ddd_kms::{
-    Error, KeyLabel, MacService, PublicKey, PublicKeyService, Signature, SignatureAlgorithm,
-    SigningKey, SigningService, VaultTransitService,
+    Error, KeyLabel, KeyOptions, MacKeyCustody, MacService, PublicKey, PublicKeyService, Signature,
+    SignatureAlgorithm, SigningKey, SigningKeyCustody, SigningService, VaultTransitService,
 };
 use ascetic_ddd_session::rest::RestSession;
 use ascetic_ddd_session::{RestSessionPool, Session, SessionPool};
@@ -347,7 +349,8 @@ async fn after_a_rotation_the_earlier_version_signs_when_it_is_named() {
     let f = fixture("pinned");
     let tenant = f.tenant.clone();
     f.atomic(|tx, kms| async move {
-        kms.rotate_signing_key(&tx, &tenant, P256).await?;
+        kms.create_signing_key(&tx, &tenant, P256, &KeyOptions::default())
+            .await?;
         kms.rotate_signing_key(&tx, &tenant, P256).await
     })
     .await
@@ -421,7 +424,8 @@ async fn a_version_the_key_does_not_sign_with_is_named() {
     let tenant = f.tenant.clone();
     let earlier = f
         .atomic(|tx, kms| async move {
-            kms.rotate_signing_key(&tx, &tenant, ED25519).await?;
+            kms.create_signing_key(&tx, &tenant, ED25519, &KeyOptions::default())
+                .await?;
             kms.rotate_signing_key(&tx, &tenant, ED25519).await?;
             kms.rotate_signing_key(&tx, &tenant, ED25519).await?;
             kms.sign_with_version(&tx, &tenant, ED25519, version(2), b"hello")
@@ -508,9 +512,12 @@ async fn a_token_that_may_only_sign_and_read_signs_at_the_version_named() {
     let f = fixture("least-privilege");
     let name = SigningKey::name_of(&f.tenant, P256);
     let tenant = f.tenant.clone();
-    f.atomic(|tx, kms| async move { kms.rotate_signing_key(&tx, &tenant, P256).await })
-        .await
-        .unwrap();
+    f.atomic(|tx, kms| async move {
+        kms.create_signing_key(&tx, &tenant, P256, &KeyOptions::default())
+            .await
+    })
+    .await
+    .unwrap();
     let mint = format!("{}-mint", f.tenant);
     let read = format!("{}-read", f.tenant);
     f.operator(
@@ -555,12 +562,34 @@ async fn a_token_that_may_only_sign_and_read_signs_at_the_version_named() {
         "the ensure of `sign` is refused: {latest:?}"
     );
     let tenant = f.tenant.clone();
+    let managed = f
+        .atomic_as(
+            Arc::new(VaultTransitService::new(f.addr.clone(), minting.clone()).managed_keys()),
+            |tx, kms| async move { kms.sign(&tx, &tenant, P256, b"hello").await },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        managed.key_version(),
+        1,
+        "managed, the latest-signing runs under the minting token"
+    );
+    let tenant = f.tenant.clone();
     let rotation = f
         .atomic_as(f.under(&minting), |tx, kms| async move {
             kms.rotate_signing_key(&tx, &tenant, P256).await
         })
         .await;
-    assert!(rotation.is_err(), "{rotation:?}");
+    assert!(
+        matches!(
+            rotation,
+            Err(Error::Forbidden {
+                operation: "rotate",
+                ..
+            })
+        ),
+        "{rotation:?}"
+    );
     let tenant = f.tenant.clone();
     let reader = f
         .atomic_as(f.under(&reading), |tx, kms| async move {
@@ -595,5 +624,225 @@ async fn a_token_that_may_only_sign_and_read_signs_at_the_version_named() {
         )
         .await;
     }
+    f.cleanup().await;
+}
+
+#[path = "common/custody.rs"]
+mod custody;
+
+/// The fixture's Vault under a service built `managed_keys()`.
+struct Managed(Fixture, Arc<VaultTransitService>);
+
+impl Managed {
+    fn of(f: Fixture) -> Self {
+        let kms =
+            Arc::new(VaultTransitService::new(f.addr.clone(), f.token.clone()).managed_keys());
+        Managed(f, kms)
+    }
+}
+
+impl custody::Scopes for Managed {
+    type Session = RestSession<reqwest::Client>;
+    type Keys = VaultTransitService;
+
+    async fn atomic<T, Fut>(
+        &self,
+        scope: impl FnOnce(RestSession<reqwest::Client>, Arc<VaultTransitService>) -> Fut + Send,
+    ) -> Result<T, Error>
+    where
+        Fut: Future<Output = Result<T, Error>> + Send,
+        T: Send,
+    {
+        self.0.atomic_as(Arc::clone(&self.1), scope).await
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs a Vault dev server"]
+async fn the_custody_of_signing_keys_keeps_the_rules() {
+    let managed = Managed::of(fixture("custody-sign"));
+    custody::signing_custody(&managed, &managed.0.tenant).await;
+    managed.0.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "needs a Vault dev server"]
+async fn the_custody_of_mac_keys_keeps_the_rules() {
+    let managed = Managed::of(fixture("custody-mac"));
+    custody::mac_custody(&managed, &managed.0.tenant).await;
+    managed.0.cleanup().await;
+}
+
+/// A key at the name of another type is a conflict, not a key taken for
+/// what was asked: Transit leaves it as it is and says nothing (measured,
+/// Vault 1.21).
+#[tokio::test]
+#[ignore = "needs a Vault dev server"]
+async fn a_key_of_another_type_at_the_name_is_a_conflict() {
+    let f = fixture("custody-conflict");
+    let name = SigningKey::name_of(&f.tenant, ED25519);
+    f.operator(
+        reqwest::Method::POST,
+        &format!("transit/keys/{name}"),
+        serde_json::json!({ "type": "ecdsa-p256" }),
+    )
+    .await;
+    let tenant = f.tenant.clone();
+    let outcome = f
+        .atomic(|tx, kms| async move {
+            kms.create_signing_key(&tx, &tenant, ED25519, &KeyOptions::default())
+                .await
+        })
+        .await;
+    assert!(
+        matches!(outcome, Err(Error::Conflict { .. })),
+        "{outcome:?}"
+    );
+    f.cleanup().await;
+}
+
+/// A key's rotation period is set where it is made, and set again only when
+/// asked for another.
+#[tokio::test]
+#[ignore = "needs a Vault dev server"]
+async fn a_rotation_period_asked_is_the_key_s() {
+    let f = fixture("custody-period");
+    let tenant = f.tenant.clone();
+    let hours = |n: u64| KeyOptions {
+        auto_rotate_period: Some(std::time::Duration::from_secs(n * 3600)),
+    };
+    let etag = KeyLabel::new("etag").unwrap();
+    f.atomic(|tx, kms| async move {
+        kms.create_mac_key(&tx, &tenant, &etag, &hours(720)).await?;
+        kms.create_mac_key(&tx, &tenant, &etag, &hours(24)).await
+    })
+    .await
+    .unwrap();
+    let name = format!("{}.mac.etag", f.tenant);
+    let answer = f
+        .operator(
+            reqwest::Method::GET,
+            &format!("transit/keys/{name}"),
+            serde_json::Value::Null,
+        )
+        .await;
+    assert_eq!(answer["data"]["auto_rotate_period"], 24 * 3600);
+    f.cleanup().await;
+}
+
+/// A holder's grant — `read` on the keys, `update` on `sign` and `hmac`:
+/// built `managed_keys()`, it signs and MACs with the keys custody made; a
+/// tenant without them is named, not a `403`; every custody operation is
+/// `Forbidden`.
+#[tokio::test]
+#[ignore = "needs a Vault dev server"]
+async fn a_holder_s_token_signs_and_macs_and_holds_no_custody() {
+    let f = fixture("holder");
+    let etag = KeyLabel::new("etag").unwrap();
+    let tenant = f.tenant.clone();
+    {
+        let etag = etag.clone();
+        f.atomic(|tx, kms| async move {
+            kms.create_signing_key(&tx, &tenant, ED25519, &KeyOptions::default())
+                .await?;
+            kms.rotate_signing_key(&tx, &tenant, ED25519).await?;
+            kms.create_mac_key(&tx, &tenant, &etag, &KeyOptions::default())
+                .await
+        })
+        .await
+        .unwrap();
+    }
+    let holder = format!("{}-holder", f.tenant);
+    f.operator(
+        reqwest::Method::PUT,
+        &format!("sys/policies/acl/{holder}"),
+        serde_json::json!({ "policy": concat!(
+            "path \"transit/keys/+\" { capabilities = [\"read\"] }\n",
+            "path \"transit/sign/+\" { capabilities = [\"update\"] }\n",
+            "path \"transit/hmac/+\" { capabilities = [\"update\"] }\n",
+        ) }),
+    )
+    .await;
+    let token = f.token_under(&holder).await;
+    let kms = Arc::new(VaultTransitService::new(f.addr.clone(), token.clone()).managed_keys());
+
+    let tenant = f.tenant.clone();
+    let used = {
+        let etag = etag.clone();
+        f.atomic_as(Arc::clone(&kms), |tx, kms| async move {
+            let signature = kms.sign(&tx, &tenant, ED25519, b"hello").await?;
+            let mac = kms.mac(&tx, &tenant, &etag, b"hello").await?;
+            Ok((signature.key_version(), mac.key_version()))
+        })
+        .await
+        .unwrap()
+    };
+    assert_eq!(used, (2, 1));
+
+    let nobody = format!("{}-nobody", f.tenant);
+    let unsigned = {
+        let nobody = nobody.clone();
+        f.atomic_as(Arc::clone(&kms), |tx, kms| async move {
+            kms.sign(&tx, &nobody, ED25519, b"hello").await
+        })
+        .await
+    };
+    assert!(
+        matches!(unsigned, Err(Error::SigningKeyNotFound { .. })),
+        "{unsigned:?}"
+    );
+    let unmade = {
+        let (nobody, etag) = (nobody.clone(), etag.clone());
+        f.atomic_as(Arc::clone(&kms), |tx, kms| async move {
+            kms.mac(&tx, &nobody, &etag, b"hello").await
+        })
+        .await
+    };
+    assert!(
+        matches!(unmade, Err(Error::MacKeyNotFound { .. })),
+        "{unmade:?}"
+    );
+
+    let tenant = f.tenant.clone();
+    let refused = {
+        let etag = etag.clone();
+        f.atomic_as(Arc::clone(&kms), |tx, kms| async move {
+            let options = KeyOptions::default();
+            Ok([
+                kms.create_signing_key(&tx, &format!("{tenant}-new"), ED25519, &options)
+                    .await
+                    .map(|_| ()),
+                kms.rotate_signing_key(&tx, &tenant, ED25519)
+                    .await
+                    .map(|_| ()),
+                kms.retire_signing_versions_before(&tx, &tenant, ED25519, 2)
+                    .await,
+                kms.delete_signing_key(&tx, &tenant, ED25519).await,
+                kms.rotate_mac_key(&tx, &tenant, &etag).await.map(|_| ()),
+                kms.delete_mac_key(&tx, &tenant, &etag).await,
+            ])
+        })
+        .await
+        .unwrap()
+    };
+    for (n, outcome) in refused.iter().enumerate() {
+        assert!(
+            matches!(outcome, Err(Error::Forbidden { .. })),
+            "custody operation {n} under the holder's token: {outcome:?}"
+        );
+    }
+
+    f.operator(
+        reqwest::Method::POST,
+        "auth/token/revoke",
+        serde_json::json!({ "token": token }),
+    )
+    .await;
+    f.operator(
+        reqwest::Method::DELETE,
+        &format!("sys/policies/acl/{holder}"),
+        serde_json::Value::Null,
+    )
+    .await;
     f.cleanup().await;
 }

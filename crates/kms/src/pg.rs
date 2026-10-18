@@ -9,9 +9,11 @@
 //! of the bus does not unwrap for another, as under a derived key of
 //! Vault's (ADR-0017). The rows are the same; the binding is the wrap's.
 //! Built [`managed_keys`](PgKeyManagementService::managed_keys), the
-//! service makes no KEK on first contact: a tenant without one is
-//! [`Error::KekNotFound`] on every wrap, and the key is made by whoever
-//! has custody ([`KeyCustody`]), under the same lock.
+//! service makes no key on first use, of any kind: a tenant without one is
+//! [`Error::KekNotFound`] on every wrap, [`Error::SigningKeyNotFound`] on
+//! `sign` and [`Error::MacKeyNotFound`] on `mac`, and the keys are made by
+//! whoever has their custody ([`KeyCustody`], [`SigningKeyCustody`],
+//! [`MacKeyCustody`]), under the same locks.
 //!
 //! # The table
 //!
@@ -50,7 +52,8 @@ use crate::domain::{
 };
 use crate::error::Error;
 use crate::port::{
-    KekOptions, KeyCustody, KeyManagementService, MacService, PublicKeyService, SigningService,
+    KekOptions, KeyCustody, KeyManagementService, KeyOptions, MacKeyCustody, MacService,
+    PublicKeyService, SigningKeyCustody, SigningService,
 };
 
 /// The key management service over a table of KEKs wrapped by one master key.
@@ -90,9 +93,12 @@ impl PgKeyManagementService {
         }
     }
 
-    /// The same service making no KEK on first contact: a tenant without
-    /// one is [`Error::KekNotFound`] on every wrap. For a producer or a
-    /// consumer of the bus, whose keys are made by whoever has custody.
+    /// The same service making no key on first use, of any kind: a tenant
+    /// without one is [`Error::KekNotFound`] on every wrap,
+    /// [`Error::SigningKeyNotFound`] on `sign` and [`Error::MacKeyNotFound`]
+    /// on `mac`. For a holder of the use ports — a producer or a consumer of
+    /// the bus, a service that signs and MACs — whose keys are made by
+    /// whoever has their custody (ADR-0017, ADR-0020).
     pub fn managed_keys(self) -> Self {
         PgKeyManagementService {
             managed_keys: true,
@@ -358,6 +364,9 @@ impl PgKeyManagementService {
         {
             return Ok(found);
         }
+        if self.managed_keys {
+            return Err(signing_key_not_found(tenant_id, algorithm));
+        }
         session
             .atomic(async |tx| {
                 let name = SigningKey::name_of(tenant_id, algorithm);
@@ -455,7 +464,8 @@ impl PgKeyManagementService {
     }
 
     /// The latest MAC key, made under the keyring's lock if the tenant has
-    /// none for the purpose.
+    /// none for the purpose — unless the keys are managed elsewhere, when
+    /// none is [`Error::MacKeyNotFound`].
     async fn get_or_create_mac_key<S>(
         &self,
         session: &S,
@@ -468,6 +478,9 @@ impl PgKeyManagementService {
         if let Some(found) = self.current_mac_key(session, tenant_id, purpose).await? {
             return Ok(found);
         }
+        if self.managed_keys {
+            return Err(mac_key_not_found(tenant_id, purpose));
+        }
         session
             .atomic(async |tx| {
                 let name = MacKey::name_of(tenant_id, purpose);
@@ -476,30 +489,98 @@ impl PgKeyManagementService {
                     Some(found) => Ok(found),
                     None => {
                         let key = MacKey::generate(tenant_id, purpose, 1)?;
-                        let wrapped = self
-                            .master_key(self.master_algorithm)?
-                            .wrap(&name, key.key())?;
-                        let sql = format!(
-                            "INSERT INTO {} (tenant_id, purpose, key_version, encrypted_key, master_algorithm) \
-                             VALUES ($1, $2, 1, $3, $4)",
-                            self.mac_table
-                        );
-                        tx.connection()
-                            .execute(
-                                &sql,
-                                &[
-                                    &tenant_id,
-                                    &purpose.as_str(),
-                                    &wrapped.to_bytes(),
-                                    &self.master_algorithm.as_str(),
-                                ],
-                            )
-                            .await?;
+                        self.save_mac_key(&tx, &key).await?;
                         Ok(key)
                     }
                 }
             })
             .await
+    }
+
+    /// Saves the MAC key, wrapped by the master key under the key's name.
+    async fn save_mac_key<S>(&self, session: &S, key: &MacKey) -> Result<(), Error>
+    where
+        S: Session + PgAccess + Sync,
+    {
+        let wrapped = self
+            .master_key(self.master_algorithm)?
+            .wrap(&key.name(), key.key())?;
+        let sql = format!(
+            "INSERT INTO {} (tenant_id, purpose, key_version, encrypted_key, master_algorithm) \
+             VALUES ($1, $2, $3, $4, $5)",
+            self.mac_table
+        );
+        session
+            .connection()
+            .execute(
+                &sql,
+                &[
+                    &key.tenant_id(),
+                    &key.purpose().as_str(),
+                    &stored_version(key.version())?,
+                    &wrapped.to_bytes(),
+                    &self.master_algorithm.as_str(),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// The latest version in `table` of the rows `filter` selects with
+    /// `params`, `None` when there are none: what custody reads under the
+    /// keyring's lock before it makes, rotates or retires.
+    async fn latest_version<S>(
+        session: &S,
+        table: &Identifier,
+        filter: &str,
+        params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+    ) -> Result<Option<u32>, Error>
+    where
+        S: Session + PgAccess + Sync,
+    {
+        let sql = format!("SELECT max(key_version) FROM {table} WHERE {filter}");
+        let row = session.connection().query_one(&sql, params).await?;
+        row.try_get::<_, Option<i32>>(0)?
+            .map(read_version)
+            .transpose()
+    }
+
+    /// The latest version of the tenant's signing key of `algorithm`.
+    async fn latest_signing_version<S>(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+    ) -> Result<Option<u32>, Error>
+    where
+        S: Session + PgAccess + Sync,
+    {
+        Self::latest_version(
+            session,
+            &self.signing_table,
+            "tenant_id = $1 AND algorithm = $2",
+            &[&tenant_id, &algorithm.as_str()],
+        )
+        .await
+    }
+
+    /// The latest version of the tenant's MAC key for `purpose`.
+    async fn latest_mac_version<S>(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        purpose: &KeyLabel,
+    ) -> Result<Option<u32>, Error>
+    where
+        S: Session + PgAccess + Sync,
+    {
+        Self::latest_version(
+            session,
+            &self.mac_table,
+            "tenant_id = $1 AND purpose = $2",
+            &[&tenant_id, &purpose.as_str()],
+        )
+        .await
     }
 
     /// The tenant's KEK of the highest version.
@@ -655,24 +736,6 @@ where
         Ok((dek, wrapped.to_bytes()))
     }
 
-    async fn rotate_kek(&self, session: &S, tenant_id: &str) -> Result<u32, Error> {
-        session
-            .atomic(async |tx| {
-                self.lock_tenant(&tx, tenant_id).await?;
-                let master = self.master_key(self.master_algorithm)?;
-                let kek = match self.current_kek(&tx, tenant_id).await {
-                    Ok(current) => master.rotate_kek(&current)?,
-                    Err(Error::KekNotFound { .. }) => {
-                        master.generate_kek(tenant_id, self.context.as_deref())?
-                    }
-                    Err(error) => return Err(error),
-                };
-                self.save_kek(&tx, &kek).await?;
-                Ok(kek.version())
-            })
-            .await
-    }
-
     async fn rewrap_dek(
         &self,
         session: &S,
@@ -683,12 +746,6 @@ where
         let from = self.kek(session, tenant_id, wrapped.key_version()).await?;
         let current = self.get_or_create_current_kek(session, tenant_id).await?;
         Ok(current.rewrap(&wrapped, &from)?.to_bytes())
-    }
-
-    async fn delete_kek(&self, session: &S, tenant_id: &str) -> Result<(), Error> {
-        let sql = format!("DELETE FROM {} WHERE tenant_id = $1", self.table);
-        session.connection().execute(&sql, &[&tenant_id]).await?;
-        Ok(())
     }
 }
 
@@ -731,22 +788,61 @@ where
             .await
     }
 
-    /// Deletes the rows of the versions below `version`: what they wrapped
-    /// is [`Error::KekNotFound`] of that version from then on.
+    /// The next version under the tenant's lock; a tenant without a KEK is
+    /// [`Error::KekNotFound`] — a rotation makes no first version.
+    async fn rotate_kek(&self, session: &S, tenant_id: &str) -> Result<u32, Error> {
+        session
+            .atomic(async |tx| {
+                self.lock_tenant(&tx, tenant_id).await?;
+                let current = self.current_kek(&tx, tenant_id).await?;
+                let kek = self
+                    .master_key(self.master_algorithm)?
+                    .rotate_kek(&current)?;
+                self.save_kek(&tx, &kek).await?;
+                Ok(kek.version())
+            })
+            .await
+    }
+
+    /// Deletes the rows of the versions below `version`, under the tenant's
+    /// lock, after reading the latest: a bound above it is
+    /// [`Error::NoKeyOfVersion`] and nothing is deleted — not the whole key.
+    /// What a retired version wrapped is [`Error::KekNotFound`] of that
+    /// version from then on.
     async fn retire_kek_versions_before(
         &self,
         session: &S,
         tenant_id: &str,
         version: u32,
     ) -> Result<(), Error> {
-        let sql = format!(
-            "DELETE FROM {} WHERE tenant_id = $1 AND key_version < $2",
-            self.table
-        );
         session
-            .connection()
-            .execute(&sql, &[&tenant_id, &stored_version(version)?])
-            .await?;
+            .atomic(async |tx| {
+                self.lock_tenant(&tx, tenant_id).await?;
+                let latest =
+                    Self::latest_version(&tx, &self.table, "tenant_id = $1", &[&tenant_id])
+                        .await?
+                        .ok_or_else(|| Error::KekNotFound {
+                            tenant_id: tenant_id.to_owned(),
+                            key_version: None,
+                        })?;
+                if version > latest {
+                    return Err(Error::NoKeyOfVersion(version));
+                }
+                let sql = format!(
+                    "DELETE FROM {} WHERE tenant_id = $1 AND key_version < $2",
+                    self.table
+                );
+                tx.connection()
+                    .execute(&sql, &[&tenant_id, &stored_version(version)?])
+                    .await?;
+                Ok(())
+            })
+            .await
+    }
+
+    async fn delete_kek(&self, session: &S, tenant_id: &str) -> Result<(), Error> {
+        let sql = format!("DELETE FROM {} WHERE tenant_id = $1", self.table);
+        session.connection().execute(&sql, &[&tenant_id]).await?;
         Ok(())
     }
 }
@@ -797,6 +893,47 @@ where
         .public()
         .verify(message, signature)
     }
+}
+
+/// Custody of the signing keys in the signing table, every write under the
+/// keyring's lock.
+impl<S> SigningKeyCustody<S> for PgKeyManagementService
+where
+    S: Session + PgAccess + Sync,
+{
+    /// Version 1 when the tenant has no key of the algorithm, the latest
+    /// version otherwise; a rotation period is refused: there is no
+    /// scheduler in a table.
+    async fn create_signing_key(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+        options: &KeyOptions,
+    ) -> Result<u32, Error> {
+        no_scheduler(options)?;
+        session
+            .atomic(async |tx| {
+                Self::lock(
+                    &tx,
+                    &self.signing_table,
+                    &SigningKey::name_of(tenant_id, algorithm),
+                )
+                .await?;
+                match self
+                    .latest_signing_version(&tx, tenant_id, algorithm)
+                    .await?
+                {
+                    Some(latest) => Ok(latest),
+                    None => {
+                        let key = SigningKey::generate(tenant_id, algorithm, 1)?;
+                        self.save_signing_key(&tx, &key).await?;
+                        Ok(1)
+                    }
+                }
+            })
+            .await
+    }
 
     async fn rotate_signing_key(
         &self,
@@ -806,15 +943,58 @@ where
     ) -> Result<u32, Error> {
         session
             .atomic(async |tx| {
-                let name = SigningKey::name_of(tenant_id, algorithm);
-                Self::lock(&tx, &self.signing_table, &name).await?;
-                let version = self
-                    .current_signing_key(&tx, tenant_id, algorithm)
+                Self::lock(
+                    &tx,
+                    &self.signing_table,
+                    &SigningKey::name_of(tenant_id, algorithm),
+                )
+                .await?;
+                let latest = self
+                    .latest_signing_version(&tx, tenant_id, algorithm)
                     .await?
-                    .map_or(1, |current| current.version() + 1);
-                let key = SigningKey::generate(tenant_id, algorithm, version)?;
+                    .ok_or_else(|| signing_key_not_found(tenant_id, algorithm))?;
+                let key = SigningKey::generate(tenant_id, algorithm, latest + 1)?;
                 self.save_signing_key(&tx, &key).await?;
-                Ok(version)
+                Ok(key.version())
+            })
+            .await
+    }
+
+    /// Deletes the rows of the versions below `version`, after reading the
+    /// latest: a bound above it retires nothing.
+    async fn retire_signing_versions_before(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+        version: u32,
+    ) -> Result<(), Error> {
+        session
+            .atomic(async |tx| {
+                Self::lock(
+                    &tx,
+                    &self.signing_table,
+                    &SigningKey::name_of(tenant_id, algorithm),
+                )
+                .await?;
+                let latest = self
+                    .latest_signing_version(&tx, tenant_id, algorithm)
+                    .await?
+                    .ok_or_else(|| signing_key_not_found(tenant_id, algorithm))?;
+                if version > latest {
+                    return Err(Error::NoKeyOfVersion(version));
+                }
+                let sql = format!(
+                    "DELETE FROM {} WHERE tenant_id = $1 AND algorithm = $2 AND key_version < $3",
+                    self.signing_table
+                );
+                tx.connection()
+                    .execute(
+                        &sql,
+                        &[&tenant_id, &algorithm.as_str(), &stored_version(version)?],
+                    )
+                    .await?;
+                Ok(())
             })
             .await
     }
@@ -892,6 +1072,88 @@ where
             .await?
             .mac(message)
     }
+}
+
+/// Custody of the MAC keys in the MAC table, every write under the
+/// keyring's lock.
+impl<S> MacKeyCustody<S> for PgKeyManagementService
+where
+    S: Session + PgAccess + Sync,
+{
+    async fn create_mac_key(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        purpose: &KeyLabel,
+        options: &KeyOptions,
+    ) -> Result<u32, Error> {
+        no_scheduler(options)?;
+        session
+            .atomic(async |tx| {
+                Self::lock(&tx, &self.mac_table, &MacKey::name_of(tenant_id, purpose)).await?;
+                match self.latest_mac_version(&tx, tenant_id, purpose).await? {
+                    Some(latest) => Ok(latest),
+                    None => {
+                        let key = MacKey::generate(tenant_id, purpose, 1)?;
+                        self.save_mac_key(&tx, &key).await?;
+                        Ok(1)
+                    }
+                }
+            })
+            .await
+    }
+
+    async fn rotate_mac_key(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        purpose: &KeyLabel,
+    ) -> Result<u32, Error> {
+        session
+            .atomic(async |tx| {
+                Self::lock(&tx, &self.mac_table, &MacKey::name_of(tenant_id, purpose)).await?;
+                let latest = self
+                    .latest_mac_version(&tx, tenant_id, purpose)
+                    .await?
+                    .ok_or_else(|| mac_key_not_found(tenant_id, purpose))?;
+                let key = MacKey::generate(tenant_id, purpose, latest + 1)?;
+                self.save_mac_key(&tx, &key).await?;
+                Ok(key.version())
+            })
+            .await
+    }
+
+    async fn retire_mac_versions_before(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        purpose: &KeyLabel,
+        version: u32,
+    ) -> Result<(), Error> {
+        session
+            .atomic(async |tx| {
+                Self::lock(&tx, &self.mac_table, &MacKey::name_of(tenant_id, purpose)).await?;
+                let latest = self
+                    .latest_mac_version(&tx, tenant_id, purpose)
+                    .await?
+                    .ok_or_else(|| mac_key_not_found(tenant_id, purpose))?;
+                if version > latest {
+                    return Err(Error::NoKeyOfVersion(version));
+                }
+                let sql = format!(
+                    "DELETE FROM {} WHERE tenant_id = $1 AND purpose = $2 AND key_version < $3",
+                    self.mac_table
+                );
+                tx.connection()
+                    .execute(
+                        &sql,
+                        &[&tenant_id, &purpose.as_str(), &stored_version(version)?],
+                    )
+                    .await?;
+                Ok(())
+            })
+            .await
+    }
 
     async fn delete_mac_key(
         &self,
@@ -908,5 +1170,31 @@ where
             .execute(&sql, &[&tenant_id, &purpose.as_str()])
             .await?;
         Ok(())
+    }
+}
+
+/// The refusal of a tenant without a signing key of the algorithm.
+fn signing_key_not_found(tenant_id: &str, algorithm: SignatureAlgorithm) -> Error {
+    Error::SigningKeyNotFound {
+        tenant_id: tenant_id.to_owned(),
+        algorithm,
+    }
+}
+
+/// The refusal of a tenant without a MAC key for the purpose.
+fn mac_key_not_found(tenant_id: &str, purpose: &KeyLabel) -> Error {
+    Error::MacKeyNotFound {
+        tenant_id: tenant_id.to_owned(),
+        purpose: purpose.as_str().to_owned(),
+    }
+}
+
+/// A rotation period, which a table cannot keep.
+fn no_scheduler(options: &KeyOptions) -> Result<(), Error> {
+    match options.auto_rotate_period {
+        Some(_) => Err(Error::Unsupported(
+            "automatic rotation: the PostgreSQL KMS rotates on request only",
+        )),
+        None => Ok(()),
     }
 }

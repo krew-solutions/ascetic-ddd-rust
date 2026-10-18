@@ -1,15 +1,76 @@
 //! The in-memory keys behave as the Vault adapter does, where the tests of
-//! a consumer would notice a difference.
+//! a consumer would notice a difference; their custody is held to the body
+//! every adapter runs (`common/custody.rs`).
 
 use std::num::NonZeroU32;
+use std::sync::Arc;
 
 use ascetic_ddd_kms::testing::InMemoryKeys;
 use ascetic_ddd_kms::{
-    Error, KeyLabel, MacService, PublicKeyService, Signature, SignatureAlgorithm, SigningKey,
-    SigningService,
+    Error, KeyLabel, KeyOptions, MacKeyCustody, MacService, PublicKeyService, Signature,
+    SignatureAlgorithm, SigningKey, SigningKeyCustody, SigningService,
 };
 use ascetic_ddd_session::testing::{MemorySession, MemorySessionPool};
 use ascetic_ddd_session::{AsyncScope, Session, SessionPool};
+
+#[path = "common/custody.rs"]
+mod custody;
+
+/// The managed in-memory keys and the scope they run in.
+struct Managed(Arc<InMemoryKeys>);
+
+impl custody::Scopes for Managed {
+    type Session = MemorySession;
+    type Keys = InMemoryKeys;
+
+    async fn atomic<T, Fut>(
+        &self,
+        scope: impl FnOnce(MemorySession, Arc<InMemoryKeys>) -> Fut + Send,
+    ) -> Result<T, Error>
+    where
+        Fut: Future<Output = Result<T, Error>> + Send,
+        T: Send,
+    {
+        let keys = Arc::clone(&self.0);
+        MemorySessionPool::new()
+            .session(async |session: MemorySession| {
+                session.atomic(async |tx| scope(tx, keys).await).await
+            })
+            .await
+    }
+}
+
+#[tokio::test]
+async fn the_custody_of_signing_keys_keeps_the_rules() {
+    custody::signing_custody(&Managed(Arc::new(InMemoryKeys::new().managed_keys())), "t").await;
+}
+
+#[tokio::test]
+async fn the_custody_of_mac_keys_keeps_the_rules() {
+    custody::mac_custody(&Managed(Arc::new(InMemoryKeys::new().managed_keys())), "t").await;
+}
+
+#[tokio::test]
+async fn a_rotation_period_is_refused_here() {
+    let keys = InMemoryKeys::new();
+    let options = KeyOptions {
+        auto_rotate_period: Some(std::time::Duration::from_secs(3600)),
+    };
+    let signing =
+        try_in_scope(async |tx| keys.create_signing_key(&tx, "t", ED25519, &options).await).await;
+    assert!(matches!(signing, Err(Error::Unsupported(_))), "{signing:?}");
+    let etag = KeyLabel::new("etag").unwrap();
+    let mac = try_in_scope(async |tx| keys.create_mac_key(&tx, "t", &etag, &options).await).await;
+    assert!(matches!(mac, Err(Error::Unsupported(_))), "{mac:?}");
+}
+
+#[tokio::test]
+async fn managed_keys_still_sign_with_a_registered_seed() {
+    let keys = InMemoryKeys::new().managed_keys();
+    keys.register("t", &[7u8; 32]);
+    let signature = in_scope(async |tx| keys.sign(&tx, "t", ED25519, b"hello").await).await;
+    assert_eq!(signature.key_version(), 1);
+}
 
 const ED25519: SignatureAlgorithm = SignatureAlgorithm::Ed25519;
 
@@ -161,8 +222,8 @@ async fn a_refused_pinned_signature_leaves_no_key_behind() {
     );
 }
 
-/// A version retired as an operator retires it neither signs, verifies nor
-/// is published, and its number is not given again.
+/// A version retired through custody neither signs, verifies nor is
+/// published, and its number is not given again.
 #[tokio::test]
 async fn a_retired_version_neither_signs_verifies_nor_is_published() {
     let keys = InMemoryKeys::new();
@@ -178,8 +239,11 @@ async fn a_retired_version_neither_signs_verifies_nor_is_published() {
     })
     .await;
     assert_eq!(pinned, first);
-    keys.retire_signing_versions_before("t", ED25519, 2)
-        .unwrap();
+    in_scope(async |tx| {
+        keys.retire_signing_versions_before(&tx, "t", ED25519, 2)
+            .await
+    })
+    .await;
     let signed = try_in_scope(async |tx| {
         keys.sign_with_version(&tx, "t", ED25519, version(1), b"hello")
             .await
@@ -198,14 +262,21 @@ async fn a_retired_version_neither_signs_verifies_nor_is_published() {
     assert_eq!(keyring.iter().map(|(v, _)| v).collect::<Vec<_>>(), [2, 3]);
     let next = in_scope(async |tx| keys.rotate_signing_key(&tx, "t", ED25519).await).await;
     assert_eq!(next, 4);
-    assert!(matches!(
-        keys.retire_signing_versions_before("t", ED25519, 9),
-        Err(Error::NoKeyOfVersion(9))
-    ));
-    assert!(matches!(
-        keys.retire_signing_versions_before("u", ED25519, 1),
-        Err(Error::SigningKeyNotFound { .. })
-    ));
+    let above = try_in_scope(async |tx| {
+        keys.retire_signing_versions_before(&tx, "t", ED25519, 9)
+            .await
+    })
+    .await;
+    assert!(matches!(above, Err(Error::NoKeyOfVersion(9))), "{above:?}");
+    let absent = try_in_scope(async |tx| {
+        keys.retire_signing_versions_before(&tx, "u", ED25519, 1)
+            .await
+    })
+    .await;
+    assert!(
+        matches!(absent, Err(Error::SigningKeyNotFound { .. })),
+        "{absent:?}"
+    );
 }
 
 #[tokio::test]

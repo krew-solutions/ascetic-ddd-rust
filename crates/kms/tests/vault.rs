@@ -94,10 +94,12 @@ async fn a_dek_wrapped_after_a_rotation_unwraps() {
     let f = fixture("rotate_and_wrap");
     let tenant_0 = f.tenant(0);
     f.atomic(|tx, kms| async move {
+        kms.create_kek(&tx, tenant_0.as_str(), &KekOptions::default())
+            .await?;
         kms.rotate_kek(&tx, tenant_0.as_str()).await?;
         let dek = key();
         let wrapped = kms.encrypt_dek(&tx, tenant_0.as_str(), &dek).await?;
-        assert!(wrapped.starts_with(b"vault:v1:"));
+        assert!(wrapped.starts_with(b"vault:v2:"));
         assert_eq!(
             kms.decrypt_dek(&tx, tenant_0.as_str(), &wrapped).await?,
             dek
@@ -115,7 +117,8 @@ async fn a_generated_dek_is_thirty_two_bytes_and_unwraps() {
     let f = fixture("generate_dek");
     let tenant_0 = f.tenant(0);
     f.atomic(|tx, kms| async move {
-        kms.rotate_kek(&tx, tenant_0.as_str()).await?;
+        kms.create_kek(&tx, tenant_0.as_str(), &KekOptions::default())
+            .await?;
         let (dek, wrapped) = kms.generate_dek(&tx, tenant_0.as_str()).await?;
         assert_eq!(dek.as_bytes().len(), 32);
         assert_eq!(
@@ -135,12 +138,82 @@ async fn each_rotation_is_the_next_version() {
     let f = fixture("rotation_versions");
     let tenant_0 = f.tenant(0);
     f.atomic(|tx, kms| async move {
-        assert_eq!(kms.rotate_kek(&tx, tenant_0.as_str()).await?, 1);
+        assert_eq!(
+            kms.create_kek(&tx, tenant_0.as_str(), &KekOptions::default())
+                .await?,
+            1
+        );
         assert_eq!(kms.rotate_kek(&tx, tenant_0.as_str()).await?, 2);
+        assert_eq!(kms.rotate_kek(&tx, tenant_0.as_str()).await?, 3);
         Ok(())
     })
     .await
     .unwrap();
+    f.cleanup().await;
+}
+
+/// A rotation never makes the first version: Transit refuses one of a key
+/// it has not got, and the adapter no longer makes it first (ADR-0020).
+#[tokio::test]
+#[ignore = "needs a Vault dev server"]
+async fn a_rotation_of_a_tenant_without_a_kek_makes_none() {
+    let f = fixture("rotation_of_nothing");
+    let tenant_0 = f.tenant(0);
+    let outcome = f
+        .atomic(|tx, kms| async move { kms.rotate_kek(&tx, tenant_0.as_str()).await })
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            Err(Error::KekNotFound {
+                key_version: None,
+                ..
+            })
+        ),
+        "{outcome:?}"
+    );
+    f.cleanup().await;
+}
+
+/// A retirement reads the floor first: a stale bound writes nothing —
+/// Transit would lower the floor and bring a retired version back — and a
+/// bound above the latest is refused, nothing retired.
+#[tokio::test]
+#[ignore = "needs a Vault dev server"]
+async fn a_retirement_never_lowers_the_floor_nor_passes_the_latest() {
+    let f = fixture("retire_bounds");
+    let tenant_0 = f.tenant(0);
+    let outcome = f
+        .atomic(|tx, kms| async move {
+            kms.create_kek(&tx, tenant_0.as_str(), &KekOptions::default())
+                .await?;
+            let wrapped_v1 = kms.encrypt_dek(&tx, tenant_0.as_str(), &key()).await?;
+            kms.rotate_kek(&tx, tenant_0.as_str()).await?;
+            kms.rotate_kek(&tx, tenant_0.as_str()).await?;
+            kms.retire_kek_versions_before(&tx, tenant_0.as_str(), 2)
+                .await?;
+            kms.retire_kek_versions_before(&tx, tenant_0.as_str(), 1)
+                .await?;
+            let above = kms
+                .retire_kek_versions_before(&tx, tenant_0.as_str(), 4)
+                .await;
+            Ok((
+                kms.decrypt_dek(&tx, tenant_0.as_str(), &wrapped_v1).await,
+                above,
+            ))
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome.0, Err(Error::NoKeyOfVersion(1))),
+        "{:?}",
+        outcome.0
+    );
+    assert!(
+        matches!(outcome.1, Err(Error::NoKeyOfVersion(4))),
+        "{:?}",
+        outcome.1
+    );
     f.cleanup().await;
 }
 
@@ -150,7 +223,8 @@ async fn what_an_earlier_version_wrapped_still_unwraps() {
     let f = fixture("unwrap_after_rotation");
     let tenant_0 = f.tenant(0);
     f.atomic(|tx, kms| async move {
-        kms.rotate_kek(&tx, tenant_0.as_str()).await?;
+        kms.create_kek(&tx, tenant_0.as_str(), &KekOptions::default())
+            .await?;
         let dek = key();
         let wrapped_v1 = kms.encrypt_dek(&tx, tenant_0.as_str(), &dek).await?;
         kms.rotate_kek(&tx, tenant_0.as_str()).await?;
@@ -171,7 +245,8 @@ async fn a_rewrap_moves_a_dek_to_the_current_version() {
     let f = fixture("rewrap");
     let tenant_0 = f.tenant(0);
     f.atomic(|tx, kms| async move {
-        kms.rotate_kek(&tx, tenant_0.as_str()).await?;
+        kms.create_kek(&tx, tenant_0.as_str(), &KekOptions::default())
+            .await?;
         let dek = key();
         let wrapped_v1 = kms.encrypt_dek(&tx, tenant_0.as_str(), &dek).await?;
         kms.rotate_kek(&tx, tenant_0.as_str()).await?;
@@ -196,7 +271,8 @@ async fn deleting_the_key_shreds_what_it_wrapped() {
     let f = fixture("crypto_shredding");
     let tenant_0 = f.tenant(0);
     f.atomic(|tx, kms| async move {
-        kms.rotate_kek(&tx, tenant_0.as_str()).await?;
+        kms.create_kek(&tx, tenant_0.as_str(), &KekOptions::default())
+            .await?;
         let wrapped = kms.encrypt_dek(&tx, tenant_0.as_str(), &key()).await?;
         kms.delete_kek(&tx, tenant_0.as_str()).await?;
         // Transit's 400 for a gone key, read as such by one read of the key.
@@ -238,8 +314,10 @@ async fn one_tenant_s_key_does_not_unwrap_another_s_dek() {
     let f = fixture("tenant_isolation");
     let (tenant_0, tenant_1) = (f.tenant(0), f.tenant(1));
     f.atomic(|tx, kms| async move {
-        kms.rotate_kek(&tx, tenant_0.as_str()).await?;
-        kms.rotate_kek(&tx, tenant_1.as_str()).await?;
+        kms.create_kek(&tx, tenant_0.as_str(), &KekOptions::default())
+            .await?;
+        kms.create_kek(&tx, tenant_1.as_str(), &KekOptions::default())
+            .await?;
         let dek = key();
         let wrapped = kms.encrypt_dek(&tx, tenant_0.as_str(), &dek).await?;
         assert_eq!(

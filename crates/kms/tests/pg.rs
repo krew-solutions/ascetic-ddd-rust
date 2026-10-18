@@ -117,6 +117,7 @@ impl Fixture {
 async fn a_dek_wrapped_after_a_rotation_unwraps() {
     let f = fixture("rotate_and_wrap").await;
     f.atomic(|tx, kms| async move {
+        kms.create_kek(&tx, "1", &KekOptions::default()).await?;
         kms.rotate_kek(&tx, "1").await?;
         let dek = key();
         let wrapped = kms.encrypt_dek(&tx, "1", &dek).await?;
@@ -132,7 +133,7 @@ async fn a_dek_wrapped_after_a_rotation_unwraps() {
 async fn a_generated_dek_is_thirty_two_bytes_and_unwraps() {
     let f = fixture("generate_dek").await;
     f.atomic(|tx, kms| async move {
-        kms.rotate_kek(&tx, "1").await?;
+        kms.create_kek(&tx, "1", &KekOptions::default()).await?;
         let (dek, wrapped) = kms.generate_dek(&tx, "1").await?;
         assert_eq!(dek.as_bytes().len(), 32);
         assert_eq!(kms.decrypt_dek(&tx, "1", &wrapped).await?, dek);
@@ -147,13 +148,36 @@ async fn a_generated_dek_is_thirty_two_bytes_and_unwraps() {
 async fn each_rotation_is_the_next_version() {
     let f = fixture("rotation_versions").await;
     f.atomic(|tx, kms| async move {
-        assert_eq!(kms.rotate_kek(&tx, "1").await?, 1);
+        assert_eq!(kms.create_kek(&tx, "1", &KekOptions::default()).await?, 1);
         assert_eq!(kms.rotate_kek(&tx, "1").await?, 2);
+        assert_eq!(kms.rotate_kek(&tx, "1").await?, 3);
         Ok(())
     })
     .await
     .unwrap();
-    assert_eq!(f.versions_of("1").await, [1, 2]);
+    assert_eq!(f.versions_of("1").await, [1, 2, 3]);
+}
+
+/// A rotation never makes the first version: a scheduled one that meets a
+/// shredded tenant does not bring its key back (ADR-0020).
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn a_rotation_of_a_tenant_without_a_kek_makes_none() {
+    let f = fixture("rotation_of_nothing").await;
+    let outcome = f
+        .atomic(|tx, kms| async move { kms.rotate_kek(&tx, "1").await })
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            Err(Error::KekNotFound {
+                key_version: None,
+                ..
+            })
+        ),
+        "{outcome:?}"
+    );
+    assert!(f.versions_of("1").await.is_empty());
 }
 
 #[tokio::test]
@@ -161,7 +185,7 @@ async fn each_rotation_is_the_next_version() {
 async fn what_an_earlier_version_wrapped_still_unwraps() {
     let f = fixture("unwrap_after_rotation").await;
     f.atomic(|tx, kms| async move {
-        kms.rotate_kek(&tx, "1").await?;
+        kms.create_kek(&tx, "1", &KekOptions::default()).await?;
         let dek = key();
         let wrapped_v1 = kms.encrypt_dek(&tx, "1", &dek).await?;
         kms.rotate_kek(&tx, "1").await?;
@@ -177,7 +201,7 @@ async fn what_an_earlier_version_wrapped_still_unwraps() {
 async fn a_rewrap_moves_a_dek_to_the_current_version() {
     let f = fixture("rewrap").await;
     f.atomic(|tx, kms| async move {
-        kms.rotate_kek(&tx, "1").await?;
+        kms.create_kek(&tx, "1", &KekOptions::default()).await?;
         let dek = key();
         let wrapped_v1 = kms.encrypt_dek(&tx, "1", &dek).await?;
         kms.rotate_kek(&tx, "1").await?;
@@ -197,7 +221,7 @@ async fn a_rewrap_moves_a_dek_to_the_current_version() {
 async fn deleting_the_keks_shreds_what_they_wrapped() {
     let f = fixture("crypto_shredding").await;
     f.atomic(|tx, kms| async move {
-        kms.rotate_kek(&tx, "1").await?;
+        kms.create_kek(&tx, "1", &KekOptions::default()).await?;
         let wrapped = kms.encrypt_dek(&tx, "1", &key()).await?;
         kms.delete_kek(&tx, "1").await?;
         assert!(matches!(
@@ -216,8 +240,8 @@ async fn deleting_the_keks_shreds_what_they_wrapped() {
 async fn one_tenant_s_key_does_not_unwrap_another_s_dek() {
     let f = fixture("tenant_isolation").await;
     f.atomic(|tx, kms| async move {
-        kms.rotate_kek(&tx, "1").await?;
-        kms.rotate_kek(&tx, "2").await?;
+        kms.create_kek(&tx, "1", &KekOptions::default()).await?;
+        kms.create_kek(&tx, "2", &KekOptions::default()).await?;
         let dek = key();
         let wrapped = kms.encrypt_dek(&tx, "1", &dek).await?;
         assert_eq!(kms.decrypt_dek(&tx, "1", &wrapped).await?, dek);
@@ -253,7 +277,7 @@ async fn a_key_made_in_a_transaction_rolled_back_is_not_there() {
     let f = fixture("rolled_back").await;
     let outcome = f
         .atomic(|tx, kms| async move {
-            kms.rotate_kek(&tx, "1").await?;
+            kms.create_kek(&tx, "1", &KekOptions::default()).await?;
             Err::<(), _>(Error::Malformed(
                 "the command failed after the key was made".into(),
             ))
@@ -320,8 +344,11 @@ async fn two_first_contacts_at_once_share_one_key() {
 /// makes the version after it.
 #[tokio::test]
 #[ignore = "needs a live PostgreSQL"]
-async fn two_rotations_at_once_make_versions_one_and_two() {
+async fn two_rotations_at_once_make_the_next_two_versions() {
     let f = Arc::new(fixture("rotations_at_once").await);
+    f.atomic(|tx, kms| async move { kms.create_kek(&tx, "1", &KekOptions::default()).await })
+        .await
+        .unwrap();
     let (made, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
     let first = {
         let (f, made, release) = (Arc::clone(&f), Arc::clone(&made), Arc::clone(&release));
@@ -350,8 +377,8 @@ async fn two_rotations_at_once_make_versions_one_and_two() {
     release.notify_one();
     let first = first.await.unwrap().unwrap();
     let second = second.await.unwrap().unwrap();
-    assert_eq!((first, second), (1, 2));
-    assert_eq!(f.versions_of("1").await, [1, 2]);
+    assert_eq!((first, second), (2, 3));
+    assert_eq!(f.versions_of("1").await, [1, 2, 3]);
 }
 
 #[tokio::test]
@@ -376,9 +403,13 @@ async fn two_setups_at_once_agree() {
     let (a, b) = tokio::join!(setup(), setup());
     a.unwrap();
     b.unwrap();
-    f.atomic(|tx, kms| async move { kms.rotate_kek(&tx, "1").await.map(|_| ()) })
-        .await
-        .unwrap();
+    f.atomic(|tx, kms| async move {
+        kms.create_kek(&tx, "1", &KekOptions::default())
+            .await
+            .map(|_| ())
+    })
+    .await
+    .unwrap();
 }
 
 /// A row the Python port wrote — its first KEK for `tenant-1` under the
@@ -508,4 +539,36 @@ async fn custody_makes_the_key_once_and_retires_its_versions() {
     .await
     .unwrap();
     assert_eq!(f.versions_of("1").await, vec![2]);
+}
+
+/// A retirement's bound above the latest version retires nothing — it once
+/// deleted every row, a crypto-shred nobody asked for — and a stale bound
+/// brings nothing back.
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn a_retirement_above_the_latest_retires_nothing() {
+    let f = fixture("custody_retire_bounds").await;
+    f.atomic(|tx, kms| async move {
+        kms.create_kek(&tx, "1", &KekOptions::default()).await?;
+        kms.rotate_kek(&tx, "1").await?;
+        kms.retire_kek_versions_before(&tx, "1", 2).await?;
+        kms.retire_kek_versions_before(&tx, "1", 1).await
+    })
+    .await
+    .unwrap();
+    let outcome = f
+        .atomic(|tx, kms| async move { kms.retire_kek_versions_before(&tx, "1", 7).await })
+        .await;
+    assert!(
+        matches!(outcome, Err(Error::NoKeyOfVersion(7))),
+        "{outcome:?}"
+    );
+    assert_eq!(f.versions_of("1").await, vec![2]);
+    let outcome = f
+        .atomic(|tx, kms| async move { kms.retire_kek_versions_before(&tx, "2", 1).await })
+        .await;
+    assert!(
+        matches!(outcome, Err(Error::KekNotFound { .. })),
+        "{outcome:?}"
+    );
 }

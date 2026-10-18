@@ -4,8 +4,9 @@
 //! result may be kept: a consumer that opens a thousand messages sealed
 //! under one DEK, or a store that loads every version of a stream's keys,
 //! asks the KMS once instead of a thousand times — which matters when the
-//! KMS is a network away, Vault. Everything else passes through, and
-//! deleting a tenant's KEK forgets what was cached for the tenant here;
+//! KMS is a network away, Vault. Everything else passes through — the
+//! custody ports too — and retiring or deleting a tenant's KEK forgets what
+//! was cached for the tenant here;
 //! elsewhere the cache's time to live is the bound, so a shredded tenant's
 //! keys open for that long at most. That, and keys held in memory for that
 //! long, is the price; the capacity bounds the memory, and a key evicted
@@ -21,7 +22,8 @@ use ascetic_ddd_session::Session;
 use crate::domain::{Key, KeyLabel, Mac, PublicKeyring, Signature, SignatureAlgorithm};
 use crate::error::Error;
 use crate::port::{
-    KekOptions, KeyCustody, KeyManagementService, MacService, PublicKeyService, SigningService,
+    KekOptions, KeyCustody, KeyManagementService, KeyOptions, MacKeyCustody, MacService,
+    PublicKeyService, SigningKeyCustody, SigningService,
 };
 
 /// A key management service that keeps what it unwraps, for a while.
@@ -150,10 +152,6 @@ where
         self.kms.generate_dek(session, tenant_id).await
     }
 
-    async fn rotate_kek(&self, session: &S, tenant_id: &str) -> Result<u32, Error> {
-        self.kms.rotate_kek(session, tenant_id).await
-    }
-
     async fn rewrap_dek(
         &self,
         session: &S,
@@ -161,13 +159,6 @@ where
         encrypted_dek: &[u8],
     ) -> Result<Vec<u8>, Error> {
         self.kms.rewrap_dek(session, tenant_id, encrypted_dek).await
-    }
-
-    /// Deletes through the service and forgets the tenant's keys held here.
-    async fn delete_kek(&self, session: &S, tenant_id: &str) -> Result<(), Error> {
-        self.kms.delete_kek(session, tenant_id).await?;
-        self.forget(tenant_id);
-        Ok(())
     }
 }
 
@@ -223,28 +214,6 @@ where
             .verify(session, tenant_id, message, signature)
             .await
     }
-
-    async fn rotate_signing_key(
-        &self,
-        session: &S,
-        tenant_id: &str,
-        algorithm: SignatureAlgorithm,
-    ) -> Result<u32, Error> {
-        self.kms
-            .rotate_signing_key(session, tenant_id, algorithm)
-            .await
-    }
-
-    async fn delete_signing_key(
-        &self,
-        session: &S,
-        tenant_id: &str,
-        algorithm: SignatureAlgorithm,
-    ) -> Result<(), Error> {
-        self.kms
-            .delete_signing_key(session, tenant_id, algorithm)
-            .await
-    }
 }
 
 /// The public keys passed through, uncached: a keyring held across a
@@ -280,15 +249,6 @@ where
     ) -> Result<Mac, Error> {
         self.kms.mac(session, tenant_id, purpose, message).await
     }
-
-    async fn delete_mac_key(
-        &self,
-        session: &S,
-        tenant_id: &str,
-        purpose: &KeyLabel,
-    ) -> Result<(), Error> {
-        self.kms.delete_mac_key(session, tenant_id, purpose).await
-    }
 }
 
 impl<S, K> KeyCustody<S> for Cached<K>
@@ -305,6 +265,10 @@ where
         self.kms.create_kek(session, tenant_id, options).await
     }
 
+    async fn rotate_kek(&self, session: &S, tenant_id: &str) -> Result<u32, Error> {
+        self.kms.rotate_kek(session, tenant_id).await
+    }
+
     async fn retire_kek_versions_before(
         &self,
         session: &S,
@@ -318,5 +282,115 @@ where
         // on a deletion: the cache's time to live would bound it otherwise.
         self.forget(tenant_id);
         Ok(())
+    }
+
+    /// Deletes through the service and forgets the tenant's keys held here.
+    async fn delete_kek(&self, session: &S, tenant_id: &str) -> Result<(), Error> {
+        self.kms.delete_kek(session, tenant_id).await?;
+        self.forget(tenant_id);
+        Ok(())
+    }
+}
+
+/// The signing keys' custody passed through: nothing of a signing key is
+/// cached here.
+impl<S, K> SigningKeyCustody<S> for Cached<K>
+where
+    S: Session,
+    K: SigningKeyCustody<S>,
+{
+    async fn create_signing_key(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+        options: &KeyOptions,
+    ) -> Result<u32, Error> {
+        self.kms
+            .create_signing_key(session, tenant_id, algorithm, options)
+            .await
+    }
+
+    async fn rotate_signing_key(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+    ) -> Result<u32, Error> {
+        self.kms
+            .rotate_signing_key(session, tenant_id, algorithm)
+            .await
+    }
+
+    async fn retire_signing_versions_before(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+        version: u32,
+    ) -> Result<(), Error> {
+        self.kms
+            .retire_signing_versions_before(session, tenant_id, algorithm, version)
+            .await
+    }
+
+    async fn delete_signing_key(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+    ) -> Result<(), Error> {
+        self.kms
+            .delete_signing_key(session, tenant_id, algorithm)
+            .await
+    }
+}
+
+/// The MAC keys' custody passed through, likewise.
+impl<S, K> MacKeyCustody<S> for Cached<K>
+where
+    S: Session,
+    K: MacKeyCustody<S>,
+{
+    async fn create_mac_key(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        purpose: &KeyLabel,
+        options: &KeyOptions,
+    ) -> Result<u32, Error> {
+        self.kms
+            .create_mac_key(session, tenant_id, purpose, options)
+            .await
+    }
+
+    async fn rotate_mac_key(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        purpose: &KeyLabel,
+    ) -> Result<u32, Error> {
+        self.kms.rotate_mac_key(session, tenant_id, purpose).await
+    }
+
+    async fn retire_mac_versions_before(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        purpose: &KeyLabel,
+        version: u32,
+    ) -> Result<(), Error> {
+        self.kms
+            .retire_mac_versions_before(session, tenant_id, purpose, version)
+            .await
+    }
+
+    async fn delete_mac_key(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        purpose: &KeyLabel,
+    ) -> Result<(), Error> {
+        self.kms.delete_mac_key(session, tenant_id, purpose).await
     }
 }

@@ -32,11 +32,12 @@ pub enum Error {
         /// The version the ciphertext names.
         found: u32,
     },
-    /// A version of the key named — by a ciphertext, a signature, or a
-    /// request to sign with it — that the holder does not have, or no
-    /// longer serves for that operation: a keyring without that version, a
-    /// version an operator retired, a version below the one the key signs
-    /// from (Transit's `min_encryption_version`), which may still verify.
+    /// A version of the key named — by a ciphertext, a signature, a request
+    /// to sign with it, or a retirement's bound — that the holder does not
+    /// have, or no longer serves for that operation: a keyring without that
+    /// version, a version an operator retired, a version below the one the
+    /// key signs from (Transit's `min_encryption_version`), which may still
+    /// verify; a retirement's bound above the latest version.
     NoKeyOfVersion(u32),
     /// The tenant has no signing key of the algorithm.
     SigningKeyNotFound {
@@ -61,9 +62,10 @@ pub enum Error {
     /// carry its version, a nonce and a tag; a key of the wrong length for
     /// its algorithm; a version that is not a count.
     Malformed(String),
-    /// The key exists with other options than the ones asked for — derived
-    /// where a plain one was asked, or the reverse — and an option that is
-    /// fixed at creation cannot be changed on it.
+    /// The key exists with other options than the ones asked for — another
+    /// type under the name, derived where a plain one was asked, or the
+    /// reverse — and an option that is fixed at creation cannot be changed
+    /// on it.
     Conflict {
         /// The tenant whose key it is.
         tenant_id: String,
@@ -71,9 +73,11 @@ pub enum Error {
         detail: String,
     },
     /// The KMS refused the operation under this identity: the policy does
-    /// not allow it on this key — wrapping, unwrapping, signing — or the
-    /// derivation context is not one the policy admits. The key exists; no
-    /// retry under the same identity and context will mend it.
+    /// not allow it on this key — wrapping, unwrapping, signing, or a
+    /// custody operation the identity does not hold — or the derivation
+    /// context is not one the policy admits. The key exists, or the
+    /// operation refused is its making; no retry under the same identity
+    /// and context will mend it.
     Forbidden {
         /// The tenant whose key it is.
         tenant_id: String,

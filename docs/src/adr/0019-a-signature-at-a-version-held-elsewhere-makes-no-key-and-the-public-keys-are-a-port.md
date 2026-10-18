@@ -26,6 +26,11 @@ dialectic — a blind solver given the problem, a discriminator who brought
 three designs of its own from other premises and measured on Vault 1.21.4
 OSS — whose findings on this crate are the facts below.
 
+Amended 2026-10-18 by ADR-0020: point 8 — the in-memory keys retire
+through `SigningKeyCustody`, as the adapters do; the owed items 1 (signing
+custody beside the port) and 2 (`managed_keys()` for `sign` and `mac`) are
+discharged.
+
 ## Context
 
 `SigningService` signed with the latest version of a tenant's key of an

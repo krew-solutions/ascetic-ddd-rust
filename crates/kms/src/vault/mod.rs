@@ -67,7 +67,8 @@ use crate::domain::{
 };
 use crate::error::Error;
 use crate::port::{
-    KekOptions, KeyCustody, KeyManagementService, MacService, PublicKeyService, SigningService,
+    KekOptions, KeyCustody, KeyManagementService, KeyOptions, MacKeyCustody, MacService,
+    PublicKeyService, SigningKeyCustody, SigningService,
 };
 
 pub use self::transport::{VaultRequest, VaultResponse, VaultTransport};
@@ -116,10 +117,13 @@ impl VaultTransitService {
         }
     }
 
-    /// The same service making no KEK on first contact: a tenant without
-    /// one is [`Error::KekNotFound`] on every wrap. For a producer or a
-    /// consumer of the bus, under a token that may neither create nor
-    /// update keys.
+    /// The same service making no key on first use, of any kind: a tenant
+    /// without one is [`Error::KekNotFound`] on every wrap,
+    /// [`Error::SigningKeyNotFound`] on `sign` and [`Error::MacKeyNotFound`]
+    /// on `mac`, each named by one read of the key. For a holder of the use
+    /// ports under a token that may not make keys — a producer or a consumer
+    /// of the bus, a service that signs and MACs — whose keys are made by
+    /// whoever has their custody (ADR-0017, ADR-0020).
     pub fn managed_keys(self) -> Self {
         VaultTransitService {
             managed_keys: true,
@@ -310,19 +314,123 @@ impl VaultTransitService {
         }
     }
 
-    /// The next version of the named key, or its first, made with `body`.
-    async fn rotate_named<S>(&self, session: &S, name: &str, body: Value) -> Result<u32, Error>
+    /// Makes the named key with `body` — `POST keys/{name}`, which Transit
+    /// answers for a key that exists with its description and without
+    /// touching it (measured, Vault 1.21) — and holds what is there to what
+    /// was asked: another type, or another `derived`, is
+    /// [`Error::Conflict`]; a rotation period asked and not the key's is set
+    /// by `config`. Answers the latest version. One read only where Vault
+    /// answered without the description.
+    #[allow(clippy::too_many_arguments)]
+    async fn create_named<S>(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        name: &str,
+        key_type: &str,
+        derived: bool,
+        auto_rotate_period: Option<std::time::Duration>,
+        mut body: Value,
+    ) -> Result<u32, Error>
     where
         S: Session + HttpAccess + Sync,
         S::Client: VaultTransport,
     {
-        if self.read_named(session, name).await?.is_none() {
-            self.ensure_named(session, name, body).await?;
-            return Ok(1);
+        if let (Some(period), Some(object)) = (auto_rotate_period, body.as_object_mut()) {
+            object.insert("auto_rotate_period".to_owned(), json!(period.as_secs()));
         }
+        let path = format!("/keys/{name}");
+        let answer = match self.transit(session, "POST", &path, Some(body)).await {
+            Ok(answer) => answer,
+            // A making refused under this identity is the policy's, whether
+            // the key is there or not: no read explains more.
+            Err(Error::Vault { status: 403, .. }) => {
+                return Err(Error::Forbidden {
+                    tenant_id: tenant_id.to_owned(),
+                    operation: "create",
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        let answer = if answer
+            .get("data")
+            .and_then(|data| data.get("type"))
+            .is_some()
+        {
+            answer
+        } else {
+            self.read_named(session, name).await?.ok_or_else(|| {
+                Error::Malformed(format!("key `{name}` vanished while being made"))
+            })?
+        };
+        let data = answer.get("data");
+        let found_type = data
+            .and_then(|data| data.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let found_derived = data
+            .and_then(|data| data.get("derived"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if found_type != key_type || found_derived != derived {
+            let kind = |key_type: &str, derived: bool| {
+                format!("{}{key_type}", if derived { "derived " } else { "" })
+            };
+            return Err(Error::Conflict {
+                tenant_id: tenant_id.to_owned(),
+                detail: format!(
+                    "`{name}` is a {} key, a {} one was asked",
+                    kind(found_type, found_derived),
+                    kind(key_type, derived)
+                ),
+            });
+        }
+        if let Some(period) = auto_rotate_period {
+            let found = data
+                .and_then(|data| data.get("auto_rotate_period"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if found != period.as_secs() {
+                let path = format!("/keys/{name}/config");
+                self.transit(
+                    session,
+                    "POST",
+                    &path,
+                    Some(json!({ "auto_rotate_period": period.as_secs() })),
+                )
+                .await?;
+            }
+        }
+        version_field(&answer, "latest_version")
+    }
+
+    /// The next version of the named key, `POST keys/{name}/rotate`, which
+    /// Transit refuses for a key it has not got: a rotation never makes the
+    /// first version. Answers the new latest version, from the answer or,
+    /// where Vault said nothing, one read.
+    async fn rotate_named<S>(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        name: &str,
+        missing: Error,
+    ) -> Result<u32, Error>
+    where
+        S: Session + HttpAccess + Sync,
+        S::Client: VaultTransport,
+    {
         let path = format!("/keys/{name}/rotate");
-        self.transit(session, "POST", &path, Some(json!({})))
-            .await?;
+        let answer = match self.transit(session, "POST", &path, Some(json!({}))).await {
+            Ok(answer) => answer,
+            Err(error) => {
+                return Err(self
+                    .explain_custody(session, tenant_id, name, "rotate", missing, error)
+                    .await);
+            }
+        };
+        if let Ok(version) = version_field(&answer, "latest_version") {
+            return Ok(version);
+        }
         let answer = self
             .read_named(session, name)
             .await?
@@ -330,8 +438,95 @@ impl VaultTransitService {
         version_field(&answer, "latest_version")
     }
 
-    /// Deletes the named key, every version; none is not an error.
-    async fn delete_named<S>(&self, session: &S, name: &str) -> Result<(), Error>
+    /// Retires the named key's versions below `version` by its
+    /// `min_decryption_version`, after one read: a bound above the latest
+    /// is [`Error::NoKeyOfVersion`] and nothing is written; one at or below
+    /// the floor there is writes nothing — Transit lowers the floor when
+    /// asked (measured, Vault 1.21), and a retried or a stale retirement
+    /// must not bring a version back. Where the key has a signing floor of
+    /// its own (`min_encryption_version`, not zero) below the bound, it is
+    /// raised with it in the same call: Transit holds it at or above the
+    /// decryption floor, and a retired version signs nothing anyway.
+    async fn retire_named<S>(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        name: &str,
+        version: u32,
+        missing: Error,
+    ) -> Result<(), Error>
+    where
+        S: Session + HttpAccess + Sync,
+        S::Client: VaultTransport,
+    {
+        let Some(answer) = self.read_named(session, name).await? else {
+            return Err(missing);
+        };
+        let latest = version_field(&answer, "latest_version")?;
+        if version > latest {
+            return Err(Error::NoKeyOfVersion(version));
+        }
+        let floor = version_field(&answer, "min_decryption_version").unwrap_or(1);
+        if version <= floor {
+            return Ok(());
+        }
+        let mut body = json!({ "min_decryption_version": version });
+        let signing_floor = version_field(&answer, "min_encryption_version").unwrap_or(0);
+        if (1..version).contains(&signing_floor)
+            && let Some(object) = body.as_object_mut()
+        {
+            object.insert("min_encryption_version".to_owned(), json!(version));
+        }
+        let path = format!("/keys/{name}/config");
+        match self.transit(session, "POST", &path, Some(body)).await {
+            Ok(_) => Ok(()),
+            Err(error) => Err(self
+                .explain_custody(session, tenant_id, name, "retire", missing, error)
+                .await),
+        }
+    }
+
+    /// What a refusal of a custody operation on the named key means, by one
+    /// read on a `400` or a `403`: the key not there, `missing`; a `403`
+    /// with the key there, [`Error::Forbidden`] — the identity holds no
+    /// custody; a `400` with the key there, the request's own fault,
+    /// [`Error::Malformed`] with Vault's words. Anything else, and a read
+    /// refused, as it came.
+    async fn explain_custody<S>(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        name: &str,
+        operation: &'static str,
+        missing: Error,
+        error: Error,
+    ) -> Error
+    where
+        S: Session + HttpAccess + Sync,
+        S::Client: VaultTransport,
+    {
+        let Error::Vault {
+            status: status @ (400 | 403),
+            ref message,
+            ..
+        } = error
+        else {
+            return error;
+        };
+        match self.read_named(session, name).await {
+            Ok(None) => missing,
+            Ok(Some(_)) if status == 403 => Error::Forbidden {
+                tenant_id: tenant_id.to_owned(),
+                operation,
+            },
+            Ok(Some(_)) => Error::Malformed(format!("vault refused {operation}: {message}")),
+            Err(_) => error,
+        }
+    }
+
+    /// Deletes the named key, every version; none is not an error. A
+    /// refusal under this identity, the key there, is [`Error::Forbidden`].
+    async fn delete_named<S>(&self, session: &S, tenant_id: &str, name: &str) -> Result<(), Error>
     where
         S: Session + HttpAccess + Sync,
         S::Client: VaultTransport,
@@ -339,6 +534,13 @@ impl VaultTransitService {
         if self.read_named(session, name).await?.is_none() {
             return Ok(());
         }
+        let forbidden = |error: Error| match error {
+            Error::Vault { status: 403, .. } => Error::Forbidden {
+                tenant_id: tenant_id.to_owned(),
+                operation: "delete",
+            },
+            error => error,
+        };
         let path = format!("/keys/{name}/config");
         self.transit(
             session,
@@ -346,9 +548,12 @@ impl VaultTransitService {
             &path,
             Some(json!({ "deletion_allowed": true })),
         )
-        .await?;
+        .await
+        .map_err(forbidden)?;
         let path = format!("/keys/{name}");
-        self.transit(session, "DELETE", &path, None).await?;
+        self.transit(session, "DELETE", &path, None)
+            .await
+            .map_err(forbidden)?;
         Ok(())
     }
 
@@ -458,27 +663,28 @@ impl VaultTransitService {
 }
 
 impl VaultTransitService {
-    /// What a refusal of signing at a named version means, by one read of
-    /// the key — on a `400`, a `403` or a `500`, since Transit answers `400`
-    /// for a key it has not got and `500` for a version above the latest,
-    /// retired, or below the one the key signs from (measured, Vault 1.21):
-    /// the key not there, [`Error::SigningKeyNotFound`]; a `403` with the
-    /// key there, [`Error::Forbidden`]; a `400` or a `500` for a version
-    /// outside what the key signs with, [`Error::NoKeyOfVersion`]; a `400`
-    /// the read does not explain, the request's own fault,
-    /// [`Error::Malformed`] (the rule ADR-0017 point 5 set for the KEK); a
-    /// `500` it does not explain stays Vault's, of the moment; the read
-    /// refused, the refusal as it came. Any other status — `429`, `502`,
-    /// `503`, `504` — is left as it came, unread: a read would add to the
-    /// load a rate limit protects, or meet the same sealed or standby node.
-    /// Vault's texts are not matched.
-    async fn explain_signing<S>(
+    /// What a refusal of signing or of a MAC means, by one read of the key —
+    /// on a `400`, a `403` or a `500`, since Transit answers `400` for a key
+    /// it has not got and, signing at a named version, `500` for a version
+    /// above the latest, retired, or below the one the key signs from
+    /// (measured, Vault 1.21): the key not there, `missing`; a `403` with
+    /// the key there, [`Error::Forbidden`]; a version named and outside what
+    /// the key signs with, [`Error::NoKeyOfVersion`]; a `400` the read does
+    /// not explain, the request's own fault, [`Error::Malformed`] (the rule
+    /// ADR-0017 point 5 set for the KEK); a `500` it does not explain stays
+    /// Vault's, of the moment; the read refused, the refusal as it came. Any
+    /// other status — `429`, `502`, `503`, `504` — is left as it came,
+    /// unread: a read would add to the load a rate limit protects, or meet
+    /// the same sealed or standby node. Vault's texts are not matched.
+    #[allow(clippy::too_many_arguments)]
+    async fn explain_use<S>(
         &self,
         session: &S,
         tenant_id: &str,
-        algorithm: SignatureAlgorithm,
         name: &str,
-        version: u32,
+        operation: &'static str,
+        version: Option<u32>,
+        missing: Error,
         error: Error,
     ) -> Error
     where
@@ -494,17 +700,16 @@ impl VaultTransitService {
             return error;
         };
         match self.read_named(session, name).await {
-            Ok(None) => Error::SigningKeyNotFound {
-                tenant_id: tenant_id.to_owned(),
-                algorithm,
-            },
+            Ok(None) => missing,
             Ok(Some(_)) if status == 403 => Error::Forbidden {
                 tenant_id: tenant_id.to_owned(),
-                operation: "sign",
+                operation,
             },
-            Ok(Some(answer)) if !signs(&answer, version) => Error::NoKeyOfVersion(version),
+            Ok(Some(answer)) if version.is_some_and(|version| !signs(&answer, version)) => {
+                Error::NoKeyOfVersion(version.unwrap_or_default())
+            }
             Ok(Some(_)) if status == 400 => {
-                Error::Malformed(format!("vault refused sign: {message}"))
+                Error::Malformed(format!("vault refused {operation}: {message}"))
             }
             Ok(Some(_)) | Err(_) => error,
         }
@@ -759,11 +964,6 @@ where
         Ok((dek, encrypted_dek))
     }
 
-    async fn rotate_kek(&self, session: &S, tenant_id: &str) -> Result<u32, Error> {
-        self.rotate_named(session, &Self::key_name(tenant_id), self.kek_body())
-            .await
-    }
-
     async fn rewrap_dek(
         &self,
         session: &S,
@@ -787,10 +987,6 @@ where
         };
         Ok(text_field(&answer, "ciphertext")?.as_bytes().to_vec())
     }
-
-    async fn delete_kek(&self, session: &S, tenant_id: &str) -> Result<(), Error> {
-        self.delete_named(session, &Self::key_name(tenant_id)).await
-    }
 }
 
 impl<S> KeyCustody<S> for VaultTransitService
@@ -798,81 +994,83 @@ where
     S: Session + HttpAccess + Sync,
     S::Client: VaultTransport,
 {
-    /// `POST keys/{name}` with the type and `derived` — idempotent on
-    /// Transit, which leaves a key that exists as it is and says nothing —
-    /// then one read: a `derived` other than asked is [`Error::Conflict`],
-    /// since it cannot be changed; the rotation period, which can, is set
-    /// by `config` when asked.
+    /// `POST keys/{name}` with the service's key type, `derived` and the
+    /// rotation period asked; a key there of another type or another
+    /// `derived` is [`Error::Conflict`], since neither can be changed; the
+    /// period, which can, is set by `config` when it differs.
     async fn create_kek(
         &self,
         session: &S,
         tenant_id: &str,
         options: &KekOptions,
     ) -> Result<u32, Error> {
-        let name = Self::key_name(tenant_id);
-        let path = format!("/keys/{name}");
-        let mut body = json!({ "type": self.key_type, "derived": options.derived });
-        if let (Some(period), Some(object)) = (options.auto_rotate_period, body.as_object_mut()) {
-            object.insert("auto_rotate_period".to_owned(), json!(period.as_secs()));
-        }
-        self.request(session, tenant_id, "POST", &path, Some(body))
-            .await?;
-        let answer = self
-            .read_named(session, &name)
-            .await?
-            .ok_or_else(|| Error::Malformed(format!("key `{name}` vanished while being made")))?;
-        let derived = answer
-            .get("data")
-            .and_then(|data| data.get("derived"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        if derived != options.derived {
-            return Err(Error::Conflict {
-                tenant_id: tenant_id.to_owned(),
-                detail: format!(
-                    "the key is {}, a {} one was asked",
-                    if derived { "derived" } else { "not derived" },
-                    if options.derived { "derived" } else { "plain" }
-                ),
-            });
-        }
-        if let Some(period) = options.auto_rotate_period {
-            let path = format!("/keys/{name}/config");
-            self.request(
-                session,
-                tenant_id,
-                "POST",
-                &path,
-                Some(json!({ "auto_rotate_period": period.as_secs() })),
-            )
-            .await?;
-        }
-        version_field(&answer, "latest_version")
+        self.create_named(
+            session,
+            tenant_id,
+            &Self::key_name(tenant_id),
+            &self.key_type,
+            options.derived,
+            options.auto_rotate_period,
+            json!({ "type": self.key_type, "derived": options.derived }),
+        )
+        .await
     }
 
-    /// `min_decryption_version` of the key raised to `version`.
+    async fn rotate_kek(&self, session: &S, tenant_id: &str) -> Result<u32, Error> {
+        self.rotate_named(
+            session,
+            tenant_id,
+            &Self::key_name(tenant_id),
+            kek_not_found(tenant_id),
+        )
+        .await
+    }
+
+    /// `min_decryption_version` of the key raised to `version`, never
+    /// lowered.
     async fn retire_kek_versions_before(
         &self,
         session: &S,
         tenant_id: &str,
         version: u32,
     ) -> Result<(), Error> {
-        let path = format!("/keys/{}/config", Self::key_name(tenant_id));
-        match self
-            .request(
-                session,
-                tenant_id,
-                "POST",
-                &path,
-                Some(json!({ "min_decryption_version": version })),
-            )
+        self.retire_named(
+            session,
+            tenant_id,
+            &Self::key_name(tenant_id),
+            version,
+            kek_not_found(tenant_id),
+        )
+        .await
+    }
+
+    async fn delete_kek(&self, session: &S, tenant_id: &str) -> Result<(), Error> {
+        self.delete_named(session, tenant_id, &Self::key_name(tenant_id))
             .await
-        {
-            Ok(_) => Ok(()),
-            Err(error) => Err(self
-                .explain_kek(session, tenant_id, None, "retire", error)
-                .await),
-        }
+    }
+}
+
+/// The refusal of a tenant without a KEK.
+fn kek_not_found(tenant_id: &str) -> Error {
+    Error::KekNotFound {
+        tenant_id: tenant_id.to_owned(),
+        key_version: None,
+    }
+}
+
+/// The refusal of a tenant without a signing key of the algorithm.
+fn signing_key_not_found(tenant_id: &str, algorithm: SignatureAlgorithm) -> Error {
+    Error::SigningKeyNotFound {
+        tenant_id: tenant_id.to_owned(),
+        algorithm,
+    }
+}
+
+/// The refusal of a tenant without a MAC key for the purpose.
+fn mac_key_not_found(tenant_id: &str, purpose: &KeyLabel) -> Error {
+    Error::MacKeyNotFound {
+        tenant_id: tenant_id.to_owned(),
+        purpose: purpose.as_str().to_owned(),
     }
 }
 
@@ -889,16 +1087,30 @@ where
         message: &[u8],
     ) -> Result<Signature, Error> {
         let name = Self::signing_key_name(tenant_id, algorithm)?;
-        self.ensure_named(
-            session,
-            &name,
-            json!({ "type": transit_key_type(algorithm) }),
-        )
-        .await?;
+        if !self.managed_keys {
+            self.ensure_named(
+                session,
+                &name,
+                json!({ "type": transit_key_type(algorithm) }),
+            )
+            .await?;
+        }
         let path = format!("/sign/{name}");
         let body = with_input(signing_parameters(algorithm), message);
-        let answer = self.transit(session, "POST", &path, Some(body)).await?;
-        signature_of(algorithm, &answer)
+        match self.transit(session, "POST", &path, Some(body)).await {
+            Ok(answer) => signature_of(algorithm, &answer),
+            Err(error) => Err(self
+                .explain_use(
+                    session,
+                    tenant_id,
+                    &name,
+                    "sign",
+                    None,
+                    signing_key_not_found(tenant_id, algorithm),
+                    error,
+                )
+                .await),
+        }
     }
 
     async fn sign_with_version(
@@ -919,12 +1131,13 @@ where
             Ok(answer) => answer,
             Err(error) => {
                 return Err(self
-                    .explain_signing(
+                    .explain_use(
                         session,
                         tenant_id,
-                        algorithm,
                         &name,
-                        key_version.get(),
+                        "sign",
+                        Some(key_version.get()),
+                        signing_key_not_found(tenant_id, algorithm),
                         error,
                     )
                     .await);
@@ -991,6 +1204,35 @@ where
             )),
         }
     }
+}
+
+/// Custody of the signing keys on the mount: `{tenant}.sign.{algorithm}`,
+/// made of the algorithm's Transit type, never derived.
+impl<S> SigningKeyCustody<S> for VaultTransitService
+where
+    S: Session + HttpAccess + Sync,
+    S::Client: VaultTransport,
+{
+    async fn create_signing_key(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+        options: &KeyOptions,
+    ) -> Result<u32, Error> {
+        let name = Self::signing_key_name(tenant_id, algorithm)?;
+        let key_type = transit_key_type(algorithm);
+        self.create_named(
+            session,
+            tenant_id,
+            &name,
+            key_type,
+            false,
+            options.auto_rotate_period,
+            json!({ "type": key_type }),
+        )
+        .await
+    }
 
     async fn rotate_signing_key(
         &self,
@@ -1001,8 +1243,27 @@ where
         let name = Self::signing_key_name(tenant_id, algorithm)?;
         self.rotate_named(
             session,
+            tenant_id,
             &name,
-            json!({ "type": transit_key_type(algorithm) }),
+            signing_key_not_found(tenant_id, algorithm),
+        )
+        .await
+    }
+
+    async fn retire_signing_versions_before(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        algorithm: SignatureAlgorithm,
+        version: u32,
+    ) -> Result<(), Error> {
+        let name = Self::signing_key_name(tenant_id, algorithm)?;
+        self.retire_named(
+            session,
+            tenant_id,
+            &name,
+            version,
+            signing_key_not_found(tenant_id, algorithm),
         )
         .await
     }
@@ -1014,7 +1275,7 @@ where
         algorithm: SignatureAlgorithm,
     ) -> Result<(), Error> {
         let name = Self::signing_key_name(tenant_id, algorithm)?;
-        self.delete_named(session, &name).await
+        self.delete_named(session, tenant_id, &name).await
     }
 }
 
@@ -1056,16 +1317,99 @@ where
         message: &[u8],
     ) -> Result<Mac, Error> {
         let name = Self::mac_key_name(tenant_id, purpose)?;
-        self.ensure_named(session, &name, json!({ "type": "hmac", "key_size": 32 }))
-            .await?;
+        if !self.managed_keys {
+            self.ensure_named(session, &name, mac_key_body()).await?;
+        }
         let path = format!("/hmac/{name}");
         let body = with_input(json!({ "algorithm": "sha2-256" }), message);
-        let answer = self.transit(session, "POST", &path, Some(body)).await?;
+        let answer = match self.transit(session, "POST", &path, Some(body)).await {
+            Ok(answer) => answer,
+            Err(error) => {
+                return Err(self
+                    .explain_use(
+                        session,
+                        tenant_id,
+                        &name,
+                        "hmac",
+                        None,
+                        mac_key_not_found(tenant_id, purpose),
+                        error,
+                    )
+                    .await);
+            }
+        };
         let (key_version, payload) = versioned(text_field(&answer, "hmac")?, "hmac")?;
         let bytes = BASE64
             .decode(payload)
             .map_err(|error| Error::Malformed(format!("vault's hmac is not base64: {error}")))?;
         Ok(Mac::new(key_version, bytes))
+    }
+}
+
+/// What a MAC key is made with: HMAC over thirty-two bytes.
+fn mac_key_body() -> Value {
+    json!({ "type": "hmac", "key_size": 32 })
+}
+
+/// Custody of the MAC keys on the mount: `{tenant}.mac.{purpose}`, of type
+/// `hmac`, never derived.
+impl<S> MacKeyCustody<S> for VaultTransitService
+where
+    S: Session + HttpAccess + Sync,
+    S::Client: VaultTransport,
+{
+    async fn create_mac_key(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        purpose: &KeyLabel,
+        options: &KeyOptions,
+    ) -> Result<u32, Error> {
+        let name = Self::mac_key_name(tenant_id, purpose)?;
+        self.create_named(
+            session,
+            tenant_id,
+            &name,
+            "hmac",
+            false,
+            options.auto_rotate_period,
+            mac_key_body(),
+        )
+        .await
+    }
+
+    async fn rotate_mac_key(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        purpose: &KeyLabel,
+    ) -> Result<u32, Error> {
+        let name = Self::mac_key_name(tenant_id, purpose)?;
+        self.rotate_named(
+            session,
+            tenant_id,
+            &name,
+            mac_key_not_found(tenant_id, purpose),
+        )
+        .await
+    }
+
+    async fn retire_mac_versions_before(
+        &self,
+        session: &S,
+        tenant_id: &str,
+        purpose: &KeyLabel,
+        version: u32,
+    ) -> Result<(), Error> {
+        let name = Self::mac_key_name(tenant_id, purpose)?;
+        self.retire_named(
+            session,
+            tenant_id,
+            &name,
+            version,
+            mac_key_not_found(tenant_id, purpose),
+        )
+        .await
     }
 
     async fn delete_mac_key(
@@ -1075,7 +1419,7 @@ where
         purpose: &KeyLabel,
     ) -> Result<(), Error> {
         let name = Self::mac_key_name(tenant_id, purpose)?;
-        self.delete_named(session, &name).await
+        self.delete_named(session, tenant_id, &name).await
     }
 }
 

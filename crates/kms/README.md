@@ -6,11 +6,14 @@ its data is sealed with; deleting the tenant's key-encryption keys is
 crypto-shredding. For what a tenant signs and authenticates: three more ports —
 digital signatures under the tenant's key of an algorithm, a read of the
 public halves of those keys for verifiers that hold them, MACs under the
-tenant's key for a purpose. Four ports, two adapters serving all four: keys
-in PostgreSQL tables under a master key, the signing and the MACs done in
-this process; or in HashiCorp Vault Transit, where the keys stay and the
-cryptography is Vault's. In-memory keys serve the signing, public-key and MAC
-ports for the tests of what consumes them. A port of `ascetic_ddd.kms` (Python) and
+tenant's key for a purpose. Beside each kind of key's use, its custody — what
+makes, rotates, retires and deletes it — is a port of its own, held by the
+tenant-management context and by nothing that merely uses the key
+(ADR-0020). Seven ports, two adapters serving all seven: keys in PostgreSQL
+tables under a master key, the signing and the MACs done in this process; or
+in HashiCorp Vault Transit, where the keys stay and the cryptography is
+Vault's. In-memory keys serve the signing, public-key and MAC ports and their
+custody for the tests of what consumes them. A port of `ascetic_ddd.kms` (Python) and
 `asceticddd/kms` (Go), which have the first port only; the encryption stage
 ADR-0002 places before the outbox.
 
@@ -37,7 +40,7 @@ The service, inside the caller's transaction (feature `pg`):
 # #[cfg(feature = "pg")]
 # async fn example(sessions: ascetic_ddd_session::PgSessionPool, master_key: ascetic_ddd_kms::Key)
 # -> Result<(), ascetic_ddd_kms::Error> {
-use ascetic_ddd_kms::{KeyManagementService, PgKeyManagementService};
+use ascetic_ddd_kms::{KeyCustody, KeyManagementService, PgKeyManagementService};
 use ascetic_ddd_session::{Session, SessionPool};
 
 let kms = PgKeyManagementService::new(master_key);
@@ -46,7 +49,7 @@ sessions.session(async |session| {
     session.atomic(async |tx| {
         let (dek, wrapped) = kms.generate_dek(&tx, "tenant-1").await?;   // the KEK is made on first contact
         assert_eq!(kms.decrypt_dek(&tx, "tenant-1", &wrapped).await?, dek);
-        let version = kms.rotate_kek(&tx, "tenant-1").await?;             // 2; what version 1 wrapped still unwraps
+        let version = kms.rotate_kek(&tx, "tenant-1").await?;             // custody: 2; what version 1 wrapped still unwraps
         let rewrapped = kms.rewrap_dek(&tx, "tenant-1", &wrapped).await?; // under version 2 now
         assert_eq!(version, 2);
         assert_eq!(kms.decrypt_dek(&tx, "tenant-1", &rewrapped).await?, dek);
@@ -101,10 +104,10 @@ newest and does not verify (ADR-0019).
 
 ## The port and the adapters
 
-`KeyManagementService<S>` is the surface of Vault Transit: `encrypt_dek`,
-`decrypt_dek`, `generate_dek`, `rotate_kek`, `rewrap_dek`, `delete_kek`,
-each in the caller's session. A wrapped DEK is bytes opaque to the caller, in
-the adapter's own form.
+`KeyManagementService<S>` is the use of the KEK, the surface of Vault
+Transit: `encrypt_dek`, `decrypt_dek`, `generate_dek`, `rewrap_dek`, each in
+the caller's session. A wrapped DEK is bytes opaque to the caller, in the
+adapter's own form. Its custody is `KeyCustody<S>`, below.
 
 `PgKeyManagementService` keeps KEKs in `kms_keys` — the table the Python and
 Go ports write, so a key made by one port is read by another; a test unwraps
@@ -146,14 +149,36 @@ makes is `derived`; on PostgreSQL the context is bound into the wrap's
 associated data beside the tenant. Either way a DEK wrapped for one channel
 does not unwrap for another, and the composition root builds one instance,
 one `Cached` and one stage per channel, from the channel's name in the
-contract. Built `managed_keys()`, the service makes no KEK on first contact:
-a tenant without one is `KekNotFound` on every wrap, and the key is made by
-whoever has custody through `KeyCustody<S>` — `create_kek` with
-`KekOptions` (`derived`, `auto_rotate_period`, which the PostgreSQL adapter
-refuses as `Unsupported`, having no scheduler) and
-`retire_kek_versions_before` (Transit's `min_decryption_version`; a
-deletion of the rows on PostgreSQL) — a port beside `KeyManagementService`,
-held by the tenant-management context and by nobody who merely wraps.
+contract. Built `managed_keys()`, the service makes no key on first use, of
+any kind: a tenant without one is `KekNotFound` on every wrap,
+`SigningKeyNotFound` on `sign` and `MacKeyNotFound` on `mac` — on Vault each
+named by one read of the key — and the keys are made by whoever has their
+custody. The executor of "a service makes no key" is its Vault policy,
+`read` alone on `keys/+`; the switch is what makes the right configuration
+work.
+
+Custody is a port per kind of key, beside its use and held by the
+tenant-management context, never by what wraps, signs or MACs (ADR-0017,
+ADR-0020): `KeyCustody<S>` — `create_kek` with `KekOptions` (`derived`,
+`auto_rotate_period`), `rotate_kek`, `retire_kek_versions_before`,
+`delete_kek`; `SigningKeyCustody<S>` — `create_signing_key` with
+`KeyOptions` (`auto_rotate_period`), `rotate_signing_key`,
+`retire_signing_versions_before`, `delete_signing_key`; `MacKeyCustody<S>` —
+`create_mac_key`, `rotate_mac_key`, `retire_mac_versions_before`,
+`delete_mac_key`. One set of rules for the three: making is idempotent and
+typed — a key there of another Transit type, or derived where a plain one
+is asked, is `Conflict`, and a rotation period the PostgreSQL adapter or the
+in-memory keys cannot keep is `Unsupported`; a rotation never makes the
+first version (`*NotFound`), so a scheduled one cannot bring an off-boarded
+tenant's key back, and is not idempotent — a retried one makes one version
+more, which serves as well; a retirement keeps the latest version and never
+lowers the floor — on Vault it reads the key once and writes only a higher
+`min_decryption_version`, raising a signing floor of the key's own with it,
+since Transit lowers the floor when asked and would bring a retired version
+back; a bound above the latest is `NoKeyOfVersion` and retires nothing; a
+version that still signs may be retired, the compromise path; a deletion of
+nothing is not an error. Under an identity that holds no custody, every
+custody operation is `Forbidden`.
 On Vault a refusal of a KEK operation is read once: a `400` is the key
 missing (`KekNotFound`), a version retired (`NoKeyOfVersion`), or — the key
 there and the version served — the request's own fault, `Decrypt` on
@@ -162,11 +187,11 @@ elsewhere; a `403` with the key there is `Forbidden`, which no retry under
 the same identity and context mends.
 
 `SigningService<S>` is signatures under the tenant's key of one algorithm —
-`sign`, `sign_with_version`, `verify`, `rotate_signing_key`,
-`delete_signing_key` — one key per tenant and algorithm (`SignatureAlgorithm`:
-Ed25519, ECDSA P-256 with SHA-256); every version verifies until an operator
-retires it. Which version signs is the caller's, by the method it calls:
-`sign` takes the latest and makes the key on first signing, right where the
+`sign`, `sign_with_version`, `verify` — one key per tenant and algorithm
+(`SignatureAlgorithm`: Ed25519, ECDSA P-256 with SHA-256); every version
+verifies until it is retired. Which version signs is the caller's, by the
+method it calls: `sign` takes the latest and makes the key on first signing
+unless the keys are managed elsewhere, right where the
 signed bytes do not name the version and the verifier is the KMS;
 `sign_with_version` takes the version named — a `NonZeroU32`, Transit
 reading `0` as the latest — and makes nothing, for a message that names its
@@ -185,8 +210,9 @@ never makes a key. Deleting a signing key ends the verifiability of
 everything it signed: the tenant's off-boarding, never a rotation.
 
 `MacService<S>` is HMAC-SHA-256 under the tenant's key for one purpose, a
-`KeyLabel` such as `draft-etag` — `mac`, `delete_mac_key` — one key per tenant
-and purpose, made on first use; a `Mac` carries the version of the key that
+`KeyLabel` such as `draft-etag` — `mac` — one key per tenant and purpose,
+made on first use unless the keys are managed elsewhere; a `Mac` carries the
+version of the key that
 made it, and is checked by recomputation, so the port only makes them. Keeping
 MAC keys apart from signing keys by name keeps their lifecycles apart: a
 signing rotation does not change what a MAC key makes. Why the ports are
@@ -242,18 +268,24 @@ keys/{name}`'s `data.keys.{n}.public_key` of the versions served — base64 of
 the raw bytes for Ed25519, a PEM SubjectPublicKeyInfo for P-256, read through
 `p256`'s `pkcs8`.
 
-`testing::InMemoryKeys` serves the signing, public-key and MAC ports from
-memory, with the model's keys — a key registered from a seed so that a test's
-signatures are the same from run to run (Ed25519), or made on first signing as
-Vault would; versions retired as an operator retires them, never numbered
-again; MAC keys made on first use — so that the adapter a consumer writes
-over the ports is exercised as it is in production, with the network behind
-the port and nothing else replaced.
+`testing::InMemoryKeys` serves the signing, public-key and MAC ports and
+their custody from memory, with the model's keys — a key registered from a
+seed so that a test's signatures are the same from run to run (Ed25519), or
+made on first signing as Vault would; built `managed_keys()`, made by custody
+alone; versions rotated and retired through the custody ports, never
+numbered again; MAC keys made on first use — so that the adapter a consumer
+writes over the ports is exercised as it is in production, with the network
+behind the port and nothing else replaced. The KEK is not held here: its
+stage's and custody's tests run on the PostgreSQL adapter. One body of
+tests, `tests/common/custody.rs`, holds the custody's rules on the in-memory
+keys, on PostgreSQL and on Vault alike.
 
-`Cached<K>` passes the signing, public-key and MAC ports through to `K`
-uncached: a signature and a verification are not functions of the cache's
-key, and a keyring held across a rotation would be a JWKS without the
-version about to sign. One `Cached<K>` then stands for every port `K` serves.
+`Cached<K>` passes the signing, public-key and MAC ports and the custody
+ports through to `K` uncached: a signature and a verification are not
+functions of the cache's key, and a keyring held across a rotation would be
+a JWKS without the version about to sign; a retirement or a deletion of a
+KEK forgets what was unwrapped under it here. One `Cached<K>` then stands for
+every port `K` serves.
 
 ## What is not here
 
@@ -263,10 +295,12 @@ by these — are the lower half of envelope encryption and live in
 them, over any `KeyManagementService`. Caching is `Cached<K>` above, in
 front of whichever service a consumer unwraps through.
 
-A MAC is not verified by the port; an operator rotates and retires a
-signing key and sets the version it signs from outside the port, and the
-in-memory keys do not model that floor; ML-DSA waits for a Vault build and
-a library that have it. Each comes with its first user.
+A MAC is not verified by the port; Transit's own signing floor,
+`min_encryption_version`, is set outside the ports — the custody raises it
+only with a retirement — and the in-memory keys do not model it; the import
+of a tenant's own key material (BYOK) waits for the first tenant that brings
+one; ML-DSA waits for a Vault build and a library that have it. Each comes
+with its first user.
 
 ## Deviations from the Python and Go sources
 
@@ -313,5 +347,5 @@ cargo test -p ascetic-ddd-kms --features vault                        # in-memor
 ```
 
 The Vault tests need the `transit` engine enabled on the dev server; the
-least-privilege test writes a policy and a token under the dev server's root
-token, and removes them.
+least-privilege and holder tests write a policy and a token under the dev
+server's root token, and remove them.

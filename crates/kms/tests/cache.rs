@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use ascetic_ddd_kms::testing::InMemoryKeys;
 use ascetic_ddd_kms::{
-    Cached, Error, Key, KeyManagementService, PublicKeyService, SignatureAlgorithm, SigningService,
+    Cached, Error, KekOptions, Key, KeyCustody, KeyManagementService, PublicKeyService,
+    SignatureAlgorithm, SigningKeyCustody, SigningService,
 };
 use ascetic_ddd_session::testing::{MemorySession, MemorySessionPool};
 use ascetic_ddd_session::{Session, SessionPool};
@@ -50,12 +51,22 @@ impl<S: Session> KeyManagementService<S> for Counting {
         Ok((Key::new(vec![7; 32]), vec![7; 32]))
     }
 
-    async fn rotate_kek(&self, _: &S, _: &str) -> Result<u32, Error> {
+    async fn rewrap_dek(&self, _: &S, _: &str, encrypted_dek: &[u8]) -> Result<Vec<u8>, Error> {
+        Ok(encrypted_dek.to_vec())
+    }
+}
+
+impl<S: Session> KeyCustody<S> for Counting {
+    async fn create_kek(&self, _: &S, _: &str, _: &KekOptions) -> Result<u32, Error> {
         Ok(1)
     }
 
-    async fn rewrap_dek(&self, _: &S, _: &str, encrypted_dek: &[u8]) -> Result<Vec<u8>, Error> {
-        Ok(encrypted_dek.to_vec())
+    async fn rotate_kek(&self, _: &S, _: &str) -> Result<u32, Error> {
+        Ok(2)
+    }
+
+    async fn retire_kek_versions_before(&self, _: &S, _: &str, _: u32) -> Result<(), Error> {
+        Ok(())
     }
 
     async fn delete_kek(&self, _: &S, _: &str) -> Result<(), Error> {
@@ -168,6 +179,7 @@ async fn deleting_a_tenant_s_kek_forgets_its_keys_here() {
             .await
             .unwrap();
         cached.delete_kek(&session, "t1").await.unwrap();
+        assert_eq!(*cached.inner().deletes.lock().unwrap(), 1);
         assert_eq!(cached.len(), 1);
         cached
             .decrypt_dek(&session, "t2", b"wrapped-1")
@@ -178,6 +190,27 @@ async fn deleting_a_tenant_s_kek_forgets_its_keys_here() {
             2,
             "the other tenant's key is still held"
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn retiring_a_tenant_s_kek_versions_forgets_its_keys_here() {
+    let cached = Cached::new(Counting::default());
+    with_session(|session| async move {
+        cached
+            .decrypt_dek(&session, "t1", b"wrapped-1")
+            .await
+            .unwrap();
+        cached
+            .decrypt_dek(&session, "t2", b"wrapped-1")
+            .await
+            .unwrap();
+        cached
+            .retire_kek_versions_before(&session, "t1", 2)
+            .await
+            .unwrap();
+        assert_eq!(cached.len(), 1, "the other tenant's key is still held");
     })
     .await;
 }
