@@ -34,6 +34,13 @@
 //! column's place. The sources write dots in every case, which PostgreSQL
 //! reads as a table and a column; and from an item they drop its alias.
 //!
+//! A column the [`Schema`] declares a `jsonb` document holds members of its
+//! own, which a path goes on into: `("s"."document" ->> 'kind')` and, for an
+//! array of objects, `EXISTS (SELECT 1 FROM jsonb_array_elements(…))`. Each
+//! value is read as the kind the document's [`Layout`] gives it, a cast or a
+//! collation, so that it is a value of a type as a column is and a constant
+//! beside it takes that type: a document does not say its kinds.
+//!
 //! The sources number parameters and aliases with counters that every
 //! visitor shares and changes. Here the count so far goes into each step and
 //! the count after comes out of it, so compiling changes nothing anywhere.
@@ -63,6 +70,7 @@
 //! and is in no table, so `(a OR b) AND c` comes out `a OR b AND c`.
 
 mod identifier;
+mod layout;
 mod param_type;
 mod precedence;
 mod schema;
@@ -73,6 +81,8 @@ mod to_sql;
 use std::fmt;
 
 use self::identifier::{identifier, plain, qualified, quoted};
+use self::layout::Member;
+pub use self::layout::{Kind, Layout};
 pub use self::param_type::ParamType;
 use self::precedence::{ATOM, Associativity};
 pub use self::schema::{ForeignKey, Schema};
@@ -109,6 +119,11 @@ pub enum CompileError {
     InvalidIdentifier(String),
     /// A text with a NUL in it: no text PostgreSQL has, so no query.
     NulInText,
+    /// A path into a document that its [`Layout`] does not declare as what
+    /// the tree takes it for: a member it does not have, an object on the
+    /// way that is not one, a value that is an object or a collection, a
+    /// collection that is not one. The message names the path.
+    UndeclaredMember(String),
 }
 
 impl fmt::Display for CompileError {
@@ -119,9 +134,9 @@ impl fmt::Display for CompileError {
                 "a member of the candidate inside a collection's predicate needs the \
                  candidate's table: compile with a schema",
             ),
-            CompileError::AmbiguousKey(message) | CompileError::WrongKey(message) => {
-                f.write_str(message)
-            }
+            CompileError::AmbiguousKey(message)
+            | CompileError::WrongKey(message)
+            | CompileError::UndeclaredMember(message) => f.write_str(message),
             CompileError::NulInText => {
                 f.write_str("a text with a NUL (U+0000) in it is no text PostgreSQL has")
             }
@@ -205,7 +220,7 @@ impl<'s> Compiler<'s> {
                 Ok((fragment, Next { param, ..next }))
             }
             Expr::Field(path) => {
-                let (sql, next) = self.member(path, item, next)?;
+                let (sql, next) = self.member(path, item, next, Reading::Value)?;
                 Ok((Fragment::text(sql), next))
             }
             Expr::Prefix(op, operand) => {
@@ -226,7 +241,15 @@ impl<'s> Compiler<'s> {
                 let precedence = precedence::postfix(*op);
                 let alone = param_type::under_postfix(operand);
                 let test = self.null_test(*op, operand, item)?;
-                let (operand, next) = self.render(operand, item, next)?;
+                // A member is read for whether it is null, which an object
+                // or a collection of a document has as a value has.
+                let (operand, next) = match operand.as_ref() {
+                    Expr::Field(path) => {
+                        let (sql, next) = self.member(path, item, next, Reading::NullTest)?;
+                        (Fragment::text(sql), next)
+                    }
+                    _ => self.render(operand, item, next)?,
+                };
                 let operand = operand.of_type(alone);
                 let operand = operand.within(precedence, true);
                 let sql = format!("{} {test}", operand.sql);
@@ -301,7 +324,14 @@ impl<'s> Compiler<'s> {
             return Ok(false);
         };
         let of = match path.root() {
-            Root::Item(up) => item_out(item, up)?.row.clone(),
+            Root::Item(up) => {
+                let item = item_out(item, up)?;
+                // A member of an object of a document is no column.
+                if item.layout.is_some() {
+                    return Ok(false);
+                }
+                item.row.clone()
+            }
             Root::Global => schema.table().to_owned(),
         };
         let of = std::iter::once(of.as_str())
@@ -379,36 +409,60 @@ impl<'s> Compiler<'s> {
     ///
     /// An object on the way to the member is looked up in the schema, as a
     /// collection is, by the names that lead to it. Kept in a table of its
-    /// own, it is reached through its key. Not mentioned, it is what the
-    /// dots have meant so far: from the item under test a composite kept in
-    /// the item's row — a Value Object; from the candidate a qualifier of
-    /// the name, `"s"."price"`.
+    /// own, it is reached through its key. A column declared a document, it
+    /// is the document, and the rest of the path is in it. Not mentioned, it
+    /// is what the dots have meant so far: from the item under test a
+    /// composite kept in the item's row — a Value Object; from the candidate
+    /// a qualifier of the name, `"s"."price"`.
     fn member(
         &self,
         path: &Path,
         item: Option<&Item>,
         next: Next,
+        reading: Reading,
     ) -> Result<(String, Next), CompileError> {
         let names: Vec<&str> = path.names().collect();
         match path.root() {
             Root::Item(up) => {
                 let item = item_out(item, up)?;
-                self.member_of_row(quoted(&item.alias), item.row.clone(), &names, next)
+                match item.layout {
+                    // The item is an object of an array in a document.
+                    Some(layout) => {
+                        let member = document_member(
+                            quoted(&item.alias),
+                            &item.row,
+                            layout,
+                            &names,
+                            reading,
+                        )?;
+                        Ok((member, next))
+                    }
+                    None => self.member_of_row(
+                        quoted(&item.alias),
+                        item.row.clone(),
+                        &names,
+                        next,
+                        reading,
+                    ),
+                }
             }
-            // An object of the candidate kept in a table of its own, or a
-            // composite column of its row - a Value Object - that the schema
-            // says is one: the dots of an undeclared name are a qualifier.
+            // An object of the candidate kept in a table of its own, a
+            // composite column of its row - a Value Object - or a document
+            // that the schema says is one: the dots of an undeclared name are
+            // a qualifier.
             Root::Global => match (names.first(), self.schema) {
                 (Some(object), Some(schema))
                     if names.len() > 1
                         && (self.key_of_object(schema.table(), object)?.is_some()
-                            || schema.is_composite(schema.table(), object)) =>
+                            || schema.is_composite(schema.table(), object)
+                            || schema.layout(schema.table(), object).is_some()) =>
                 {
                     self.member_of_row(
                         qualified(schema.row())?,
                         schema.table().to_owned(),
                         &names,
                         next,
+                        reading,
                     )
                 }
                 _ => Ok((self.column(path, item)?, next)),
@@ -431,14 +485,32 @@ impl<'s> Compiler<'s> {
         of: String,
         names: &[&str],
         next: Next,
+        reading: Reading,
     ) -> Result<(String, Next), CompileError> {
         match names {
             [] => Ok((row, next)),
             [name] => Ok((format!("{row}.{}", identifier(name)?), next)),
             [object, rest @ ..] => {
+                if let Some(layout) = self.schema.and_then(|schema| schema.layout(&of, object)) {
+                    let document = format!("{row}.{}", identifier(object)?);
+                    let member = document_member(
+                        document,
+                        &format!("{of}.{object}"),
+                        layout,
+                        rest,
+                        reading,
+                    )?;
+                    return Ok((member, next));
+                }
                 let Some(key) = self.key_of_object(&of, object)? else {
                     let composite = format!("({row}.{})", identifier(object)?);
-                    return self.member_of_row(composite, format!("{of}.{object}"), rest, next);
+                    return self.member_of_row(
+                        composite,
+                        format!("{of}.{object}"),
+                        rest,
+                        next,
+                        reading,
+                    );
                 };
                 // The row read is one of the referenced table, and its alias
                 // says so.
@@ -461,8 +533,13 @@ impl<'s> Compiler<'s> {
                     alias: number,
                     ..next
                 };
-                let (member, next) =
-                    self.member_of_row(alias.clone(), key.referenced_table.clone(), rest, next)?;
+                let (member, next) = self.member_of_row(
+                    alias.clone(),
+                    key.referenced_table.clone(),
+                    rest,
+                    next,
+                    reading,
+                )?;
                 let sql = format!(
                     "(SELECT {member} FROM {} AS {alias} WHERE {keys})",
                     qualified(&key.referenced_table)?,
@@ -473,7 +550,8 @@ impl<'s> Compiler<'s> {
     }
 
     /// `EXISTS (SELECT 1 FROM … AS alias WHERE …)` over an array of the
-    /// parent's row, or over the rows of a table that point at the parent.
+    /// parent's row, over the rows of a table that point at the parent, or
+    /// over an array of objects in a document.
     fn exists<V: Clone + ParamType>(
         &self,
         source: &Path,
@@ -485,6 +563,26 @@ impl<'s> Compiler<'s> {
             Root::Global => None,
             Root::Item(up) => Some(item_out(item, up)?),
         };
+        if let Some((array, row, layout)) = self.document_collection(source, enclosing)? {
+            let number = next.alias + 1;
+            let inner = Item {
+                alias: format!("{}_{number}", singular_of(source.name())?),
+                row,
+                layout: Some(layout),
+                outer: item,
+            };
+            let next = Next {
+                alias: number,
+                ..next
+            };
+            let (predicate, next) = self.render(predicate, Some(&inner), next)?;
+            let sql = format!(
+                "EXISTS (SELECT 1 FROM jsonb_array_elements({array}) AS {} WHERE {})",
+                quoted(&inner.alias),
+                predicate.sql,
+            );
+            return Ok((predicate.with(sql, ATOM), next));
+        }
         // The row the collection is of, to the schema: the enclosing item's,
         // or the root's. Without a schema there is no relation to look for.
         let of: Option<String> = match (enclosing, self.schema) {
@@ -512,6 +610,7 @@ impl<'s> Compiler<'s> {
                 Some(key) => key.table.clone(),
                 None => format!("{}.{name}", of.unwrap_or_default()),
             },
+            layout: None,
             outer: item,
         };
         let next = Next {
@@ -561,6 +660,83 @@ impl<'s> Compiler<'s> {
         Ok((fragment, next))
     }
 
+    /// The array of objects at `source` in a document, written as a `jsonb`;
+    /// the row its items are of, by the document's column and the names in
+    /// it; and what they hold. None: `source` is not in a document.
+    ///
+    /// A path is in a document if it starts in an item of a document's array,
+    /// or at a column the schema declares a document, of the enclosing
+    /// item's row or of the candidate's.
+    fn document_collection<'a>(
+        &self,
+        source: &Path,
+        enclosing: Option<&'a Item<'a>>,
+    ) -> Result<Option<(String, String, &'a Layout)>, CompileError>
+    where
+        's: 'a,
+    {
+        let names: Vec<&str> = source.names().collect();
+        let entered = match enclosing {
+            Some(item) => match item.layout {
+                Some(layout) => Some(Entered {
+                    document: quoted(&item.alias),
+                    of: item.row.clone(),
+                    layout,
+                    names: &names[..],
+                }),
+                None => self.document_at(&item.row, quoted(&item.alias), &names)?,
+            },
+            None => match self.schema {
+                Some(schema) => {
+                    self.document_at(schema.table(), qualified(schema.row())?, &names)?
+                }
+                None => None,
+            },
+        };
+        let Some(Entered {
+            document,
+            of,
+            layout,
+            names,
+        }) = entered
+        else {
+            return Ok(None);
+        };
+        let (object, name, member) = in_document(document, &of, layout, names)?;
+        let at = format!("{of}.{}", names.join("."));
+        match member {
+            Member::Collection(items) => {
+                Ok(Some((format!("{object} -> {}", key(name)?), at, items)))
+            }
+            Member::Value(_) | Member::Object(_) => Err(CompileError::UndeclaredMember(format!(
+                "{at} is not a collection of its document's layout"
+            ))),
+        }
+    }
+
+    /// The document at the column `names[0]` of a row of `of`, written
+    /// `row`, as the path enters it. None: the column is not declared a
+    /// document, or the path does not go into it.
+    fn document_at<'n>(
+        &self,
+        of: &str,
+        row: String,
+        names: &'n [&'n str],
+    ) -> Result<Option<Entered<'s, 'n>>, CompileError> {
+        let (Some(schema), [column, rest @ ..]) = (self.schema, names) else {
+            return Ok(None);
+        };
+        match schema.layout(of, column) {
+            Some(layout) if !rest.is_empty() => Ok(Some(Entered {
+                document: format!("{row}.{}", identifier(column)?),
+                of: format!("{of}.{column}"),
+                layout,
+                names: rest,
+            })),
+            _ => Ok(None),
+        }
+    }
+
     /// The path as a column reference, no object on its way looked up: the
     /// place of a collection, and a name from the candidate.
     ///
@@ -606,12 +782,99 @@ struct Next {
 
 /// The item under test, inside a collection's predicate: what its row is
 /// called in the query, what it is a row of to the schema - a table, or the
-/// composite at a column of one - and the item of the enclosing collection's
-/// predicate, if there is one.
+/// composite at a column of one, or the array at a path in a document -
+/// what it holds if it is an object of a document, and the item of the
+/// enclosing collection's predicate, if there is one.
 struct Item<'a> {
     alias: String,
     row: String,
+    layout: Option<&'a Layout>,
     outer: Option<&'a Item<'a>>,
+}
+
+/// A document a path goes into: written as a `jsonb`, named by its table and
+/// column or by the array its object is an item of, what it holds, and the
+/// names of the path in it.
+struct Entered<'l, 'n> {
+    document: String,
+    of: String,
+    layout: &'l Layout,
+    names: &'n [&'n str],
+}
+
+/// What a member is read for: its value, or whether it is null - which an
+/// object or a collection of a document can be said to be, and is no value.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reading {
+    Value,
+    NullTest,
+}
+
+/// The member at `names` of the document written `document`, which holds
+/// what `layout` says and is `of` to a message: `->` through its objects,
+/// `->>` of the member, read as the member's kind. Of an object or a
+/// collection, the text `->>` makes of it is null if the member is, and is
+/// read for that alone.
+fn document_member(
+    document: String,
+    of: &str,
+    layout: &Layout,
+    names: &[&str],
+    reading: Reading,
+) -> Result<String, CompileError> {
+    let (object, name, member) = in_document(document, of, layout, names)?;
+    let text = format!("({object} ->> {})", key(name)?);
+    match (member, reading) {
+        (Member::Value(kind), _) => Ok(kind.read(&text)),
+        (Member::Object(_) | Member::Collection(_), Reading::NullTest) => Ok(text),
+        (Member::Object(_) | Member::Collection(_), Reading::Value) => {
+            Err(CompileError::UndeclaredMember(format!(
+                "{of}.{} is an object or a collection of its document, not a value",
+                names.join("."),
+            )))
+        }
+    }
+}
+
+/// The object of the document written `document` that the member at
+/// `names` is in, reached by `->`; the member's name; and what the layout
+/// declares it.
+fn in_document<'l, 'n>(
+    document: String,
+    of: &str,
+    layout: &'l Layout,
+    names: &[&'n str],
+) -> Result<(String, &'n str, &'l Member), CompileError> {
+    let Some((name, objects)) = names.split_last() else {
+        return Err(CompileError::UndeclaredMember(format!(
+            "{of}: a path into a document names a member"
+        )));
+    };
+    let mut object = document;
+    let mut layout = layout;
+    let mut at = of.to_owned();
+    for step in objects {
+        at = format!("{at}.{step}");
+        let Some(Member::Object(inner)) = layout.member(step) else {
+            return Err(CompileError::UndeclaredMember(format!(
+                "{at} is not an object of its document's layout"
+            )));
+        };
+        object = format!("{object} -> {}", key(step)?);
+        layout = inner;
+    }
+    let member = layout.member(name).ok_or_else(|| {
+        CompileError::UndeclaredMember(format!(
+            "{at}.{name} is not a member of its document's layout"
+        ))
+    })?;
+    Ok((object, name, member))
+}
+
+/// The key of a member of a document, as a literal of the query: a name of
+/// the alphabet of names, so that nothing ends the literal.
+fn key(name: &str) -> Result<String, CompileError> {
+    Ok(format!("'{}'", plain(name)?))
 }
 
 /// The singular of the last name of `table`, in lower case: what an alias

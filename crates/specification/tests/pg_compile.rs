@@ -9,7 +9,9 @@ use ascetic_ddd_specification::ast::{
     is_not_null, is_null, left_shift, less_than, mul, neg, not, not_equal, or, right_shift, sub,
     value,
 };
-use ascetic_ddd_specification::pg::{CompileError, Compiler, ForeignKey, Query, Schema, compile};
+use ascetic_ddd_specification::pg::{
+    CompileError, Compiler, ForeignKey, Kind, Layout, Query, Schema, compile,
+};
 use ascetic_ddd_specification::{Date, Expr, Path, Value};
 
 type Spec = Expr<Value>;
@@ -943,4 +945,285 @@ fn a_schema_is_the_foreign_keys_of_the_storage() {
         sql_with(&shared, &equal(field("owner_id.name"), value("x"))),
         r#"(SELECT "owner_1"."name" FROM "owners" AS "owner_1" WHERE "owner_1"."tenant_id" = "stores"."tenant_id" AND "owner_1"."id" = "stores"."owner_id") = $1"#,
     );
+}
+
+/// What the encoding of a policy writes into its document, in the tests of
+/// documents below.
+fn policy() -> Layout {
+    Layout::new()
+        .value("status", Kind::Text)
+        .value("priority", Kind::Int)
+        .value("weight", Kind::Float)
+        .value("published", Kind::Bool)
+        .value("created_at", Kind::Timestamp)
+        .value("due", Kind::Date)
+        .value("owner_id", Kind::Uuid)
+        .value("a'b", Kind::Text)
+        .object(
+            "targeting",
+            Layout::new()
+                .value("mode", Kind::Text)
+                .object("window", Layout::new().value("hours", Kind::Int)),
+        )
+        .collection(
+            "versions",
+            Layout::new()
+                .value("number", Kind::Int)
+                .value("published_at", Kind::Timestamp)
+                .collection(
+                    "approvals",
+                    Layout::new()
+                        .value("by", Kind::Text)
+                        .value("limit", Kind::Int),
+                ),
+        )
+}
+
+fn policies() -> Schema {
+    Schema::new("policies")
+        .alias("p")
+        .document("policies", "document", policy())
+}
+
+/// A member of a document is read by `->>` as text, and the text is read as
+/// the kind the layout gives the member: a value of a type, as a column is,
+/// so that a constant beside it takes that type. A text is ordered by code
+/// point, as the evaluator orders it. A column beside the document is a
+/// column.
+#[test]
+fn a_member_of_a_document_is_read_as_the_kind_its_layout_gives_it() {
+    let schema = policies();
+    for (specification, expected) in [
+        (
+            greater_than(field("document.priority"), value(5)),
+            r#"("p"."document" ->> 'priority')::bigint > $1"#,
+        ),
+        (
+            equal(field("document.status"), value("active")),
+            r#"(("p"."document" ->> 'status') COLLATE "C") = $1"#,
+        ),
+        (
+            field("document.published"),
+            r#"("p"."document" ->> 'published')::boolean"#,
+        ),
+        (
+            less_than(field("document.weight"), value(0.5)),
+            r#"("p"."document" ->> 'weight')::double precision < $1"#,
+        ),
+        (
+            greater_than(field("document.created_at"), value("2026-01-10")),
+            r#"("p"."document" ->> 'created_at')::timestamptz > $1"#,
+        ),
+        (
+            equal(field("document.due"), value(Date::from_days(0))),
+            r#"("p"."document" ->> 'due')::date = $1"#,
+        ),
+        (
+            equal(field("document.owner_id"), value("x")),
+            r#"("p"."document" ->> 'owner_id')::uuid = $1"#,
+        ),
+        (
+            equal(field("document.targeting.window.hours"), value(8)),
+            r#"("p"."document" -> 'targeting' -> 'window' ->> 'hours')::bigint = $1"#,
+        ),
+        (
+            and(
+                field("archived"),
+                equal(field("document.targeting.mode"), value("x")),
+            ),
+            r#""archived" AND (("p"."document" -> 'targeting' ->> 'mode') COLLATE "C") = $1"#,
+        ),
+        // A cast binds tighter than unary minus, and than the cast of the
+        // count of a shift.
+        (
+            less_than(neg(field("document.priority")), value(0)),
+            r#"-("p"."document" ->> 'priority')::bigint < $1"#,
+        ),
+        (
+            equal(
+                left_shift(field("mask"), field("document.priority")),
+                value(4),
+            ),
+            r#""mask" << ("p"."document" ->> 'priority')::bigint::integer = $1"#,
+        ),
+    ] {
+        assert_eq!(sql_with(&schema, &specification), expected);
+    }
+}
+
+/// A null test reads whether the member is null, which an object and a
+/// collection of a document can be said to be: `->>` of a JSON null, and of
+/// a member that is not there, is the null of SQL. An object is no value to
+/// compare.
+#[test]
+fn a_null_test_of_a_member_of_a_document_reads_whether_it_is_null() {
+    let schema = policies();
+    for (specification, expected) in [
+        (
+            is_null(field("document.priority")),
+            r#"("p"."document" ->> 'priority')::bigint IS NULL"#,
+        ),
+        (
+            is_not_null(field("document.targeting")),
+            r#"("p"."document" ->> 'targeting') IS NOT NULL"#,
+        ),
+        (
+            is_null(field("document.versions")),
+            r#"("p"."document" ->> 'versions') IS NULL"#,
+        ),
+    ] {
+        assert_eq!(sql_with(&schema, &specification), expected);
+    }
+    assert_eq!(
+        Compiler::new()
+            .schema(&schema)
+            .compile::<Value>(&equal(field("document.targeting"), value("x"))),
+        Err(CompileError::UndeclaredMember(
+            "policies.document.targeting is an object or a collection of its document, not a value"
+                .to_owned()
+        )),
+    );
+}
+
+/// An array of objects in a document is read with `jsonb_array_elements`,
+/// whose rows are the objects; a member of one is read as a member of the
+/// document is. The aliases of the enclosing queries are in scope of the
+/// inner one, the candidate's row is named by the schema, as for the other
+/// storages of a collection.
+#[test]
+fn a_collection_in_a_document_is_read_with_jsonb_array_elements() {
+    let schema = policies();
+    let approved_by = |name: &str| any(Path::item("approvals"), equal(item("by"), value(name)));
+    for (specification, expected) in [
+        (
+            any("document.versions", greater_than(item("number"), value(2))),
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE ("version_1" ->> 'number')::bigint > $1)"#,
+        ),
+        (
+            any("document.versions", approved_by("ann")),
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE EXISTS (SELECT 1 FROM jsonb_array_elements("version_1" -> 'approvals') AS "approval_2" WHERE (("approval_2" ->> 'by') COLLATE "C") = $1))"#,
+        ),
+        (
+            any(
+                "document.versions",
+                any(
+                    Path::item("approvals"),
+                    greater_than(item("limit"), field(Path::outer(1, "number"))),
+                ),
+            ),
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE EXISTS (SELECT 1 FROM jsonb_array_elements("version_1" -> 'approvals') AS "approval_2" WHERE ("approval_2" ->> 'limit')::bigint > ("version_1" ->> 'number')::bigint))"#,
+        ),
+        (
+            any(
+                "document.versions",
+                greater_than(item("published_at"), field("document.created_at")),
+            ),
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE ("version_1" ->> 'published_at')::timestamptz > ("p"."document" ->> 'created_at')::timestamptz)"#,
+        ),
+        (
+            any(
+                "document.versions",
+                greater_than(item("number"), field("floor")),
+            ),
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE ("version_1" ->> 'number')::bigint > "p"."floor")"#,
+        ),
+        (
+            all("document.versions", is_not_null(item("published_at"))),
+            r#"NOT EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE NOT ("version_1" ->> 'published_at')::timestamptz IS NOT NULL)"#,
+        ),
+    ] {
+        assert_eq!(sql_with(&schema, &specification), expected);
+    }
+}
+
+/// A path into a document is what the layout declares, or the query is
+/// refused: the layout is what the encoding writes, and a member it does not
+/// write would be a null in every row, a query that selects nothing in
+/// silence. A key is written as a literal, of the alphabet of names.
+#[test]
+fn a_path_into_a_document_is_what_its_layout_declares_or_refused() {
+    let schema = policies();
+    let refused = |specification: Spec, message: &str| {
+        assert_eq!(
+            Compiler::new().schema(&schema).compile(&specification),
+            Err(CompileError::UndeclaredMember(message.to_owned())),
+        );
+    };
+    refused(
+        equal(field("document.title"), value("x")),
+        "policies.document.title is not a member of its document's layout",
+    );
+    refused(
+        equal(field("document.status.code"), value("x")),
+        "policies.document.status is not an object of its document's layout",
+    );
+    refused(
+        any("document.status", item("x")),
+        "policies.document.status is not a collection of its document's layout",
+    );
+    refused(
+        any("document.targeting", item("x")),
+        "policies.document.targeting is not a collection of its document's layout",
+    );
+    refused(
+        any("document.versions", item("title")),
+        "policies.document.versions.title is not a member of its document's layout",
+    );
+    assert_eq!(
+        Compiler::new().schema(&schema).compile::<Value>(&equal(
+            field(Path::global("document").child("a'b")),
+            value("x")
+        )),
+        Err(CompileError::InvalidIdentifier("a'b".to_owned())),
+    );
+    // Not declared a document, the column is what the dots have meant.
+    assert_eq!(
+        sql(&equal(field("document.status"), value("x"))),
+        r#""document"."status" = $1"#,
+    );
+}
+
+/// A document is a column of a table, any table of the schema: the table
+/// of a collection, the table of an object kept by a key.
+#[test]
+fn a_document_is_a_column_of_any_table_of_the_schema() {
+    let schema = Schema::new("stores")
+        .alias("s")
+        .foreign_key("store_items", "store_id", "stores", "id")
+        .foreign_key("stores", "owner_id", "owners", "id")
+        .document(
+            "store_items",
+            "document",
+            Layout::new()
+                .value("price", Kind::Int)
+                .collection("tags", Layout::new().value("name", Kind::Text)),
+        )
+        .document(
+            "owners",
+            "document",
+            Layout::new().value("name", Kind::Text),
+        );
+    let price = || field(Path::item("document").child("price"));
+    for (specification, expected) in [
+        (
+            any("store_items", greater_than(price(), value(5))),
+            r#"EXISTS (SELECT 1 FROM "store_items" AS "store_item_1" WHERE "store_item_1"."store_id" = "s"."id" AND ("store_item_1"."document" ->> 'price')::bigint > $1)"#,
+        ),
+        (
+            any(
+                "store_items",
+                any(
+                    Path::item("document").child("tags"),
+                    equal(item("name"), value("x")),
+                ),
+            ),
+            r#"EXISTS (SELECT 1 FROM "store_items" AS "store_item_1" WHERE "store_item_1"."store_id" = "s"."id" AND EXISTS (SELECT 1 FROM jsonb_array_elements("store_item_1"."document" -> 'tags') AS "tag_2" WHERE (("tag_2" ->> 'name') COLLATE "C") = $1))"#,
+        ),
+        (
+            equal(field("owner_id.document.name"), value("x")),
+            r#"(SELECT (("owner_1"."document" ->> 'name') COLLATE "C") FROM "owners" AS "owner_1" WHERE "owner_1"."id" = "s"."owner_id") = $1"#,
+        ),
+    ] {
+        assert_eq!(sql_with(&schema, &specification), expected);
+    }
 }

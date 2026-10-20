@@ -115,8 +115,9 @@ else is a compile error at the place it stands.
 objects, which collections; or a [`Record`] of plain data.
 
 **As SQL**: [`pg::compile`], to a condition with numbered parameters; with a
-[`pg::Schema`] for the collections kept in tables of their own. With the
-`pg` feature, [`Value`] goes to `tokio-postgres` as a parameter as it is.
+[`pg::Schema`] for the collections kept in tables of their own and the
+columns that hold a document. With the `pg` feature, [`Value`] goes to
+`tokio-postgres` as a parameter as it is.
 
 The two agree, nulls included: the logic of the evaluator is PostgreSQL's
 three-valued one, and `tests/pg.rs` holds them against each other on a live
@@ -126,6 +127,67 @@ the same rows selected for each specification.
 Between the two stands [`transform`], for a domain whose members and values
 are not the table's columns and scalars: a composite identity compared as
 one value in the domain and column by column in the query.
+
+## An aggregate kept as a document
+
+A table may keep an aggregate as one `jsonb` document, with a few of its
+members beside it as columns a listing filters by (ADR-0021). Where each
+member is read from is the [`Mapping`]'s to say, member by member: a column,
+`aggregate_version`, or a path in the document, `document.status`. A member
+moved from the document to a column is one answer of the mapping changed,
+and no specification. What the document holds is the [`pg::Schema`]'s to
+say, by a [`pg::Layout`]: a document does not say the kinds of its members -
+a point in time and a UUID are strings in it - so the layout gives each its
+[`pg::Kind`], and the compiler reads it as that.
+
+```rust
+use ascetic_ddd_specification::ast::{and, any, equal, field, greater_than, value};
+use ascetic_ddd_specification::pg::{Compiler, Kind, Layout, Schema};
+use ascetic_ddd_specification::{Expr, Path, Value};
+
+let schema = Schema::new("policies").alias("p").document(
+    "policies",
+    "document",
+    Layout::new()
+        .value("status", Kind::Text)
+        .collection("versions", Layout::new().value("number", Kind::Int)),
+);
+// As the mapping left it: `published` a column, the rest in the document.
+let specification: Expr<Value> = and(
+    field("published"),
+    and(
+        equal(field("document.status"), value("active")),
+        any("document.versions", greater_than(field(Path::item("number")), value(2))),
+    ),
+);
+let query = Compiler::new().schema(&schema).compile(&specification)?;
+assert_eq!(
+    query.sql,
+    concat!(
+        r#""published" AND (("p"."document" ->> 'status') COLLATE "C") = $1 "#,
+        r#"AND EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') "#,
+        r#"AS "version_1" WHERE ("version_1" ->> 'number')::bigint > $2)"#,
+    ),
+);
+# Ok::<(), ascetic_ddd_specification::pg::CompileError>(())
+```
+
+A member is read by `->>`, which has the null of SQL for a JSON null, and
+then cast to its kind, or for a text ordered by code point: a value of a
+type, as a column's is, so the logic of nulls, the arithmetic and the
+reading of a string constant beside it are what they are for a column.
+The query is not a JSONPath one: there a null is a value, `!($.a == 5)` is
+true of a null `a`, `7 / 2` is `3.5`, an enclosing item has no name, and an
+index serves equality alone.
+
+A member that a listing compares by order is a column beside the document:
+one the server generates from it, `priority bigint GENERATED ALWAYS AS
+((document ->> 'priority')::bigint) STORED`, is what the document says by
+construction; or an index on the expression the compiler writes,
+`((document ->> 'priority')::bigint)`, `((document ->> 'status') COLLATE
+"C")`. A point in time or a date has neither: its cast depends on the
+session's settings, and the server refuses it in an index - it is a column
+the repository writes, of its type.
 
 ## What maps to what
 
@@ -314,9 +376,24 @@ the sources as they were.
   PostgreSQL if all its members are, and not null only if none is.
 * A path from the candidate of several parts is written into the query as it
   is: `s.price` is `"s"."price"`, the author's qualifier.
-* An embedded collection is read with `unnest`, so it is an array of a
-  composite type. A `jsonb` array is not supported, as it is not in the
-  sources.
+* An embedded collection is read with `unnest`, an array of a composite
+  type, or with `jsonb_array_elements`, an array of objects in a document. An
+  array of scalars is neither: the tree names a member of an item, never the
+  item itself.
+* A member of a document that is not in it is the null of SQL: `->>` reads
+  a missing member as it reads a JSON null, where the evaluator says it is
+  missing. The layout is what the encoding writes; a layout that is not makes
+  a query that selects nothing, in silence. What holds the two together is a
+  test of the repository that writes an aggregate and selects it by every
+  member the layout declares. A document of an older shape, read into the
+  aggregate by an upcast, is the same: it is rewritten before a query goes
+  into it.
+* A point in time in a document is read at microseconds. The server rounds
+  what is finer - `.999999999Z` is the next second - and the evaluator's
+  [`Timestamp`] has none of it: an encoding that writes nanoseconds and is
+  compared at a boundary has the two disagree.
+* A collection of a document that is a JSON null, and not an empty array,
+  fails the whole query: `jsonb_array_elements` takes no scalar.
 * `numeric` parameters are not written by the `pg` feature.
 * The text of a template has one `@`, the nearest item, as RFC 9535 has it;
   the item of an enclosing collection is named in the tree only.
