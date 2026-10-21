@@ -70,6 +70,27 @@ pub(super) enum Member {
     Object(Layout),
     /// An array of objects of these members.
     Collection(Layout),
+    /// An array of values of this kind: the groups a policy targets.
+    Values(Kind),
+}
+
+impl Member {
+    /// What the items are, if this is an array.
+    pub(super) fn items(&self) -> Option<Items<'_>> {
+        match self {
+            Member::Collection(layout) => Some(Items::Objects(layout)),
+            Member::Values(kind) => Some(Items::Values(*kind)),
+            Member::Value(_) | Member::Object(_) => None,
+        }
+    }
+}
+
+/// The items of an array in a document: objects of these members, or values
+/// of this kind.
+#[derive(Clone, Copy)]
+pub(super) enum Items<'a> {
+    Objects(&'a Layout),
+    Values(Kind),
 }
 
 /// The members of an object in a document: the document itself, an object
@@ -87,7 +108,8 @@ pub(super) enum Member {
 ///         Layout::new()
 ///             .value("number", Kind::Int)
 ///             .value("published_at", Kind::Timestamp),
-///     );
+///     )
+///     .values("device_groups", Kind::Text);
 /// ```
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Layout {
@@ -113,6 +135,13 @@ impl Layout {
     /// The member `name` is an array of objects of the members `layout`.
     pub fn collection(self, name: impl Into<String>, layout: Layout) -> Self {
         self.with(name.into(), Member::Collection(layout))
+    }
+
+    /// The member `name` is an array of values of the kind `kind`, each
+    /// named in a specification as the item itself,
+    /// [`ast::item`](crate::ast::item).
+    pub fn values(self, name: impl Into<String>, kind: Kind) -> Self {
+        self.with(name.into(), Member::Values(kind))
     }
 
     /// What the member `name` is: the last declaration of that name.

@@ -4,7 +4,8 @@
 //! columns in the table.
 
 use ascetic_ddd_specification::ast::{
-    and, any, equal, field, greater_than, is_not_null, is_null, less_than, not, not_equal, value,
+    and, any, equal, field, greater_than, is_not_null, is_null, item, less_than, not, not_equal,
+    value,
 };
 use ascetic_ddd_specification::{
     Expr, Infix, Mapped, Mapping, Path, Record, Root, TransformError, Value, is_satisfied_by, pg,
@@ -78,6 +79,9 @@ impl Mapping<Domain, Value> for Something {
             // starts with the collection's, in the domain's names and in the
             // storage's.
             ["something", "parts"] => Ok(Mapped::Scalar(Expr::Field(Path::global("parts")))),
+            ["something", "tags"] => Ok(Mapped::Scalar(Expr::Field(
+                Path::global("document").child("tags"),
+            ))),
             ["something", "parts", "weight"] => Ok(Mapped::Scalar(Expr::Field(
                 Path::global("parts").child("weight_grams"),
             ))),
@@ -511,4 +515,27 @@ fn equality_with_what_the_mapping_says_is_the_storages_null_is_the_null_test() {
             "{specification:?}"
         );
     }
+}
+
+/// An element of a collection of values is not asked about: it is what the
+/// collection holds, where the mapping put the collection, and the constant
+/// it is compared with is the mapping's. A composite constant has no parts
+/// there to be compared with, and is refused.
+#[test]
+fn an_element_of_a_collection_of_values_is_where_its_collection_is() {
+    let tagged: Expr<Domain> = any("something.tags", equal(item(), value(5)));
+    let transformed: Transformed = transform(&tagged, &Something);
+    assert_eq!(transformed, Ok(any("document.tags", equal(item(), int(5)))),);
+    let composite: Expr<Domain> = any(
+        "something.tags",
+        equal(item(), value(something_id(1, 2, 3))),
+    );
+    assert_eq!(
+        transform(&composite, &Something),
+        Err(TransformError::NotComposite),
+    );
+    assert_eq!(
+        transform::<Domain, Value, _>(&item(), &Something),
+        Err(TransformError::NoCurrentItem),
+    );
 }

@@ -104,7 +104,9 @@ parameter that is an `Option`, where the name stands for it, and which are
 how what an `Option` holds is ordered - `<` with `Some(x)`, `None` or an
 `Option` parameter is refused; the comparison methods `.eq(&x)` … `.ge(&x)` a Value Object
 compares by; `.iter().any(|item| …)` and `.all(…)`, nested as deep as the
-collections are; `&`, `*`, `.clone()`, `.as_str()`, `.as_ref()`,
+collections are, the item a member's owner or, of a collection of values,
+the value itself, `|tag| *tag == x`; `.contains(&x)`, which is `any` of
+that; `&`, `*`, `.clone()`, `.as_str()`, `.as_ref()`,
 `.as_deref()`, which change how a value is held and not the value. Anything
 else is a compile error at the place it stands.
 
@@ -112,7 +114,24 @@ else is a compile error at the place it stands.
 
 **In memory**: [`is_satisfied_by`] against anything that implements
 [`Context`] — a domain object saying which of its members are values, which
-objects, which collections; or a [`Record`] of plain data.
+objects, which collections, and whether the items of a collection are
+objects or values, [`Element`]; or a [`Record`] of plain data.
+
+## A collection of values
+
+The groups a policy targets are a collection of identifiers, whose elements
+have no members to name. The element is the item itself, [`Expr::Item`]
+(ADR-0023): `any("tags", equal(item(), value("sale")))`, `$.tags[*][?@ ==
+%s]` in a template, `store.tags.contains(&tag)` or `|tag| *tag == tag` in a
+Rust function. A domain object gives the elements by value,
+`Element::Value`: an element is often a type of the domain's own, for which
+no `Context` can be implemented where it is used. In SQL an element of an
+array of a scalar type is the alias `unnest` gives it, `EXISTS (SELECT 1
+FROM unnest("tags") AS "tag_1" WHERE "tag_1" = $1)`; of a document's array
+of values, declared by [`pg::Layout::values`], the text
+`jsonb_array_elements_text` gives it, read as its kind. A row of a table and
+an object of a document have members, and are no value: the item itself of
+either is refused.
 
 **As SQL**: [`pg::compile`], to a condition with numbered parameters; with a
 [`pg::Schema`] for the collections kept in tables of their own and the
@@ -390,10 +409,21 @@ the sources as they were.
   PostgreSQL if all its members are, and not null only if none is.
 * A path from the candidate of several parts is written into the query as it
   is: `s.price` is `"s"."price"`, the author's qualifier.
-* An embedded collection is read with `unnest`, an array of a composite
-  type, or with `jsonb_array_elements`, an array of objects in a document. An
-  array of scalars is neither: the tree names a member of an item, never the
-  item itself.
+* An embedded collection is read with `unnest`, an array of a composite or
+  of a scalar type, or with `jsonb_array_elements` and
+  `jsonb_array_elements_text`, an array of objects or of values in a
+  document. An array of arrays is not read: an item itself is a value or an
+  object, not a collection.
+* An element is compared as the storage keeps it. An element the domain
+  holds as a composite and the storage as a part of it - a tenant-scoped
+  identity kept as its local key, the tenant in the candidate's row - is
+  given by the domain's `Context` as the part, and queried within its
+  tenant: a mapping that maps a composite constant to a part compares other
+  values than the evaluator, and a composite constant beside an element is
+  `TransformError::NotComposite`.
+* `.contains` of a text is a substring to Rust and `any` to the macro, which
+  has no types: the evaluator and the server refuse a text for a collection,
+  at run time.
 * A member of a document that is not in it is the null of SQL: `->>` reads
   a missing member as it reads a JSON null, where the evaluator says it is
   missing. The layout is what the encoding writes; a layout that is not makes

@@ -61,6 +61,13 @@ pub enum Mapped<S> {
 /// [`transform`] puts the answer there: the member of an item is the answer
 /// less the collection's, from the item.
 ///
+/// An element of a collection of values, [`Expr::Item`], is not asked
+/// about: it is what the collection holds, where the mapping put the
+/// collection, and a constant compared with it is the mapping's
+/// [`value`](Mapping::value). An element the storage keeps otherwise than the
+/// domain - a tenant-scoped identity kept as its local key - is for the
+/// domain's [`Context`](crate::Context) to give as the storage keeps it.
+///
 /// A mapping is a guard as well. A specification may arrive as data - a
 /// template bound from a request, a tree from another service - and the
 /// mapping names every member such a specification may filter by, and
@@ -235,7 +242,7 @@ fn placed_expr<S, E>(
             let first = rest.next().ok_or(TransformError::OutsideItsCollection)?;
             Expr::Field(rest.fold(Path::outer(up, first), Path::child))
         }
-        Expr::Field(_) | Expr::Value(_) => expr,
+        Expr::Field(_) | Expr::Value(_) | Expr::Item(_) => expr,
         Expr::Prefix(op, operand) => Expr::Prefix(op, place(operand)?),
         Expr::Postfix(operand, op) => Expr::Postfix(place(operand)?, op),
         Expr::Infix(left, op, right) => Expr::Infix(place(left)?, op, place(right)?),
@@ -251,6 +258,11 @@ fn lower<D, S, M: Mapping<D, S>>(
     match expr {
         Expr::Value(value) => mapping.value(value).map_err(TransformError::Mapping),
         Expr::Field(path) => member(path, mapping, inside),
+        // An element of a collection of values is the element: the mapping
+        // has said where the collection is, and says what a constant compared
+        // with the element is.
+        Expr::Item(up) if *up < inside.len() => Ok(Mapped::Scalar(Expr::Item(*up))),
+        Expr::Item(_) => Err(TransformError::NoCurrentItem),
         Expr::Prefix(op, operand) => Ok(Mapped::Scalar(Expr::Prefix(
             *op,
             Box::new(scalar(lower(operand, mapping, inside)?)?),

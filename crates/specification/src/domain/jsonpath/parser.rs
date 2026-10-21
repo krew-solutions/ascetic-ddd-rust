@@ -329,12 +329,21 @@ fn operand(input: Input<'_>, scope: Root, depth: usize) -> Parsed<'_, Tree> {
     }
 }
 
-/// `query = ( "@" | "$" ) path ( "[*]" filter )?`, after its first token:
-/// the value of a member, or a collection with a predicate on its items.
+/// `query = "@" | ( "@" | "$" ) path ( "[*]" filter )?`, after its first
+/// token: the item itself, the value of a member, or a collection with a
+/// predicate on its items.
 fn query(input: Input<'_>, root: Root, depth: usize) -> Parsed<'_, Tree> {
     let (names, input) = names(input)?;
-    let path = collection(root, names)
-        .ok_or_else(|| input.error("Expected field name", "after '@' or '$'"))?;
+    let path = match (collection(root, names), root) {
+        (Some(path), _) => path,
+        // `@` alone in the predicate of a collection: the item itself, an
+        // element of a collection of values. Of the candidate, `$` or `@` of
+        // `$[?…]`, there is no value, and of an item no collection.
+        (None, Root::Item(up)) if input.kind() != Some(&Kind::LeftBracket) => {
+            return Ok((Tree::leaf(Expr::Item(up)), input));
+        }
+        (None, _) => return Err(input.error("Expected field name", "after '@' or '$'")),
+    };
     if input.kind() == Some(&Kind::LeftBracket) {
         let (predicate, rest) = filter(wildcard(input)?, Root::Item(0), deeper(input, depth)?)?;
         let any = Tree::over(input, |predicate| ast::any(path, predicate), predicate)?;

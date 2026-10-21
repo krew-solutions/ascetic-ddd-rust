@@ -9,6 +9,10 @@ is discharged - where the schema says a document has a GIN index, an
 equality where only truth counts is containment, and `any` has the
 equalities of its predicate beside it as containment.
 
+Amended 2026-10-21 by ADR-0023: the consequence on collections of scalars is
+discharged - the element of a collection of values is the item itself,
+`Expr::Item`, and a document's array of values is `Layout::values`.
+
 ## Context
 
 A service that keeps an aggregate as one `jsonb` document has the

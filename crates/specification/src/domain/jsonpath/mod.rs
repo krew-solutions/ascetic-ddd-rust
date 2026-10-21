@@ -26,7 +26,7 @@
 //! unary       = "!" unary | comparison
 //! comparison  = operand ( ( "==" | "!=" | "<" | "<=" | ">" | ">=" ) operand )?
 //! operand     = "(" or ")" | literal | placeholder | query
-//! query       = ( "@" | "$" ) path ( "[*]" filter )?
+//! query       = "@" | ( "@" | "$" ) path ( "[*]" filter )?
 //! literal     = integer | float | string | "true" | "false" | "null"
 //! placeholder = "%s" | "%d" | "%f" | "%(" name ")" ( "s" | "d" | "f" )
 //! name        = ( letter | "_" ) ( letter | digit | "_" )*
@@ -34,7 +34,9 @@
 //!
 //! `$[?p]` is `p` of the candidate, and `@` in it is the candidate.
 //! `$.a.items[*][?p]` is "some item of `a.items` satisfies `p`", and `@` in
-//! `p` is the item; `$` is the candidate everywhere. A query with `[*]`
+//! `p` is the item: `@.price` a member of it, `@` alone the item itself, an
+//! element of a collection of values, `$.tags[*][?@ == "sale"]`. `$` is the
+//! candidate everywhere, and the candidate itself is no value. A query with `[*]`
 //! inside a filter nests the same. This is the language of the Python and Go
 //! ports as well - a template of one is a template of the others - and it is
 //! not RFC 9535's reading of the same text, where a filter selects among the

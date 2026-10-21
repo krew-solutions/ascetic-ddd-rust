@@ -69,6 +69,16 @@ impl Place {
         Some(quote!(#ast::Path::#root #(.child(#names))*))
     }
 
+    /// The code of the expression the place is: a member, or an item itself,
+    /// an element of a collection of values; none of the candidate itself.
+    fn value(&self) -> Option<Tokens> {
+        let ast = ast();
+        match (self.root, self.names.is_empty()) {
+            (Root::Item(up), true) => Some(quote!(#ast::outer_item(#up))),
+            _ => self.path().map(|path| quote!(#ast::field(#path))),
+        }
+    }
+
     /// The same place, seen from one collection further in.
     fn further_in(self) -> Self {
         Place {
@@ -231,8 +241,13 @@ pub(crate) fn expr(expr: &Expr, scope: &Scope<'_>) -> Result<Tokens, Error> {
             }
             _ => Err(inexpressible(expr)),
         },
-        Expr::Path(_) | Expr::Field(_) => match member(expr, scope)? {
-            Some(path) => Ok(quote!(#ast::field(#path))),
+        Expr::Path(_) | Expr::Field(_) => match place(expr, scope)? {
+            Some(place) => place.value().ok_or_else(|| {
+                Error::new_spanned(
+                    expr,
+                    "the candidate itself is not a value: name one of its members",
+                )
+            }),
             None => {
                 if scope.receiver
                     && matches!(chain(expr)?, Some((base, names)) if base == "self" && names.is_empty())
@@ -344,16 +359,21 @@ fn infix(op: &BinOp) -> Option<Tokens> {
 }
 
 /// The code of the `Path` that `expr` is, if it is a member of the
-/// candidate or of the item; `None` if it is a value from elsewhere.
+/// candidate or of the item; `None` if it is a value from elsewhere. What a
+/// collection is: the candidate itself is none, and an item itself is an
+/// object or a value, not a collection of collections.
 fn member(expr: &Expr, scope: &Scope<'_>) -> Result<Option<Tokens>, Error> {
     let Some(place) = place(expr, scope)? else {
         return Ok(None);
     };
     let path = place.path().ok_or_else(|| {
-        Error::new_spanned(
-            expr,
-            "the candidate itself is not a value: name one of its members",
-        )
+        let message = match place.root {
+            Root::Candidate => "the candidate itself is not a collection: name one of its members",
+            Root::Item(_) => {
+                "an item itself is not a collection: a collection of collections is not expressible"
+            }
+        };
+        Error::new_spanned(expr, message)
     })?;
     Ok(Some(path))
 }
@@ -429,6 +449,7 @@ fn method(call: &ExprMethodCall, scope: &Scope<'_>) -> Result<Tokens, Error> {
         ("gt", [right]) => order(quote!(#ast::greater_than), right),
         ("ge", [right]) => order(quote!(#ast::greater_than_equal), right),
         ("any", [Expr::Closure(predicate)]) => quantifier(quote!(any), call, predicate, scope),
+        ("contains", [element]) => contains(call, element, scope),
         ("all", [Expr::Closure(predicate)]) => quantifier(quote!(all), call, predicate, scope),
         ("is_some_and", [Expr::Closure(predicate)]) => {
             held(quote!(and), quote!(is_not_null), call, predicate, scope)
@@ -485,8 +506,8 @@ fn held(
     };
     let (held, option) = match place(option, scope)? {
         Some(place) => {
-            let path = place.path().ok_or_else(nameless)?;
-            (Held::Member(place), quote!(#ast::field(#path)))
+            let value = place.value().ok_or_else(nameless)?;
+            (Held::Member(place), value)
         }
         None => {
             chain(option)?.ok_or_else(nameless)?;
@@ -541,6 +562,26 @@ fn quantifier(
     };
     let predicate = expr(&predicate.body, &scope.inside(item))?;
     Ok(quote!(#ast::#make(#source, #predicate)))
+}
+
+/// `collection.contains(&x)`: some element of the collection is `x`, an
+/// equality - with a none, the null test. `x` is seen from inside the
+/// collection, whose element no name of the function stands for, so the
+/// items of enclosing collections are one further out from it.
+///
+/// The macro has no types: `contains` of a text, a substring, is taken for
+/// this as well, and a text is no collection to the evaluator or the server.
+fn contains(call: &ExprMethodCall, element: &Expr, scope: &Scope<'_>) -> Result<Tokens, Error> {
+    let (ast, null_test) = (ast(), null_test());
+    let source = member(&call.receiver, scope)?.ok_or_else(|| {
+        Error::new_spanned(
+            &call.receiver,
+            "a collection of a specification is a member of the candidate or of the item",
+        )
+    })?;
+    let unnamed = Ident::new("__specification_element", call.method.span());
+    let element = expr(element, &scope.inside(&unnamed))?;
+    Ok(quote!(#ast::any(#source, #null_test::equal(#ast::item(), #element))))
 }
 
 /// The name a closure gives its item: `|item|`, `|&item|`, `|item: &Item|`.

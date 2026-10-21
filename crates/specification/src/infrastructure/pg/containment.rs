@@ -19,30 +19,43 @@
 //! is stable, and is called again for every row a sequential scan reads -
 //! three times the time of the scan, measured on PostgreSQL 14.
 
-use super::layout::{Kind, Layout, Member};
+use super::layout::{Items, Kind, Layout, Member};
 use super::param_type::ParamType;
 use super::{CompileError, Next, key};
 use crate::domain::ast::{Expr, Path, Root};
 use crate::domain::operator::{Comparison, Infix, Logical};
 
 /// What a document is asked to contain: an object of members, each a
-/// constant of a kind, an object, or an array that contains objects.
+/// constant of a kind, an object, or an array that contains objects or
+/// constants.
 pub(super) struct Pattern<V> {
     members: Vec<(String, Contained<V>)>,
 }
 
-enum Contained<V> {
+pub(super) enum Contained<V> {
     Constant(Spelled, V),
     Object(Pattern<V>),
-    Array(Vec<Pattern<V>>),
+    Array(Vec<Contained<V>>),
 }
 
 /// A kind with one spelling in JSON, and the type its constant is said.
 #[derive(Clone, Copy)]
-enum Spelled {
+pub(super) enum Spelled {
     Text,
     Int,
     Bool,
+}
+
+impl Spelled {
+    /// The kind, if it has one spelling in JSON.
+    fn of(kind: Kind) -> Option<Self> {
+        match kind {
+            Kind::Text => Some(Spelled::Text),
+            Kind::Int => Some(Spelled::Int),
+            Kind::Bool => Some(Spelled::Bool),
+            Kind::Float | Kind::Timestamp | Kind::Date | Kind::Uuid => None,
+        }
+    }
 }
 
 impl<V: Clone + ParamType> Contained<V> {
@@ -74,14 +87,10 @@ impl<V: Clone + ParamType> Pattern<V> {
             };
             layout = inner;
         }
-        let spelled = match layout.member(name)? {
-            Member::Value(Kind::Text) => Spelled::Text,
-            Member::Value(Kind::Int) => Spelled::Int,
-            Member::Value(Kind::Bool) => Spelled::Bool,
-            Member::Value(Kind::Float | Kind::Timestamp | Kind::Date | Kind::Uuid)
-            | Member::Object(_)
-            | Member::Collection(_) => return None,
+        let Member::Value(kind) = layout.member(name)? else {
+            return None;
         };
+        let spelled = Spelled::of(*kind)?;
         value.param_type()?;
         let constant = Contained::Constant(spelled, value.clone());
         Some(Self::nested(objects, Pattern::of(name, constant)))
@@ -130,20 +139,62 @@ impl<V: Clone + ParamType> Pattern<V> {
             };
             layout = inner;
         }
-        let Some(Member::Collection(items)) = layout.member(name) else {
+        let Some(items) = layout.member(name).and_then(Member::items) else {
             return Self::none();
         };
-        Self::of_item(predicate, items)
-            .in_array(name)
-            .map_or_else(Self::none, |pattern| Self::nested(objects, pattern))
+        Self::of_array(&names, Self::elements(predicate, items)).unwrap_or_else(Self::none)
     }
 
-    /// An object that contains, at `names`, an array that contains an
-    /// object that contains `item`: none if `item` asks for nothing.
-    pub(super) fn of_array(names: &[&str], item: Self) -> Option<Self> {
+    /// What an array whose items are `items` contains when one of them
+    /// satisfies `predicate`: an object of what the predicate says of its
+    /// members, or the constants it says the value is equal to.
+    pub(super) fn elements(predicate: &Expr<V>, items: Items<'_>) -> Vec<Contained<V>> {
+        match items {
+            Items::Objects(layout) => {
+                let object = Self::of_item(predicate, layout);
+                if object.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![Contained::Object(object)]
+                }
+            }
+            Items::Values(kind) => match Spelled::of(kind) {
+                Some(spelled) => Self::constants(predicate, spelled),
+                None => Vec::new(),
+            },
+        }
+    }
+
+    /// The constants that `predicate`, by `AND`, says the item itself is
+    /// equal to. An item equal to two is equal to both, so the array
+    /// contains both.
+    fn constants(predicate: &Expr<V>, spelled: Spelled) -> Vec<Contained<V>> {
+        match predicate {
+            Expr::Infix(left, Infix::Logical(Logical::And), right) => {
+                let mut constants = Self::constants(left, spelled);
+                constants.extend(Self::constants(right, spelled));
+                constants
+            }
+            Expr::Infix(left, Infix::Comparison(Comparison::Eq), right) => {
+                match (left.as_ref(), right.as_ref()) {
+                    (Expr::Item(0), Expr::Value(value)) | (Expr::Value(value), Expr::Item(0))
+                        if value.param_type().is_some() =>
+                    {
+                        vec![Contained::Constant(spelled, value.clone())]
+                    }
+                    _ => Vec::new(),
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// An object that contains, at `names`, an array that contains
+    /// `elements`: none if there are none.
+    pub(super) fn of_array(names: &[&str], elements: Vec<Contained<V>>) -> Option<Self> {
         let (name, objects) = names.split_last()?;
-        item.in_array(name)
-            .map(|pattern| Self::nested(objects, pattern))
+        (!elements.is_empty())
+            .then(|| Self::nested(objects, Self::of(name, Contained::Array(elements))))
     }
 
     /// Whether the pattern asks for nothing: every document contains it.
@@ -178,11 +229,6 @@ impl<V: Clone + ParamType> Pattern<V> {
         })
     }
 
-    /// An object whose member `name` is an array that contains this.
-    fn in_array(self, name: &str) -> Option<Self> {
-        (!self.is_empty()).then(|| Self::of(name, Contained::Array(vec![self])))
-    }
-
     /// What contains both: the members of objects at one name merged, the
     /// items of arrays at one name both asked for. Of two constants at one
     /// name the first is kept, as of a constant and an object: the pattern
@@ -211,45 +257,17 @@ impl<V: Clone + ParamType> Pattern<V> {
         for (name, member) in self.members {
             let key = key(&name)?;
             let (entry, after) = match member {
-                Contained::Constant(spelled, value) => {
-                    if value.nul_in_text() {
-                        return Err(CompileError::NulInText);
-                    }
-                    let param = next.param + 1;
-                    params.push(value);
-                    let entry = match spelled {
-                        Spelled::Text => {
-                            format!("jsonb_object(ARRAY[{key}], ARRAY[${param}::text])")
-                        }
-                        Spelled::Int => format!(
-                            "jsonb_set('{{}}'::jsonb, ARRAY[{key}], ${param}::bigint::text::jsonb)"
-                        ),
-                        Spelled::Bool => format!(
-                            "jsonb_set('{{}}'::jsonb, ARRAY[{key}], ${param}::boolean::text::jsonb)"
-                        ),
-                    };
-                    (entry, Next { param, ..next })
-                }
-                Contained::Object(object) => {
-                    let (object, next) = object.object(params, next)?;
+                Contained::Constant(Spelled::Text, value) => {
+                    let (param, next) = parameter(value, params, next)?;
                     (
-                        format!("jsonb_set('{{}}'::jsonb, ARRAY[{key}], {object})"),
+                        format!("jsonb_object(ARRAY[{key}], ARRAY[${param}::text])"),
                         next,
                     )
                 }
-                Contained::Array(items) => {
-                    let mut written = vec!["'[]'::jsonb".to_owned()];
-                    let mut next = next;
-                    for item in items {
-                        let (item, after) = item.object(params, next)?;
-                        written.push(item);
-                        next = after;
-                    }
+                member => {
+                    let (value, next) = member.json(params, next)?;
                     (
-                        format!(
-                            "jsonb_set('{{}}'::jsonb, ARRAY[{key}], {})",
-                            written.join(" || ")
-                        ),
+                        format!("jsonb_set('{{}}'::jsonb, ARRAY[{key}], {value})"),
                         next,
                     )
                 }
@@ -260,4 +278,50 @@ impl<V: Clone + ParamType> Pattern<V> {
         let sql = entries.join(" || ");
         Ok((if several { format!("({sql})") } else { sql }, next))
     }
+}
+
+impl<V: Clone + ParamType> Contained<V> {
+    /// This as a `jsonb` value: a constant cast to its type and read as
+    /// JSON - a text through `jsonb_object`, which writes it as a JSON
+    /// string - an object, or an array, `'[]'::jsonb ||` each of its items.
+    fn json(self, params: &mut Vec<V>, next: Next) -> Result<(String, Next), CompileError> {
+        match self {
+            Contained::Constant(spelled, value) => {
+                let (param, next) = parameter(value, params, next)?;
+                let json = match spelled {
+                    Spelled::Text => {
+                        format!("(jsonb_object(ARRAY['v'], ARRAY[${param}::text]) -> 'v')")
+                    }
+                    Spelled::Int => format!("${param}::bigint::text::jsonb"),
+                    Spelled::Bool => format!("${param}::boolean::text::jsonb"),
+                };
+                Ok((json, next))
+            }
+            Contained::Object(object) => object.object(params, next),
+            Contained::Array(items) => {
+                let mut written = vec!["'[]'::jsonb".to_owned()];
+                let mut next = next;
+                for item in items {
+                    let (item, after) = item.json(params, next)?;
+                    written.push(item);
+                    next = after;
+                }
+                Ok((written.join(" || "), next))
+            }
+        }
+    }
+}
+
+/// `value` as the next parameter.
+fn parameter<V: ParamType>(
+    value: V,
+    params: &mut Vec<V>,
+    next: Next,
+) -> Result<(usize, Next), CompileError> {
+    if value.nul_in_text() {
+        return Err(CompileError::NulInText);
+    }
+    let param = next.param + 1;
+    params.push(value);
+    Ok((param, Next { param, ..next }))
 }

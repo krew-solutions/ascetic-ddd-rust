@@ -87,7 +87,7 @@ use std::fmt;
 
 use self::containment::Pattern;
 use self::identifier::{identifier, plain, qualified, quoted};
-use self::layout::Member;
+use self::layout::{Items, Member};
 pub use self::layout::{Kind, Layout};
 pub use self::param_type::ParamType;
 use self::precedence::{ATOM, Associativity};
@@ -130,6 +130,10 @@ pub enum CompileError {
     /// way that is not one, a value that is an object or a collection, a
     /// collection that is not one. The message names the path.
     UndeclaredMember(String),
+    /// The item itself where the item has members and is no value: a row of
+    /// a table, whose column is named, or an object of a document, whose
+    /// member is.
+    NotAValue(String),
 }
 
 impl fmt::Display for CompileError {
@@ -142,7 +146,8 @@ impl fmt::Display for CompileError {
             ),
             CompileError::AmbiguousKey(message)
             | CompileError::WrongKey(message)
-            | CompileError::UndeclaredMember(message) => f.write_str(message),
+            | CompileError::UndeclaredMember(message)
+            | CompileError::NotAValue(message) => f.write_str(message),
             CompileError::NulInText => {
                 f.write_str("a text with a NUL (U+0000) in it is no text PostgreSQL has")
             }
@@ -228,6 +233,27 @@ impl<'s> Compiler<'s> {
             }
             Expr::Field(path) => {
                 let (sql, next) = self.member(path, item, next, Reading::Value)?;
+                Ok((Fragment::text(sql), next))
+            }
+            Expr::Item(up) => {
+                let item = item_out(item, *up)?;
+                let sql = match item.holds {
+                    // `unnest` names the element by its alias.
+                    Holds::Unnested => quoted(&item.alias),
+                    Holds::Document(Items::Values(kind)) => kind.read(&quoted(&item.alias)),
+                    Holds::Table => {
+                        return Err(CompileError::NotAValue(format!(
+                            "an item of {} is a row of a table: name its column",
+                            item.row
+                        )));
+                    }
+                    Holds::Document(Items::Objects(_)) => {
+                        return Err(CompileError::NotAValue(format!(
+                            "an item of {} is an object of a document: name its member",
+                            item.row
+                        )));
+                    }
+                };
                 Ok((Fragment::text(sql), next))
             }
             Expr::Prefix(op, operand) => {
@@ -351,7 +377,7 @@ impl<'s> Compiler<'s> {
             Root::Item(up) => {
                 let item = item_out(item, up)?;
                 // A member of an object of a document is no column.
-                if item.layout.is_some() {
+                if let Holds::Document(_) = item.holds {
                     return Ok(false);
                 }
                 item.row.clone()
@@ -449,9 +475,9 @@ impl<'s> Compiler<'s> {
         match path.root() {
             Root::Item(up) => {
                 let item = item_out(item, up)?;
-                match item.layout {
+                match item.holds {
                     // The item is an object of an array in a document.
-                    Some(layout) => {
+                    Holds::Document(Items::Objects(layout)) => {
                         let member = document_member(
                             quoted(&item.alias),
                             &item.row,
@@ -461,7 +487,8 @@ impl<'s> Compiler<'s> {
                         )?;
                         Ok((member, next))
                     }
-                    None => self.member_of_row(
+                    Holds::Document(Items::Values(_)) => Err(no_members(&item.row, &names)),
+                    Holds::Table | Holds::Unnested => self.member_of_row(
                         quoted(&item.alias),
                         item.row.clone(),
                         &names,
@@ -598,7 +625,7 @@ impl<'s> Compiler<'s> {
             let contained = match (stand, collection.gin) {
                 (Stand::Truth, Some((document, names))) => {
                     let names: Vec<&str> = names.iter().map(String::as_str).collect();
-                    Pattern::of_array(&names, Pattern::of_item(predicate, collection.items))
+                    Pattern::of_array(&names, Pattern::elements(predicate, collection.items))
                         .map(|pattern| (document, pattern))
                 }
                 _ => None,
@@ -614,7 +641,7 @@ impl<'s> Compiler<'s> {
             let inner = Item {
                 alias: format!("{}_{number}", singular_of(source.name())?),
                 row: collection.row,
-                layout: Some(collection.items),
+                holds: Holds::Document(collection.items),
                 outer: item,
             };
             let next = Next {
@@ -622,8 +649,13 @@ impl<'s> Compiler<'s> {
                 ..next
             };
             let (predicate, next) = self.render(predicate, Some(&inner), next, Stand::Truth)?;
+            // Values are read as text, and the text as their kind.
+            let elements = match collection.items {
+                Items::Objects(_) => "jsonb_array_elements",
+                Items::Values(_) => "jsonb_array_elements_text",
+            };
             let sql = format!(
-                "EXISTS (SELECT 1 FROM jsonb_array_elements({}) AS {} WHERE {})",
+                "EXISTS (SELECT 1 FROM {elements}({}) AS {} WHERE {})",
                 collection.array,
                 quoted(&inner.alias),
                 predicate.sql,
@@ -670,7 +702,10 @@ impl<'s> Compiler<'s> {
                 Some(key) => key.table.clone(),
                 None => format!("{}.{name}", of.unwrap_or_default()),
             },
-            layout: None,
+            holds: match key {
+                Some(_) => Holds::Table,
+                None => Holds::Unnested,
+            },
             outer: item,
         };
         let next = Next {
@@ -720,8 +755,8 @@ impl<'s> Compiler<'s> {
         Ok((fragment, next))
     }
 
-    /// The array of objects at `source` in a document. None: `source` is
-    /// not in a document.
+    /// The array of objects or of values at `source` in a document. None:
+    /// `source` is not in a document.
     ///
     /// A path is in a document if it starts in an item of a document's array,
     /// or at a column the schema declares a document, of the enclosing
@@ -736,15 +771,18 @@ impl<'s> Compiler<'s> {
     {
         let names: Vec<&str> = source.names().collect();
         let entered = match enclosing {
-            Some(item) => match item.layout {
-                Some(layout) => Some(Entered {
+            Some(item) => match item.holds {
+                Holds::Document(Items::Objects(layout)) => Some(Entered {
                     document: quoted(&item.alias),
                     of: item.row.clone(),
                     layout,
                     names: &names[..],
                     gin: false,
                 }),
-                None => self.document_at(&item.row, quoted(&item.alias), &names)?,
+                Holds::Document(Items::Values(_)) => return Err(no_members(&item.row, &names)),
+                Holds::Table | Holds::Unnested => {
+                    self.document_at(&item.row, quoted(&item.alias), &names)?
+                }
             },
             None => match self.schema {
                 Some(schema) => {
@@ -769,14 +807,14 @@ impl<'s> Compiler<'s> {
         });
         let (object, name, member) = in_document(document, &of, layout, names)?;
         let at = format!("{of}.{}", names.join("."));
-        match member {
-            Member::Collection(items) => Ok(Some(DocumentCollection {
+        match member.items() {
+            Some(items) => Ok(Some(DocumentCollection {
                 array: format!("{object} -> {}", key(name)?),
                 row: at,
                 items,
                 gin,
             })),
-            Member::Value(_) | Member::Object(_) => Err(CompileError::UndeclaredMember(format!(
+            None => Err(CompileError::UndeclaredMember(format!(
                 "{at} is not a collection of its document's layout"
             ))),
         }
@@ -831,9 +869,11 @@ impl<'s> Compiler<'s> {
             (Root::Global, None) => None,
             (Root::Item(up), _) => {
                 let item = item_out(item, up)?;
-                match item.layout {
-                    Some(_) => None,
-                    None => self.document_at(&item.row, quoted(&item.alias), &names)?,
+                match item.holds {
+                    Holds::Document(_) => None,
+                    Holds::Table | Holds::Unnested => {
+                        self.document_at(&item.row, quoted(&item.alias), &names)?
+                    }
                 }
             }
         };
@@ -889,13 +929,25 @@ struct Next {
 /// The item under test, inside a collection's predicate: what its row is
 /// called in the query, what it is a row of to the schema - a table, or the
 /// composite at a column of one, or the array at a path in a document -
-/// what it holds if it is an object of a document, and the item of the
-/// enclosing collection's predicate, if there is one.
+/// what it is, and the item of the enclosing collection's predicate, if
+/// there is one.
 struct Item<'a> {
     alias: String,
     row: String,
-    layout: Option<&'a Layout>,
+    holds: Holds<'a>,
     outer: Option<&'a Item<'a>>,
+}
+
+/// What an item of a collection is, to the query.
+#[derive(Clone, Copy)]
+enum Holds<'a> {
+    /// A row of a table: its columns are named, and it is no value.
+    Table,
+    /// An element of an array, of a composite type or of a scalar one, that
+    /// `unnest` names by its alias: a member of a composite, or the value.
+    Unnested,
+    /// An object or a value of an array in a document.
+    Document(Items<'a>),
 }
 
 /// A document a path goes into: written as a `jsonb`, named by its table and
@@ -910,15 +962,23 @@ struct Entered<'l, 'n> {
     gin: bool,
 }
 
-/// An array of objects in a document, as `exists` reads it: written as a
-/// `jsonb`; the row its items are of, by the document's column and the names
-/// in it; what they hold; and the document and the names from it to the
-/// array, if the document is a column with a GIN index.
+/// An array of a document, as `exists` reads it: written as a `jsonb`; the
+/// row its items are of, by the document's column and the names in it; what
+/// they are; and the document and the names from it to the array, if the
+/// document is a column with a GIN index.
 struct DocumentCollection<'a> {
     array: String,
     row: String,
-    items: &'a Layout,
+    items: Items<'a>,
     gin: Option<(String, Vec<String>)>,
+}
+
+/// A member named of an item that is a value of a document.
+fn no_members(row: &str, names: &[&str]) -> CompileError {
+    CompileError::UndeclaredMember(format!(
+        "{row}.{}: the items of {row} are values, which have no members",
+        names.join(".")
+    ))
 }
 
 /// Where an expression stands: where only its truth counts - the condition
@@ -954,8 +1014,10 @@ fn document_member(
     let text = format!("({object} ->> {})", key(name)?);
     match (member, reading) {
         (Member::Value(kind), _) => Ok(kind.read(&text)),
-        (Member::Object(_) | Member::Collection(_), Reading::NullTest) => Ok(text),
-        (Member::Object(_) | Member::Collection(_), Reading::Value) => {
+        (Member::Object(_) | Member::Collection(_) | Member::Values(_), Reading::NullTest) => {
+            Ok(text)
+        }
+        (Member::Object(_) | Member::Collection(_) | Member::Values(_), Reading::Value) => {
             Err(CompileError::UndeclaredMember(format!(
                 "{of}.{} is an object or a collection of its document, not a value",
                 names.join("."),

@@ -6,10 +6,11 @@
 
 use ascetic_ddd_specification::ast::{
     add, all, and, any, div, equal, field, greater_than, greater_than_equal, is_not_null, is_null,
-    left_shift, less_than, modulo, mul, neg, not, not_equal, or, right_shift, sub, value,
+    left_shift, less_than, modulo, mul, neg, not, not_equal, or, outer_item, right_shift, sub,
+    value,
 };
 use ascetic_ddd_specification::{
-    Context, ContextError, Expr, Path, Value, is_satisfied_by, pg, specification,
+    Context, ContextError, Element, Expr, Path, Value, is_satisfied_by, pg, specification,
 };
 
 type Spec = Expr<Value>;
@@ -23,6 +24,7 @@ struct Item {
     price: i64,
     active: bool,
     discount: Option<i64>,
+    tags: Vec<String>,
 }
 
 struct Category {
@@ -38,6 +40,8 @@ struct Store {
     owner: Profile,
     items: Vec<Item>,
     categories: Vec<Category>,
+    tags: Vec<String>,
+    sizes: Vec<Option<i64>>,
 }
 
 const ADULT: i64 = 18;
@@ -181,6 +185,39 @@ fn has_a_well_discounted_item(s: &Store) -> bool {
     })
 }
 
+// An element of a collection of values is the item itself, as the closure
+// names it or as `contains` asks for it; the closure is what is tested.
+#[specification]
+#[allow(clippy::manual_contains)]
+fn tagged(s: &Store, tag: String) -> bool {
+    s.tags.iter().any(|t| *t == tag)
+}
+
+#[specification]
+fn tagged_as(s: &Store, tag: String) -> bool {
+    s.tags.contains(&tag)
+}
+
+#[specification]
+fn never_tagged(s: &Store, tag: &str) -> bool {
+    s.tags.iter().all(|t| t != tag)
+}
+
+// The element beside the item it is an element of: the item is one further
+// out from inside the collection of its tags.
+#[specification]
+fn has_an_item_tagged_with_its_name(s: &Store) -> bool {
+    s.items.iter().any(|item| item.tags.contains(&item.name))
+}
+
+// What an element that may be none holds.
+#[specification]
+fn has_a_size_above(s: &Store, size: i64) -> bool {
+    s.sizes
+        .iter()
+        .any(|held| held.is_some_and(|known| known > size))
+}
+
 // A specification type: its fields are the constants, `self` is the
 // specification, and the candidate comes beside it. `self` alone, as in
 // `Store::is_active` below, stays the candidate.
@@ -208,6 +245,10 @@ impl Store {
 
 fn item(name: &str) -> Spec {
     field(Path::item(name))
+}
+
+fn element() -> Spec {
+    outer_item(0)
 }
 
 #[test]
@@ -303,6 +344,35 @@ fn the_tree_of_a_predicate() {
                         less_than(field("closed_at"), value(5)),
                     ),
                 ),
+            ),
+        ),
+        (
+            tagged_ast("sale".to_owned()),
+            any("tags", equal(element(), value("sale"))),
+        ),
+        (
+            tagged_as_ast("sale".to_owned()),
+            any("tags", equal(element(), value("sale"))),
+        ),
+        (
+            never_tagged_ast("sale"),
+            all("tags", not_equal(element(), value("sale"))),
+        ),
+        (
+            has_an_item_tagged_with_its_name_ast(),
+            any(
+                "items",
+                any(
+                    Path::item("tags"),
+                    equal(element(), field(Path::outer(1, "name"))),
+                ),
+            ),
+        ),
+        (
+            has_a_size_above_ast(3),
+            any(
+                "sizes",
+                and(is_not_null(element()), greater_than(element(), value(3))),
             ),
         ),
         // A comparison with none is the null test, in the tree as in Rust.
@@ -403,7 +473,7 @@ impl Context<Value> for Profile {
     fn object(&self, name: &str) -> Result<&dyn Context<Value>, ContextError> {
         missing(name)
     }
-    fn collection(&self, name: &str) -> Result<Vec<&dyn Context<Value>>, ContextError> {
+    fn collection(&self, name: &str) -> Result<Vec<Element<'_, Value>>, ContextError> {
         missing(name)
     }
 }
@@ -421,8 +491,15 @@ impl Context<Value> for Item {
     fn object(&self, name: &str) -> Result<&dyn Context<Value>, ContextError> {
         missing(name)
     }
-    fn collection(&self, name: &str) -> Result<Vec<&dyn Context<Value>>, ContextError> {
-        missing(name)
+    fn collection(&self, name: &str) -> Result<Vec<Element<'_, Value>>, ContextError> {
+        match name {
+            "tags" => Ok(self
+                .tags
+                .iter()
+                .map(|tag| Element::Value(tag.into()))
+                .collect()),
+            _ => missing(name),
+        }
     }
 }
 
@@ -433,12 +510,12 @@ impl Context<Value> for Category {
     fn object(&self, name: &str) -> Result<&dyn Context<Value>, ContextError> {
         missing(name)
     }
-    fn collection(&self, name: &str) -> Result<Vec<&dyn Context<Value>>, ContextError> {
+    fn collection(&self, name: &str) -> Result<Vec<Element<'_, Value>>, ContextError> {
         match name {
             "items" => Ok(self
                 .items
                 .iter()
-                .map(|item| item as &dyn Context<Value>)
+                .map(|item| Element::Object(item))
                 .collect()),
             _ => missing(name),
         }
@@ -462,17 +539,24 @@ impl Context<Value> for Store {
             _ => missing(name),
         }
     }
-    fn collection(&self, name: &str) -> Result<Vec<&dyn Context<Value>>, ContextError> {
+    fn collection(&self, name: &str) -> Result<Vec<Element<'_, Value>>, ContextError> {
         match name {
             "items" => Ok(self
                 .items
                 .iter()
-                .map(|item| item as &dyn Context<Value>)
+                .map(|item| Element::Object(item))
                 .collect()),
-            "categories" => Ok(self
-                .categories
+            "categories" => Ok(self.categories.iter().map(|c| Element::Object(c)).collect()),
+            // Elements of collections of values, given by value.
+            "tags" => Ok(self
+                .tags
                 .iter()
-                .map(|c| c as &dyn Context<Value>)
+                .map(|tag| Element::Value(tag.into()))
+                .collect()),
+            "sizes" => Ok(self
+                .sizes
+                .iter()
+                .map(|size| Element::Value((*size).into()))
                 .collect()),
             _ => missing(name),
         }
@@ -481,12 +565,19 @@ impl Context<Value> for Store {
 
 fn stores() -> Vec<Store> {
     // A dear item has a discount, of a tenth of its price.
+    // An item is tagged with its name if it is dear.
     let item = |name: &str, price: i64, active| Item {
         name: name.to_owned(),
         price,
         active,
         discount: (price > 100).then_some(price / 10),
+        tags: if price > 100 {
+            vec!["dear".to_owned(), name.to_owned()]
+        } else {
+            vec!["cheap".to_owned()]
+        },
     };
+    let tags = |tags: &[&str]| tags.iter().map(|tag| (*tag).to_owned()).collect();
     vec![
         Store {
             name: "MyStore".to_owned(),
@@ -499,6 +590,8 @@ fn stores() -> Vec<Store> {
             categories: vec![Category {
                 items: vec![item("Laptop", 999, true)],
             }],
+            tags: tags(&["sale", "new"]),
+            sizes: vec![Some(1), Some(5)],
         },
         Store {
             name: "Pen".to_owned(),
@@ -514,6 +607,8 @@ fn stores() -> Vec<Store> {
                     items: vec![item("Pen", 2, true)],
                 },
             ],
+            tags: tags(&["new"]),
+            sizes: vec![None, Some(2)],
         },
         Store {
             name: String::new(),
@@ -524,6 +619,8 @@ fn stores() -> Vec<Store> {
             owner: Profile { age: 125 },
             items: vec![],
             categories: vec![],
+            tags: Vec::new(),
+            sizes: vec![None],
         },
     ]
 }
@@ -645,6 +742,43 @@ fn the_function_and_its_tree_agree() {
                 );
             }
         }
+        for tag in ["sale", "new", "dear"] {
+            for (name, function, tree) in [
+                (
+                    "tagged",
+                    tagged as fn(&Store, String) -> bool,
+                    tagged_ast(tag.to_owned()),
+                ),
+                ("tagged_as", tagged_as, tagged_as_ast(tag.to_owned())),
+            ] {
+                assert_eq!(
+                    is_satisfied_by(&tree, &store),
+                    Ok(function(&store, tag.to_owned())),
+                    "{name}({tag}) of {:?}",
+                    store.name,
+                );
+            }
+            assert_eq!(
+                is_satisfied_by(&never_tagged_ast(tag), &store),
+                Ok(never_tagged(&store, tag)),
+                "never_tagged({tag}) of {:?}",
+                store.name,
+            );
+        }
+        assert_eq!(
+            is_satisfied_by(&has_an_item_tagged_with_its_name_ast(), &store),
+            Ok(has_an_item_tagged_with_its_name(&store)),
+            "has_an_item_tagged_with_its_name of {:?}",
+            store.name,
+        );
+        for size in [0, 3, 5] {
+            assert_eq!(
+                is_satisfied_by(&has_a_size_above_ast(size), &store),
+                Ok(has_a_size_above(&store, size)),
+                "has_a_size_above({size}) of {:?}",
+                store.name,
+            );
+        }
         for alias in [None, Some("Pens"), Some("Inks")] {
             assert_eq!(
                 is_satisfied_by(&known_as_ast(alias), &store),
@@ -696,4 +830,11 @@ fn the_tree_compiles_to_a_query() {
         r#"EXISTS (SELECT 1 FROM unnest("items") AS "item_1" WHERE "item_1"."price" > $1) AND ($2::text IS NULL OR "closed_at" IS NOT NULL AND "closed_at" < $3)"#,
     );
     assert_eq!(query.params, [Value::Int(500), Value::Null, Value::Null]);
+    // An element of an array of a scalar type is its `unnest`'s alias.
+    assert_eq!(
+        pg::compile(&tagged_as_ast("sale".to_owned()))
+            .expect("compiled")
+            .sql,
+        r#"EXISTS (SELECT 1 FROM unnest("tags") AS "tag_1" WHERE "tag_1" = $1)"#,
+    );
 }

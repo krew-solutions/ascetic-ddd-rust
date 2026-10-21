@@ -15,7 +15,7 @@
 use ascetic_ddd_specification::ast::{
     add, all, and, any, div, equal, field, greater_than, greater_than_equal, is, is_not_null,
     is_null, left_shift, less_than, less_than_equal, modulo, mul, neg, not, not_equal, or,
-    right_shift, sub, value,
+    outer_item, right_shift, sub, value,
 };
 use ascetic_ddd_specification::jsonpath::{Params, Template};
 use ascetic_ddd_specification::pg::{Compiler, Kind, Layout, Schema, compile};
@@ -362,6 +362,19 @@ fn stores() -> Vec<Store> {
 }
 
 impl Store {
+    /// The store's tags: a collection of values, kept as an array of text
+    /// and in the document as an array of strings. A tag may be null.
+    fn tags(&self) -> Vec<Option<&'static str>> {
+        match self.id {
+            1 => vec![Some("sale"), Some("new")],
+            2 => vec![Some("new"), None, Some("cheap")],
+            3 => vec![],
+            4 => vec![Some("sale"), Some("four")],
+            5 => vec![None],
+            _ => vec![Some("dear"), Some("sale")],
+        }
+    }
+
     /// The store's owner, kept as the owners of items are: in the table of
     /// owners, by a key.
     fn owner(&self) -> (i64, Option<&'static str>) {
@@ -396,6 +409,10 @@ fn record(store: &Store) -> Record<Value> {
         ("name", Record::value(store.name)),
         ("items", Record::collection(items)),
         (
+            "tags",
+            Record::collection(store.tags().into_iter().map(Record::value)),
+        ),
+        (
             "owner",
             Record::object([("name", Record::value(store.owner().1))]),
         ),
@@ -420,7 +437,8 @@ async fn tables(client: &Client) {
              CREATE TEMP TABLE spec_stores (
                  id int8 PRIMARY KEY, a int8, b int8, flag bool, name text,
                  items pg_temp.spec_item[] NOT NULL,
-                 "user" text, "order" int8, "createdAt" int8, owner_id int8
+                 "user" text, "order" int8, "createdAt" int8, owner_id int8,
+                 tags text[] NOT NULL
              );
              CREATE TEMP TABLE spec_items (
                  store_id int8 NOT NULL, price int8, active bool, maker pg_temp.spec_maker,
@@ -432,7 +450,7 @@ async fn tables(client: &Client) {
     for store in stores() {
         client
             .execute(
-                "INSERT INTO spec_stores VALUES ($1, $2, $3, $4, $5, '{}', $5, $2, $3, $6)",
+                "INSERT INTO spec_stores VALUES ($1, $2, $3, $4, $5, '{}', $5, $2, $3, $6, $7)",
                 &[
                     &store.id,
                     &store.a,
@@ -440,6 +458,7 @@ async fn tables(client: &Client) {
                     &store.flag,
                     &store.name,
                     &store.owner().0,
+                    &store.tags(),
                 ],
             )
             .await
@@ -475,6 +494,7 @@ fn store_layout() -> Layout {
         .value("user", Kind::Text)
         .value("order", Kind::Int)
         .value("createdAt", Kind::Int)
+        .values("tags", Kind::Text)
         .object("owner", named())
         .collection(
             "items",
@@ -508,7 +528,8 @@ async fn documents(client: &Client) {
                 "INSERT INTO spec_documents (id, document) VALUES ($1, jsonb_build_object(
                      'a', $2::int8, 'b', $3::int8, 'flag', $4::bool, 'name', $5::text,
                      'owner', jsonb_build_object('name', $6::text), 'items', '[]'::jsonb,
-                     'user', $5::text, 'order', $2::int8, 'createdAt', $3::int8))",
+                     'user', $5::text, 'order', $2::int8, 'createdAt', $3::int8,
+                     'tags', to_jsonb($7::text[])))",
                 &[
                     &store.id,
                     &store.a,
@@ -516,6 +537,7 @@ async fn documents(client: &Client) {
                     &store.flag,
                     &store.name,
                     &store.owner().1,
+                    &store.tags(),
                 ],
             )
             .await
@@ -699,7 +721,47 @@ fn specifications() -> Vec<Spec> {
         // Built by hand, `= NULL` is null of every row.
         equal(field("name"), null()),
         any("items", equal(item("active"), null())),
+        // A collection of values: its element is the item itself.
+        any("tags", equal(element(), value("sale"))),
+        not(any("tags", equal(element(), value("sale")))),
+        all("tags", not_equal(element(), value("new"))),
+        any("tags", is_null(element())),
+        any("tags", equal(element(), field("name"))),
+        and(field("flag"), any("tags", equal(element(), value("new")))),
+        or(
+            any("tags", equal(element(), value("cheap"))),
+            any("tags", equal(element(), value("four"))),
+        ),
+        any(
+            "tags",
+            and(
+                equal(element(), value("sale")),
+                equal(element(), value("new")),
+            ),
+        ),
+        any(
+            "tags",
+            or(
+                equal(element(), value("cheap")),
+                equal(element(), value("four")),
+            ),
+        ),
+        any("tags", equal(element(), null())),
+        // The element beside a member of the item of an enclosing collection.
+        any(
+            "items",
+            any(
+                "tags",
+                equal(element(), field(Path::outer(1, "maker").child("name"))),
+            ),
+        ),
+        bound("$.tags[*][?@ == %s]", Params::positional(["new"])),
+        bound("$.tags[*][?@ == %s]", Params::positional([Value::Null])),
     ]
+}
+
+fn element() -> Spec {
+    outer_item(0)
 }
 
 #[tokio::test]
@@ -1789,7 +1851,8 @@ async fn a_gin_index_serves_the_equalities_where_only_truth_counts() {
              INSERT INTO spec_gin
                  SELECT n, jsonb_build_object(
                      'status', 's' || n, 'priority', n % 50,
-                     'versions', jsonb_build_array(jsonb_build_object('number', n % 7)))
+                     'versions', jsonb_build_array(jsonb_build_object('number', n % 7)),
+                     'groups', jsonb_build_array('g' || n % 10))
                  FROM generate_series(1, 1000) AS n;
              CREATE INDEX spec_gin_document ON spec_gin USING gin (document jsonb_path_ops);
              ANALYZE spec_gin;
@@ -1804,11 +1867,12 @@ async fn a_gin_index_serves_the_equalities_where_only_truth_counts() {
             Layout::new()
                 .value("status", Kind::Text)
                 .value("priority", Kind::Int)
-                .collection("versions", Layout::new().value("number", Kind::Int)),
+                .collection("versions", Layout::new().value("number", Kind::Int))
+                .values("groups", Kind::Text),
         )
         .gin("spec_gin", "document");
     let status = |text: &str| equal(field("document.status"), value(text));
-    let cases: [(Spec, &str); 3] = [
+    let cases: [(Spec, &str); 4] = [
         (status("s7"), r#"'{"status": "s7"}'::jsonb"#),
         (
             or(status("s7"), status("s8")),
@@ -1823,6 +1887,10 @@ async fn a_gin_index_serves_the_equalities_where_only_truth_counts() {
                 ),
             ),
             r#"'{"versions": [{"number": 3}]}'::jsonb"#,
+        ),
+        (
+            any("document.groups", equal(outer_item(0), value("g7"))),
+            r#"'{"groups": ["g7"]}'::jsonb"#,
         ),
     ];
     for (specification, folded) in cases {

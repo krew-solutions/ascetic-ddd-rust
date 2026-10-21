@@ -36,8 +36,19 @@ pub trait Context<V> {
     /// The object that is the member `name`.
     fn object(&self, name: &str) -> Result<&dyn Context<V>, ContextError>;
 
-    /// The items of the collection that is the member `name`.
-    fn collection(&self, name: &str) -> Result<Vec<&dyn Context<V>>, ContextError>;
+    /// The items of the collection that is the member `name`: objects, or
+    /// values - the identifiers of the groups a policy targets.
+    fn collection(&self, name: &str) -> Result<Vec<Element<'_, V>>, ContextError>;
+}
+
+/// An item of a collection: an object, which has members, or a value, which
+/// is one - as [`Context::field`] gives it, by value: a domain's element is
+/// often a type of its own that no `Context` can be implemented for.
+pub enum Element<'a, V> {
+    /// An object, whose members a path names: `Path::item("price")`.
+    Object(&'a dyn Context<V>),
+    /// A value, which the tree names as a whole: [`Expr::Item`].
+    Value(V),
 }
 
 /// A context has no such member, or has it as something else.
@@ -141,9 +152,10 @@ struct Scope<'a, V> {
 }
 
 /// The item of one collection's predicate, inside the item of the enclosing
-/// collection's.
+/// collection's; the collection by its name, for an error to say.
 struct Frame<'a, V> {
-    context: &'a dyn Context<V>,
+    element: &'a Element<'a, V>,
+    collection: &'a str,
     outer: Option<&'a Frame<'a, V>>,
 }
 
@@ -159,6 +171,15 @@ fn eval<V: Operand + Clone>(expr: &Expr<V>, scope: Scope<'_, V>) -> Result<V, Ev
     match expr {
         Expr::Value(value) => Ok(value.clone()),
         Expr::Field(path) => Ok(owner(path, scope)?.field(path.name())?),
+        Expr::Item(up) => match frame(*up, scope)? {
+            Frame {
+                element: Element::Value(value),
+                ..
+            } => Ok(value.clone()),
+            Frame { collection, .. } => {
+                Err(ContextError::NotAValue(format!("{collection}[*]")).into())
+            }
+        },
         Expr::Prefix(Prefix::Not, operand) => Ok(from_truth(
             truth(&eval(operand, scope)?)?.map(|value| !value),
         )),
@@ -205,9 +226,10 @@ fn eval<V: Operand + Clone>(expr: &Expr<V>, scope: Scope<'_, V>) -> Result<V, Ev
             .map_err(|error| named(error, op))
         }
         Expr::Any(source, predicate) => {
-            let witness = |item| {
+            let witness = |element: &Element<'_, V>| {
                 let frame = Frame {
-                    context: item,
+                    element,
+                    collection: source.name(),
                     outer: scope.item,
                 };
                 let scope = Scope {
@@ -218,7 +240,7 @@ fn eval<V: Operand + Clone>(expr: &Expr<V>, scope: Scope<'_, V>) -> Result<V, Ev
             };
             owner(source, scope)?
                 .collection(source.name())?
-                .into_iter()
+                .iter()
                 .map(witness)
                 .find(|outcome| !matches!(outcome, Ok(false)))
                 .unwrap_or(Ok(false))
@@ -274,18 +296,29 @@ fn read_constants<V: Operand>(
 fn owner<'a, V>(path: &Path, scope: Scope<'a, V>) -> Result<&'a dyn Context<V>, EvalError> {
     let root = match path.root() {
         Root::Global => scope.global,
-        Root::Item(up) => {
-            let mut frame = scope.item;
-            for _ in 0..up {
-                frame = frame.and_then(|frame| frame.outer);
+        Root::Item(up) => match frame(up, scope)? {
+            Frame {
+                element: Element::Object(context),
+                ..
+            } => *context,
+            Frame { collection, .. } => {
+                return Err(ContextError::NotAnObject(format!("{collection}[*]")).into());
             }
-            frame.ok_or(EvalError::NoCurrentItem)?.context
-        }
+        },
     };
     path.objects()
         .iter()
         .try_fold(root, |context, name| context.object(name))
         .map_err(EvalError::Context)
+}
+
+/// The item `up` collections out from the item under test.
+fn frame<'a, V>(up: usize, scope: Scope<'a, V>) -> Result<&'a Frame<'a, V>, EvalError> {
+    let mut frame = scope.item;
+    for _ in 0..up {
+        frame = frame.and_then(|frame| frame.outer);
+    }
+    frame.ok_or(EvalError::NoCurrentItem)
 }
 
 /// True, false, or — `None` — unknown.

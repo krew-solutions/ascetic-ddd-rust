@@ -4,8 +4,8 @@
 
 use ascetic_ddd_specification::ast::{
     add, all, and, and_all, any, div, equal, field, greater_than, greater_than_equal, is,
-    is_not_null, is_null, left_shift, less_than, less_than_equal, modulo, mul, neg, not, not_equal,
-    or, or_all, right_shift, sub, value,
+    is_not_null, is_null, item, left_shift, less_than, less_than_equal, modulo, mul, neg, not,
+    not_equal, or, or_all, outer_item, right_shift, sub, value,
 };
 use ascetic_ddd_specification::{
     ContextError, Date, EvalError, Expr, Infix, Interval, OperandError, Path, Record, Root,
@@ -814,4 +814,75 @@ fn the_values_of_a_tree_can_be_mapped() {
             other => Err(format!("{other:?}")),
         });
     assert_eq!(refused, Err("Text(\"x\")".to_owned()));
+}
+
+/// A collection of values - the groups a policy targets - has elements with
+/// no members to name: the element is the item itself. A null element is
+/// null to a comparison, and no witness. An object has no value of its own,
+/// and a value no members.
+#[test]
+fn an_element_of_a_collection_of_values_is_the_item_itself() {
+    let policy = Record::object([
+        ("name", Record::value("sale")),
+        (
+            "tags",
+            Record::collection([
+                Record::value("sale"),
+                Record::value(Value::Null),
+                Record::value("new"),
+            ]),
+        ),
+        (
+            "sizes",
+            Record::collection([Record::value(1), Record::value(5)]),
+        ),
+        ("limits", Record::collection([Record::value(5)])),
+        (
+            "items",
+            Record::collection([Record::object([("price", Record::value(1))])]),
+        ),
+    ]);
+    let tagged = |tag: &str| any("tags", equal(item(), value(tag)));
+    assert_eq!(is_satisfied_by(&tagged("new"), &policy), Ok(true));
+    assert_eq!(is_satisfied_by(&tagged("old"), &policy), Ok(false));
+    assert_eq!(
+        is_satisfied_by(&all("tags", not_equal(item(), value("old"))), &policy),
+        Ok(true),
+    );
+    assert_eq!(
+        is_satisfied_by(&any("tags", is_null(item())), &policy),
+        Ok(true),
+    );
+    // The candidate beside the element, and the element of an enclosing
+    // collection from inside another.
+    assert_eq!(
+        is_satisfied_by(&any("tags", equal(item(), field("name"))), &policy),
+        Ok(true),
+    );
+    assert_eq!(
+        is_satisfied_by(
+            &any("limits", any("sizes", equal(item(), outer_item(1)))),
+            &policy
+        ),
+        Ok(true),
+    );
+    assert_eq!(
+        evaluate(&any("items", equal(item(), value(1))), &policy),
+        Err(EvalError::Context(ContextError::NotAValue(
+            "items[*]".to_owned()
+        ))),
+    );
+    assert_eq!(
+        evaluate(
+            &any("tags", equal(field(Path::item("code")), value(1))),
+            &policy
+        ),
+        Err(EvalError::Context(ContextError::NotAnObject(
+            "tags[*]".to_owned()
+        ))),
+    );
+    assert_eq!(
+        evaluate::<Value>(&item(), &policy),
+        Err(EvalError::NoCurrentItem)
+    );
 }
