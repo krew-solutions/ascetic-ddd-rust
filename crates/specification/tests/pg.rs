@@ -2007,6 +2007,190 @@ async fn a_gin_index_on_a_path_serves_the_containment_of_the_value_there() {
     assert!(!counts[0].is_empty());
 }
 
+/// The values of a domain whose groups are tenant-scoped: a group is its
+/// tenant and its key, and equal to a group of another tenant with the same
+/// key it is not.
+#[derive(Clone, Debug, PartialEq)]
+enum Scoped {
+    Scalar(Value),
+    Group(i64, &'static str),
+}
+
+impl Operand for Scoped {
+    fn null() -> Self {
+        Scoped::Scalar(Value::null())
+    }
+
+    fn is_null(&self) -> bool {
+        matches!(self, Scoped::Scalar(value) if value.is_null())
+    }
+
+    fn from_bool(value: bool) -> Self {
+        Scoped::Scalar(Value::from_bool(value))
+    }
+
+    fn as_bool(&self) -> Option<bool> {
+        match self {
+            Scoped::Scalar(value) => value.as_bool(),
+            Scoped::Group(..) => None,
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            Scoped::Scalar(value) => value.kind(),
+            Scoped::Group(..) => "group",
+        }
+    }
+
+    fn equals(&self, other: &Self) -> Result<bool, OperandError> {
+        match (self, other) {
+            (Scoped::Scalar(left), Scoped::Scalar(right)) => left.equals(right),
+            (Scoped::Group(..), Scoped::Group(..)) => Ok(self == other),
+            _ => Err(OperandError::unsupported("=", self.kind(), other.kind())),
+        }
+    }
+
+    fn compare(&self, other: &Self) -> Result<Ordering, OperandError> {
+        match (self, other) {
+            (Scoped::Scalar(left), Scoped::Scalar(right)) => left.compare(right),
+            _ => Err(OperandError::unsupported("<", self.kind(), other.kind())),
+        }
+    }
+
+    fn negate(&self) -> Result<Self, OperandError> {
+        Err(OperandError::unsupported_unary("-", self.kind()))
+    }
+
+    fn compute(&self, op: Arithmetic, other: &Self) -> Result<Self, OperandError> {
+        Err(OperandError::unsupported(op, self.kind(), other.kind()))
+    }
+}
+
+/// What the storage keeps of a policy's groups: the keys in its document's
+/// array, the tenant once, in its row.
+struct Groups;
+
+impl Mapping<Scoped, Value> for Groups {
+    type Error = String;
+
+    fn field(&self, path: &Path) -> Result<Mapped<Value>, String> {
+        match path.names().collect::<Vec<_>>().as_slice() {
+            ["tenant_id"] => Ok(Mapped::Scalar(field("tenant_id"))),
+            ["groups"] => Ok(Mapped::Scalar(field("document.groups"))),
+            names => Err(format!("unknown field: {}", names.join("."))),
+        }
+    }
+
+    fn value(&self, value: &Scoped) -> Result<Mapped<Value>, String> {
+        Ok(match value {
+            Scoped::Scalar(value) => Mapped::Scalar(Expr::Value(value.clone())),
+            Scoped::Group(tenant, key) => Mapped::Composite(vec![
+                Mapped::Scalar(Expr::Value(Value::Int(*tenant))),
+                Mapped::Scalar(Expr::Value(Value::from(*key))),
+            ]),
+        })
+    }
+
+    fn element(&self, collection: &Path) -> Result<Mapped<Value>, String> {
+        match collection.names().collect::<Vec<_>>().as_slice() {
+            ["groups"] => Ok(Mapped::Composite(vec![
+                Mapped::Scalar(field("tenant_id")),
+                Mapped::Scalar(outer_item(0)),
+            ])),
+            names => Err(format!("no collection of values: {}", names.join("."))),
+        }
+    }
+}
+
+/// A group the domain holds as its tenant and its key, and the storage as
+/// the key in the array and the tenant in the row, is compared part by part:
+/// a group of another tenant with the same key is not targeted, in memory as
+/// in the database - where a group mapped to its key alone was.
+#[tokio::test]
+async fn an_element_kept_in_part_in_the_candidates_row_is_compared_part_by_part() {
+    let client = client().await;
+    client
+        .batch_execute(
+            r#"CREATE TEMP TABLE spec_policies (id int8, tenant_id int8, document jsonb NOT NULL);
+             INSERT INTO spec_policies VALUES
+                 (1, 1, '{"groups": ["k1", "k2"]}'),
+                 (2, 2, '{"groups": ["k1"]}'),
+                 (3, 1, '{"groups": []}'),
+                 (4, 2, '{"groups": ["k2"]}');"#,
+        )
+        .await
+        .expect("a table of policies");
+    let policy = |tenant: i64, keys: &[&'static str]| {
+        Record::object([
+            (
+                "tenant_id",
+                Record::value(Scoped::Scalar(Value::Int(tenant))),
+            ),
+            (
+                "groups",
+                Record::collection(
+                    keys.iter()
+                        .map(|key| Record::value(Scoped::Group(tenant, key))),
+                ),
+            ),
+        ])
+    };
+    let rows: [(i64, Record<Scoped>); 4] = [
+        (1, policy(1, &["k1", "k2"])),
+        (2, policy(2, &["k1"])),
+        (3, policy(1, &[])),
+        (4, policy(2, &["k2"])),
+    ];
+    let schema = Schema::new("spec_policies").document(
+        "spec_policies",
+        "document",
+        Layout::new().values("groups", Kind::Text),
+    );
+    let targets = |tenant, key| {
+        any(
+            "groups",
+            equal(outer_item(0), Expr::Value(Scoped::Group(tenant, key))),
+        )
+    };
+    let specifications: [(Expr<Scoped>, Vec<i64>); 4] = [
+        (targets(1, "k1"), vec![1]),
+        (targets(2, "k1"), vec![2]),
+        // A group of a tenant that has none of these policies.
+        (targets(3, "k1"), vec![]),
+        (not(targets(1, "k2")), vec![2, 3, 4]),
+    ];
+    for (specification, expected) in &specifications {
+        let satisfied: Vec<i64> = rows
+            .iter()
+            .filter(|(_, row)| is_satisfied_by(specification, row).expect("evaluated"))
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(&satisfied, expected, "the evaluator, {specification:?}");
+        let query = Compiler::new()
+            .schema(&schema)
+            .compile(&transform(specification, &Groups).expect("transformed"))
+            .expect("compiled");
+        let text = format!(
+            "SELECT id FROM spec_policies WHERE {} ORDER BY id",
+            query.sql
+        );
+        let params: Vec<&(dyn ToSql + Sync)> = query
+            .params
+            .iter()
+            .map(|param| param as &(dyn ToSql + Sync))
+            .collect();
+        let selected: Vec<i64> = client
+            .query(&text, &params)
+            .await
+            .unwrap_or_else(|error| panic!("{text}: {error}"))
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert_eq!(&selected, expected, "{text}");
+    }
+}
+
 #[tokio::test]
 async fn a_value_is_written_as_the_type_the_server_asks_for_if_it_fits() {
     let client = client().await;

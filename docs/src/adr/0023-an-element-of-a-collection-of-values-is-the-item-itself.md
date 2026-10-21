@@ -8,6 +8,12 @@ consequences.
 Amended 2026-10-21 by ADR-0024: the consequence on a GIN index declared at a
 path of a document is discharged - `Schema::gin_at`.
 
+Amended 2026-10-21 by ADR-0025: the consequence on an element the domain
+holds as a composite and the storage keeps in part in the candidate's row
+is discharged - `Mapping::element`; decision 6 is amended: the mapping is
+asked about an element, and says the element itself unless it says
+otherwise.
+
 ## Context
 
 The commonest array of the target services holds identifiers: the device

@@ -61,12 +61,11 @@ pub enum Mapped<S> {
 /// [`transform`] puts the answer there: the member of an item is the answer
 /// less the collection's, from the item.
 ///
-/// An element of a collection of values, [`Expr::Item`], is not asked
-/// about: it is what the collection holds, where the mapping put the
-/// collection, and a constant compared with it is the mapping's
-/// [`value`](Mapping::value). An element the storage keeps otherwise than the
-/// domain - a tenant-scoped identity kept as its local key - is for the
-/// domain's [`Context`](crate::Context) to give as the storage keeps it.
+/// An element of a collection of values, [`Expr::Item`], is what the
+/// collection holds, where the mapping put the collection - unless the
+/// mapping says otherwise, by [`element`](Mapping::element), of an element
+/// the storage keeps in part elsewhere. A constant compared with it is the
+/// mapping's [`value`](Mapping::value).
 ///
 /// A mapping is a guard as well. A specification may arrive as data - a
 /// template bound from a request, a tree from another service - and the
@@ -88,6 +87,26 @@ pub trait Mapping<D, S> {
 
     /// What `value` is.
     fn value(&self, value: &D) -> Result<Mapped<S>, Self::Error>;
+
+    /// What an element of the collection at `collection` - a path from the
+    /// candidate, as `field` is asked - is in the storage, said from where
+    /// the collection's predicate stands, as the tree says it there:
+    /// [`Expr::Item`]`(0)` is the element, `Item(n)` and a path from it the
+    /// item `n` collections further out, a path from the candidate is the
+    /// candidate's. [`transform`] puts the answer where the element was.
+    ///
+    /// The element itself, unless the storage keeps a part of it elsewhere.
+    /// A tenant-scoped identity in the domain is often its local key in the
+    /// storage's array and its tenant once, in the candidate's row: the
+    /// element is then `Composite([Scalar(field("tenant_id")),
+    /// Scalar(item())])`, and its equality with an identity, mapped to the
+    /// same two parts, compares the tenant with the row's and the key with
+    /// the element - where an identity mapped to its key alone would find
+    /// the groups of another tenant that have the same key.
+    fn element(&self, collection: &Path) -> Result<Mapped<S>, Self::Error> {
+        let _ = collection;
+        Ok(Mapped::Scalar(Expr::Item(0)))
+    }
 }
 
 /// A specification could not be transformed.
@@ -258,11 +277,7 @@ fn lower<D, S, M: Mapping<D, S>>(
     match expr {
         Expr::Value(value) => mapping.value(value).map_err(TransformError::Mapping),
         Expr::Field(path) => member(path, mapping, inside),
-        // An element of a collection of values is the element: the mapping
-        // has said where the collection is, and says what a constant compared
-        // with the element is.
-        Expr::Item(up) if *up < inside.len() => Ok(Mapped::Scalar(Expr::Item(*up))),
-        Expr::Item(_) => Err(TransformError::NoCurrentItem),
+        Expr::Item(up) => element(*up, mapping, inside),
         Expr::Prefix(op, operand) => Ok(Mapped::Scalar(Expr::Prefix(
             *op,
             Box::new(scalar(lower(operand, mapping, inside)?)?),
@@ -323,6 +338,65 @@ fn member<D, S, M: Mapping<D, S>>(
         .field(&whole(path, inside)?)
         .map_err(TransformError::Mapping)?;
     placed(mapped, path.root(), inside)
+}
+
+/// The element `up` collections out, as the mapping has it and where the
+/// element was: what the mapping says from the collection's predicate, `up`
+/// collections further out. Not inlined, as [`member`] is not.
+#[inline(never)]
+fn element<D, S, M: Mapping<D, S>>(
+    up: usize,
+    mapping: &M,
+    inside: &Inside<'_>,
+) -> Result<Mapped<S>, TransformError<M::Error>> {
+    let collection = inside
+        .len()
+        .checked_sub(up + 1)
+        .map(|at| inside[at])
+        .ok_or(TransformError::NoCurrentItem)?;
+    let path = from_candidate(collection.domain.iter().map(String::as_str))
+        .ok_or(TransformError::NoCurrentItem)?;
+    let mapped = mapping.element(&path).map_err(TransformError::Mapping)?;
+    Ok(further_out(mapped, up))
+}
+
+/// `mapped`, said from one place, said from `up` collections further in:
+/// every item named in it is `up` further out, unless it is an item of a
+/// collection inside it. A path from the candidate is where it was.
+fn further_out<S>(mapped: Mapped<S>, up: usize) -> Mapped<S> {
+    match mapped {
+        Mapped::Scalar(expr) => Mapped::Scalar(shifted(expr, up, 0)),
+        Mapped::Composite(parts) => Mapped::Composite(
+            parts
+                .into_iter()
+                .map(|part| further_out(part, up))
+                .collect(),
+        ),
+        null @ Mapped::Null(_) => null,
+    }
+}
+
+/// `expr` with every item named in it `up` further out, but the items of
+/// the `local` collections it is inside of itself.
+fn shifted<S>(expr: Expr<S>, up: usize, local: usize) -> Expr<S> {
+    let item = |n: usize| if n < local { n } else { n + up };
+    let path = |path: Path| match path.root() {
+        Root::Global => path,
+        Root::Item(n) => Path::dotted(
+            Root::Item(item(n)),
+            &path.names().collect::<Vec<_>>().join("."),
+        ),
+    };
+    let inside = |expr: Box<Expr<S>>, local: usize| Box::new(shifted(*expr, up, local));
+    match expr {
+        Expr::Value(_) => expr,
+        Expr::Field(at) => Expr::Field(path(at)),
+        Expr::Item(n) => Expr::Item(item(n)),
+        Expr::Prefix(op, operand) => Expr::Prefix(op, inside(operand, local)),
+        Expr::Postfix(operand, op) => Expr::Postfix(inside(operand, local), op),
+        Expr::Infix(left, op, right) => Expr::Infix(inside(left, local), op, inside(right, local)),
+        Expr::Any(source, predicate) => Expr::Any(path(source), inside(predicate, local + 1)),
+    }
 }
 
 /// `any` over the collection at `source`: a collection is a member, the

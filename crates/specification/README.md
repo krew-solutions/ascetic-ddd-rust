@@ -419,13 +419,16 @@ the sources as they were.
   `jsonb_array_elements_text`, an array of objects or of values in a
   document. An array of arrays is not read: an item itself is a value or an
   object, not a collection.
-* An element is compared as the storage keeps it. An element the domain
-  holds as a composite and the storage as a part of it - a tenant-scoped
-  identity kept as its local key, the tenant in the candidate's row - is
-  given by the domain's `Context` as the part, and queried within its
-  tenant: a mapping that maps a composite constant to a part compares other
-  values than the evaluator, and a composite constant beside an element is
-  `TransformError::NotComposite`.
+* An element the domain holds as a composite and the storage keeps in part
+  elsewhere - a tenant-scoped identity kept as its local key in the array
+  and its tenant once, in the candidate's row - is what the mapping's
+  [`Mapping::element`] says it is from the collection's predicate,
+  `Composite([Scalar(field("tenant_id")), Scalar(item())])` (ADR-0025): its
+  equality with an identity is the tenant compared with the row's and the key
+  with the element. A mapping that maps the identity to its key alone
+  compares other values than the evaluator - the groups of another tenant
+  with the same key - in silence; one that says nothing of the element has a
+  composite constant beside it refused, `TransformError::NotComposite`.
 * `.contains` of a text is a substring to Rust and `any` to the macro, which
   has no types: the evaluator and the server refuse a text for a collection,
   at run time.

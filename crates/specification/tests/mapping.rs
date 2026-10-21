@@ -5,7 +5,7 @@
 
 use ascetic_ddd_specification::ast::{
     and, any, equal, field, greater_than, is_not_null, is_null, item, less_than, not, not_equal,
-    value,
+    outer_item, value,
 };
 use ascetic_ddd_specification::{
     Expr, Infix, Mapped, Mapping, Path, Record, Root, TransformError, Value, is_satisfied_by, pg,
@@ -537,5 +537,111 @@ fn an_element_of_a_collection_of_values_is_where_its_collection_is() {
     assert_eq!(
         transform::<Domain, Value, _>(&item(), &Something),
         Err(TransformError::NoCurrentItem),
+    );
+}
+
+/// Members kept as a tenant's documents: a member id is its tenant and its
+/// member; the storage keeps the member in an array, and the tenant once,
+/// in the row - of the members of the tenant, and of the members of each of
+/// its teams.
+struct Members;
+
+impl Mapping<Domain, Value> for Members {
+    type Error = String;
+
+    fn field(&self, path: &Path) -> Result<Mapped<Value>, String> {
+        let document =
+            |names: &str| Ok(Mapped::Scalar(field(format!("document.{names}").as_str())));
+        match path.names().collect::<Vec<_>>().as_slice() {
+            ["tenant_id"] => Ok(Mapped::Scalar(field("tenant_id"))),
+            ["members"] => document("members"),
+            ["teams"] => document("teams"),
+            ["teams", "members"] => document("teams.members"),
+            names => Err(format!("unknown field: {}", names.join("."))),
+        }
+    }
+
+    fn value(&self, value: &Domain) -> Result<Mapped<Value>, String> {
+        Something.value(value)
+    }
+
+    fn element(&self, collection: &Path) -> Result<Mapped<Value>, String> {
+        match collection.names().collect::<Vec<_>>().as_slice() {
+            ["members"] | ["teams", "members"] => Ok(Mapped::Composite(vec![
+                Mapped::Scalar(field("tenant_id")),
+                Mapped::Scalar(item()),
+            ])),
+            names => Err(format!("no collection of values: {}", names.join("."))),
+        }
+    }
+}
+
+/// An element the storage keeps in part in the candidate's row is what the
+/// mapping says it is from the collection's predicate: the tenant in the
+/// row and the member in the array. An equality with a member id is then
+/// the tenant compared with the row's and the member with the element. An
+/// element of an enclosing collection is said from its own predicate and
+/// put where it was; the candidate's row is where it was.
+#[test]
+fn an_element_kept_in_part_in_the_candidates_row_is_compared_part_by_part() {
+    let member = |tenant_id, member_id| {
+        Expr::Value(Domain::MemberId(MemberId {
+            tenant_id,
+            member_id,
+        }))
+    };
+    let one: Expr<Domain> = any("members", equal(item(), member(10, 3)));
+    let transformed: Transformed = transform(&one, &Members);
+    assert_eq!(
+        transformed,
+        Ok(any(
+            "document.members",
+            and(equal(field("tenant_id"), int(10)), equal(item(), int(3)))
+        )),
+    );
+    let schema = pg::Schema::new("tenants").alias("t").document(
+        "tenants",
+        "document",
+        pg::Layout::new()
+            .values("members", pg::Kind::Int)
+            .collection("teams", pg::Layout::new().values("members", pg::Kind::Int)),
+    );
+    assert_eq!(
+        pg::Compiler::new()
+            .schema(&schema)
+            .compile(&transformed.expect("transformed"))
+            .expect("compiled")
+            .sql,
+        r#"EXISTS (SELECT 1 FROM jsonb_array_elements_text("t"."document" -> 'members') AS "member_1" WHERE "t"."tenant_id" = $1 AND "member_1"::bigint = $2)"#,
+    );
+    // A member of the tenant who is a member of one of its teams: the
+    // element two collections out, said from its own predicate.
+    let in_a_team: Expr<Domain> = any(
+        "members",
+        any(
+            "teams",
+            any(Path::item("members"), equal(item(), outer_item(2))),
+        ),
+    );
+    assert_eq!(
+        transform(&in_a_team, &Members),
+        Ok(any(
+            "document.members",
+            any(
+                "document.teams",
+                any(
+                    Path::item("members"),
+                    and(
+                        equal(field("tenant_id"), field("tenant_id")),
+                        equal(item(), outer_item(2))
+                    ),
+                ),
+            ),
+        )),
+    );
+    // A composite has no one value to be null: as of a member, refused.
+    assert_eq!(
+        transform(&any::<Domain>("members", is_null(item())), &Members),
+        Err(TransformError::UnexpectedComposite),
     );
 }
