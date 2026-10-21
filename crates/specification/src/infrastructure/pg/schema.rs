@@ -20,7 +20,9 @@
 //! is declared with what the document holds, `document("policies",
 //! "document", layout)`, and a path through it from the candidate or from an
 //! item is a member of the document, `("s"."document" ->> 'kind')`, read as
-//! the [`Layout`] says.
+//! the [`Layout`] says. A document with a GIN index is declared to have one,
+//! `gin("policies", "document")`, and an equality on a member of it where
+//! only truth counts is written as containment, which the index serves.
 
 use super::layout::Layout;
 
@@ -96,6 +98,7 @@ pub struct Schema {
     keys: Vec<ForeignKey>,
     composites: Vec<(String, String)>,
     documents: Vec<(String, String, Layout)>,
+    gins: Vec<(String, String)>,
 }
 
 impl Schema {
@@ -107,6 +110,7 @@ impl Schema {
             keys: Vec::new(),
             composites: Vec::new(),
             documents: Vec::new(),
+            gins: Vec::new(),
         }
     }
 
@@ -166,6 +170,33 @@ impl Schema {
         let mut documents = self.documents;
         documents.push((table.into(), column.into(), layout));
         Schema { documents, ..self }
+    }
+
+    /// The document at `column` of `table` has a GIN index, of `jsonb_ops` or
+    /// of `jsonb_path_ops`: `CREATE INDEX … USING gin (document
+    /// jsonb_path_ops)`. Where only truth counts - the condition as a whole,
+    /// `AND` and `OR` there, the predicate of `any` - an equality of a text,
+    /// an integer or a boolean member with a constant is written as
+    /// containment, `"p"."document" @> …`, which the index serves; and `any`
+    /// over a collection of the document has the equalities of its predicate
+    /// beside it as containment. Without this a btree index on the member's
+    /// expression serves the equality, and containment would not be served.
+    ///
+    /// Containment is true or false where the equality is null: the
+    /// condition is what goes after `WHERE`, and a caller that negates it
+    /// negates the specification, not the text.
+    pub fn gin(self, table: impl Into<String>, column: impl Into<String>) -> Self {
+        let mut gins = self.gins;
+        gins.push((table.into(), column.into()));
+        Schema { gins, ..self }
+    }
+
+    /// Whether the document at `column` of `table` is declared to have a GIN
+    /// index.
+    pub(super) fn is_gin(&self, table: &str, column: &str) -> bool {
+        self.gins
+            .iter()
+            .any(|(of, name)| of == table && name == column)
     }
 
     /// What the document at `column` of `table` holds, if it is declared one.

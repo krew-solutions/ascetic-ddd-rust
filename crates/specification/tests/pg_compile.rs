@@ -1227,3 +1227,184 @@ fn a_document_is_a_column_of_any_table_of_the_schema() {
         assert_eq!(sql_with(&schema, &specification), expected);
     }
 }
+
+/// Where the schema says a document has a GIN index, an equality of a text,
+/// an integer or a boolean member with a constant is what the document
+/// contains, where only truth counts: the condition, `AND` and `OR` there.
+/// Containment is false where the equality is null, so under `NOT` the
+/// equality stays; and a null constant, a kind of several spellings, two
+/// members compared, stay as they are.
+#[test]
+fn an_equality_where_only_truth_counts_is_containment_with_a_gin_index() {
+    let schema = policies().gin("policies", "document");
+    let status = |text: &str| equal(field("document.status"), value(text));
+    for (specification, expected) in [
+        (
+            status("active"),
+            r#""p"."document" @> jsonb_object(ARRAY['status'], ARRAY[$1::text])"#,
+        ),
+        (
+            equal(value(5), field("document.priority")),
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['priority'], $1::bigint::text::jsonb)"#,
+        ),
+        (
+            equal(field("document.published"), value(true)),
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['published'], $1::boolean::text::jsonb)"#,
+        ),
+        (
+            equal(field("document.targeting.mode"), value("x")),
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['targeting'], jsonb_object(ARRAY['mode'], ARRAY[$1::text]))"#,
+        ),
+        (
+            and(
+                status("active"),
+                greater_than(field("document.priority"), value(5)),
+            ),
+            r#""p"."document" @> jsonb_object(ARRAY['status'], ARRAY[$1::text]) AND ("p"."document" ->> 'priority')::bigint > $2"#,
+        ),
+        (
+            or(status("a"), status("b")),
+            r#""p"."document" @> jsonb_object(ARRAY['status'], ARRAY[$1::text]) OR "p"."document" @> jsonb_object(ARRAY['status'], ARRAY[$2::text])"#,
+        ),
+        (
+            not(status("a")),
+            r#"NOT (("p"."document" ->> 'status') COLLATE "C") = $1"#,
+        ),
+        (
+            not_equal(field("document.status"), value("a")),
+            r#"(("p"."document" ->> 'status') COLLATE "C") != $1"#,
+        ),
+        (
+            equal(field("document.status"), Expr::Value(Value::Null)),
+            r#"(("p"."document" ->> 'status') COLLATE "C") = $1"#,
+        ),
+        (
+            equal(field("document.weight"), value(0.5)),
+            r#"("p"."document" ->> 'weight')::double precision = $1"#,
+        ),
+        (
+            equal(field("document.created_at"), value("2026-01-01")),
+            r#"("p"."document" ->> 'created_at')::timestamptz = $1"#,
+        ),
+        (
+            equal(field("document.status"), field("document.targeting.mode")),
+            r#"(("p"."document" ->> 'status') COLLATE "C") = (("p"."document" -> 'targeting' ->> 'mode') COLLATE "C")"#,
+        ),
+        (
+            equal(status("a"), field("archived")),
+            r#"((("p"."document" ->> 'status') COLLATE "C") = $1) = "archived""#,
+        ),
+    ] {
+        assert_eq!(sql_with(&schema, &specification), expected);
+    }
+    // Without the index the equality is what it was.
+    assert_eq!(
+        sql_with(&policies(), &status("active")),
+        r#"(("p"."document" ->> 'status') COLLATE "C") = $1"#,
+    );
+}
+
+/// `any` over a collection of a document with a GIN index, where only its
+/// truth counts, has beside it what the document contains if it is true:
+/// the equalities its predicate joins by `AND`, of the item and of the items
+/// of the item's collections, in one object of the array. They follow from
+/// the predicate, which stays as it was: an `OR`, a range, a member of the
+/// candidate are left out of the containment and kept in the `EXISTS`.
+#[test]
+fn any_over_a_collection_with_a_gin_index_has_its_equalities_beside_it() {
+    let schema = policies().gin("policies", "document");
+    let number = |n: i64| equal(item("number"), value(n));
+    let approved_by = |name: &str| any(Path::item("approvals"), equal(item("by"), value(name)));
+    for (specification, expected) in [
+        (
+            any("document.versions", number(3)),
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['versions'], '[]'::jsonb || jsonb_set('{}'::jsonb, ARRAY['number'], $1::bigint::text::jsonb)) AND EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $2)"#,
+        ),
+        (
+            any(
+                "document.versions",
+                and_all(
+                    number(3),
+                    [
+                        greater_than(item("published_at"), value("2026-01-01")),
+                        approved_by("ann"),
+                    ],
+                ),
+            ),
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['versions'], '[]'::jsonb || (jsonb_set('{}'::jsonb, ARRAY['number'], $1::bigint::text::jsonb) || jsonb_set('{}'::jsonb, ARRAY['approvals'], '[]'::jsonb || jsonb_object(ARRAY['by'], ARRAY[$2::text])))) AND EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $3 AND ("version_1" ->> 'published_at')::timestamptz > $4 AND EXISTS (SELECT 1 FROM jsonb_array_elements("version_1" -> 'approvals') AS "approval_2" WHERE (("approval_2" ->> 'by') COLLATE "C") = $5))"#,
+        ),
+        // Two items of one collection: the array contains both.
+        (
+            any(
+                "document.versions",
+                and(approved_by("ann"), approved_by("bob")),
+            ),
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['versions'], '[]'::jsonb || jsonb_set('{}'::jsonb, ARRAY['approvals'], '[]'::jsonb || jsonb_object(ARRAY['by'], ARRAY[$1::text]) || jsonb_object(ARRAY['by'], ARRAY[$2::text]))) AND EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE EXISTS (SELECT 1 FROM jsonb_array_elements("version_1" -> 'approvals') AS "approval_2" WHERE (("approval_2" ->> 'by') COLLATE "C") = $3) AND EXISTS (SELECT 1 FROM jsonb_array_elements("version_1" -> 'approvals') AS "approval_3" WHERE (("approval_3" ->> 'by') COLLATE "C") = $4))"#,
+        ),
+        // Two constants at one member: the first is asked for, which still
+        // follows from the predicate.
+        (
+            any("document.versions", and(number(3), number(4))),
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['versions'], '[]'::jsonb || jsonb_set('{}'::jsonb, ARRAY['number'], $1::bigint::text::jsonb)) AND EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $2 AND ("version_1" ->> 'number')::bigint = $3)"#,
+        ),
+        // Nothing that follows: the `EXISTS` alone.
+        (
+            any("document.versions", or(number(3), number(4))),
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $1 OR ("version_1" ->> 'number')::bigint = $2)"#,
+        ),
+        // Where the falsity counts as well, nothing is beside it.
+        (
+            not(any("document.versions", number(3))),
+            r#"NOT EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $1)"#,
+        ),
+        (
+            all("document.versions", number(3)),
+            r#"NOT EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE NOT ("version_1" ->> 'number')::bigint = $1)"#,
+        ),
+        // Beside another condition, under `OR`.
+        (
+            or(field("archived"), any("document.versions", number(3))),
+            r#""archived" OR "p"."document" @> jsonb_set('{}'::jsonb, ARRAY['versions'], '[]'::jsonb || jsonb_set('{}'::jsonb, ARRAY['number'], $1::bigint::text::jsonb)) AND EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $2)"#,
+        ),
+    ] {
+        assert_eq!(sql_with(&schema, &specification), expected);
+    }
+}
+
+/// A document with a GIN index is a column of any table: of a collection's
+/// table, whose rows the predicate of `any` stands on.
+#[test]
+fn a_document_with_a_gin_index_of_a_table_of_a_collection() {
+    let schema = Schema::new("stores")
+        .alias("s")
+        .foreign_key("store_items", "store_id", "stores", "id")
+        .document(
+            "store_items",
+            "document",
+            Layout::new()
+                .value("price", Kind::Int)
+                .collection("tags", Layout::new().value("name", Kind::Text)),
+        )
+        .gin("store_items", "document");
+    for (specification, expected) in [
+        (
+            any(
+                "store_items",
+                equal(field(Path::item("document").child("price")), value(5)),
+            ),
+            r#"EXISTS (SELECT 1 FROM "store_items" AS "store_item_1" WHERE "store_item_1"."store_id" = "s"."id" AND "store_item_1"."document" @> jsonb_set('{}'::jsonb, ARRAY['price'], $1::bigint::text::jsonb))"#,
+        ),
+        (
+            any(
+                "store_items",
+                any(
+                    Path::item("document").child("tags"),
+                    equal(item("name"), value("x")),
+                ),
+            ),
+            r#"EXISTS (SELECT 1 FROM "store_items" AS "store_item_1" WHERE "store_item_1"."store_id" = "s"."id" AND "store_item_1"."document" @> jsonb_set('{}'::jsonb, ARRAY['tags'], '[]'::jsonb || jsonb_object(ARRAY['name'], ARRAY[$1::text])) AND EXISTS (SELECT 1 FROM jsonb_array_elements("store_item_1"."document" -> 'tags') AS "tag_2" WHERE (("tag_2" ->> 'name') COLLATE "C") = $2))"#,
+        ),
+    ] {
+        assert_eq!(sql_with(&schema, &specification), expected);
+    }
+}

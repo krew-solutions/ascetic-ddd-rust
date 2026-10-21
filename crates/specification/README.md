@@ -189,6 +189,20 @@ construction; or an index on the expression the compiler writes,
 session's settings, and the server refuses it in an index - it is a column
 the repository writes, of its type.
 
+An equality is served by a GIN index on the document, where the schema says
+the document has one, `gin("policies", "document")` (ADR-0022). Where only
+truth counts - the condition as a whole, `AND` and `OR` there, the predicate
+of `any` - an equality of a text, an integer or a boolean member with a
+constant is what the document contains, `"p"."document" @>
+jsonb_object(ARRAY['status'], ARRAY[$1::text])`; and `any` over a collection
+of the document has the equalities of its predicate beside its `EXISTS`, as
+containment. Under `NOT`, with a null constant, of a member of another kind,
+an equality is what it was: containment is false where the equality is null,
+and agrees with it only for a kind with one spelling in JSON. The pattern is
+made of immutable functions, which the server folds into a constant;
+`jsonb_build_object` is stable, and is called again for every row a scan
+reads.
+
 ## What maps to what
 
 | Python, Go | here |
@@ -394,6 +408,14 @@ the sources as they were.
   compared at a boundary has the two disagree.
 * A collection of a document that is a JSON null, and not an empty array,
   fails the whole query: `jsonb_array_elements` takes no scalar.
+* With a GIN index declared, the compiled condition is what goes after
+  `WHERE` and nothing else: containment is false where the equality it
+  stands for is null, so the text negated, `NOT (…)`, selects the rows where
+  the specification is null. A specification is negated in the tree. And a
+  member declared an integer, a boolean or a text is a JSON number without a
+  fraction, a boolean, a string: an encoding that writes an integer as a
+  string, as the JSON mapping of proto3 writes an `int64`, is read by `->>`
+  and not contained.
 * `numeric` parameters are not written by the `pg` feature.
 * The text of a template has one `@`, the nearest item, as RFC 9535 has it;
   the item of an enclosing collection is named in the tree only.

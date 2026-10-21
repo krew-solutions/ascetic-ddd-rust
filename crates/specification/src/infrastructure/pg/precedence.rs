@@ -26,6 +26,10 @@ pub(super) const ATOM: u8 = u8::MAX;
 /// against before its type is said.
 pub(super) const CAST: u8 = 160;
 
+/// Of "any other operator", the row of the operators that have none of
+/// their own: `<<`, `@>`, `||`.
+pub(super) const OTHER: u8 = 100;
+
 pub(super) fn prefix(op: Prefix) -> u8 {
     match op {
         Prefix::Neg => 140,
@@ -39,8 +43,7 @@ pub(super) fn infix(op: Infix) -> (u8, Associativity) {
             (120, Associativity::Left)
         }
         Infix::Arithmetic(Arithmetic::Add | Arithmetic::Sub) => (110, Associativity::Left),
-        // "Any other operator."
-        Infix::Arithmetic(Arithmetic::Shl | Arithmetic::Shr) => (100, Associativity::Left),
+        Infix::Arithmetic(Arithmetic::Shl | Arithmetic::Shr) => (OTHER, Associativity::Left),
         Infix::Comparison(_) => (80, Associativity::Non),
         Infix::Is => (70, Associativity::Non),
         Infix::Logical(Logical::And) => (50, Associativity::Left),

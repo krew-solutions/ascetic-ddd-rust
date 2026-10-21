@@ -4,6 +4,11 @@
 
 Accepted (2026-10-21).
 
+Amended 2026-10-21 by ADR-0022: the consequence on equality and a GIN index
+is discharged - where the schema says a document has a GIN index, an
+equality where only truth counts is containment, and `any` has the
+equalities of its predicate beside it as containment.
+
 ## Context
 
 A service that keeps an aggregate as one `jsonb` document has the

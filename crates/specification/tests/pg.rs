@@ -497,7 +497,8 @@ async fn documents(client: &Client) {
                  a int8 GENERATED ALWAYS AS ((document ->> 'a')::bigint) STORED,
                  flag bool GENERATED ALWAYS AS ((document ->> 'flag')::boolean) STORED,
                  document jsonb NOT NULL
-             );"#,
+             );
+             CREATE INDEX ON spec_documents USING gin (document jsonb_path_ops);"#,
         )
         .await
         .expect("a table of documents");
@@ -661,6 +662,43 @@ fn specifications() -> Vec<Spec> {
             "$.items[*][?@.active != null && @.price > 500]",
             Params::none(),
         ),
+        // Equalities where only truth counts and where it does not: what a
+        // GIN index on a document has them written as containment, and not.
+        not(equal(field("name"), value("one"))),
+        or(
+            equal(field("name"), value("one")),
+            equal(field("a"), value(7)),
+        ),
+        and(
+            equal(field("flag"), value(true)),
+            equal(field("b"), value(1)),
+        ),
+        not(and(
+            equal(field("flag"), value(true)),
+            equal(field("b"), value(1)),
+        )),
+        any("items", and(equal(item("active"), value(true)), dear())),
+        any("items", equal(maker_name(), value("cheap"))),
+        any(
+            "items",
+            and(
+                equal(item("price"), value(900)),
+                equal(owner_name(), value("ann")),
+            ),
+        ),
+        any(
+            "items",
+            and(
+                equal(item("price"), value(10)),
+                equal(item("price"), value(900)),
+            ),
+        ),
+        not(any("items", equal(item("price"), value(10)))),
+        all("items", equal(item("active"), value(true))),
+        or(field("flag"), any("items", equal(item("price"), value(10)))),
+        // Built by hand, `= NULL` is null of every row.
+        equal(field("name"), null()),
+        any("items", equal(item("active"), null())),
     ]
 }
 
@@ -696,13 +734,16 @@ async fn a_specification_selects_the_rows_it_is_satisfied_by() {
         Schema::new("spec_documents").document("spec_documents", "document", store_layout());
     let in_the_document = InTheDocument(&[]);
     let beside_the_document = InTheDocument(&["a", "flag"]);
+    // The same, the server told the document has a GIN index: equalities
+    // where only truth counts are written as containment.
+    let indexed = document.clone().gin("spec_documents", "document");
     for specification in specifications() {
         let satisfied: Vec<i64> = stores()
             .iter()
             .filter(|store| is_satisfied_by(&specification, &record(store)).expect("evaluated"))
             .map(|store| store.id)
             .collect();
-        let storages: [(&str, &str, &Schema, Spec); 4] = [
+        let storages: [(&str, &str, &Schema, Spec); 5] = [
             (
                 "embedded",
                 "spec_stores",
@@ -726,6 +767,12 @@ async fn a_specification_selects_the_rows_it_is_satisfied_by() {
                 "spec_documents",
                 &document,
                 transform(&specification, &beside_the_document).expect("transformed"),
+            ),
+            (
+                "document with a GIN index",
+                "spec_documents",
+                &indexed,
+                transform(&specification, &in_the_document).expect("transformed"),
             ),
         ];
         for (storage, table, schema, tree) in storages {
@@ -1725,6 +1772,81 @@ async fn an_index_on_the_expression_of_a_member_serves_its_comparisons() {
         .await
         .expect_err("a cast that depends on the session is no expression of an index");
     assert_eq!(refused.code(), Some(&SqlState::INVALID_OBJECT_DEFINITION));
+}
+
+/// Where the schema says a document has a GIN index, an equality where only
+/// truth counts is containment the index serves: of a member, of members
+/// under `OR`, of an item of a collection beside its `EXISTS`. The pattern is
+/// made of immutable functions, which the server folds into a constant for
+/// the parameters it is given, where `jsonb_build_object` would be called
+/// again for every row a sequential scan reads.
+#[tokio::test]
+async fn a_gin_index_serves_the_equalities_where_only_truth_counts() {
+    let client = client().await;
+    client
+        .batch_execute(
+            r#"CREATE TEMP TABLE spec_gin (id int8 PRIMARY KEY, document jsonb NOT NULL);
+             INSERT INTO spec_gin
+                 SELECT n, jsonb_build_object(
+                     'status', 's' || n, 'priority', n % 50,
+                     'versions', jsonb_build_array(jsonb_build_object('number', n % 7)))
+                 FROM generate_series(1, 1000) AS n;
+             CREATE INDEX spec_gin_document ON spec_gin USING gin (document jsonb_path_ops);
+             ANALYZE spec_gin;
+             SET enable_seqscan = off;"#,
+        )
+        .await
+        .expect("a table with a GIN index");
+    let schema = Schema::new("spec_gin")
+        .document(
+            "spec_gin",
+            "document",
+            Layout::new()
+                .value("status", Kind::Text)
+                .value("priority", Kind::Int)
+                .collection("versions", Layout::new().value("number", Kind::Int)),
+        )
+        .gin("spec_gin", "document");
+    let status = |text: &str| equal(field("document.status"), value(text));
+    let cases: [(Spec, &str); 3] = [
+        (status("s7"), r#"'{"status": "s7"}'::jsonb"#),
+        (
+            or(status("s7"), status("s8")),
+            r#"'{"status": "s8"}'::jsonb"#,
+        ),
+        (
+            any(
+                "document.versions",
+                and(
+                    equal(field(Path::item("number")), value(3)),
+                    less_than(field(Path::item("number")), value(5)),
+                ),
+            ),
+            r#"'{"versions": [{"number": 3}]}'::jsonb"#,
+        ),
+    ];
+    for (specification, folded) in cases {
+        let query = Compiler::new()
+            .schema(&schema)
+            .compile(&specification)
+            .expect("compiled");
+        let text = format!("EXPLAIN SELECT id FROM spec_gin WHERE {}", query.sql);
+        let params: Vec<&(dyn ToSql + Sync)> = query
+            .params
+            .iter()
+            .map(|param| param as &(dyn ToSql + Sync))
+            .collect();
+        let plan: String = client
+            .query(&text, &params)
+            .await
+            .unwrap_or_else(|error| panic!("{text}: {error}"))
+            .iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plan.contains("spec_gin_document"), "{text}\n{plan}");
+        assert!(plan.contains(folded), "{text}\n{plan}");
+    }
 }
 
 #[tokio::test]
