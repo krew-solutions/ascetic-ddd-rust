@@ -29,14 +29,18 @@ let specification: Expr<Value> = and(
 
 **With typed terms**, [`dsl`], which refuse at compile time what the tree
 would accept and the evaluator refuse later — a number conjoined, a text
-multiplied, `is_null` of a member not declared nullable:
+multiplied, `is_null` of a member not declared nullable, a predicate of a
+collection that is no truth value:
 
 ```rust
-use ascetic_ddd_specification::dsl::{Boolean, NullDatetime, Number};
+use ascetic_ddd_specification::Path;
+use ascetic_ddd_specification::dsl::{Boolean, NullDatetime, Number, Text, any};
 
 let cheap = (Number::field("price") - Number::field("discount")).lt(Number::value(100));
 let listed = Boolean::field("active") & NullDatetime::field("deleted_at").is_null();
-let specification = (cheap & listed).into_expr();
+let dear = any("items", Number::field(Path::item("price")).gt(Number::value(500)));
+let on_sale = any("tags", Text::item().eq(Text::value("sale")));
+let specification = (cheap & listed & dear & on_sale).into_expr();
 ```
 
 **As a JSONPath template**, [`jsonpath`], parsed once and bound to

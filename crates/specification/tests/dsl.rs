@@ -4,9 +4,9 @@
 //! this file's subject say so with `compile_fail`.
 
 use ascetic_ddd_specification::ast::{
-    add, and, any, div, equal, field, greater_than, greater_than_equal, is, is_not_null, is_null,
-    left_shift, less_than, less_than_equal, modulo, mul, neg, not, not_equal, or, right_shift, sub,
-    value,
+    self, add, and, any, div, equal, field, greater_than, greater_than_equal, is, is_not_null,
+    is_null, left_shift, less_than, less_than_equal, modulo, mul, neg, not, not_equal, or,
+    right_shift, sub, value,
 };
 use ascetic_ddd_specification::dsl::{
     Boolean, Datetime, NullBoolean, NullDatetime, NullNumber, NullText, Number, Text, Timespan,
@@ -204,5 +204,65 @@ fn what_is_built_is_a_specification() {
     assert_eq!(
         pg::compile(&specification).expect("compiled").sql,
         r#""price" - "discount" < $1 AND "deleted_at" IS NULL"#,
+    );
+}
+
+/// A collection is quantified with a predicate that is a boolean term: a
+/// member of the item a field of `Path::item`, an element of a collection
+/// of values the item itself, of the sort it is declared; an element that
+/// may be null is declared nullable, and has the null test.
+#[test]
+fn a_collection_is_quantified_by_a_boolean_term() {
+    use ascetic_ddd_specification::dsl::{all, any};
+    let dear = any(
+        "items",
+        Number::field(Path::item("price")).gt(Number::value(500)),
+    );
+    assert_eq!(
+        dear.expr(),
+        &ast::any(
+            "items",
+            greater_than(field(Path::item("price")), value(500))
+        ),
+    );
+    let on_sale = any("tags", Text::item().eq(Text::value("sale")));
+    assert_eq!(
+        on_sale.expr(),
+        &ast::any("tags", equal(ast::item(), value("sale"))),
+    );
+    let none_missing = all("tags", NullText::item().is_not_null());
+    assert_eq!(
+        none_missing.expr(),
+        &ast::all("tags", is_not_null(ast::item())),
+    );
+    // The element of an enclosing collection, from the predicate of another.
+    let tagged_with_a_size = any("sizes", any("tags", Text::item().eq(Text::outer_item(1))));
+    assert_eq!(
+        tagged_with_a_size.expr(),
+        &ast::any(
+            "sizes",
+            ast::any("tags", equal(ast::item(), ast::outer_item(1)))
+        ),
+    );
+    let specification = (Boolean::field("active") & dear & on_sale & none_missing).into_expr();
+    let store = Record::<Value>::object([
+        ("active", Record::value(true)),
+        (
+            "items",
+            Record::collection([Record::object([("price", Record::value(999))])]),
+        ),
+        (
+            "tags",
+            Record::collection([Record::value("new"), Record::value("sale")]),
+        ),
+    ]);
+    assert_eq!(is_satisfied_by(&specification, &store), Ok(true));
+    assert_eq!(
+        pg::compile(&specification).expect("compiled").sql,
+        concat!(
+            r#""active" AND EXISTS (SELECT 1 FROM unnest("items") AS "item_1" WHERE "item_1"."price" > $1) "#,
+            r#"AND EXISTS (SELECT 1 FROM unnest("tags") AS "tag_2" WHERE "tag_2" = $2) "#,
+            r#"AND NOT EXISTS (SELECT 1 FROM unnest("tags") AS "tag_3" WHERE NOT "tag_3" IS NOT NULL)"#,
+        ),
     );
 }

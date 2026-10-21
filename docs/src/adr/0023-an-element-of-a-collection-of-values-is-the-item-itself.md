@@ -14,6 +14,9 @@ is discharged - `Mapping::element`; decision 6 is amended: the mapping is
 asked about an element, and says the element itself unless it says
 otherwise.
 
+Amended 2026-10-21 by ADR-0026: the consequence on the typed terms is
+discharged - `dsl::any`, `dsl::all`, `Term::item`.
+
 ## Context
 
 The commonest array of the target services holds identifiers: the device
