@@ -1570,3 +1570,63 @@ fn the_item_itself_is_a_value_or_refused() {
         );
     }
 }
+
+/// A GIN index on a path of a document - `CREATE INDEX … USING gin
+/// ((document -> 'subgroups'))` - serves containment of the value at the
+/// path, written of the expression the index is on; containment of the
+/// whole document it does not serve. What is not under the path is as it
+/// was; of several paths on the way, the deepest is written.
+#[test]
+fn a_gin_index_on_a_path_serves_containment_of_the_value_there() {
+    let groups = |name: &str| {
+        any(
+            "document.targeting.device_groups",
+            equal(element(), value(name)),
+        )
+    };
+    let at_groups = targeted().gin_at("policies", "document", "targeting.device_groups");
+    for (specification, expected) in [
+        (
+            groups("g1"),
+            r#"("p"."document" -> 'targeting' -> 'device_groups') @> ('[]'::jsonb || (jsonb_object(ARRAY['v'], ARRAY[$1::text]) -> 'v')) AND EXISTS (SELECT 1 FROM jsonb_array_elements_text("p"."document" -> 'targeting' -> 'device_groups') AS "device_group_1" WHERE ("device_group_1" COLLATE "C") = $2)"#,
+        ),
+        (
+            any("document.ranks", equal(element(), value(3))),
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements_text("p"."document" -> 'ranks') AS "rank_1" WHERE "rank_1"::bigint = $1)"#,
+        ),
+    ] {
+        assert_eq!(sql_with(&at_groups, &specification), expected);
+    }
+    let at_targeting = policies().gin_at("policies", "document", "targeting");
+    for (specification, expected) in [
+        (
+            equal(field("document.targeting.mode"), value("x")),
+            r#"("p"."document" -> 'targeting') @> (jsonb_object(ARRAY['mode'], ARRAY[$1::text]))"#,
+        ),
+        (
+            equal(field("document.targeting.window.hours"), value(8)),
+            r#"("p"."document" -> 'targeting') @> (jsonb_set('{}'::jsonb, ARRAY['window'], jsonb_set('{}'::jsonb, ARRAY['hours'], $1::bigint::text::jsonb)))"#,
+        ),
+        (
+            equal(field("document.status"), value("x")),
+            r#"(("p"."document" ->> 'status') COLLATE "C") = $1"#,
+        ),
+    ] {
+        assert_eq!(sql_with(&at_targeting, &specification), expected);
+    }
+    let both = targeted()
+        .gin("policies", "document")
+        .gin_at("policies", "document", "targeting");
+    for (specification, expected) in [
+        (
+            groups("g1"),
+            r#"("p"."document" -> 'targeting') @> (jsonb_set('{}'::jsonb, ARRAY['device_groups'], '[]'::jsonb || (jsonb_object(ARRAY['v'], ARRAY[$1::text]) -> 'v'))) AND EXISTS (SELECT 1 FROM jsonb_array_elements_text("p"."document" -> 'targeting' -> 'device_groups') AS "device_group_1" WHERE ("device_group_1" COLLATE "C") = $2)"#,
+        ),
+        (
+            any("document.ranks", equal(element(), value(3))),
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['ranks'], '[]'::jsonb || $1::bigint::text::jsonb) AND EXISTS (SELECT 1 FROM jsonb_array_elements_text("p"."document" -> 'ranks') AS "rank_1" WHERE "rank_1"::bigint = $2)"#,
+        ),
+    ] {
+        assert_eq!(sql_with(&both, &specification), expected);
+    }
+}

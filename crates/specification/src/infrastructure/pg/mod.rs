@@ -345,12 +345,14 @@ impl<'s> Compiler<'s> {
         item: Option<&Item>,
         next: Next,
     ) -> Result<Option<(Fragment<V>, Next)>, CompileError> {
-        let Some((document, pattern)) = self.contained(left, right, item)? else {
+        let Some((gin, pattern)) = self.contained(left, right, item)? else {
             return Ok(None);
         };
-        let (pattern, params, next) = pattern.written(next)?;
+        let Some((sql, params, next)) = pattern.containing(&gin.document, &gin.at, next)? else {
+            return Ok(None);
+        };
         let fragment = Fragment {
-            sql: format!("{document} @> {pattern}"),
+            sql,
             params,
             precedence: precedence::OTHER,
         };
@@ -668,19 +670,19 @@ impl<'s> Compiler<'s> {
         next: Next,
         stand: Stand,
     ) -> Result<(Fragment<V>, Next), CompileError> {
-        let contained = match (stand, collection.gin) {
-            (Stand::Truth, Some((document, names))) => {
-                let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let pattern = match (stand, collection.gin) {
+            (Stand::Truth, Some(gin)) => {
+                let names: Vec<&str> = gin.names.iter().map(String::as_str).collect();
                 Pattern::of_array(&names, Pattern::elements(predicate, collection.items))
-                    .map(|pattern| (document, pattern))
+                    .map(|pattern| (gin, pattern))
             }
             _ => None,
         };
-        let (contained, next) = match contained {
-            Some((document, pattern)) => {
-                let (pattern, params, next) = pattern.written(next)?;
-                (Some((format!("{document} @> {pattern}"), params)), next)
-            }
+        let (contained, next) = match pattern {
+            Some((gin, pattern)) => match pattern.containing(&gin.document, &gin.at, next)? {
+                Some((contains, params, next)) => (Some((contains, params)), next),
+                None => (None, next),
+            },
             None => (None, next),
         };
         let number = next.alias + 1;
@@ -835,7 +837,7 @@ impl<'s> Compiler<'s> {
                     of: item.row.clone(),
                     layout,
                     names: &names[..],
-                    gin: false,
+                    gins: Vec::new(),
                 }),
                 Holds::Document(Items::Values(_)) => return Err(no_members(&item.row, &names)),
                 Holds::Table | Holds::Unnested => {
@@ -854,15 +856,12 @@ impl<'s> Compiler<'s> {
             of,
             layout,
             names,
-            gin,
+            gins,
         }) = entered
         else {
             return Ok(None);
         };
-        let gin = gin.then(|| {
-            let names = names.iter().map(|name| (*name).to_owned()).collect();
-            (document.clone(), names)
-        });
+        let gin = Gin::serving(&gins, &document, names);
         let (object, name, member) = in_document(document, &of, layout, names)?;
         let at = format!("{of}.{}", names.join("."));
         match member.items() {
@@ -896,7 +895,7 @@ impl<'s> Compiler<'s> {
                 of: format!("{of}.{column}"),
                 layout,
                 names: rest,
-                gin: schema.is_gin(of, column),
+                gins: schema.gins(of, column),
             })),
             _ => Ok(None),
         }
@@ -913,7 +912,7 @@ impl<'s> Compiler<'s> {
         left: &Expr<V>,
         right: &Expr<V>,
         item: Option<&Item>,
-    ) -> Result<Option<(String, Pattern<V>)>, CompileError> {
+    ) -> Result<Option<(Gin, Pattern<V>)>, CompileError> {
         let ((Expr::Field(path), Expr::Value(value)) | (Expr::Value(value), Expr::Field(path))) =
             (left, right)
         else {
@@ -935,9 +934,9 @@ impl<'s> Compiler<'s> {
                 }
             }
         };
-        Ok(entered.filter(|entered| entered.gin).and_then(|entered| {
-            Pattern::equal(entered.layout, entered.names, value)
-                .map(|pattern| (entered.document, pattern))
+        Ok(entered.and_then(|entered| {
+            let gin = Gin::serving(&entered.gins, &entered.document, entered.names)?;
+            Pattern::equal(entered.layout, entered.names, value).map(|pattern| (gin, pattern))
         }))
     }
 
@@ -1063,19 +1062,46 @@ struct Entered<'l, 'n> {
     of: String,
     layout: &'l Layout,
     names: &'n [&'n str],
-    /// Whether the document is a column the schema says has a GIN index.
-    gin: bool,
+    /// The paths in the document, a column, that the schema says have a GIN
+    /// index; none in a document's array.
+    gins: Vec<&'l [String]>,
+}
+
+/// A GIN index that serves a path into a document: the document, the path
+/// in it the index is on, and the path from the document to what is asked.
+struct Gin {
+    document: String,
+    at: Vec<String>,
+    names: Vec<String>,
+}
+
+impl Gin {
+    /// The deepest of `gins` on the way to `names` in `document`: none if no
+    /// index is on the way.
+    fn serving(gins: &[&[String]], document: &str, names: &[&str]) -> Option<Self> {
+        let at = gins
+            .iter()
+            .filter(|gin| {
+                gin.len() <= names.len() && gin.iter().zip(names).all(|(at, name)| at == name)
+            })
+            .max_by_key(|gin| gin.len())?;
+        Some(Gin {
+            document: document.to_owned(),
+            at: at.to_vec(),
+            names: names.iter().map(|name| (*name).to_owned()).collect(),
+        })
+    }
 }
 
 /// An array of a document, as `exists` reads it: written as a `jsonb`; the
 /// row its items are of, by the document's column and the names in it; what
-/// they are; and the document and the names from it to the array, if the
-/// document is a column with a GIN index.
+/// they are; and the GIN index on the way to it, if the document is a column
+/// that has one.
 struct DocumentCollection<'a> {
     array: String,
     row: String,
     items: Items<'a>,
-    gin: Option<(String, Vec<String>)>,
+    gin: Option<Gin>,
 }
 
 /// A member named of an item that is a value of a document.

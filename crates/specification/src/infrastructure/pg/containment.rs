@@ -202,12 +202,53 @@ impl<V: Clone + ParamType> Pattern<V> {
         self.members.is_empty()
     }
 
-    /// The pattern as the text of a query, its constants as parameters
-    /// numbered from `next`.
-    pub(super) fn written(self, next: Next) -> Result<(String, Vec<V>, Next), CompileError> {
+    /// The condition that `document` contains the pattern, its constants
+    /// as parameters numbered from `next`: of the document itself, or of the
+    /// value at `at` in it, where a GIN index is - `("g"."document" ->
+    /// 'subgroups') @> …`, the expression the index is on. None if the pattern
+    /// is not a path to that value alone.
+    pub(super) fn containing(
+        self,
+        document: &str,
+        at: &[String],
+        next: Next,
+    ) -> Result<Option<(String, Vec<V>, Next)>, CompileError> {
         let mut params = Vec::new();
-        let (sql, next) = self.object(&mut params, next)?;
-        Ok((sql, params, next))
+        if at.is_empty() {
+            let (pattern, next) = self.object(&mut params, next)?;
+            return Ok(Some((format!("{document} @> {pattern}"), params, next)));
+        }
+        let Some(contained) = self.at(at) else {
+            return Ok(None);
+        };
+        let (json, next) = contained.json(&mut params, next)?;
+        let path = at
+            .iter()
+            .map(|name| key(name))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(" -> ");
+        // `->`, `@>` and `||` bind alike, from the left.
+        Ok(Some((
+            format!("({document} -> {path}) @> ({json})"),
+            params,
+            next,
+        )))
+    }
+
+    /// What the pattern asks of the value at `path`, where it asks nothing
+    /// beside it on the way there.
+    fn at(self, path: &[String]) -> Option<Contained<V>> {
+        let (name, rest) = path.split_first()?;
+        let mut members = self.members;
+        let (member, contained) = members.pop()?;
+        if !members.is_empty() || member != *name {
+            return None;
+        }
+        match (rest.is_empty(), contained) {
+            (true, contained) => Some(contained),
+            (false, Contained::Object(inner)) => inner.at(rest),
+            (false, Contained::Constant(..) | Contained::Array(_)) => None,
+        }
     }
 
     fn none() -> Self {

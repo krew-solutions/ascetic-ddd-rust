@@ -518,7 +518,8 @@ async fn documents(client: &Client) {
                  flag bool GENERATED ALWAYS AS ((document ->> 'flag')::boolean) STORED,
                  document jsonb NOT NULL
              );
-             CREATE INDEX ON spec_documents USING gin (document jsonb_path_ops);"#,
+             CREATE INDEX ON spec_documents USING gin (document jsonb_path_ops);
+             CREATE INDEX ON spec_documents USING gin ((document -> 'tags'));"#,
         )
         .await
         .expect("a table of documents");
@@ -799,13 +800,17 @@ async fn a_specification_selects_the_rows_it_is_satisfied_by() {
     // The same, the server told the document has a GIN index: equalities
     // where only truth counts are written as containment.
     let indexed = document.clone().gin("spec_documents", "document");
+    // The same, told the tags have a GIN index of their own.
+    let tags_indexed = document
+        .clone()
+        .gin_at("spec_documents", "document", "tags");
     for specification in specifications() {
         let satisfied: Vec<i64> = stores()
             .iter()
             .filter(|store| is_satisfied_by(&specification, &record(store)).expect("evaluated"))
             .map(|store| store.id)
             .collect();
-        let storages: [(&str, &str, &Schema, Spec); 5] = [
+        let storages: [(&str, &str, &Schema, Spec); 6] = [
             (
                 "embedded",
                 "spec_stores",
@@ -834,6 +839,12 @@ async fn a_specification_selects_the_rows_it_is_satisfied_by() {
                 "document with a GIN index",
                 "spec_documents",
                 &indexed,
+                transform(&specification, &in_the_document).expect("transformed"),
+            ),
+            (
+                "document with a GIN index on its tags",
+                "spec_documents",
+                &tags_indexed,
                 transform(&specification, &in_the_document).expect("transformed"),
             ),
         ];
@@ -1915,6 +1926,85 @@ async fn a_gin_index_serves_the_equalities_where_only_truth_counts() {
         assert!(plan.contains("spec_gin_document"), "{text}\n{plan}");
         assert!(plan.contains(folded), "{text}\n{plan}");
     }
+}
+
+/// A GIN index on a path of a document, as the services index the subgroups
+/// of a group, serves the containment of the value at the path: the
+/// compiler writes it of the expression the index is on, and the server
+/// folds the pattern into a constant.
+#[tokio::test]
+async fn a_gin_index_on_a_path_serves_the_containment_of_the_value_there() {
+    let client = client().await;
+    client
+        .batch_execute(
+            r#"CREATE TEMP TABLE spec_groups (id int8 PRIMARY KEY, document jsonb NOT NULL);
+             INSERT INTO spec_groups
+                 SELECT n, jsonb_build_object(
+                     'subgroups', jsonb_build_array('s' || n % 1000, 's' || n % 997))
+                 FROM generate_series(1, 1000) AS n;
+             CREATE INDEX spec_groups_subgroups ON spec_groups USING gin ((document -> 'subgroups'));
+             ANALYZE spec_groups;
+             SET enable_seqscan = off;"#,
+        )
+        .await
+        .expect("a table with a GIN index on a path");
+    let schema = Schema::new("spec_groups")
+        .document(
+            "spec_groups",
+            "document",
+            Layout::new().values("subgroups", Kind::Text),
+        )
+        .gin_at("spec_groups", "document", "subgroups");
+    let nesting: Spec = any("document.subgroups", equal(outer_item(0), value("s7")));
+    let query = Compiler::new()
+        .schema(&schema)
+        .compile(&nesting)
+        .expect("compiled");
+    let params: Vec<&(dyn ToSql + Sync)> = query
+        .params
+        .iter()
+        .map(|param| param as &(dyn ToSql + Sync))
+        .collect();
+    let text = format!("EXPLAIN SELECT id FROM spec_groups WHERE {}", query.sql);
+    let plan: String = client
+        .query(&text, &params)
+        .await
+        .unwrap_or_else(|error| panic!("{text}: {error}"))
+        .iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(plan.contains("spec_groups_subgroups"), "{text}\n{plan}");
+    assert!(plan.contains(r#"'["s7"]'::jsonb"#), "{text}\n{plan}");
+    // The rows are those of the same condition written without the index.
+    let plain = Compiler::new()
+        .schema(&Schema::new("spec_groups").document(
+            "spec_groups",
+            "document",
+            Layout::new().values("subgroups", Kind::Text),
+        ))
+        .compile(&nesting)
+        .expect("compiled");
+    let mut counts = Vec::new();
+    for query in [&query, &plain] {
+        let text = format!(
+            "SELECT array_agg(id ORDER BY id) FROM spec_groups WHERE {}",
+            query.sql
+        );
+        let params: Vec<&(dyn ToSql + Sync)> = query
+            .params
+            .iter()
+            .map(|param| param as &(dyn ToSql + Sync))
+            .collect();
+        let ids: Vec<i64> = client
+            .query_one(&text, &params)
+            .await
+            .unwrap_or_else(|error| panic!("{text}: {error}"))
+            .get(0);
+        counts.push(ids);
+    }
+    assert_eq!(counts[0], counts[1]);
+    assert!(!counts[0].is_empty());
 }
 
 #[tokio::test]

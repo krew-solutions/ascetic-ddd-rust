@@ -215,8 +215,13 @@ of `any` - an equality of a text, an integer or a boolean member with a
 constant is what the document contains, `"p"."document" @>
 jsonb_object(ARRAY['status'], ARRAY[$1::text])`; and `any` over a collection
 of the document has the equalities of its predicate beside its `EXISTS`, as
-containment. Under `NOT`, with a null constant, of a member of another kind,
-an equality is what it was: containment is false where the equality is null,
+containment. A GIN index on a path of the document, as `CREATE INDEX …
+USING gin ((document -> 'subgroups'))` has it, is `gin_at("groups",
+"document", "subgroups")` (ADR-0024): containment of what is under the path
+is written of the value there, `("g"."document" -> 'subgroups') @> …`, the
+expression the index is on, which containment of the whole document is not.
+Under `NOT`, with a null constant, of a member of another kind, an equality
+is what it was: containment is false where the equality is null,
 and agrees with it only for a kind with one spelling in JSON. The pattern is
 made of immutable functions, which the server folds into a constant;
 `jsonb_build_object` is stable, and is called again for every row a scan

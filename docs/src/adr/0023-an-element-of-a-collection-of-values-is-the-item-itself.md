@@ -5,6 +5,9 @@
 Accepted (2026-10-21). Discharges the step ADR-0021 named among its
 consequences.
 
+Amended 2026-10-21 by ADR-0024: the consequence on a GIN index declared at a
+path of a document is discharged - `Schema::gin_at`.
+
 ## Context
 
 The commonest array of the target services holds identifiers: the device
