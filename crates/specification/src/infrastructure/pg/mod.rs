@@ -209,6 +209,12 @@ impl<'s> Compiler<'s> {
         })
     }
 
+    /// The text of `expr`, and the count after it. A dispatch and nothing
+    /// else: the frame of this function is what the height of a tree costs
+    /// in stack at every level of it, so each case is a function of its
+    /// own, not inlined, whose locals are on the stack only where that case
+    /// is - in a build without optimisation the frame of a `match` holds the
+    /// locals of every arm at once.
     fn render<V: Clone + ParamType>(
         &self,
         expr: &Expr<V>,
@@ -217,119 +223,138 @@ impl<'s> Compiler<'s> {
         stand: Stand,
     ) -> Result<(Fragment<V>, Next), CompileError> {
         match expr {
-            Expr::Value(value) => {
-                // In memory such a text is a string like any other; here it
-                // meets the server, which has no such text.
-                if value.nul_in_text() {
-                    return Err(CompileError::NulInText);
-                }
-                let param = next.param + 1;
-                let fragment = Fragment {
-                    sql: format!("${param}"),
-                    params: vec![value.clone()],
-                    precedence: ATOM,
-                };
-                Ok((fragment, Next { param, ..next }))
-            }
-            Expr::Field(path) => {
-                let (sql, next) = self.member(path, item, next, Reading::Value)?;
-                Ok((Fragment::text(sql), next))
-            }
-            Expr::Item(up) => {
-                let item = item_out(item, *up)?;
-                let sql = match item.holds {
-                    // `unnest` names the element by its alias.
-                    Holds::Unnested => quoted(&item.alias),
-                    Holds::Document(Items::Values(kind)) => kind.read(&quoted(&item.alias)),
-                    Holds::Table => {
-                        return Err(CompileError::NotAValue(format!(
-                            "an item of {} is a row of a table: name its column",
-                            item.row
-                        )));
-                    }
-                    Holds::Document(Items::Objects(_)) => {
-                        return Err(CompileError::NotAValue(format!(
-                            "an item of {} is an object of a document: name its member",
-                            item.row
-                        )));
-                    }
-                };
-                Ok((Fragment::text(sql), next))
-            }
-            Expr::Prefix(op, operand) => {
-                let precedence = precedence::prefix(*op);
-                let alone = param_type::under_prefix(*op, operand);
-                let (operand, next) = self.render(operand, item, next, Stand::Value)?;
-                let operand = operand.of_type(alone);
-                // `NOT NOT a` reads as it should; `--a` reads as a comment.
-                let doubled = *op == Prefix::Neg && operand.precedence == precedence;
-                let operand = operand.within(precedence, doubled);
-                let sql = match op {
-                    Prefix::Not => format!("NOT {}", operand.sql),
-                    Prefix::Neg => format!("-{}", operand.sql),
-                };
-                Ok((operand.with(sql, precedence), next))
-            }
-            Expr::Postfix(operand, op) => {
-                let precedence = precedence::postfix(*op);
-                let alone = param_type::under_postfix(operand);
-                let test = self.null_test(*op, operand, item)?;
-                // A member is read for whether it is null, which an object
-                // or a collection of a document has as a value has.
-                let (operand, next) = match operand.as_ref() {
-                    Expr::Field(path) => {
-                        let (sql, next) = self.member(path, item, next, Reading::NullTest)?;
-                        (Fragment::text(sql), next)
-                    }
-                    _ => self.render(operand, item, next, Stand::Value)?,
-                };
-                let operand = operand.of_type(alone);
-                let operand = operand.within(precedence, true);
-                let sql = format!("{} {test}", operand.sql);
-                Ok((operand.with(sql, precedence), next))
-            }
-            Expr::Infix(left, op, right) => {
-                if let (Stand::Truth, Infix::Comparison(Comparison::Eq)) = (stand, op) {
-                    if let Some((document, pattern)) = self.contained(left, right, item)? {
-                        let (pattern, params, next) = pattern.written(next)?;
-                        let fragment = Fragment {
-                            sql: format!("{document} @> {pattern}"),
-                            params,
-                            precedence: precedence::OTHER,
-                        };
-                        return Ok((fragment, next));
-                    }
-                }
-                let (precedence, associativity) = precedence::infix(*op);
-                let apart = |side| associativity != side && !precedence::regroups(*op);
-                let (of_left, of_right) = param_type::of_both(left, *op, right);
-                let count = param_type::is_a_count_to_cast(*op, right);
-                // The operands of `AND` and `OR` stand where the connective
-                // does; those of any other operator are values.
-                let operands = match op {
-                    Infix::Logical(_) => stand,
-                    Infix::Comparison(_) | Infix::Arithmetic(_) | Infix::Is => Stand::Value,
-                };
-                let (left, next) = self.render(left, item, next, operands)?;
-                let (right, next) = self.render(right, item, next, operands)?;
-                let left = left.of_type(of_left);
-                // A cast binds tighter than any operator: the count of a
-                // shift is parenthesised against the cast, if it is not an
-                // atom, before its type is said: `("b" + $1)::integer`.
-                let right = if count {
-                    right
-                        .within(precedence::CAST, false)
-                        .of_type(Some("integer"))
-                } else {
-                    right.of_type(of_right)
-                };
-                let left = left.within(precedence, apart(Associativity::Left));
-                let right = right.within(precedence, apart(Associativity::Right));
-                let sql = format!("{} {} {}", left.sql, spelling(*op), right.sql);
-                Ok((left.with(sql, precedence).and(right.params), next))
-            }
+            Expr::Value(value) => constant(value, next),
+            Expr::Field(path) => self.field(path, item, next),
+            Expr::Item(up) => itself(*up, item, next),
+            Expr::Prefix(op, operand) => self.prefix(*op, operand, item, next),
+            Expr::Postfix(operand, op) => self.postfix(operand, *op, item, next),
+            Expr::Infix(left, op, right) => self.infix(left, *op, right, item, next, stand),
             Expr::Any(source, predicate) => self.exists(source, predicate, item, next, stand),
         }
+    }
+
+    #[inline(never)]
+    fn field<V>(
+        &self,
+        path: &Path,
+        item: Option<&Item>,
+        next: Next,
+    ) -> Result<(Fragment<V>, Next), CompileError> {
+        let (sql, next) = self.member(path, item, next, Reading::Value)?;
+        Ok((Fragment::text(sql), next))
+    }
+
+    #[inline(never)]
+    fn prefix<V: Clone + ParamType>(
+        &self,
+        op: Prefix,
+        operand: &Expr<V>,
+        item: Option<&Item>,
+        next: Next,
+    ) -> Result<(Fragment<V>, Next), CompileError> {
+        let precedence = precedence::prefix(op);
+        let alone = param_type::under_prefix(op, operand);
+        let (operand, next) = self.render(operand, item, next, Stand::Value)?;
+        let operand = operand.of_type(alone);
+        // `NOT NOT a` reads as it should; `--a` reads as a comment.
+        let doubled = op == Prefix::Neg && operand.precedence == precedence;
+        let operand = operand.within(precedence, doubled);
+        let sql = match op {
+            Prefix::Not => format!("NOT {}", operand.sql),
+            Prefix::Neg => format!("-{}", operand.sql),
+        };
+        Ok((operand.with(sql, precedence), next))
+    }
+
+    #[inline(never)]
+    fn postfix<V: Clone + ParamType>(
+        &self,
+        operand: &Expr<V>,
+        op: Postfix,
+        item: Option<&Item>,
+        next: Next,
+    ) -> Result<(Fragment<V>, Next), CompileError> {
+        let precedence = precedence::postfix(op);
+        let alone = param_type::under_postfix(operand);
+        let test = self.null_test(op, operand, item)?;
+        // A member is read for whether it is null, which an object or a
+        // collection of a document has as a value has.
+        let (operand, next) = match operand {
+            Expr::Field(path) => {
+                let (sql, next) = self.member(path, item, next, Reading::NullTest)?;
+                (Fragment::text(sql), next)
+            }
+            _ => self.render(operand, item, next, Stand::Value)?,
+        };
+        let operand = operand.of_type(alone);
+        let operand = operand.within(precedence, true);
+        let sql = format!("{} {test}", operand.sql);
+        Ok((operand.with(sql, precedence), next))
+    }
+
+    #[inline(never)]
+    fn infix<V: Clone + ParamType>(
+        &self,
+        left: &Expr<V>,
+        op: Infix,
+        right: &Expr<V>,
+        item: Option<&Item>,
+        next: Next,
+        stand: Stand,
+    ) -> Result<(Fragment<V>, Next), CompileError> {
+        if let (Stand::Truth, Infix::Comparison(Comparison::Eq)) = (stand, op) {
+            if let Some(contained) = self.containment(left, right, item, next)? {
+                return Ok(contained);
+            }
+        }
+        let (precedence, associativity) = precedence::infix(op);
+        let apart = |side| associativity != side && !precedence::regroups(op);
+        let (of_left, of_right) = param_type::of_both(left, op, right);
+        let count = param_type::is_a_count_to_cast(op, right);
+        // The operands of `AND` and `OR` stand where the connective does;
+        // those of any other operator are values.
+        let operands = match op {
+            Infix::Logical(_) => stand,
+            Infix::Comparison(_) | Infix::Arithmetic(_) | Infix::Is => Stand::Value,
+        };
+        let (left, next) = self.render(left, item, next, operands)?;
+        let (right, next) = self.render(right, item, next, operands)?;
+        let left = left.of_type(of_left);
+        // A cast binds tighter than any operator: the count of a shift is
+        // parenthesised against the cast, if it is not an atom, before its
+        // type is said: `("b" + $1)::integer`.
+        let right = if count {
+            right
+                .within(precedence::CAST, false)
+                .of_type(Some("integer"))
+        } else {
+            right.of_type(of_right)
+        };
+        let left = left.within(precedence, apart(Associativity::Left));
+        let right = right.within(precedence, apart(Associativity::Right));
+        let sql = format!("{} {} {}", left.sql, spelling(op), right.sql);
+        Ok((left.with(sql, precedence).and(right.params), next))
+    }
+
+    /// `left = right` written as containment, where it is one.
+    #[inline(never)]
+    fn containment<V: Clone + ParamType>(
+        &self,
+        left: &Expr<V>,
+        right: &Expr<V>,
+        item: Option<&Item>,
+        next: Next,
+    ) -> Result<Option<(Fragment<V>, Next)>, CompileError> {
+        let Some((document, pattern)) = self.contained(left, right, item)? else {
+            return Ok(None);
+        };
+        let (pattern, params, next) = pattern.written(next)?;
+        let fragment = Fragment {
+            sql: format!("{document} @> {pattern}"),
+            params,
+            precedence: precedence::OTHER,
+        };
+        Ok(Some((fragment, next)))
     }
     /// The words of a null test: of the value as a whole, for a column the
     /// schema declares a composite.
@@ -609,6 +634,7 @@ impl<'s> Compiler<'s> {
     /// a collection of a document with a GIN index has beside it what the
     /// document contains if it is true: the equalities of the predicate,
     /// which follow from it, written as containment for the index.
+    #[inline(never)]
     fn exists<V: Clone + ParamType>(
         &self,
         source: &Path,
@@ -621,60 +647,92 @@ impl<'s> Compiler<'s> {
             Root::Global => None,
             Root::Item(up) => Some(item_out(item, up)?),
         };
-        if let Some(collection) = self.document_collection(source, enclosing)? {
-            let contained = match (stand, collection.gin) {
-                (Stand::Truth, Some((document, names))) => {
-                    let names: Vec<&str> = names.iter().map(String::as_str).collect();
-                    Pattern::of_array(&names, Pattern::elements(predicate, collection.items))
-                        .map(|pattern| (document, pattern))
-                }
-                _ => None,
-            };
-            let (contained, next) = match contained {
-                Some((document, pattern)) => {
-                    let (pattern, params, next) = pattern.written(next)?;
-                    (Some((format!("{document} @> {pattern}"), params)), next)
-                }
-                None => (None, next),
-            };
-            let number = next.alias + 1;
-            let inner = Item {
-                alias: format!("{}_{number}", singular_of(source.name())?),
-                row: collection.row,
-                holds: Holds::Document(collection.items),
-                outer: item,
-            };
-            let next = Next {
-                alias: number,
-                ..next
-            };
-            let (predicate, next) = self.render(predicate, Some(&inner), next, Stand::Truth)?;
-            // Values are read as text, and the text as their kind.
-            let elements = match collection.items {
-                Items::Objects(_) => "jsonb_array_elements",
-                Items::Values(_) => "jsonb_array_elements_text",
-            };
-            let sql = format!(
-                "EXISTS (SELECT 1 FROM {elements}({}) AS {} WHERE {})",
-                collection.array,
-                quoted(&inner.alias),
-                predicate.sql,
-            );
-            let exists = predicate.with(sql, ATOM);
-            let fragment = match contained {
-                None => exists,
-                Some((contains, params)) => {
-                    let (and, _) = precedence::infix(Infix::Logical(Logical::And));
-                    Fragment {
-                        sql: format!("{contains} AND {}", exists.sql),
-                        params,
-                        precedence: and,
-                    }
-                    .and(exists.params)
-                }
-            };
-            return Ok((fragment, next));
+        match self.document_collection(source, enclosing)? {
+            Some(collection) => {
+                self.exists_in_document(collection, source, predicate, item, next, stand)
+            }
+            None => self.exists_in_rows(source, enclosing, predicate, item, next),
         }
+    }
+
+    /// `EXISTS` over an array of a document, and beside it, where only its
+    /// truth counts and the document has a GIN index, what the document
+    /// contains if it is true.
+    #[inline(never)]
+    fn exists_in_document<V: Clone + ParamType>(
+        &self,
+        collection: DocumentCollection<'_>,
+        source: &Path,
+        predicate: &Expr<V>,
+        item: Option<&Item>,
+        next: Next,
+        stand: Stand,
+    ) -> Result<(Fragment<V>, Next), CompileError> {
+        let contained = match (stand, collection.gin) {
+            (Stand::Truth, Some((document, names))) => {
+                let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                Pattern::of_array(&names, Pattern::elements(predicate, collection.items))
+                    .map(|pattern| (document, pattern))
+            }
+            _ => None,
+        };
+        let (contained, next) = match contained {
+            Some((document, pattern)) => {
+                let (pattern, params, next) = pattern.written(next)?;
+                (Some((format!("{document} @> {pattern}"), params)), next)
+            }
+            None => (None, next),
+        };
+        let number = next.alias + 1;
+        let inner = Item {
+            alias: format!("{}_{number}", singular_of(source.name())?),
+            row: collection.row,
+            holds: Holds::Document(collection.items),
+            outer: item,
+        };
+        let next = Next {
+            alias: number,
+            ..next
+        };
+        let (predicate, next) = self.render(predicate, Some(&inner), next, Stand::Truth)?;
+        // Values are read as text, and the text as their kind.
+        let elements = match collection.items {
+            Items::Objects(_) => "jsonb_array_elements",
+            Items::Values(_) => "jsonb_array_elements_text",
+        };
+        let sql = format!(
+            "EXISTS (SELECT 1 FROM {elements}({}) AS {} WHERE {})",
+            collection.array,
+            quoted(&inner.alias),
+            predicate.sql,
+        );
+        let exists = predicate.with(sql, ATOM);
+        let fragment = match contained {
+            None => exists,
+            Some((contains, params)) => {
+                let (and, _) = precedence::infix(Infix::Logical(Logical::And));
+                Fragment {
+                    sql: format!("{contains} AND {}", exists.sql),
+                    params,
+                    precedence: and,
+                }
+                .and(exists.params)
+            }
+        };
+        Ok((fragment, next))
+    }
+
+    /// `EXISTS` over an array of the parent's row, or over the rows of a
+    /// table that point at the parent.
+    #[inline(never)]
+    fn exists_in_rows<V: Clone + ParamType>(
+        &self,
+        source: &Path,
+        enclosing: Option<&Item>,
+        predicate: &Expr<V>,
+        item: Option<&Item>,
+        next: Next,
+    ) -> Result<(Fragment<V>, Next), CompileError> {
         // The row the collection is of, to the schema: the enclosing item's,
         // or the root's. Without a schema there is no relation to look for.
         let of: Option<String> = match (enclosing, self.schema) {
@@ -917,6 +975,53 @@ impl<'s> Compiler<'s> {
             }
         }
     }
+}
+
+/// A constant: the next parameter. In memory a text with a NUL in it is a
+/// string like any other; here it meets the server, which has no such text.
+#[inline(never)]
+fn constant<V: Clone + ParamType>(
+    value: &V,
+    next: Next,
+) -> Result<(Fragment<V>, Next), CompileError> {
+    if value.nul_in_text() {
+        return Err(CompileError::NulInText);
+    }
+    let param = next.param + 1;
+    let fragment = Fragment {
+        sql: format!("${param}"),
+        params: vec![value.clone()],
+        precedence: ATOM,
+    };
+    Ok((fragment, Next { param, ..next }))
+}
+
+/// The item `up` collections out itself: the alias `unnest` gives an
+/// element, or the text of a document's value read as its kind.
+#[inline(never)]
+fn itself<V>(
+    up: usize,
+    item: Option<&Item>,
+    next: Next,
+) -> Result<(Fragment<V>, Next), CompileError> {
+    let item = item_out(item, up)?;
+    let sql = match item.holds {
+        Holds::Unnested => quoted(&item.alias),
+        Holds::Document(Items::Values(kind)) => kind.read(&quoted(&item.alias)),
+        Holds::Table => {
+            return Err(CompileError::NotAValue(format!(
+                "an item of {} is a row of a table: name its column",
+                item.row
+            )));
+        }
+        Holds::Document(Items::Objects(_)) => {
+            return Err(CompileError::NotAValue(format!(
+                "an item of {} is an object of a document: name its member",
+                item.row
+            )));
+        }
+    };
+    Ok((Fragment::text(sql), next))
 }
 
 /// How many parameters and aliases have been numbered so far.
