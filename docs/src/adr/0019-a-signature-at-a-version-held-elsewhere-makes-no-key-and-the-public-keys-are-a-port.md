@@ -42,6 +42,12 @@ request's fault and not the version's. Held by `tests/vault_mapping.rs`
 (each case against a scripted transport) and the holder's test in
 `tests/vault_signing.rs` (`verify` under the holder's token is `Forbidden`).
 
+Amended 2026-10-23: the alternatives to decision 5 that the review of this
+ADR found unweighed — the stored public half sealed under the master key,
+and sealed for reading with the pair checked at signing — are recorded
+under the alternatives rejected, with the consequence on a publisher's
+privileges on PostgreSQL.
+
 ## Context
 
 `SigningService` signed with the latest version of a tenant's key of an
@@ -166,6 +172,12 @@ Measured on Vault 1.21.4 OSS, Transit, `ecdsa-p256` and `ed25519`:
   one scalar multiplication per version — and fail with `Decrypt` under a
   wrong master key, as `sign` does: integrity over availability for what a
   verifier trusts.
+- On PostgreSQL a publisher of public keys holds the master key, as a
+  signer does, and so could sign: the separation `PublicKeyService` is made
+  for — a holder of public keys that cannot sign — is Vault's alone, where
+  the publisher holds `read` on the key and nothing else. The adapter's
+  posture is the simple one (ADR-0016), and nothing short of Vault behind
+  the same port changes it.
 - The version that signs lives in the consumer's configuration; it can name
   a version the KMS has not made or no longer signs with, which the crate
   turns into `NoKeyOfVersion` at the first signature. A consumer turns that
@@ -228,6 +240,33 @@ makes the hazard of point 1 the obvious line.
 
 **The stored public half on PostgreSQL.** Cheaper by an unwrap per version,
 and a trust anchor anyone who can write the table controls.
+
+**The stored public half sealed under the master key.** Tamper-evident as
+the derivation is, and the private half stays wrapped while a verifier or
+a publisher reads: a step towards the posture Vault has in full behind the
+same port. It authenticates the writer and not the pair: a public half of
+another key, sealed by the master key's holder — a fault of a rotation, an
+import — passes, where the derivation refuses it. The processor is no
+argument either way, a scalar multiplication and an AES-GCM open both
+vanishing in the round trip to the table; the difference is the private
+half in memory on the paths that verify and publish, which is below the
+adapter's posture — the master key is in the process, and the private half
+in memory at every signing. And the separation the port is made for, a
+publisher that cannot sign, neither gives on PostgreSQL: both need the
+master key, which opens everything. Found unweighed by the review of
+2026-10-23, and weighed then.
+
+**Both, sealed for reading and derived at signing.** Covers both
+properties: the pair checked where the private half is unwrapped anyway,
+nothing unwrapped to verify or to publish. It replaces the derivation rather
+than stands beside it, at the price of a column, a migration of every row,
+and a fourth run of the custody tests; deferred until a publisher of public
+keys runs on the PostgreSQL adapter, which none does.
+
+**A switch between the two.** The property the adapter holds would then be
+the configuration's, for a difference below its posture; two formats of the
+table and a doubled test matrix to hold it — the ground on which ADR-0020
+refused a type-state switch.
 
 **An unexplained `400` left to Vault.** Contradicts ADR-0017 point 5: a
 request the adapter itself composes is not mended by a retry.
