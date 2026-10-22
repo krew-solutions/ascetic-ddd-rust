@@ -227,9 +227,12 @@ expression the index is on, which containment of the whole document is not.
 Under `NOT`, with a null constant, of a member of another kind, an equality
 is what it was: containment is false where the equality is null,
 and agrees with it only for a kind with one spelling in JSON. The pattern is
-made of immutable functions, which the server folds into a constant;
-`jsonb_build_object` is stable, and is called again for every row a scan
-reads.
+made of immutable functions, which the server folds into a constant under a
+custom plan, where the parameters are known; under a generic plan - a named
+prepared statement after its fifth execution - it is evaluated for every row
+a sequential scan reads, and once for an index scan (ADR-0027).
+`jsonb_build_object` is stable, and is called again for every row under
+either plan.
 
 ## What maps to what
 

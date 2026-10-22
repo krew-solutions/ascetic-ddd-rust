@@ -2,16 +2,19 @@
 
 ## Status
 
-Proposed (2026-10-22), for the owner's review. A review of ADR-0021 to
-ADR-0026 from a premise the two designs behind them did not start from -
-the construction of interpreters for a DSL - read against the code, the
-tests and PostgreSQL 14.24. Each finding below is a measurement, and the
-SQL that makes it is in the text.
+Accepted (2026-10-23), decisions 1 and 2; decision 3 is deferred, the
+owner's to decide. Proposed 2026-10-22. A review of ADR-0021 to ADR-0026
+from a premise the two designs behind them did not start from - the
+construction of interpreters for a DSL - read against the code, the tests
+and PostgreSQL 14.24. Each finding below is a measurement, and the SQL that
+makes it is in the text.
 
 Decision 1 is held by the tests named under it. Decision 2 bounds a
-measurement and changes no query. Decision 3 is not yet held: the test named
-under it is to be written with the change, as ADR-0009 named tests that
-failed at its commit. Until it is green the status stays as it is.
+measurement and changes no query; the crate's README and its `containment`
+module state the bound. Decision 3 is deferred: a test gate is the weakest
+of three executors for the finding it answers, and no repository in this
+workspace declares an index yet; the choice among the three is under the
+decision, with the design of the gate kept for when it is taken up.
 
 Amends ADR-0021 (the consequence on a collection that is a JSON null) and
 ADR-0022 (the reach of its measurement of the fold).
@@ -150,6 +153,32 @@ one it replaced.
    every member the layout declares. To be held by: the three `EXPLAIN`
    tests of `tests/pg.rs` rewritten through the function, which are its
    test; and a test in each service's repository that declares an index.
+
+   Deferred (2026-10-23), the owner's to decide between three executors
+   of the finding. The gate above, test infrastructure: it catches a
+   declaration without its migration in CI, where a repository writes the
+   call. A schema that reads its GIN indexes from the catalog at the
+   composition root: the README defines a schema by what `\d` shows, and
+   a missing index then degrades the condition to the plain equality,
+   with no claim left to be false - the text of a query becomes the
+   environment's, and a forgotten migration is seen in a log line or by a
+   test of the indexes expected, which is a test again, of intent and not
+   of plans. DDL generated from the schema, the declaration and the
+   migration one artifact: the services' migrations to decide. Worked for
+   the gate, a blind solver against a discriminator, measured on
+   PostgreSQL 14.24, and kept here: a function of `pg::testing` behind
+   `pg`, which gains `tokio-postgres` as the `pg` features of kms, dek and
+   event-store have it; it takes a `GenericClient`, the schema, the
+   specification and the index's name, derives `FROM` from the schema's
+   table and alias, which the compiler qualified the columns with, runs
+   `EXPLAIN (FORMAT JSON)` with the parameters under `SET LOCAL
+   enable_seqscan = off` in a savepoint rolled back on every path - in a
+   transaction of its own where there is none, `SAVEPOINT` outside one
+   being SQLSTATE 25P01 - and requires `"Index Name": "<name>"` in the
+   plan, the closing quote against a name that is a prefix of another. A
+   table of one row without statistics takes the index so, and a generic
+   plan takes the same indexes. Existence in `pg_indexes` is not serving:
+   an index on the text without `COLLATE "C"` exists and serves nothing.
 
 ## Consequences
 

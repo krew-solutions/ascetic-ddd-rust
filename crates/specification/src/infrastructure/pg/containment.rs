@@ -17,7 +17,11 @@
 //! The pattern is built of functions the server folds into a constant,
 //! `jsonb_object` and `jsonb_set`, which are immutable: `jsonb_build_object`
 //! is stable, and is called again for every row a sequential scan reads -
-//! three times the time of the scan, measured on PostgreSQL 14.
+//! three times the time of the scan, measured on PostgreSQL 14. The fold is
+//! a custom plan's, where the parameters are known; under a generic plan the
+//! pattern is evaluated for every row of a sequential scan, three times the
+//! time of the equality it replaced, and once for an index scan, where it
+//! costs nothing (ADR-0027).
 
 use super::layout::{Items, Kind, Layout, Member};
 use super::param_type::ParamType;
