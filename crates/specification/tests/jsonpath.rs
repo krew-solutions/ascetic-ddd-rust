@@ -2,7 +2,7 @@
 //! `parser_test` check, and what this parser refuses that theirs let through.
 
 use ascetic_ddd_specification::ast::{
-    and, any, equal, field, greater_than, is_not_null, is_null, less_than, not, or,
+    and, any, equal, field, greater_than, is_not_null, is_null, item, less_than, not, or,
 };
 use ascetic_ddd_specification::jsonpath::{
     BindError, MAX_LENGTH, MatchError, Param, ParamKey, ParamKind, Params, Slot, SyntaxError,
@@ -509,6 +509,9 @@ fn what_the_grammar_does_not_have_is_refused() {
         ("$.items", "Expected wildcard '[*]'", 7),
         ("$[?@. > 1]", "Expected field name", 6),
         ("$[?@ > 1]", "Expected field name", 5),
+        // The item itself is a value, not a collection; `$` is no value.
+        ("$.tags[*][?@[*][?@ == 1]]", "Expected field name", 12),
+        ("$.tags[*][?$ == 1]", "Expected field name", 13),
         ("$[?@.age > ]", "Unexpected token ']'", 11),
         ("$[?@.age > foo]", "Unexpected token 'foo'", 11),
         ("$[?@.age > %x]", "Malformed placeholder", 11),
@@ -565,7 +568,7 @@ fn what_the_grammar_does_not_have_is_refused() {
 /// through, and what dropping it does.
 fn height<V>(expr: &Expr<V>) -> usize {
     match expr {
-        Expr::Value(_) | Expr::Field(_) => 1,
+        Expr::Value(_) | Expr::Field(_) | Expr::Item(_) => 1,
         Expr::Prefix(_, operand) | Expr::Postfix(operand, _) | Expr::Any(_, operand) => {
             1 + height(operand)
         }
@@ -784,4 +787,32 @@ fn a_tree_has_a_bound_on_its_depth() {
     let chained = format!("$[?@.a{}]", " && @.a".repeat(200));
     assert_eq!(error(&chained).message, "Expression is nested too deep");
     assert!(Template::parse(&format!("$[?@.a{}]", " && @.a".repeat(100))).is_ok());
+}
+
+/// `@` alone in the predicate of a collection is the item itself, as RFC
+/// 9535 has it: an element of a collection of values. Bound to a null, its
+/// equality is the null test, as a member's is.
+#[test]
+fn a_bare_at_is_the_element_of_a_collection_of_values() {
+    let tagged = template("$.tags[*][?@ == %s]");
+    assert_eq!(
+        tagged.bind(&Params::positional(["sale"])),
+        Ok(any("tags", equal(item(), Expr::Value(Value::from("sale"))))),
+    );
+    assert_eq!(
+        tagged.bind(&Params::positional([Value::Null])),
+        Ok(any("tags", is_null(item()))),
+    );
+    let policy = Record::object([(
+        "tags",
+        Record::collection([Record::value("sale"), Record::value("new")]),
+    )]);
+    assert_eq!(
+        tagged.matches(&policy, &Params::positional(["new"])),
+        Ok(true)
+    );
+    assert_eq!(
+        tagged.matches(&policy, &Params::positional(["old"])),
+        Ok(false)
+    );
 }

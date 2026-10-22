@@ -15,13 +15,13 @@
 use ascetic_ddd_specification::ast::{
     add, all, and, any, div, equal, field, greater_than, greater_than_equal, is, is_not_null,
     is_null, left_shift, less_than, less_than_equal, modulo, mul, neg, not, not_equal, or,
-    right_shift, sub, value,
+    outer_item, right_shift, sub, value,
 };
 use ascetic_ddd_specification::jsonpath::{Params, Template};
-use ascetic_ddd_specification::pg::{Compiler, Schema, compile};
+use ascetic_ddd_specification::pg::{Compiler, Kind, Layout, Schema, compile};
 use ascetic_ddd_specification::{
-    Arithmetic, Date, EvalError, Expr, Interval, Mapped, Mapping, Operand, OperandError, Path,
-    Record, Timestamp, Value, evaluate, is_satisfied_by, transform,
+    Arithmetic, ContextError, Date, EvalError, Expr, Interval, Mapped, Mapping, Operand,
+    OperandError, Path, Record, Timestamp, Value, evaluate, is_satisfied_by, transform,
 };
 use std::cmp::Ordering;
 use tokio_postgres::error::SqlState;
@@ -362,6 +362,19 @@ fn stores() -> Vec<Store> {
 }
 
 impl Store {
+    /// The store's tags: a collection of values, kept as an array of text
+    /// and in the document as an array of strings. A tag may be null.
+    fn tags(&self) -> Vec<Option<&'static str>> {
+        match self.id {
+            1 => vec![Some("sale"), Some("new")],
+            2 => vec![Some("new"), None, Some("cheap")],
+            3 => vec![],
+            4 => vec![Some("sale"), Some("four")],
+            5 => vec![None],
+            _ => vec![Some("dear"), Some("sale")],
+        }
+    }
+
     /// The store's owner, kept as the owners of items are: in the table of
     /// owners, by a key.
     fn owner(&self) -> (i64, Option<&'static str>) {
@@ -396,6 +409,10 @@ fn record(store: &Store) -> Record<Value> {
         ("name", Record::value(store.name)),
         ("items", Record::collection(items)),
         (
+            "tags",
+            Record::collection(store.tags().into_iter().map(Record::value)),
+        ),
+        (
             "owner",
             Record::object([("name", Record::value(store.owner().1))]),
         ),
@@ -420,7 +437,8 @@ async fn tables(client: &Client) {
              CREATE TEMP TABLE spec_stores (
                  id int8 PRIMARY KEY, a int8, b int8, flag bool, name text,
                  items pg_temp.spec_item[] NOT NULL,
-                 "user" text, "order" int8, "createdAt" int8, owner_id int8
+                 "user" text, "order" int8, "createdAt" int8, owner_id int8,
+                 tags text[] NOT NULL
              );
              CREATE TEMP TABLE spec_items (
                  store_id int8 NOT NULL, price int8, active bool, maker pg_temp.spec_maker,
@@ -432,7 +450,7 @@ async fn tables(client: &Client) {
     for store in stores() {
         client
             .execute(
-                "INSERT INTO spec_stores VALUES ($1, $2, $3, $4, $5, '{}', $5, $2, $3, $6)",
+                "INSERT INTO spec_stores VALUES ($1, $2, $3, $4, $5, '{}', $5, $2, $3, $6, $7)",
                 &[
                     &store.id,
                     &store.a,
@@ -440,6 +458,7 @@ async fn tables(client: &Client) {
                     &store.flag,
                     &store.name,
                     &store.owner().0,
+                    &store.tags(),
                 ],
             )
             .await
@@ -460,6 +479,114 @@ async fn tables(client: &Client) {
                 .await
                 .expect("an item");
         }
+    }
+}
+
+/// What the stores' documents hold: a store as one `jsonb` document, the
+/// owner and the maker objects in it, the items an array of objects in it.
+fn store_layout() -> Layout {
+    let named = || Layout::new().value("name", Kind::Text);
+    Layout::new()
+        .value("a", Kind::Int)
+        .value("b", Kind::Int)
+        .value("flag", Kind::Bool)
+        .value("name", Kind::Text)
+        .value("user", Kind::Text)
+        .value("order", Kind::Int)
+        .value("createdAt", Kind::Int)
+        .values("tags", Kind::Text)
+        .object("owner", named())
+        .collection(
+            "items",
+            Layout::new()
+                .value("price", Kind::Int)
+                .value("active", Kind::Bool)
+                .object("maker", named())
+                .object("owner", named()),
+        )
+}
+
+/// The stores as documents, and beside each document two of its members
+/// as columns the server generates from it: what a listing would filter by
+/// with a btree index of its own.
+async fn documents(client: &Client) {
+    client
+        .batch_execute(
+            r#"CREATE TEMP TABLE spec_documents (
+                 id int8 PRIMARY KEY,
+                 a int8 GENERATED ALWAYS AS ((document ->> 'a')::bigint) STORED,
+                 flag bool GENERATED ALWAYS AS ((document ->> 'flag')::boolean) STORED,
+                 document jsonb NOT NULL
+             );
+             CREATE INDEX ON spec_documents USING gin (document jsonb_path_ops);
+             CREATE INDEX ON spec_documents USING gin ((document -> 'tags'));"#,
+        )
+        .await
+        .expect("a table of documents");
+    for store in stores() {
+        client
+            .execute(
+                "INSERT INTO spec_documents (id, document) VALUES ($1, jsonb_build_object(
+                     'a', $2::int8, 'b', $3::int8, 'flag', $4::bool, 'name', $5::text,
+                     'owner', jsonb_build_object('name', $6::text), 'items', '[]'::jsonb,
+                     'user', $5::text, 'order', $2::int8, 'createdAt', $3::int8,
+                     'tags', to_jsonb($7::text[])))",
+                &[
+                    &store.id,
+                    &store.a,
+                    &store.b,
+                    &store.flag,
+                    &store.name,
+                    &store.owner().1,
+                    &store.tags(),
+                ],
+            )
+            .await
+            .expect("a document");
+        for item in &store.items {
+            client
+                .execute(
+                    "UPDATE spec_documents SET document = jsonb_set(document, '{items}',
+                         document -> 'items' || jsonb_build_array(jsonb_build_object(
+                             'price', $2::int8, 'active', $3::bool,
+                             'maker', jsonb_build_object('name', $4::text),
+                             'owner', jsonb_build_object('name', $5::text))))
+                     WHERE id = $1",
+                    &[
+                        &store.id,
+                        &item.price,
+                        &item.active,
+                        &item.maker_name(),
+                        &item.owner().1,
+                    ],
+                )
+                .await
+                .expect("an item of a document");
+        }
+    }
+}
+
+/// A mapping to a document: a member is the member at the same path in the
+/// column `document`, unless it is one of the members kept as columns of
+/// their own beside the document.
+struct InTheDocument(&'static [&'static str]);
+
+impl Mapping<Value, Value> for InTheDocument {
+    type Error = String;
+
+    fn field(&self, path: &Path) -> Result<Mapped<Value>, String> {
+        let beside = path.objects().is_empty() && self.0.contains(&path.name());
+        let storage = if beside {
+            path.clone()
+        } else {
+            path.names()
+                .fold(Path::new(path.root(), "document"), Path::child)
+        };
+        Ok(Mapped::Scalar(Expr::Field(storage)))
+    }
+
+    fn value(&self, value: &Value) -> Result<Mapped<Value>, String> {
+        Ok(Mapped::Scalar(Expr::Value(value.clone())))
     }
 }
 
@@ -558,13 +685,91 @@ fn specifications() -> Vec<Spec> {
             "$.items[*][?@.active != null && @.price > 500]",
             Params::none(),
         ),
+        // Equalities where only truth counts and where it does not: what a
+        // GIN index on a document has them written as containment, and not.
+        not(equal(field("name"), value("one"))),
+        or(
+            equal(field("name"), value("one")),
+            equal(field("a"), value(7)),
+        ),
+        and(
+            equal(field("flag"), value(true)),
+            equal(field("b"), value(1)),
+        ),
+        not(and(
+            equal(field("flag"), value(true)),
+            equal(field("b"), value(1)),
+        )),
+        any("items", and(equal(item("active"), value(true)), dear())),
+        any("items", equal(maker_name(), value("cheap"))),
+        any(
+            "items",
+            and(
+                equal(item("price"), value(900)),
+                equal(owner_name(), value("ann")),
+            ),
+        ),
+        any(
+            "items",
+            and(
+                equal(item("price"), value(10)),
+                equal(item("price"), value(900)),
+            ),
+        ),
+        not(any("items", equal(item("price"), value(10)))),
+        all("items", equal(item("active"), value(true))),
+        or(field("flag"), any("items", equal(item("price"), value(10)))),
+        // Built by hand, `= NULL` is null of every row.
+        equal(field("name"), null()),
+        any("items", equal(item("active"), null())),
+        // A collection of values: its element is the item itself.
+        any("tags", equal(element(), value("sale"))),
+        not(any("tags", equal(element(), value("sale")))),
+        all("tags", not_equal(element(), value("new"))),
+        any("tags", is_null(element())),
+        any("tags", equal(element(), field("name"))),
+        and(field("flag"), any("tags", equal(element(), value("new")))),
+        or(
+            any("tags", equal(element(), value("cheap"))),
+            any("tags", equal(element(), value("four"))),
+        ),
+        any(
+            "tags",
+            and(
+                equal(element(), value("sale")),
+                equal(element(), value("new")),
+            ),
+        ),
+        any(
+            "tags",
+            or(
+                equal(element(), value("cheap")),
+                equal(element(), value("four")),
+            ),
+        ),
+        any("tags", equal(element(), null())),
+        // The element beside a member of the item of an enclosing collection.
+        any(
+            "items",
+            any(
+                "tags",
+                equal(element(), field(Path::outer(1, "maker").child("name"))),
+            ),
+        ),
+        bound("$.tags[*][?@ == %s]", Params::positional(["new"])),
+        bound("$.tags[*][?@ == %s]", Params::positional([Value::Null])),
     ]
+}
+
+fn element() -> Spec {
+    outer_item(0)
 }
 
 #[tokio::test]
 async fn a_specification_selects_the_rows_it_is_satisfied_by() {
     let client = client().await;
     tables(&client).await;
+    documents(&client).await;
     // The owner of an item is in a table of its own in either storage of the items.    // The schema is the storage's keys; the tree reaches the compiler in the
     // storage's names, which a mapping gives it: the items are a table of
     // their own in one storage and an array in the other, and the owner is
@@ -585,21 +790,70 @@ async fn a_specification_selects_the_rows_it_is_satisfied_by() {
         "owner" => "owner_id",
         name => name,
     });
+    // A store as a document, every member read from it; or two of its
+    // members read from the columns generated from it, which are what the
+    // document says or the two would select other rows.
+    let document =
+        Schema::new("spec_documents").document("spec_documents", "document", store_layout());
+    let in_the_document = InTheDocument(&[]);
+    let beside_the_document = InTheDocument(&["a", "flag"]);
+    // The same, the server told the document has a GIN index: equalities
+    // where only truth counts are written as containment.
+    let indexed = document.clone().gin("spec_documents", "document");
+    // The same, told the tags have a GIN index of their own.
+    let tags_indexed = document
+        .clone()
+        .gin_at("spec_documents", "document", "tags");
     for specification in specifications() {
         let satisfied: Vec<i64> = stores()
             .iter()
             .filter(|store| is_satisfied_by(&specification, &record(store)).expect("evaluated"))
             .map(|store| store.id)
             .collect();
-        for (storage, schema, mapping) in [
-            ("embedded", &embedded, &in_the_row),
-            ("relational", &relational, &in_a_table),
-        ] {
+        let storages: [(&str, &str, &Schema, Spec); 6] = [
+            (
+                "embedded",
+                "spec_stores",
+                &embedded,
+                transform(&specification, &in_the_row).expect("transformed"),
+            ),
+            (
+                "relational",
+                "spec_stores",
+                &relational,
+                transform(&specification, &in_a_table).expect("transformed"),
+            ),
+            (
+                "document",
+                "spec_documents",
+                &document,
+                transform(&specification, &in_the_document).expect("transformed"),
+            ),
+            (
+                "document and columns",
+                "spec_documents",
+                &document,
+                transform(&specification, &beside_the_document).expect("transformed"),
+            ),
+            (
+                "document with a GIN index",
+                "spec_documents",
+                &indexed,
+                transform(&specification, &in_the_document).expect("transformed"),
+            ),
+            (
+                "document with a GIN index on its tags",
+                "spec_documents",
+                &tags_indexed,
+                transform(&specification, &in_the_document).expect("transformed"),
+            ),
+        ];
+        for (storage, table, schema, tree) in storages {
             let query = Compiler::new()
                 .schema(schema)
-                .compile(&transform(&specification, mapping).expect("transformed"))
-                .expect("compiled");
-            let text = format!("SELECT id FROM spec_stores WHERE {} ORDER BY id", query.sql);
+                .compile(&tree)
+                .unwrap_or_else(|error| panic!("{storage}: {error}"));
+            let text = format!("SELECT id FROM {table} WHERE {} ORDER BY id", query.sql);
             let params: Vec<&(dyn ToSql + Sync)> = query
                 .params
                 .iter()
@@ -1392,6 +1646,551 @@ async fn a_string_constant_is_read_as_the_kind_of_the_column_beside_it() {
     );
 }
 
+/// A document does not say the kinds of its members: a point in time, a
+/// date and a UUID are strings in it, and a number is one with or without a
+/// fraction. Read as the layout says, a member is compared as its kind: a
+/// string constant beside it is read as that kind (ADR-0015), as beside a
+/// column of that type, and a text is ordered by code point. Compared as the
+/// text of the document, the midnight `"2026-09-01T00:00:00.000000Z"` would
+/// be greater than `"2026-09-01"`, and `"B"` would come after `"a"` in the
+/// database's collation.
+#[tokio::test]
+async fn a_member_of_a_document_is_compared_as_its_declared_kind() {
+    let client = client().await;
+    client
+        .batch_execute(
+            r#"SET TIME ZONE 'UTC';
+             CREATE TEMP TABLE spec_kind_documents (id int8, document jsonb NOT NULL);
+             INSERT INTO spec_kind_documents VALUES
+                 (1, '{"at": "2026-09-01T00:00:00.000000Z", "day": "2026-09-01",
+                       "uid": "3f2a0c1e-5b7d-4e8a-9f01-23456789abcd", "weight": 0.1, "word": "B"}'),
+                 (2, '{"at": "2026-09-02T12:00:00.000000Z", "day": "2026-09-02",
+                       "uid": "00000000-0000-0000-0000-000000000001", "weight": 1.0, "word": "a"}'),
+                 (3, '{"at": null, "day": null, "uid": null, "weight": null, "word": null}');"#,
+        )
+        .await
+        .expect("a table of documents");
+    let at = |day: u32, hour: u32| {
+        let moment = chrono::NaiveDate::from_ymd_opt(2026, 9, day)
+            .unwrap()
+            .and_hms_opt(hour, 0, 0)
+            .unwrap()
+            .and_utc();
+        Timestamp::from_micros(moment.timestamp_micros())
+    };
+    let day = |day: u32| Date::from(chrono::NaiveDate::from_ymd_opt(2026, 9, day).unwrap());
+    let ann = uuid::Uuid::parse_str("3f2a0c1e-5b7d-4e8a-9f01-23456789abcd").unwrap();
+    let rows: [(i64, Record<Value>); 3] = [
+        (
+            1,
+            Record::object([
+                ("at", Record::value(at(1, 0))),
+                ("day", Record::value(day(1))),
+                ("uid", Record::value(ann)),
+                ("weight", Record::value(0.1)),
+                ("word", Record::value("B")),
+            ]),
+        ),
+        (
+            2,
+            Record::object([
+                ("at", Record::value(at(2, 12))),
+                ("day", Record::value(day(2))),
+                ("uid", Record::value(uuid::Uuid::from_u128(1))),
+                ("weight", Record::value(1.0)),
+                ("word", Record::value("a")),
+            ]),
+        ),
+        (
+            3,
+            Record::object([
+                ("at", Record::value(Value::Null)),
+                ("day", Record::value(Value::Null)),
+                ("uid", Record::value(Value::Null)),
+                ("weight", Record::value(Value::Null)),
+                ("word", Record::value(Value::Null)),
+            ]),
+        ),
+    ];
+    let schema = Schema::new("spec_kind_documents").document(
+        "spec_kind_documents",
+        "document",
+        Layout::new()
+            .value("at", Kind::Timestamp)
+            .value("day", Kind::Date)
+            .value("uid", Kind::Uuid)
+            .value("weight", Kind::Float)
+            .value("word", Kind::Text),
+    );
+    let specifications: [(Spec, Vec<i64>); 11] = [
+        (greater_than(field("at"), value("2026-09-01")), vec![2]),
+        (
+            greater_than_equal(field("at"), value("2026-09-01T03:00:00+03:00")),
+            vec![1, 2],
+        ),
+        (equal(field("at"), value(at(2, 12))), vec![2]),
+        (equal(field("day"), value("2026-09-01")), vec![1]),
+        (less_than(field("day"), value(day(2))), vec![1]),
+        (
+            equal(field("uid"), value("3F2A0C1E-5B7D-4E8A-9F01-23456789ABCD")),
+            vec![1],
+        ),
+        (greater_than(field("weight"), value(0.5)), vec![2]),
+        // An integer beside a number: `1.0` is `1`.
+        (equal(field("weight"), value(1)), vec![2]),
+        (not(greater_than(field("weight"), value(0.5))), vec![1]),
+        (less_than(field("word"), value("a")), vec![1]),
+        (is_null(field("at")), vec![3]),
+    ];
+    for (specification, expected) in &specifications {
+        let satisfied: Vec<i64> = rows
+            .iter()
+            .filter(|(_, row)| is_satisfied_by(specification, row).expect("evaluated"))
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(&satisfied, expected, "the evaluator, {specification:?}");
+        let tree = transform(specification, &InTheDocument(&[])).expect("transformed");
+        let query = Compiler::new()
+            .schema(&schema)
+            .compile(&tree)
+            .expect("compiled");
+        let text = format!(
+            "SELECT id FROM spec_kind_documents WHERE {} ORDER BY id",
+            query.sql
+        );
+        let params: Vec<&(dyn ToSql + Sync)> = query
+            .params
+            .iter()
+            .map(|param| param as &(dyn ToSql + Sync))
+            .collect();
+        let selected: Vec<i64> = client
+            .query(&text, &params)
+            .await
+            .unwrap_or_else(|error| panic!("{text}: {error}"))
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert_eq!(&selected, expected, "{text}");
+    }
+}
+
+/// The text a member of a document is read by is an expression a btree
+/// index can be made on, and the server matches the index by it: the cast
+/// of a number, the collation of a text. A point in time and a date are
+/// not so: their casts depend on the session's settings, and the server
+/// refuses an index on them - such a member is a column beside the document.
+#[tokio::test]
+async fn an_index_on_the_expression_of_a_member_serves_its_comparisons() {
+    let client = client().await;
+    client
+        .batch_execute(
+            r#"CREATE TEMP TABLE spec_indexed (id int8 PRIMARY KEY, document jsonb NOT NULL);
+             INSERT INTO spec_indexed
+                 SELECT n, jsonb_build_object('priority', n % 50, 'status', 's' || n,
+                                              'at', '2026-09-01T00:00:00.000000Z')
+                 FROM generate_series(1, 1000) AS n;
+             CREATE INDEX spec_indexed_priority ON spec_indexed (((document ->> 'priority')::bigint));
+             CREATE INDEX spec_indexed_status ON spec_indexed (((document ->> 'status') COLLATE "C"));
+             ANALYZE spec_indexed;
+             SET enable_seqscan = off;"#,
+        )
+        .await
+        .expect("an indexed table");
+    let schema = Schema::new("spec_indexed").document(
+        "spec_indexed",
+        "document",
+        Layout::new()
+            .value("priority", Kind::Int)
+            .value("status", Kind::Text),
+    );
+    let indexed: [(Spec, &str); 3] = [
+        (
+            greater_than(field("document.priority"), value(48)),
+            "spec_indexed_priority",
+        ),
+        (
+            equal(field("document.status"), value("s7")),
+            "spec_indexed_status",
+        ),
+        (
+            less_than(field("document.status"), value("s1")),
+            "spec_indexed_status",
+        ),
+    ];
+    for (specification, index) in indexed {
+        let query = Compiler::new()
+            .schema(&schema)
+            .compile(&specification)
+            .expect("compiled");
+        let text = format!("EXPLAIN SELECT id FROM spec_indexed WHERE {}", query.sql);
+        let params: Vec<&(dyn ToSql + Sync)> = query
+            .params
+            .iter()
+            .map(|param| param as &(dyn ToSql + Sync))
+            .collect();
+        let plan: String = client
+            .query(&text, &params)
+            .await
+            .unwrap_or_else(|error| panic!("{text}: {error}"))
+            .iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plan.contains(index), "{text}\n{plan}");
+    }
+    let refused = client
+        .batch_execute(
+            "CREATE INDEX spec_indexed_at ON spec_indexed (((document ->> 'at')::timestamptz))",
+        )
+        .await
+        .expect_err("a cast that depends on the session is no expression of an index");
+    assert_eq!(refused.code(), Some(&SqlState::INVALID_OBJECT_DEFINITION));
+}
+
+/// Where the schema says a document has a GIN index, an equality where only
+/// truth counts is containment the index serves: of a member, of members
+/// under `OR`, of an item of a collection beside its `EXISTS`. The pattern is
+/// made of immutable functions, which the server folds into a constant for
+/// the parameters it is given, where `jsonb_build_object` would be called
+/// again for every row a sequential scan reads.
+#[tokio::test]
+async fn a_gin_index_serves_the_equalities_where_only_truth_counts() {
+    let client = client().await;
+    client
+        .batch_execute(
+            r#"CREATE TEMP TABLE spec_gin (id int8 PRIMARY KEY, document jsonb NOT NULL);
+             INSERT INTO spec_gin
+                 SELECT n, jsonb_build_object(
+                     'status', 's' || n, 'priority', n % 50,
+                     'versions', jsonb_build_array(jsonb_build_object('number', n % 7)),
+                     'groups', jsonb_build_array('g' || n % 10))
+                 FROM generate_series(1, 1000) AS n;
+             CREATE INDEX spec_gin_document ON spec_gin USING gin (document jsonb_path_ops);
+             ANALYZE spec_gin;
+             SET enable_seqscan = off;"#,
+        )
+        .await
+        .expect("a table with a GIN index");
+    let schema = Schema::new("spec_gin")
+        .document(
+            "spec_gin",
+            "document",
+            Layout::new()
+                .value("status", Kind::Text)
+                .value("priority", Kind::Int)
+                .collection("versions", Layout::new().value("number", Kind::Int))
+                .values("groups", Kind::Text),
+        )
+        .gin("spec_gin", "document");
+    let status = |text: &str| equal(field("document.status"), value(text));
+    let cases: [(Spec, &str); 4] = [
+        (status("s7"), r#"'{"status": "s7"}'::jsonb"#),
+        (
+            or(status("s7"), status("s8")),
+            r#"'{"status": "s8"}'::jsonb"#,
+        ),
+        (
+            any(
+                "document.versions",
+                and(
+                    equal(field(Path::item("number")), value(3)),
+                    less_than(field(Path::item("number")), value(5)),
+                ),
+            ),
+            r#"'{"versions": [{"number": 3}]}'::jsonb"#,
+        ),
+        (
+            any("document.groups", equal(outer_item(0), value("g7"))),
+            r#"'{"groups": ["g7"]}'::jsonb"#,
+        ),
+    ];
+    for (specification, folded) in cases {
+        let query = Compiler::new()
+            .schema(&schema)
+            .compile(&specification)
+            .expect("compiled");
+        let text = format!("EXPLAIN SELECT id FROM spec_gin WHERE {}", query.sql);
+        let params: Vec<&(dyn ToSql + Sync)> = query
+            .params
+            .iter()
+            .map(|param| param as &(dyn ToSql + Sync))
+            .collect();
+        let plan: String = client
+            .query(&text, &params)
+            .await
+            .unwrap_or_else(|error| panic!("{text}: {error}"))
+            .iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plan.contains("spec_gin_document"), "{text}\n{plan}");
+        assert!(plan.contains(folded), "{text}\n{plan}");
+    }
+}
+
+/// A GIN index on a path of a document, as the services index the subgroups
+/// of a group, serves the containment of the value at the path: the
+/// compiler writes it of the expression the index is on, and the server
+/// folds the pattern into a constant.
+#[tokio::test]
+async fn a_gin_index_on_a_path_serves_the_containment_of_the_value_there() {
+    let client = client().await;
+    client
+        .batch_execute(
+            r#"CREATE TEMP TABLE spec_groups (id int8 PRIMARY KEY, document jsonb NOT NULL);
+             INSERT INTO spec_groups
+                 SELECT n, jsonb_build_object(
+                     'subgroups', jsonb_build_array('s' || n % 1000, 's' || n % 997))
+                 FROM generate_series(1, 1000) AS n;
+             CREATE INDEX spec_groups_subgroups ON spec_groups USING gin ((document -> 'subgroups'));
+             ANALYZE spec_groups;
+             SET enable_seqscan = off;"#,
+        )
+        .await
+        .expect("a table with a GIN index on a path");
+    let schema = Schema::new("spec_groups")
+        .document(
+            "spec_groups",
+            "document",
+            Layout::new().values("subgroups", Kind::Text),
+        )
+        .gin_at("spec_groups", "document", "subgroups");
+    let nesting: Spec = any("document.subgroups", equal(outer_item(0), value("s7")));
+    let query = Compiler::new()
+        .schema(&schema)
+        .compile(&nesting)
+        .expect("compiled");
+    let params: Vec<&(dyn ToSql + Sync)> = query
+        .params
+        .iter()
+        .map(|param| param as &(dyn ToSql + Sync))
+        .collect();
+    let text = format!("EXPLAIN SELECT id FROM spec_groups WHERE {}", query.sql);
+    let plan: String = client
+        .query(&text, &params)
+        .await
+        .unwrap_or_else(|error| panic!("{text}: {error}"))
+        .iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(plan.contains("spec_groups_subgroups"), "{text}\n{plan}");
+    assert!(plan.contains(r#"'["s7"]'::jsonb"#), "{text}\n{plan}");
+    // The rows are those of the same condition written without the index.
+    let plain = Compiler::new()
+        .schema(&Schema::new("spec_groups").document(
+            "spec_groups",
+            "document",
+            Layout::new().values("subgroups", Kind::Text),
+        ))
+        .compile(&nesting)
+        .expect("compiled");
+    let mut counts = Vec::new();
+    for query in [&query, &plain] {
+        let text = format!(
+            "SELECT array_agg(id ORDER BY id) FROM spec_groups WHERE {}",
+            query.sql
+        );
+        let params: Vec<&(dyn ToSql + Sync)> = query
+            .params
+            .iter()
+            .map(|param| param as &(dyn ToSql + Sync))
+            .collect();
+        let ids: Vec<i64> = client
+            .query_one(&text, &params)
+            .await
+            .unwrap_or_else(|error| panic!("{text}: {error}"))
+            .get(0);
+        counts.push(ids);
+    }
+    assert_eq!(counts[0], counts[1]);
+    assert!(!counts[0].is_empty());
+}
+
+/// The values of a domain whose groups are tenant-scoped: a group is its
+/// tenant and its key, and equal to a group of another tenant with the same
+/// key it is not.
+#[derive(Clone, Debug, PartialEq)]
+enum Scoped {
+    Scalar(Value),
+    Group(i64, &'static str),
+}
+
+impl Operand for Scoped {
+    fn null() -> Self {
+        Scoped::Scalar(Value::null())
+    }
+
+    fn is_null(&self) -> bool {
+        matches!(self, Scoped::Scalar(value) if value.is_null())
+    }
+
+    fn from_bool(value: bool) -> Self {
+        Scoped::Scalar(Value::from_bool(value))
+    }
+
+    fn as_bool(&self) -> Option<bool> {
+        match self {
+            Scoped::Scalar(value) => value.as_bool(),
+            Scoped::Group(..) => None,
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            Scoped::Scalar(value) => value.kind(),
+            Scoped::Group(..) => "group",
+        }
+    }
+
+    fn equals(&self, other: &Self) -> Result<bool, OperandError> {
+        match (self, other) {
+            (Scoped::Scalar(left), Scoped::Scalar(right)) => left.equals(right),
+            (Scoped::Group(..), Scoped::Group(..)) => Ok(self == other),
+            _ => Err(OperandError::unsupported("=", self.kind(), other.kind())),
+        }
+    }
+
+    fn compare(&self, other: &Self) -> Result<Ordering, OperandError> {
+        match (self, other) {
+            (Scoped::Scalar(left), Scoped::Scalar(right)) => left.compare(right),
+            _ => Err(OperandError::unsupported("<", self.kind(), other.kind())),
+        }
+    }
+
+    fn negate(&self) -> Result<Self, OperandError> {
+        Err(OperandError::unsupported_unary("-", self.kind()))
+    }
+
+    fn compute(&self, op: Arithmetic, other: &Self) -> Result<Self, OperandError> {
+        Err(OperandError::unsupported(op, self.kind(), other.kind()))
+    }
+}
+
+/// What the storage keeps of a policy's groups: the keys in its document's
+/// array, the tenant once, in its row.
+struct Groups;
+
+impl Mapping<Scoped, Value> for Groups {
+    type Error = String;
+
+    fn field(&self, path: &Path) -> Result<Mapped<Value>, String> {
+        match path.names().collect::<Vec<_>>().as_slice() {
+            ["tenant_id"] => Ok(Mapped::Scalar(field("tenant_id"))),
+            ["groups"] => Ok(Mapped::Scalar(field("document.groups"))),
+            names => Err(format!("unknown field: {}", names.join("."))),
+        }
+    }
+
+    fn value(&self, value: &Scoped) -> Result<Mapped<Value>, String> {
+        Ok(match value {
+            Scoped::Scalar(value) => Mapped::Scalar(Expr::Value(value.clone())),
+            Scoped::Group(tenant, key) => Mapped::Composite(vec![
+                Mapped::Scalar(Expr::Value(Value::Int(*tenant))),
+                Mapped::Scalar(Expr::Value(Value::from(*key))),
+            ]),
+        })
+    }
+
+    fn element(&self, collection: &Path) -> Result<Mapped<Value>, String> {
+        match collection.names().collect::<Vec<_>>().as_slice() {
+            ["groups"] => Ok(Mapped::Composite(vec![
+                Mapped::Scalar(field("tenant_id")),
+                Mapped::Scalar(outer_item(0)),
+            ])),
+            names => Err(format!("no collection of values: {}", names.join("."))),
+        }
+    }
+}
+
+/// A group the domain holds as its tenant and its key, and the storage as
+/// the key in the array and the tenant in the row, is compared part by part:
+/// a group of another tenant with the same key is not targeted, in memory as
+/// in the database - where a group mapped to its key alone was.
+#[tokio::test]
+async fn an_element_kept_in_part_in_the_candidates_row_is_compared_part_by_part() {
+    let client = client().await;
+    client
+        .batch_execute(
+            r#"CREATE TEMP TABLE spec_policies (id int8, tenant_id int8, document jsonb NOT NULL);
+             INSERT INTO spec_policies VALUES
+                 (1, 1, '{"groups": ["k1", "k2"]}'),
+                 (2, 2, '{"groups": ["k1"]}'),
+                 (3, 1, '{"groups": []}'),
+                 (4, 2, '{"groups": ["k2"]}');"#,
+        )
+        .await
+        .expect("a table of policies");
+    let policy = |tenant: i64, keys: &[&'static str]| {
+        Record::object([
+            (
+                "tenant_id",
+                Record::value(Scoped::Scalar(Value::Int(tenant))),
+            ),
+            (
+                "groups",
+                Record::collection(
+                    keys.iter()
+                        .map(|key| Record::value(Scoped::Group(tenant, key))),
+                ),
+            ),
+        ])
+    };
+    let rows: [(i64, Record<Scoped>); 4] = [
+        (1, policy(1, &["k1", "k2"])),
+        (2, policy(2, &["k1"])),
+        (3, policy(1, &[])),
+        (4, policy(2, &["k2"])),
+    ];
+    let schema = Schema::new("spec_policies").document(
+        "spec_policies",
+        "document",
+        Layout::new().values("groups", Kind::Text),
+    );
+    let targets = |tenant, key| {
+        any(
+            "groups",
+            equal(outer_item(0), Expr::Value(Scoped::Group(tenant, key))),
+        )
+    };
+    let specifications: [(Expr<Scoped>, Vec<i64>); 4] = [
+        (targets(1, "k1"), vec![1]),
+        (targets(2, "k1"), vec![2]),
+        // A group of a tenant that has none of these policies.
+        (targets(3, "k1"), vec![]),
+        (not(targets(1, "k2")), vec![2, 3, 4]),
+    ];
+    for (specification, expected) in &specifications {
+        let satisfied: Vec<i64> = rows
+            .iter()
+            .filter(|(_, row)| is_satisfied_by(specification, row).expect("evaluated"))
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(&satisfied, expected, "the evaluator, {specification:?}");
+        let query = Compiler::new()
+            .schema(&schema)
+            .compile(&transform(specification, &Groups).expect("transformed"))
+            .expect("compiled");
+        let text = format!(
+            "SELECT id FROM spec_policies WHERE {} ORDER BY id",
+            query.sql
+        );
+        let params: Vec<&(dyn ToSql + Sync)> = query
+            .params
+            .iter()
+            .map(|param| param as &(dyn ToSql + Sync))
+            .collect();
+        let selected: Vec<i64> = client
+            .query(&text, &params)
+            .await
+            .unwrap_or_else(|error| panic!("{text}: {error}"))
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert_eq!(&selected, expected, "{text}");
+    }
+}
+
 #[tokio::test]
 async fn a_value_is_written_as_the_type_the_server_asks_for_if_it_fits() {
     let client = client().await;
@@ -1539,6 +2338,122 @@ async fn the_item_of_an_enclosing_collection_is_named_from_an_inner_predicate() 
                 .map(|row| row.get(0))
                 .collect();
             assert_eq!(selected, satisfied, "{storage}: {text}");
+        }
+    }
+}
+
+/// A collection of a document that is not an array has no items (ADR-0027):
+/// a JSON null, an object, a scalar and a member that is not there are
+/// alike no rows, whatever the schema declares and whatever the plan
+/// evaluates first - `any` is false of them and `all` true, as of an empty
+/// array. Without the guard the `EXISTS` alone failed on the null, "cannot
+/// extract elements from a scalar", and beside containment it did not, the
+/// planner evaluating `@>` first: the same specification over the same rows
+/// failed under one schema and selected under the other. The evaluator
+/// refuses such a candidate, as it refuses a member that is not there, and
+/// the rows it refuses are listed as such.
+#[tokio::test]
+async fn a_collection_of_a_document_that_is_not_an_array_has_no_items() {
+    let client = client().await;
+    client
+        .batch_execute(
+            r#"CREATE TEMP TABLE spec_arrays (id int8 PRIMARY KEY, document jsonb NOT NULL);
+             INSERT INTO spec_arrays VALUES
+                 (1, '{"items": [{"s": "a"}]}'),
+                 (2, '{"items": [{"s": "b"}, {"s": null}]}'),
+                 (3, '{"items": null}'),
+                 (4, '{}'),
+                 (5, '{"items": []}'),
+                 (6, '{"items": {"s": "a"}}'),
+                 (7, '{"items": "a"}');
+             CREATE INDEX spec_arrays_document ON spec_arrays USING gin (document);
+             ANALYZE spec_arrays;"#,
+        )
+        .await
+        .expect("a table of documents");
+    let plain = Schema::new("spec_arrays").document(
+        "spec_arrays",
+        "document",
+        Layout::new().collection("items", Layout::new().value("s", Kind::Text)),
+    );
+    let indexed = plain.clone().gin("spec_arrays", "document");
+    let is_a: Make = || equal(field(Path::item("s")), value("a"));
+    let cases: [(Spec, &[i64]); 3] = [
+        (any("document.items", is_a()), &[1]),
+        (all("document.items", is_a()), &[1, 3, 4, 5, 6, 7]),
+        (not(any("document.items", is_a())), &[2, 3, 4, 5, 6, 7]),
+    ];
+    // The same documents as candidates in memory, each under `document` as
+    // the column is: the arrays are evaluated, the rest refused - no
+    // collection, or no member.
+    let object = |s: Option<&str>| Record::object([("s", Record::value(s))]);
+    let candidate = |members: Vec<(&str, Record<Value>)>| {
+        Record::object([("document", Record::object(members))])
+    };
+    let documents: [(i64, Record<Value>); 7] = [
+        (
+            1,
+            candidate(vec![("items", Record::collection([object(Some("a"))]))]),
+        ),
+        (
+            2,
+            candidate(vec![(
+                "items",
+                Record::collection([object(Some("b")), object(None)]),
+            )]),
+        ),
+        (3, candidate(vec![("items", Record::value(Value::Null))])),
+        (4, candidate(vec![])),
+        (
+            5,
+            candidate(vec![("items", Record::collection(Vec::new()))]),
+        ),
+        (6, candidate(vec![("items", object(Some("a")))])),
+        (7, candidate(vec![("items", Record::value("a"))])),
+    ];
+    let refused = [3, 4, 6, 7];
+    for (specification, expected) in &cases {
+        for (id, document) in &documents {
+            match is_satisfied_by(specification, document) {
+                Ok(satisfied) => assert_eq!(satisfied, expected.contains(id), "document {id}"),
+                Err(EvalError::Context(
+                    ContextError::NotACollection(_) | ContextError::Missing(_),
+                )) => assert!(refused.contains(id), "document {id} refused"),
+                Err(error) => panic!("document {id}: {error}"),
+            }
+        }
+    }
+    for (storage, schema) in [("without the index", &plain), ("with the index", &indexed)] {
+        for seqscan in ["on", "off"] {
+            client
+                .batch_execute(&format!("SET enable_seqscan = {seqscan}"))
+                .await
+                .expect("set");
+            for (specification, expected) in &cases {
+                let query = Compiler::new()
+                    .schema(schema)
+                    .compile(specification)
+                    .expect("compiled");
+                let text = format!("SELECT id FROM spec_arrays WHERE {} ORDER BY id", query.sql);
+                let params: Vec<&(dyn ToSql + Sync)> = query
+                    .params
+                    .iter()
+                    .map(|param| param as &(dyn ToSql + Sync))
+                    .collect();
+                let selected: Vec<i64> = client
+                    .query(&text, &params)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("{storage}, enable_seqscan = {seqscan}: {text}: {error}")
+                    })
+                    .iter()
+                    .map(|row| row.get(0))
+                    .collect();
+                assert_eq!(
+                    &selected, expected,
+                    "{storage}, enable_seqscan = {seqscan}: {text}"
+                );
+            }
         }
     }
 }

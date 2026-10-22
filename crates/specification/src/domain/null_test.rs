@@ -43,7 +43,7 @@ pub fn throughout<V: Operand>(expr: Expr<V>) -> Expr<V> {
         Expr::Prefix(op, operand) => Expr::Prefix(op, Box::new(throughout(*operand))),
         Expr::Postfix(operand, op) => Expr::Postfix(Box::new(throughout(*operand)), op),
         Expr::Any(source, predicate) => Expr::Any(source, Box::new(throughout(*predicate))),
-        leaf @ (Expr::Value(_) | Expr::Field(_)) => leaf,
+        leaf @ (Expr::Value(_) | Expr::Field(_) | Expr::Item(_)) => leaf,
     }
 }
 

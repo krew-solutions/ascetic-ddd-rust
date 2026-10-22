@@ -29,14 +29,18 @@ let specification: Expr<Value> = and(
 
 **With typed terms**, [`dsl`], which refuse at compile time what the tree
 would accept and the evaluator refuse later — a number conjoined, a text
-multiplied, `is_null` of a member not declared nullable:
+multiplied, `is_null` of a member not declared nullable, a predicate of a
+collection that is no truth value:
 
 ```rust
-use ascetic_ddd_specification::dsl::{Boolean, NullDatetime, Number};
+use ascetic_ddd_specification::Path;
+use ascetic_ddd_specification::dsl::{Boolean, NullDatetime, Number, Text, any};
 
 let cheap = (Number::field("price") - Number::field("discount")).lt(Number::value(100));
 let listed = Boolean::field("active") & NullDatetime::field("deleted_at").is_null();
-let specification = (cheap & listed).into_expr();
+let dear = any("items", Number::field(Path::item("price")).gt(Number::value(500)));
+let on_sale = any("tags", Text::item().eq(Text::value("sale")));
+let specification = (cheap & listed & dear & on_sale).into_expr();
 ```
 
 **As a JSONPath template**, [`jsonpath`], parsed once and bound to
@@ -104,7 +108,9 @@ parameter that is an `Option`, where the name stands for it, and which are
 how what an `Option` holds is ordered - `<` with `Some(x)`, `None` or an
 `Option` parameter is refused; the comparison methods `.eq(&x)` … `.ge(&x)` a Value Object
 compares by; `.iter().any(|item| …)` and `.all(…)`, nested as deep as the
-collections are; `&`, `*`, `.clone()`, `.as_str()`, `.as_ref()`,
+collections are, the item a member's owner or, of a collection of values,
+the value itself, `|tag| *tag == x`; `.contains(&x)`, which is `any` of
+that; `&`, `*`, `.clone()`, `.as_str()`, `.as_ref()`,
 `.as_deref()`, which change how a value is held and not the value. Anything
 else is a compile error at the place it stands.
 
@@ -112,11 +118,29 @@ else is a compile error at the place it stands.
 
 **In memory**: [`is_satisfied_by`] against anything that implements
 [`Context`] — a domain object saying which of its members are values, which
-objects, which collections; or a [`Record`] of plain data.
+objects, which collections, and whether the items of a collection are
+objects or values, [`Element`]; or a [`Record`] of plain data.
+
+## A collection of values
+
+The groups a policy targets are a collection of identifiers, whose elements
+have no members to name. The element is the item itself, [`Expr::Item`]
+(ADR-0023): `any("tags", equal(item(), value("sale")))`, `$.tags[*][?@ ==
+%s]` in a template, `store.tags.contains(&tag)` or `|tag| *tag == tag` in a
+Rust function. A domain object gives the elements by value,
+`Element::Value`: an element is often a type of the domain's own, for which
+no `Context` can be implemented where it is used. In SQL an element of an
+array of a scalar type is the alias `unnest` gives it, `EXISTS (SELECT 1
+FROM unnest("tags") AS "tag_1" WHERE "tag_1" = $1)`; of a document's array
+of values, declared by [`pg::Layout::values`], the text
+`jsonb_array_elements_text` gives it, read as its kind. A row of a table and
+an object of a document have members, and are no value: the item itself of
+either is refused.
 
 **As SQL**: [`pg::compile`], to a condition with numbered parameters; with a
-[`pg::Schema`] for the collections kept in tables of their own. With the
-`pg` feature, [`Value`] goes to `tokio-postgres` as a parameter as it is.
+[`pg::Schema`] for the collections kept in tables of their own and the
+columns that hold a document. With the `pg` feature, [`Value`] goes to
+`tokio-postgres` as a parameter as it is.
 
 The two agree, nulls included: the logic of the evaluator is PostgreSQL's
 three-valued one, and `tests/pg.rs` holds them against each other on a live
@@ -126,6 +150,89 @@ the same rows selected for each specification.
 Between the two stands [`transform`], for a domain whose members and values
 are not the table's columns and scalars: a composite identity compared as
 one value in the domain and column by column in the query.
+
+## An aggregate kept as a document
+
+A table may keep an aggregate as one `jsonb` document, with a few of its
+members beside it as columns a listing filters by (ADR-0021). Where each
+member is read from is the [`Mapping`]'s to say, member by member: a column,
+`aggregate_version`, or a path in the document, `document.status`. A member
+moved from the document to a column is one answer of the mapping changed,
+and no specification. What the document holds is the [`pg::Schema`]'s to
+say, by a [`pg::Layout`]: a document does not say the kinds of its members -
+a point in time and a UUID are strings in it - so the layout gives each its
+[`pg::Kind`], and the compiler reads it as that.
+
+```rust
+use ascetic_ddd_specification::ast::{and, any, equal, field, greater_than, value};
+use ascetic_ddd_specification::pg::{Compiler, Kind, Layout, Schema};
+use ascetic_ddd_specification::{Expr, Path, Value};
+
+let schema = Schema::new("policies").alias("p").document(
+    "policies",
+    "document",
+    Layout::new()
+        .value("status", Kind::Text)
+        .collection("versions", Layout::new().value("number", Kind::Int)),
+);
+// As the mapping left it: `published` a column, the rest in the document.
+let specification: Expr<Value> = and(
+    field("published"),
+    and(
+        equal(field("document.status"), value("active")),
+        any("document.versions", greater_than(field(Path::item("number")), value(2))),
+    ),
+);
+let query = Compiler::new().schema(&schema).compile(&specification)?;
+assert_eq!(
+    query.sql,
+    concat!(
+        r#""published" AND (("p"."document" ->> 'status') COLLATE "C") = $1 "#,
+        r#"AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) "#,
+        r#"AS "version_1" WHERE ("version_1" ->> 'number')::bigint > $2)"#,
+    ),
+);
+# Ok::<(), ascetic_ddd_specification::pg::CompileError>(())
+```
+
+A member is read by `->>`, which has the null of SQL for a JSON null, and
+then cast to its kind, or for a text ordered by code point: a value of a
+type, as a column's is, so the logic of nulls, the arithmetic and the
+reading of a string constant beside it are what they are for a column.
+The query is not a JSONPath one: there a null is a value, `!($.a == 5)` is
+true of a null `a`, `7 / 2` is `3.5`, an enclosing item has no name, and an
+index serves equality alone.
+
+A member that a listing compares by order is a column beside the document:
+one the server generates from it, `priority bigint GENERATED ALWAYS AS
+((document ->> 'priority')::bigint) STORED`, is what the document says by
+construction; or an index on the expression the compiler writes,
+`((document ->> 'priority')::bigint)`, `((document ->> 'status') COLLATE
+"C")`. A point in time or a date has neither: its cast depends on the
+session's settings, and the server refuses it in an index - it is a column
+the repository writes, of its type.
+
+An equality is served by a GIN index on the document, where the schema says
+the document has one, `gin("policies", "document")` (ADR-0022). Where only
+truth counts - the condition as a whole, `AND` and `OR` there, the predicate
+of `any` - an equality of a text, an integer or a boolean member with a
+constant is what the document contains, `"p"."document" @>
+jsonb_object(ARRAY['status'], ARRAY[$1::text])`; and `any` over a collection
+of the document has the equalities of its predicate beside its `EXISTS`, as
+containment. A GIN index on a path of the document, as `CREATE INDEX …
+USING gin ((document -> 'subgroups'))` has it, is `gin_at("groups",
+"document", "subgroups")` (ADR-0024): containment of what is under the path
+is written of the value there, `("g"."document" -> 'subgroups') @> …`, the
+expression the index is on, which containment of the whole document is not.
+Under `NOT`, with a null constant, of a member of another kind, an equality
+is what it was: containment is false where the equality is null,
+and agrees with it only for a kind with one spelling in JSON. The pattern is
+made of immutable functions, which the server folds into a constant under a
+custom plan, where the parameters are known; under a generic plan - a named
+prepared statement after its fifth execution - it is evaluated for every row
+a sequential scan reads, and once for an index scan (ADR-0027).
+`jsonb_build_object` is stable, and is called again for every row under
+either plan.
 
 ## What maps to what
 
@@ -314,9 +421,55 @@ the sources as they were.
   PostgreSQL if all its members are, and not null only if none is.
 * A path from the candidate of several parts is written into the query as it
   is: `s.price` is `"s"."price"`, the author's qualifier.
-* An embedded collection is read with `unnest`, so it is an array of a
-  composite type. A `jsonb` array is not supported, as it is not in the
-  sources.
+* An embedded collection is read with `unnest`, an array of a composite or
+  of a scalar type, or with `jsonb_array_elements` and
+  `jsonb_array_elements_text`, an array of objects or of values in a
+  document. An array of arrays is not read: an item itself is a value or an
+  object, not a collection.
+* An element the domain holds as a composite and the storage keeps in part
+  elsewhere - a tenant-scoped identity kept as its local key in the array
+  and its tenant once, in the candidate's row - is what the mapping's
+  [`Mapping::element`] says it is from the collection's predicate,
+  `Composite([Scalar(field("tenant_id")), Scalar(item())])` (ADR-0025): its
+  equality with an identity is the tenant compared with the row's and the key
+  with the element. A mapping that maps the identity to its key alone
+  compares other values than the evaluator - the groups of another tenant
+  with the same key - in silence; one that says nothing of the element has a
+  composite constant beside it refused, `TransformError::NotComposite`.
+* `.contains` of a text is a substring to Rust and `any` to the macro, which
+  has no types: the evaluator and the server refuse a text for a collection,
+  at run time.
+* A member of a document that is not in it is the null of SQL: `->>` reads
+  a missing member as it reads a JSON null, where the evaluator says it is
+  missing. The layout is what the encoding writes; a layout that is not makes
+  a query that selects nothing, in silence. What holds the two together is a
+  test of the repository that writes an aggregate and selects it by every
+  member the layout declares. A document of an older shape, read into the
+  aggregate by an upcast, is the same: it is rewritten before a query goes
+  into it.
+* A point in time in a document is read at microseconds. The server rounds
+  what is finer - `.999999999Z` is the next second - and the evaluator's
+  [`Timestamp`] has none of it: an encoding that writes nanoseconds and is
+  compared at a boundary has the two disagree.
+* A collection of a document that is not an array - a JSON null, an object,
+  a scalar, a member that is not there - has no items: `any` is false of it
+  and `all` true, as of an empty array, where the evaluator refuses such a
+  candidate as it refuses a member that is not there. The array is read
+  through `CASE WHEN jsonb_typeof(…) = 'array'`: `jsonb_array_elements`
+  fails on a scalar, and whether a row reaches it is the plan's to decide -
+  the planner evaluates the cheaper operand of an `AND` first - so the same
+  query failed under one schema and selected under another (ADR-0027).
+* With a GIN index declared, the compiled condition is what goes after
+  `WHERE` and nothing else: containment is false where the equality it
+  stands for is null, so the text negated, `NOT (…)`, selects the rows where
+  the specification is null. A specification is negated in the tree. And a
+  member declared an integer, a boolean or a text is a JSON number without a
+  fraction, a boolean, a string: an encoding that writes an integer as a
+  string, as the JSON mapping of proto3 writes an `int64`, is read by `->>`
+  and not contained; one that writes it with a fraction, `100.0`, is
+  contained by `100` and fails the cast `->>` is read with. Either way the
+  layout is not what the encoding writes, and the repository's test runs
+  under the schema it compiles with.
 * `numeric` parameters are not written by the `pg` feature.
 * The text of a template has one `@`, the nearest item, as RFC 9535 has it;
   the item of an enclosing collection is named in the tree only.

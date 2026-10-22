@@ -36,8 +36,19 @@ pub trait Context<V> {
     /// The object that is the member `name`.
     fn object(&self, name: &str) -> Result<&dyn Context<V>, ContextError>;
 
-    /// The items of the collection that is the member `name`.
-    fn collection(&self, name: &str) -> Result<Vec<&dyn Context<V>>, ContextError>;
+    /// The items of the collection that is the member `name`: objects, or
+    /// values - the identifiers of the groups a policy targets.
+    fn collection(&self, name: &str) -> Result<Vec<Element<'_, V>>, ContextError>;
+}
+
+/// An item of a collection: an object, which has members, or a value, which
+/// is one - as [`Context::field`] gives it, by value: a domain's element is
+/// often a type of its own that no `Context` can be implemented for.
+pub enum Element<'a, V> {
+    /// An object, whose members a path names: `Path::item("price")`.
+    Object(&'a dyn Context<V>),
+    /// A value, which the tree names as a whole: [`Expr::Item`].
+    Value(V),
 }
 
 /// A context has no such member, or has it as something else.
@@ -141,9 +152,10 @@ struct Scope<'a, V> {
 }
 
 /// The item of one collection's predicate, inside the item of the enclosing
-/// collection's.
+/// collection's; the collection by its name, for an error to say.
 struct Frame<'a, V> {
-    context: &'a dyn Context<V>,
+    element: &'a Element<'a, V>,
+    collection: &'a str,
     outer: Option<&'a Frame<'a, V>>,
 }
 
@@ -155,76 +167,145 @@ impl<V> Clone for Scope<'_, V> {
 
 impl<V> Copy for Scope<'_, V> {}
 
+/// The value of `expr` in `scope`. A dispatch and nothing else: the frame
+/// of this function is what the height of a tree costs in stack at every
+/// level of it, so each case is a function of its own, not inlined, whose
+/// locals are on the stack only where that case is - in a build without
+/// optimisation the frame of a `match` holds the locals of every arm at once.
 fn eval<V: Operand + Clone>(expr: &Expr<V>, scope: Scope<'_, V>) -> Result<V, EvalError> {
     match expr {
         Expr::Value(value) => Ok(value.clone()),
-        Expr::Field(path) => Ok(owner(path, scope)?.field(path.name())?),
-        Expr::Prefix(Prefix::Not, operand) => Ok(from_truth(
-            truth(&eval(operand, scope)?)?.map(|value| !value),
-        )),
-        Expr::Prefix(Prefix::Neg, operand) => {
-            let operand = eval(operand, scope)?;
-            if operand.is_null() {
-                Ok(V::null())
-            } else {
-                operand.negate().map_err(EvalError::Operand)
-            }
-        }
-        Expr::Postfix(operand, Postfix::IsNull) => Ok(V::from_bool(is_null(operand, scope)?)),
-        Expr::Postfix(operand, Postfix::IsNotNull) => Ok(V::from_bool(!is_null(operand, scope)?)),
-        Expr::Infix(left, Infix::Logical(op), right) => {
-            connective(*op, truth(&eval(left, scope)?)?, || {
-                truth(&eval(right, scope)?)
-            })
-            .map(from_truth)
-        }
-        Expr::Infix(left, Infix::Is, right) => {
-            let (left, right) =
-                read_constants(left, right, eval(left, scope)?, eval(right, scope)?)
-                    .map_err(|error| named(error, Infix::Is))?;
+        Expr::Field(path) => member(path, scope),
+        Expr::Item(up) => itself(*up, scope),
+        Expr::Prefix(op, operand) => prefix(*op, operand, scope),
+        Expr::Postfix(operand, op) => postfix(operand, *op, scope),
+        Expr::Infix(left, Infix::Logical(op), right) => logical(left, *op, right, scope),
+        Expr::Infix(left, op, right) => infix(left, *op, right, scope),
+        Expr::Any(source, predicate) => some(source, predicate, scope),
+    }
+}
+
+#[inline(never)]
+fn member<V: Operand + Clone>(path: &Path, scope: Scope<'_, V>) -> Result<V, EvalError> {
+    Ok(owner(path, scope)?.field(path.name())?)
+}
+
+/// The item `up` collections out itself: a value, or no value to give.
+#[inline(never)]
+fn itself<V: Operand + Clone>(up: usize, scope: Scope<'_, V>) -> Result<V, EvalError> {
+    match frame(up, scope)? {
+        Frame {
+            element: Element::Value(value),
+            ..
+        } => Ok(value.clone()),
+        Frame { collection, .. } => Err(ContextError::NotAValue(format!("{collection}[*]")).into()),
+    }
+}
+
+#[inline(never)]
+fn prefix<V: Operand + Clone>(
+    op: Prefix,
+    operand: &Expr<V>,
+    scope: Scope<'_, V>,
+) -> Result<V, EvalError> {
+    let operand = eval(operand, scope)?;
+    match op {
+        Prefix::Not => Ok(from_truth(truth(&operand)?.map(|value| !value))),
+        Prefix::Neg if operand.is_null() => Ok(V::null()),
+        Prefix::Neg => operand.negate().map_err(EvalError::Operand),
+    }
+}
+
+#[inline(never)]
+fn postfix<V: Operand + Clone>(
+    operand: &Expr<V>,
+    op: Postfix,
+    scope: Scope<'_, V>,
+) -> Result<V, EvalError> {
+    let null = is_null(operand, scope)?;
+    Ok(V::from_bool(match op {
+        Postfix::IsNull => null,
+        Postfix::IsNotNull => !null,
+    }))
+}
+
+#[inline(never)]
+fn logical<V: Operand + Clone>(
+    left: &Expr<V>,
+    op: Logical,
+    right: &Expr<V>,
+    scope: Scope<'_, V>,
+) -> Result<V, EvalError> {
+    connective(op, truth(&eval(left, scope)?)?, || {
+        truth(&eval(right, scope)?)
+    })
+    .map(from_truth)
+}
+
+/// An operator of values, `IS` and the comparisons among them, applied to
+/// both operands.
+#[inline(never)]
+fn infix<V: Operand + Clone>(
+    left_expr: &Expr<V>,
+    op: Infix,
+    right_expr: &Expr<V>,
+    scope: Scope<'_, V>,
+) -> Result<V, EvalError> {
+    let (left, right) = (eval(left_expr, scope)?, eval(right_expr, scope)?);
+    match op {
+        Infix::Is => {
+            let (left, right) = read_constants(left_expr, right_expr, left, right)
+                .map_err(|error| named(error, op))?;
             if left.is_null() || right.is_null() {
                 Ok(V::from_bool(left.is_null() && right.is_null()))
             } else {
                 left.equals(&right)
                     .map(V::from_bool)
-                    .map_err(|error| named(error, Infix::Is))
+                    .map_err(|error| named(error, op))
             }
         }
-        Expr::Infix(left, Infix::Comparison(op), right) => {
-            let (l, r) = read_constants(left, right, eval(left, scope)?, eval(right, scope)?)
+        Infix::Comparison(comparison) => {
+            let (left, right) = read_constants(left_expr, right_expr, left, right)
                 .map_err(|error| named(error, op))?;
-            strict(l, r, |left, right| {
-                compare(left, *op, right).map(V::from_bool)
+            strict(left, right, |left, right| {
+                compare(left, comparison, right).map(V::from_bool)
             })
             .map_err(|error| named(error, op))
         }
-        Expr::Infix(left, Infix::Arithmetic(op), right) => {
-            strict(eval(left, scope)?, eval(right, scope)?, |left, right| {
-                left.compute(*op, right)
-            })
-            .map_err(|error| named(error, op))
+        Infix::Arithmetic(arithmetic) => {
+            strict(left, right, |left, right| left.compute(arithmetic, right))
+                .map_err(|error| named(error, op))
         }
-        Expr::Any(source, predicate) => {
-            let witness = |item| {
-                let frame = Frame {
-                    context: item,
-                    outer: scope.item,
-                };
-                let scope = Scope {
-                    item: Some(&frame),
-                    ..scope
-                };
-                Ok(truth(&eval(predicate, scope)?)? == Some(true))
-            };
-            owner(source, scope)?
-                .collection(source.name())?
-                .into_iter()
-                .map(witness)
-                .find(|outcome| !matches!(outcome, Ok(false)))
-                .unwrap_or(Ok(false))
-                .map(V::from_bool)
-        }
+        Infix::Logical(logical) => self::logical(left_expr, logical, right_expr, scope),
     }
+}
+
+/// Whether some item of the collection at `source` satisfies `predicate`.
+#[inline(never)]
+fn some<V: Operand + Clone>(
+    source: &Path,
+    predicate: &Expr<V>,
+    scope: Scope<'_, V>,
+) -> Result<V, EvalError> {
+    let witness = |element: &Element<'_, V>| {
+        let frame = Frame {
+            element,
+            collection: source.name(),
+            outer: scope.item,
+        };
+        let scope = Scope {
+            item: Some(&frame),
+            ..scope
+        };
+        Ok(truth(&eval(predicate, scope)?)? == Some(true))
+    };
+    owner(source, scope)?
+        .collection(source.name())?
+        .iter()
+        .map(witness)
+        .find(|outcome| !matches!(outcome, Ok(false)))
+        .unwrap_or(Ok(false))
+        .map(V::from_bool)
 }
 
 /// The context that has the member the path names.
@@ -274,18 +355,29 @@ fn read_constants<V: Operand>(
 fn owner<'a, V>(path: &Path, scope: Scope<'a, V>) -> Result<&'a dyn Context<V>, EvalError> {
     let root = match path.root() {
         Root::Global => scope.global,
-        Root::Item(up) => {
-            let mut frame = scope.item;
-            for _ in 0..up {
-                frame = frame.and_then(|frame| frame.outer);
+        Root::Item(up) => match frame(up, scope)? {
+            Frame {
+                element: Element::Object(context),
+                ..
+            } => *context,
+            Frame { collection, .. } => {
+                return Err(ContextError::NotAnObject(format!("{collection}[*]")).into());
             }
-            frame.ok_or(EvalError::NoCurrentItem)?.context
-        }
+        },
     };
     path.objects()
         .iter()
         .try_fold(root, |context, name| context.object(name))
         .map_err(EvalError::Context)
+}
+
+/// The item `up` collections out from the item under test.
+fn frame<'a, V>(up: usize, scope: Scope<'a, V>) -> Result<&'a Frame<'a, V>, EvalError> {
+    let mut frame = scope.item;
+    for _ in 0..up {
+        frame = frame.and_then(|frame| frame.outer);
+    }
+    frame.ok_or(EvalError::NoCurrentItem)
 }
 
 /// True, false, or — `None` — unknown.

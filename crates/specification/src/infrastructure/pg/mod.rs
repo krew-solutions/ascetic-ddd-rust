@@ -34,6 +34,18 @@
 //! column's place. The sources write dots in every case, which PostgreSQL
 //! reads as a table and a column; and from an item they drop its alias.
 //!
+//! A column the [`Schema`] declares a `jsonb` document holds members of its
+//! own, which a path goes on into: `("s"."document" ->> 'kind')` and, for an
+//! array of objects, `EXISTS (SELECT 1 FROM jsonb_array_elements(…))` over
+//! what is at the path if it is an array, and over nothing if it is not. Each
+//! value is read as the kind the document's [`Layout`] gives it, a cast or a
+//! collation, so that it is a value of a type as a column is and a constant
+//! beside it takes that type: a document does not say its kinds.
+//!
+//! Where the schema says a document has a GIN index, an equality on a member
+//! of it, where only truth counts, is what the document contains:
+//! `"p"."document" @> …`, which the index serves.
+//!
 //! The sources number parameters and aliases with counters that every
 //! visitor shares and changes. Here the count so far goes into each step and
 //! the count after comes out of it, so compiling changes nothing anywhere.
@@ -62,7 +74,9 @@
 //! `str`-and-`Enum` operators is `"OPERATOR.AND ASSOCIATIVITY.LEFT_ASSOCIATIVE"`
 //! and is in no table, so `(a OR b) AND c` comes out `a OR b AND c`.
 
+mod containment;
 mod identifier;
+mod layout;
 mod param_type;
 mod precedence;
 mod schema;
@@ -72,12 +86,15 @@ mod to_sql;
 
 use std::fmt;
 
+use self::containment::Pattern;
 use self::identifier::{identifier, plain, qualified, quoted};
+use self::layout::{Items, Member};
+pub use self::layout::{Kind, Layout};
 pub use self::param_type::ParamType;
 use self::precedence::{ATOM, Associativity};
 pub use self::schema::{ForeignKey, Schema};
 use crate::domain::ast::{Expr, Path, Root};
-use crate::domain::operator::{Infix, Logical, Postfix, Prefix};
+use crate::domain::operator::{Comparison, Infix, Logical, Postfix, Prefix};
 
 /// A condition and its parameters: `$1` is `params[0]`, unless the
 /// compiler was given an [offset](Compiler::offset).
@@ -109,6 +126,15 @@ pub enum CompileError {
     InvalidIdentifier(String),
     /// A text with a NUL in it: no text PostgreSQL has, so no query.
     NulInText,
+    /// A path into a document that its [`Layout`] does not declare as what
+    /// the tree takes it for: a member it does not have, an object on the
+    /// way that is not one, a value that is an object or a collection, a
+    /// collection that is not one. The message names the path.
+    UndeclaredMember(String),
+    /// The item itself where the item has members and is no value: a row of
+    /// a table, whose column is named, or an object of a document, whose
+    /// member is.
+    NotAValue(String),
 }
 
 impl fmt::Display for CompileError {
@@ -119,9 +145,10 @@ impl fmt::Display for CompileError {
                 "a member of the candidate inside a collection's predicate needs the \
                  candidate's table: compile with a schema",
             ),
-            CompileError::AmbiguousKey(message) | CompileError::WrongKey(message) => {
-                f.write_str(message)
-            }
+            CompileError::AmbiguousKey(message)
+            | CompileError::WrongKey(message)
+            | CompileError::UndeclaredMember(message)
+            | CompileError::NotAValue(message) => f.write_str(message),
             CompileError::NulInText => {
                 f.write_str("a text with a NUL (U+0000) in it is no text PostgreSQL has")
             }
@@ -176,87 +203,161 @@ impl<'s> Compiler<'s> {
             param: self.offset,
             alias: 0,
         };
-        let (fragment, _) = self.render(specification, None, start)?;
+        let (fragment, _) = self.render(specification, None, start, Stand::Truth)?;
         Ok(Query {
             sql: fragment.sql,
             params: fragment.params,
         })
     }
 
+    /// The text of `expr`, and the count after it. A dispatch and nothing
+    /// else: the frame of this function is what the height of a tree costs
+    /// in stack at every level of it, so each case is a function of its
+    /// own, not inlined, whose locals are on the stack only where that case
+    /// is - in a build without optimisation the frame of a `match` holds the
+    /// locals of every arm at once.
     fn render<V: Clone + ParamType>(
         &self,
         expr: &Expr<V>,
         item: Option<&Item>,
         next: Next,
+        stand: Stand,
     ) -> Result<(Fragment<V>, Next), CompileError> {
         match expr {
-            Expr::Value(value) => {
-                // In memory such a text is a string like any other; here it
-                // meets the server, which has no such text.
-                if value.nul_in_text() {
-                    return Err(CompileError::NulInText);
-                }
-                let param = next.param + 1;
-                let fragment = Fragment {
-                    sql: format!("${param}"),
-                    params: vec![value.clone()],
-                    precedence: ATOM,
-                };
-                Ok((fragment, Next { param, ..next }))
-            }
-            Expr::Field(path) => {
-                let (sql, next) = self.member(path, item, next)?;
-                Ok((Fragment::text(sql), next))
-            }
-            Expr::Prefix(op, operand) => {
-                let precedence = precedence::prefix(*op);
-                let alone = param_type::under_prefix(*op, operand);
-                let (operand, next) = self.render(operand, item, next)?;
-                let operand = operand.of_type(alone);
-                // `NOT NOT a` reads as it should; `--a` reads as a comment.
-                let doubled = *op == Prefix::Neg && operand.precedence == precedence;
-                let operand = operand.within(precedence, doubled);
-                let sql = match op {
-                    Prefix::Not => format!("NOT {}", operand.sql),
-                    Prefix::Neg => format!("-{}", operand.sql),
-                };
-                Ok((operand.with(sql, precedence), next))
-            }
-            Expr::Postfix(operand, op) => {
-                let precedence = precedence::postfix(*op);
-                let alone = param_type::under_postfix(operand);
-                let test = self.null_test(*op, operand, item)?;
-                let (operand, next) = self.render(operand, item, next)?;
-                let operand = operand.of_type(alone);
-                let operand = operand.within(precedence, true);
-                let sql = format!("{} {test}", operand.sql);
-                Ok((operand.with(sql, precedence), next))
-            }
-            Expr::Infix(left, op, right) => {
-                let (precedence, associativity) = precedence::infix(*op);
-                let apart = |side| associativity != side && !precedence::regroups(*op);
-                let (of_left, of_right) = param_type::of_both(left, *op, right);
-                let count = param_type::is_a_count_to_cast(*op, right);
-                let (left, next) = self.render(left, item, next)?;
-                let (right, next) = self.render(right, item, next)?;
-                let left = left.of_type(of_left);
-                // A cast binds tighter than any operator: the count of a
-                // shift is parenthesised against the cast, if it is not an
-                // atom, before its type is said: `("b" + $1)::integer`.
-                let right = if count {
-                    right
-                        .within(precedence::CAST, false)
-                        .of_type(Some("integer"))
-                } else {
-                    right.of_type(of_right)
-                };
-                let left = left.within(precedence, apart(Associativity::Left));
-                let right = right.within(precedence, apart(Associativity::Right));
-                let sql = format!("{} {} {}", left.sql, spelling(*op), right.sql);
-                Ok((left.with(sql, precedence).and(right.params), next))
-            }
-            Expr::Any(source, predicate) => self.exists(source, predicate, item, next),
+            Expr::Value(value) => constant(value, next),
+            Expr::Field(path) => self.field(path, item, next),
+            Expr::Item(up) => itself(*up, item, next),
+            Expr::Prefix(op, operand) => self.prefix(*op, operand, item, next),
+            Expr::Postfix(operand, op) => self.postfix(operand, *op, item, next),
+            Expr::Infix(left, op, right) => self.infix(left, *op, right, item, next, stand),
+            Expr::Any(source, predicate) => self.exists(source, predicate, item, next, stand),
         }
+    }
+
+    #[inline(never)]
+    fn field<V>(
+        &self,
+        path: &Path,
+        item: Option<&Item>,
+        next: Next,
+    ) -> Result<(Fragment<V>, Next), CompileError> {
+        let (sql, next) = self.member(path, item, next, Reading::Value)?;
+        Ok((Fragment::text(sql), next))
+    }
+
+    #[inline(never)]
+    fn prefix<V: Clone + ParamType>(
+        &self,
+        op: Prefix,
+        operand: &Expr<V>,
+        item: Option<&Item>,
+        next: Next,
+    ) -> Result<(Fragment<V>, Next), CompileError> {
+        let precedence = precedence::prefix(op);
+        let alone = param_type::under_prefix(op, operand);
+        let (operand, next) = self.render(operand, item, next, Stand::Value)?;
+        let operand = operand.of_type(alone);
+        // `NOT NOT a` reads as it should; `--a` reads as a comment.
+        let doubled = op == Prefix::Neg && operand.precedence == precedence;
+        let operand = operand.within(precedence, doubled);
+        let sql = match op {
+            Prefix::Not => format!("NOT {}", operand.sql),
+            Prefix::Neg => format!("-{}", operand.sql),
+        };
+        Ok((operand.with(sql, precedence), next))
+    }
+
+    #[inline(never)]
+    fn postfix<V: Clone + ParamType>(
+        &self,
+        operand: &Expr<V>,
+        op: Postfix,
+        item: Option<&Item>,
+        next: Next,
+    ) -> Result<(Fragment<V>, Next), CompileError> {
+        let precedence = precedence::postfix(op);
+        let alone = param_type::under_postfix(operand);
+        let test = self.null_test(op, operand, item)?;
+        // A member is read for whether it is null, which an object or a
+        // collection of a document has as a value has.
+        let (operand, next) = match operand {
+            Expr::Field(path) => {
+                let (sql, next) = self.member(path, item, next, Reading::NullTest)?;
+                (Fragment::text(sql), next)
+            }
+            _ => self.render(operand, item, next, Stand::Value)?,
+        };
+        let operand = operand.of_type(alone);
+        let operand = operand.within(precedence, true);
+        let sql = format!("{} {test}", operand.sql);
+        Ok((operand.with(sql, precedence), next))
+    }
+
+    #[inline(never)]
+    fn infix<V: Clone + ParamType>(
+        &self,
+        left: &Expr<V>,
+        op: Infix,
+        right: &Expr<V>,
+        item: Option<&Item>,
+        next: Next,
+        stand: Stand,
+    ) -> Result<(Fragment<V>, Next), CompileError> {
+        if let (Stand::Truth, Infix::Comparison(Comparison::Eq)) = (stand, op) {
+            if let Some(contained) = self.containment(left, right, item, next)? {
+                return Ok(contained);
+            }
+        }
+        let (precedence, associativity) = precedence::infix(op);
+        let apart = |side| associativity != side && !precedence::regroups(op);
+        let (of_left, of_right) = param_type::of_both(left, op, right);
+        let count = param_type::is_a_count_to_cast(op, right);
+        // The operands of `AND` and `OR` stand where the connective does;
+        // those of any other operator are values.
+        let operands = match op {
+            Infix::Logical(_) => stand,
+            Infix::Comparison(_) | Infix::Arithmetic(_) | Infix::Is => Stand::Value,
+        };
+        let (left, next) = self.render(left, item, next, operands)?;
+        let (right, next) = self.render(right, item, next, operands)?;
+        let left = left.of_type(of_left);
+        // A cast binds tighter than any operator: the count of a shift is
+        // parenthesised against the cast, if it is not an atom, before its
+        // type is said: `("b" + $1)::integer`.
+        let right = if count {
+            right
+                .within(precedence::CAST, false)
+                .of_type(Some("integer"))
+        } else {
+            right.of_type(of_right)
+        };
+        let left = left.within(precedence, apart(Associativity::Left));
+        let right = right.within(precedence, apart(Associativity::Right));
+        let sql = format!("{} {} {}", left.sql, spelling(op), right.sql);
+        Ok((left.with(sql, precedence).and(right.params), next))
+    }
+
+    /// `left = right` written as containment, where it is one.
+    #[inline(never)]
+    fn containment<V: Clone + ParamType>(
+        &self,
+        left: &Expr<V>,
+        right: &Expr<V>,
+        item: Option<&Item>,
+        next: Next,
+    ) -> Result<Option<(Fragment<V>, Next)>, CompileError> {
+        let Some((gin, pattern)) = self.contained(left, right, item)? else {
+            return Ok(None);
+        };
+        let Some((sql, params, next)) = pattern.containing(&gin.document, &gin.at, next)? else {
+            return Ok(None);
+        };
+        let fragment = Fragment {
+            sql,
+            params,
+            precedence: precedence::OTHER,
+        };
+        Ok(Some((fragment, next)))
     }
     /// The words of a null test: of the value as a whole, for a column the
     /// schema declares a composite.
@@ -301,7 +402,14 @@ impl<'s> Compiler<'s> {
             return Ok(false);
         };
         let of = match path.root() {
-            Root::Item(up) => item_out(item, up)?.row.clone(),
+            Root::Item(up) => {
+                let item = item_out(item, up)?;
+                // A member of an object of a document is no column.
+                if let Holds::Document(_) = item.holds {
+                    return Ok(false);
+                }
+                item.row.clone()
+            }
             Root::Global => schema.table().to_owned(),
         };
         let of = std::iter::once(of.as_str())
@@ -379,36 +487,61 @@ impl<'s> Compiler<'s> {
     ///
     /// An object on the way to the member is looked up in the schema, as a
     /// collection is, by the names that lead to it. Kept in a table of its
-    /// own, it is reached through its key. Not mentioned, it is what the
-    /// dots have meant so far: from the item under test a composite kept in
-    /// the item's row — a Value Object; from the candidate a qualifier of
-    /// the name, `"s"."price"`.
+    /// own, it is reached through its key. A column declared a document, it
+    /// is the document, and the rest of the path is in it. Not mentioned, it
+    /// is what the dots have meant so far: from the item under test a
+    /// composite kept in the item's row — a Value Object; from the candidate
+    /// a qualifier of the name, `"s"."price"`.
     fn member(
         &self,
         path: &Path,
         item: Option<&Item>,
         next: Next,
+        reading: Reading,
     ) -> Result<(String, Next), CompileError> {
         let names: Vec<&str> = path.names().collect();
         match path.root() {
             Root::Item(up) => {
                 let item = item_out(item, up)?;
-                self.member_of_row(quoted(&item.alias), item.row.clone(), &names, next)
+                match item.holds {
+                    // The item is an object of an array in a document.
+                    Holds::Document(Items::Objects(layout)) => {
+                        let member = document_member(
+                            quoted(&item.alias),
+                            &item.row,
+                            layout,
+                            &names,
+                            reading,
+                        )?;
+                        Ok((member, next))
+                    }
+                    Holds::Document(Items::Values(_)) => Err(no_members(&item.row, &names)),
+                    Holds::Table | Holds::Unnested => self.member_of_row(
+                        quoted(&item.alias),
+                        item.row.clone(),
+                        &names,
+                        next,
+                        reading,
+                    ),
+                }
             }
-            // An object of the candidate kept in a table of its own, or a
-            // composite column of its row - a Value Object - that the schema
-            // says is one: the dots of an undeclared name are a qualifier.
+            // An object of the candidate kept in a table of its own, a
+            // composite column of its row - a Value Object - or a document
+            // that the schema says is one: the dots of an undeclared name are
+            // a qualifier.
             Root::Global => match (names.first(), self.schema) {
                 (Some(object), Some(schema))
                     if names.len() > 1
                         && (self.key_of_object(schema.table(), object)?.is_some()
-                            || schema.is_composite(schema.table(), object)) =>
+                            || schema.is_composite(schema.table(), object)
+                            || schema.layout(schema.table(), object).is_some()) =>
                 {
                     self.member_of_row(
                         qualified(schema.row())?,
                         schema.table().to_owned(),
                         &names,
                         next,
+                        reading,
                     )
                 }
                 _ => Ok((self.column(path, item)?, next)),
@@ -431,14 +564,32 @@ impl<'s> Compiler<'s> {
         of: String,
         names: &[&str],
         next: Next,
+        reading: Reading,
     ) -> Result<(String, Next), CompileError> {
         match names {
             [] => Ok((row, next)),
             [name] => Ok((format!("{row}.{}", identifier(name)?), next)),
             [object, rest @ ..] => {
+                if let Some(layout) = self.schema.and_then(|schema| schema.layout(&of, object)) {
+                    let document = format!("{row}.{}", identifier(object)?);
+                    let member = document_member(
+                        document,
+                        &format!("{of}.{object}"),
+                        layout,
+                        rest,
+                        reading,
+                    )?;
+                    return Ok((member, next));
+                }
                 let Some(key) = self.key_of_object(&of, object)? else {
                     let composite = format!("({row}.{})", identifier(object)?);
-                    return self.member_of_row(composite, format!("{of}.{object}"), rest, next);
+                    return self.member_of_row(
+                        composite,
+                        format!("{of}.{object}"),
+                        rest,
+                        next,
+                        reading,
+                    );
                 };
                 // The row read is one of the referenced table, and its alias
                 // says so.
@@ -461,8 +612,13 @@ impl<'s> Compiler<'s> {
                     alias: number,
                     ..next
                 };
-                let (member, next) =
-                    self.member_of_row(alias.clone(), key.referenced_table.clone(), rest, next)?;
+                let (member, next) = self.member_of_row(
+                    alias.clone(),
+                    key.referenced_table.clone(),
+                    rest,
+                    next,
+                    reading,
+                )?;
                 let sql = format!(
                     "(SELECT {member} FROM {} AS {alias} WHERE {keys})",
                     qualified(&key.referenced_table)?,
@@ -473,18 +629,115 @@ impl<'s> Compiler<'s> {
     }
 
     /// `EXISTS (SELECT 1 FROM … AS alias WHERE …)` over an array of the
-    /// parent's row, or over the rows of a table that point at the parent.
+    /// parent's row, over the rows of a table that point at the parent, or
+    /// over an array of objects in a document.
+    ///
+    /// The predicate stands where only its truth counts: an item is a
+    /// witness if it is true of it. Where only the truth of `any` counts, too,
+    /// a collection of a document with a GIN index has beside it what the
+    /// document contains if it is true: the equalities of the predicate,
+    /// which follow from it, written as containment for the index.
+    #[inline(never)]
     fn exists<V: Clone + ParamType>(
         &self,
         source: &Path,
         predicate: &Expr<V>,
         item: Option<&Item>,
         next: Next,
+        stand: Stand,
     ) -> Result<(Fragment<V>, Next), CompileError> {
         let enclosing = match source.root() {
             Root::Global => None,
             Root::Item(up) => Some(item_out(item, up)?),
         };
+        match self.document_collection(source, enclosing)? {
+            Some(collection) => {
+                self.exists_in_document(collection, source, predicate, item, next, stand)
+            }
+            None => self.exists_in_rows(source, enclosing, predicate, item, next),
+        }
+    }
+
+    /// `EXISTS` over an array of a document, and beside it, where only its
+    /// truth counts and the document has a GIN index, what the document
+    /// contains if it is true. The array is read if it is one: what is no
+    /// array - a JSON null, an object, a scalar, a member that is not there -
+    /// is no rows, whatever the plan evaluates first (ADR-0027).
+    #[inline(never)]
+    fn exists_in_document<V: Clone + ParamType>(
+        &self,
+        collection: DocumentCollection<'_>,
+        source: &Path,
+        predicate: &Expr<V>,
+        item: Option<&Item>,
+        next: Next,
+        stand: Stand,
+    ) -> Result<(Fragment<V>, Next), CompileError> {
+        let pattern = match (stand, collection.gin) {
+            (Stand::Truth, Some(gin)) => {
+                let names: Vec<&str> = gin.names.iter().map(String::as_str).collect();
+                Pattern::of_array(&names, Pattern::elements(predicate, collection.items))
+                    .map(|pattern| (gin, pattern))
+            }
+            _ => None,
+        };
+        let (contained, next) = match pattern {
+            Some((gin, pattern)) => match pattern.containing(&gin.document, &gin.at, next)? {
+                Some((contains, params, next)) => (Some((contains, params)), next),
+                None => (None, next),
+            },
+            None => (None, next),
+        };
+        let number = next.alias + 1;
+        let inner = Item {
+            alias: format!("{}_{number}", singular_of(source.name())?),
+            row: collection.row,
+            holds: Holds::Document(collection.items),
+            outer: item,
+        };
+        let next = Next {
+            alias: number,
+            ..next
+        };
+        let (predicate, next) = self.render(predicate, Some(&inner), next, Stand::Truth)?;
+        // Values are read as text, and the text as their kind.
+        let elements = match collection.items {
+            Items::Objects(_) => "jsonb_array_elements",
+            Items::Values(_) => "jsonb_array_elements_text",
+        };
+        let sql = format!(
+            "EXISTS (SELECT 1 FROM {elements}({}) AS {} WHERE {})",
+            if_array(&collection.array),
+            quoted(&inner.alias),
+            predicate.sql,
+        );
+        let exists = predicate.with(sql, ATOM);
+        let fragment = match contained {
+            None => exists,
+            Some((contains, params)) => {
+                let (and, _) = precedence::infix(Infix::Logical(Logical::And));
+                Fragment {
+                    sql: format!("{contains} AND {}", exists.sql),
+                    params,
+                    precedence: and,
+                }
+                .and(exists.params)
+            }
+        };
+        Ok((fragment, next))
+    }
+
+    /// `EXISTS` over an array of the parent's row, or over the rows of a
+    /// table that point at the parent.
+    #[inline(never)]
+    fn exists_in_rows<V: Clone + ParamType>(
+        &self,
+        source: &Path,
+        enclosing: Option<&Item>,
+        predicate: &Expr<V>,
+        item: Option<&Item>,
+        next: Next,
+    ) -> Result<(Fragment<V>, Next), CompileError> {
         // The row the collection is of, to the schema: the enclosing item's,
         // or the root's. Without a schema there is no relation to look for.
         let of: Option<String> = match (enclosing, self.schema) {
@@ -512,13 +765,17 @@ impl<'s> Compiler<'s> {
                 Some(key) => key.table.clone(),
                 None => format!("{}.{name}", of.unwrap_or_default()),
             },
+            holds: match key {
+                Some(_) => Holds::Table,
+                None => Holds::Unnested,
+            },
             outer: item,
         };
         let next = Next {
             alias: number,
             ..next
         };
-        let (predicate, next) = self.render(predicate, Some(&inner), next)?;
+        let (predicate, next) = self.render(predicate, Some(&inner), next, Stand::Truth)?;
         let alias = quoted(&inner.alias);
         let fragment = match relation {
             None => {
@@ -561,6 +818,131 @@ impl<'s> Compiler<'s> {
         Ok((fragment, next))
     }
 
+    /// The array of objects or of values at `source` in a document. None:
+    /// `source` is not in a document.
+    ///
+    /// A path is in a document if it starts in an item of a document's array,
+    /// or at a column the schema declares a document, of the enclosing
+    /// item's row or of the candidate's.
+    fn document_collection<'a>(
+        &self,
+        source: &Path,
+        enclosing: Option<&'a Item<'a>>,
+    ) -> Result<Option<DocumentCollection<'a>>, CompileError>
+    where
+        's: 'a,
+    {
+        let names: Vec<&str> = source.names().collect();
+        let entered = match enclosing {
+            Some(item) => match item.holds {
+                Holds::Document(Items::Objects(layout)) => Some(Entered {
+                    document: quoted(&item.alias),
+                    of: item.row.clone(),
+                    layout,
+                    names: &names[..],
+                    gins: Vec::new(),
+                }),
+                Holds::Document(Items::Values(_)) => return Err(no_members(&item.row, &names)),
+                Holds::Table | Holds::Unnested => {
+                    self.document_at(&item.row, quoted(&item.alias), &names)?
+                }
+            },
+            None => match self.schema {
+                Some(schema) => {
+                    self.document_at(schema.table(), qualified(schema.row())?, &names)?
+                }
+                None => None,
+            },
+        };
+        let Some(Entered {
+            document,
+            of,
+            layout,
+            names,
+            gins,
+        }) = entered
+        else {
+            return Ok(None);
+        };
+        let gin = Gin::serving(&gins, &document, names);
+        let (object, name, member) = in_document(document, &of, layout, names)?;
+        let at = format!("{of}.{}", names.join("."));
+        match member.items() {
+            Some(items) => Ok(Some(DocumentCollection {
+                array: format!("{object} -> {}", key(name)?),
+                row: at,
+                items,
+                gin,
+            })),
+            None => Err(CompileError::UndeclaredMember(format!(
+                "{at} is not a collection of its document's layout"
+            ))),
+        }
+    }
+
+    /// The document at the column `names[0]` of a row of `of`, written
+    /// `row`, as the path enters it. None: the column is not declared a
+    /// document, or the path does not go into it.
+    fn document_at<'n>(
+        &self,
+        of: &str,
+        row: String,
+        names: &'n [&'n str],
+    ) -> Result<Option<Entered<'s, 'n>>, CompileError> {
+        let (Some(schema), [column, rest @ ..]) = (self.schema, names) else {
+            return Ok(None);
+        };
+        match schema.layout(of, column) {
+            Some(layout) if !rest.is_empty() => Ok(Some(Entered {
+                document: format!("{row}.{}", identifier(column)?),
+                of: format!("{of}.{column}"),
+                layout,
+                names: rest,
+                gins: schema.gins(of, column),
+            })),
+            _ => Ok(None),
+        }
+    }
+
+    /// `left = right` as what a document with a GIN index contains, and the
+    /// document: none if it is not an equality of a member of such a
+    /// document, of a kind with one spelling, with a constant that is not
+    /// null. The document is a column, of the candidate's row or of the row
+    /// of an item of a table; an item of a document's array is no column, and
+    /// no index has its rows.
+    fn contained<V: Clone + ParamType>(
+        &self,
+        left: &Expr<V>,
+        right: &Expr<V>,
+        item: Option<&Item>,
+    ) -> Result<Option<(Gin, Pattern<V>)>, CompileError> {
+        let ((Expr::Field(path), Expr::Value(value)) | (Expr::Value(value), Expr::Field(path))) =
+            (left, right)
+        else {
+            return Ok(None);
+        };
+        let names: Vec<&str> = path.names().collect();
+        let entered = match (path.root(), self.schema) {
+            (Root::Global, Some(schema)) => {
+                self.document_at(schema.table(), qualified(schema.row())?, &names)?
+            }
+            (Root::Global, None) => None,
+            (Root::Item(up), _) => {
+                let item = item_out(item, up)?;
+                match item.holds {
+                    Holds::Document(_) => None,
+                    Holds::Table | Holds::Unnested => {
+                        self.document_at(&item.row, quoted(&item.alias), &names)?
+                    }
+                }
+            }
+        };
+        Ok(entered.and_then(|entered| {
+            let gin = Gin::serving(&entered.gins, &entered.document, entered.names)?;
+            Pattern::equal(entered.layout, entered.names, value).map(|pattern| (gin, pattern))
+        }))
+    }
+
     /// The path as a column reference, no object on its way looked up: the
     /// place of a collection, and a name from the candidate.
     ///
@@ -597,6 +979,53 @@ impl<'s> Compiler<'s> {
     }
 }
 
+/// A constant: the next parameter. In memory a text with a NUL in it is a
+/// string like any other; here it meets the server, which has no such text.
+#[inline(never)]
+fn constant<V: Clone + ParamType>(
+    value: &V,
+    next: Next,
+) -> Result<(Fragment<V>, Next), CompileError> {
+    if value.nul_in_text() {
+        return Err(CompileError::NulInText);
+    }
+    let param = next.param + 1;
+    let fragment = Fragment {
+        sql: format!("${param}"),
+        params: vec![value.clone()],
+        precedence: ATOM,
+    };
+    Ok((fragment, Next { param, ..next }))
+}
+
+/// The item `up` collections out itself: the alias `unnest` gives an
+/// element, or the text of a document's value read as its kind.
+#[inline(never)]
+fn itself<V>(
+    up: usize,
+    item: Option<&Item>,
+    next: Next,
+) -> Result<(Fragment<V>, Next), CompileError> {
+    let item = item_out(item, up)?;
+    let sql = match item.holds {
+        Holds::Unnested => quoted(&item.alias),
+        Holds::Document(Items::Values(kind)) => kind.read(&quoted(&item.alias)),
+        Holds::Table => {
+            return Err(CompileError::NotAValue(format!(
+                "an item of {} is a row of a table: name its column",
+                item.row
+            )));
+        }
+        Holds::Document(Items::Objects(_)) => {
+            return Err(CompileError::NotAValue(format!(
+                "an item of {} is an object of a document: name its member",
+                item.row
+            )));
+        }
+    };
+    Ok((Fragment::text(sql), next))
+}
+
 /// How many parameters and aliases have been numbered so far.
 #[derive(Clone, Copy)]
 struct Next {
@@ -606,12 +1035,181 @@ struct Next {
 
 /// The item under test, inside a collection's predicate: what its row is
 /// called in the query, what it is a row of to the schema - a table, or the
-/// composite at a column of one - and the item of the enclosing collection's
-/// predicate, if there is one.
+/// composite at a column of one, or the array at a path in a document -
+/// what it is, and the item of the enclosing collection's predicate, if
+/// there is one.
 struct Item<'a> {
     alias: String,
     row: String,
+    holds: Holds<'a>,
     outer: Option<&'a Item<'a>>,
+}
+
+/// What an item of a collection is, to the query.
+#[derive(Clone, Copy)]
+enum Holds<'a> {
+    /// A row of a table: its columns are named, and it is no value.
+    Table,
+    /// An element of an array, of a composite type or of a scalar one, that
+    /// `unnest` names by its alias: a member of a composite, or the value.
+    Unnested,
+    /// An object or a value of an array in a document.
+    Document(Items<'a>),
+}
+
+/// A document a path goes into: written as a `jsonb`, named by its table and
+/// column or by the array its object is an item of, what it holds, and the
+/// names of the path in it.
+struct Entered<'l, 'n> {
+    document: String,
+    of: String,
+    layout: &'l Layout,
+    names: &'n [&'n str],
+    /// The paths in the document, a column, that the schema says have a GIN
+    /// index; none in a document's array.
+    gins: Vec<&'l [String]>,
+}
+
+/// A GIN index that serves a path into a document: the document, the path
+/// in it the index is on, and the path from the document to what is asked.
+struct Gin {
+    document: String,
+    at: Vec<String>,
+    names: Vec<String>,
+}
+
+impl Gin {
+    /// The deepest of `gins` on the way to `names` in `document`: none if no
+    /// index is on the way.
+    fn serving(gins: &[&[String]], document: &str, names: &[&str]) -> Option<Self> {
+        let at = gins
+            .iter()
+            .filter(|gin| {
+                gin.len() <= names.len() && gin.iter().zip(names).all(|(at, name)| at == name)
+            })
+            .max_by_key(|gin| gin.len())?;
+        Some(Gin {
+            document: document.to_owned(),
+            at: at.to_vec(),
+            names: names.iter().map(|name| (*name).to_owned()).collect(),
+        })
+    }
+}
+
+/// An array of a document, as `exists` reads it: written as a `jsonb`; the
+/// row its items are of, by the document's column and the names in it; what
+/// they are; and the GIN index on the way to it, if the document is a column
+/// that has one.
+struct DocumentCollection<'a> {
+    array: String,
+    row: String,
+    items: Items<'a>,
+    gin: Option<Gin>,
+}
+
+/// A member named of an item that is a value of a document.
+fn no_members(row: &str, names: &[&str]) -> CompileError {
+    CompileError::UndeclaredMember(format!(
+        "{row}.{}: the items of {row} are values, which have no members",
+        names.join(".")
+    ))
+}
+
+/// Where an expression stands: where only its truth counts - the condition
+/// as a whole, `AND` and `OR` there, the predicate of `any` - and a null
+/// selects as a false does; or where its value does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stand {
+    Truth,
+    Value,
+}
+
+/// What a member is read for: its value, or whether it is null - which an
+/// object or a collection of a document can be said to be, and is no value.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reading {
+    Value,
+    NullTest,
+}
+
+/// The member at `names` of the document written `document`, which holds
+/// what `layout` says and is `of` to a message: `->` through its objects,
+/// `->>` of the member, read as the member's kind. Of an object or a
+/// collection, the text `->>` makes of it is null if the member is, and is
+/// read for that alone.
+fn document_member(
+    document: String,
+    of: &str,
+    layout: &Layout,
+    names: &[&str],
+    reading: Reading,
+) -> Result<String, CompileError> {
+    let (object, name, member) = in_document(document, of, layout, names)?;
+    let text = format!("({object} ->> {})", key(name)?);
+    match (member, reading) {
+        (Member::Value(kind), _) => Ok(kind.read(&text)),
+        (Member::Object(_) | Member::Collection(_) | Member::Values(_), Reading::NullTest) => {
+            Ok(text)
+        }
+        (Member::Object(_) | Member::Collection(_) | Member::Values(_), Reading::Value) => {
+            Err(CompileError::UndeclaredMember(format!(
+                "{of}.{} is an object or a collection of its document, not a value",
+                names.join("."),
+            )))
+        }
+    }
+}
+
+/// The object of the document written `document` that the member at
+/// `names` is in, reached by `->`; the member's name; and what the layout
+/// declares it.
+fn in_document<'l, 'n>(
+    document: String,
+    of: &str,
+    layout: &'l Layout,
+    names: &[&'n str],
+) -> Result<(String, &'n str, &'l Member), CompileError> {
+    let Some((name, objects)) = names.split_last() else {
+        return Err(CompileError::UndeclaredMember(format!(
+            "{of}: a path into a document names a member"
+        )));
+    };
+    let mut object = document;
+    let mut layout = layout;
+    let mut at = of.to_owned();
+    for step in objects {
+        at = format!("{at}.{step}");
+        let Some(Member::Object(inner)) = layout.member(step) else {
+            return Err(CompileError::UndeclaredMember(format!(
+                "{at} is not an object of its document's layout"
+            )));
+        };
+        object = format!("{object} -> {}", key(step)?);
+        layout = inner;
+    }
+    let member = layout.member(name).ok_or_else(|| {
+        CompileError::UndeclaredMember(format!(
+            "{at}.{name} is not a member of its document's layout"
+        ))
+    })?;
+    Ok((object, name, member))
+}
+
+/// `array` if it is one, and a null if it is not. `jsonb_array_elements`
+/// fails on a scalar, a JSON null among them, and on an object; and whether
+/// a row with one reaches it is the plan's to decide, not the text's - the
+/// planner orders the operands of `AND` by cost and skips what a false one
+/// makes moot, so the same query failed under one schema and selected under
+/// another. Of a null the function gives no rows: what is no array has no
+/// items, as a member that is not there is null (ADR-0027).
+fn if_array(array: &str) -> String {
+    format!("CASE WHEN jsonb_typeof({array}) = 'array' THEN {array} END")
+}
+
+/// The key of a member of a document, as a literal of the query: a name of
+/// the alphabet of names, so that nothing ends the literal.
+fn key(name: &str) -> Result<String, CompileError> {
+    Ok(format!("'{}'", plain(name)?))
 }
 
 /// The singular of the last name of `table`, in lower case: what an alias

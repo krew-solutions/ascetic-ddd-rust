@@ -6,10 +6,12 @@
 
 use ascetic_ddd_specification::ast::{
     add, all, and, and_all, any, div, equal, field, greater_than, greater_than_equal, is,
-    is_not_null, is_null, left_shift, less_than, mul, neg, not, not_equal, or, right_shift, sub,
-    value,
+    is_not_null, is_null, left_shift, less_than, mul, neg, not, not_equal, or, outer_item,
+    right_shift, sub, value,
 };
-use ascetic_ddd_specification::pg::{CompileError, Compiler, ForeignKey, Query, Schema, compile};
+use ascetic_ddd_specification::pg::{
+    CompileError, Compiler, ForeignKey, Kind, Layout, Query, Schema, compile,
+};
 use ascetic_ddd_specification::{Date, Expr, Path, Value};
 
 type Spec = Expr<Value>;
@@ -943,4 +945,688 @@ fn a_schema_is_the_foreign_keys_of_the_storage() {
         sql_with(&shared, &equal(field("owner_id.name"), value("x"))),
         r#"(SELECT "owner_1"."name" FROM "owners" AS "owner_1" WHERE "owner_1"."tenant_id" = "stores"."tenant_id" AND "owner_1"."id" = "stores"."owner_id") = $1"#,
     );
+}
+
+/// What the encoding of a policy writes into its document, in the tests of
+/// documents below.
+fn policy() -> Layout {
+    Layout::new()
+        .value("status", Kind::Text)
+        .value("priority", Kind::Int)
+        .value("weight", Kind::Float)
+        .value("published", Kind::Bool)
+        .value("created_at", Kind::Timestamp)
+        .value("due", Kind::Date)
+        .value("owner_id", Kind::Uuid)
+        .value("a'b", Kind::Text)
+        .object(
+            "targeting",
+            Layout::new()
+                .value("mode", Kind::Text)
+                .object("window", Layout::new().value("hours", Kind::Int)),
+        )
+        .collection(
+            "versions",
+            Layout::new()
+                .value("number", Kind::Int)
+                .value("published_at", Kind::Timestamp)
+                .collection(
+                    "approvals",
+                    Layout::new()
+                        .value("by", Kind::Text)
+                        .value("limit", Kind::Int),
+                ),
+        )
+}
+
+fn policies() -> Schema {
+    Schema::new("policies")
+        .alias("p")
+        .document("policies", "document", policy())
+}
+
+/// A member of a document is read by `->>` as text, and the text is read as
+/// the kind the layout gives the member: a value of a type, as a column is,
+/// so that a constant beside it takes that type. A text is ordered by code
+/// point, as the evaluator orders it. A column beside the document is a
+/// column.
+#[test]
+fn a_member_of_a_document_is_read_as_the_kind_its_layout_gives_it() {
+    let schema = policies();
+    for (specification, expected) in [
+        (
+            greater_than(field("document.priority"), value(5)),
+            r#"("p"."document" ->> 'priority')::bigint > $1"#,
+        ),
+        (
+            equal(field("document.status"), value("active")),
+            r#"(("p"."document" ->> 'status') COLLATE "C") = $1"#,
+        ),
+        (
+            field("document.published"),
+            r#"("p"."document" ->> 'published')::boolean"#,
+        ),
+        (
+            less_than(field("document.weight"), value(0.5)),
+            r#"("p"."document" ->> 'weight')::double precision < $1"#,
+        ),
+        (
+            greater_than(field("document.created_at"), value("2026-01-10")),
+            r#"("p"."document" ->> 'created_at')::timestamptz > $1"#,
+        ),
+        (
+            equal(field("document.due"), value(Date::from_days(0))),
+            r#"("p"."document" ->> 'due')::date = $1"#,
+        ),
+        (
+            equal(field("document.owner_id"), value("x")),
+            r#"("p"."document" ->> 'owner_id')::uuid = $1"#,
+        ),
+        (
+            equal(field("document.targeting.window.hours"), value(8)),
+            r#"("p"."document" -> 'targeting' -> 'window' ->> 'hours')::bigint = $1"#,
+        ),
+        (
+            and(
+                field("archived"),
+                equal(field("document.targeting.mode"), value("x")),
+            ),
+            r#""archived" AND (("p"."document" -> 'targeting' ->> 'mode') COLLATE "C") = $1"#,
+        ),
+        // A cast binds tighter than unary minus, and than the cast of the
+        // count of a shift.
+        (
+            less_than(neg(field("document.priority")), value(0)),
+            r#"-("p"."document" ->> 'priority')::bigint < $1"#,
+        ),
+        (
+            equal(
+                left_shift(field("mask"), field("document.priority")),
+                value(4),
+            ),
+            r#""mask" << ("p"."document" ->> 'priority')::bigint::integer = $1"#,
+        ),
+    ] {
+        assert_eq!(sql_with(&schema, &specification), expected);
+    }
+}
+
+/// A null test reads whether the member is null, which an object and a
+/// collection of a document can be said to be: `->>` of a JSON null, and of
+/// a member that is not there, is the null of SQL. An object is no value to
+/// compare.
+#[test]
+fn a_null_test_of_a_member_of_a_document_reads_whether_it_is_null() {
+    let schema = policies();
+    for (specification, expected) in [
+        (
+            is_null(field("document.priority")),
+            r#"("p"."document" ->> 'priority')::bigint IS NULL"#,
+        ),
+        (
+            is_not_null(field("document.targeting")),
+            r#"("p"."document" ->> 'targeting') IS NOT NULL"#,
+        ),
+        (
+            is_null(field("document.versions")),
+            r#"("p"."document" ->> 'versions') IS NULL"#,
+        ),
+    ] {
+        assert_eq!(sql_with(&schema, &specification), expected);
+    }
+    assert_eq!(
+        Compiler::new()
+            .schema(&schema)
+            .compile::<Value>(&equal(field("document.targeting"), value("x"))),
+        Err(CompileError::UndeclaredMember(
+            "policies.document.targeting is an object or a collection of its document, not a value"
+                .to_owned()
+        )),
+    );
+}
+
+/// An array of objects in a document is read with `jsonb_array_elements`,
+/// whose rows are the objects; a member of one is read as a member of the
+/// document is. The aliases of the enclosing queries are in scope of the
+/// inner one, the candidate's row is named by the schema, as for the other
+/// storages of a collection.
+#[test]
+fn a_collection_in_a_document_is_read_with_jsonb_array_elements() {
+    let schema = policies();
+    let approved_by = |name: &str| any(Path::item("approvals"), equal(item("by"), value(name)));
+    for (specification, expected) in [
+        (
+            any("document.versions", greater_than(item("number"), value(2))),
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE ("version_1" ->> 'number')::bigint > $1)"#,
+        ),
+        (
+            any("document.versions", approved_by("ann")),
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("version_1" -> 'approvals') = 'array' THEN "version_1" -> 'approvals' END) AS "approval_2" WHERE (("approval_2" ->> 'by') COLLATE "C") = $1))"#,
+        ),
+        (
+            any(
+                "document.versions",
+                any(
+                    Path::item("approvals"),
+                    greater_than(item("limit"), field(Path::outer(1, "number"))),
+                ),
+            ),
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("version_1" -> 'approvals') = 'array' THEN "version_1" -> 'approvals' END) AS "approval_2" WHERE ("approval_2" ->> 'limit')::bigint > ("version_1" ->> 'number')::bigint))"#,
+        ),
+        (
+            any(
+                "document.versions",
+                greater_than(item("published_at"), field("document.created_at")),
+            ),
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE ("version_1" ->> 'published_at')::timestamptz > ("p"."document" ->> 'created_at')::timestamptz)"#,
+        ),
+        (
+            any(
+                "document.versions",
+                greater_than(item("number"), field("floor")),
+            ),
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE ("version_1" ->> 'number')::bigint > "p"."floor")"#,
+        ),
+        (
+            all("document.versions", is_not_null(item("published_at"))),
+            r#"NOT EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE NOT ("version_1" ->> 'published_at')::timestamptz IS NOT NULL)"#,
+        ),
+    ] {
+        assert_eq!(sql_with(&schema, &specification), expected);
+    }
+}
+
+/// A path into a document is what the layout declares, or the query is
+/// refused: the layout is what the encoding writes, and a member it does not
+/// write would be a null in every row, a query that selects nothing in
+/// silence. A key is written as a literal, of the alphabet of names.
+#[test]
+fn a_path_into_a_document_is_what_its_layout_declares_or_refused() {
+    let schema = policies();
+    let refused = |specification: Spec, message: &str| {
+        assert_eq!(
+            Compiler::new().schema(&schema).compile(&specification),
+            Err(CompileError::UndeclaredMember(message.to_owned())),
+        );
+    };
+    refused(
+        equal(field("document.title"), value("x")),
+        "policies.document.title is not a member of its document's layout",
+    );
+    refused(
+        equal(field("document.status.code"), value("x")),
+        "policies.document.status is not an object of its document's layout",
+    );
+    refused(
+        any("document.status", item("x")),
+        "policies.document.status is not a collection of its document's layout",
+    );
+    refused(
+        any("document.targeting", item("x")),
+        "policies.document.targeting is not a collection of its document's layout",
+    );
+    refused(
+        any("document.versions", item("title")),
+        "policies.document.versions.title is not a member of its document's layout",
+    );
+    assert_eq!(
+        Compiler::new().schema(&schema).compile::<Value>(&equal(
+            field(Path::global("document").child("a'b")),
+            value("x")
+        )),
+        Err(CompileError::InvalidIdentifier("a'b".to_owned())),
+    );
+    // Not declared a document, the column is what the dots have meant.
+    assert_eq!(
+        sql(&equal(field("document.status"), value("x"))),
+        r#""document"."status" = $1"#,
+    );
+}
+
+/// A document is a column of a table, any table of the schema: the table
+/// of a collection, the table of an object kept by a key.
+#[test]
+fn a_document_is_a_column_of_any_table_of_the_schema() {
+    let schema = Schema::new("stores")
+        .alias("s")
+        .foreign_key("store_items", "store_id", "stores", "id")
+        .foreign_key("stores", "owner_id", "owners", "id")
+        .document(
+            "store_items",
+            "document",
+            Layout::new()
+                .value("price", Kind::Int)
+                .collection("tags", Layout::new().value("name", Kind::Text)),
+        )
+        .document(
+            "owners",
+            "document",
+            Layout::new().value("name", Kind::Text),
+        );
+    let price = || field(Path::item("document").child("price"));
+    for (specification, expected) in [
+        (
+            any("store_items", greater_than(price(), value(5))),
+            r#"EXISTS (SELECT 1 FROM "store_items" AS "store_item_1" WHERE "store_item_1"."store_id" = "s"."id" AND ("store_item_1"."document" ->> 'price')::bigint > $1)"#,
+        ),
+        (
+            any(
+                "store_items",
+                any(
+                    Path::item("document").child("tags"),
+                    equal(item("name"), value("x")),
+                ),
+            ),
+            r#"EXISTS (SELECT 1 FROM "store_items" AS "store_item_1" WHERE "store_item_1"."store_id" = "s"."id" AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("store_item_1"."document" -> 'tags') = 'array' THEN "store_item_1"."document" -> 'tags' END) AS "tag_2" WHERE (("tag_2" ->> 'name') COLLATE "C") = $1))"#,
+        ),
+        (
+            equal(field("owner_id.document.name"), value("x")),
+            r#"(SELECT (("owner_1"."document" ->> 'name') COLLATE "C") FROM "owners" AS "owner_1" WHERE "owner_1"."id" = "s"."owner_id") = $1"#,
+        ),
+    ] {
+        assert_eq!(sql_with(&schema, &specification), expected);
+    }
+}
+
+/// Where the schema says a document has a GIN index, an equality of a text,
+/// an integer or a boolean member with a constant is what the document
+/// contains, where only truth counts: the condition, `AND` and `OR` there.
+/// Containment is false where the equality is null, so under `NOT` the
+/// equality stays; and a null constant, a kind of several spellings, two
+/// members compared, stay as they are.
+#[test]
+fn an_equality_where_only_truth_counts_is_containment_with_a_gin_index() {
+    let schema = policies().gin("policies", "document");
+    let status = |text: &str| equal(field("document.status"), value(text));
+    for (specification, expected) in [
+        (
+            status("active"),
+            r#""p"."document" @> jsonb_object(ARRAY['status'], ARRAY[$1::text])"#,
+        ),
+        (
+            equal(value(5), field("document.priority")),
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['priority'], $1::bigint::text::jsonb)"#,
+        ),
+        (
+            equal(field("document.published"), value(true)),
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['published'], $1::boolean::text::jsonb)"#,
+        ),
+        (
+            equal(field("document.targeting.mode"), value("x")),
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['targeting'], jsonb_object(ARRAY['mode'], ARRAY[$1::text]))"#,
+        ),
+        (
+            and(
+                status("active"),
+                greater_than(field("document.priority"), value(5)),
+            ),
+            r#""p"."document" @> jsonb_object(ARRAY['status'], ARRAY[$1::text]) AND ("p"."document" ->> 'priority')::bigint > $2"#,
+        ),
+        (
+            or(status("a"), status("b")),
+            r#""p"."document" @> jsonb_object(ARRAY['status'], ARRAY[$1::text]) OR "p"."document" @> jsonb_object(ARRAY['status'], ARRAY[$2::text])"#,
+        ),
+        (
+            not(status("a")),
+            r#"NOT (("p"."document" ->> 'status') COLLATE "C") = $1"#,
+        ),
+        (
+            not_equal(field("document.status"), value("a")),
+            r#"(("p"."document" ->> 'status') COLLATE "C") != $1"#,
+        ),
+        (
+            equal(field("document.status"), Expr::Value(Value::Null)),
+            r#"(("p"."document" ->> 'status') COLLATE "C") = $1"#,
+        ),
+        (
+            equal(field("document.weight"), value(0.5)),
+            r#"("p"."document" ->> 'weight')::double precision = $1"#,
+        ),
+        (
+            equal(field("document.created_at"), value("2026-01-01")),
+            r#"("p"."document" ->> 'created_at')::timestamptz = $1"#,
+        ),
+        (
+            equal(field("document.status"), field("document.targeting.mode")),
+            r#"(("p"."document" ->> 'status') COLLATE "C") = (("p"."document" -> 'targeting' ->> 'mode') COLLATE "C")"#,
+        ),
+        (
+            equal(status("a"), field("archived")),
+            r#"((("p"."document" ->> 'status') COLLATE "C") = $1) = "archived""#,
+        ),
+    ] {
+        assert_eq!(sql_with(&schema, &specification), expected);
+    }
+    // Without the index the equality is what it was.
+    assert_eq!(
+        sql_with(&policies(), &status("active")),
+        r#"(("p"."document" ->> 'status') COLLATE "C") = $1"#,
+    );
+}
+
+/// `any` over a collection of a document with a GIN index, where only its
+/// truth counts, has beside it what the document contains if it is true:
+/// the equalities its predicate joins by `AND`, of the item and of the items
+/// of the item's collections, in one object of the array. They follow from
+/// the predicate, which stays as it was: an `OR`, a range, a member of the
+/// candidate are left out of the containment and kept in the `EXISTS`.
+#[test]
+fn any_over_a_collection_with_a_gin_index_has_its_equalities_beside_it() {
+    let schema = policies().gin("policies", "document");
+    let number = |n: i64| equal(item("number"), value(n));
+    let approved_by = |name: &str| any(Path::item("approvals"), equal(item("by"), value(name)));
+    for (specification, expected) in [
+        (
+            any("document.versions", number(3)),
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['versions'], '[]'::jsonb || jsonb_set('{}'::jsonb, ARRAY['number'], $1::bigint::text::jsonb)) AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $2)"#,
+        ),
+        (
+            any(
+                "document.versions",
+                and_all(
+                    number(3),
+                    [
+                        greater_than(item("published_at"), value("2026-01-01")),
+                        approved_by("ann"),
+                    ],
+                ),
+            ),
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['versions'], '[]'::jsonb || (jsonb_set('{}'::jsonb, ARRAY['number'], $1::bigint::text::jsonb) || jsonb_set('{}'::jsonb, ARRAY['approvals'], '[]'::jsonb || jsonb_object(ARRAY['by'], ARRAY[$2::text])))) AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $3 AND ("version_1" ->> 'published_at')::timestamptz > $4 AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("version_1" -> 'approvals') = 'array' THEN "version_1" -> 'approvals' END) AS "approval_2" WHERE (("approval_2" ->> 'by') COLLATE "C") = $5))"#,
+        ),
+        // Two items of one collection: the array contains both.
+        (
+            any(
+                "document.versions",
+                and(approved_by("ann"), approved_by("bob")),
+            ),
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['versions'], '[]'::jsonb || jsonb_set('{}'::jsonb, ARRAY['approvals'], '[]'::jsonb || jsonb_object(ARRAY['by'], ARRAY[$1::text]) || jsonb_object(ARRAY['by'], ARRAY[$2::text]))) AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("version_1" -> 'approvals') = 'array' THEN "version_1" -> 'approvals' END) AS "approval_2" WHERE (("approval_2" ->> 'by') COLLATE "C") = $3) AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("version_1" -> 'approvals') = 'array' THEN "version_1" -> 'approvals' END) AS "approval_3" WHERE (("approval_3" ->> 'by') COLLATE "C") = $4))"#,
+        ),
+        // Two constants at one member: the first is asked for, which still
+        // follows from the predicate.
+        (
+            any("document.versions", and(number(3), number(4))),
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['versions'], '[]'::jsonb || jsonb_set('{}'::jsonb, ARRAY['number'], $1::bigint::text::jsonb)) AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $2 AND ("version_1" ->> 'number')::bigint = $3)"#,
+        ),
+        // Nothing that follows: the `EXISTS` alone.
+        (
+            any("document.versions", or(number(3), number(4))),
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $1 OR ("version_1" ->> 'number')::bigint = $2)"#,
+        ),
+        // Where the falsity counts as well, nothing is beside it.
+        (
+            not(any("document.versions", number(3))),
+            r#"NOT EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $1)"#,
+        ),
+        (
+            all("document.versions", number(3)),
+            r#"NOT EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE NOT ("version_1" ->> 'number')::bigint = $1)"#,
+        ),
+        // Beside another condition, under `OR`.
+        (
+            or(field("archived"), any("document.versions", number(3))),
+            r#""archived" OR "p"."document" @> jsonb_set('{}'::jsonb, ARRAY['versions'], '[]'::jsonb || jsonb_set('{}'::jsonb, ARRAY['number'], $1::bigint::text::jsonb)) AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $2)"#,
+        ),
+    ] {
+        assert_eq!(sql_with(&schema, &specification), expected);
+    }
+}
+
+/// A document with a GIN index is a column of any table: of a collection's
+/// table, whose rows the predicate of `any` stands on.
+#[test]
+fn a_document_with_a_gin_index_of_a_table_of_a_collection() {
+    let schema = Schema::new("stores")
+        .alias("s")
+        .foreign_key("store_items", "store_id", "stores", "id")
+        .document(
+            "store_items",
+            "document",
+            Layout::new()
+                .value("price", Kind::Int)
+                .collection("tags", Layout::new().value("name", Kind::Text)),
+        )
+        .gin("store_items", "document");
+    for (specification, expected) in [
+        (
+            any(
+                "store_items",
+                equal(field(Path::item("document").child("price")), value(5)),
+            ),
+            r#"EXISTS (SELECT 1 FROM "store_items" AS "store_item_1" WHERE "store_item_1"."store_id" = "s"."id" AND "store_item_1"."document" @> jsonb_set('{}'::jsonb, ARRAY['price'], $1::bigint::text::jsonb))"#,
+        ),
+        (
+            any(
+                "store_items",
+                any(
+                    Path::item("document").child("tags"),
+                    equal(item("name"), value("x")),
+                ),
+            ),
+            r#"EXISTS (SELECT 1 FROM "store_items" AS "store_item_1" WHERE "store_item_1"."store_id" = "s"."id" AND "store_item_1"."document" @> jsonb_set('{}'::jsonb, ARRAY['tags'], '[]'::jsonb || jsonb_object(ARRAY['name'], ARRAY[$1::text])) AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("store_item_1"."document" -> 'tags') = 'array' THEN "store_item_1"."document" -> 'tags' END) AS "tag_2" WHERE (("tag_2" ->> 'name') COLLATE "C") = $2))"#,
+        ),
+    ] {
+        assert_eq!(sql_with(&schema, &specification), expected);
+    }
+}
+
+fn element() -> Spec {
+    outer_item(0)
+}
+
+/// What a policy's document holds, with arrays of values in it.
+fn targeted() -> Schema {
+    Schema::new("policies").alias("p").document(
+        "policies",
+        "document",
+        Layout::new()
+            .object(
+                "targeting",
+                Layout::new().values("device_groups", Kind::Text),
+            )
+            .values("ranks", Kind::Int)
+            .collection(
+                "versions",
+                Layout::new()
+                    .value("number", Kind::Int)
+                    .values("labels", Kind::Text),
+            ),
+    )
+}
+
+/// An element of a collection of values is the item itself: of an array of
+/// a scalar type the alias `unnest` gives it, of a document's array of
+/// values the text `jsonb_array_elements_text` gives it, read as its kind.
+#[test]
+fn an_element_of_a_collection_of_values_is_the_item_itself() {
+    assert_eq!(
+        sql(&any("tags", equal(element(), value("sale")))),
+        r#"EXISTS (SELECT 1 FROM unnest("tags") AS "tag_1" WHERE "tag_1" = $1)"#,
+    );
+    let schema = targeted();
+    for (specification, expected) in [
+        (
+            any(
+                "document.targeting.device_groups",
+                equal(element(), value("g1")),
+            ),
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'targeting' -> 'device_groups') = 'array' THEN "p"."document" -> 'targeting' -> 'device_groups' END) AS "device_group_1" WHERE ("device_group_1" COLLATE "C") = $1)"#,
+        ),
+        (
+            any("document.ranks", greater_than(element(), value(3))),
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'ranks') = 'array' THEN "p"."document" -> 'ranks' END) AS "rank_1" WHERE "rank_1"::bigint > $1)"#,
+        ),
+        (
+            any("document.ranks", is_null(element())),
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'ranks') = 'array' THEN "p"."document" -> 'ranks' END) AS "rank_1" WHERE "rank_1"::bigint IS NULL)"#,
+        ),
+        (
+            any(
+                "document.versions",
+                any(
+                    Path::item("labels"),
+                    equal(element(), field(Path::outer(1, "number"))),
+                ),
+            ),
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("version_1" -> 'labels') = 'array' THEN "version_1" -> 'labels' END) AS "label_2" WHERE ("label_2" COLLATE "C") = ("version_1" ->> 'number')::bigint))"#,
+        ),
+        (
+            any(
+                "document.ranks",
+                any("document.ranks", greater_than(element(), outer_item(1))),
+            ),
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'ranks') = 'array' THEN "p"."document" -> 'ranks' END) AS "rank_1" WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'ranks') = 'array' THEN "p"."document" -> 'ranks' END) AS "rank_2" WHERE "rank_2"::bigint > "rank_1"::bigint))"#,
+        ),
+    ] {
+        assert_eq!(sql_with(&schema, &specification), expected);
+    }
+}
+
+/// Where the document has a GIN index, the equalities of an element with
+/// constants are what its array contains: an array of values contains them.
+#[test]
+fn a_collection_of_values_with_a_gin_index_has_its_equalities_beside_it() {
+    let schema = targeted().gin("policies", "document");
+    for (specification, expected) in [
+        (
+            any(
+                "document.targeting.device_groups",
+                equal(element(), value("g1")),
+            ),
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['targeting'], jsonb_set('{}'::jsonb, ARRAY['device_groups'], '[]'::jsonb || (jsonb_object(ARRAY['v'], ARRAY[$1::text]) -> 'v'))) AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'targeting' -> 'device_groups') = 'array' THEN "p"."document" -> 'targeting' -> 'device_groups' END) AS "device_group_1" WHERE ("device_group_1" COLLATE "C") = $2)"#,
+        ),
+        (
+            any(
+                "document.ranks",
+                and(equal(element(), value(3)), equal(value(4), element())),
+            ),
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['ranks'], '[]'::jsonb || $1::bigint::text::jsonb || $2::bigint::text::jsonb) AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'ranks') = 'array' THEN "p"."document" -> 'ranks' END) AS "rank_1" WHERE "rank_1"::bigint = $3 AND $4 = "rank_1"::bigint)"#,
+        ),
+        (
+            any(
+                "document.versions",
+                and(
+                    equal(field(Path::item("number")), value(2)),
+                    any(Path::item("labels"), equal(element(), value("x"))),
+                ),
+            ),
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['versions'], '[]'::jsonb || (jsonb_set('{}'::jsonb, ARRAY['number'], $1::bigint::text::jsonb) || jsonb_set('{}'::jsonb, ARRAY['labels'], '[]'::jsonb || (jsonb_object(ARRAY['v'], ARRAY[$2::text]) -> 'v')))) AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $3 AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("version_1" -> 'labels') = 'array' THEN "version_1" -> 'labels' END) AS "label_2" WHERE ("label_2" COLLATE "C") = $4))"#,
+        ),
+        // A null constant, a range: nothing that follows.
+        (
+            any(
+                "document.ranks",
+                or(
+                    equal(element(), Expr::Value(Value::Null)),
+                    greater_than(element(), value(3)),
+                ),
+            ),
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'ranks') = 'array' THEN "p"."document" -> 'ranks' END) AS "rank_1" WHERE "rank_1"::bigint = $1 OR "rank_1"::bigint > $2)"#,
+        ),
+    ] {
+        assert_eq!(sql_with(&schema, &specification), expected);
+    }
+}
+
+/// The item itself where the item has members is refused, and so is a
+/// member of an item that is a value.
+#[test]
+fn the_item_itself_is_a_value_or_refused() {
+    let schema = targeted()
+        .document(
+            "policies",
+            "document",
+            Layout::new()
+                .collection("versions", Layout::new().value("number", Kind::Int))
+                .values("ranks", Kind::Int),
+        )
+        .foreign_key("policy_rules", "policy_id", "policies", "id");
+    for (specification, error) in [
+        (
+            any("policy_rules", equal(element(), value(1))),
+            CompileError::NotAValue(
+                "an item of policy_rules is a row of a table: name its column".to_owned(),
+            ),
+        ),
+        (
+            any("document.versions", equal(element(), value(1))),
+            CompileError::NotAValue(
+                "an item of policies.document.versions is an object of a document: name its member"
+                    .to_owned(),
+            ),
+        ),
+        (
+            any("document.ranks", equal(item("code"), value(1))),
+            CompileError::UndeclaredMember(
+                "policies.document.ranks.code: the items of policies.document.ranks are values, \
+                 which have no members"
+                    .to_owned(),
+            ),
+        ),
+        (element(), CompileError::NoCurrentItem),
+    ] {
+        assert_eq!(
+            Compiler::new().schema(&schema).compile(&specification),
+            Err(error)
+        );
+    }
+}
+
+/// A GIN index on a path of a document - `CREATE INDEX … USING gin
+/// ((document -> 'subgroups'))` - serves containment of the value at the
+/// path, written of the expression the index is on; containment of the
+/// whole document it does not serve. What is not under the path is as it
+/// was; of several paths on the way, the deepest is written.
+#[test]
+fn a_gin_index_on_a_path_serves_containment_of_the_value_there() {
+    let groups = |name: &str| {
+        any(
+            "document.targeting.device_groups",
+            equal(element(), value(name)),
+        )
+    };
+    let at_groups = targeted().gin_at("policies", "document", "targeting.device_groups");
+    for (specification, expected) in [
+        (
+            groups("g1"),
+            r#"("p"."document" -> 'targeting' -> 'device_groups') @> ('[]'::jsonb || (jsonb_object(ARRAY['v'], ARRAY[$1::text]) -> 'v')) AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'targeting' -> 'device_groups') = 'array' THEN "p"."document" -> 'targeting' -> 'device_groups' END) AS "device_group_1" WHERE ("device_group_1" COLLATE "C") = $2)"#,
+        ),
+        (
+            any("document.ranks", equal(element(), value(3))),
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'ranks') = 'array' THEN "p"."document" -> 'ranks' END) AS "rank_1" WHERE "rank_1"::bigint = $1)"#,
+        ),
+    ] {
+        assert_eq!(sql_with(&at_groups, &specification), expected);
+    }
+    let at_targeting = policies().gin_at("policies", "document", "targeting");
+    for (specification, expected) in [
+        (
+            equal(field("document.targeting.mode"), value("x")),
+            r#"("p"."document" -> 'targeting') @> (jsonb_object(ARRAY['mode'], ARRAY[$1::text]))"#,
+        ),
+        (
+            equal(field("document.targeting.window.hours"), value(8)),
+            r#"("p"."document" -> 'targeting') @> (jsonb_set('{}'::jsonb, ARRAY['window'], jsonb_set('{}'::jsonb, ARRAY['hours'], $1::bigint::text::jsonb)))"#,
+        ),
+        (
+            equal(field("document.status"), value("x")),
+            r#"(("p"."document" ->> 'status') COLLATE "C") = $1"#,
+        ),
+    ] {
+        assert_eq!(sql_with(&at_targeting, &specification), expected);
+    }
+    let both = targeted()
+        .gin("policies", "document")
+        .gin_at("policies", "document", "targeting");
+    for (specification, expected) in [
+        (
+            groups("g1"),
+            r#"("p"."document" -> 'targeting') @> (jsonb_set('{}'::jsonb, ARRAY['device_groups'], '[]'::jsonb || (jsonb_object(ARRAY['v'], ARRAY[$1::text]) -> 'v'))) AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'targeting' -> 'device_groups') = 'array' THEN "p"."document" -> 'targeting' -> 'device_groups' END) AS "device_group_1" WHERE ("device_group_1" COLLATE "C") = $2)"#,
+        ),
+        (
+            any("document.ranks", equal(element(), value(3))),
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['ranks'], '[]'::jsonb || $1::bigint::text::jsonb) AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'ranks') = 'array' THEN "p"."document" -> 'ranks' END) AS "rank_1" WHERE "rank_1"::bigint = $2)"#,
+        ),
+    ] {
+        assert_eq!(sql_with(&both, &specification), expected);
+    }
 }

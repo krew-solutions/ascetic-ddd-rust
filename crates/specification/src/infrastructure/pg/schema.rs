@@ -16,7 +16,15 @@
 //! column of a composite type is declared as one, `composite("stores",
 //! "address")`, and a path through it from the candidate is a member of it,
 //! `("s"."address")."city"`: from the candidate an undeclared name is a
-//! table's alias, `"s"."price"`.
+//! table's alias, `"s"."price"`. A column of `jsonb` that holds a document
+//! is declared with what the document holds, `document("policies",
+//! "document", layout)`, and a path through it from the candidate or from an
+//! item is a member of the document, `("s"."document" ->> 'kind')`, read as
+//! the [`Layout`] says. A document with a GIN index is declared to have one,
+//! `gin("policies", "document")`, and an equality on a member of it where
+//! only truth counts is written as containment, which the index serves.
+
+use super::layout::Layout;
 
 /// A foreign key: `table (columns) REFERENCES referenced_table
 /// (referenced_columns)`.
@@ -89,6 +97,8 @@ pub struct Schema {
     alias: Option<String>,
     keys: Vec<ForeignKey>,
     composites: Vec<(String, String)>,
+    documents: Vec<(String, String, Layout)>,
+    gins: Vec<(String, String, Vec<String>)>,
 }
 
 impl Schema {
@@ -99,6 +109,8 @@ impl Schema {
             alias: None,
             keys: Vec::new(),
             composites: Vec::new(),
+            documents: Vec::new(),
+            gins: Vec::new(),
         }
     }
 
@@ -141,6 +153,80 @@ impl Schema {
         let mut composites = self.composites;
         composites.push((table.into(), column.into()));
         Schema { composites, ..self }
+    }
+
+    /// The column `column` of `table` is a `jsonb` document that holds what
+    /// `layout` says. A path through it is a member of the document,
+    /// `("s"."document" ->> 'kind')`, read as the kind the layout gives it;
+    /// a collection in it is read with `jsonb_array_elements`. `table` is a
+    /// table, the query's or the table of a collection or of an object kept
+    /// by a key.
+    pub fn document(
+        self,
+        table: impl Into<String>,
+        column: impl Into<String>,
+        layout: Layout,
+    ) -> Self {
+        let mut documents = self.documents;
+        documents.push((table.into(), column.into(), layout));
+        Schema { documents, ..self }
+    }
+
+    /// The document at `column` of `table` has a GIN index, of `jsonb_ops` or
+    /// of `jsonb_path_ops`: `CREATE INDEX … USING gin (document
+    /// jsonb_path_ops)`. Where only truth counts - the condition as a whole,
+    /// `AND` and `OR` there, the predicate of `any` - an equality of a text,
+    /// an integer or a boolean member with a constant is written as
+    /// containment, `"p"."document" @> …`, which the index serves; and `any`
+    /// over a collection of the document has the equalities of its predicate
+    /// beside it as containment. Without this a btree index on the member's
+    /// expression serves the equality, and containment would not be served.
+    ///
+    /// Containment is true or false where the equality is null: the
+    /// condition is what goes after `WHERE`, and a caller that negates it
+    /// negates the specification, not the text.
+    pub fn gin(self, table: impl Into<String>, column: impl Into<String>) -> Self {
+        self.with_gin(table.into(), column.into(), Vec::new())
+    }
+
+    /// The value at `path` in the document at `column` of `table` has a GIN
+    /// index of its own, on the expression that reaches it: `gin_at("groups",
+    /// "document", "subgroups")` is `CREATE INDEX … USING gin ((document ->
+    /// 'subgroups'))`, and `"targeting.device_groups"` is `(document ->
+    /// 'targeting' -> 'device_groups')`. What [`gin`](Schema::gin) writes as
+    /// containment of the document is written of that value where the member
+    /// or the collection is under `path`: `("g"."document" -> 'subgroups') @>
+    /// …`, the expression the index is on; containment of the whole document
+    /// is not served by it. Where several declared paths lead to a member,
+    /// the deepest is written.
+    pub fn gin_at(self, table: impl Into<String>, column: impl Into<String>, path: &str) -> Self {
+        let path = path.split('.').map(str::to_owned).collect();
+        self.with_gin(table.into(), column.into(), path)
+    }
+
+    fn with_gin(self, table: String, column: String, path: Vec<String>) -> Self {
+        let mut gins = self.gins;
+        gins.push((table, column, path));
+        Schema { gins, ..self }
+    }
+
+    /// The paths in the document at `column` of `table` that have a GIN
+    /// index: the document itself is the empty one.
+    pub(super) fn gins(&self, table: &str, column: &str) -> Vec<&[String]> {
+        self.gins
+            .iter()
+            .filter(|(of, name, _)| of == table && name == column)
+            .map(|(_, _, path)| path.as_slice())
+            .collect()
+    }
+
+    /// What the document at `column` of `table` holds, if it is declared one.
+    pub(super) fn layout(&self, table: &str, column: &str) -> Option<&Layout> {
+        self.documents
+            .iter()
+            .rev()
+            .find(|(of, name, _)| of == table && name == column)
+            .map(|(_, _, layout)| layout)
     }
 
     /// Whether `column` of `table` is declared a composite.

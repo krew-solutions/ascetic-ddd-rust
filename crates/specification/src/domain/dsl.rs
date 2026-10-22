@@ -37,6 +37,30 @@
 //! let _ = Number::field("age").is_null(); // `age` was not declared nullable
 //! ```
 //!
+//! A collection is quantified by [`any`] and [`all`], whose predicate is a
+//! boolean term: a member of the item is a field of [`Path::item`], and an
+//! element of a collection of values the item itself, [`Term::item`],
+//! declared of its sort as a field is.
+//!
+//! ```
+//! use ascetic_ddd_specification::Path;
+//! use ascetic_ddd_specification::dsl::{Number, Text, all, any};
+//!
+//! let dear = any("items", Number::field(Path::item("price")).gt(Number::value(500)));
+//! let on_sale = any("tags", Text::item().eq(Text::value("sale")));
+//! let priced = all("items", Number::field(Path::item("price")).gt(Number::value(0)));
+//! let specification = (dear & on_sale & priced).into_expr();
+//! # let _ = specification;
+//! ```
+//!
+//! A predicate that is no truth value does not compile:
+//!
+//! ```compile_fail
+//! # use ascetic_ddd_specification::Path;
+//! # use ascetic_ddd_specification::dsl::{Number, any};
+//! let _ = any("items", Number::field(Path::item("price"))); // a number is no predicate
+//! ```
+//!
 //! Python overloads the comparison operators as well. Rust's `==` and `<`
 //! return `bool` and nothing else, so comparisons are methods here, as they
 //! are in Go; the arithmetic and logical operators are overloaded.
@@ -120,6 +144,18 @@ pub mod sort {
     pub struct Nullable;
 }
 
+/// Some item of the collection at `source` satisfies `predicate`: a truth
+/// value, never null, as [`ast::any`] is.
+pub fn any<N>(source: impl Into<Path>, predicate: Term<sort::Boolean, N>) -> Boolean {
+    Term::from_expr(ast::any(source, predicate.into_expr()))
+}
+
+/// No item of the collection at `source` fails `predicate`: a truth value,
+/// never null, as [`ast::all`] is.
+pub fn all<N>(source: impl Into<Path>, predicate: Term<sort::Boolean, N>) -> Boolean {
+    Term::from_expr(ast::all(source, predicate.into_expr()))
+}
+
 /// A Rust value that is a literal of sort `S`.
 pub trait Literal<S>: Into<Value> {}
 
@@ -169,6 +205,19 @@ impl<S, N> Term<S, N> {
     /// `make_field`.
     pub fn field(path: impl Into<Path>) -> Self {
         Term::from_expr(ast::field(path))
+    }
+
+    /// The item under test itself, declared to be of this sort: an element of
+    /// a collection of values, in the predicate of [`any`] or [`all`] -
+    /// `Text::item()` of the tags of a store.
+    pub fn item() -> Self {
+        Term::from_expr(ast::item())
+    }
+
+    /// The item `up` collections out itself: `outer_item(0)` is
+    /// [`item`](Term::item).
+    pub fn outer_item(up: usize) -> Self {
+        Term::from_expr(ast::outer_item(up))
     }
 
     /// `expr`, declared to be of this sort. Nothing checks the declaration:

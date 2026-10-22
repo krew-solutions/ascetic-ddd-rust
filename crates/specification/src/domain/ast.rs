@@ -151,6 +151,11 @@ pub enum Expr<V> {
     /// unknown: an item whose predicate is unknown is not a witness. The
     /// sources call this node `Wildcard`, after JSONPath's `[*]`.
     Any(Path, Box<Expr<V>>),
+    /// The item under test itself, `up` collections out: an element of a
+    /// collection of values - the groups a policy targets - which has no
+    /// members to name. JSONPath's `@` alone. A [`Path`] names a member of
+    /// the item, `Path::item("price")`; this is the item.
+    Item(usize),
 }
 
 impl<V> Expr<V> {
@@ -160,6 +165,7 @@ impl<V> Expr<V> {
         Ok(match self {
             Expr::Value(value) => Expr::Value(f(value)?),
             Expr::Field(path) => Expr::Field(path.clone()),
+            Expr::Item(up) => Expr::Item(*up),
             Expr::Prefix(op, operand) => Expr::Prefix(*op, Box::new(operand.try_map_values(f)?)),
             Expr::Infix(left, op, right) => Expr::Infix(
                 Box::new(left.try_map_values(f)?),
@@ -182,6 +188,16 @@ pub fn value<V>(value: impl Into<V>) -> Expr<V> {
 /// The value of the member at `path`.
 pub fn field<V>(path: impl Into<Path>) -> Expr<V> {
     Expr::Field(path.into())
+}
+
+/// The item under test itself: an element of a collection of values.
+pub fn item<V>() -> Expr<V> {
+    Expr::Item(0)
+}
+
+/// The item `up` collections out itself: `outer_item(0)` is [`item`].
+pub fn outer_item<V>(up: usize) -> Expr<V> {
+    Expr::Item(up)
 }
 
 /// `NOT operand`.

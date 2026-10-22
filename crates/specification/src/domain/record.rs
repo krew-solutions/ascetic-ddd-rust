@@ -7,10 +7,14 @@
 //! value where it is absent, `Record::value(Value::Null)`: null to a null
 //! test, and no object to go into. A member left out is missing, which is
 //! another thing.
+//!
+//! A collection of values - the groups a policy targets - is a collection of
+//! `Record::value`s: its items are values, [`Element::Value`], and the tree
+//! names each as the item itself.
 
 use std::collections::BTreeMap;
 
-use super::evaluate::{Context, ContextError};
+use super::evaluate::{Context, ContextError, Element};
 
 /// A value, an object of named members, or a collection of items.
 #[derive(Clone, Debug, PartialEq)]
@@ -74,11 +78,15 @@ impl<V: Clone> Context<V> for Record<V> {
         }
     }
 
-    fn collection(&self, name: &str) -> Result<Vec<&dyn Context<V>>, ContextError> {
+    fn collection(&self, name: &str) -> Result<Vec<Element<'_, V>>, ContextError> {
         match self.member(name)? {
-            Record::Collection(items) => {
-                Ok(items.iter().map(|item| item as &dyn Context<V>).collect())
-            }
+            Record::Collection(items) => Ok(items
+                .iter()
+                .map(|item| match item {
+                    Record::Value(value) => Element::Value(value.clone()),
+                    object => Element::Object(object as &dyn Context<V>),
+                })
+                .collect()),
             Record::Value(_) | Record::Object(_) => {
                 Err(ContextError::NotACollection(name.to_owned()))
             }
