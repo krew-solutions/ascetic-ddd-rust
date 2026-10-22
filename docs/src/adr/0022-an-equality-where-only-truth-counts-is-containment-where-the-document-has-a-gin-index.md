@@ -5,6 +5,12 @@
 Accepted (2026-10-21). Discharges the step ADR-0021 named among its
 consequences.
 
+Amended 2026-10-22 by ADR-0027: the fold of the pattern into a constant is
+measured under a custom plan; under a generic plan the pattern is evaluated
+for every row of a sequential scan, 58 ms against 29 ms over 200 000
+documents, and the key of an index scan is computed once under either. The
+pattern stays as it is.
+
 ## Context
 
 ADR-0021 reads a member of a document as `(("p"."document" ->> 'status')

@@ -13,6 +13,11 @@ Amended 2026-10-21 by ADR-0023: the consequence on collections of scalars is
 discharged - the element of a collection of values is the item itself,
 `Expr::Item`, and a document's array of values is `Layout::values`.
 
+Amended 2026-10-22 by ADR-0027: the consequence on a collection that is a
+JSON null is withdrawn - whether `jsonb_array_elements` fails the query is
+the plan's to decide, measured; under ADR-0027 a collection that is not an
+array has no items.
+
 ## Context
 
 A service that keeps an aggregate as one `jsonb` document has the
