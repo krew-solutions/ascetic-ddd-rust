@@ -164,26 +164,35 @@ async fn an_ecdsa_signature_names_its_hash_and_marshaling_on_both_sides() {
 }
 
 #[tokio::test]
-async fn a_400_on_verify_is_explained_by_one_read_of_the_key() {
-    // No such key.
-    let transport = Scripted::answering(vec![
-        (
-            "POST",
-            "/verify/t.sign.ed25519",
-            400,
-            json!({ "errors": ["signature verification key not found"] }),
-        ),
-        ("GET", "/keys/t.sign.ed25519", 404, json!({ "errors": [] })),
-    ]);
-    let outcome = with(&transport, |tx, kms| async move {
-        kms.verify(&tx, "t", b"hi", &Signature::new(ED25519, 1, vec![0; 64]))
-            .await
-    })
-    .await;
-    assert!(
-        matches!(outcome, Err(Error::SigningKeyNotFound { ref tenant_id, algorithm: ED25519 }) if tenant_id == "t"),
-        "{outcome:?}"
-    );
+async fn a_refusal_of_verify_is_explained_by_one_read_of_the_key() {
+    let signed_by = |version: u32| Signature::new(ED25519, version, vec![0; 64]);
+    let key = |latest: u32, min_decryption: u32, min_encryption: u32| {
+        json!({ "data": {
+            "latest_version": latest,
+            "min_decryption_version": min_decryption,
+            "min_encryption_version": min_encryption,
+        } })
+    };
+    // No such key: on a `400` and on a `403` alike.
+    for status in [400, 403] {
+        let transport = Scripted::answering(vec![
+            (
+                "POST",
+                "/verify/t.sign.ed25519",
+                status,
+                json!({ "errors": ["signature verification key not found"] }),
+            ),
+            ("GET", "/keys/t.sign.ed25519", 404, json!({ "errors": [] })),
+        ]);
+        let outcome = with(&transport, |tx, kms| async move {
+            kms.verify(&tx, "t", b"hi", &signed_by(1)).await
+        })
+        .await;
+        assert!(
+            matches!(outcome, Err(Error::SigningKeyNotFound { ref tenant_id, algorithm: ED25519 }) if tenant_id == "t"),
+            "{status}: {outcome:?}"
+        );
+    }
     // A version the key no longer serves.
     let transport = Scripted::answering(vec![
         (
@@ -192,44 +201,59 @@ async fn a_400_on_verify_is_explained_by_one_read_of_the_key() {
             400,
             json!({ "errors": ["ciphertext or signature version is disallowed by policy (too old)"] }),
         ),
-        (
-            "GET",
-            "/keys/t.sign.ed25519",
-            200,
-            json!({ "data": { "latest_version": 3, "min_decryption_version": 2 } }),
-        ),
+        ("GET", "/keys/t.sign.ed25519", 200, key(3, 2, 0)),
     ]);
     let outcome = with(&transport, |tx, kms| async move {
-        kms.verify(&tx, "t", b"hi", &Signature::new(ED25519, 1, vec![0; 64]))
-            .await
+        kms.verify(&tx, "t", b"hi", &signed_by(1)).await
     })
     .await;
     assert!(
         matches!(outcome, Err(Error::NoKeyOfVersion(1))),
         "{outcome:?}"
     );
-    // Any other 400 stays Vault's.
+    // A version that verifies and no longer signs serves a verification:
+    // a `400` by it is not the version's fault but the request's own.
+    for (version, floors) in [(1, (1, 0)), (2, (1, 3))] {
+        let transport = Scripted::answering(vec![
+            (
+                "POST",
+                "/verify/t.sign.ed25519",
+                400,
+                json!({ "errors": ["something else"] }),
+            ),
+            (
+                "GET",
+                "/keys/t.sign.ed25519",
+                200,
+                key(3, floors.0, floors.1),
+            ),
+        ]);
+        let outcome = with(&transport, |tx, kms| async move {
+            kms.verify(&tx, "t", b"hi", &signed_by(version)).await
+        })
+        .await;
+        assert!(
+            matches!(outcome, Err(Error::Malformed(ref message)) if message.contains("something else")),
+            "v{version}: {outcome:?}"
+        );
+    }
+    // A `403` with the key there: the identity holds no `verify`, and no
+    // retry under it mends that.
     let transport = Scripted::answering(vec![
         (
             "POST",
             "/verify/t.sign.ed25519",
-            400,
-            json!({ "errors": ["something else"] }),
+            403,
+            json!({ "errors": ["1 error occurred:\n\t* permission denied\n\n"] }),
         ),
-        (
-            "GET",
-            "/keys/t.sign.ed25519",
-            200,
-            json!({ "data": { "latest_version": 3, "min_decryption_version": 1 } }),
-        ),
+        ("GET", "/keys/t.sign.ed25519", 200, key(3, 1, 0)),
     ]);
     let outcome = with(&transport, |tx, kms| async move {
-        kms.verify(&tx, "t", b"hi", &Signature::new(ED25519, 1, vec![0; 64]))
-            .await
+        kms.verify(&tx, "t", b"hi", &signed_by(1)).await
     })
     .await;
     assert!(
-        matches!(outcome, Err(Error::Vault { status: 400, ref message, .. }) if message == "something else"),
+        matches!(outcome, Err(Error::Forbidden { ref tenant_id, operation: "verify" }) if tenant_id == "t"),
         "{outcome:?}"
     );
 }

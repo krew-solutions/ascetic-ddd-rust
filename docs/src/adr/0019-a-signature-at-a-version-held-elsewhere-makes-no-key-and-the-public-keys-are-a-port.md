@@ -31,6 +31,17 @@ through `SigningKeyCustody`, as the adapters do; the owed items 1 (signing
 custody beside the port) and 2 (`managed_keys()` for `sign` and `mac`) are
 discharged.
 
+Amended 2026-10-23: owed item 3 discharged — a refusal of `verify` is read
+as decision 3 reads a pinned signature's, of the versions that verify
+rather than sign: the key missing `SigningKeyNotFound` on a `403` as on a
+`400`, a `403` with the key there `Forbidden`, which a holder whose policy
+holds `sign` and `read` and no `verify` meets, a retired version
+`NoKeyOfVersion`, an unexplained `400` `Malformed`; a version below
+`min_encryption_version` serves a verification, so a `400` by it is the
+request's fault and not the version's. Held by `tests/vault_mapping.rs`
+(each case against a scripted transport) and the holder's test in
+`tests/vault_signing.rs` (`verify` under the holder's token is `Forbidden`).
+
 ## Context
 
 `SigningService` signed with the latest version of a tenant's key of an

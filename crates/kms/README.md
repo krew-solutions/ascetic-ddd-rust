@@ -256,7 +256,10 @@ public key Transit publishes, read into the model's `PublicKey`, so the two
 adapters' byte forms are one. Transit answers `400` both for a key it has not got
 and for a version a key does not serve; the adapter reads the key once, on
 that path only, to tell `SigningKeyNotFound` and `NoKeyOfVersion` apart,
-rather than matching Vault's text. A signature at a named version asks
+rather than matching Vault's text, and reads a refusal of `verify` as it
+reads a pinned signature's, below, of the versions that verify rather than
+sign: a `403` with the key there is `Forbidden` — a holder whose policy
+lacks `verify` meets it — and an unexplained `400` `Malformed`. A signature at a named version asks
 `key_version`, makes no `POST keys`, and checks the version Transit reports;
 Transit refuses a version above the latest, retired or below the key's
 `min_encryption_version` with a `500` and a missing key with a `400`, so a

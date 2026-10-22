@@ -767,12 +767,13 @@ async fn a_holder_s_token_signs_and_macs_and_holds_no_custody() {
     let kms = Arc::new(VaultTransitService::new(f.addr.clone(), token.clone()).managed_keys());
 
     let tenant = f.tenant.clone();
-    let used = {
+    let (signature, used) = {
         let etag = etag.clone();
         f.atomic_as(Arc::clone(&kms), |tx, kms| async move {
             let signature = kms.sign(&tx, &tenant, ED25519, b"hello").await?;
             let mac = kms.mac(&tx, &tenant, &etag, b"hello").await?;
-            Ok((signature.key_version(), mac.key_version()))
+            let versions = (signature.key_version(), mac.key_version());
+            Ok((signature, versions))
         })
         .await
         .unwrap()
@@ -809,6 +810,9 @@ async fn a_holder_s_token_signs_and_macs_and_holds_no_custody() {
         f.atomic_as(Arc::clone(&kms), |tx, kms| async move {
             let options = KeyOptions::default();
             Ok([
+                // Verifying through the KMS is `verify`, which this policy
+                // leaves out: a holder that signs holds no verify by that.
+                kms.verify(&tx, &tenant, b"hello", &signature).await,
                 kms.create_signing_key(&tx, &format!("{tenant}-new"), ED25519, &options)
                     .await
                     .map(|_| ()),
@@ -825,10 +829,21 @@ async fn a_holder_s_token_signs_and_macs_and_holds_no_custody() {
         .await
         .unwrap()
     };
+    assert!(
+        matches!(
+            refused[0],
+            Err(Error::Forbidden {
+                operation: "verify",
+                ..
+            })
+        ),
+        "verify under the holder's token: {:?}",
+        refused[0]
+    );
     for (n, outcome) in refused.iter().enumerate() {
         assert!(
             matches!(outcome, Err(Error::Forbidden { .. })),
-            "custody operation {n} under the holder's token: {outcome:?}"
+            "operation {n} under the holder's token: {outcome:?}"
         );
     }
 

@@ -21,12 +21,15 @@
 //! their version and bytes; signatures are asked for and verified in JWS
 //! marshaling, so an ECDSA signature is `r || s` and never DER. Transit
 //! answers `400` both for a key it has not got and for a version a key has
-//! not got or no longer serves; the adapter tells them apart by reading the
-//! key once, on that path only, rather than by Vault's text. Signing at a
-//! named version is refused with a `500` for a version above the latest,
-//! retired, or below the key's `min_encryption_version` (measured, Vault
-//! 1.21), so a refusal of it is read the same way whether `400`, `403` or
-//! `500` (ADR-0019). The public keys are `GET keys/{name}`'s
+//! not got or no longer serves, and refuses a signature at a named version
+//! with a `500` for a version above the latest, retired, or below the key's
+//! `min_encryption_version` (measured, Vault 1.21); so a refusal of
+//! signing, of a MAC or of verifying is read by one read of the key, on
+//! that path only and never by Vault's text, whether `400`, `403` or `500`
+//! (ADR-0019): the key missing is its absence, a `403` with the key there
+//! [`Error::Forbidden`], a version the key does not sign with — or, for a
+//! verification, does not serve — [`Error::NoKeyOfVersion`], an
+//! unexplained `400` [`Error::Malformed`]. The public keys are `GET keys/{name}`'s
 //! `data.keys.{n}.public_key` of the versions served: base64 of the raw
 //! bytes for Ed25519, a PEM SubjectPublicKeyInfo for P-256. A `403` on a
 //! KEK operation is read the same way: the key there, it is
@@ -668,9 +671,9 @@ impl VaultTransitService {
     /// it has not got and, signing at a named version, `500` for a version
     /// above the latest, retired, or below the one the key signs from
     /// (measured, Vault 1.21): the key not there, `missing`; a `403` with
-    /// the key there, [`Error::Forbidden`]; a version named and outside what
-    /// the key signs with, [`Error::NoKeyOfVersion`]; a `400` the read does
-    /// not explain, the request's own fault, [`Error::Malformed`] (the rule
+    /// the key there, [`Error::Forbidden`]; a version asked that the key does
+    /// not sign with — or, verifying, does not serve — [`Error::NoKeyOfVersion`];
+    /// a `400` the read does not explain, the request's own fault, [`Error::Malformed`] (the rule
     /// ADR-0017 point 5 set for the KEK); a `500` it does not explain stays
     /// Vault's, of the moment; the read refused, the refusal as it came. Any
     /// other status — `429`, `502`, `503`, `504` — is left as it came,
@@ -683,7 +686,7 @@ impl VaultTransitService {
         tenant_id: &str,
         name: &str,
         operation: &'static str,
-        version: Option<u32>,
+        asked: Option<Asked>,
         missing: Error,
         error: Error,
     ) -> Error
@@ -705,8 +708,8 @@ impl VaultTransitService {
                 tenant_id: tenant_id.to_owned(),
                 operation,
             },
-            Ok(Some(answer)) if version.is_some_and(|version| !signs(&answer, version)) => {
-                Error::NoKeyOfVersion(version.unwrap_or_default())
+            Ok(Some(answer)) if asked.is_some_and(|asked| !asked.holds(&answer)) => {
+                Error::NoKeyOfVersion(asked.map_or(0, Asked::version))
             }
             Ok(Some(_)) if status == 400 => {
                 Error::Malformed(format!("vault refused {operation}: {message}"))
@@ -768,6 +771,33 @@ fn serves(answer: &Value, version: u32) -> bool {
     let latest = version_field(answer, "latest_version").unwrap_or(0);
     let oldest = version_field(answer, "min_decryption_version").unwrap_or(1);
     (oldest..=latest).contains(&version)
+}
+
+/// What a use asks of a version of the key: that it signs with it, or that
+/// it serves it — verifies a signature by it. A version below the key's
+/// `min_encryption_version` serves and no longer signs, so a refusal of a
+/// signature by it is the version's, and a refusal of its verification is
+/// the request's own.
+#[derive(Clone, Copy)]
+enum Asked {
+    Signs(u32),
+    Serves(u32),
+}
+
+impl Asked {
+    fn version(self) -> u32 {
+        match self {
+            Asked::Signs(version) | Asked::Serves(version) => version,
+        }
+    }
+
+    /// Whether the key, as Vault describes it, holds what was asked.
+    fn holds(self, answer: &Value) -> bool {
+        match self {
+            Asked::Signs(version) => signs(answer, version),
+            Asked::Serves(version) => serves(answer, version),
+        }
+    }
 }
 
 /// Whether the key, as Vault describes it, signs with `version`: made, not
@@ -1136,7 +1166,7 @@ where
                         tenant_id,
                         &name,
                         "sign",
-                        Some(key_version.get()),
+                        Some(Asked::Signs(key_version.get())),
                         signing_key_not_found(tenant_id, algorithm),
                         error,
                     )
@@ -1179,14 +1209,13 @@ where
             Ok(answer) => answer,
             Err(error) => {
                 return Err(self
-                    .explain(
+                    .explain_use(
                         session,
+                        tenant_id,
                         &name,
-                        Some(signature.key_version()),
-                        || Error::SigningKeyNotFound {
-                            tenant_id: tenant_id.to_owned(),
-                            algorithm,
-                        },
+                        "verify",
+                        Some(Asked::Serves(signature.key_version())),
+                        signing_key_not_found(tenant_id, algorithm),
                         error,
                     )
                     .await);
