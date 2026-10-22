@@ -8,10 +8,10 @@ the construction of interpreters for a DSL - read against the code, the
 tests and PostgreSQL 14.24. Each finding below is a measurement, and the
 SQL that makes it is in the text.
 
-Decision 2 bounds a measurement and changes no query. Decisions 1 and 3 are
-not yet held: the tests named under each are to be written with the change,
-as ADR-0009 named tests that failed at its commit. Until they are green the
-status stays as it is.
+Decision 1 is held by the tests named under it. Decision 2 bounds a
+measurement and changes no query. Decision 3 is not yet held: the test named
+under it is to be written with the change, as ADR-0009 named tests that
+failed at its commit. Until it is green the status stays as it is.
 
 Amends ADR-0021 (the consequence on a collection that is a JSON null) and
 ADR-0022 (the reach of its measurement of the fold).
@@ -119,13 +119,18 @@ one it replaced.
    text says what a row is; the plan does not. The guard is immutable and
    costs about a sixth of a full scan of the subquery, 133 ms against 115
    ms over 200 000 documents with a sequential scan forced, and nothing
-   where the index serves. To be held by: the text in
-   `tests/pg_compile.rs`; in `tests/pg.rs` the four documents above under
-   the schema with and without `gin`, under `any`, `all` and `NOT any`,
-   with `enable_seqscan` either way, the same rows selected; and the
-   evaluator's side named in the same test - it refuses a candidate whose
-   collection is no collection, as it refuses a member that is not there,
-   and the rows it refuses are listed as such.
+   where the index serves. Held by: the text in `tests/pg_compile.rs`,
+   `a_collection_in_a_document_is_read_with_jsonb_array_elements` and every
+   `EXISTS` of a document there; in `tests/pg.rs`,
+   `a_collection_of_a_document_that_is_not_an_array_has_no_items` - seven
+   documents, an array, an array with a null member, a JSON null, no
+   member, an empty array, an object and a scalar, under the schema with
+   and without `gin`, under `any`, `all` and `NOT any`, with
+   `enable_seqscan` either way, the same rows selected; and the evaluator's
+   side in the same test - it refuses the four candidates whose collection
+   is no collection or is not there, and evaluates the three arrays as the
+   server selects them. Checked to fail without the guard: "cannot extract
+   elements from a scalar" on the `EXISTS` alone, at the null.
 
 2. **The fold is a property of a custom plan, and the pattern stays as it
    is.** `jsonb_object` and `jsonb_set` remain right: never dearer than

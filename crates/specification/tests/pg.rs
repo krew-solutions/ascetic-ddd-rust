@@ -20,8 +20,8 @@ use ascetic_ddd_specification::ast::{
 use ascetic_ddd_specification::jsonpath::{Params, Template};
 use ascetic_ddd_specification::pg::{Compiler, Kind, Layout, Schema, compile};
 use ascetic_ddd_specification::{
-    Arithmetic, Date, EvalError, Expr, Interval, Mapped, Mapping, Operand, OperandError, Path,
-    Record, Timestamp, Value, evaluate, is_satisfied_by, transform,
+    Arithmetic, ContextError, Date, EvalError, Expr, Interval, Mapped, Mapping, Operand,
+    OperandError, Path, Record, Timestamp, Value, evaluate, is_satisfied_by, transform,
 };
 use std::cmp::Ordering;
 use tokio_postgres::error::SqlState;
@@ -2338,6 +2338,122 @@ async fn the_item_of_an_enclosing_collection_is_named_from_an_inner_predicate() 
                 .map(|row| row.get(0))
                 .collect();
             assert_eq!(selected, satisfied, "{storage}: {text}");
+        }
+    }
+}
+
+/// A collection of a document that is not an array has no items (ADR-0027):
+/// a JSON null, an object, a scalar and a member that is not there are
+/// alike no rows, whatever the schema declares and whatever the plan
+/// evaluates first - `any` is false of them and `all` true, as of an empty
+/// array. Without the guard the `EXISTS` alone failed on the null, "cannot
+/// extract elements from a scalar", and beside containment it did not, the
+/// planner evaluating `@>` first: the same specification over the same rows
+/// failed under one schema and selected under the other. The evaluator
+/// refuses such a candidate, as it refuses a member that is not there, and
+/// the rows it refuses are listed as such.
+#[tokio::test]
+async fn a_collection_of_a_document_that_is_not_an_array_has_no_items() {
+    let client = client().await;
+    client
+        .batch_execute(
+            r#"CREATE TEMP TABLE spec_arrays (id int8 PRIMARY KEY, document jsonb NOT NULL);
+             INSERT INTO spec_arrays VALUES
+                 (1, '{"items": [{"s": "a"}]}'),
+                 (2, '{"items": [{"s": "b"}, {"s": null}]}'),
+                 (3, '{"items": null}'),
+                 (4, '{}'),
+                 (5, '{"items": []}'),
+                 (6, '{"items": {"s": "a"}}'),
+                 (7, '{"items": "a"}');
+             CREATE INDEX spec_arrays_document ON spec_arrays USING gin (document);
+             ANALYZE spec_arrays;"#,
+        )
+        .await
+        .expect("a table of documents");
+    let plain = Schema::new("spec_arrays").document(
+        "spec_arrays",
+        "document",
+        Layout::new().collection("items", Layout::new().value("s", Kind::Text)),
+    );
+    let indexed = plain.clone().gin("spec_arrays", "document");
+    let is_a: Make = || equal(field(Path::item("s")), value("a"));
+    let cases: [(Spec, &[i64]); 3] = [
+        (any("document.items", is_a()), &[1]),
+        (all("document.items", is_a()), &[1, 3, 4, 5, 6, 7]),
+        (not(any("document.items", is_a())), &[2, 3, 4, 5, 6, 7]),
+    ];
+    // The same documents as candidates in memory, each under `document` as
+    // the column is: the arrays are evaluated, the rest refused - no
+    // collection, or no member.
+    let object = |s: Option<&str>| Record::object([("s", Record::value(s))]);
+    let candidate = |members: Vec<(&str, Record<Value>)>| {
+        Record::object([("document", Record::object(members))])
+    };
+    let documents: [(i64, Record<Value>); 7] = [
+        (
+            1,
+            candidate(vec![("items", Record::collection([object(Some("a"))]))]),
+        ),
+        (
+            2,
+            candidate(vec![(
+                "items",
+                Record::collection([object(Some("b")), object(None)]),
+            )]),
+        ),
+        (3, candidate(vec![("items", Record::value(Value::Null))])),
+        (4, candidate(vec![])),
+        (
+            5,
+            candidate(vec![("items", Record::collection(Vec::new()))]),
+        ),
+        (6, candidate(vec![("items", object(Some("a")))])),
+        (7, candidate(vec![("items", Record::value("a"))])),
+    ];
+    let refused = [3, 4, 6, 7];
+    for (specification, expected) in &cases {
+        for (id, document) in &documents {
+            match is_satisfied_by(specification, document) {
+                Ok(satisfied) => assert_eq!(satisfied, expected.contains(id), "document {id}"),
+                Err(EvalError::Context(
+                    ContextError::NotACollection(_) | ContextError::Missing(_),
+                )) => assert!(refused.contains(id), "document {id} refused"),
+                Err(error) => panic!("document {id}: {error}"),
+            }
+        }
+    }
+    for (storage, schema) in [("without the index", &plain), ("with the index", &indexed)] {
+        for seqscan in ["on", "off"] {
+            client
+                .batch_execute(&format!("SET enable_seqscan = {seqscan}"))
+                .await
+                .expect("set");
+            for (specification, expected) in &cases {
+                let query = Compiler::new()
+                    .schema(schema)
+                    .compile(specification)
+                    .expect("compiled");
+                let text = format!("SELECT id FROM spec_arrays WHERE {} ORDER BY id", query.sql);
+                let params: Vec<&(dyn ToSql + Sync)> = query
+                    .params
+                    .iter()
+                    .map(|param| param as &(dyn ToSql + Sync))
+                    .collect();
+                let selected: Vec<i64> = client
+                    .query(&text, &params)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("{storage}, enable_seqscan = {seqscan}: {text}: {error}")
+                    })
+                    .iter()
+                    .map(|row| row.get(0))
+                    .collect();
+                assert_eq!(
+                    &selected, expected,
+                    "{storage}, enable_seqscan = {seqscan}: {text}"
+                );
+            }
         }
     }
 }

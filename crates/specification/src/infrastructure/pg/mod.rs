@@ -36,7 +36,8 @@
 //!
 //! A column the [`Schema`] declares a `jsonb` document holds members of its
 //! own, which a path goes on into: `("s"."document" ->> 'kind')` and, for an
-//! array of objects, `EXISTS (SELECT 1 FROM jsonb_array_elements(…))`. Each
+//! array of objects, `EXISTS (SELECT 1 FROM jsonb_array_elements(…))` over
+//! what is at the path if it is an array, and over nothing if it is not. Each
 //! value is read as the kind the document's [`Layout`] gives it, a cast or a
 //! collation, so that it is a value of a type as a column is and a constant
 //! beside it takes that type: a document does not say its kinds.
@@ -659,7 +660,9 @@ impl<'s> Compiler<'s> {
 
     /// `EXISTS` over an array of a document, and beside it, where only its
     /// truth counts and the document has a GIN index, what the document
-    /// contains if it is true.
+    /// contains if it is true. The array is read if it is one: what is no
+    /// array - a JSON null, an object, a scalar, a member that is not there -
+    /// is no rows, whatever the plan evaluates first (ADR-0027).
     #[inline(never)]
     fn exists_in_document<V: Clone + ParamType>(
         &self,
@@ -704,7 +707,7 @@ impl<'s> Compiler<'s> {
         };
         let sql = format!(
             "EXISTS (SELECT 1 FROM {elements}({}) AS {} WHERE {})",
-            collection.array,
+            if_array(&collection.array),
             quoted(&inner.alias),
             predicate.sql,
         );
@@ -1190,6 +1193,17 @@ fn in_document<'l, 'n>(
         ))
     })?;
     Ok((object, name, member))
+}
+
+/// `array` if it is one, and a null if it is not. `jsonb_array_elements`
+/// fails on a scalar, a JSON null among them, and on an object; and whether
+/// a row with one reaches it is the plan's to decide, not the text's - the
+/// planner orders the operands of `AND` by cost and skips what a false one
+/// makes moot, so the same query failed under one schema and selected under
+/// another. Of a null the function gives no rows: what is no array has no
+/// items, as a member that is not there is null (ADR-0027).
+fn if_array(array: &str) -> String {
+    format!("CASE WHEN jsonb_typeof({array}) = 'array' THEN {array} END")
 }
 
 /// The key of a member of a document, as a literal of the query: a name of

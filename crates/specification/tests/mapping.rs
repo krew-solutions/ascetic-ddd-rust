@@ -612,7 +612,7 @@ fn an_element_kept_in_part_in_the_candidates_row_is_compared_part_by_part() {
             .compile(&transformed.expect("transformed"))
             .expect("compiled")
             .sql,
-        r#"EXISTS (SELECT 1 FROM jsonb_array_elements_text("t"."document" -> 'members') AS "member_1" WHERE "t"."tenant_id" = $1 AND "member_1"::bigint = $2)"#,
+        r#"EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("t"."document" -> 'members') = 'array' THEN "t"."document" -> 'members' END) AS "member_1" WHERE "t"."tenant_id" = $1 AND "member_1"::bigint = $2)"#,
     );
     // A member of the tenant who is a member of one of its teams: the
     // element two collections out, said from its own predicate.

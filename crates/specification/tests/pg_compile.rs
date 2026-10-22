@@ -1097,11 +1097,11 @@ fn a_collection_in_a_document_is_read_with_jsonb_array_elements() {
     for (specification, expected) in [
         (
             any("document.versions", greater_than(item("number"), value(2))),
-            r#"EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE ("version_1" ->> 'number')::bigint > $1)"#,
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE ("version_1" ->> 'number')::bigint > $1)"#,
         ),
         (
             any("document.versions", approved_by("ann")),
-            r#"EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE EXISTS (SELECT 1 FROM jsonb_array_elements("version_1" -> 'approvals') AS "approval_2" WHERE (("approval_2" ->> 'by') COLLATE "C") = $1))"#,
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("version_1" -> 'approvals') = 'array' THEN "version_1" -> 'approvals' END) AS "approval_2" WHERE (("approval_2" ->> 'by') COLLATE "C") = $1))"#,
         ),
         (
             any(
@@ -1111,25 +1111,25 @@ fn a_collection_in_a_document_is_read_with_jsonb_array_elements() {
                     greater_than(item("limit"), field(Path::outer(1, "number"))),
                 ),
             ),
-            r#"EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE EXISTS (SELECT 1 FROM jsonb_array_elements("version_1" -> 'approvals') AS "approval_2" WHERE ("approval_2" ->> 'limit')::bigint > ("version_1" ->> 'number')::bigint))"#,
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("version_1" -> 'approvals') = 'array' THEN "version_1" -> 'approvals' END) AS "approval_2" WHERE ("approval_2" ->> 'limit')::bigint > ("version_1" ->> 'number')::bigint))"#,
         ),
         (
             any(
                 "document.versions",
                 greater_than(item("published_at"), field("document.created_at")),
             ),
-            r#"EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE ("version_1" ->> 'published_at')::timestamptz > ("p"."document" ->> 'created_at')::timestamptz)"#,
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE ("version_1" ->> 'published_at')::timestamptz > ("p"."document" ->> 'created_at')::timestamptz)"#,
         ),
         (
             any(
                 "document.versions",
                 greater_than(item("number"), field("floor")),
             ),
-            r#"EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE ("version_1" ->> 'number')::bigint > "p"."floor")"#,
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE ("version_1" ->> 'number')::bigint > "p"."floor")"#,
         ),
         (
             all("document.versions", is_not_null(item("published_at"))),
-            r#"NOT EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE NOT ("version_1" ->> 'published_at')::timestamptz IS NOT NULL)"#,
+            r#"NOT EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE NOT ("version_1" ->> 'published_at')::timestamptz IS NOT NULL)"#,
         ),
     ] {
         assert_eq!(sql_with(&schema, &specification), expected);
@@ -1217,7 +1217,7 @@ fn a_document_is_a_column_of_any_table_of_the_schema() {
                     equal(item("name"), value("x")),
                 ),
             ),
-            r#"EXISTS (SELECT 1 FROM "store_items" AS "store_item_1" WHERE "store_item_1"."store_id" = "s"."id" AND EXISTS (SELECT 1 FROM jsonb_array_elements("store_item_1"."document" -> 'tags') AS "tag_2" WHERE (("tag_2" ->> 'name') COLLATE "C") = $1))"#,
+            r#"EXISTS (SELECT 1 FROM "store_items" AS "store_item_1" WHERE "store_item_1"."store_id" = "s"."id" AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("store_item_1"."document" -> 'tags') = 'array' THEN "store_item_1"."document" -> 'tags' END) AS "tag_2" WHERE (("tag_2" ->> 'name') COLLATE "C") = $1))"#,
         ),
         (
             equal(field("owner_id.document.name"), value("x")),
@@ -1318,7 +1318,7 @@ fn any_over_a_collection_with_a_gin_index_has_its_equalities_beside_it() {
     for (specification, expected) in [
         (
             any("document.versions", number(3)),
-            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['versions'], '[]'::jsonb || jsonb_set('{}'::jsonb, ARRAY['number'], $1::bigint::text::jsonb)) AND EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $2)"#,
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['versions'], '[]'::jsonb || jsonb_set('{}'::jsonb, ARRAY['number'], $1::bigint::text::jsonb)) AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $2)"#,
         ),
         (
             any(
@@ -1331,7 +1331,7 @@ fn any_over_a_collection_with_a_gin_index_has_its_equalities_beside_it() {
                     ],
                 ),
             ),
-            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['versions'], '[]'::jsonb || (jsonb_set('{}'::jsonb, ARRAY['number'], $1::bigint::text::jsonb) || jsonb_set('{}'::jsonb, ARRAY['approvals'], '[]'::jsonb || jsonb_object(ARRAY['by'], ARRAY[$2::text])))) AND EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $3 AND ("version_1" ->> 'published_at')::timestamptz > $4 AND EXISTS (SELECT 1 FROM jsonb_array_elements("version_1" -> 'approvals') AS "approval_2" WHERE (("approval_2" ->> 'by') COLLATE "C") = $5))"#,
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['versions'], '[]'::jsonb || (jsonb_set('{}'::jsonb, ARRAY['number'], $1::bigint::text::jsonb) || jsonb_set('{}'::jsonb, ARRAY['approvals'], '[]'::jsonb || jsonb_object(ARRAY['by'], ARRAY[$2::text])))) AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $3 AND ("version_1" ->> 'published_at')::timestamptz > $4 AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("version_1" -> 'approvals') = 'array' THEN "version_1" -> 'approvals' END) AS "approval_2" WHERE (("approval_2" ->> 'by') COLLATE "C") = $5))"#,
         ),
         // Two items of one collection: the array contains both.
         (
@@ -1339,32 +1339,32 @@ fn any_over_a_collection_with_a_gin_index_has_its_equalities_beside_it() {
                 "document.versions",
                 and(approved_by("ann"), approved_by("bob")),
             ),
-            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['versions'], '[]'::jsonb || jsonb_set('{}'::jsonb, ARRAY['approvals'], '[]'::jsonb || jsonb_object(ARRAY['by'], ARRAY[$1::text]) || jsonb_object(ARRAY['by'], ARRAY[$2::text]))) AND EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE EXISTS (SELECT 1 FROM jsonb_array_elements("version_1" -> 'approvals') AS "approval_2" WHERE (("approval_2" ->> 'by') COLLATE "C") = $3) AND EXISTS (SELECT 1 FROM jsonb_array_elements("version_1" -> 'approvals') AS "approval_3" WHERE (("approval_3" ->> 'by') COLLATE "C") = $4))"#,
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['versions'], '[]'::jsonb || jsonb_set('{}'::jsonb, ARRAY['approvals'], '[]'::jsonb || jsonb_object(ARRAY['by'], ARRAY[$1::text]) || jsonb_object(ARRAY['by'], ARRAY[$2::text]))) AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("version_1" -> 'approvals') = 'array' THEN "version_1" -> 'approvals' END) AS "approval_2" WHERE (("approval_2" ->> 'by') COLLATE "C") = $3) AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("version_1" -> 'approvals') = 'array' THEN "version_1" -> 'approvals' END) AS "approval_3" WHERE (("approval_3" ->> 'by') COLLATE "C") = $4))"#,
         ),
         // Two constants at one member: the first is asked for, which still
         // follows from the predicate.
         (
             any("document.versions", and(number(3), number(4))),
-            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['versions'], '[]'::jsonb || jsonb_set('{}'::jsonb, ARRAY['number'], $1::bigint::text::jsonb)) AND EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $2 AND ("version_1" ->> 'number')::bigint = $3)"#,
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['versions'], '[]'::jsonb || jsonb_set('{}'::jsonb, ARRAY['number'], $1::bigint::text::jsonb)) AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $2 AND ("version_1" ->> 'number')::bigint = $3)"#,
         ),
         // Nothing that follows: the `EXISTS` alone.
         (
             any("document.versions", or(number(3), number(4))),
-            r#"EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $1 OR ("version_1" ->> 'number')::bigint = $2)"#,
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $1 OR ("version_1" ->> 'number')::bigint = $2)"#,
         ),
         // Where the falsity counts as well, nothing is beside it.
         (
             not(any("document.versions", number(3))),
-            r#"NOT EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $1)"#,
+            r#"NOT EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $1)"#,
         ),
         (
             all("document.versions", number(3)),
-            r#"NOT EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE NOT ("version_1" ->> 'number')::bigint = $1)"#,
+            r#"NOT EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE NOT ("version_1" ->> 'number')::bigint = $1)"#,
         ),
         // Beside another condition, under `OR`.
         (
             or(field("archived"), any("document.versions", number(3))),
-            r#""archived" OR "p"."document" @> jsonb_set('{}'::jsonb, ARRAY['versions'], '[]'::jsonb || jsonb_set('{}'::jsonb, ARRAY['number'], $1::bigint::text::jsonb)) AND EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $2)"#,
+            r#""archived" OR "p"."document" @> jsonb_set('{}'::jsonb, ARRAY['versions'], '[]'::jsonb || jsonb_set('{}'::jsonb, ARRAY['number'], $1::bigint::text::jsonb)) AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $2)"#,
         ),
     ] {
         assert_eq!(sql_with(&schema, &specification), expected);
@@ -1402,7 +1402,7 @@ fn a_document_with_a_gin_index_of_a_table_of_a_collection() {
                     equal(item("name"), value("x")),
                 ),
             ),
-            r#"EXISTS (SELECT 1 FROM "store_items" AS "store_item_1" WHERE "store_item_1"."store_id" = "s"."id" AND "store_item_1"."document" @> jsonb_set('{}'::jsonb, ARRAY['tags'], '[]'::jsonb || jsonb_object(ARRAY['name'], ARRAY[$1::text])) AND EXISTS (SELECT 1 FROM jsonb_array_elements("store_item_1"."document" -> 'tags') AS "tag_2" WHERE (("tag_2" ->> 'name') COLLATE "C") = $2))"#,
+            r#"EXISTS (SELECT 1 FROM "store_items" AS "store_item_1" WHERE "store_item_1"."store_id" = "s"."id" AND "store_item_1"."document" @> jsonb_set('{}'::jsonb, ARRAY['tags'], '[]'::jsonb || jsonb_object(ARRAY['name'], ARRAY[$1::text])) AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("store_item_1"."document" -> 'tags') = 'array' THEN "store_item_1"."document" -> 'tags' END) AS "tag_2" WHERE (("tag_2" ->> 'name') COLLATE "C") = $2))"#,
         ),
     ] {
         assert_eq!(sql_with(&schema, &specification), expected);
@@ -1449,15 +1449,15 @@ fn an_element_of_a_collection_of_values_is_the_item_itself() {
                 "document.targeting.device_groups",
                 equal(element(), value("g1")),
             ),
-            r#"EXISTS (SELECT 1 FROM jsonb_array_elements_text("p"."document" -> 'targeting' -> 'device_groups') AS "device_group_1" WHERE ("device_group_1" COLLATE "C") = $1)"#,
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'targeting' -> 'device_groups') = 'array' THEN "p"."document" -> 'targeting' -> 'device_groups' END) AS "device_group_1" WHERE ("device_group_1" COLLATE "C") = $1)"#,
         ),
         (
             any("document.ranks", greater_than(element(), value(3))),
-            r#"EXISTS (SELECT 1 FROM jsonb_array_elements_text("p"."document" -> 'ranks') AS "rank_1" WHERE "rank_1"::bigint > $1)"#,
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'ranks') = 'array' THEN "p"."document" -> 'ranks' END) AS "rank_1" WHERE "rank_1"::bigint > $1)"#,
         ),
         (
             any("document.ranks", is_null(element())),
-            r#"EXISTS (SELECT 1 FROM jsonb_array_elements_text("p"."document" -> 'ranks') AS "rank_1" WHERE "rank_1"::bigint IS NULL)"#,
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'ranks') = 'array' THEN "p"."document" -> 'ranks' END) AS "rank_1" WHERE "rank_1"::bigint IS NULL)"#,
         ),
         (
             any(
@@ -1467,14 +1467,14 @@ fn an_element_of_a_collection_of_values_is_the_item_itself() {
                     equal(element(), field(Path::outer(1, "number"))),
                 ),
             ),
-            r#"EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text("version_1" -> 'labels') AS "label_2" WHERE ("label_2" COLLATE "C") = ("version_1" ->> 'number')::bigint))"#,
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("version_1" -> 'labels') = 'array' THEN "version_1" -> 'labels' END) AS "label_2" WHERE ("label_2" COLLATE "C") = ("version_1" ->> 'number')::bigint))"#,
         ),
         (
             any(
                 "document.ranks",
                 any("document.ranks", greater_than(element(), outer_item(1))),
             ),
-            r#"EXISTS (SELECT 1 FROM jsonb_array_elements_text("p"."document" -> 'ranks') AS "rank_1" WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text("p"."document" -> 'ranks') AS "rank_2" WHERE "rank_2"::bigint > "rank_1"::bigint))"#,
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'ranks') = 'array' THEN "p"."document" -> 'ranks' END) AS "rank_1" WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'ranks') = 'array' THEN "p"."document" -> 'ranks' END) AS "rank_2" WHERE "rank_2"::bigint > "rank_1"::bigint))"#,
         ),
     ] {
         assert_eq!(sql_with(&schema, &specification), expected);
@@ -1492,14 +1492,14 @@ fn a_collection_of_values_with_a_gin_index_has_its_equalities_beside_it() {
                 "document.targeting.device_groups",
                 equal(element(), value("g1")),
             ),
-            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['targeting'], jsonb_set('{}'::jsonb, ARRAY['device_groups'], '[]'::jsonb || (jsonb_object(ARRAY['v'], ARRAY[$1::text]) -> 'v'))) AND EXISTS (SELECT 1 FROM jsonb_array_elements_text("p"."document" -> 'targeting' -> 'device_groups') AS "device_group_1" WHERE ("device_group_1" COLLATE "C") = $2)"#,
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['targeting'], jsonb_set('{}'::jsonb, ARRAY['device_groups'], '[]'::jsonb || (jsonb_object(ARRAY['v'], ARRAY[$1::text]) -> 'v'))) AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'targeting' -> 'device_groups') = 'array' THEN "p"."document" -> 'targeting' -> 'device_groups' END) AS "device_group_1" WHERE ("device_group_1" COLLATE "C") = $2)"#,
         ),
         (
             any(
                 "document.ranks",
                 and(equal(element(), value(3)), equal(value(4), element())),
             ),
-            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['ranks'], '[]'::jsonb || $1::bigint::text::jsonb || $2::bigint::text::jsonb) AND EXISTS (SELECT 1 FROM jsonb_array_elements_text("p"."document" -> 'ranks') AS "rank_1" WHERE "rank_1"::bigint = $3 AND $4 = "rank_1"::bigint)"#,
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['ranks'], '[]'::jsonb || $1::bigint::text::jsonb || $2::bigint::text::jsonb) AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'ranks') = 'array' THEN "p"."document" -> 'ranks' END) AS "rank_1" WHERE "rank_1"::bigint = $3 AND $4 = "rank_1"::bigint)"#,
         ),
         (
             any(
@@ -1509,7 +1509,7 @@ fn a_collection_of_values_with_a_gin_index_has_its_equalities_beside_it() {
                     any(Path::item("labels"), equal(element(), value("x"))),
                 ),
             ),
-            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['versions'], '[]'::jsonb || (jsonb_set('{}'::jsonb, ARRAY['number'], $1::bigint::text::jsonb) || jsonb_set('{}'::jsonb, ARRAY['labels'], '[]'::jsonb || (jsonb_object(ARRAY['v'], ARRAY[$2::text]) -> 'v')))) AND EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $3 AND EXISTS (SELECT 1 FROM jsonb_array_elements_text("version_1" -> 'labels') AS "label_2" WHERE ("label_2" COLLATE "C") = $4))"#,
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['versions'], '[]'::jsonb || (jsonb_set('{}'::jsonb, ARRAY['number'], $1::bigint::text::jsonb) || jsonb_set('{}'::jsonb, ARRAY['labels'], '[]'::jsonb || (jsonb_object(ARRAY['v'], ARRAY[$2::text]) -> 'v')))) AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) AS "version_1" WHERE ("version_1" ->> 'number')::bigint = $3 AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("version_1" -> 'labels') = 'array' THEN "version_1" -> 'labels' END) AS "label_2" WHERE ("label_2" COLLATE "C") = $4))"#,
         ),
         // A null constant, a range: nothing that follows.
         (
@@ -1520,7 +1520,7 @@ fn a_collection_of_values_with_a_gin_index_has_its_equalities_beside_it() {
                     greater_than(element(), value(3)),
                 ),
             ),
-            r#"EXISTS (SELECT 1 FROM jsonb_array_elements_text("p"."document" -> 'ranks') AS "rank_1" WHERE "rank_1"::bigint = $1 OR "rank_1"::bigint > $2)"#,
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'ranks') = 'array' THEN "p"."document" -> 'ranks' END) AS "rank_1" WHERE "rank_1"::bigint = $1 OR "rank_1"::bigint > $2)"#,
         ),
     ] {
         assert_eq!(sql_with(&schema, &specification), expected);
@@ -1588,11 +1588,11 @@ fn a_gin_index_on_a_path_serves_containment_of_the_value_there() {
     for (specification, expected) in [
         (
             groups("g1"),
-            r#"("p"."document" -> 'targeting' -> 'device_groups') @> ('[]'::jsonb || (jsonb_object(ARRAY['v'], ARRAY[$1::text]) -> 'v')) AND EXISTS (SELECT 1 FROM jsonb_array_elements_text("p"."document" -> 'targeting' -> 'device_groups') AS "device_group_1" WHERE ("device_group_1" COLLATE "C") = $2)"#,
+            r#"("p"."document" -> 'targeting' -> 'device_groups') @> ('[]'::jsonb || (jsonb_object(ARRAY['v'], ARRAY[$1::text]) -> 'v')) AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'targeting' -> 'device_groups') = 'array' THEN "p"."document" -> 'targeting' -> 'device_groups' END) AS "device_group_1" WHERE ("device_group_1" COLLATE "C") = $2)"#,
         ),
         (
             any("document.ranks", equal(element(), value(3))),
-            r#"EXISTS (SELECT 1 FROM jsonb_array_elements_text("p"."document" -> 'ranks') AS "rank_1" WHERE "rank_1"::bigint = $1)"#,
+            r#"EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'ranks') = 'array' THEN "p"."document" -> 'ranks' END) AS "rank_1" WHERE "rank_1"::bigint = $1)"#,
         ),
     ] {
         assert_eq!(sql_with(&at_groups, &specification), expected);
@@ -1620,11 +1620,11 @@ fn a_gin_index_on_a_path_serves_containment_of_the_value_there() {
     for (specification, expected) in [
         (
             groups("g1"),
-            r#"("p"."document" -> 'targeting') @> (jsonb_set('{}'::jsonb, ARRAY['device_groups'], '[]'::jsonb || (jsonb_object(ARRAY['v'], ARRAY[$1::text]) -> 'v'))) AND EXISTS (SELECT 1 FROM jsonb_array_elements_text("p"."document" -> 'targeting' -> 'device_groups') AS "device_group_1" WHERE ("device_group_1" COLLATE "C") = $2)"#,
+            r#"("p"."document" -> 'targeting') @> (jsonb_set('{}'::jsonb, ARRAY['device_groups'], '[]'::jsonb || (jsonb_object(ARRAY['v'], ARRAY[$1::text]) -> 'v'))) AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'targeting' -> 'device_groups') = 'array' THEN "p"."document" -> 'targeting' -> 'device_groups' END) AS "device_group_1" WHERE ("device_group_1" COLLATE "C") = $2)"#,
         ),
         (
             any("document.ranks", equal(element(), value(3))),
-            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['ranks'], '[]'::jsonb || $1::bigint::text::jsonb) AND EXISTS (SELECT 1 FROM jsonb_array_elements_text("p"."document" -> 'ranks') AS "rank_1" WHERE "rank_1"::bigint = $2)"#,
+            r#""p"."document" @> jsonb_set('{}'::jsonb, ARRAY['ranks'], '[]'::jsonb || $1::bigint::text::jsonb) AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof("p"."document" -> 'ranks') = 'array' THEN "p"."document" -> 'ranks' END) AS "rank_1" WHERE "rank_1"::bigint = $2)"#,
         ),
     ] {
         assert_eq!(sql_with(&both, &specification), expected);

@@ -188,7 +188,7 @@ assert_eq!(
     query.sql,
     concat!(
         r#""published" AND (("p"."document" ->> 'status') COLLATE "C") = $1 "#,
-        r#"AND EXISTS (SELECT 1 FROM jsonb_array_elements("p"."document" -> 'versions') "#,
+        r#"AND EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("p"."document" -> 'versions') = 'array' THEN "p"."document" -> 'versions' END) "#,
         r#"AS "version_1" WHERE ("version_1" ->> 'number')::bigint > $2)"#,
     ),
 );
@@ -448,8 +448,14 @@ the sources as they were.
   what is finer - `.999999999Z` is the next second - and the evaluator's
   [`Timestamp`] has none of it: an encoding that writes nanoseconds and is
   compared at a boundary has the two disagree.
-* A collection of a document that is a JSON null, and not an empty array,
-  fails the whole query: `jsonb_array_elements` takes no scalar.
+* A collection of a document that is not an array - a JSON null, an object,
+  a scalar, a member that is not there - has no items: `any` is false of it
+  and `all` true, as of an empty array, where the evaluator refuses such a
+  candidate as it refuses a member that is not there. The array is read
+  through `CASE WHEN jsonb_typeof(…) = 'array'`: `jsonb_array_elements`
+  fails on a scalar, and whether a row reaches it is the plan's to decide -
+  the planner evaluates the cheaper operand of an `AND` first - so the same
+  query failed under one schema and selected under another (ADR-0027).
 * With a GIN index declared, the compiled condition is what goes after
   `WHERE` and nothing else: containment is false where the equality it
   stands for is null, so the text negated, `NOT (…)`, selects the rows where
@@ -457,7 +463,10 @@ the sources as they were.
   member declared an integer, a boolean or a text is a JSON number without a
   fraction, a boolean, a string: an encoding that writes an integer as a
   string, as the JSON mapping of proto3 writes an `int64`, is read by `->>`
-  and not contained.
+  and not contained; one that writes it with a fraction, `100.0`, is
+  contained by `100` and fails the cast `->>` is read with. Either way the
+  layout is not what the encoding writes, and the repository's test runs
+  under the schema it compiles with.
 * `numeric` parameters are not written by the `pg` feature.
 * The text of a template has one `@`, the nearest item, as RFC 9535 has it;
   the item of an enclosing collection is named in the tree only.
