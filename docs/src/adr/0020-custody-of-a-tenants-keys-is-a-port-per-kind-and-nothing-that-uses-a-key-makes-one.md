@@ -41,6 +41,14 @@ candidate, its design held against the author's own drawn up beforehand;
 the two agreed on the shape, and the solver's measurements found the two
 defects of the retirement below.
 
+Amended 2026-10-23: what a retirement does to the material of the versions
+retired differs by adapter, and the port's documentation says so — on
+PostgreSQL the rows are deleted, and nothing brings them back; on Vault the
+material stays until the key is trimmed, which the port does not do, and an
+operator may lower the floor outside the port. Decision 4's "bounds the key
+material kept at rest" holds on PostgreSQL alone. Recorded under the
+consequences and the owed items, by the review of this ADR.
+
 ## Context
 
 ADR-0017 put the KEK's custody beside its use — `KeyCustody` with
@@ -179,6 +187,20 @@ Measured on Vault 1.21.4 OSS, Transit:
 - The custodian holds `create`, `update` and `read` on `keys/+`, `update` on
   `keys/+/rotate` and `keys/+/config`, `delete` on `keys/+`; a holder `read`
   on `keys/+` and `update` on the operation's path alone.
+- A retirement is final on PostgreSQL and final within the port on Vault.
+  The port promises that a retired version never serves again, and both
+  keep it; but PostgreSQL keeps it by deleting the rows — the material with
+  them, as a trim would — where Vault raises a floor the adapter never
+  lowers and keeps the material until the key is trimmed, which the port
+  does not do, so an operator with Vault's own API may lower the floor and
+  bring a version back, and a mistaken bound is mended there and not on
+  PostgreSQL. For the KEK the deletion is the one retirement every reader
+  of `kms_keys` honours, the Python and Go ports among them, which a floor
+  they do not know would not bind. The guard against a mistaken bound is
+  the custodian's, where this ADR put the serialisation of custody: a
+  retirement is reviewed as a deletion is. Decision 4's "bounds the key
+  material kept at rest" is true of PostgreSQL; on Vault the material is
+  bounded by a trim, which no port calls.
 
 ## What can go wrong, and what holds it
 
@@ -204,6 +226,13 @@ Measured on Vault 1.21.4 OSS, Transit:
   once consumers make their keys through custody.
 - The two adapters name a KEK version retired otherwise: `NoKeyOfVersion`
   on Vault, `KekNotFound { key_version: Some(_) }` on PostgreSQL.
+- A floor on PostgreSQL for the signing and MAC keys, whose tables are this
+  port's alone — reads refusing below it, the material kept, `delete_*`
+  the one deletion — would give Vault's reversibility and name a retired
+  version `NoKeyOfVersion` as Vault does; the KEK keeps its deletion, for
+  the readers of `kms_keys` that know no floor. A step of its own, taken
+  with the first custodian's procedure that needs a retirement undone, or
+  with a `trim` on the custody ports, which bounds the material on Vault.
 
 ## Alternatives rejected
 

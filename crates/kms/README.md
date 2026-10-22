@@ -175,7 +175,10 @@ more, which serves as well; a retirement keeps the latest version and never
 lowers the floor — on Vault it reads the key once and writes only a higher
 `min_decryption_version`, raising a signing floor of the key's own with it,
 since Transit lowers the floor when asked and would bring a retired version
-back; a bound above the latest is `NoKeyOfVersion` and retires nothing; a
+back, and on PostgreSQL it deletes the rows of the versions retired, their
+material with them, which nothing brings back, where Vault keeps the
+material until the key is trimmed and an operator may lower the floor
+outside the port; a bound above the latest is `NoKeyOfVersion` and retires nothing; a
 version that still signs may be retired, the compromise path; a deletion of
 nothing is not an error. Under an identity that holds no custody, every
 custody operation is `Forbidden`.

@@ -86,7 +86,12 @@ pub struct KeyOptions {
 /// a retried one makes one version more, which serves as well; a
 /// retirement keeps the latest version and never lowers the floor, so a
 /// retried or a stale one does nothing; a deletion of nothing is not an
-/// error.
+/// error. What a retirement does to the material of the versions retired
+/// is the adapter's: on PostgreSQL their rows are deleted, and nothing
+/// brings them back; on Vault the material stays until the key is trimmed,
+/// which no port does, and an operator may lower the floor outside the
+/// port. The port promises that a retired version never serves again, and
+/// a custodian reviews a retirement as it reviews a deletion.
 pub trait KeyCustody<S: Session>: Send + Sync {
     /// Makes the tenant's KEK with `options`, version 1, and answers its
     /// latest version; a key that exists with the same options is left as
@@ -326,8 +331,8 @@ pub trait MacService<S: Session>: Send + Sync {
 /// Custody of a tenant's MAC keys: what makes, rotates, retires and deletes
 /// them, never what makes MACs (ADR-0020). The rules are [`KeyCustody`]'s.
 /// Since a MAC is made with the latest version alone, a retirement changes
-/// nothing a holder of [`MacService`] sees: it bounds the key material
-/// kept at rest.
+/// nothing a holder of [`MacService`] sees: it bounds the versions that
+/// serve, and on PostgreSQL the key material kept at rest.
 pub trait MacKeyCustody<S: Session>: Send + Sync {
     /// Makes the tenant's key for `purpose` with `options`, version 1, and
     /// answers its latest version; a key that exists is left as it is and
