@@ -12,6 +12,11 @@ ASCETIC_DDD_TEST_PG_URL=postgresql://user:pass@localhost/db ./verify/pg/lost-wak
 ASCETIC_DDD_TEST_PG_URL=postgresql://user:pass@localhost/db ./verify/pg/lost-wake/exp2.sh
 ```
 
+`silent-rollback/` — the experiments behind ADR-0028, one session each:
+`exp.sh` shows what the server answers when a transaction a statement aborted
+is closed (EXP 1 to 5, as the ADR cites them), `bench.sh` what the probe sent
+with `COMMIT` costs, through pgbench.
+
 `lost-wake/` — the experiments behind ADR-0009, numbered as the ADR cites
 them: session A runs a script in the background, session B starts after a
 delay, and both outputs are printed with `\timing` where the point is who

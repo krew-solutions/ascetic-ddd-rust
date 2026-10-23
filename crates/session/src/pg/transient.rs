@@ -14,8 +14,6 @@ use std::error::Error as _;
 
 use tokio_postgres::error::SqlState;
 
-use crate::SessionError;
-
 /// Whether an error of the driver is of the moment.
 pub fn transient(error: &tokio_postgres::Error) -> bool {
     if error.is_closed() {
@@ -48,21 +46,6 @@ pub fn transient_state(code: &SqlState) -> bool {
         || code.starts_with("53")
 }
 
-/// Whether an error of a session is of the moment: a connection that could
-/// not be taken from the pool is, and so is a scope boundary the driver
-/// failed on for a reason of the moment.
-pub fn transient_session(error: &SessionError) -> bool {
-    match error {
-        SessionError::Acquire(_) => true,
-        SessionError::Begin(error)
-        | SessionError::Commit(error)
-        | SessionError::Rollback(error) => error
-            .downcast_ref::<tokio_postgres::Error>()
-            .is_some_and(transient),
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,16 +69,5 @@ mod tests {
                 "{code}"
             );
         }
-    }
-
-    #[test]
-    fn a_connection_that_cannot_be_taken_is_of_the_moment() {
-        assert!(transient_session(&SessionError::Acquire(
-            "pool timed out".into()
-        )));
-        assert!(!transient_session(&SessionError::ScopeAlreadyOpen));
-        assert!(!transient_session(&SessionError::Begin(
-            "not the driver's".into()
-        )));
     }
 }
