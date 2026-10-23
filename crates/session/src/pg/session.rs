@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use deadpool_postgres::Pool;
+use tokio_postgres::error::SqlState;
 
 use crate::error::SessionError;
 use crate::identity_map::IdentityMap;
@@ -12,6 +13,7 @@ use crate::session::{Abandon, AsyncScope, ScopeFlag, Session, SessionPool};
 
 use super::connection::PgConnection;
 use super::observer::PgObserver;
+use super::transient::transient;
 
 /// A repository asks for the capability instead of naming a concrete session
 /// type, so it works with any session that offers it. The domain never
@@ -110,7 +112,15 @@ impl Session for PgSession {
         let mut abandon = Abandon::armed(self.connection.poisoned(), &*observer, depth, kind);
         if let Err(error) = self.connection.batch_execute(&open).await {
             abandon.disarm();
-            return Err(SessionError::Begin(Box::new(error)).into());
+            return Err(SessionError::Begin {
+                transient: transient(&error),
+                error: Box::new(error),
+            }
+            .into());
+        }
+        if savepoint.is_none() {
+            // A failure before the transaction began aborted nothing in it.
+            self.connection.forget_abort_cause();
         }
         observer.on_scope_started(&ScopeStarted { depth, kind });
         abandon.started();
@@ -124,21 +134,21 @@ impl Session for PgSession {
             Ok(_) if self.connection.is_poisoned() => Err(SessionError::Abandoned.into()),
             outcome => outcome,
         };
-        let committed = outcome.is_ok();
-
-        let close = match (&savepoint, committed) {
-            (None, true) => "COMMIT".to_owned(),
-            (None, false) => "ROLLBACK".to_owned(),
-            (Some(name), true) => format!("RELEASE SAVEPOINT {name}"),
-            (Some(name), false) => format!("ROLLBACK TO SAVEPOINT {name}"),
+        let closed = if outcome.is_ok() {
+            self.commit(savepoint.as_deref()).await
+        } else {
+            // A failing rollback does not replace the error that caused it;
+            // the observer has already seen it as a failed statement.
+            self.roll_back(savepoint.as_deref()).await;
+            Ok(())
         };
-        let closed = self.connection.batch_execute(&close).await;
         abandon.disarm();
 
+        let succeeded = outcome.is_ok() && closed.is_ok();
         observer.on_scope_ended(&ScopeEnded {
             depth,
             kind,
-            outcome: if committed {
+            outcome: if succeeded {
                 Outcome::Succeeded
             } else {
                 Outcome::Failed
@@ -151,13 +161,79 @@ impl Session for PgSession {
         }
 
         match (outcome, closed) {
-            // A failing commit is a failure of the whole scope: the caller
-            // believes the work is durable, and it is not.
-            (Ok(_), Err(error)) => Err(SessionError::Commit(Box::new(error)).into()),
-            // A failing rollback does not replace the error that caused it;
-            // the observer has already seen it as a failed statement.
+            // A scope that did not commit is a failure of the whole scope: the
+            // caller believes the work is durable, and it is not.
+            (Ok(_), Err(error)) => Err(error.into()),
             (outcome, _) => outcome,
         }
+    }
+}
+
+impl PgSession {
+    /// Closes a scope that succeeded: commits the transaction, or releases
+    /// the savepoint of a nested scope (ADR-0028).
+    ///
+    /// The server alone knows whether the transaction is still whole: a
+    /// statement that failed inside it aborted it, and the scope may have
+    /// absorbed the failure. To a `COMMIT` in that state the server answers
+    /// with a rollback and no error, and the driver keeps the answer's tag to
+    /// itself; so the transaction is closed with `SELECT 1; COMMIT` in one
+    /// message, whose probe the server refuses with `25P02` before it reaches
+    /// the `COMMIT`. A `RELEASE SAVEPOINT` in that state is refused the same
+    /// way. A refused close leaves nothing open behind it: the scope is rolled
+    /// back, and the failure that aborted it, as the connection remembers it,
+    /// is named in [`SessionError::Aborted`].
+    async fn commit(&self, savepoint: Option<&str>) -> Result<(), SessionError> {
+        let closed = match savepoint {
+            None => {
+                self.connection
+                    .batch_execute_reported("COMMIT", "SELECT 1; COMMIT")
+                    .await
+            }
+            Some(name) => {
+                self.connection
+                    .batch_execute(&format!("RELEASE SAVEPOINT {name}"))
+                    .await
+            }
+        };
+        let Err(error) = closed else {
+            self.connection.forget_abort_cause();
+            return Ok(());
+        };
+        let aborted = error.code() == Some(&SqlState::IN_FAILED_SQL_TRANSACTION);
+        // Taken before the rollback, which forgets it.
+        let cause = aborted
+            .then(|| self.connection.take_abort_cause())
+            .flatten();
+        // Whatever refused the close, nothing of the scope is durable: a
+        // refused probe left the transaction open and a refused release the
+        // savepoint; after a refused COMMIT the server has ended the block,
+        // and the ROLLBACK is a warning.
+        self.roll_back(savepoint).await;
+        Err(if aborted {
+            SessionError::Aborted { cause }
+        } else {
+            SessionError::Commit {
+                transient: transient(&error),
+                error: Box::new(error),
+            }
+        })
+    }
+
+    /// Rolls a scope back: the transaction, or a nested scope to its
+    /// savepoint. A rollback that fails leaves the connection in a state
+    /// nobody knows — inside a transaction the pool would hand to its next
+    /// user, whose `BEGIN` the server only warns about — so the connection is
+    /// poisoned and discarded.
+    async fn roll_back(&self, savepoint: Option<&str>) {
+        let statement = match savepoint {
+            None => "ROLLBACK".to_owned(),
+            Some(name) => format!("ROLLBACK TO SAVEPOINT {name}"),
+        };
+        if self.connection.batch_execute(&statement).await.is_err() {
+            self.connection.poison();
+        }
+        self.connection.forget_abort_cause();
     }
 }
 

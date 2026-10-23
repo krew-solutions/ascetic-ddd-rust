@@ -76,7 +76,7 @@ impl Error {
     /// (`ascetic_ddd_session::pg::transient`).
     pub fn is_transient(&self) -> bool {
         match self {
-            Error::Session(error) => ascetic_ddd_session::pg::transient_session(error),
+            Error::Session(error) => error.is_transient(),
             Error::Database(error) => ascetic_ddd_session::pg::transient(error),
             Error::Subscriber(_) | Error::Malformed(_) => false,
         }

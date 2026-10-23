@@ -276,9 +276,37 @@ a way past the guard. That is why it is a `ScopeFlag` rather than a bare
 construction, where a hand-written clone could have quietly given the copy a flag
 of its own.
 
-A failing `COMMIT` becomes `SessionError::Commit` — the caller believes the work
-is durable and it is not. A failing `ROLLBACK` does *not* replace the error that
-caused it; the observer has already seen it as a failed statement.
+The server alone knows whether a transaction is still whole. A statement that
+fails inside it aborts it, and a scope that catches the failure and goes on
+would otherwise be committed into nothing: PostgreSQL answers a `COMMIT` in that
+state with a rollback and no error. So a scope that succeeded is closed with
+`SELECT 1; COMMIT` in one message — the probe is refused with `25P02` before the
+`COMMIT` is reached when the transaction was aborted — and a nested one with
+`RELEASE SAVEPOINT`, refused the same way. A refused close rolls the scope back
+(to its savepoint, so the enclosing transaction goes on) and becomes
+`SessionError::Aborted { cause }`, naming the failure the scope absorbed; a
+`COMMIT` the server refused for a reason of its own becomes
+`SessionError::Commit`. Either way nothing of the scope is durable. A failing
+`ROLLBACK` does *not* replace the error that caused it, but it poisons the
+connection: its transaction state is no longer known. The observer hears the
+probe as `COMMIT`. ADR-0028 has the measurements.
+
+**A server error inside a transaction is never absorbed in the scope that met
+it.** A refusal meant to be absorbed — a row held already, a race whose winner
+will be found — is met in a nested scope of its own; the nested scope fails,
+its savepoint is rolled back, and the enclosing scope maps the failure to its
+meaning and goes on:
+
+```rust
+session.atomic(async |tx| {
+    orders.save(&tx, &order).await?;
+    let held = tx.atomic(async |tx| grants.insert(&tx, &grant).await).await;
+    match held {
+        Ok(()) | Err(Error::AlreadyHeld) => Ok(()),   // only the INSERT is undone
+        Err(other) => Err(other),
+    }
+}).await
+```
 
 A scope whose future is dropped before it closes — a timeout, the losing branch
 of a `select!` — would leave the connection inside an open transaction. The
@@ -293,7 +321,9 @@ Two small things the adapters built on this crate share. `pg::transient`
 tells an error of the moment — a lock cycle the server broke, a serialization
 failure, a connection lost, a server going down or out of resources, by
 SQLSTATE class — from a defect, so that a loop can wait on the first and stop
-on the second; `pg::transient_session` does the same for a `SessionError`.
+on the second. A `SessionError` carries that verdict with it, set by the
+adapter where it saw the driver's error: `SessionError::is_transient()` answers
+without naming a driver, and an absorbed failure (`Aborted`) never is one.
 `pg::Identifier` is a table or sequence name parsed once and safe to splice
 into SQL after: lower-case letters, digits and underscores, at most forty
 characters, unqualified.
@@ -332,8 +362,12 @@ What the integration tests cover:
 * 7 on the tuple — the same use case, nesting, rollback and guard, four
   delegates staying flat, the order delegates open and close in, and the same
   compile-depth regression;
-* 8 against a real PostgreSQL — durable nested commit, a savepoint rolled back
+* 15 against a real PostgreSQL — durable nested commit, a savepoint rolled back
   inside a live transaction, full rollback, pipelined statements in one scope,
   the statements the observer actually sees, two concurrent scopes refused, a
-  dropped scope discarding its connection, and an outer scope refused after an
-  inner one was dropped.
+  dropped scope discarding its connection, an outer scope refused after an
+  inner one was dropped; and ADR-0028's seven — an absorbed failure aborting
+  its scope with its cause named, a nested one leaving the outer transaction
+  alive, a failed rollback poisoning the connection, what the observer hears
+  of it, a failure the scope recovered from itself, a commit the server
+  refused, and a failure before a scope.

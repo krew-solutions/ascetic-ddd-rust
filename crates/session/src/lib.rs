@@ -47,7 +47,7 @@ pub mod testing;
 
 pub use crate::composite::many::Many;
 pub use crate::composite::pair::{CompositeSession, CompositeSessionPool};
-pub use crate::error::{BoxError, SessionError};
+pub use crate::error::{AbortCause, BoxError, SessionError};
 pub use crate::identity_map::{DEFAULT_CACHE_SIZE, IdentityKey, IdentityMap, Lookup};
 pub use crate::isolation::IsolationLevel;
 pub use crate::observer::SessionObserver;

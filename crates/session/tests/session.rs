@@ -314,7 +314,10 @@ fn identity_map_is_shared_by_nested_scopes_and_cleared_at_the_end() {
 /// application error type without the domain knowing about the driver.
 #[test]
 fn session_errors_convert_into_the_application_error() {
-    let error = AppError::from(SessionError::Commit("connection reset".into()));
+    let error = AppError::from(SessionError::Commit {
+        error: "connection reset".into(),
+        transient: true,
+    });
 
     let AppError::Session(inner) = error else {
         panic!("expected a session error");

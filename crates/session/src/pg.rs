@@ -29,4 +29,4 @@ pub use self::connection::{PgConnection, PgError};
 pub use self::identifier::{Identifier, InvalidIdentifier, MAX_IDENTIFIER};
 pub use self::observer::{PgObserver, QueryEnded, QueryStarted};
 pub use self::session::{PgAccess, PgSession, PgSessionPool};
-pub use self::transient::{transient, transient_session};
+pub use self::transient::transient;
