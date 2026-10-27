@@ -19,7 +19,7 @@ use ascetic_ddd_outbox::observer::{
     Acked, Dispatched, Fetched, Handled, OutboxObserver, Published, Receipt,
 };
 use ascetic_ddd_outbox::{
-    BoxError, Error, Loops, Outbox, OutboxMessage, PgOutbox, Position, Selection,
+    BoxError, Error, Identity, Loops, Outbox, OutboxMessage, PgOutbox, Position, Selection,
 };
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -902,6 +902,199 @@ async fn the_observer_sees_the_protocol() {
     );
 }
 
+/// A message under the identity `(tenant-1, orders.Order, {"id": stream},
+/// position)` to `uri` (ADR-0030).
+fn identified(uri: &str, id: u64, stream: &str, position: i32) -> OutboxMessage {
+    let mut message = message(uri, id);
+    let metadata = message.metadata.as_object_mut().unwrap();
+    metadata.insert("tenant_id".to_owned(), json!("tenant-1"));
+    metadata.insert("stream_type".to_owned(), json!("orders.Order"));
+    metadata.insert(
+        "stream_id".to_owned(),
+        json!(format!(r#"{{"id":"{stream}"}}"#)),
+    );
+    metadata.insert("stream_position".to_owned(), json!(position.to_string()));
+    message
+}
+
+impl<O: OutboxObserver> Fixture<O> {
+    /// Writes `messages` in one transaction; what it answered.
+    async fn publish_together(&self, messages: &[OutboxMessage]) -> Result<(), Error> {
+        self.sessions
+            .session(async |session| {
+                session
+                    .atomic(async |tx| {
+                        for message in messages {
+                            self.outbox.publish(&tx, message).await?;
+                        }
+                        Ok::<_, Error>(())
+                    })
+                    .await
+            })
+            .await
+    }
+
+    async fn rows(&self) -> i64 {
+        let sql = format!("SELECT count(*) FROM {}", self.tables.0);
+        self.sessions
+            .session(async |session| {
+                Ok::<_, Error>(session.connection().query_one(&sql, &[]).await?.get(0))
+            })
+            .await
+            .unwrap()
+    }
+}
+
+/// The incident ADR-0030 closes: a transaction writes two messages under one
+/// identity to one channel — two keys of a topic are one channel — and the
+/// inbox would keep the first and drop the second. The second is refused,
+/// named, and nothing of the transaction commits.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_transaction_writes_one_message_per_identity_on_a_channel() {
+    let f = fixture("identity").await;
+    let refused = f
+        .publish_together(&[
+            identified("kafka://orders/order-1", 1, "a", 1),
+            identified("kafka://orders/order-2", 2, "a", 1),
+        ])
+        .await;
+    let Err(Error::IdentityTaken(identity)) = refused else {
+        panic!("a second message under one identity is refused: {refused:?}");
+    };
+    assert_eq!(
+        identity,
+        Identity {
+            channel: "kafka://orders".to_owned(),
+            tenant_id: "tenant-1".to_owned(),
+            stream_type: "orders.Order".to_owned(),
+            stream_id: r#"{"id":"a"}"#.to_owned(),
+            stream_position: "1".to_owned(),
+        }
+    );
+    assert!(!Error::IdentityTaken(identity).is_transient());
+    assert_eq!(f.rows().await, 0, "nothing of the transaction commits");
+}
+
+/// What the guard leaves alone: one identity on two channels (one fact in
+/// two forms), in two transactions (a republication), a message carrying no
+/// identity, and a write whose savepoint was rolled back; and what it holds
+/// to: a write whose savepoint was released.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn an_identity_recurs_on_another_channel_in_another_transaction_or_after_a_rollback() {
+    let f = fixture("identity_scope").await;
+    f.publish_together(&[
+        identified("kafka://orders", 1, "a", 1),
+        identified("kafka://audit", 2, "a", 1),
+    ])
+    .await
+    .expect("one identity on two channels");
+    f.publish_together(&[identified("kafka://orders", 3, "a", 1)])
+        .await
+        .expect("one identity in another transaction");
+    f.publish_together(&[message("kafka://orders", 4), message("kafka://orders", 5)])
+        .await
+        .expect("messages without an identity");
+    assert_eq!(f.rows().await, 5);
+
+    let rolled_back = f
+        .sessions
+        .session(async |session| {
+            session
+                .atomic(async |tx| {
+                    let inner = tx
+                        .atomic(async |savepoint| {
+                            f.outbox
+                                .publish(&savepoint, &identified("kafka://orders", 6, "b", 1))
+                                .await?;
+                            Err::<(), _>(Error::Malformed("roll the savepoint back".to_owned()))
+                        })
+                        .await;
+                    assert!(inner.is_err());
+                    f.outbox
+                        .publish(&tx, &identified("kafka://orders", 7, "b", 1))
+                        .await
+                })
+                .await
+        })
+        .await;
+    assert!(
+        rolled_back.is_ok(),
+        "a rolled-back write frees its identity: {rolled_back:?}"
+    );
+
+    let released = f
+        .sessions
+        .session(async |session| {
+            session
+                .atomic(async |tx| {
+                    tx.atomic(async |savepoint| {
+                        f.outbox
+                            .publish(&savepoint, &identified("kafka://orders", 8, "c", 1))
+                            .await
+                    })
+                    .await?;
+                    f.outbox
+                        .publish(&tx, &identified("kafka://orders", 9, "c", 1))
+                        .await
+                })
+                .await
+        })
+        .await;
+    assert!(
+        matches!(released, Err(Error::IdentityTaken(_))),
+        "a released write keeps its identity: {released:?}"
+    );
+}
+
+/// An outbox that took two messages under one identity before the guard:
+/// the guard's migration names them — the identity, the channel and both
+/// ids — rather than failing on an index that names a digest.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_guard_s_migration_names_what_a_transaction_wrote_twice_before_it() {
+    let f = fixture("identity_history").await;
+    let (first, second) = (
+        identified("kafka://orders/order-1", 1, "a", 1),
+        identified("kafka://orders/order-2", 2, "a", 1),
+    );
+    let table = f.tables.0.clone();
+    let component = format!("outbox:{table}");
+    f.sessions
+        .session(async |session| {
+            session
+                .connection()
+                .batch_execute(&format!(
+                    "DROP INDEX {table}_identity_uniq; \
+                     DELETE FROM ascetic_ddd_migrations \
+                     WHERE component = '{component}' AND migration <> '20261027T000000Z_baseline'"
+                ))
+                .await?;
+            Ok::<_, Error>(())
+        })
+        .await
+        .unwrap();
+    f.publish_together(&[first.clone(), second.clone()])
+        .await
+        .expect("no guard yet");
+    let refused = f
+        .outbox
+        .migrate()
+        .await
+        .expect_err("the history breaks the guard");
+    // The server's words are the cause's, under the runner's.
+    let text = format!("{refused:?}");
+    for named in [
+        "kafka://orders",
+        "orders.Order",
+        first.metadata["message_id"].as_str().unwrap(),
+        second.metadata["message_id"].as_str().unwrap(),
+    ] {
+        assert!(text.contains(named), "`{named}` is not named: {text}");
+    }
+}
+
 /// A released migration is never edited (ADR-0029): every database that
 /// applied it would refuse to start. A new shape is a new migration,
 /// written here with its checksum when it is released.
@@ -916,9 +1109,15 @@ fn the_released_migrations_keep_their_checksums() {
         .collect();
     assert_eq!(
         checksums,
-        [(
-            "20261027T000000Z_baseline".to_owned(),
-            "fnv1a64:76ac925a2b946934:1394".to_owned()
-        )]
+        [
+            (
+                "20261027T000000Z_baseline".to_owned(),
+                "fnv1a64:76ac925a2b946934:1394".to_owned()
+            ),
+            (
+                "20261027T120000Z_one_message_per_identity".to_owned(),
+                "fnv1a64:77bd7c9c075ddfa7:1511".to_owned()
+            )
+        ]
     );
 }

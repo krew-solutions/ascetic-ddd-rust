@@ -1,14 +1,17 @@
 //! The tables and the statements: what the outbox does to PostgreSQL. The
 //! loop that drives them is in `dispatch`.
 
+use ascetic_ddd_bus::{identity, uri};
 use ascetic_ddd_migration::{
     Applied, Component, Migration, Options as MigrationOptions, forget, migrate,
 };
 use ascetic_ddd_session::{PgAccess, SessionPool};
+use serde_json::Value;
 use tokio_postgres::Row;
+use tokio_postgres::error::SqlState;
 
 use super::PgOutbox;
-use crate::error::Error;
+use crate::error::{Error, Identity};
 use crate::message::{OutboxMessage, Position};
 use crate::observer::{OutboxObserver, Published, Receipt};
 use crate::port::Outbox;
@@ -61,6 +64,50 @@ const BASELINE: &str = r#"
     );
 "#;
 
+/// One message per identity and channel in a transaction (ADR-0030): a
+/// unique index on the writing transaction and a digest of the channel —
+/// the destination without its key — and the four identity fields as one
+/// JSON array, so that no two spellings run together; a row missing any of
+/// them is exempt (`NULL`). The digest is SHA-256, the one a FIPS-mode
+/// server computes, over the text's UTF-8 bytes (`decode(…, 'escape')`
+/// with its backslashes doubled, which is IMMUTABLE where `convert_to` is
+/// not), its first sixteen bytes kept as a `uuid`. Before it, a check that
+/// names every identity a transaction already wrote twice: a unique index
+/// would refuse to build over them and name only a digest.
+const IDENTITY: &str = r#"
+    DO $$
+    DECLARE
+        taken TEXT;
+    BEGIN
+        SELECT string_agg(format('%s on %s in transaction %s (messages %s)',
+                                 identity, channel, transaction_id, messages), '; ')
+        INTO taken
+        FROM (
+            SELECT transaction_id,
+                   split_part(uri, '/', 1) || '//' || split_part(uri, '/', 3) AS channel,
+                   ((metadata->'tenant_id') || (metadata->'stream_type')
+                     || (metadata->'stream_id') || (metadata->'stream_position'))::text AS identity,
+                   string_agg(metadata->>'message_id', ', ') AS messages
+            FROM {outbox}
+            WHERE metadata ?& ARRAY['tenant_id', 'stream_type', 'stream_id', 'stream_position']
+            GROUP BY 1, 2, 3
+            HAVING count(*) > 1
+            LIMIT 10
+        ) AS twice;
+        IF taken IS NOT NULL THEN
+            RAISE EXCEPTION 'outbox {outbox}: a transaction wrote a second message under an identity on its channel, which the inbox dropped as a repeat (ADR-0030): %', taken;
+        END IF;
+    END $$;
+    CREATE UNIQUE INDEX {outbox}_identity_uniq ON {outbox} (
+        transaction_id,
+        (encode(substring(sha256(decode(replace(
+            split_part(uri, '/', 1) || '//' || split_part(uri, '/', 3) || ' ' ||
+            ((metadata->'tenant_id') || (metadata->'stream_type')
+              || (metadata->'stream_id') || (metadata->'stream_position'))::text,
+            '\', '\\'), 'escape')) for 16), 'hex')::uuid)
+    );
+"#;
+
 impl<P, O> PgOutbox<P, O>
 where
     P: SessionPool + Send + Sync,
@@ -80,16 +127,36 @@ where
     /// slot is a stored column computed from the URI, so the rows carry
     /// their slot for good and no statement recomputes it; `<outbox>_meta`
     /// holds the number of slots the table was cut into.
+    ///
+    /// Its second migration holds a transaction to one message per identity
+    /// and channel (ADR-0030).
     pub fn component(&self) -> Component {
         let sql = BASELINE
             .replace("{outbox}", self.outbox_table.as_str())
             .replace("{offsets}", self.offsets_table.as_str())
             .replace("{slots}", &self.slots.to_string());
+        let identity = IDENTITY.replace("{outbox}", self.outbox_table.as_str());
         Component::new(
             format!("outbox:{}", self.outbox_table),
-            vec![Migration::new("20261027T000000Z_baseline", sql).checked_over(BASELINE)],
+            vec![
+                Migration::new("20261027T000000Z_baseline", sql).checked_over(BASELINE),
+                Migration::new("20261027T120000Z_one_message_per_identity", identity)
+                    .on(self.outbox_table.clone())
+                    .checked_over(IDENTITY),
+            ],
         )
-        .unwrap_or_else(|_| unreachable!("one migration with an id, under a name"))
+        .unwrap_or_else(|_| unreachable!("two migrations with ids, under a name"))
+    }
+
+    /// Whether `error` is the refusal of a second message under an identity
+    /// the transaction already wrote to the channel.
+    fn identity_taken(&self, error: &tokio_postgres::Error) -> bool {
+        let index = format!("{}_identity_uniq", self.outbox_table);
+        error.code() == Some(&SqlState::UNIQUE_VIOLATION)
+            && error
+                .as_db_error()
+                .and_then(|db| db.constraint())
+                .is_some_and(|constraint| constraint == index)
     }
 
     /// Brings the outbox's tables up to its migrations — a read of the
@@ -347,7 +414,10 @@ where
     O: OutboxObserver,
 {
     /// Writes the message inside `session`'s transaction, stamped with that
-    /// transaction's id, and tells the observer where it landed.
+    /// transaction's id, and tells the observer where it landed. A second
+    /// message under an identity the transaction already wrote to the
+    /// channel is refused, [`Error::IdentityTaken`], and leaves the
+    /// transaction aborted (ADR-0030).
     async fn publish(&self, session: &P::Session, message: &OutboxMessage) -> Result<(), Error> {
         let sql = format!(
             "INSERT INTO {} (uri, payload, metadata, transaction_id) \
@@ -355,16 +425,39 @@ where
              RETURNING transaction_id::text, \"position\"",
             self.outbox_table
         );
-        let row = session
+        let row = match session
             .connection()
             .query_one(&sql, &[&message.uri, &message.payload, &message.metadata])
-            .await?;
+            .await
+        {
+            Ok(row) => row,
+            Err(error) if self.identity_taken(&error) => {
+                return Err(Error::IdentityTaken(identity_of(message)));
+            }
+            Err(error) => return Err(error.into()),
+        };
         let receipt = Receipt {
             transaction_id: transaction_id(row.get::<_, String>(0))?,
             position: row.get::<_, i64>(1),
         };
         self.observer.on_published(&Published { message, receipt });
         Ok(())
+    }
+}
+
+/// The identity `message` carries on its channel, as its metadata spells it.
+fn identity_of(message: &OutboxMessage) -> Identity {
+    let field = |name: &str| match message.metadata.get(name) {
+        Some(Value::String(text)) => text.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    };
+    Identity {
+        channel: uri::without_key(&message.uri).to_owned(),
+        tenant_id: field(identity::TENANT_ID),
+        stream_type: field(identity::STREAM_TYPE),
+        stream_id: field(identity::STREAM_ID),
+        stream_position: field(identity::STREAM_POSITION),
     }
 }
 
@@ -384,4 +477,18 @@ fn message_of(row: &Row) -> Result<OutboxMessage, Error> {
         metadata: row.get(5),
         created_at: Some(row.get::<_, String>(6)),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::IDENTITY;
+
+    /// The guard's digest is one a FIPS-mode server computes: `md5()`
+    /// raises there, and the index is evaluated at every write, so every
+    /// message of the deployment would be refused (ADR-0030).
+    #[test]
+    fn the_guard_s_digest_is_computed_under_fips() {
+        assert!(IDENTITY.contains("sha256("));
+        assert!(!IDENTITY.to_lowercase().contains("md5("));
+    }
 }

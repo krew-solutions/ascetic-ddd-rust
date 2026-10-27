@@ -21,6 +21,37 @@ pub enum Error {
     Malformed(String),
     /// The tables could not be migrated (ADR-0029).
     Migration(ascetic_ddd_migration::MigrationError),
+    /// The transaction already wrote a message under this one's identity to
+    /// its channel (ADR-0030): the inbox would keep the first and drop this
+    /// one as a redelivery of it. Named from the message refused; the
+    /// transaction is aborted, so nothing of it commits.
+    IdentityTaken(Identity),
+}
+
+/// A message's identity on a channel (`ascetic_ddd_bus::identity`), as its
+/// headers spell it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Identity {
+    /// The channel: the destination without its key.
+    pub channel: String,
+    /// The Tenant.
+    pub tenant_id: String,
+    /// The stream's type.
+    pub stream_type: String,
+    /// The stream's id.
+    pub stream_id: String,
+    /// The position in the stream.
+    pub stream_position: String,
+}
+
+impl fmt::Display for Identity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Tenant {}, stream {} {} at {}, on `{}`",
+            self.tenant_id, self.stream_type, self.stream_id, self.stream_position, self.channel
+        )
+    }
 }
 
 impl Error {
@@ -33,7 +64,10 @@ impl Error {
         match self {
             Error::Session(error) => error.is_transient(),
             Error::Database(error) => ascetic_ddd_session::pg::transient(error),
-            Error::Subscriber(_) | Error::Malformed(_) | Error::Migration(_) => false,
+            Error::Subscriber(_)
+            | Error::Malformed(_)
+            | Error::Migration(_)
+            | Error::IdentityTaken(_) => false,
         }
     }
 }
@@ -46,6 +80,11 @@ impl fmt::Display for Error {
             Error::Subscriber(error) => write!(f, "subscriber: {error}"),
             Error::Malformed(what) => write!(f, "malformed value in the outbox: {what}"),
             Error::Migration(error) => write!(f, "{error}"),
+            Error::IdentityTaken(identity) => write!(
+                f,
+                "the transaction already wrote a message under this one's identity ({identity}): \
+                 the inbox would drop it as a repeat of the first"
+            ),
         }
     }
 }
@@ -56,7 +95,7 @@ impl std::error::Error for Error {
             Error::Session(error) => Some(error),
             Error::Database(error) => Some(error),
             Error::Subscriber(error) => Some(error.as_ref()),
-            Error::Malformed(_) => None,
+            Error::Malformed(_) | Error::IdentityTaken(_) => None,
             Error::Migration(error) => Some(error),
         }
     }

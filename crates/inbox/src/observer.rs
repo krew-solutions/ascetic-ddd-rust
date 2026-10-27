@@ -49,6 +49,13 @@ pub struct Received<'a> {
     /// Where it landed; `None` when a message of the same identity was
     /// already stored and this one was ignored.
     pub receipt: Option<Receipt>,
+    /// When this one was ignored, the `message_id` of the one stored under
+    /// its identity (ADR-0030): this one's own for a redelivery, another's
+    /// for a second message the producer gave one identity — which a
+    /// channel whose producers never reuse an identity takes for a defect,
+    /// and one that republishes for a repeat. `None` when stored, or when
+    /// the stored row names no id.
+    pub held_by: Option<&'a str>,
 }
 
 /// A dispatcher found the head of its queue depending on a message not yet

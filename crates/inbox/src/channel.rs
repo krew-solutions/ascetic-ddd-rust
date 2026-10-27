@@ -33,6 +33,7 @@
 
 use std::sync::Arc;
 
+use ascetic_ddd_bus::identity::{STREAM_ID, STREAM_POSITION, STREAM_TYPE, TENANT_ID};
 use ascetic_ddd_bus::{
     Adapter, BoxError, Error as BusError, Message, Permanent, Subscription, TransactionalConsumer,
     TransactionalHandler, TransactionalWireConsumer, WireConsumer, WireProducer, handling, uri,
@@ -52,12 +53,9 @@ use crate::port::Inbox;
 /// The scheme the inbox is registered under.
 pub const INBOX_SCHEME: &str = "inbox";
 
-/// The headers that are columns of the inbox: its identity, and the channel
-/// the message was sent to, which the outbox stamps.
-const TENANT_ID: &str = "tenant_id";
-const STREAM_TYPE: &str = "stream_type";
-const STREAM_ID: &str = "stream_id";
-const STREAM_POSITION: &str = "stream_position";
+// The headers that are columns of the inbox: its identity (the bus's,
+// ADR-0030), and the channel the message was sent to, which the outbox
+// stamps.
 const DESTINATION: &str = "destination";
 const COLUMNS: [&str; 5] = [
     TENANT_ID,
