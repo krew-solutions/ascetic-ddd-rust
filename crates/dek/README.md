@@ -18,9 +18,9 @@ use ascetic_ddd_session::{Session, SessionPool};
 
 let deks = PgDekStore::new(PgKeyManagementService::new(master_key));
 let order = Resource::new("tenant-1", "Order", "order-7");
+deks.kms().migrate(&sessions).await?;
+deks.migrate(&sessions).await?;
 sessions.session(async |session| {
-    deks.kms().setup(&session).await?;
-    deks.setup(&session).await?;
     session.atomic(async |tx| {
         let cipher = deks.get_or_create(&tx, &order).await?;      // the DEK is made on first contact
         let sealed = cipher.encrypt(b"the order's events")?;      // names the DEK's version
@@ -62,8 +62,9 @@ tenant at once.
 
 `PgDekStore` keeps DEKs in `deks`, each wrapped by the tenant's current KEK
 through the `KeyManagementService` it is built with, and labelled with the
-DEK's algorithm, AES-256-GCM unless `with_algorithm` says otherwise. `setup`
-creates the table in one transaction under an advisory lock on its name;
+DEK's algorithm, AES-256-GCM unless `with_algorithm` says otherwise. The table
+is a component of the database's migration ledger, `dek:<table>` (ADR-0029),
+created once by `migrate`;
 making a resource's first DEK takes an advisory lock on the resource in a
 scope the adapter opens itself, as the KMS does, so two transactions meeting
 a new resource at once make one key, inside a transaction or not. Reads take
@@ -174,7 +175,7 @@ repository that chains them.
 * Making a resource's first DEK is under a per-resource advisory lock. In
   the sources two transactions meeting a new resource at once both insert
   version 1, and the second fails on the primary key.
-* `setup` is the adapter's and `cleanup` is gone, as in the KMS.
+* `migrate` is the adapter's and `cleanup` is gone, as in the KMS.
 
 ## Testing
 

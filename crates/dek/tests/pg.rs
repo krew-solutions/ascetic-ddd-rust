@@ -62,23 +62,14 @@ async fn fixture(name: &str) -> Fixture {
     let tables = (format!("deks_{name}"), format!("kms_keys_dek_{name}"));
     let sessions = PgSessionPool::new(pool());
     let kms = PgKeyManagementService::new(Algorithm::Aes256Gcm.generate_key().unwrap())
-        .with_table(Identifier::new(&tables.1).unwrap());
+        .with_table(Identifier::new(&tables.1).unwrap())
+        .with_signing_table(Identifier::new(format!("{}_sign", tables.1)).unwrap())
+        .with_mac_table(Identifier::new(format!("{}_mac", tables.1)).unwrap());
     let deks = PgDekStore::new(kms).with_table(Identifier::new(&tables.0).unwrap());
-    sessions
-        .session(async |session| {
-            session
-                .connection()
-                .batch_execute(&format!(
-                    "DROP TABLE IF EXISTS {}; DROP TABLE IF EXISTS {};",
-                    tables.0, tables.1
-                ))
-                .await
-                .unwrap();
-            deks.kms().setup(&session).await.unwrap();
-            deks.setup(&session).await
-        })
-        .await
-        .unwrap();
+    deks.kms().teardown(&sessions).await.unwrap();
+    deks.kms().migrate(&sessions).await.unwrap();
+    deks.teardown(&sessions).await.unwrap();
+    deks.migrate(&sessions).await.unwrap();
     Fixture {
         sessions,
         deks: Arc::new(deks),
@@ -412,24 +403,10 @@ async fn two_first_contacts_at_once_share_one_dek() {
 
 #[tokio::test]
 #[ignore = "needs a live PostgreSQL"]
-async fn two_setups_at_once_agree() {
-    let f = fixture("setups_at_once").await;
-    f.sessions
-        .session(async |session| {
-            session
-                .connection()
-                .batch_execute(&format!("DROP TABLE IF EXISTS {}", f.tables.0))
-                .await
-                .unwrap();
-            Ok::<_, Error>(())
-        })
-        .await
-        .unwrap();
-    let setup = || {
-        f.sessions
-            .session(async |session| f.deks.setup(&session).await)
-    };
-    let (a, b) = tokio::join!(setup(), setup());
+async fn two_migrations_at_once_agree() {
+    let f = fixture("migrations_at_once").await;
+    f.deks.teardown(&f.sessions).await.unwrap();
+    let (a, b) = tokio::join!(f.deks.migrate(&f.sessions), f.deks.migrate(&f.sessions));
     a.unwrap();
     b.unwrap();
     f.atomic(|tx, deks| async move {
@@ -439,4 +416,27 @@ async fn two_setups_at_once_agree() {
     })
     .await
     .unwrap();
+}
+
+/// A released migration is never edited (ADR-0029): every database that
+/// applied it would refuse to start. A new shape is a new migration,
+/// written here with its checksum when it is released.
+#[test]
+fn the_released_migrations_keep_their_checksums() {
+    let deks = PgDekStore::new(PgKeyManagementService::new(
+        Algorithm::Aes256Gcm.generate_key().unwrap(),
+    ));
+    let checksums: Vec<_> = deks
+        .component()
+        .migrations()
+        .iter()
+        .map(|migration| (migration.id().to_owned(), migration.checksum().to_owned()))
+        .collect();
+    assert_eq!(
+        checksums,
+        [(
+            "20261027T000000Z_baseline".to_owned(),
+            "fnv1a64:869c0f897a61dfe5:445".to_owned()
+        )]
+    );
 }

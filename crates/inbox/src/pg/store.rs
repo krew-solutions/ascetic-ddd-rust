@@ -3,6 +3,9 @@
 
 use std::time::Duration;
 
+use ascetic_ddd_migration::{
+    Applied, Component, Migration, Options as MigrationOptions, forget, migrate,
+};
 use ascetic_ddd_session::{PgAccess, Session, SessionPool};
 use tokio_postgres::Row;
 
@@ -20,6 +23,51 @@ const COLUMNS: &str = "tenant_id, stream_type, stream_id, stream_position, uri, 
 const WIDTH: usize = 12;
 /// The rows a dispatcher may take: neither processed, parked nor waiting.
 const QUEUE: &str = "processed_position IS NULL AND parked_at IS NULL AND waiting_for IS NULL";
+
+/// The inbox's sequence, tables and indexes as created, `{table}`,
+/// `{sequence}`, `{slots}` and `{key}` standing for their names, the cut and
+/// the partition key's expression, `{key_text}` for that expression as a
+/// literal, and `{queue}` for [`QUEUE`]: the baseline of its component, its
+/// checksum the template's with the queue written out.
+const BASELINE: &str = r#"
+    CREATE SEQUENCE IF NOT EXISTS {sequence};
+    CREATE TABLE IF NOT EXISTS {table} (
+        tenant_id varchar(128) NOT NULL,
+        stream_type varchar(128) NOT NULL,
+        stream_id jsonb NOT NULL,
+        stream_position integer NOT NULL,
+        uri varchar(255) NOT NULL,
+        payload bytea NOT NULL,
+        metadata jsonb NULL,
+        received_position bigint NOT NULL DEFAULT nextval('{sequence}'),
+        processed_position bigint NULL,
+        attempts integer NOT NULL DEFAULT 0,
+        last_error text NULL,
+        next_attempt_at timestamptz NULL,
+        parked_at timestamptz NULL,
+        waiting_for jsonb NULL,
+        waiting_since timestamptz NULL,
+        slot smallint GENERATED ALWAYS AS ((hashtext({key}) & 2147483647) % {slots}) STORED,
+        CONSTRAINT {table}_pk PRIMARY KEY (tenant_id, stream_type, stream_id, stream_position)
+    );
+    CREATE INDEX IF NOT EXISTS {table}__head_idx
+        ON {table} (slot, received_position) WHERE {queue};
+    CREATE INDEX IF NOT EXISTS {table}__waiting_idx
+        ON {table} (waiting_for) WHERE waiting_for IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS {table}__waiting_since_idx
+        ON {table} (waiting_since) WHERE waiting_for IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS {table}__message_id_uniq
+        ON {table} (((metadata->>'message_id')::uuid));
+    CREATE TABLE IF NOT EXISTS {table}_meta (slots integer NOT NULL, partition_key text NOT NULL);
+    INSERT INTO {table}_meta (slots, partition_key) SELECT {slots}, {key_text}
+        WHERE NOT EXISTS (SELECT 1 FROM {table}_meta);
+    CREATE TABLE IF NOT EXISTS {table}_slots (
+        slot smallint PRIMARY KEY,
+        served_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    INSERT INTO {table}_slots (slot) SELECT s FROM generate_series(0, {slots} - 1) AS s
+        ON CONFLICT DO NOTHING;
+"#;
 
 /// What taking a slot returned: the slot whose row the statement locked, or
 /// none when no slot had a due head; the statement's snapshot, read in the
@@ -44,12 +92,10 @@ where
     P::Session: PgAccess + Sync,
     O: InboxObserver,
 {
-    /// Creates the sequence, the table, the indexes and the tables of the
-    /// cut and of the slots if they do not exist, in one transaction under
-    /// an advisory lock on the table's name, so that two processes may run
-    /// it at once; and refuses to go on when the table is cut into another
-    /// number of slots or by another key: that is a migration, not a
-    /// restart.
+    /// The inbox's tables as a component of the database's ledger
+    /// (ADR-0029), `inbox:<table>`: its baseline is the sequence, the
+    /// tables and the indexes below, its checksum over their template,
+    /// whatever the names, the cut and the key.
     ///
     /// The head index, `(slot, received_position)` over the queue — the rows
     /// neither processed, parked nor waiting — is the walk's order: the
@@ -68,72 +114,41 @@ where
     /// recomputes it; `<table>_meta` holds the number of slots and the key
     /// the table was cut by, and `<table>_slots` one row per slot, the row a
     /// dispatcher locks to hold the slot.
-    pub async fn setup(&self, session: &P::Session) -> Result<(), Error> {
-        let (table, sequence, slots) = (&self.table, &self.sequence, self.slots);
+    pub fn component(&self) -> Component {
         let key = self.partition.sql_expression();
-        let ddl = format!(
-            r#"
-            CREATE SEQUENCE IF NOT EXISTS {sequence};
-            CREATE TABLE IF NOT EXISTS {table} (
-                tenant_id varchar(128) NOT NULL,
-                stream_type varchar(128) NOT NULL,
-                stream_id jsonb NOT NULL,
-                stream_position integer NOT NULL,
-                uri varchar(255) NOT NULL,
-                payload bytea NOT NULL,
-                metadata jsonb NULL,
-                received_position bigint NOT NULL DEFAULT nextval('{sequence}'),
-                processed_position bigint NULL,
-                attempts integer NOT NULL DEFAULT 0,
-                last_error text NULL,
-                next_attempt_at timestamptz NULL,
-                parked_at timestamptz NULL,
-                waiting_for jsonb NULL,
-                waiting_since timestamptz NULL,
-                slot smallint GENERATED ALWAYS AS ((hashtext({key}) & 2147483647) % {slots}) STORED,
-                CONSTRAINT {table}_pk PRIMARY KEY (tenant_id, stream_type, stream_id, stream_position)
-            );
-            CREATE INDEX IF NOT EXISTS {table}__head_idx
-                ON {table} (slot, received_position) WHERE {QUEUE};
-            CREATE INDEX IF NOT EXISTS {table}__waiting_idx
-                ON {table} (waiting_for) WHERE waiting_for IS NOT NULL;
-            CREATE INDEX IF NOT EXISTS {table}__waiting_since_idx
-                ON {table} (waiting_since) WHERE waiting_for IS NOT NULL;
-            CREATE UNIQUE INDEX IF NOT EXISTS {table}__message_id_uniq
-                ON {table} (((metadata->>'message_id')::uuid));
-            CREATE TABLE IF NOT EXISTS {table}_meta (slots integer NOT NULL, partition_key text NOT NULL);
-            CREATE TABLE IF NOT EXISTS {table}_slots (
-                slot smallint PRIMARY KEY,
-                served_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            INSERT INTO {table}_slots (slot) SELECT s FROM generate_series(0, {slots} - 1) AS s
-                ON CONFLICT DO NOTHING;
-            "#
-        );
-        // One transaction under an advisory lock on the table's name: two
-        // processes setting the table up at once would otherwise race in
-        // CREATE TABLE IF NOT EXISTS and both write the cut.
-        session
-            .atomic(async |tx| {
-                tx.connection()
-                    .execute("SELECT pg_advisory_xact_lock(hashtext($1))", &[&table.as_str()])
-                    .await?;
-                tx.connection().batch_execute(&ddl).await?;
-                tx.connection()
-                    .execute(
-                        &format!(
-                            "INSERT INTO {table}_meta (slots, partition_key) SELECT $1, $2 \
-                             WHERE NOT EXISTS (SELECT 1 FROM {table}_meta)"
-                        ),
-                        &[&(slots as i32), &key],
-                    )
-                    .await?;
-                let pinned = tx
+        let sql = BASELINE
+            .replace("{queue}", QUEUE)
+            .replace("{table}", self.table.as_str())
+            .replace("{sequence}", self.sequence.as_str())
+            .replace("{slots}", &self.slots.to_string())
+            .replace("{key_text}", &format!("'{}'", key.replace('\'', "''")))
+            .replace("{key}", key);
+        Component::new(
+            format!("inbox:{}", self.table),
+            vec![
+                Migration::new("20261027T000000Z_baseline", sql)
+                    .checked_over(&BASELINE.replace("{queue}", QUEUE)),
+            ],
+        )
+        .unwrap_or_else(|_| unreachable!("one migration with an id, under a name"))
+    }
+
+    /// Brings the inbox's tables up to its migrations — a read of the
+    /// ledger when they are current, so that a process starts beside live
+    /// traffic without locking them — and refuses to go on when the table
+    /// is cut into another number of slots or by another key: that is a
+    /// migration, not a restart.
+    pub async fn migrate(&self) -> Result<Applied, Error> {
+        let applied = migrate(&self.pool, &self.component(), &MigrationOptions::default())
+            .await
+            .map_err(Error::Migration)?;
+        let (table, slots) = (&self.table, self.slots);
+        let key = self.partition.sql_expression();
+        self.pool
+            .session(async |session: P::Session| {
+                let pinned = session
                     .connection()
-                    .query_one(
-                        &format!("SELECT slots, partition_key FROM {table}_meta"),
-                        &[],
-                    )
+                    .query_one(&format!("SELECT slots, partition_key FROM {table}_meta"), &[])
                     .await?;
                 let (pinned_slots, pinned_key): (i32, String) = (pinned.get(0), pinned.get(1));
                 if pinned_slots != slots as i32 || pinned_key != key {
@@ -144,7 +159,29 @@ where
                 }
                 Ok(())
             })
+            .await?;
+        Ok(applied)
+    }
+
+    /// Drops the inbox's tables and its sequence and forgets them in the
+    /// ledger: for an inbox that lives as long as a test.
+    pub async fn teardown(&self) -> Result<(), Error> {
+        let (table, sequence) = (&self.table, &self.sequence);
+        self.pool
+            .session(async |session: P::Session| {
+                session
+                    .connection()
+                    .batch_execute(&format!(
+                        "DROP TABLE IF EXISTS {table}; DROP SEQUENCE IF EXISTS {sequence}; \
+                         DROP TABLE IF EXISTS {table}_meta; DROP TABLE IF EXISTS {table}_slots;"
+                    ))
+                    .await?;
+                Ok::<_, Error>(())
+            })
+            .await?;
+        forget(&self.pool, &format!("inbox:{table}"))
             .await
+            .map_err(Error::Migration)
     }
 
     /// Takes a slot: the one least recently served among those whose head —

@@ -39,8 +39,8 @@ impl EventCodec<Order> for OrderCodec {
 
 let store = PgEventStore::new(Encrypted::new(deks), OrderCodec);
 let order = StreamId::new("tenant-1", "Order", "order-7");
+store.migrate(&sessions).await?;
 sessions.session(async |session| {
-    store.setup(&session).await?;
     session.atomic(async |tx| {
         // load, fold, decide, append
         let history = store.load(&tx, &order, 0).await?;
@@ -112,7 +112,9 @@ transaction. Nor a snapshot: a long stream is read whole.
   and the Python inbox read something else again.
 * Ids are text, not UUID values; `occurred_at` is ISO 8601 text, as every
   serializable contract carries a date.
-* `setup` is the adapter's, under an advisory lock, as in the other stores.
+* The table is a component of the database's migration ledger (ADR-0029):
+  `migrate` creates it once and is a read of the ledger after, so that a
+  process starts beside live appends without locking the table.
 
 ## Testing
 

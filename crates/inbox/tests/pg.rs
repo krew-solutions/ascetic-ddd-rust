@@ -82,7 +82,7 @@ fn recorded(name: &str) -> TraceFile {
     TraceFile::from_env(&format!("inbox-{name}"))
 }
 
-/// The number of slots and the key are read at `setup`, so they are set
+/// The number of slots and the key are read at `migrate`, so they are set
 /// before the table exists.
 async fn fixture_cut<O: InboxObserver>(
     name: &str,
@@ -101,14 +101,8 @@ async fn fixture_cut<O: InboxObserver>(
         .with_slots(slots)
         .partitioned_by(ByStream)
         .observed_by((observer, trace.recorder()));
-    let drop = format!("DROP TABLE IF EXISTS {table}; DROP SEQUENCE IF EXISTS {sequence};");
-    sessions
-        .session(async |session| {
-            session.connection().batch_execute(&drop).await.unwrap();
-            inbox.setup(&session).await
-        })
-        .await
-        .unwrap();
+    inbox.teardown().await.unwrap();
+    inbox.migrate().await.unwrap();
     Fixture {
         sessions,
         inbox,
@@ -1124,11 +1118,12 @@ async fn a_defect_stops_the_loops() {
     assert_eq!(f.processed().await, 0, "the table is as it was");
 }
 
-/// Two processes set the same table up at once: both succeed, and the cut
-/// is written once. Without the lock, both would see no cut and write theirs.
+/// Two processes migrate the same table at once: both succeed, and the cut
+/// is written once. Without the ledger's lock, both would see no cut and
+/// write theirs.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
-async fn two_setups_at_once_agree() {
+async fn two_migrations_at_once_agree() {
     let (table, sequence) = ("inbox_twice", "inbox_twice_seq");
     let sessions = PgSessionPool::new(pool());
     let build = || {
@@ -1140,21 +1135,9 @@ async fn two_setups_at_once_agree() {
             .with_slots(2)
     };
     let (first, second) = (build(), build());
-    let drop = format!(
-        "DROP TABLE IF EXISTS {table}, {table}_meta, {table}_slots; DROP SEQUENCE IF EXISTS {sequence};"
-    );
-    sessions
-        .session(async |session| {
-            session.connection().batch_execute(&drop).await?;
-            Ok::<(), Error>(())
-        })
-        .await
-        .unwrap();
+    first.teardown().await.unwrap();
 
-    let (a, b) = tokio::join!(
-        sessions.session(async |session| first.setup(&session).await),
-        sessions.session(async |session| second.setup(&session).await),
-    );
+    let (a, b) = tokio::join!(first.migrate(), second.migrate());
 
     a.unwrap();
     b.unwrap();
@@ -1166,6 +1149,34 @@ async fn two_setups_at_once_agree() {
         .await
         .unwrap();
     assert_eq!(cuts, 1);
+}
+
+/// A table cut into some number of slots is not re-cut by a restart asking
+/// for another: that is a migration, and the start refuses.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn another_cut_is_refused() {
+    let (table, sequence) = ("inbox_recut", "inbox_recut_seq");
+    let build = |slots| {
+        PgInbox::new(PgSessionPool::new(pool()))
+            .with_table(
+                Identifier::new(table).unwrap(),
+                Identifier::new(sequence).unwrap(),
+            )
+            .with_slots(slots)
+            .partitioned_by(ByStream)
+    };
+    let cut = build(2);
+    cut.teardown().await.unwrap();
+    cut.migrate().await.unwrap();
+
+    let refused = build(3).migrate().await;
+
+    assert!(
+        matches!(&refused, Err(Error::Malformed(what)) if what.contains("2 slots")),
+        "{refused:?}"
+    );
+    cut.migrate().await.unwrap();
 }
 
 /// The port is what the edge depends on; a fake collects what it received.
@@ -1465,4 +1476,25 @@ async fn a_dependency_that_never_arrives_parks_the_message_after_max_wait() {
     assert!(unparked);
     while f.dispatch(&subscriber).await != Outcome::Nothing {}
     assert_eq!(*seen.lock().unwrap(), ["user@5", "order@1"]);
+}
+
+/// A released migration is never edited (ADR-0029): every database that
+/// applied it would refuse to start. A new shape is a new migration,
+/// written here with its checksum when it is released.
+#[test]
+fn the_released_migrations_keep_their_checksums() {
+    let inbox = PgInbox::new(PgSessionPool::new(pool()));
+    let checksums: Vec<_> = inbox
+        .component()
+        .migrations()
+        .iter()
+        .map(|migration| (migration.id().to_owned(), migration.checksum().to_owned()))
+        .collect();
+    assert_eq!(
+        checksums,
+        [(
+            "20261027T000000Z_baseline".to_owned(),
+            "fnv1a64:e803015b7116f1bd:1917".to_owned()
+        )]
+    );
 }

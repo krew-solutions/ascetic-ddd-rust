@@ -140,19 +140,8 @@ async fn fixture_with_master(name: &str, master_key: Key) -> Fixture {
         .with_table(Identifier::new(&keks).unwrap())
         .with_signing_table(Identifier::new(&signing).unwrap())
         .with_mac_table(Identifier::new(&mac).unwrap());
-    sessions
-        .session(async |session| {
-            session
-                .connection()
-                .batch_execute(&format!(
-                    "DROP TABLE IF EXISTS {keks}; DROP TABLE IF EXISTS {signing}; DROP TABLE IF EXISTS {mac};"
-                ))
-                .await
-                .unwrap();
-            kms.setup(&session).await
-        })
-        .await
-        .unwrap();
+    kms.teardown(&sessions).await.unwrap();
+    kms.migrate(&sessions).await.unwrap();
     Fixture {
         sessions,
         kms: Arc::new(kms),

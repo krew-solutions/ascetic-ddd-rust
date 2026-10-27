@@ -19,6 +19,8 @@ pub enum Error {
     /// A stored value could not be read back, such as a transaction id that
     /// is not a number.
     Malformed(String),
+    /// The tables could not be migrated (ADR-0029).
+    Migration(ascetic_ddd_migration::MigrationError),
 }
 
 impl Error {
@@ -31,7 +33,7 @@ impl Error {
         match self {
             Error::Session(error) => error.is_transient(),
             Error::Database(error) => ascetic_ddd_session::pg::transient(error),
-            Error::Subscriber(_) | Error::Malformed(_) => false,
+            Error::Subscriber(_) | Error::Malformed(_) | Error::Migration(_) => false,
         }
     }
 }
@@ -43,6 +45,7 @@ impl fmt::Display for Error {
             Error::Database(error) => write!(f, "database: {error}"),
             Error::Subscriber(error) => write!(f, "subscriber: {error}"),
             Error::Malformed(what) => write!(f, "malformed value in the outbox: {what}"),
+            Error::Migration(error) => write!(f, "{error}"),
         }
     }
 }
@@ -54,6 +57,7 @@ impl std::error::Error for Error {
             Error::Database(error) => Some(error),
             Error::Subscriber(error) => Some(error.as_ref()),
             Error::Malformed(_) => None,
+            Error::Migration(error) => Some(error),
         }
     }
 }

@@ -48,24 +48,28 @@ fn pool() -> Pool {
 
 type PgStage = EnvelopeStage<PgSessionPool, PgKeyManagementService>;
 
-/// A KMS in a table of its own per test, and the stage over it.
-async fn stage(name: &str) -> Arc<PgStage> {
-    let table = format!("kms_keys_stage_{name}");
-    let kms = PgKeyManagementService::new(Algorithm::Aes256Gcm.generate_key().unwrap())
-        .with_table(Identifier::new(&table).unwrap());
+/// A KMS under `master` whose tables are the test's own: the KEKs' in
+/// `table`, the signing and MAC keys' beside it.
+fn kms_in(master: &ascetic_ddd_kms::Key, table: &str) -> PgKeyManagementService {
+    PgKeyManagementService::new(master.clone())
+        .with_table(Identifier::new(table).unwrap())
+        .with_signing_table(Identifier::new(format!("{table}_sign")).unwrap())
+        .with_mac_table(Identifier::new(format!("{table}_mac")).unwrap())
+}
+
+/// The KMS's tables dropped and made again: a test starts from none.
+async fn fresh(kms: &PgKeyManagementService) {
     let sessions = PgSessionPool::new(pool());
-    sessions
-        .session(async |session| {
-            session
-                .connection()
-                .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
-                .await
-                .unwrap();
-            kms.setup(&session).await
-        })
-        .await
-        .unwrap();
-    Arc::new(EnvelopeStage::new(sessions, kms))
+    kms.teardown(&sessions).await.unwrap();
+    kms.migrate(&sessions).await.unwrap();
+}
+
+/// A KMS in tables of its own per test, and the stage over it.
+async fn stage(name: &str) -> Arc<PgStage> {
+    let master = Algorithm::Aes256Gcm.generate_key().unwrap();
+    let kms = kms_in(&master, &format!("kek_stage_{name}"));
+    fresh(&kms).await;
+    Arc::new(EnvelopeStage::new(PgSessionPool::new(pool()), kms))
 }
 
 fn message(tenant_id: &str, payload: &str) -> Message {
@@ -182,21 +186,8 @@ async fn the_binding_is_the_sealing_side_s_and_travels_with_the_message() {
     // Two stages over one KMS: one bound to the tenant and the id, one to
     // the tenant alone.
     let master_key = Algorithm::Aes256Gcm.generate_key().unwrap();
-    let kms = || {
-        PgKeyManagementService::new(master_key.clone())
-            .with_table(Identifier::new("kms_keys_stage_binding").unwrap())
-    };
-    PgSessionPool::new(pool())
-        .session(async |session| {
-            session
-                .connection()
-                .batch_execute("DROP TABLE IF EXISTS kms_keys_stage_binding")
-                .await
-                .unwrap();
-            kms().setup(&session).await
-        })
-        .await
-        .unwrap();
+    let kms = || kms_in(&master_key, "kek_stage_binding");
+    fresh(&kms()).await;
     let by_identity = EnvelopeStage::new(PgSessionPool::new(pool()), kms());
     let by_tenant = EnvelopeStage::new(PgSessionPool::new(pool()), kms()).bound_to([TENANT_ID]);
 
@@ -224,21 +215,8 @@ async fn the_binding_is_the_sealing_side_s_and_travels_with_the_message() {
 #[ignore = "needs a live PostgreSQL"]
 async fn a_reused_dek_serves_so_many_messages_and_each_opens() {
     let master_key = Algorithm::Aes256Gcm.generate_key().unwrap();
-    let kms = || {
-        PgKeyManagementService::new(master_key.clone())
-            .with_table(Identifier::new("kms_keys_stage_reuse").unwrap())
-    };
-    PgSessionPool::new(pool())
-        .session(async |session| {
-            session
-                .connection()
-                .batch_execute("DROP TABLE IF EXISTS kms_keys_stage_reuse")
-                .await
-                .unwrap();
-            kms().setup(&session).await
-        })
-        .await
-        .unwrap();
+    let kms = || kms_in(&master_key, "kek_stage_reuse");
+    fresh(&kms()).await;
     let sealing = EnvelopeStage::new(PgSessionPool::new(pool()), kms()).reusing(Reuse {
         messages: 2,
         lifetime: Duration::from_secs(3600),
@@ -293,7 +271,7 @@ async fn a_shredded_tenant_s_messages_are_refused_for_good() {
         .await
         .unwrap();
     let kms = PgKeyManagementService::new(Algorithm::Aes256Gcm.generate_key().unwrap())
-        .with_table(Identifier::new("kms_keys_stage_shredded").unwrap());
+        .with_table(Identifier::new("kek_stage_shredded").unwrap());
     PgSessionPool::new(pool())
         .session(async |session| kms.delete_kek(&session, "tenant-1").await)
         .await
@@ -347,23 +325,10 @@ async fn the_outbox_and_the_inbox_hold_nothing_but_ciphertext() {
                 ..InboxLoops::default()
             }),
     );
-    sessions
-        .session(async |session| {
-            session
-                .connection()
-                .batch_execute(
-                    "DROP TABLE IF EXISTS dek_stage_outbox; DROP TABLE IF EXISTS dek_stage_outbox_meta; \
-                     DROP TABLE IF EXISTS dek_stage_outbox_offsets; DROP TABLE IF EXISTS dek_stage_inbox; \
-                     DROP SEQUENCE IF EXISTS dek_stage_inbox_seq;",
-                )
-                .await
-                .unwrap();
-            outbox.setup(&session).await.unwrap();
-            inbox.setup(&session).await.unwrap();
-            Ok::<_, SessionError>(())
-        })
-        .await
-        .unwrap();
+    outbox.teardown().await.unwrap();
+    outbox.migrate().await.unwrap();
+    inbox.teardown().await.unwrap();
+    inbox.migrate().await.unwrap();
 
     let mut bus = Bus::new();
     bus.register(OUTBOX_SCHEME, outbox.channel()).unwrap();
@@ -495,7 +460,10 @@ async fn eight_first_contacts_at_once_through_the_stage_make_one_kek() {
         .session(async |session| {
             let row = session
                 .connection()
-                .query_one("SELECT count(*) FROM kms_keys_stage_eight_at_once WHERE tenant_id = 'tenant-9'", &[])
+                .query_one(
+                    "SELECT count(*) FROM kek_stage_eight_at_once WHERE tenant_id = 'tenant-9'",
+                    &[],
+                )
                 .await
                 .unwrap();
             Ok::<_, SessionError>(row.get(0))
@@ -511,31 +479,19 @@ const CHANNEL: &str = "policy.lifecycle";
 /// A stage over the KMS of `table` under `master`, serving `context`: what
 /// the composition root builds per channel, at either end.
 async fn stage_of(table: &str, master: &ascetic_ddd_kms::Key, context: &str) -> Arc<PgStage> {
-    let kms = PgKeyManagementService::new(master.clone())
-        .with_table(Identifier::new(table).unwrap())
-        .with_derivation_context(context);
+    let kms = kms_in(master, table).with_derivation_context(context);
     let sessions = PgSessionPool::new(pool());
-    sessions
-        .session(async |session| kms.setup(&session).await)
-        .await
-        .unwrap();
+    kms.migrate(&sessions).await.unwrap();
     Arc::new(EnvelopeStage::new(sessions, kms))
 }
 
 #[tokio::test]
 #[ignore = "needs a live PostgreSQL"]
 async fn the_channel_s_other_end_opens_what_was_sealed_for_it_and_no_other_channel_does() {
-    let table = "kms_keys_stage_channel";
+    let table = "kek_stage_channel";
     let master = Algorithm::Aes256Gcm.generate_key().unwrap();
-    PgSessionPool::new(pool())
-        .session(async |session| {
-            session
-                .connection()
-                .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
-                .await
-                .unwrap();
-            Ok::<_, SessionError>(())
-        })
+    kms_in(&master, table)
+        .teardown(&PgSessionPool::new(pool()))
         .await
         .unwrap();
     // The producer's stage and the consumer's: two instances, built apart,
@@ -580,18 +536,12 @@ fn sealing_of(table: &str, master: &ascetic_ddd_kms::Key, channels: &[&str]) -> 
 #[ignore = "needs a live PostgreSQL"]
 async fn the_sealing_of_the_channels_is_built_up_front_and_answers_for_those_alone() {
     use ascetic_ddd_kms::{KekOptions, KeyCustody as _};
-    let table = "kms_keys_stage_sealing";
+    let table = "kek_stage_sealing";
     let master = Algorithm::Aes256Gcm.generate_key().unwrap();
-    let custody =
-        PgKeyManagementService::new(master.clone()).with_table(Identifier::new(table).unwrap());
+    let custody = kms_in(&master, table);
+    fresh(&custody).await;
     PgSessionPool::new(pool())
         .session(async |session| {
-            session
-                .connection()
-                .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
-                .await
-                .unwrap();
-            custody.setup(&session).await?;
             session
                 .atomic(async |tx| {
                     custody
@@ -642,16 +592,10 @@ async fn the_sealing_of_the_channels_is_built_up_front_and_answers_for_those_alo
 async fn tenant_with_a_key(table: &str) -> ascetic_ddd_kms::Key {
     use ascetic_ddd_kms::{KekOptions, KeyCustody as _};
     let master = Algorithm::Aes256Gcm.generate_key().unwrap();
-    let custody =
-        PgKeyManagementService::new(master.clone()).with_table(Identifier::new(table).unwrap());
+    let custody = kms_in(&master, table);
+    fresh(&custody).await;
     PgSessionPool::new(pool())
         .session(async |session| {
-            session
-                .connection()
-                .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
-                .await
-                .unwrap();
-            custody.setup(&session).await?;
             session
                 .atomic(async |tx| {
                     custody
@@ -678,7 +622,7 @@ fn row_of(sealed: Message, destination: &str) -> Message {
 #[tokio::test]
 #[ignore = "needs a live PostgreSQL"]
 async fn one_stage_opens_the_rows_of_two_channels_by_their_destination() {
-    let table = "kms_keys_stage_by_destination";
+    let table = "kek_stage_by_destination";
     let master = tenant_with_a_key(table).await;
     let channels = ["device.lifecycle", "inbox://policy-commands"];
     let producers = sealing_of(table, &master, &channels);
@@ -734,7 +678,7 @@ async fn one_stage_opens_the_rows_of_two_channels_by_their_destination() {
 #[tokio::test]
 #[ignore = "needs a live PostgreSQL"]
 async fn a_row_under_another_channel_s_destination_does_not_open() {
-    let table = "kms_keys_stage_by_destination_other";
+    let table = "kek_stage_by_destination_other";
     let master = tenant_with_a_key(table).await;
     let channels = ["device.lifecycle", "inbox://policy-commands"];
     let producers = sealing_of(table, &master, &channels);
@@ -770,7 +714,7 @@ async fn a_row_under_another_channel_s_destination_does_not_open() {
 #[tokio::test]
 #[ignore = "needs a live PostgreSQL"]
 async fn a_destination_outside_the_map_is_refused_for_good() {
-    let table = "kms_keys_stage_by_destination_outside";
+    let table = "kek_stage_by_destination_outside";
     let master = tenant_with_a_key(table).await;
     let sealing = sealing_of(table, &master, &["device.lifecycle"]);
     let consumer = sealing
@@ -812,7 +756,7 @@ async fn a_destination_outside_the_map_is_refused_for_good() {
 #[tokio::test]
 #[ignore = "needs a live PostgreSQL"]
 async fn a_map_naming_a_channel_the_sealing_lacks_is_refused_up_front() {
-    let table = "kms_keys_stage_by_destination_lacking";
+    let table = "kek_stage_by_destination_lacking";
     let master = tenant_with_a_key(table).await;
     let sealing = sealing_of(table, &master, &["device.lifecycle"]);
     let error = sealing

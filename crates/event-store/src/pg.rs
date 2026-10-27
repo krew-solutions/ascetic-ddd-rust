@@ -12,8 +12,11 @@
 //! `payload` is what the stream's codec made: ciphertext, under
 //! [`Encrypted`][crate::Encrypted].
 
-use ascetic_ddd_session::Session;
+use ascetic_ddd_migration::{
+    Applied, Component, Migration, Options as MigrationOptions, forget, migrate,
+};
 use ascetic_ddd_session::pg::{Identifier, PgAccess};
+use ascetic_ddd_session::{Session, SessionPool};
 use serde_json::Value;
 use tokio_postgres::Row;
 use tokio_postgres::error::SqlState;
@@ -22,6 +25,24 @@ use crate::codecs::Codecs;
 use crate::domain::{Appended, Encoded, EventCodec, EventMeta, Recorded, StreamId};
 use crate::error::Error;
 use crate::port::EventStore;
+
+/// The table and its index as created, `{table}` standing for its name: the
+/// baseline of the store's component, its checksum the template's.
+const BASELINE: &str = r#"
+    CREATE TABLE IF NOT EXISTS {table} (
+        "tenant_id" VARCHAR(128) NOT NULL,
+        "stream_type" VARCHAR(128) NOT NULL,
+        "stream_id" JSONB NOT NULL,
+        "stream_position" INTEGER NOT NULL,
+        "event_type" VARCHAR(60) NOT NULL,
+        "event_version" SMALLINT NOT NULL,
+        "payload" BYTEA NOT NULL,
+        "metadata" JSONB NULL,
+        CONSTRAINT {table}_pk PRIMARY KEY ("tenant_id", "stream_type", "stream_id", "stream_position")
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS {table}__event_id_uniq
+        ON {table} (((metadata->>'event_id')::uuid));
+"#;
 
 /// The event store over a table, with codecs `C` for the payload and `F`
 /// for the events.
@@ -53,42 +74,55 @@ impl<C, F> PgEventStore<C, F> {
         &self.table
     }
 
-    /// Creates the table if it is not there, in one transaction under an
-    /// advisory lock on the table's name.
-    pub async fn setup<S>(&self, session: &S) -> Result<(), Error>
+    /// The table as a component of the database's ledger (ADR-0029),
+    /// `event_store:<table>`: its baseline is the table and its index
+    /// below, its checksum over their template, whatever the name.
+    pub fn component(&self) -> Component {
+        Component::new(
+            format!("event_store:{}", self.table),
+            vec![
+                Migration::new(
+                    "20261027T000000Z_baseline",
+                    BASELINE.replace("{table}", self.table.as_str()),
+                )
+                .checked_over(BASELINE),
+            ],
+        )
+        .unwrap_or_else(|_| unreachable!("one migration with an id, under a name"))
+    }
+
+    /// Brings the table up to its migrations: a read of the ledger when it
+    /// is current, so that a process starts beside live appends without
+    /// locking the table.
+    pub async fn migrate<P>(&self, pool: &P) -> Result<Applied, Error>
     where
-        S: Session + PgAccess + Sync,
+        P: SessionPool,
+        P::Session: PgAccess,
+    {
+        migrate(pool, &self.component(), &MigrationOptions::default())
+            .await
+            .map_err(Error::Migration)
+    }
+
+    /// Drops the table and forgets it in the ledger: for a store that lives
+    /// as long as a test.
+    pub async fn teardown<P>(&self, pool: &P) -> Result<(), Error>
+    where
+        P: SessionPool,
+        P::Session: PgAccess,
     {
         let table = &self.table;
-        let ddl = format!(
-            r#"
-            CREATE TABLE IF NOT EXISTS {table} (
-                "tenant_id" VARCHAR(128) NOT NULL,
-                "stream_type" VARCHAR(128) NOT NULL,
-                "stream_id" JSONB NOT NULL,
-                "stream_position" INTEGER NOT NULL,
-                "event_type" VARCHAR(60) NOT NULL,
-                "event_version" SMALLINT NOT NULL,
-                "payload" BYTEA NOT NULL,
-                "metadata" JSONB NULL,
-                CONSTRAINT {table}_pk PRIMARY KEY ("tenant_id", "stream_type", "stream_id", "stream_position")
-            );
-            CREATE UNIQUE INDEX IF NOT EXISTS {table}__event_id_uniq
-                ON {table} (((metadata->>'event_id')::uuid));
-            "#
-        );
-        session
-            .atomic(async |tx| {
-                tx.connection()
-                    .execute(
-                        "SELECT pg_advisory_xact_lock(hashtext($1))",
-                        &[&table.as_str()],
-                    )
-                    .await?;
-                tx.connection().batch_execute(&ddl).await?;
-                Ok::<_, Error>(())
-            })
+        pool.session(async |session: P::Session| {
+            session
+                .connection()
+                .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+                .await?;
+            Ok::<_, Error>(())
+        })
+        .await?;
+        forget(pool, &format!("event_store:{table}"))
             .await
+            .map_err(Error::Migration)
     }
 }
 

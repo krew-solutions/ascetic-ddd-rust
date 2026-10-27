@@ -41,7 +41,7 @@ inbox.run(|tx, message| handle(tx, message), Loops::default(), ctrl_c).await?;
 ## The port and the adapter
 
 The edge sees `Inbox`, one method, `publish`. Processing — `dispatch`,
-`run`, `setup` — is on `PgInbox`, because it is the business of a separate
+`run`, `migrate` — is on `PgInbox`, because it is the business of a separate
 loop.
 
 ## As a channel of the bus
@@ -185,7 +185,7 @@ tenth with a subscriber that does nothing, less with one that does anything.
 A row carries its slot, `hashtext(<partition key>) % slots` with the sign bit
 cleared, stored at insert; the key, `ByUri` or `ByStream`, and the number of
 slots are fixed for the life of the table, `partitioned_by` and
-`with_slots(S)` before `setup` creates it, the URI and one slot by default.
+`with_slots(S)` before `migrate` creates it, the URI and one slot by default.
 The table `<table>_slots` has one row per slot. A dispatcher has no identity:
 `dispatch(subscriber)` takes whichever slot has a due head and is held by
 nobody, least recently served first, locks that slot's row for the length of
@@ -197,8 +197,14 @@ the next poll of a survivor takes it. One slot is the order of arrival over
 the whole table; more slots are parallelism, and order within a stream
 still, since a stream is in one slot. A head waiting for its backoff holds
 its slot, and the other slots flow. Changing the number of slots or the key
-moves rows between slots and is a migration, not a restart: `setup` refuses a
-table cut otherwise (ADR-0008).
+moves rows between slots and is a migration, not a restart: `migrate` refuses
+a table cut otherwise (ADR-0008).
+
+The tables are a component of the database's migration ledger, `inbox:<table>`
+(ADR-0029): `migrate` creates them once and is a read of the ledger after,
+so that a process starts beside live traffic without locking them;
+`teardown` drops them and forgets them, for an inbox that lives as long as a
+test.
 
 Taking a slot is one statement, and reading its head another, under a
 snapshot taken after the lock: a statement's snapshot predates the lock it

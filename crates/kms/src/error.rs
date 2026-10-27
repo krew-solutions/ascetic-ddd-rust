@@ -94,6 +94,9 @@ pub enum Error {
     /// The database refused a statement.
     #[cfg(feature = "pg")]
     Database(tokio_postgres::Error),
+    /// The tables could not be migrated (ADR-0029).
+    #[cfg(feature = "pg")]
+    Migration(ascetic_ddd_migration::MigrationError),
     /// Vault could not be reached, or its answer could not be read.
     #[cfg(feature = "vault")]
     Transport(BoxError),
@@ -161,6 +164,8 @@ impl fmt::Display for Error {
             Error::Session(error) => write!(f, "session: {error}"),
             #[cfg(feature = "pg")]
             Error::Database(error) => write!(f, "database: {error}"),
+            #[cfg(feature = "pg")]
+            Error::Migration(error) => write!(f, "{error}"),
             #[cfg(feature = "vault")]
             Error::Transport(error) => write!(f, "vault unreachable: {error}"),
             #[cfg(feature = "vault")]
@@ -181,6 +186,8 @@ impl std::error::Error for Error {
             Error::Session(error) => Some(error),
             #[cfg(feature = "pg")]
             Error::Database(error) => Some(error),
+            #[cfg(feature = "pg")]
+            Error::Migration(error) => Some(error),
             #[cfg(feature = "vault")]
             Error::Transport(error) => Some(error.as_ref()),
             _ => None,

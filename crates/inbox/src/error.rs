@@ -67,6 +67,8 @@ pub enum Error {
     /// The table is not what the inbox expects: a value that cannot be read
     /// back, a row that is gone, a cut other than the configured one.
     Malformed(String),
+    /// The tables could not be migrated (ADR-0029).
+    Migration(ascetic_ddd_migration::MigrationError),
 }
 
 impl Error {
@@ -78,7 +80,7 @@ impl Error {
         match self {
             Error::Session(error) => error.is_transient(),
             Error::Database(error) => ascetic_ddd_session::pg::transient(error),
-            Error::Subscriber(_) | Error::Malformed(_) => false,
+            Error::Subscriber(_) | Error::Malformed(_) | Error::Migration(_) => false,
         }
     }
 }
@@ -90,6 +92,7 @@ impl fmt::Display for Error {
             Error::Database(error) => write!(f, "database: {error}"),
             Error::Subscriber(error) => write!(f, "subscriber: {error}"),
             Error::Malformed(what) => write!(f, "malformed inbox: {what}"),
+            Error::Migration(error) => write!(f, "{error}"),
         }
     }
 }
@@ -101,6 +104,7 @@ impl std::error::Error for Error {
             Error::Database(error) => Some(error),
             Error::Subscriber(failure) => Some(failure.error().as_ref()),
             Error::Malformed(_) => None,
+            Error::Migration(error) => Some(error),
         }
     }
 }

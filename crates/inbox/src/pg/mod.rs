@@ -274,7 +274,7 @@ impl<P, O> PgInbox<P, O> {
     }
 
     /// The same inbox, sharing messages between slots by `key`. Read by
-    /// [`PgInbox::setup`] when it creates the table, and fixed with it.
+    /// [`PgInbox::migrate`] when it creates the table, and fixed with it.
     pub fn partitioned_by(self, key: impl PartitionKey + 'static) -> Self {
         PgInbox {
             partition: Box::new(key),
@@ -283,7 +283,7 @@ impl<P, O> PgInbox<P, O> {
     }
 
     /// The same inbox cutting its table into `slots` slots, `1..=32767`.
-    /// Read by [`PgInbox::setup`] when it creates the table; a table already
+    /// Read by [`PgInbox::migrate`] when it creates the table; a table already
     /// cut otherwise is refused, because the rows carry their slot for good
     /// (ADR-0008).
     pub fn with_slots(self, slots: u32) -> Self {

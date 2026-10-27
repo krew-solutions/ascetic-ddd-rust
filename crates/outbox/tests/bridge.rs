@@ -13,7 +13,7 @@ use ascetic_ddd_outbox::{Loops, OUTBOX_SCHEME, PgOutbox};
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use ascetic_ddd_session::pg::tokio_postgres::{Config, NoTls};
-use ascetic_ddd_session::{PgAccess, PgSessionPool, Session, SessionPool};
+use ascetic_ddd_session::{PgSessionPool, Session, SessionPool};
 use tokio::sync::mpsc;
 
 const DEFAULT_URL: &str = "postgresql://devel:devel@localhost:5432/devel_karmabot_test";
@@ -48,17 +48,8 @@ async fn a_committed_message_crosses_the_bridge_and_a_rolled_back_one_does_not()
                 ..Loops::default()
             }),
     );
-    sessions
-        .session(async |session| {
-            session
-                .connection()
-                .batch_execute("DROP TABLE IF EXISTS outbox_bridge; DROP TABLE IF EXISTS outbox_bridge_offsets;")
-                .await
-                .unwrap();
-            outbox.setup(&session).await
-        })
-        .await
-        .unwrap();
+    outbox.teardown().await.unwrap();
+    outbox.migrate().await.unwrap();
 
     let mut bus = Bus::new();
     bus.register(OUTBOX_SCHEME, outbox.channel()).unwrap();
@@ -158,19 +149,8 @@ async fn a_failing_subscriber_gets_the_batch_again() {
                 ..Loops::default()
             }),
     );
-    sessions
-        .session(async |session| {
-            session
-                .connection()
-                .batch_execute(
-                    "DROP TABLE IF EXISTS outbox_retry; DROP TABLE IF EXISTS outbox_retry_offsets;",
-                )
-                .await
-                .unwrap();
-            outbox.setup(&session).await
-        })
-        .await
-        .unwrap();
+    outbox.teardown().await.unwrap();
+    outbox.migrate().await.unwrap();
 
     let mut bus = Bus::new();
     bus.register(OUTBOX_SCHEME, outbox.channel()).unwrap();

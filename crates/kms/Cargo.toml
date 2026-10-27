@@ -16,7 +16,7 @@ readme = "README.md"
 [features]
 # PostgreSQL adapter: key-encryption, signing and MAC keys in tables, each wrapped
 # by a master key; the signing and MACs are the model's, in this process.
-pg = ["ascetic-ddd-session/pg", "dep:tokio-postgres"]
+pg = ["ascetic-ddd-session/pg", "dep:ascetic-ddd-migration", "dep:tokio-postgres"]
 # HashiCorp Vault Transit adapter, over any HTTP client that implements `VaultTransport`.
 # `p256/pkcs8`: the P-256 public keys Transit publishes are PEM SubjectPublicKeyInfo,
 # read into the model's SEC1 point (ADR-0019); it pulls `der` and `spki`, already in a
@@ -28,6 +28,7 @@ reqwest = ["vault", "dep:reqwest"]
 
 [dependencies]
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc", "zeroize"] }
+ascetic-ddd-migration = { path = "../migration", optional = true }
 ascetic-ddd-session = { path = "../session" }
 base64 = { version = "0.22", optional = true }
 ed25519-dalek = "3"

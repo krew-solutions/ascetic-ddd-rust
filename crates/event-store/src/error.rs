@@ -38,6 +38,9 @@ pub enum Error {
     /// A stored value could not be read back: metadata that is not the
     /// event's, a version that does not fit its column.
     Malformed(String),
+    /// The table could not be migrated (ADR-0029).
+    #[cfg(feature = "pg")]
+    Migration(ascetic_ddd_migration::MigrationError),
 }
 
 impl fmt::Display for Error {
@@ -54,6 +57,8 @@ impl fmt::Display for Error {
             #[cfg(feature = "pg")]
             Error::Database(error) => write!(f, "database: {error}"),
             Error::Malformed(what) => write!(f, "malformed: {what}"),
+            #[cfg(feature = "pg")]
+            Error::Migration(error) => write!(f, "{error}"),
         }
     }
 }
@@ -66,6 +71,8 @@ impl std::error::Error for Error {
             Error::Session(error) => Some(error),
             #[cfg(feature = "pg")]
             Error::Database(error) => Some(error),
+            #[cfg(feature = "pg")]
+            Error::Migration(error) => Some(error),
             Error::ConcurrentUpdate { .. } | Error::Malformed(_) => None,
         }
     }
