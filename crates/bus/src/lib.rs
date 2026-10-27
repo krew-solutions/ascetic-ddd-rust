@@ -73,6 +73,7 @@ pub mod adapters;
 mod bridge;
 mod error;
 pub mod handling;
+pub mod identity;
 mod message;
 mod stage;
 pub mod uri;

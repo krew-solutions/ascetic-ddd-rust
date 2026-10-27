@@ -275,6 +275,14 @@ fn message(stream: &str, position: i32) -> InboxMessage {
     .with_metadata(json!({ "message_id": format!("00000000-0000-4000-8000-{event:012x}") }))
 }
 
+/// The `message_id` the message carries in its metadata.
+fn message_id(message: &InboxMessage) -> String {
+    message.metadata.as_ref().unwrap()["message_id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
 fn label(message: &InboxMessage) -> String {
     format!(
         "{}@{}",
@@ -340,6 +348,69 @@ async fn receiving_the_same_message_twice_stores_it_once() {
     f.publish(&[once, again]).await;
 
     assert_eq!(f.rows().await, 1);
+}
+
+/// A message ignored under a stored identity names the one holding it
+/// (ADR-0030): itself for a redelivery, the first for a second message the
+/// producer gave one identity.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn an_ignored_message_names_the_one_holding_its_identity() {
+    let recorder = Arc::new(Recorder::default());
+    let f = fixture_observed("held_by", Arc::clone(&recorder)).await;
+    let first = message("a", 1);
+    let second = message("a", 1);
+    f.publish(&[first.clone(), first.clone(), second.clone()])
+        .await;
+    let id = |message: &InboxMessage| message_id(message);
+    assert_eq!(
+        *recorder.held_by.lock().unwrap(),
+        [None, Some(id(&first)), Some(id(&first))]
+    );
+    assert_ne!(id(&first), id(&second));
+    assert_eq!(f.rows().await, 1);
+}
+
+/// The holder committed while the message's insert waited on it: the
+/// insert's snapshot does not see it, the second statement's does.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_holder_committed_while_the_insert_waited_is_named() {
+    let recorder = Arc::new(Recorder::default());
+    let f = fixture_observed("held_by_concurrent", Arc::clone(&recorder)).await;
+    let holder = message("a", 1);
+    let late = message("a", 1);
+    let mut client = pool().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        &format!(
+            "INSERT INTO {} (tenant_id, stream_type, stream_id, stream_position, uri, payload, metadata) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            f.table
+        ),
+        &[
+            &holder.tenant_id,
+            &holder.stream_type,
+            &holder.stream_id,
+            &holder.stream_position,
+            &holder.uri,
+            &holder.payload,
+            &holder.metadata,
+        ],
+    )
+    .await
+    .unwrap();
+    let inbox = &f.inbox;
+    let waiting = async { inbox.publish(&late).await.unwrap() };
+    let committing = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        tx.commit().await.unwrap();
+    };
+    tokio::join!(waiting, committing);
+    assert_eq!(
+        *recorder.held_by.lock().unwrap(),
+        [Some(message_id(&holder))]
+    );
 }
 
 #[tokio::test]
@@ -1201,6 +1272,8 @@ async fn the_port_is_implementable_without_a_database() {
 struct Recorder {
     events: Mutex<Vec<String>>,
     received: Mutex<Vec<(String, Option<Receipt>)>>,
+    /// Each receipt's holder, when the message was ignored (ADR-0030).
+    held_by: Mutex<Vec<Option<String>>>,
     /// Each fetch of a row, with whether its snapshot saw the row's transaction.
     fetches_saw_their_row: Mutex<Vec<bool>>,
     marked: Mutex<Vec<(String, i64)>>,
@@ -1218,6 +1291,10 @@ impl InboxObserver for Recorder {
             .lock()
             .unwrap()
             .push((label(event.message), event.receipt));
+        self.held_by
+            .lock()
+            .unwrap()
+            .push(event.held_by.map(str::to_owned));
         let how = match event.receipt {
             Some(_) => "stored",
             None => "duplicate",

@@ -60,7 +60,7 @@ pub mod observer;
 pub mod pg;
 mod port;
 
-pub use crate::error::{BoxError, Error};
+pub use crate::error::{BoxError, Error, Identity};
 pub use crate::message::{OutboxMessage, Position};
 pub use crate::observer::{OutboxObserver, Receipt};
 pub use crate::pg::{DEFAULT_BATCH_SIZE, Loops, PgOutbox, Selection};

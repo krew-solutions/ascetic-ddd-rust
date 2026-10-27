@@ -546,7 +546,11 @@ where
     O: InboxObserver,
 {
     /// Stores the message in a transaction of its own and tells the
-    /// observer where it landed, or that it was already there.
+    /// observer where it landed, or that it was already there and under
+    /// which message (ADR-0030). The holder is read by a second statement,
+    /// on the conflict alone: under `READ COMMITTED` it takes a snapshot of
+    /// its own, which sees a holder that committed while the insert waited
+    /// on it — the insert's own snapshot does not.
     async fn publish(&self, message: &InboxMessage) -> Result<(), Error> {
         let sql = format!(
             "INSERT INTO {} (tenant_id, stream_type, stream_id, stream_position, uri, payload, metadata) \
@@ -555,7 +559,12 @@ where
              RETURNING pg_current_xact_id()::text, received_position, slot",
             self.table
         );
-        let receipt = self
+        let holder = format!(
+            "SELECT metadata->>'message_id' FROM {} \
+             WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4",
+            self.table
+        );
+        let (receipt, held_by) = self
             .pool
             .session(async |session| {
                 session
@@ -575,19 +584,37 @@ where
                                 ],
                             )
                             .await?;
-                        row.map(|row| {
-                            Ok::<_, Error>(Receipt {
-                                transaction_id: transaction_id(row.get::<_, String>(0))?,
-                                received_position: row.get::<_, i64>(1),
-                                slot: row.get::<_, i16>(2) as u32,
-                            })
-                        })
-                        .transpose()
+                        let Some(row) = row else {
+                            let held_by = tx
+                                .connection()
+                                .query_opt(
+                                    &holder,
+                                    &[
+                                        &message.tenant_id,
+                                        &message.stream_type,
+                                        &message.stream_id,
+                                        &message.stream_position,
+                                    ],
+                                )
+                                .await?
+                                .and_then(|row| row.get::<_, Option<String>>(0));
+                            return Ok::<_, Error>((None, held_by));
+                        };
+                        let receipt = Receipt {
+                            transaction_id: transaction_id(row.get::<_, String>(0))?,
+                            received_position: row.get::<_, i64>(1),
+                            slot: row.get::<_, i16>(2) as u32,
+                        };
+                        Ok((Some(receipt), None))
                     })
                     .await
             })
             .await?;
-        self.observer.on_received(&Received { message, receipt });
+        self.observer.on_received(&Received {
+            message,
+            receipt,
+            held_by: held_by.as_deref(),
+        });
         Ok(())
     }
 }
