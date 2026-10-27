@@ -24,6 +24,9 @@ pub enum Error {
     /// The database refused a statement.
     #[cfg(feature = "pg")]
     Database(tokio_postgres::Error),
+    /// The table could not be migrated (ADR-0029).
+    #[cfg(feature = "pg")]
+    Migration(ascetic_ddd_migration::MigrationError),
     /// A stored value could not be read back: a version that is not a
     /// count.
     Malformed(String),
@@ -47,6 +50,8 @@ impl fmt::Display for Error {
             Error::Session(error) => write!(f, "session: {error}"),
             #[cfg(feature = "pg")]
             Error::Database(error) => write!(f, "database: {error}"),
+            #[cfg(feature = "pg")]
+            Error::Migration(error) => write!(f, "{error}"),
             Error::Malformed(what) => write!(f, "malformed: {what}"),
         }
     }
@@ -59,6 +64,8 @@ impl std::error::Error for Error {
             Error::Session(error) => Some(error),
             #[cfg(feature = "pg")]
             Error::Database(error) => Some(error),
+            #[cfg(feature = "pg")]
+            Error::Migration(error) => Some(error),
             Error::DekNotFound { .. } | Error::Malformed(_) => None,
         }
     }

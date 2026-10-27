@@ -1,0 +1,23 @@
+[package]
+name = "ascetic-ddd-migration"
+description = "Migrations on PostgreSQL: a schema moved by appended steps, each in a transaction of its own that takes its one table first."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[dependencies]
+ascetic-ddd-session = { path = "../session", features = ["pg"] }
+log = "0.4"
+tokio = { version = "1.53.1", features = ["time"] }
+
+[dev-dependencies]
+futures.workspace = true
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "time"] }

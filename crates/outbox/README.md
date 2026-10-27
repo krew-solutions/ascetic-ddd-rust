@@ -37,7 +37,7 @@ outbox.run(send_to_broker, &Selection::group("broker"), Workers::default(), ctrl
 ## The port and the adapter
 
 The application layer sees `Outbox`, one method, `publish`. A test double
-collects messages. Everything else — `dispatch`, `run`, positions, `setup` —
+collects messages. Everything else — `dispatch`, `run`, positions, `migrate` —
 is on `PgOutbox`, because dispatching is the business of a separate process.
 
 ## As a channel of the bus
@@ -87,7 +87,7 @@ exactly that, through the recorder of `ascetic-ddd-trace`: with
 
 A row carries its slot, `hashtext(uri) % slots` with the sign bit cleared,
 stored at insert; the number of slots is fixed for the life of the table,
-`with_slots(S)` before `setup` creates it, one by default. Each
+`with_slots(S)` before `migrate` creates it, one by default. Each
 `(consumer_group, uri, slot)` keeps a position of its own. A dispatcher has
 no identity: `dispatch(subscriber, selection)` takes whichever slot of the
 selection has visible work and is held by nobody, least recently served
@@ -99,8 +99,14 @@ dies releases its slot with its transaction, and the next poll of a survivor
 takes it. One slot is one position per group and the order of the whole
 selection; more slots are parallelism, and order within a URI still, since a
 URI is in one slot. Changing the number of slots moves rows between
-positions and is a migration, not a restart: `setup` refuses a table cut
+positions and is a migration, not a restart: `migrate` refuses a table cut
 otherwise (ADR-0007).
+
+The tables are a component of the database's migration ledger, `outbox:<table>`
+(ADR-0029): `migrate` creates them once and is a read of the ledger after,
+so that a process starts beside live traffic without locking them;
+`teardown` drops them and forgets them, for an outbox that lives as long as
+a test.
 
 The fetch is one statement. On 200,000 rows, with work at three quarters of
 the table: 0.06 ms for one slot, 0.20 ms for sixteen, 0.26 ms for

@@ -97,17 +97,8 @@ async fn fixture_built<O: OutboxObserver>(
         )
         .with_slots(slots)
         .observed_by((observer, trace.recorder()));
-    let drop = format!(
-        "DROP TABLE IF EXISTS {0}; DROP TABLE IF EXISTS {0}_meta; DROP TABLE IF EXISTS {1};",
-        tables.0, tables.1
-    );
-    sessions
-        .session(async |session| {
-            session.connection().batch_execute(&drop).await.unwrap();
-            outbox.setup(&session).await
-        })
-        .await
-        .unwrap();
+    outbox.teardown().await.unwrap();
+    outbox.migrate().await.unwrap();
     Fixture {
         sessions,
         outbox,
@@ -715,7 +706,7 @@ async fn run_outlives_a_failing_subscriber() {
 /// is written once.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
-async fn two_setups_at_once_agree() {
+async fn two_migrations_at_once_agree() {
     let (outbox, offsets) = ("outbox_twice", "outbox_twice_offsets");
     let sessions = PgSessionPool::new(pool());
     let build = || {
@@ -727,19 +718,9 @@ async fn two_setups_at_once_agree() {
             .with_slots(2)
     };
     let (first, second) = (build(), build());
-    let drop = format!("DROP TABLE IF EXISTS {outbox}, {outbox}_meta, {offsets};");
-    sessions
-        .session(async |session| {
-            session.connection().batch_execute(&drop).await?;
-            Ok::<(), Error>(())
-        })
-        .await
-        .unwrap();
+    first.teardown().await.unwrap();
 
-    let (a, b) = tokio::join!(
-        sessions.session(async |session| first.setup(&session).await),
-        sessions.session(async |session| second.setup(&session).await),
-    );
+    let (a, b) = tokio::join!(first.migrate(), second.migrate());
 
     a.unwrap();
     b.unwrap();
@@ -918,5 +899,26 @@ async fn the_observer_sees_the_protocol() {
                 offset: receipts[2].position
             },
         ]
+    );
+}
+
+/// A released migration is never edited (ADR-0029): every database that
+/// applied it would refuse to start. A new shape is a new migration,
+/// written here with its checksum when it is released.
+#[test]
+fn the_released_migrations_keep_their_checksums() {
+    let outbox = PgOutbox::new(PgSessionPool::new(pool()));
+    let checksums: Vec<_> = outbox
+        .component()
+        .migrations()
+        .iter()
+        .map(|migration| (migration.id().to_owned(), migration.checksum().to_owned()))
+        .collect();
+    assert_eq!(
+        checksums,
+        [(
+            "20261027T000000Z_baseline".to_owned(),
+            "fnv1a64:76ac925a2b946934:1394".to_owned()
+        )]
     );
 }

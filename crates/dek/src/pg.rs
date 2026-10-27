@@ -21,14 +21,32 @@
 //! KMS.
 
 use ascetic_ddd_kms::{Algorithm, Key, KeyManagementService};
-use ascetic_ddd_session::Session;
+use ascetic_ddd_migration::{
+    Applied, Component, Migration, Options as MigrationOptions, forget, migrate,
+};
 use ascetic_ddd_session::pg::{Identifier, PgAccess};
+use ascetic_ddd_session::{Session, SessionPool};
 use serde_json::Value;
 use tokio_postgres::Row;
 
 use crate::domain::{Keyring, Resource, VersionedCipher};
 use crate::error::Error;
 use crate::port::DekStore;
+
+/// The table as created, `{table}` standing for its name: the baseline of
+/// the store's component, its checksum the template's.
+const BASELINE: &str = r#"
+    CREATE TABLE IF NOT EXISTS {table} (
+        "tenant_id" VARCHAR(128) NOT NULL,
+        "kind" VARCHAR(128) NOT NULL,
+        "resource_id" JSONB NOT NULL,
+        "version" INTEGER NOT NULL,
+        "encrypted_dek" BYTEA NOT NULL,
+        "algorithm" VARCHAR(32) NOT NULL,
+        "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT {table}_pk PRIMARY KEY ("tenant_id", "kind", "resource_id", "version")
+    );
+"#;
 
 /// The DEK store over a table, wrapping through the KMS `K`.
 pub struct PgDekStore<K> {
@@ -70,39 +88,55 @@ impl<K> PgDekStore<K> {
         &self.kms
     }
 
-    /// Creates the table if it is not there, in one transaction under an
-    /// advisory lock on the table's name.
-    pub async fn setup<S>(&self, session: &S) -> Result<(), Error>
+    /// The table as a component of the database's ledger (ADR-0029),
+    /// `dek:<table>`: its baseline is the table below, its checksum over its
+    /// template, whatever the name.
+    pub fn component(&self) -> Component {
+        Component::new(
+            format!("dek:{}", self.table),
+            vec![
+                Migration::new(
+                    "20261027T000000Z_baseline",
+                    BASELINE.replace("{table}", self.table.as_str()),
+                )
+                .checked_over(BASELINE),
+            ],
+        )
+        .unwrap_or_else(|_| unreachable!("one migration with an id, under a name"))
+    }
+
+    /// Brings the table up to its migrations: a read of the ledger when it
+    /// is current, so that a process starts beside live traffic without
+    /// locking the table.
+    pub async fn migrate<P>(&self, pool: &P) -> Result<Applied, Error>
     where
-        S: Session + PgAccess + Sync,
+        P: SessionPool,
+        P::Session: PgAccess,
+    {
+        migrate(pool, &self.component(), &MigrationOptions::default())
+            .await
+            .map_err(Error::Migration)
+    }
+
+    /// Drops the table and forgets it in the ledger: for keys that live as
+    /// long as a test.
+    pub async fn teardown<P>(&self, pool: &P) -> Result<(), Error>
+    where
+        P: SessionPool,
+        P::Session: PgAccess,
     {
         let table = &self.table;
-        let ddl = format!(
-            r#"
-            CREATE TABLE IF NOT EXISTS {table} (
-                "tenant_id" VARCHAR(128) NOT NULL,
-                "kind" VARCHAR(128) NOT NULL,
-                "resource_id" JSONB NOT NULL,
-                "version" INTEGER NOT NULL,
-                "encrypted_dek" BYTEA NOT NULL,
-                "algorithm" VARCHAR(32) NOT NULL,
-                "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                CONSTRAINT {table}_pk PRIMARY KEY ("tenant_id", "kind", "resource_id", "version")
-            );
-            "#
-        );
-        session
-            .atomic(async |tx| {
-                tx.connection()
-                    .execute(
-                        "SELECT pg_advisory_xact_lock(hashtext($1))",
-                        &[&table.as_str()],
-                    )
-                    .await?;
-                tx.connection().batch_execute(&ddl).await?;
-                Ok::<_, Error>(())
-            })
+        pool.session(async |session: P::Session| {
+            session
+                .connection()
+                .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+                .await?;
+            Ok::<_, Error>(())
+        })
+        .await?;
+        forget(pool, &format!("dek:{table}"))
             .await
+            .map_err(Error::Migration)
     }
 
     /// The resource's cipher over `dek`, as DEK version `version`, bound to

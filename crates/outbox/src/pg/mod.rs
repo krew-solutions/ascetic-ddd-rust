@@ -182,7 +182,7 @@ impl<P, O> PgOutbox<P, O> {
     }
 
     /// The same outbox cutting its table into `slots` slots, `1..=32767`,
-    /// each with a position of its own per group. Read by [`PgOutbox::setup`]
+    /// each with a position of its own per group. Read by [`PgOutbox::migrate`]
     /// when it creates the table; a table already cut otherwise is refused,
     /// because the rows carry their slot for good (ADR-0007).
     pub fn with_slots(self, slots: u32) -> Self {

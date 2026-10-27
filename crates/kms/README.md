@@ -44,8 +44,8 @@ use ascetic_ddd_kms::{KeyCustody, KeyManagementService, PgKeyManagementService};
 use ascetic_ddd_session::{Session, SessionPool};
 
 let kms = PgKeyManagementService::new(master_key);
+kms.migrate(&sessions).await?;
 sessions.session(async |session| {
-    kms.setup(&session).await?;
     session.atomic(async |tx| {
         let (dek, wrapped) = kms.generate_dek(&tx, "tenant-1").await?;   // the KEK is made on first contact
         assert_eq!(kms.decrypt_dek(&tx, "tenant-1", &wrapped).await?, dek);
@@ -112,8 +112,8 @@ adapter's own form. Its custody is `KeyCustody<S>`, below.
 `PgKeyManagementService` keeps KEKs in `kms_keys` — the table the Python and
 Go ports write, so a key made by one port is read by another; a test unwraps
 what the Python port wrapped — each wrapped by the master key the service was
-built with. `setup` creates the table in one transaction under an advisory
-lock on its name. Making a tenant's first key and rotating take an advisory
+built with. The table is a component of the database's migration ledger
+(ADR-0029), created once by `migrate`. Making a tenant's first key and rotating take an advisory
 lock on the tenant in a scope the adapter opens itself — a savepoint inside
 the caller's transaction, a transaction of its own outside one, where the
 lock would otherwise end with its own statement — so two transactions
@@ -137,9 +137,10 @@ by tenant, purpose and version, wrapped under `{tenant}.mac.{purpose}`; the
 signing, verifying and MACs are the model's `SigningKey`, `PublicKey` and
 `MacKey`, in this process, in the byte forms the ports fix, the same the
 Vault adapter asks Transit for. A keyring's first key and its rotations are
-under an advisory lock on the key's name, as a tenant's KEK is; `setup`
-makes the three tables under a lock on each name, since two services may
-share one of the tables and not the others. A key wrapped under one master
+under an advisory lock on the key's name, as a tenant's KEK is; each of
+the three tables is a component of its own in the ledger — `kms_keks:<table>`,
+`kms_signing:<table>`, `kms_mac:<table>` — since two services may share one
+of the tables and not the others. A key wrapped under one master
 key does not open under another: `Decrypt`.
 
 Two settings of either adapter serve the bus (ADR-0017). Built
@@ -320,7 +321,7 @@ with its first user.
 * Making a tenant's first key and rotating are under a per-tenant advisory
   lock. In the sources two transactions meeting a new tenant at once both
   insert version 1, and the second fails on the primary key.
-* `setup` is the adapter's, as in the outbox and the inbox; `cleanup` did
+* `migrate` is the adapter's, as in the outbox and the inbox; `cleanup` did
   nothing in any port and is gone. A KEK carries no `created_at`: no port
   ever wrote it, the column's default does, and nothing read it.
 * The master key is not bound to a tenant; the tenant is named at each

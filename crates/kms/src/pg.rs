@@ -42,8 +42,11 @@
 
 use std::num::NonZeroU32;
 
-use ascetic_ddd_session::Session;
+use ascetic_ddd_migration::{
+    Applied, Component, Migration, Options as MigrationOptions, forget, migrate,
+};
 use ascetic_ddd_session::pg::{Identifier, PgAccess};
+use ascetic_ddd_session::{Session, SessionPool};
 use tokio_postgres::Row;
 
 use crate::domain::{
@@ -55,6 +58,46 @@ use crate::port::{
     KekOptions, KeyCustody, KeyManagementService, KeyOptions, MacKeyCustody, MacService,
     PublicKeyService, SigningKeyCustody, SigningService,
 };
+
+/// The KEKs' table as created, `{table}` standing for its name.
+const KEKS: &str = r#"
+    CREATE TABLE IF NOT EXISTS {table} (
+        "tenant_id" VARCHAR(128) NOT NULL,
+        "key_version" INTEGER NOT NULL,
+        "encrypted_key" BYTEA NOT NULL,
+        "master_algorithm" VARCHAR(32) NOT NULL,
+        "key_algorithm" VARCHAR(32) NOT NULL,
+        "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT {table}_pk PRIMARY KEY ("tenant_id", "key_version")
+    );
+"#;
+
+/// The signing keys' table as created, `{table}` standing for its name.
+const SIGNING_KEYS: &str = r#"
+    CREATE TABLE IF NOT EXISTS {table} (
+        "tenant_id" VARCHAR(128) NOT NULL,
+        "algorithm" VARCHAR(32) NOT NULL,
+        "key_version" INTEGER NOT NULL,
+        "encrypted_key" BYTEA NOT NULL,
+        "public_key" BYTEA NOT NULL,
+        "master_algorithm" VARCHAR(32) NOT NULL,
+        "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT {table}_pk PRIMARY KEY ("tenant_id", "algorithm", "key_version")
+    );
+"#;
+
+/// The MAC keys' table as created, `{table}` standing for its name.
+const MAC_KEYS: &str = r#"
+    CREATE TABLE IF NOT EXISTS {table} (
+        "tenant_id" VARCHAR(128) NOT NULL,
+        "purpose" VARCHAR(64) NOT NULL,
+        "key_version" INTEGER NOT NULL,
+        "encrypted_key" BYTEA NOT NULL,
+        "master_algorithm" VARCHAR(32) NOT NULL,
+        "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT {table}_pk PRIMARY KEY ("tenant_id", "purpose", "key_version")
+    );
+"#;
 
 /// The key management service over a table of KEKs wrapped by one master key.
 pub struct PgKeyManagementService {
@@ -153,65 +196,76 @@ impl PgKeyManagementService {
         &self.mac_table
     }
 
-    /// Creates the tables that are not there: the KEKs', the signing keys'
-    /// and the MAC keys'. One transaction under an advisory lock on each
-    /// table's name, taken in one order, so that two processes setting up
-    /// at once do not race in `CREATE TABLE IF NOT EXISTS` — on any of the
-    /// three, since two services may share one of the tables and not the
-    /// others.
-    pub async fn setup<S>(&self, session: &S) -> Result<(), Error>
+    /// The tables as components of the database's ledger (ADR-0029), one
+    /// per table — `kms_keks:<table>`, `kms_signing:<table>`,
+    /// `kms_mac:<table>` — since two services may share one of the tables
+    /// and not the others; each baseline's checksum is over its template,
+    /// whatever the name.
+    pub fn components(&self) -> [Component; 3] {
+        let component = |kind: &str, table: &Identifier, template: &str| {
+            Component::new(
+                format!("{kind}:{table}"),
+                vec![
+                    Migration::new(
+                        "20261027T000000Z_baseline",
+                        template.replace("{table}", table.as_str()),
+                    )
+                    .checked_over(template),
+                ],
+            )
+            .unwrap_or_else(|_| unreachable!("one migration with an id, under a name"))
+        };
+        [
+            component("kms_keks", &self.table, KEKS),
+            component("kms_signing", &self.signing_table, SIGNING_KEYS),
+            component("kms_mac", &self.mac_table, MAC_KEYS),
+        ]
+    }
+
+    /// Brings the tables up to their migrations: a read of the ledger when
+    /// they are current, so that a process starts beside live traffic
+    /// without locking them.
+    pub async fn migrate<P>(&self, pool: &P) -> Result<Vec<Applied>, Error>
     where
-        S: Session + PgAccess + Sync,
+        P: SessionPool,
+        P::Session: PgAccess,
     {
-        let table = &self.table;
-        let signing = &self.signing_table;
-        let mac = &self.mac_table;
-        let ddl = format!(
-            r#"
-            CREATE TABLE IF NOT EXISTS {table} (
-                "tenant_id" VARCHAR(128) NOT NULL,
-                "key_version" INTEGER NOT NULL,
-                "encrypted_key" BYTEA NOT NULL,
-                "master_algorithm" VARCHAR(32) NOT NULL,
-                "key_algorithm" VARCHAR(32) NOT NULL,
-                "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                CONSTRAINT {table}_pk PRIMARY KEY ("tenant_id", "key_version")
+        let mut applied = Vec::new();
+        for component in self.components() {
+            applied.push(
+                migrate(pool, &component, &MigrationOptions::default())
+                    .await
+                    .map_err(Error::Migration)?,
             );
-            CREATE TABLE IF NOT EXISTS {signing} (
-                "tenant_id" VARCHAR(128) NOT NULL,
-                "algorithm" VARCHAR(32) NOT NULL,
-                "key_version" INTEGER NOT NULL,
-                "encrypted_key" BYTEA NOT NULL,
-                "public_key" BYTEA NOT NULL,
-                "master_algorithm" VARCHAR(32) NOT NULL,
-                "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                CONSTRAINT {signing}_pk PRIMARY KEY ("tenant_id", "algorithm", "key_version")
-            );
-            CREATE TABLE IF NOT EXISTS {mac} (
-                "tenant_id" VARCHAR(128) NOT NULL,
-                "purpose" VARCHAR(64) NOT NULL,
-                "key_version" INTEGER NOT NULL,
-                "encrypted_key" BYTEA NOT NULL,
-                "master_algorithm" VARCHAR(32) NOT NULL,
-                "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                CONSTRAINT {mac}_pk PRIMARY KEY ("tenant_id", "purpose", "key_version")
-            );
-            "#
-        );
-        session
-            .atomic(async |tx| {
-                for name in [table, signing, mac] {
-                    tx.connection()
-                        .execute(
-                            "SELECT pg_advisory_xact_lock(hashtext($1))",
-                            &[&name.as_str()],
-                        )
-                        .await?;
-                }
-                tx.connection().batch_execute(&ddl).await?;
-                Ok::<_, Error>(())
-            })
-            .await
+        }
+        Ok(applied)
+    }
+
+    /// Drops the tables and forgets them in the ledger: for keys that live
+    /// as long as a test.
+    pub async fn teardown<P>(&self, pool: &P) -> Result<(), Error>
+    where
+        P: SessionPool,
+        P::Session: PgAccess,
+    {
+        let (table, signing, mac) = (&self.table, &self.signing_table, &self.mac_table);
+        pool.session(async |session: P::Session| {
+            session
+                .connection()
+                .batch_execute(&format!(
+                    "DROP TABLE IF EXISTS {table}; DROP TABLE IF EXISTS {signing}; \
+                     DROP TABLE IF EXISTS {mac};"
+                ))
+                .await?;
+            Ok::<_, Error>(())
+        })
+        .await?;
+        for component in self.components() {
+            forget(pool, component.name())
+                .await
+                .map_err(Error::Migration)?;
+        }
+        Ok(())
     }
 
     /// The master key for `algorithm`: the configured one for what is made

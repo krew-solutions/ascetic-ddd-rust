@@ -15,11 +15,17 @@ readme = "README.md"
 
 [features]
 # PostgreSQL adapter: the `event_log` table.
-pg = ["ascetic-ddd-session/pg", "ascetic-ddd-dek/pg", "dep:tokio-postgres"]
+pg = [
+    "ascetic-ddd-session/pg",
+    "ascetic-ddd-dek/pg",
+    "dep:ascetic-ddd-migration",
+    "dep:tokio-postgres",
+]
 
 [dependencies]
 ascetic-ddd-dek = { path = "../dek" }
 ascetic-ddd-kms = { path = "../kms" }
+ascetic-ddd-migration = { path = "../migration", optional = true }
 ascetic-ddd-session = { path = "../session" }
 flate2 = "1"
 futures.workspace = true

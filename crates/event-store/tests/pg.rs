@@ -98,23 +98,14 @@ fn order(id: &str) -> StreamId {
 async fn encrypted(name: &str) -> Fixture<Encrypted<Deks>> {
     let sessions = PgSessionPool::new(pool());
     let kms = PgKeyManagementService::new(Algorithm::Aes256Gcm.generate_key().unwrap())
-        .with_table(Identifier::new(format!("kms_keys_es_{name}")).unwrap());
+        .with_table(Identifier::new(format!("kms_keys_es_{name}")).unwrap())
+        .with_signing_table(Identifier::new(format!("kms_keys_es_{name}_sign")).unwrap())
+        .with_mac_table(Identifier::new(format!("kms_keys_es_{name}_mac")).unwrap());
     let deks = PgDekStore::new(kms).with_table(Identifier::new(format!("deks_es_{name}")).unwrap());
-    sessions
-        .session(async |session| {
-            session
-                .connection()
-                .batch_execute(&format!(
-                    "DROP TABLE IF EXISTS deks_es_{name}; DROP TABLE IF EXISTS kms_keys_es_{name};"
-                ))
-                .await
-                .unwrap();
-            deks.kms().setup(&session).await.unwrap();
-            deks.setup(&session).await.unwrap();
-            Ok::<_, Error>(())
-        })
-        .await
-        .unwrap();
+    deks.kms().teardown(&sessions).await.unwrap();
+    deks.kms().migrate(&sessions).await.unwrap();
+    deks.teardown(&sessions).await.unwrap();
+    deks.migrate(&sessions).await.unwrap();
     fixture(name, Encrypted::new(deks)).await
 }
 
@@ -122,17 +113,8 @@ async fn fixture<C: Codecs<PgSession>>(name: &str, codecs: C) -> Fixture<C> {
     let table = format!("event_log_{name}");
     let sessions = PgSessionPool::new(pool());
     let store = PgEventStore::new(codecs, OrderCodec).with_table(Identifier::new(&table).unwrap());
-    sessions
-        .session(async |session| {
-            session
-                .connection()
-                .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
-                .await
-                .unwrap();
-            store.setup(&session).await
-        })
-        .await
-        .unwrap();
+    store.teardown(&sessions).await.unwrap();
+    store.migrate(&sessions).await.unwrap();
     Fixture {
         sessions,
         store: Arc::new(store),
@@ -452,24 +434,10 @@ async fn an_empty_stream_loads_as_nothing_and_needs_no_key() {
 
 #[tokio::test]
 #[ignore = "needs a live PostgreSQL"]
-async fn two_setups_at_once_agree() {
-    let f = fixture("setups_at_once", Plain).await;
-    f.sessions
-        .session(async |session| {
-            session
-                .connection()
-                .batch_execute(&format!("DROP TABLE IF EXISTS {}", f.table))
-                .await
-                .unwrap();
-            Ok::<_, Error>(())
-        })
-        .await
-        .unwrap();
-    let setup = || {
-        f.sessions
-            .session(async |session| f.store.setup(&session).await)
-    };
-    let (a, b) = tokio::join!(setup(), setup());
+async fn two_migrations_at_once_agree() {
+    let f = fixture("migrations_at_once", Plain).await;
+    f.store.teardown(&f.sessions).await.unwrap();
+    let (a, b) = tokio::join!(f.store.migrate(&f.sessions), f.store.migrate(&f.sessions));
     a.unwrap();
     b.unwrap();
     f.atomic(|tx, store| async move {
@@ -485,4 +453,25 @@ async fn two_setups_at_once_agree() {
     })
     .await
     .unwrap();
+}
+
+/// A released migration is never edited (ADR-0029): every database that
+/// applied it would refuse to start. A new shape is a new migration,
+/// written here with its checksum when it is released.
+#[test]
+fn the_released_migrations_keep_their_checksums() {
+    let store = PgEventStore::new(Plain, OrderCodec);
+    let checksums: Vec<_> = store
+        .component()
+        .migrations()
+        .iter()
+        .map(|migration| (migration.id().to_owned(), migration.checksum().to_owned()))
+        .collect();
+    assert_eq!(
+        checksums,
+        [(
+            "20261027T000000Z_baseline".to_owned(),
+            "fnv1a64:2463df89ea9bf25a:586".to_owned()
+        )]
+    );
 }

@@ -62,6 +62,7 @@ dependencies = [
  "ascetic-ddd-bus",
  "ascetic-ddd-inbox",
  "ascetic-ddd-kms",
+ "ascetic-ddd-migration",
  "ascetic-ddd-outbox",
  "ascetic-ddd-session",
  "base64 0.22.1",
@@ -77,6 +78,7 @@ version = "0.1.0"
 dependencies = [
  "ascetic-ddd-dek",
  "ascetic-ddd-kms",
+ "ascetic-ddd-migration",
  "ascetic-ddd-session",
  "flate2",
  "futures",
@@ -92,6 +94,7 @@ name = "ascetic-ddd-inbox"
 version = "0.1.0"
 dependencies = [
  "ascetic-ddd-bus",
+ "ascetic-ddd-migration",
  "ascetic-ddd-outbox",
  "ascetic-ddd-session",
  "ascetic-ddd-trace",
@@ -108,6 +111,7 @@ name = "ascetic-ddd-kms"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "ascetic-ddd-migration",
  "ascetic-ddd-session",
  "base64 0.22.1",
  "ed25519-dalek",
@@ -125,10 +129,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ascetic-ddd-migration"
+version = "0.1.0"
+dependencies = [
+ "ascetic-ddd-session",
+ "futures",
+ "log",
+ "tokio",
+]
+
+[[package]]
 name = "ascetic-ddd-outbox"
 version = "0.1.0"
 dependencies = [
  "ascetic-ddd-bus",
+ "ascetic-ddd-migration",
  "ascetic-ddd-session",
  "ascetic-ddd-trace",
  "futures",

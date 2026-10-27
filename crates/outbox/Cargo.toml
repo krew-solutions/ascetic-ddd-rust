@@ -15,6 +15,7 @@ readme = "README.md"
 
 [dependencies]
 ascetic-ddd-bus = { path = "../bus" }
+ascetic-ddd-migration = { path = "../migration" }
 ascetic-ddd-session = { path = "../session", features = ["pg"] }
 futures.workspace = true
 log = "0.4"

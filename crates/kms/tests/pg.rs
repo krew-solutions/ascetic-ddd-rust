@@ -59,18 +59,12 @@ async fn fixture_with_master(name: &str, master_key: Key) -> Fixture {
     let table = format!("kms_keys_{name}");
     let sessions = PgSessionPool::new(pool());
     let master = master_key.clone();
-    let kms = PgKeyManagementService::new(master_key).with_table(Identifier::new(&table).unwrap());
-    sessions
-        .session(async |session| {
-            session
-                .connection()
-                .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
-                .await
-                .unwrap();
-            kms.setup(&session).await
-        })
-        .await
-        .unwrap();
+    let kms = PgKeyManagementService::new(master_key)
+        .with_table(Identifier::new(&table).unwrap())
+        .with_signing_table(Identifier::new(format!("{table}_sign")).unwrap())
+        .with_mac_table(Identifier::new(format!("{table}_mac")).unwrap());
+    kms.teardown(&sessions).await.unwrap();
+    kms.migrate(&sessions).await.unwrap();
     Fixture {
         sessions,
         kms: Arc::new(kms),
@@ -383,24 +377,10 @@ async fn two_rotations_at_once_make_the_next_two_versions() {
 
 #[tokio::test]
 #[ignore = "needs a live PostgreSQL"]
-async fn two_setups_at_once_agree() {
-    let f = fixture("setups_at_once").await;
-    f.sessions
-        .session(async |session| {
-            session
-                .connection()
-                .batch_execute(&format!("DROP TABLE IF EXISTS {}", f.table))
-                .await
-                .unwrap();
-            Ok::<_, Error>(())
-        })
-        .await
-        .unwrap();
-    let setup = || {
-        f.sessions
-            .session(async |session| f.kms.setup(&session).await)
-    };
-    let (a, b) = tokio::join!(setup(), setup());
+async fn two_migrations_at_once_agree() {
+    let f = fixture("migrations_at_once").await;
+    f.kms.teardown(&f.sessions).await.unwrap();
+    let (a, b) = tokio::join!(f.kms.migrate(&f.sessions), f.kms.migrate(&f.sessions));
     a.unwrap();
     b.unwrap();
     f.atomic(|tx, kms| async move {
@@ -570,5 +550,38 @@ async fn a_retirement_above_the_latest_retires_nothing() {
     assert!(
         matches!(outcome, Err(Error::KekNotFound { .. })),
         "{outcome:?}"
+    );
+}
+
+/// A released migration is never edited (ADR-0029): every database that
+/// applied it would refuse to start. A new shape is a new migration,
+/// written here with its checksum when it is released.
+#[test]
+fn the_released_migrations_keep_their_checksums() {
+    let kms = PgKeyManagementService::new(key());
+    let checksums: Vec<_> = kms
+        .components()
+        .iter()
+        .map(|component| {
+            let baseline = &component.migrations()[0];
+            (baseline.id().to_owned(), baseline.checksum().to_owned())
+        })
+        .collect();
+    assert_eq!(
+        checksums,
+        [
+            (
+                "20261027T000000Z_baseline".to_owned(),
+                "fnv1a64:4175bcda07043550:407".to_owned()
+            ),
+            (
+                "20261027T000000Z_baseline".to_owned(),
+                "fnv1a64:077017a9bc2d76f9:453".to_owned()
+            ),
+            (
+                "20261027T000000Z_baseline".to_owned(),
+                "fnv1a64:c8ad0ed3463b6698:412".to_owned()
+            ),
+        ]
     );
 }

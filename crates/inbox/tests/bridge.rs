@@ -69,17 +69,18 @@ async fn fixture(name: &str, stem: &str) -> Fixture {
             .observed_by(trace.recorder()),
     );
     let reset = format!(
-        "DROP TABLE IF EXISTS {table}; DROP SEQUENCE IF EXISTS {sequence}; \
-         DROP TABLE IF EXISTS {table}_handled; \
+        "DROP TABLE IF EXISTS {table}_handled; \
          CREATE TABLE {table}_handled (payload text NOT NULL);"
     );
     sessions
         .session(async |session| {
-            session.connection().batch_execute(&reset).await.unwrap();
-            inbox.setup(&session).await
+            session.connection().batch_execute(&reset).await?;
+            Ok::<_, Error>(())
         })
         .await
         .unwrap();
+    inbox.teardown().await.unwrap();
+    inbox.migrate().await.unwrap();
     Fixture {
         sessions,
         inbox,
@@ -230,21 +231,8 @@ async fn the_outbox_feeds_the_inbox_without_a_broker() {
             })
             .observed_by(fixture.trace.recorder()),
     );
-    fixture
-        .sessions
-        .session(async |session| {
-            session
-                .connection()
-                .batch_execute(
-                    "DROP TABLE IF EXISTS inbox_bridge_outbox_out; \
-                     DROP TABLE IF EXISTS inbox_bridge_outbox_out_offsets;",
-                )
-                .await
-                .unwrap();
-            outbox.setup(&session).await
-        })
-        .await
-        .unwrap();
+    outbox.teardown().await.unwrap();
+    outbox.migrate().await.unwrap();
     let mut bus = Bus::new();
     bus.register(OUTBOX_SCHEME, outbox.channel()).unwrap();
     bus.register(INBOX_SCHEME, fixture.inbox.channel()).unwrap();
