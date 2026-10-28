@@ -15,7 +15,12 @@
 //!
 //! Every other driver setting comes from the [`ClientConfig`] the broker was
 //! built with, so TLS, SASL and tuning are the caller's, not this crate's.
+//! A setting of one role — a producer's `linger.ms`, a consumer's
+//! `session.timeout.ms` — goes to that role alone ([`KafkaBroker::set_producer`],
+//! [`KafkaBroker::set_consumer`]): the driver ignores a setting of the other
+//! role and warns at every client it creates with one (ADR-0031).
 
+use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -42,10 +47,12 @@ use crate::uri;
 pub use rdkafka;
 
 /// A Kafka cluster, as a client configuration to build consumers and
-/// producers from.
+/// producers from: the settings of both, then each role's own.
 #[derive(Clone)]
 pub struct KafkaBroker {
     config: ClientConfig,
+    producer: BTreeMap<String, String>,
+    consumer: BTreeMap<String, String>,
     send_timeout: Duration,
 }
 
@@ -54,24 +61,66 @@ impl KafkaBroker {
     pub fn new(bootstrap_servers: &str) -> Self {
         let mut config = ClientConfig::new();
         config.set("bootstrap.servers", bootstrap_servers);
-        KafkaBroker {
-            config,
-            send_timeout: Duration::from_secs(30),
-        }
+        Self::from_config(config)
     }
 
-    /// A broker from a full driver configuration.
+    /// A broker from a full driver configuration, shared by its producers
+    /// and its consumers.
     pub fn from_config(config: ClientConfig) -> Self {
         KafkaBroker {
             config,
+            producer: BTreeMap::new(),
+            consumer: BTreeMap::new(),
             send_timeout: Duration::from_secs(30),
         }
     }
 
-    /// Returns a broker with one more driver setting.
+    /// Returns a broker with one more driver setting, for its producers and
+    /// its consumers alike: the connection's — the brokers, TLS, SASL.
     pub fn set(mut self, key: &str, value: &str) -> Self {
         self.config.set(key, value);
         self
+    }
+
+    /// Returns a broker with one more setting of its producers alone, over
+    /// a shared one of the same name.
+    pub fn set_producer(mut self, key: &str, value: &str) -> Self {
+        self.producer.insert(key.to_owned(), value.to_owned());
+        self
+    }
+
+    /// Returns a broker with one more setting of its consumers alone, over
+    /// a shared one of the same name. The settings the adapter's delivery
+    /// rests on — the group, the offsets stored after the handler — stay
+    /// the adapter's.
+    pub fn set_consumer(mut self, key: &str, value: &str) -> Self {
+        self.consumer.insert(key.to_owned(), value.to_owned());
+        self
+    }
+
+    /// What a producer is created from: the shared settings, then the
+    /// producers' own.
+    pub fn producer_config(&self) -> ClientConfig {
+        let mut config = self.config.clone();
+        for (key, value) in &self.producer {
+            config.set(key, value);
+        }
+        config
+    }
+
+    /// What a consumer in `group` is created from: the shared settings,
+    /// then the consumers' own, then the adapter's — last, so no setting
+    /// of the caller's breaks delivery at least once.
+    pub fn consumer_config(&self, group: &str) -> ClientConfig {
+        let mut config = self.config.clone();
+        for (key, value) in &self.consumer {
+            config.set(key, value);
+        }
+        config
+            .set("group.id", group)
+            .set("enable.auto.commit", "true")
+            .set("enable.auto.offset.store", "false");
+        config
     }
 
     /// Returns a broker whose producers give up on a send after `timeout`.
@@ -86,12 +135,7 @@ impl KafkaBroker {
 impl Adapter for KafkaBroker {
     fn consumer(&self, uri: &str, group: &str) -> Result<Box<dyn WireConsumer>, Error> {
         let topic = uri::channel(uri)?.to_owned();
-        let mut config = self.config.clone();
-        config
-            .set("group.id", group)
-            .set("enable.auto.commit", "true")
-            .set("enable.auto.offset.store", "false");
-        let consumer: StreamConsumer = config.create().map_err(transport)?;
+        let consumer: StreamConsumer = self.consumer_config(group).create().map_err(transport)?;
         consumer.subscribe(&[&topic]).map_err(transport)?;
         Ok(Box::new(KafkaConsumer {
             consumer: Arc::new(consumer),
@@ -103,7 +147,7 @@ impl Adapter for KafkaBroker {
 
     fn producer(&self, uri: &str) -> Result<Box<dyn WireProducer>, Error> {
         let topic = uri::channel(uri)?.to_owned();
-        let producer: FutureProducer = self.config.create().map_err(transport)?;
+        let producer: FutureProducer = self.producer_config().create().map_err(transport)?;
         Ok(Box::new(KafkaProducer {
             producer,
             topic,
@@ -239,4 +283,45 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn broker() -> KafkaBroker {
+        KafkaBroker::new("localhost:9092")
+            .set("security.protocol", "SASL_PLAINTEXT")
+            .set("linger.ms", "5")
+            .set_producer("linger.ms", "0")
+            .set_producer("message.timeout.ms", "10000")
+            .set_consumer("session.timeout.ms", "10000")
+            .set_consumer("enable.auto.offset.store", "true")
+            .set_consumer("group.id", "not-the-callers")
+    }
+
+    #[test]
+    fn a_producer_has_the_shared_settings_and_its_own_over_them() {
+        let producer = broker().producer_config();
+        assert_eq!(producer.get("bootstrap.servers"), Some("localhost:9092"));
+        assert_eq!(producer.get("security.protocol"), Some("SASL_PLAINTEXT"));
+        assert_eq!(producer.get("linger.ms"), Some("0"));
+        assert_eq!(producer.get("message.timeout.ms"), Some("10000"));
+        assert_eq!(producer.get("session.timeout.ms"), None);
+        assert_eq!(producer.get("group.id"), None);
+    }
+
+    #[test]
+    fn a_consumer_has_the_shared_settings_its_own_and_the_adapters_last() {
+        let consumer = broker().consumer_config("orders");
+        assert_eq!(consumer.get("security.protocol"), Some("SASL_PLAINTEXT"));
+        assert_eq!(consumer.get("session.timeout.ms"), Some("10000"));
+        assert_eq!(consumer.get("message.timeout.ms"), None);
+        // A shared setting of the other role reaches it, as the caller set it.
+        assert_eq!(consumer.get("linger.ms"), Some("5"));
+        // Delivery at least once is the adapter's, whatever the caller set.
+        assert_eq!(consumer.get("group.id"), Some("orders"));
+        assert_eq!(consumer.get("enable.auto.offset.store"), Some("false"));
+        assert_eq!(consumer.get("enable.auto.commit"), Some("true"));
+    }
 }

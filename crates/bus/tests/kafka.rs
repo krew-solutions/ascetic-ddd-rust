@@ -36,7 +36,7 @@ fn setup() -> Bus {
     bus.register(
         "kafka",
         KafkaBroker::new(&brokers)
-            .set("auto.offset.reset", "earliest")
+            .set_consumer("auto.offset.reset", "earliest")
             .set("allow.auto.create.topics", "true"),
     )
     .unwrap();
