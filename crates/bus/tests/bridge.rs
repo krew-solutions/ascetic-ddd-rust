@@ -2,10 +2,11 @@
 //! is published on `b://`.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ascetic_ddd_bus::adapters::in_memory::InMemoryBroker;
-use ascetic_ddd_bus::{Bridge, Bus, Message, Target};
+use ascetic_ddd_bus::{Adapter, Bridge, Bus, Error, Message, Target, WireConsumer, WireProducer};
 use tokio::sync::mpsc;
 
 fn two_brokers() -> Arc<Bus> {
@@ -126,4 +127,94 @@ async fn a_message_without_a_destination_is_not_forwarded() {
         .unwrap();
 
     assert!(nothing_arrives(&mut orders).await);
+}
+
+/// An in-memory broker that counts the producers it is asked for.
+struct Counted {
+    broker: InMemoryBroker,
+    producers: Arc<AtomicUsize>,
+}
+
+impl Adapter for Counted {
+    fn consumer(&self, uri: &str, group: &str) -> Result<Box<dyn WireConsumer>, Error> {
+        self.broker.consumer(uri, group)
+    }
+
+    fn producer(&self, uri: &str) -> Result<Box<dyn WireProducer>, Error> {
+        self.producers.fetch_add(1, Ordering::SeqCst);
+        self.broker.producer(uri)
+    }
+}
+
+/// Destinations of one channel under many keys — a host's channel keyed by
+/// Tenant — are published through one producer, and each message keeps its
+/// key: the producers grow with the channels, not with the keys (ADR-0032).
+#[tokio::test]
+async fn a_bridge_publishes_a_channel_through_one_producer_whatever_the_keys() {
+    let producers = Arc::new(AtomicUsize::new(0));
+    let mut bus = Bus::new();
+    bus.register("a", InMemoryBroker::new()).unwrap();
+    bus.register(
+        "b",
+        Counted {
+            broker: InMemoryBroker::new(),
+            producers: Arc::clone(&producers),
+        },
+    )
+    .unwrap();
+    let bus = Arc::new(bus);
+    let mut orders = collect(&bus, "b://orders");
+    let bridge = Bridge::new(Arc::clone(&bus));
+    let _run = bridge
+        .run(
+            "a://outbox",
+            "dispatcher",
+            Target::Header("destination".into()),
+        )
+        .unwrap();
+    let outbox = bus.producer("a://outbox", |m: &Message| m.clone()).unwrap();
+    let before = producers.load(Ordering::SeqCst);
+    for n in 0..50 {
+        outbox
+            .publish(
+                &Message::new(format!("order {n}"))
+                    .with_header("destination", format!("b://orders/tenant-{n}")),
+            )
+            .await
+            .unwrap();
+    }
+    for n in 0..50 {
+        let order = next(&mut orders).await.unwrap();
+        assert_eq!(order.payload(), format!("order {n}").as_bytes());
+        assert_eq!(order.key(), Some(format!("tenant-{n}").as_bytes()));
+    }
+    assert_eq!(producers.load(Ordering::SeqCst) - before, 1);
+}
+
+/// A message's own key stands: the destination's is for one without.
+#[tokio::test]
+async fn a_message_s_own_key_wins_over_the_destination_s() {
+    let bus = two_brokers();
+    let mut orders = collect(&bus, "b://orders");
+    let bridge = Bridge::new(Arc::clone(&bus));
+    let _run = bridge
+        .run(
+            "a://outbox",
+            "dispatcher",
+            Target::Header("destination".into()),
+        )
+        .unwrap();
+    bus.producer("a://outbox", |m: &Message| m.clone())
+        .unwrap()
+        .publish(
+            &Message::new("x")
+                .with_key("its-own")
+                .with_header("destination", "b://orders/the-destinations"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        next(&mut orders).await.unwrap().key(),
+        Some(&b"its-own"[..])
+    );
 }
