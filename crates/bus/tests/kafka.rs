@@ -9,6 +9,7 @@
 
 #![cfg(feature = "kafka")]
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -160,4 +161,66 @@ async fn a_cancelled_subscription_receives_nothing_more() {
         tokio::time::timeout(Duration::from_secs(3), inbox.recv()).await,
         Err(_) | Ok(None)
     ));
+}
+
+/// A consumer of `uri` handing each message's key and payload on.
+fn collect_keyed(bus: &Bus, uri: &str, group: &str) -> mpsc::UnboundedReceiver<(String, String)> {
+    let consumer = bus
+        .consumer(uri, group, |message: &Message| {
+            let key = String::from_utf8(message.key().unwrap_or_default().to_vec())?;
+            Ok((key, as_text(message)?))
+        })
+        .unwrap();
+    let (seen, inbox) = mpsc::unbounded_channel();
+    consumer
+        .subscribe(move |keyed: (String, String)| {
+            let seen = seen.clone();
+            async move {
+                seen.send(keyed).ok();
+            }
+        })
+        .unwrap();
+    inbox
+}
+
+/// Producers of one broker — two topics, each destination's key in its URI
+/// as an outbox stores it — send through the broker's one client, and every
+/// message arrives at its topic under its key, in order per key (ADR-0032).
+#[tokio::test]
+#[ignore = "requires Kafka; run with --ignored"]
+async fn producers_of_one_broker_deliver_to_their_topics_under_their_keys() {
+    let bus = setup();
+    let topics = [unique("orders"), unique("payments")];
+    let mut inboxes: Vec<_> = topics
+        .iter()
+        .map(|topic| collect_keyed(&bus, &format!("kafka://{topic}"), &unique("g")))
+        .collect();
+    for topic in &topics {
+        for key in 0..10 {
+            let producer = bus
+                .producer(
+                    &format!("kafka://{topic}/tenant-{key}"),
+                    |value: &String| Message::new(value.as_bytes()),
+                )
+                .unwrap();
+            for i in 0..3 {
+                producer.publish(&format!("{key}:{i}")).await.unwrap();
+            }
+        }
+    }
+    for inbox in &mut inboxes {
+        let mut arrived: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for _ in 0..30 {
+            let (key, value) = tokio::time::timeout(Duration::from_secs(30), inbox.recv())
+                .await
+                .ok()
+                .flatten()
+                .expect("every message arrives");
+            arrived.entry(key).or_default().push(value);
+        }
+        for key in 0..10 {
+            let expected: Vec<String> = (0..3).map(|i| format!("{key}:{i}")).collect();
+            assert_eq!(arrived[&format!("tenant-{key}")], expected);
+        }
+    }
 }

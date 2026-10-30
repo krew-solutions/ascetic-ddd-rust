@@ -9,6 +9,10 @@
 //! An outbox dispatcher is a bridge from the outbox channel to the
 //! destination each message names; an inbox intake is a bridge from a broker
 //! channel to the inbox channel.
+//!
+//! A destination may carry a key (`kafka://orders/order-7`); the bridge
+//! publishes through one producer per channel, whatever the keys, and a
+//! message without a key of its own gets the destination's (ADR-0032).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -16,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use crate::adapter::Subscription;
 use crate::error::{BoxError, Error};
 use crate::message::Message;
+use crate::uri;
 use crate::{Bus, Producer};
 
 /// Where a bridge publishes.
@@ -71,25 +76,29 @@ impl Bridge {
                 String::from_utf8(value.to_vec())?
             }
         };
-        let producer = self.producer(&uri)?;
-        producer.publish(message).await?;
+        let producer = self.producer(uri::without_key(&uri))?;
+        match (message.key(), uri::key(&uri)) {
+            (None, Some(key)) => producer.publish(&message.clone().with_key(key)).await?,
+            _ => producer.publish(message).await?,
+        }
         Ok(())
     }
 
-    /// One producer per destination, made on first use.
-    fn producer(&self, uri: &str) -> Result<Arc<Producer<Message>>, Error> {
+    /// One producer per channel, made on first use: the key is the
+    /// message's, so the producers do not grow with the keys.
+    fn producer(&self, channel: &str) -> Result<Arc<Producer<Message>>, Error> {
         let mut producers = self
             .producers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(producer) = producers.get(uri) {
+        if let Some(producer) = producers.get(channel) {
             return Ok(Arc::clone(producer));
         }
         let producer = Arc::new(
             self.bus
-                .producer(uri, |message: &Message| message.clone())?,
+                .producer(channel, |message: &Message| message.clone())?,
         );
-        producers.insert(uri.to_owned(), Arc::clone(&producer));
+        producers.insert(channel.to_owned(), Arc::clone(&producer));
         Ok(producer)
     }
 }

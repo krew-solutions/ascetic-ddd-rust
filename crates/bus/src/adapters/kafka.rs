@@ -19,6 +19,12 @@
 //! `session.timeout.ms` — goes to that role alone ([`KafkaBroker::set_producer`],
 //! [`KafkaBroker::set_consumer`]): the driver ignores a setting of the other
 //! role and warns at every client it creates with one (ADR-0031).
+//!
+//! A broker's producers share one driver client, made with the first of
+//! them (ADR-0032): a client sends to any topic under any key, the topic and
+//! the key given with each message. A client per producer would be a client
+//! per destination — per channel and key — each with its threads and its
+//! connections to every broker of the cluster.
 
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
@@ -47,13 +53,17 @@ use crate::uri;
 pub use rdkafka;
 
 /// A Kafka cluster, as a client configuration to build consumers and
-/// producers from: the settings of both, then each role's own.
+/// producers from: the settings of both, then each role's own. Its
+/// producers send through one driver client; a clone shares it, and a
+/// broker given another setting is another broker, with a client of its own.
 #[derive(Clone)]
 pub struct KafkaBroker {
     config: ClientConfig,
     producer: BTreeMap<String, String>,
     consumer: BTreeMap<String, String>,
     send_timeout: Duration,
+    /// The driver client the producers share, made with the first of them.
+    client: Arc<Mutex<Option<FutureProducer>>>,
 }
 
 impl KafkaBroker {
@@ -72,6 +82,7 @@ impl KafkaBroker {
             producer: BTreeMap::new(),
             consumer: BTreeMap::new(),
             send_timeout: Duration::from_secs(30),
+            client: Arc::default(),
         }
     }
 
@@ -79,6 +90,7 @@ impl KafkaBroker {
     /// its consumers alike: the connection's — the brokers, TLS, SASL.
     pub fn set(mut self, key: &str, value: &str) -> Self {
         self.config.set(key, value);
+        self.client = Arc::default();
         self
     }
 
@@ -86,6 +98,7 @@ impl KafkaBroker {
     /// a shared one of the same name.
     pub fn set_producer(mut self, key: &str, value: &str) -> Self {
         self.producer.insert(key.to_owned(), value.to_owned());
+        self.client = Arc::default();
         self
     }
 
@@ -95,6 +108,7 @@ impl KafkaBroker {
     /// the adapter's.
     pub fn set_consumer(mut self, key: &str, value: &str) -> Self {
         self.consumer.insert(key.to_owned(), value.to_owned());
+        self.client = Arc::default();
         self
     }
 
@@ -127,8 +141,22 @@ impl KafkaBroker {
     pub fn with_send_timeout(self, timeout: Duration) -> Self {
         KafkaBroker {
             send_timeout: timeout,
+            client: Arc::default(),
             ..self
         }
+    }
+
+    /// The driver client this broker's producers send through: made from
+    /// [`producer_config`](Self::producer_config) with the first of them,
+    /// the same client for every one after.
+    fn client(&self) -> Result<FutureProducer, Error> {
+        let mut client = lock(&self.client);
+        if let Some(made) = client.as_ref() {
+            return Ok(made.clone());
+        }
+        let made: FutureProducer = self.producer_config().create().map_err(transport)?;
+        *client = Some(made.clone());
+        Ok(made)
     }
 }
 
@@ -146,14 +174,20 @@ impl Adapter for KafkaBroker {
     }
 
     fn producer(&self, uri: &str) -> Result<Box<dyn WireProducer>, Error> {
-        let topic = uri::channel(uri)?.to_owned();
-        let producer: FutureProducer = self.producer_config().create().map_err(transport)?;
-        Ok(Box::new(KafkaProducer {
-            producer,
-            topic,
+        Ok(Box::new(self.kafka_producer(uri)?))
+    }
+}
+
+impl KafkaBroker {
+    /// A producer to `uri`'s topic, its key the URI's, sending through the
+    /// broker's client.
+    fn kafka_producer(&self, uri: &str) -> Result<KafkaProducer, Error> {
+        Ok(KafkaProducer {
+            producer: self.client()?,
+            topic: uri::channel(uri)?.to_owned(),
             key: uri::key(uri).map(|key| key.as_bytes().to_vec()),
             timeout: self.send_timeout,
-        }))
+        })
     }
 }
 
@@ -240,6 +274,7 @@ impl WireConsumer for KafkaConsumer {
 const RETRY_AFTER: Duration = Duration::from_secs(1);
 
 struct KafkaProducer {
+    /// The broker's client, shared with its other producers.
     producer: FutureProducer,
     topic: String,
     /// The key the producer's URI carries; a message without one gets it.
@@ -287,6 +322,8 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use rdkafka::producer::Producer as _;
+
     use super::*;
 
     fn broker() -> KafkaBroker {
@@ -309,6 +346,45 @@ mod tests {
         assert_eq!(producer.get("message.timeout.ms"), Some("10000"));
         assert_eq!(producer.get("session.timeout.ms"), None);
         assert_eq!(producer.get("group.id"), None);
+    }
+
+    /// The client of a broker the tests make producers of: no broker
+    /// answers, the client is made all the same.
+    fn reachable_nowhere() -> KafkaBroker {
+        KafkaBroker::new("localhost:1").set_producer("linger.ms", "0")
+    }
+
+    fn native(producer: &FutureProducer) -> usize {
+        producer.client().native_ptr() as usize
+    }
+
+    #[test]
+    fn the_producers_of_one_broker_share_one_driver_client() {
+        let broker = reachable_nowhere();
+        let orders = broker.kafka_producer("kafka://orders/order-7").unwrap();
+        // Another topic, another key: the same client.
+        let payments = broker.kafka_producer("kafka://payments/payment-9").unwrap();
+        assert_eq!(native(&payments.producer), native(&orders.producer));
+        assert_eq!(payments.topic, "payments");
+        assert_eq!(payments.key.as_deref(), Some(&b"payment-9"[..]));
+        // A clone of the broker shares its client.
+        let cloned = broker.clone().kafka_producer("kafka://orders").unwrap();
+        assert_eq!(native(&cloned.producer), native(&orders.producer));
+    }
+
+    #[test]
+    fn a_broker_given_another_setting_has_a_client_of_its_own() {
+        let broker = reachable_nowhere();
+        let first = broker.kafka_producer("kafka://orders").unwrap();
+        for other in [
+            broker.clone().set("client.id", "another"),
+            broker.clone().set_producer("linger.ms", "1"),
+            broker.clone().set_consumer("session.timeout.ms", "10000"),
+            broker.clone().with_send_timeout(Duration::from_secs(5)),
+        ] {
+            let its_own = other.kafka_producer("kafka://orders").unwrap();
+            assert_ne!(native(&its_own.producer), native(&first.producer));
+        }
     }
 
     #[test]
