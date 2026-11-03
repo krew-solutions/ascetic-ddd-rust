@@ -406,15 +406,41 @@ Measured on the host's drill:
        or above it is older than the horizon. That row's `created_at` is its
        transaction's start, so the refusal comes a little early, never late.
        A host's windows cover its producers' horizons.
-     - **A relay hands its own inbox's channel on by a selection of its
-       own,** never in one batch with a broker's destinations. Today one
-       selection takes the whole outbox (`outbox://all`). A broker's outage
-       then retries the whole batch, and each retry stores the batch's
-       Commands to self in the inbox again, for as long as the outage lasts:
-       past any window. The outbox's channel reads its name as a selection
-       by destination prefix — its store already selects by prefix — and a
-       host runs one bridge for its inbox and one for its broker. A retry of
-       the inbox's selection then lasts as long as a database's error.
+     - **A relay hands its own inbox's channel on in a lane of its own:** a
+       selection with its own position and its own loops, never in one batch
+       with a broker's destinations. Today one selection takes the whole
+       outbox (`outbox://all`). A broker's outage then retries the whole
+       batch, and each retry stores the batch's Commands to self in the
+       inbox again, for as long as the outage lasts: past any window. A
+       retry of the inbox's lane lasts as long as a database's error.
+       - **The subscriber names its lane by the destinations' prefix**
+         (`outbox://inbox`, `outbox://kafka`). The outbox's channel reads the
+         name after `outbox://` as its selection's prefix, which its store
+         already filters by. Neither the outbox nor the bridge learns what
+         an inbox is: the host's composition root, which registers both
+         channels, puts them in lanes.
+       - **A broker's events no longer wait behind the service's own
+         Commands.** In one lane, an Integration Event written after a
+         publication's fan-out waits until the relay has handed the whole
+         fan-out on: at about 680 rows a second, two and a half minutes for
+         100 000 Devices, about 25 for a million (inferred; M14). And a
+         broker's outage no longer holds the service's own asynchronous
+         work — a delay only, since its results leave through the broker
+         anyway.
+       - **Lanes land with ADR-0035.** Under ADR-0007's rule a selection's
+         position moves only past rows it hands on, so a lane whose rows lie
+         behind another's would walk the other's rows again on every poll.
+         Under epochs `delivered` moves by snapshot.
+       - **Each lane reads the other's rows once.** The prefix is no index's
+         key: on the host's drill one slot held 101 140 rows to the inbox and
+         24 to the broker. A look that finds rows new since `delivered`, none
+         of its lane's, delivers that epoch at once (ADR-0035 decision 5), so
+         that the next look does not walk them again. Reading the outbox
+         twice is the lanes' price (M14).
+       - **Switching:** the lanes start at the position the selection of
+         everything holds, not from the ring's start, and its positions are
+         forgotten once no old binary relays them. Until then both relay, and
+         identities drop the repeats.
    - **What de-duplication then means.** A repeat that arrives after its row
      went is processed again: that is the rule's meaning. The holder read of
      ADR-0030 may race the sweep and find no holder. It reports an unknown
@@ -460,7 +486,7 @@ Measured on the host's drill:
   - It declares a rule per inbox channel. A channel left without one keeps
     its rows, as today.
   - It declares its producers' replay horizons, and relays its own inbox's
-    channel by a bridge of its own.
+    channel in a lane of its own: two bridges, its pool sized for both.
   - Its own gates hold the rules: a window covers the channel class's
     re-consumption horizon, and no channel whose stream types are dependency
     targets has a window.
@@ -588,6 +614,27 @@ Measured on the host's drill:
   epoch, and the emptying queued behind the fetches' locks.
 - **A batch's branches without their own limit.** The planner sorted the
   whole remaining epoch for each batch (§ Context).
+- **Commands to self through the broker** (raised by the owner,
+  2026-11-04), so that the relay has one failure domain. It would make
+  Commands to self travel as Commands between contexts do (the host's
+  ADR-0065), and let a customer's systems observe or take part in them —
+  monitoring such as Zabbix, integration with the customer's own systems.
+  Not chosen:
+  - the inbox's window for Commands to self would follow the command
+    topic's retention;
+  - a fan-out of a million Devices would be a million messages through the
+    broker, and the service's own work would stop with it;
+  - a customer subscribed to a step of a process freezes that process's
+    shape: the host changed its fan-out's form more than once (ADR-0084).
+    Observation has Integration Events, and control the published Commands.
+
+  The events' lane is needed on that path too: everything in one lane to
+  the broker, events still wait behind the fan-out.
+- **Lanes that never read each other's rows:** a second outbox table for
+  Commands to self, or the destination's class in the slot's hash. Not
+  chosen while reading the outbox twice is cheap (M14): the first doubles a
+  host's outbox components, the second recreates the table and makes a
+  selection name its slots.
 - **"Old enough" by a generation's newest `created_at`** (the first
   decision). It scans the generation, twice, the second time under its lock;
   and it is a transaction's start, not its relay.
@@ -717,8 +764,12 @@ confirmed in `pg_locks`, as `verify/pg/lost-wake` does.
   - A Command to self within its window: a relay's retry and a rewind
     within the producer's horizon are dropped as repeats.
   - A rewind deeper than the producer's horizon is refused.
-  - A broker's outage does not retry the inbox's own selection, nor store
-    its Commands to self again.
+  - Two lanes: a broker's outage stalls only its lane, and the inbox's lane
+    hands its Commands to self on once; an Integration Event written after a
+    fan-out leaves without waiting for it.
+  - A lane whose epoch held only the other lane's rows delivers it at once,
+    and its next look walks none of them (red when it waits).
+  - The lanes start at the position the selection of everything held.
   - A changed rule applies to rows already processed.
   - The grace is re-armed after an outage of the database.
 
@@ -799,6 +850,11 @@ On a scratch database, each with the result that changes the decision:
 - **M10.** The cluster's rate of transaction ids at the launch's load, every
   context's database on one server: the margin in generations against
   `margin_age`.
+- **M14.** On the drill, an Integration Event's relay latency behind a fan-out
+  of 100 000 and of 1 000 000, one lane against two; and the rows the
+  broker's lane walks for one fan-out. If the walk costs the broker's lane
+  more than a few per cent of its time, the lanes stop sharing a table or a
+  slot (§ Alternatives).
 
 ## References
 
@@ -891,3 +947,14 @@ On a scratch database, each with the result that changes the decision:
     inbox as generations after Storm's `GenerationalCache`, taken up again
     if M8 fails.
   - **Closed:** the carrier rule's owed rule across a rebase.
+- 2026-11-04 — Lanes, by the owner's choice: the inbox's own channel relayed
+  by a selection of its own, named by the subscriber's destination prefix.
+  - **Two reasons:** a broker's outage no longer retries Commands to self
+    past their window; a broker's events no longer wait behind the
+    service's own fan-out.
+  - **Its conditions:** it lands with ADR-0035; a lane reads the other's rows
+    once, a look that finds only theirs delivering the epoch at once; the
+    lanes start at the old selection's position.
+  - **Recorded as alternatives:** Commands to self through the broker, with
+    the owner's reasons for it; lanes in separate tables or slots, taken up
+    if M14 shows the double read matters.
