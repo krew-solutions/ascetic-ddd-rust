@@ -139,9 +139,10 @@ and on a scratch outbox of 4 million rows, about a thousand per transaction:
 
 2. **A probe, then the lock, then the reads, each with its own snapshot.**
    - A look first asks, without a lock, whether the slot holds a row new
-     since `delivered`. A row lock assigns the transaction an id (§ Context),
-     so a look that locked first would take one on every poll. A probe that
-     read a `delivered` already moved costs one look more, nothing else.
+     since `delivered` — of its selection, or of any. A row lock assigns the
+     transaction an id (§ Context), so a look that locked first would take
+     one on every poll. A probe that read a `delivered` already moved costs
+     one look more, nothing else.
    - Only then one statement takes the position row, `FOR UPDATE SKIP
      LOCKED`, as the inbox's `take` does (ADR-0008).
    - The epoch's start and each batch are later statements of the same
@@ -184,6 +185,12 @@ and on a scratch outbox of 4 million rows, about a thousand per transaction:
    transaction id: it ends at decision 2's probe, a read, as today. Over an
    idle slot `delivered` is advanced at most once per interval, so that
    ADR-0033's generations pass.
+   - **A look that finds rows new since `delivered`, none of its
+     selection's,** takes the lock and starts its epoch as decision 3 does.
+     Found empty, the epoch is delivered at once, so that the next look
+     does not walk the same rows again. The write is paid only while
+     another selection of the slot has work — ADR-0033's lanes, which share
+     the table and read each other's rows once.
 
 6. **The position sequence draws one at a time.**
    - `migrate` refuses an outbox whose `position` column owns no sequence,
@@ -587,3 +594,6 @@ Until they do, a mutation held by a model alone also gets a test.
 - 2026-11-03 — ADR-0033's review of roles found a lock-first look taking a
   transaction id on every poll, against decision 5: a look now probes
   without a lock first. The ring's floor is ADR-0033's `intact_from`.
+- 2026-11-04 — ADR-0033's lanes: a look that finds only another selection's
+  rows new delivers its empty epoch at once, so that lanes sharing a table
+  read each other's rows once, not on every poll.
