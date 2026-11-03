@@ -120,6 +120,8 @@ and on a scratch outbox of 4 million rows, about a thousand per transaction:
 - **A snapshot grows with the server's running transactions:** 824 bytes at
   100 ids, 2 024 at 250, 8 024 at 1 000. Two of them push a position row
   past the TOAST threshold at about 120 running transactions.
+- **A row lock assigns a transaction id.** After `FOR UPDATE SKIP LOCKED`,
+  `pg_current_xact_id_if_assigned()` read 10251; after a plain read, nothing.
 - **`'0:0:'::pg_snapshot` is invalid input;** `'1:1:'` is valid and shows
   nothing.
 - **`pg_snapshot` has no operators,** not even `=`.
@@ -135,9 +137,13 @@ and on a scratch outbox of 4 million rows, about a thousand per transaction:
    - `epoch_end` — the highest position of it;
    - `epoch_at` and `delivered_at` — when each was taken.
 
-2. **The lock first, then the reads, each with its own snapshot.**
-   - One statement takes the position row, `FOR UPDATE SKIP LOCKED`, as the
-     inbox's `take` does (ADR-0008).
+2. **A probe, then the lock, then the reads, each with its own snapshot.**
+   - A look first asks, without a lock, whether the slot holds a row new
+     since `delivered`. A row lock assigns the transaction an id (§ Context),
+     so a look that locked first would take one on every poll. A probe that
+     read a `delivered` already moved costs one look more, nothing else.
+   - Only then one statement takes the position row, `FOR UPDATE SKIP
+     LOCKED`, as the inbox's `take` does (ADR-0008).
    - The epoch's start and each batch are later statements of the same
      transaction. Under `READ COMMITTED` each takes its snapshot after the
      lock, so every transaction of a stored epoch is visible to it.
@@ -175,7 +181,7 @@ and on a scratch outbox of 4 million rows, about a thousand per transaction:
 
 5. **An idle look writes nothing.** A look that finds no row new since
    `delivered` neither starts nor delivers an epoch, and takes no
-   transaction id: it is a read, as today. Over an idle slot `delivered` is
+   transaction id: it ends at decision 2's probe, a read, as today. Over an idle slot `delivered` is
    advanced at most once per interval, so that ADR-0033's generations pass.
 
 6. **The position sequence draws one at a time.**
@@ -282,7 +288,7 @@ and on a scratch outbox of 4 million rows, about a thousand per transaction:
       `'F:F:'` alone would mark delivered every transaction below `F` still
       running, or still in the epoch.
     - **"Skip to now"** is `pg_current_snapshot()`. **"Zero"** is `'1:1:'`,
-      or ADR-0033's floor.
+      or ADR-0033's `intact_from`.
     - **`Position` becomes the delivered snapshot.** It is no longer `Copy`.
       `positions()` then `set_position()` drops the epoch in flight, whose
       rows are handed on again.
@@ -356,7 +362,7 @@ and on a scratch outbox of 4 million rows, about a thousand per transaction:
   - the ring's copy keeping the rows past the live positions, restated over
     `delivered` and the epoch;
   - the copied sequence owned by the new table, and the outbox's new index;
-  - rewinds and new groups from the floor;
+  - rewinds and new groups from `intact_from`, apart from `gone_below`;
   - the counter reset by decision 12;
   - its statement that an older binary relays on the ring, held by decision
     10's old pair;
@@ -577,3 +583,6 @@ Until they do, a mutation held by a model alone also gets a test.
     failure;
   - a statement-level model with paired must-fail configurations, on the
     library's gate.
+- 2026-11-03 — ADR-0033's review of roles found a lock-first look taking a
+  transaction id on every poll, against decision 5: a look now probes
+  without a lock first. The ring's floor is ADR-0033's `intact_from`.
