@@ -20,6 +20,10 @@ Proposed (2026-11-03), not implemented. Decided in three rounds:
   here. The relay's positions are snapshots now, so the fetch, "passed",
   the floor's forms, the copy and the counter reset are restated over them.
   "Closed" is judged per database. The two land in one release.
+- **The amendment refuted from two roles, database and distributed
+  systems.** Its rules stood; three of its mechanisms did not — one floor
+  for two meanings, the counter reset's rebase, and a bound handed to a
+  migration through the session. Their findings are taken in below.
 
 The partition and lock behaviour below was measured on a scratch PostgreSQL
 14.24. § Executors lists what will hold each decision.
@@ -161,7 +165,26 @@ where the storage order is the obligation's order.
   own, as a copied table's position does.
 - An ordinary role sees every session's database and `backend_xid` in
   `pg_stat_activity`, a superuser's in another database included, and reads
-  `pg_prepared_xacts`.
+  `pg_prepared_xacts`. The view is read once per transaction: a second read
+  in it missed a transaction opened since, until the statistics snapshot was
+  cleared.
+- A batch over an epoch that spans two generations, 100 rows, on `ring8`:
+
+  | Shape | Plan | Rows read | Time |
+  | --- | --- | --- | --- |
+  | `UNION ALL`, no limit per branch | Append, top-N sort | 464 200 | 108 ms |
+  | One statement, the generations named | Append, top-N sort | 464 200 | 71.5 ms |
+  | Each branch `ORDER BY … LIMIT 100` | Merge Append over the limits | 101 | 0.097 ms |
+
+- The newest `created_at` of a generation has no index: 60 ms over 208 000
+  rows, 9.4 s over 4 million, cold.
+- A custom setting made by an earlier transaction of a pooled connection
+  reads back empty in a later one, and a fresh connection reads none; a
+  predicate defended against both matched no row.
+- A named generation costs one relation lock and one per index: ten locks
+  for two generations of three indexes, twelve of four. With the ring's six,
+  a statement naming two reaches the sixteen a backend takes on its fast
+  path before the position and meta tables (inferred).
 
 Measured on the scratch server, the outbox's table as the library makes it
 beside the same table as a ring, 2 million rows each, about 1.3 KB a row:
@@ -226,57 +249,86 @@ Measured on the host's drill:
      transaction. `message_id` is unique within a generation. ADR-0035's
      `(slot, position) INCLUDE (transaction_id)` is built on the ring, its
      leaves named too.
-   - **The floor.** `{outbox}_meta` records the floor: the absolute window
-     (`transaction_id / R`) below which every row is gone. Generations are
-     emptied strictly in order from the floor.
-     - **A new group starts at the floor:** its `delivered` is `'F:F:'`,
-       `F` the floor's first id, at least 1. Every id below it has ended,
-       since only closed generations are emptied.
-     - **`set_position` below the floor is refused,** with a typed error
-       naming it, so "back to zero" means back to the floor. A rewind above
-       it is ADR-0035's intersection.
-     - It reads the floor and moves the positions in one transaction, under
-       the reclamation's advisory lock, so that a truncation cannot commit
-       between them.
+   - **Two bounds, recorded in `{outbox}_meta`.** A generation holds every
+     lap that wrote into it, so emptying it removes windows above older ones
+     still kept. One number cannot say both "below it all is gone" and "from
+     it all is kept".
+     - **`gone_below`** — an id below which no row is left and none will be
+       written: the least of the ring's least remaining id (read on each
+       generation's primary key), this database's oldest open id, and the
+       next id. Each emptying sets it again; nothing counts it forward. The
+       inbox's carrier rule reads it (decision 4).
+     - **`intact_from`** — an id from which every row written is still kept:
+       one past the highest id of any generation emptied, raised by each
+       emptying. Rewinds and new groups read it.
+   - **Rewinds and new groups start no lower than `intact_from`.**
+     - **`set_position` below it is refused,** with a typed error naming it,
+       so "back to zero" means back to it. A rewind above it is ADR-0035's
+       intersection.
+     - **A new group starts as that rewind of the current snapshot** to
+       `intact_from`. Ids below it may still be running: a window between two
+       emptied ones need not be closed.
+     - Both read `intact_from` and write the positions in one transaction
+       under the reclamation's key — a rewind exclusively, a new group or
+       `ensure_positions` shared — so that no emptying commits between them.
    - **The fetch names its generations.**
-     - **An epoch's start** names the windows from the later of the floor and
-       `delivered`'s `xmin` to the current transaction's, counted
-       absolutely; all `K` when they span `K − 1` or more. No row below
-       `delivered`'s `xmin` is new.
+     - **An epoch's start names exactly the windows its rows can lie in,**
+       worked out after `epoch` is taken, in a statement of its own: those of
+       `[delivered.xmax, epoch.xmax)`, and those of `delivered`'s in-progress
+       ids that `epoch` sees. All `K` when they span `K − 1` windows or more.
+       Neither bound nor `delivered`'s `xmin` enters it: that is the server's
+       oldest transaction, and would name — and lock — the partitions an
+       emptying is waiting for.
      - **It records the generations it found rows in,** each with its first
        and last position in the epoch, in the position row beside the epoch.
-     - **A batch names those generations only,** each a branch of a `UNION
-       ALL` scanned from the later of the offset and its first position, and
-       drops a generation once the offset passes its last. One `Merge
-       Append` over them all would re-walk a generation with nothing left on
-       every batch (§ Context).
-     - The names are computed between ADR-0035's statements and passed as
-       constants, so that the planner prunes and locks the named partitions
-       alone. The floor only moves forward and `delivered` is read under the
-       position's lock, so neither names less than the fetch needs.
+       A converted epoch (ADR-0035 decision 10) is recorded at the relay's
+       next look, with its `epoch_end`.
+     - **A batch names those generations only.** Each is a branch of a
+       `UNION ALL` scanned from the later of the offset and its first
+       position up to its last, with its own `ORDER BY position LIMIT n`;
+       the branches are merged by position and limited to `n`. The branch's
+       limit does the work: without it every batch read the whole remaining
+       epoch (§ Context).
+     - The names are passed as constants, so that the planner prunes and
+       locks the named partitions alone.
    - **Reclamation.** The dispatcher works it between its batches, at most
      once an interval, in a `READ COMMITTED` transaction of its own:
      1. `pg_try_advisory_xact_lock` on the outbox's reclamation; another
         holder means this pass is skipped.
-     2. The floor's generation is checked without its partition's lock:
+     2. **A counter reset** (below) is checked here too, not taken from a
+        relay's report: a `delivered` whose `xmax` lies above the next id
+        stops the pass.
+     3. **The candidate** is the generation holding `gone_below`. Its newest
+        id is read on its primary key.
+     4. **The checks, without its partition's lock, each in a statement of
+        its own, in this order:**
+        - past — its newest window lies `margin` windows below the next
+          id's, so no id can be assigned in its windows any more;
         - closed — no transaction of this database that could still write
-          into it is open: no `backend_xid` of the database's sessions,
-          widened against the next id, and none of its prepared
-          transactions lies in the generation's windows. A transaction is
+          into it is open: no `backend_xid` of its sessions, widened against
+          the next id, then none of its prepared transactions, belongs to
+          the generation, at any lap. The statistics snapshot is cleared first:
+          `pg_stat_activity` is read once per transaction. Sessions come
+          before prepared transactions, since a transaction being prepared is
+          listed as prepared before it leaves its session. A transaction is
           bound to its database, so one left open elsewhere on the server
           holds no ring back;
-        - passed — every row of it is visible in every position's
-          `delivered`: each `delivered`'s `xmax` lies past its windows, and
-          no id of its in-progress list within them has a row in the
-          generation. A row of an epoch in flight is not passed yet. An
+        - passed — read after "closed", so that a transaction committing in
+          between is seen committed and not yet delivered, never gone and
+          invisible at once: every row of the generation is visible in every
+          position's `delivered`; each `delivered`'s `xmax` lies past its
+          windows, and no id of its in-progress list within them has a row
+          in the generation. A row of an epoch in flight is not passed yet. An
           idle slot's `delivered` still advances (ADR-0035 decision 5);
-        - old enough — `margin` generations newer than it exist, and its
-          newest `created_at` is older than `margin_age`, so that a row
-          relayed a moment ago can still be re-injected whatever the
-          cluster's rate of ids.
-     3. Only then the partition's lock, under `SET LOCAL lock_timeout`. The
-        conditions are checked again under it; then `TRUNCATE`, and the floor
-        moves one generation.
+        - old enough — the first pass to find it passed records the time,
+          and it is emptied only `margin_age` after, so that a row relayed a
+          moment ago can still be re-injected. A rewind clears the times of
+          the generations it reaches back into. A row's `created_at` would
+          not do: it is its transaction's start, and reading the newest one
+          scans the generation (§ Context).
+     5. **Only then the partition's lock,** under `SET LOCAL lock_timeout`.
+        "Passed" is read again in a statement after it; then `TRUNCATE`, and
+        both bounds and the generation's time are recorded.
 
      A lock not granted, a statement cancelled, or any other error of the
      reclamation is reported and retried at the next interval. It never
@@ -285,15 +337,31 @@ Measured on the host's drill:
      lagging or abandoned group, maintenance not running — takes the next
      lap's rows as well. The table grows, as today; no insert is ever
      refused for want of a partition.
+   - **`K` and `R` are checked against the ring itself** — its partitions and
+     its `CHECK` — as well as against the meta table: one component's steps
+     may be applied by processes configured apart.
    - **A counter reset** (ADR-0035 decision 12) stops relay and reclamation
-     alike, and the refusal sticks until the rebase. On the ring the rebase
-     keeps only the rows some position has not handed on:
-     - it re-stamps them under its own transaction, which moves them into
-       the current generation in their positions' order;
-     - it empties every other generation;
-     - it sets the floor to the current window.
-   - **Groups that pin the floor.** The group pinning the floor is reported:
-     its name, its last acknowledgement, the generations it pins.
+     alike, and the refusal sticks until the rebase. The rebase, in one
+     transaction:
+     1. locks the outbox, so that no publish lands while it works;
+     2. takes its snapshot `S` before it writes anything, so that its own id
+        is not visible in `S`;
+     3. keeps the rows no position has handed on: every row below the
+        restored `gone_below`, written in the new ids since the restore, and
+        every restored row not visible in some `delivered`. If the new ids
+        have reached the restored `gone_below`, the two cannot be told
+        apart, and it refuses;
+     4. keeps the first of rows that share an identity and a channel:
+        ADR-0030's guard admits one per transaction, and the inbox drops the
+        rest as repeats;
+     5. writes them again under its own id, in their positions' order, and
+        empties every generation of everything else, the current one
+        included;
+     6. sets every `delivered` to `S` and clears every epoch, and sets both
+        bounds to the least of its own id and this database's oldest open
+        id. The bounds move back here, and only here.
+   - **Groups that pin the ring.** The group pinning `gone_below` is
+     reported: its name, its last acknowledgement, the generations it pins.
      `forget_group` drops an abandoned group's positions, and refuses one
      acknowledged within the margin.
 
@@ -307,9 +375,9 @@ Measured on the host's drill:
      - **Its carrier reclaimed** — for the inbox channel a service's own outbox
        relays to: Commands to self. The relay stamps each such row with the
        `(transaction_id, position)` of the outbox row that carried it. The
-       sweep forgets the row once that position lies below the outbox's
-       floor, a comparison within one database. No rewind reaches below the
-       floor, so no Command to self is carried again after its row went.
+       sweep forgets the row once that id lies below the outbox's
+       `gone_below`, a comparison within one database. No row below it is
+       left, so no Command to self is carried again after its row went.
      - **A window**, from `processed_at`. A host sets it at least to the
        longest a repeat can reach the inbox: the broker's whole retention,
        tiers included, the time a segment outlives it, and the producer's
@@ -355,14 +423,14 @@ Measured on the host's drill:
    (`pg_partition_root`), not as a second table.
 
 7. **What an operator sees.** The observer reports:
-   - a generation reclaimed (its window, its rows, the floor);
+   - a generation reclaimed (its windows, its rows, both bounds);
    - a pass skipped, with why: a group pinning it and since when, a reader
      holding the partition, the margin, not closed;
    - rows swept, and the oldest expiry left;
    - the replay horizon: the `created_at` of the oldest kept row.
 
    Logs, rate-limited:
-   - a warning for a floor pinned over a number of generations;
+   - a warning for `gone_below` pinned over a number of generations;
    - a warning for a sweep behind its expiries by more than a bound;
    - an error for a counter reset.
 
@@ -382,26 +450,47 @@ Measured on the host's drill:
     targets has a window.
 - One more session per process, for the sweep.
 - **Migrations,** after ADR-0035's conversion of the positions:
-  - **`K`, `R` and the floor** go into `{outbox}_meta` by a step of their
-    own, beside ADR-0035's format.
-  - **The outbox is recreated as the ring** by a migration (ADR-0029):
-    - it keeps every row's `transaction_id` and position, and stamps each
-      row's own generation;
-    - it continues the position sequence and makes the new table own it, so
-      that ADR-0035's check of the cache finds it;
-    - it builds ADR-0035's position index, so that publishers wait for one
+  - **`K`, `R`, the two bounds and the generations' times** go into
+    `{outbox}_meta` by a step of their own, beside ADR-0035's format.
+  - **The copy's bound is fixed before the ring's step,** by an ordinary
+    transaction of `migrate` between the runner's steps, skipped once the
+    ring's step is recorded. Under the reclamation's key, held for that
+    transaction only, it first advances every position with no row new to
+    it to the current snapshot, as an idle look would (ADR-0035 decision
+    5) — else a slot its selection never matched, still at nothing
+    delivered, would make the copy take everything. Then it takes the
+    least of:
+    - every `delivered`'s `xmax`;
+    - every id of a `delivered`'s in-progress list that has a row;
+    - this database's oldest open id.
+
+    It records that id as both bounds. From its commit, a rewind below it is
+    refused and a new group starts at it; positions otherwise only advance.
+    So every row some position has not handed on, then or at the ring's
+    step, has an id at or above it: a row not visible in a `delivered` lies
+    at or above its `xmax` or in its in-progress list, and a transaction
+    open then or begun since has an id at or above the bound. `xmin` would
+    not do: it is the server's oldest transaction.
+  - **The ring's step renders the bound into its text** as a literal, its
+    checksum over the template (`checked_over`). The runner hands a step
+    nothing session-scoped — its connection is a pooled one (ADR-0029) —
+    and refuses a step that reads a second table. The step:
+    - copies the rows at or above the bound, keeping each row's
+      `transaction_id` and position, and stamps each row's own generation;
+    - continues the position sequence and moves its ownership to the new
+      column before it drops the old table. The runner finds its target by
+      name after the step, so the old table is dropped, not set aside, and
+      a sequence it still owned would go with it;
+    - builds ADR-0035's position index, so that publishers wait for one
       lock, not two.
-  - **The copy is bounded.** It runs under the table's lock, so it copies
-    only the rows some position has not handed on: per slot, from the least
-    `xmin` of that slot's `delivered`s.
-    - The runner refuses a step that reads the position table. The library
-      reads the bounds before the step and hands them to it as a session
-      setting.
-    - It holds the reclamation's advisory lock across both, so that no
-      rewind lands below a bound in between. Positions otherwise only
-      advance, so a stale bound copies more, never less.
-    - An abandoned group holds its slots' bounds low: `forget_group` first,
-      as for a pinned floor.
+  - **Before the step,** the library reports how many rows it will copy. A
+    host drains its relays first, which keeps the bound near the head: on
+    the host's drill, one row of 101 164. An abandoned group holds the bound
+    low: `forget_group` first, as for a pinned ring.
+  - **Old binaries in the rolling window:** their `set_position` moves only
+    ADR-0035's old pair and checks no bound, so their replays may come up
+    short; their new groups take the default, nothing delivered, and read
+    the history the ring holds.
   - **The inbox gains `processed_at`.** Its old processed rows carry none, so
     they are kept until a one-time pass stamps them.
   - Stands made before are recreated.
@@ -410,6 +499,11 @@ Measured on the host's drill:
   reclaims nothing — but the table does not go back.
 - **A database moved by dump and restore** is rebased by an operator
   (decision 3, a counter reset); nothing is drained or truncated by hand.
+- **Owed: the inbox's carrier rule across a rebase.** The bounds move back,
+  so the Commands to self carried before it never fall below `gone_below`
+  again: kept, not lost. Forgetting them needs to know which carriers the
+  rebase wrote again — a group that had them may receive them anew — and is
+  decided with the rebase's implementation.
 - `idle_in_transaction_session_timeout` for the service's role belongs to the
   host: a transaction left open holds back every vacuum, deletes included,
   and the ring's generation it writes into.
@@ -464,11 +558,33 @@ Measured on the host's drill:
   by an ordinary role (§ Context).
 - **The copy bounded by a read of the positions inside its step.** The
   runner refuses it (§ Context).
+- **Bounds handed to the ring's step as a session setting, the key held
+  across both** (the amendment's first form). A pooled connection carries
+  neither: a defensive read of a setting another transaction made copied
+  nothing (§ Context), and a session lock leaks to the next borrower
+  (ADR-0029).
+- **A bound per slot** (the same form). It copies less, but each slot then
+  has its own hole for rewinds and new groups. One bound, with idle
+  positions advanced first, copied one row on the host's drained drill.
+- **One floor, counted forward by each emptying** (the first decision). A
+  generation emptied with a later lap leaves kept windows below removed
+  ones, so the one number either loses rows to the fetch or lets rewinds
+  and new groups fall into holes. And counted forward, it never catches up
+  once it starts behind: one window an emptying, one emptying a window.
+- **An epoch named from the floor or `delivered`'s `xmin`** (the
+  amendment's first form). `xmin` is the server's oldest transaction: one
+  left open in another database named the floor's partition on every
+  epoch, and the emptying queued behind the fetches' locks.
+- **A batch's branches without their own limit.** The planner sorted the
+  whole remaining epoch for each batch (§ Context).
+- **"Old enough" by a generation's newest `created_at`** (the first
+  decision). It scans the generation, twice, the second time under its lock;
+  and it is a transaction's start, not its relay.
 - **A window for Commands to self.** A Kafka outage keeps a mixed batch
   retrying, each retry inserting its Command to self again, and an
   operator's rewind of the relay carries Commands again. Both outlive any
-  window that is not tied to the outbox's floor. Their rule is the carrier's
-  reclamation (decision 4).
+  window that is not tied to the outbox's `gone_below`. Their rule is the
+  carrier's reclamation (decision 4).
 - **De-duplication by a trigger that looks back over a window** (the
   owner's earlier work on a partitioned journal). Under READ COMMITTED, two
   concurrent inserts of one identity each miss the other's uncommitted row,
@@ -501,32 +617,55 @@ confirmed in `pg_locks`, as `verify/pg/lost-wake` does.
   - A group lagging a full lap receives every message.
   - A rewind racing a fetch: every row delivered.
   - Generations go in order; a rewind racing a truncation never lands below
-    the floor; "back to zero" lands on the floor.
-  - A truncation is refused when it is not closed, not passed (a second group
-    lagging), or not old enough.
+    `intact_from`; "back to zero" lands on it.
+  - A generation holding two laps emptied: a rewind or a new group between
+    the laps is refused or starts above them; `gone_below` is the least row
+    left, not a count of emptyings.
+  - A new group created while a transaction with an id below `intact_from`
+    is open receives that transaction's rows.
+  - A truncation is refused when it is not past, not closed, not passed (a
+    second group lagging), or not old enough; a rewind into it clears its
+    time.
+  - "Passed" read before "closed", or prepared transactions before
+    sessions, with a transaction committing or preparing between the reads:
+    a row lost (each red with its order swapped).
   - A reclamation's error or lock timeout never stops dispatch.
   - A fetch locks the partitions it names and no others.
   - An epoch spanning generations: a batch names only those the epoch found
-    rows in, each from its first position, and drops one once passed.
-  - A transaction held open in another database holds no reclamation; one
-    in this database, with no row written yet, holds its generation.
+    rows in, each from its first position with its own limit, and drops one
+    once passed; the rows a batch reads stay within a bound (red without the
+    branch's limit).
+  - An epoch's names worked out from its own `xmax`: a transaction
+    committing into the next window between a name computed early and the
+    snapshot is handed on (red when computed before).
+  - A converted epoch on the ring: the rest of its transaction handed on.
+  - A transaction held open in another database holds no reclamation and
+    adds no partition to a fetch; one in this database, with no row written
+    yet, holds its generation.
   - An id of `delivered`'s in-progress list that committed rows into the
     generation after it was taken: the generation is not passed.
   - ADR-0030's refusal is named on the ring (the existing test, run on it).
   - A later migration of the ring is accepted by the runner.
-  - The ring's copy, bounded per slot, with a rewind attempted between the
-    reading of the bounds and the step: every row not handed on is copied;
-    a slot never acknowledged keeps all of its rows.
-  - The new table owns the position sequence.
-  - A counter reset stops relay and reclamation until the rebase, which
-    keeps every row not handed on, in order, and moves the floor.
+  - The ring's copy, from a bound fixed before its step, with a rewind and
+    a new group attempted in between and a transaction of this database
+    open: every row not handed on is copied; the rewind is refused.
+  - A slot its selection never matched does not pull the bound down.
+  - The new table owns the position sequence; the old one is dropped.
+  - A counter reset stops relay and reclamation until the rebase, and the
+    reclamation stops on it without a relay's report. The rebase keeps every
+    row not handed on — those written since the restore included — in
+    order; empties the current generation's restored rows; survives two
+    rows of one identity; and, with a transaction committing after it takes
+    its id, leaves its rows undelivered (red when `S` is taken after its
+    first write).
   - A full lap without reclamation refuses no insert.
 - **The inbox.**
   - Unprocessed, parked, waiting and kept rows, and rows a waiting row names,
     are never deleted.
   - Within a window a repeat is ignored; after it, it is processed.
-  - A Command to self is forgotten only after its carrier is reclaimed, and
-    a rewind within the floor finds its row and drops the repeat.
+  - A Command to self is forgotten only after its carrier lies below
+    `gone_below`, and a rewind above `intact_from` finds its row and drops
+    the repeat.
   - A changed rule applies to rows already processed.
   - The grace is re-armed after an outage of the database.
 
@@ -535,18 +674,25 @@ confirmed in `pg_locks`, as `verify/pg/lost-wake` does.
   - generations at small `R` and `K` that lap;
   - a reclaimed set that the fetch skips;
   - `Reclaim(g)` with its conditions as switches;
-  - a `Rewind` that checks the floor;
-  - two groups, and a transaction of another database.
+  - a `Rewind` and a `NewGroup` that check `intact_from`;
+  - two groups, and a transaction of another database;
+  - the reclamation's reads as separate steps, a commit or a prepare able to
+    fall between them.
 - **Its invariants:**
-  - `NoPositionBelowGone`;
+  - `NoPositionBelowGone`, over the windows emptied, not over a bound;
   - `ReclaimedWasReceived` for every group.
 - **Configurations that must fail:**
   - "passed" dropped;
   - "passed" by `delivered`'s `xmax` alone, its in-progress list ignored;
   - "closed" dropped, a transaction writing its first row after the check;
+  - "passed" read before "closed"; prepared transactions read before
+    sessions;
   - the fetch's arc by the ring's arithmetic;
+  - an epoch's names computed before its snapshot;
   - one group checked;
-  - a rewind racing a reclamation.
+  - a rewind racing a reclamation;
+  - a rewind into a lap emptied together with an older one;
+  - one bound for both meanings.
 - **`Inbox.tla` gains:**
   - re-arrival after `Forget`;
   - a ghost of everything ever processed, over which `WaitingIsAside` and
@@ -583,8 +729,17 @@ On a scratch database, each with the result that changes the decision:
   write budget (its ADR-0083). Above it, the copy's bound is what keeps the
   upgrade within budget, and a host drains its relays first.
 - **M11.** The fetch on the ring under epochs — an epoch's start over its
-  named windows, a batch over its per-generation branches — against
-  ADR-0035's figures on one table.
+  named windows, a batch over its per-generation branches with their limits,
+  on ADR-0035's `(slot, position)` index — against ADR-0035's figures on one
+  table.
+- **M12.** Waits on the server's lock manager (`LWLock:lock_manager`) at the
+  launch's concurrency, with fetches naming two generations of six indexes:
+  above a few per cent of a fetch's time, the ring drops an index or a
+  fetch names fewer generations.
+- **M13.** Eight loops relaying, a transaction held open in another
+  database, the reclamation passing: emptyings at their usual rate and the
+  fetch's p99 unchanged, or the coupling to the server's oldest transaction
+  is back.
 - **M10.** The cluster's rate of transaction ids at the launch's load, every
   context's database on one server: the margin in generations against
   `margin_age`.
@@ -646,3 +801,25 @@ On a scratch database, each with the result that changes the decision:
     - the sequence owned;
     - ADR-0035's index built in the ring.
   - **The stream record** stays withdrawn, its reason restated.
+- 2026-11-03 — The amendment refuted from two roles (database, distributed
+  systems); every finding taken in:
+  - **Two bounds for the floor's two meanings:** `gone_below`, the least row
+    left or id open, set again by each emptying; `intact_from`, one past the
+    highest id emptied, for rewinds and new groups.
+  - **The fetch:** an epoch named exactly from its two snapshots, after its
+    own; a batch's branches each with its own limit; a converted epoch
+    recorded at the relay's next look.
+  - **The reclamation:** past, closed, passed read in that order, sessions
+    before prepared transactions, the statistics snapshot cleared; "old
+    enough" by the time a generation was first found passed; the counter
+    reset checked by the reclamation itself.
+  - **The rebase:** the outbox locked, its snapshot taken before its first
+    write, rows written since the restore kept, one row per identity, the
+    current generation emptied of restored rows, the bounds to the oldest
+    open id.
+  - **The migration:** one bound fixed by an ordinary transaction before the
+    ring's step, idle positions advanced first, rendered into the step's
+    text; the old table dropped after its sequence moved.
+  - **New groups** under the reclamation's key; `K` and `R` checked against
+    the ring itself.
+  - **Owed:** the inbox's carrier rule across a rebase.
