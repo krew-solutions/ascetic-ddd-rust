@@ -181,8 +181,9 @@ and on a scratch outbox of 4 million rows, about a thousand per transaction:
 
 5. **An idle look writes nothing.** A look that finds no row new since
    `delivered` neither starts nor delivers an epoch, and takes no
-   transaction id: it ends at decision 2's probe, a read, as today. Over an idle slot `delivered` is
-   advanced at most once per interval, so that ADR-0033's generations pass.
+   transaction id: it ends at decision 2's probe, a read, as today. Over an
+   idle slot `delivered` is advanced at most once per interval, so that
+   ADR-0033's generations pass.
 
 6. **The position sequence draws one at a time.**
    - `migrate` refuses an outbox whose `position` column owns no sequence,
