@@ -24,6 +24,9 @@ Proposed (2026-11-03), not implemented. Decided in three rounds:
   systems.** Its rules stood; three of its mechanisms did not — one floor
   for two meanings, the counter reset's rebase, and a bound handed to a
   migration through the session. Their findings are taken in below.
+- **Revised by the owner (2026-11-04):** the inbox's carrier rule withdrawn
+  to the alternatives. Commands to self are held by a window, as every
+  channel is, and their repeats are bounded where they arise.
 
 The partition and lock behaviour below was measured on a scratch PostgreSQL
 14.24. § Executors lists what will hold each decision.
@@ -99,9 +102,8 @@ position n takes a late arrival for a repeat, and nothing rules a late
 arrival out past the outbox.
 
 **How long each obligation lives.** Each ends by one of three signals:
-- *an event in the same database* — the row visible in every position's
-  `delivered`; the outbox row that carried a Command to self reclaimed, so
-  that no rewind can carry it again;
+- *an event in the same database* — for an outbox row, the row visible in
+  every position's `delivered`;
 - *a window* — the longest a repeat can still reach the inbox: a broker's
   whole retention, its tiers included, plus the time a segment outlives
   `retention.ms`; a producer's own rewind of its outbox; a republication;
@@ -257,7 +259,7 @@ Measured on the host's drill:
        written: the least of the ring's least remaining id (read on each
        generation's primary key), this database's oldest open id, and the
        next id. Each emptying sets it again; nothing counts it forward. The
-       inbox's carrier rule reads it (decision 4).
+       reclamation starts from it, and an operator sees what pins it.
      - **`intact_from`** — an id from which every row written is still kept:
        one past the highest id of any generation emptied, raised by each
        emptying. Rewinds and new groups read it.
@@ -372,17 +374,13 @@ Measured on the host's drill:
      are covered.
    - **The rules.** A host declares one per channel (the destination without
      its key) in `InboxRetention`:
-     - **Its carrier reclaimed** — for the inbox channel a service's own outbox
-       relays to: Commands to self. The relay stamps each such row with the
-       `(transaction_id, position)` of the outbox row that carried it. The
-       sweep forgets the row once that id lies below the outbox's
-       `gone_below`, a comparison within one database. No row below it is
-       left, so no Command to self is carried again after its row went.
      - **A window**, from `processed_at`. A host sets it at least to the
        longest a repeat can reach the inbox: the broker's whole retention,
        tiers included, the time a segment outlives it, and the producer's
-       replay horizon. A producer on this library bounds its own horizon by
-       its ring's span.
+       replay horizon. Every channel is held by this rule, whoever sent its
+       messages and however — another service, a tool, the service's own
+       outbox. The inbox knows its channels' windows, and nothing of their
+       senders.
      - **Keep** — the default:
        - a channel without a rule;
        - a channel whose stream types any message names as causal
@@ -401,6 +399,22 @@ Measured on the host's drill:
        and relays rejoining after an outage redeliver first;
      - its errors are reported and retried, and never touch the inbox's
        loops.
+   - **Each source of repeats bounds them where they arise,** so that a
+     window can cover them:
+     - **A producer on this library declares its replay horizon,** a time.
+       `set_position` refuses a rewind to a transaction whose first row at
+       or above it is older than the horizon. That row's `created_at` is its
+       transaction's start, so the refusal comes a little early, never late.
+       A host's windows cover its producers' horizons.
+     - **A relay hands its own inbox's channel on by a selection of its
+       own,** never in one batch with a broker's destinations. Today one
+       selection takes the whole outbox (`outbox://all`). A broker's outage
+       then retries the whole batch, and each retry stores the batch's
+       Commands to self in the inbox again, for as long as the outage lasts:
+       past any window. The outbox's channel reads its name as a selection
+       by destination prefix — its store already selects by prefix — and a
+       host runs one bridge for its inbox and one for its broker. A retry of
+       the inbox's selection then lasts as long as a database's error.
    - **What de-duplication then means.** A repeat that arrives after its row
      went is processed again: that is the rule's meaning. The holder read of
      ADR-0030 may race the sweep and find no holder. It reports an unknown
@@ -445,6 +459,8 @@ Measured on the host's drill:
 - **A host's work:**
   - It declares a rule per inbox channel. A channel left without one keeps
     its rows, as today.
+  - It declares its producers' replay horizons, and relays its own inbox's
+    channel by a bridge of its own.
   - Its own gates hold the rules: a window covers the channel class's
     re-consumption horizon, and no channel whose stream types are dependency
     targets has a window.
@@ -499,11 +515,6 @@ Measured on the host's drill:
   reclaims nothing — but the table does not go back.
 - **A database moved by dump and restore** is rebased by an operator
   (decision 3, a counter reset); nothing is drained or truncated by hand.
-- **Owed: the inbox's carrier rule across a rebase.** The bounds move back,
-  so the Commands to self carried before it never fall below `gone_below`
-  again: kept, not lost. Forgetting them needs to know which carriers the
-  rebase wrote again — a group that had them may receive them anew — and is
-  decided with the rebase's implementation.
 - `idle_in_transaction_session_timeout` for the service's role belongs to the
   host: a transaction left open holds back every vacuum, deletes included,
   and the ring's generation it writes into.
@@ -580,11 +591,51 @@ Measured on the host's drill:
 - **"Old enough" by a generation's newest `created_at`** (the first
   decision). It scans the generation, twice, the second time under its lock;
   and it is a transaction's start, not its relay.
-- **A window for Commands to self.** A Kafka outage keeps a mixed batch
-  retrying, each retry inserting its Command to self again, and an
-  operator's rewind of the relay carries Commands again. Both outlive any
-  window that is not tied to the outbox's `gone_below`. Their rule is the
-  carrier's reclamation (decision 4).
+- **Commands to self forgotten once their carrier is reclaimed** (decided
+  in the earlier rounds, withdrawn by the owner on 2026-11-04).
+  - **The rule.** The relay stamped each inbox row with the
+    `(transaction_id, position)` of the outbox row that carried it. The
+    sweep forgot the row once that id fell below the outbox's `gone_below`:
+    no row below it is left, so neither a retry nor a rewind could carry
+    the Command again. It kept a row exactly as long as needed, with no
+    window to set.
+  - **Why it was withdrawn.** It makes the inbox know the outbox's ring, and
+    it serves one origin. A Command from another service (the host's
+    ADR-0065), or one written to a broker without an outbox, is not covered
+    and needs a window anyway. A rule that holds for one sender and not the
+    others is not the inbox's.
+  - **The two reasons it was chosen over a window** — a broker's outage
+    retrying a mixed batch, and an operator's rewind — are bounded where
+    they arise instead (decision 4).
+  - **Its premise, to check if it returns:** a Command to self is repeated
+    only through the outbox row that carried it. A writer that sends the
+    same identity again from another transaction breaks it once the carrier
+    is gone.
+  - **It also owed a rule across a rebase:** the bounds move back, and the
+    carriers stamped before it never fall below `gone_below` again.
+- **The inbox as generations, after Storm's `GenerationalCache`** (raised by
+  the owner, 2026-11-04; the library's identity map keeps one,
+  `crates/session/src/identity_map/generations.rs`).
+  - **The idea.** The inbox partitioned by generation. A generation is let
+    go of whole by `TRUNCATE`; the rows still alive in it — unprocessed,
+    parked, waiting, kept, named by a waiting row — are carried into the
+    young one first, as a key in use survives a bump. It answers decision
+    2's premise another way: a range holding obligations of minutes and of
+    forever can go whole if its long-lived minority is carried forward.
+    Forgetting would cost a `TRUNCATE` and the survivors' copy, not a
+    `DELETE` and a vacuum per row.
+  - **With the carrier rule,** a Command to self's generation could have been
+    its carrier's window: its repeats come through the same carrier, so a
+    unique index within the generation would have sufficed.
+  - **Without it,** no unique index refuses a repeat whose original lies in
+    the other generation. Every insert would look the other generation up,
+    and a switch of generations take a lock that inserts in flight hold: a
+    change to the inbox's de-duplication, its most critical part
+    (`EffectsOnce`).
+  - **What is carried forward is what is used, not what may be:** a
+    dependency target still needs "keep".
+  - **Taken up again** if M8 shows that the per-row sweep's dead tuples or
+    size do not level off; then with a blind solver and a discriminator.
 - **De-duplication by a trigger that looks back over a window** (the
   owner's earlier work on a partitioned journal). Under READ COMMITTED, two
   concurrent inserts of one identity each miss the other's uncommitted row,
@@ -663,9 +714,11 @@ confirmed in `pg_locks`, as `verify/pg/lost-wake` does.
   - Unprocessed, parked, waiting and kept rows, and rows a waiting row names,
     are never deleted.
   - Within a window a repeat is ignored; after it, it is processed.
-  - A Command to self is forgotten only after its carrier lies below
-    `gone_below`, and a rewind above `intact_from` finds its row and drops
-    the repeat.
+  - A Command to self within its window: a relay's retry and a rewind
+    within the producer's horizon are dropped as repeats.
+  - A rewind deeper than the producer's horizon is refused.
+  - A broker's outage does not retry the inbox's own selection, nor store
+    its Commands to self again.
   - A changed rule applies to rows already processed.
   - The grace is re-armed after an outage of the database.
 
@@ -701,7 +754,9 @@ confirmed in `pg_locks`, as `verify/pg/lost-wake` does.
   - forgetting early;
   - forgetting a dependency target.
 - **`Bridge.tla`:** an outbox `Rewind` with an inbox `Forget` at the mark must
-  fail `EffectsOnce`, and hold with the carrier's rule.
+  fail `EffectsOnce`, and hold when the window covers the producer's horizon
+  and a deeper `Rewind` is refused; a mixed selection retried across a
+  broker's outage must fail it too.
 
 **Traces.** The observer's `reclaimed` and `forgotten` events, mapped by
 `trace2tla.py`, and producers' commits logged, so that a lost row is not
@@ -719,8 +774,9 @@ On a scratch database, each with the result that changes the decision:
   adopted if the index shrinks more than tenfold with no slower publish,
   mark or dependency lookup.
 - **M6.** The relay writing its own inbox's rows in its own transaction,
-  against today's about 680 rows a second; it would also end the mixed
-  batch's re-inserts.
+  against today's about 680 rows a second: it would make the inbox's own
+  selection hand on exactly once, ending even a database error's
+  re-insert.
 - **M8.** The inbox at 410 inserts, marks and deletes a second for an hour,
   and again with the vacuum horizon held for ten minutes: whether dead
   tuples and size level off.
@@ -823,3 +879,15 @@ On a scratch database, each with the result that changes the decision:
   - **New groups** under the reclamation's key; `K` and `R` checked against
     the ring itself.
   - **Owed:** the inbox's carrier rule across a rebase.
+- 2026-11-04 — Revised by the owner: the carrier rule withdrawn to the
+  alternatives. It made the inbox know the outbox's ring and served one
+  origin.
+  - **Every channel is held by a window,** Commands to self included.
+  - **Repeats bounded where they arise:**
+    - a producer's declared replay horizon, which `set_position` holds;
+    - the inbox's own channel relayed by a selection of its own, so that a
+      broker's outage no longer retries it.
+  - **Recorded as alternatives:** the carrier rule with its premise, and the
+    inbox as generations after Storm's `GenerationalCache`, taken up again
+    if M8 fails.
+  - **Closed:** the carrier rule's owed rule across a rebase.
