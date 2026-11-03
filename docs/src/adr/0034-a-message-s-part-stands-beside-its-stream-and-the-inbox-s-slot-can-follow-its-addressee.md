@@ -112,18 +112,29 @@ record depends on none of it.
      The others it writes are written as today, under their locks and
      versions.
    - **What it guarantees.** Within one inbox, the messages addressed to one
-     aggregate are processed one at a time, in arrival order — with
-     ADR-0035, their senders' commit order. Their transactions do not
-     overlap, so they neither conflict on its version nor block each
-     other's loops.
+     aggregate are processed one at a time, in arrival order. Their
+     transactions do not overlap, so they neither conflict on its version
+     nor block each other's loops.
    - **What it does not.**
+     - **An order between their senders.** They come from several streams —
+       several causes, several senders — and ADR-0035 orders one stream's
+       messages on one URI, not several streams': within an epoch they go by
+       drawn position, and across URIs, slots or a broker's partitions they
+       keep none.
+     - **An order past a message that waits.** A parked message, or one
+       waiting for its causal dependency, leaves the queue, and later
+       messages to the same aggregate pass it.
      - A writer outside this inbox's processing — a request's handler,
        another service — meets these messages at the aggregate's lock and
        version, as today.
      - The order in which the aggregate's own messages leave its outbox is
        ADR-0035's.
 
-3. **The tables change once.**
+3. **The tables change once, after ADR-0033 and ADR-0035.** The outbox's
+   guard is rebuilt on ADR-0033's ring, over the leaf indexes the ring
+   names; the runner allows that step because it counts a partition as its
+   parent's (ADR-0033 decision 6). Landed before the ring, this record
+   would leave the ring's copy to recreate the part-aware guard.
    - **The inbox.** Its primary key and its slot's key are fixed for the
      table's life (ADR-0008), so a host recreates its inbox, as it does for a
      new cut.
@@ -191,7 +202,7 @@ record depends on none of it.
   orders the wire for all of them.
 - **Only the consumer's comparison of positions.** It concerns what a
   consumer applies, not how a service processes one aggregate's messages;
-  ADR-0035 decision 7 keeps it.
+  ADR-0035 decision 9 keeps it.
 
 ## Executors
 
@@ -253,3 +264,6 @@ Owed, with the implementation.
     no promise of order.
   - **Also:** the contention's costs named, a locking read added as the
     measured comparison, and the host's decisions dated by their ADRs.
+- 2026-11-03 — Corrected by ADR-0035's review of roles: arrival keeps no
+  order between the senders of one aggregate's messages, nor past a message
+  that waits; the record lands after ADR-0033 and ADR-0035.
