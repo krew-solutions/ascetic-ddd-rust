@@ -16,6 +16,10 @@ Proposed (2026-11-03), not implemented. Decided in three rounds:
   either mechanism. Their findings are taken into the decisions below, each
   with its executor. One finding was confirmed by measurement and withdrew
   the first draft's per-stream record (§ Context, order on the bus).
+- **Amended on top of ADR-0035,** whose review of roles named what changes
+  here. The relay's positions are snapshots now, so the fetch, "passed",
+  the floor's forms, the copy and the counter reset are restated over them.
+  "Closed" is judged per database. The two land in one release.
 
 The partition and lock behaviour below was measured on a scratch PostgreSQL
 14.24. § Executors lists what will hold each decision.
@@ -41,9 +45,10 @@ Measured in the host project, on its drill of one service:
 **What a kept row is still for.**
 
 *The outbox:*
-- (O1) A row is read until every position of its slot has passed it
-  (ADR-0007; `NoPassedOver`, `verify/tla/Outbox.tla`).
-- (O2) A new consumer group starts at `(0, '0')`, so it reads all history.
+- (O1) A row is read until it is visible in every position's `delivered`
+  (ADR-0035; `NoPassedOver`, `verify/tla/Outbox.tla`).
+- (O2) A new consumer group starts with nothing delivered, so it reads all
+  history.
 - (O3) `set_position` rewinds to replay (ADR-0005 decision 4).
 - (O4) `message_id` is unique in the table. The README promises consumers a
   `message_id` to de-duplicate on; the library's own inbox de-duplicates by
@@ -75,27 +80,24 @@ need old rows: its key leads with the writer's transaction.
 - (I7) Parked and waiting rows wait for an operator or a dependency
   (ADR-0005, ADR-0006).
 
-**Order on the bus.** The relay hands rows on in `(transaction_id,
-position)` order (ADR-0007). A transaction's id is assigned at its first
-write, not at its commit or its read of an aggregate. The inbox's dispatch
-writes first: `take` updates its slot's row before the handler loads
-anything. So two dispatches can write one stream in the reverse of their ids.
-Measured on the scratch server:
-1. Transaction A took its slot (id 10222) and waited.
-2. Transaction B (id 10223) took another, wrote version 5 of an aggregate and
-   its outbox row, and committed.
-3. A then wrote version 6.
-4. The relay's order was version 6, then version 5.
+**Order on the bus.** This record found the relay handing a stream's
+versions on out of order: it released by transaction id, which is assigned
+at a first write, and the inbox's dispatch writes first. Measured: version 6
+relayed before version 5. ADR-0035 now releases a stream's messages on one
+URI in their writers' commit order. It promises nothing past the outbox:
+- a broker's partitions;
+- a channel fed by several URIs;
+- a re-done epoch interleaving streams;
+- an inbox row parked or waiting while later ones pass it.
 
-The library delivers in that order end to end (`EndToEndOrder`), so a
-stream's messages can arrive out of their positions' order. Any record that
-infers "every position up to n was seen" from a forgotten position n takes
-such a late arrival for a repeat.
+Any record that infers "every position up to n was seen" from a forgotten
+position n takes a late arrival for a repeat, and nothing rules a late
+arrival out past the outbox.
 
 **How long each obligation lives.** Each ends by one of three signals:
-- *an event in the same database* — every position past the row; the outbox
-  row that carried a Command to self reclaimed, so that no rewind can carry
-  it again;
+- *an event in the same database* — the row visible in every position's
+  `delivered`; the outbox row that carried a Command to self reclaimed, so
+  that no rewind can carry it again;
 - *a window* — the longest a repeat can still reach the inbox: a broker's
   whole retention, its tiers included, plus the time a segment outlives
   `retention.ms`; a producer's own rewind of its outbox; a republication;
@@ -147,7 +149,19 @@ where the storage order is the obligation's order.
   next row in generation 7 was 1 640 001 rows past the next row of the
   table.
 - The migration runner (ADR-0029) counts the partitions its lock on the
-  parent reaches as other tables, and refuses the migration.
+  parent reaches as other tables, and refuses the migration. It refuses a
+  step that locks any pre-existing table but its target, in any mode: a
+  read of the position table from the outbox's step is refused
+  (`crates/migration/src/lib.rs`).
+- A batch by position over the ring, as one `Merge Append`, walked a
+  generation with no row left in the epoch from the offset to the epoch's
+  end before it could return anything: 208 001 rows, 96.6 ms, on every
+  batch.
+- `pg_get_serial_sequence` finds no sequence that a column uses but does not
+  own, as a copied table's position does.
+- An ordinary role sees every session's database and `backend_xid` in
+  `pg_stat_activity`, a superuser's in another database included, and reads
+  `pg_prepared_xacts`.
 
 Measured on the scratch server, the outbox's table as the library makes it
 beside the same table as a ring, 2 million rows each, about 1.3 KB a row:
@@ -161,7 +175,8 @@ beside the same table as a ring, 2 million rows each, about 1.3 KB a row:
 - Inserting the same million wrote 1 321 MB: deleting them, with their
   vacuum, writes about nine tenths as much again. The space a vacuum frees
   is reused: a million more rows grew the table by 128 MB, its indexes.
-- The relay's fetch of 100 rows past a position, planned and executed:
+- The relay's fetch of 100 rows past a position, ADR-0007's, planned and
+  executed:
   0.9 ms on the table as it is, 5.6 ms over sixteen generations, 2.6 ms
   over eight, every partition planned; with two generations named,
   planning 0.28 ms. Against the relay's batch, 100 to 300 ms of handing
@@ -183,9 +198,10 @@ Measured on the host's drill:
    index cannot say "recent": its predicate must be immutable.
 
 2. **The unit follows the obligation.** The outbox reclaims ranges, because
-   its order — the transaction id, then the position — is its obligation's
-   order. The inbox reclaims rows, because one range of it holds obligations
-   of minutes, of weeks and of forever.
+   its obligation ends in transaction-id order: a row is passed once its id
+   is visible in every position's `delivered`, and a snapshot sees every id
+   below its `xmin`. The inbox reclaims rows, because one range of it holds
+   obligations of minutes, of weeks and of forever.
 
 3. **The outbox is a ring of generations, emptied whole, in order.**
    - **The table.** It is partitioned `BY LIST (generation)` into `K`
@@ -207,31 +223,53 @@ Measured on the host's drill:
    - **The keys.** The primary key becomes `(generation, transaction_id,
      position)` and ADR-0030's guard `(generation, transaction_id, digest)`.
      Neither is weaker, since the generation is a function of the
-     transaction. `message_id` is unique within a generation.
+     transaction. `message_id` is unique within a generation. ADR-0035's
+     `(slot, position) INCLUDE (transaction_id)` is built on the ring, its
+     leaves named too.
    - **The floor.** `{outbox}_meta` records the floor: the absolute window
      (`transaction_id / R`) below which every row is gone. Generations are
-     emptied strictly in order from the floor. A new group starts at the
-     floor. `set_position` below it is refused, with a typed error naming
-     it, so "back to zero" means back to the floor. It reads the floor and
-     moves the positions in one transaction, under the reclamation's
-     advisory lock, so that a truncation cannot commit between them.
+     emptied strictly in order from the floor.
+     - **A new group starts at the floor:** its `delivered` is `'F:F:'`,
+       `F` the floor's first id, at least 1. Every id below it has ended,
+       since only closed generations are emptied.
+     - **`set_position` below the floor is refused,** with a typed error
+       naming it, so "back to zero" means back to the floor. A rewind above
+       it is ADR-0035's intersection.
+     - It reads the floor and moves the positions in one transaction, under
+       the reclamation's advisory lock, so that a truncation cannot commit
+       between them.
    - **The fetch names its generations.**
-     - The windows from the floor to the current transaction's, counted
-       absolutely; all `K` when they span `K − 1` or more.
-     - Computed before the statement and passed as constants, so that the
-       planner prunes and locks the named partitions alone.
-     - Named from the floor, which only moves forward, so a stale reading
-       names a superset, and no rewind goes below what is named.
+     - **An epoch's start** names the windows from the later of the floor and
+       `delivered`'s `xmin` to the current transaction's, counted
+       absolutely; all `K` when they span `K − 1` or more. No row below
+       `delivered`'s `xmin` is new.
+     - **It records the generations it found rows in,** each with its first
+       and last position in the epoch, in the position row beside the epoch.
+     - **A batch names those generations only,** each a branch of a `UNION
+       ALL` scanned from the later of the offset and its first position, and
+       drops a generation once the offset passes its last. One `Merge
+       Append` over them all would re-walk a generation with nothing left on
+       every batch (§ Context).
+     - The names are computed between ADR-0035's statements and passed as
+       constants, so that the planner prunes and locks the named partitions
+       alone. The floor only moves forward and `delivered` is read under the
+       position's lock, so neither names less than the fetch needs.
    - **Reclamation.** The dispatcher works it between its batches, at most
      once an interval, in a `READ COMMITTED` transaction of its own:
      1. `pg_try_advisory_xact_lock` on the outbox's reclamation; another
         holder means this pass is skipped.
      2. The floor's generation is checked without its partition's lock:
-        - closed — no transaction that could still write into it is open:
-          the ids from the snapshot's `xmin` to the next meet none of its
-          windows;
-        - passed — every selection's position, in every slot, is past the
-          generation's last row of that slot that matches the selection;
+        - closed — no transaction of this database that could still write
+          into it is open: no `backend_xid` of the database's sessions,
+          widened against the next id, and none of its prepared
+          transactions lies in the generation's windows. A transaction is
+          bound to its database, so one left open elsewhere on the server
+          holds no ring back;
+        - passed — every row of it is visible in every position's
+          `delivered`: each `delivered`'s `xmax` lies past its windows, and
+          no id of its in-progress list within them has a row in the
+          generation. A row of an epoch in flight is not passed yet. An
+          idle slot's `delivered` still advances (ADR-0035 decision 5);
         - old enough — `margin` generations newer than it exist, and its
           newest `created_at` is older than `margin_age`, so that a row
           relayed a moment ago can still be re-injected whatever the
@@ -247,12 +285,13 @@ Measured on the host's drill:
      lagging or abandoned group, maintenance not running — takes the next
      lap's rows as well. The table grows, as today; no insert is ever
      refused for want of a partition.
-   - **A counter reset.** A position whose transaction id is at or above the
-     current snapshot's `xmax` means the database was moved by dump and
-     restore or by logical replication, and its ids restarted. Relay and
-     reclamation both stop, and report it. No row is passed over and no
-     generation emptied until an operator drains, truncates and resets the
-     positions.
+   - **A counter reset** (ADR-0035 decision 12) stops relay and reclamation
+     alike, and the refusal sticks until the rebase. On the ring the rebase
+     keeps only the rows some position has not handed on:
+     - it re-stamps them under its own transaction, which moves them into
+       the current generation in their positions' order;
+     - it empties every other generation;
+     - it sets the floor to the current window.
    - **Groups that pin the floor.** The group pinning the floor is reported:
      its name, its last acknowledgement, the generations it pins.
      `forget_group` drops an abandoned group's positions, and refuses one
@@ -342,29 +381,43 @@ Measured on the host's drill:
     re-consumption horizon, and no channel whose stream types are dependency
     targets has a window.
 - One more session per process, for the sweep.
-- **Migrations.**
-  - The outbox is recreated as the ring by a migration (ADR-0029). The
-    migration keeps every row's `transaction_id` and position, continues the
-    position sequence, and stamps each row's own generation. It copies under
-    the table's lock, so a database whose history must be kept copies only
-    rows past its live groups' positions, or drains first.
-  - The inbox gains `processed_at`. Its old processed rows carry none, so
+- **Migrations,** after ADR-0035's conversion of the positions:
+  - **`K`, `R` and the floor** go into `{outbox}_meta` by a step of their
+    own, beside ADR-0035's format.
+  - **The outbox is recreated as the ring** by a migration (ADR-0029):
+    - it keeps every row's `transaction_id` and position, and stamps each
+      row's own generation;
+    - it continues the position sequence and makes the new table own it, so
+      that ADR-0035's check of the cache finds it;
+    - it builds ADR-0035's position index, so that publishers wait for one
+      lock, not two.
+  - **The copy is bounded.** It runs under the table's lock, so it copies
+    only the rows some position has not handed on: per slot, from the least
+    `xmin` of that slot's `delivered`s.
+    - The runner refuses a step that reads the position table. The library
+      reads the bounds before the step and hands them to it as a session
+      setting.
+    - It holds the reclamation's advisory lock across both, so that no
+      rewind lands below a bound in between. Positions otherwise only
+      advance, so a stale bound copies more, never less.
+    - An abandoned group holds its slots' bounds low: `forget_group` first,
+      as for a pinned floor.
+  - **The inbox gains `processed_at`.** Its old processed rows carry none, so
     they are kept until a one-time pass stamps them.
   - Stands made before are recreated.
 - **The rollback boundary is the ring's migration.** A binary from before it
-  runs on the ring — it relays, unpruned, and reclaims nothing — but the
-  table does not go back.
-- **The host's runbook for a database moved by dump and restore:** drain,
-  truncate, reset the positions (decision 3, a counter reset).
+  runs on the ring — it relays by ADR-0035's old pair, unpruned, and
+  reclaims nothing — but the table does not go back.
+- **A database moved by dump and restore** is rebased by an operator
+  (decision 3, a counter reset); nothing is drained or truncated by hand.
 - `idle_in_transaction_session_timeout` for the service's role belongs to the
-  host: a transaction left open holds back every vacuum, deletes included.
-- **Outside this decision, found by it: a stream's messages can leave the
-  outbox out of their positions' order** (§ Context, order on the bus). The
-  library promises arrival order and transaction-id order, not a stream's.
-  A consumer whose state follows a stream's versions must compare them; one
-  that does not can be set back by a reordering. Decided in ADR-0034: the
-  order stated as transaction-id order, a message's part beside its stream,
-  and the inbox's slot by the aggregate a message addresses.
+  host: a transaction left open holds back every vacuum, deletes included,
+  and the ring's generation it writes into.
+- **The order on the wire, which this record found broken, is ADR-0035's;**
+  the processing of one aggregate's messages is ADR-0034's. This record and
+  ADR-0035 land in one release: the ring's migration builds ADR-0035's
+  index, and the ring's fetch is the epochs'. ADR-0034 lands after both, on
+  this record's runner.
 
 ## Alternatives Considered
 
@@ -394,16 +447,23 @@ Measured on the host's drill:
   answer for channels "ordered per stream"): one row per stream, advanced to
   each forgotten position, answering de-duplication and dependencies for the
   stream's life.
-  - Withdrawn. No channel fed by this library is ordered per stream
-    (§ Context, order on the bus), so it would take a late lower position for
-    a repeat and drop a first arrival.
+  - Withdrawn. ADR-0035 orders a stream's first delivery on one URI, but
+    nothing past the outbox (§ Context, order on the bus). The record would
+    take a late lower position for a repeat and drop a first arrival,
+    silently.
   - Advanced only over a gapless prefix it is safe, but it compacts nothing
     past the first position a channel does not carry, and channels carry a
     subset of a stream's versions.
-  - Kept for a reordering window, it is unsafe: a transaction may stay open
-    for as long as it likes.
   - It would also make a stream re-created under the same id lose every
     message for good.
+  - A channel that needs to compact what "keep" holds is a decision of its
+    own, with the order past the outbox as its premise.
+- **"Closed" by the server's `xmin`** (the first decision). A transaction
+  left open in any database of the server held every ring on it back. A
+  transaction is bound to its database, and every session's id is readable
+  by an ordinary role (§ Context).
+- **The copy bounded by a read of the positions inside its step.** The
+  runner refuses it (§ Context).
 - **A window for Commands to self.** A Kafka outage keeps a mixed batch
   retrying, each retry inserting its Command to self again, and an
   operator's rewind of the relay carries Commands again. Both outlive any
@@ -446,9 +506,20 @@ confirmed in `pg_locks`, as `verify/pg/lost-wake` does.
     lagging), or not old enough.
   - A reclamation's error or lock timeout never stops dispatch.
   - A fetch locks the partitions it names and no others.
+  - An epoch spanning generations: a batch names only those the epoch found
+    rows in, each from its first position, and drops one once passed.
+  - A transaction held open in another database holds no reclamation; one
+    in this database, with no row written yet, holds its generation.
+  - An id of `delivered`'s in-progress list that committed rows into the
+    generation after it was taken: the generation is not passed.
   - ADR-0030's refusal is named on the ring (the existing test, run on it).
   - A later migration of the ring is accepted by the runner.
-  - A position above the snapshot's `xmax` stops relay and reclamation.
+  - The ring's copy, bounded per slot, with a rewind attempted between the
+    reading of the bounds and the step: every row not handed on is copied;
+    a slot never acknowledged keeps all of its rows.
+  - The new table owns the position sequence.
+  - A counter reset stops relay and reclamation until the rebase, which
+    keeps every row not handed on, in order, and moves the floor.
   - A full lap without reclamation refuses no insert.
 - **The inbox.**
   - Unprocessed, parked, waiting and kept rows, and rows a waiting row names,
@@ -460,17 +531,19 @@ confirmed in `pg_locks`, as `verify/pg/lost-wake` does.
   - The grace is re-armed after an outage of the database.
 
 **TLA+.**
-- **`Outbox.tla` gains:**
+- **ADR-0035's statement-level `OutboxPg.tla` gains:**
   - generations at small `R` and `K` that lap;
   - a reclaimed set that the fetch skips;
   - `Reclaim(g)` with its conditions as switches;
   - a `Rewind` that checks the floor;
-  - two groups.
+  - two groups, and a transaction of another database.
 - **Its invariants:**
   - `NoPositionBelowGone`;
   - `ReclaimedWasReceived` for every group.
 - **Configurations that must fail:**
   - "passed" dropped;
+  - "passed" by `delivered`'s `xmax` alone, its in-progress list ignored;
+  - "closed" dropped, a transaction writing its first row after the check;
   - the fetch's arc by the ring's arithmetic;
   - one group checked;
   - a rewind racing a reclamation.
@@ -505,8 +578,13 @@ On a scratch database, each with the result that changes the decision:
 - **M8.** The inbox at 410 inserts, marks and deletes a second for an hour,
   and again with the vacuum horizon held for ten minutes: whether dead
   tuples and size level off.
-- **M9.** The ring's migration copying 5 million rows: how long publishers
-  wait.
+- **M9.** The ring's migration copying 5 million rows, ADR-0035's index
+  built in it: how long publishers wait, against the host's one-second
+  write budget (its ADR-0083). Above it, the copy's bound is what keeps the
+  upgrade within budget, and a host drains its relays first.
+- **M11.** The fetch on the ring under epochs — an epoch's start over its
+  named windows, a batch over its per-generation branches — against
+  ADR-0035's figures on one table.
 - **M10.** The cluster's rate of transaction ids at the launch's load, every
   context's database on one server: the margin in generations against
   `margin_age`.
@@ -514,8 +592,9 @@ On a scratch database, each with the result that changes the decision:
 ## References
 
 - ADR-0003, ADR-0005, ADR-0006, ADR-0007, ADR-0008, ADR-0009, ADR-0010,
-  ADR-0029, ADR-0030.
-- `crates/outbox/README.md`, `crates/inbox/README.md`.
+  ADR-0029, ADR-0030, ADR-0034, ADR-0035.
+- `crates/outbox/README.md`, `crates/inbox/README.md`,
+  `crates/migration/src/lib.rs`.
 - `verify/tla/Outbox.tla`, `verify/tla/Inbox.tla`, `verify/tla/Bridge.tla`.
 - PostgreSQL 14 documentation: 5.11 Table Partitioning; `ALTER TABLE`
   (`ATTACH`, `DETACH … CONCURRENTLY`); `TRUNCATE`; 73.7 Heap-Only Tuples.
@@ -551,3 +630,19 @@ On a scratch database, each with the result that changes the decision:
     - the grace re-armed after outages.
   - **Withdrawn:** the stream record, on a measurement of the relay emitting a
     stream out of order. That order is recorded as a finding of its own.
+- 2026-11-03 — Amended on top of ADR-0035, from its review of roles:
+  - **The ring under epochs:**
+    - "passed" over every position's `delivered`;
+    - a new group from the floor's snapshot;
+    - an epoch's start named from `delivered`'s `xmin`;
+    - a batch over per-generation branches bounded by the epoch's own
+      positions;
+    - the counter reset's rebase on the ring.
+  - **"Closed" per database,** by its sessions' ids (measured readable).
+  - **The migrations:**
+    - the meta in a step of its own;
+    - the copy bounded per slot from outside the step, since the runner
+      refuses a read of the position table (measured);
+    - the sequence owned;
+    - ADR-0035's index built in the ring.
+  - **The stream record** stays withdrawn, its reason restated.
