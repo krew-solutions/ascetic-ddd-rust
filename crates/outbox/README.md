@@ -205,8 +205,10 @@ again — this is what keeps the rows — then records `gone_below`, the least
 row left, and `intact_from`, one past the highest id emptied. Its outcome
 goes to the observer, `on_reclamation`: a generation emptied, or the pass
 skipped and why, the position pinning the ring among the reasons. A group
-that pins it for good is dropped with `forget_group`, which refuses one that
-moved a position within the margin's age. Its errors are logged and never
+that pins it for good is dropped with `forget_group`, and a selection a
+relay no longer runs — the selection of everything, once its lanes have
+taken over — with `forget_selection`; each refuses positions moved within the
+margin's age. Its errors are logged and never
 stop dispatch; a counter reset stops it as it stops the relay.
 
 

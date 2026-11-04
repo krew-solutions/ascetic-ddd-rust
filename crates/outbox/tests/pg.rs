@@ -3043,3 +3043,48 @@ async fn an_emptying_waiting_for_its_lock_holds_back_no_dispatch() {
         "{outcome:?}"
     );
 }
+
+/// A selection a relay no longer runs — the selection of everything, once
+/// its lanes have taken over — is forgotten alone, its lanes kept, so that
+/// it no longer pins the ring; one that moved within the margin's age is
+/// refused (ADR-0033 decision 4).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_selection_of_everything_is_forgotten_once_its_lanes_took_over() {
+    let f = fixture_ring("forget_selection", Ring::new(2, 1 << 40))
+        .await
+        .with_reclaiming(eager(0));
+    let (seen, subscriber) = collector();
+    let everything = Selection::group("relay");
+    let lane = Selection::group("relay").uri("kafka:");
+    f.publish(&[message("kafka://orders", 1)]).await;
+    f.drain(&subscriber, &everything).await;
+    f.publish(&[message("kafka://orders", 2)]).await;
+    f.drain(&subscriber, &lane).await;
+    assert_eq!(*seen.lock().unwrap(), [1, 2]);
+    // the selection of everything, left behind, pins the ring
+    assert!(matches!(
+        reclaim_settled(&f.outbox).await,
+        Reclamation::Skipped(Skipped::NotPassed { uri, .. }) if uri.is_empty()
+    ));
+
+    let patient = beside(&f, Ring::new(2, 1 << 40)).with_reclaiming(Reclaiming {
+        margin_age: Duration::from_secs(3600),
+        ..eager(0)
+    });
+    let refused = f
+        .sessions
+        .session(async |session| patient.forget_selection(&session, &everything).await)
+        .await;
+    assert!(matches!(refused, Err(Error::GroupActive { .. })));
+    f.sessions
+        .session(async |session| f.outbox.forget_selection(&session, &everything).await)
+        .await
+        .unwrap();
+    assert!(f.positions(&everything).await.is_empty());
+    assert_eq!(f.positions(&lane).await.len(), 1);
+    assert!(matches!(
+        reclaim_settled(&f.outbox).await,
+        Reclamation::Emptied { .. }
+    ));
+}
