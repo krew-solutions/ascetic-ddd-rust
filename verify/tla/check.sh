@@ -70,6 +70,15 @@ echo "== outbox, statement by statement: the migration, an old relay beside a ne
 tlc -config OutboxPgMigrate.cfg MCOutboxPg.tla
 echo "== outbox, statement by statement: the migration, the old relay stopping, hands nothing on twice"
 tlc -config OutboxPgMigrateExact.cfg MCOutboxPg.tla
+echo "== outbox, statement by statement: ADR-0033's ring loses nothing, and both bounds hold"
+tlc -config OutboxPgRing.cfg MCOutboxPg.tla
+echo "== outbox, statement by statement: the ring with a rewind, refused below intact_from"
+tlc -config OutboxPgRingRewind.cfg MCOutboxPg.tla
+echo "== outbox, statement by statement: the ring with a group created later"
+tlc -config OutboxPgRingLate.cfg MCOutboxPg.tla
+echo "== outbox, statement by statement: the ring without \"closed\", or with \"passed\" read first, still loses nothing: the recheck keeps the rows"
+tlc -config OutboxPgRingNoClosed.cfg MCOutboxPg.tla
+tlc -config OutboxPgRingPassedFirst.cfg MCOutboxPg.tla
 for case in \
   "OutboxPgMixedDown:Temporal properties were violated" \
   "OutboxPgXmin:Invariant VersionOrder is violated" \
@@ -88,7 +97,14 @@ for case in \
   "OutboxPgCache2:Invariant VersionOrder is violated" \
   "OutboxPgMigrateDelivered:Invariant NoRedeliveryWithoutFailure is violated" \
   "OutboxPgMigrateTooFar:Invariant NoPassedOver is violated" \
-  "OutboxPgMigrateShared:Invariant NoPassedOver is violated"; do
+  "OutboxPgMigrateShared:Invariant NoPassedOver is violated" \
+  "OutboxPgRingNoRecheck:Invariant NoPositionBelowGone is violated" \
+  "OutboxPgRingPassedFirstNoRecheck:Invariant NoPositionBelowGone is violated" \
+  "OutboxPgRingNamesEarly:Invariant NoPassedOver is violated" \
+  "OutboxPgRingOneBound:Invariant IntactFromSound is violated" \
+  "OutboxPgRingNewGroupNaive:Invariant NoPassedOver is violated" \
+  "OutboxPgRingRewindBelow:Invariant NoPositionBelowGone is violated" \
+  "OutboxPgRingNoRecord:Invariant NoPassedOver is violated"; do
   echo "== outbox, statement by statement: ${case%%:*}, a refuted design, must fail"
   must_fail "${case%%:*}" MCOutboxPg.tla "${case#*:}"
 done

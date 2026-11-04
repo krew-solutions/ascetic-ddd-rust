@@ -84,11 +84,18 @@ dispatcher's transaction against PostgreSQL under READ COMMITTED.
   old pair; it converts every position at once; after it, old relays may go
   on beside new ones until they retire, on the old pair the new ones keep up.
 - **The position sequence** hands each session a block of `Cache` values.
+- **ADR-0033's ring:** rows live in `K` generations by their transaction's
+  window of `R` ids. A reclaimer works one generation at a time, its checks
+  each a step — past, closed, passed — then the partition's lock, which
+  waits for every open writer of a row in it, the recheck of "passed", and
+  `TRUNCATE`. It records `gone_below` and `intact_from`. A group may be
+  created later, from the current snapshot kept below `intact_from`; a
+  rewind below it is refused. An epoch names the generations its rows can
+  lie in, from its two snapshots, and records those it found rows in.
 
 Left out:
 - the probe of decision 2, which decides whether a look happens, not what
   it does;
-- the ring of ADR-0033 — the next step;
 - the refinement to `Outbox.tla`, which waits for that module to be restated
   over versions.
 
@@ -106,6 +113,9 @@ relay can acknowledge it halfway, and one new relay runs beside one old.
 | `NoRedeliveryWithoutFailure` | invariant | a row is received twice only after a rollback or a rewind |
 | `EpochCoversDelivered` | invariant | an epoch in flight sees everything delivered |
 | `DeliveredMonotone` | action | `delivered` only grows, but at a rewind |
+| `NoPositionBelowGone` | invariant | a row emptied with its generation was passed by every group's position |
+| `IntactFromSound` | invariant | no row at or above `intact_from` was emptied |
+| `GoneBelowSound` | invariant | no row is left below `gone_below` |
 | `OldPairSound` | invariant | during a migration, the old pair, which old relays read, passes no row unreceived |
 | `NoHeadOfLineBlocking` | liveness | a committed row is received whatever transaction stays open for ever, unless its own lane's destination is down |
 
@@ -123,6 +133,15 @@ Must hold:
   beside a new one until it retires; nothing lost, by either position.
 - `OutboxPgMigrateExact.cfg`: the old relay stopping at the migration;
   nothing handed on twice, and the order holds across it.
+- `OutboxPgRing.cfg`, `OutboxPgRingRewind.cfg`, `OutboxPgRingLate.cfg`: the
+  ring as decided, two generations of one id each — alone, with a rewind,
+  with a group created later. About 136 000, 863 000 and 1.35 million
+  states; under a minute each.
+- `OutboxPgRingNoClosed.cfg`, `OutboxPgRingPassedFirst.cfg`: the ring without
+  "closed", or with "passed" read before it. Both hold: the recheck of
+  "passed" under the partition's lock keeps the rows, and the checks before
+  the lock only spare a lock queued in vain. ADR-0033's first reading had
+  them as safety checks.
 
 Must fail, each with the property it breaks (`check.sh` greps it):
 
@@ -146,6 +165,13 @@ Must fail, each with the property it breaks (`check.sh` greps it):
 | `OutboxPgMigrateDelivered` | positions converted to `'L:L:'` alone | `NoRedeliveryWithoutFailure` |
 | `OutboxPgMigrateTooFar` | positions converted to `'L+1:L+1:'` alone | `NoPassedOver` |
 | `OutboxPgMigrateShared` | the epoch's offset in the old column, which an old relay moves | `NoPassedOver` |
+| `OutboxPgRingNoRecheck` | the ring truncating without the recheck under the lock | `NoPositionBelowGone` |
+| `OutboxPgRingPassedFirstNoRecheck` | "passed" read first, and no recheck | `NoPositionBelowGone` |
+| `OutboxPgRingNamesEarly` | an epoch's generations named before its snapshot | `NoPassedOver` |
+| `OutboxPgRingOneBound` | one bound for both meanings | `IntactFromSound` |
+| `OutboxPgRingNewGroupNaive` | a group created at `'F:F:'`, F = `intact_from` | `NoPassedOver` |
+| `OutboxPgRingRewindBelow` | a rewind below `intact_from` | `NoPositionBelowGone` |
+| `OutboxPgRingNoRecord` | a converted epoch with no generations recorded | `NoPassedOver` |
 
 Two of the traces, as TLC prints them:
 

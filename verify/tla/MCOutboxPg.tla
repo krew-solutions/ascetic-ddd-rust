@@ -14,7 +14,7 @@
 EXTENDS OutboxPg, TLC
 
 CONSTANTS t1, t2, t3, o1, m1, m2, m3, sA, sB, inbox, broker, all, si, sk, d1, d2,
-          ses1, ses2
+          ses1, ses2, late
 
 MCTxs == {t1, t2, t3, o1}
 \* The writer of the later version, and the other database's transaction,
@@ -58,5 +58,15 @@ MCOld == {d2}
 \* The next version's writer holding its id before the first transaction's:
 \* xid order and position order then differ.
 MCMigEarly == {t2}
+
+\* The ring's instance: one group from the start, one created later, a
+\* dispatcher each; the fourth transaction of another database.
+MCRingSels == {all, late}
+MCRingLanes == (all :> {inbox, broker}) @@ (late :> {inbox, broker})
+MCRingOf == (d1 :> all) @@ (d2 :> late)
+MCLate == {late}
+MCNoSel == {}
+MCOtherDb == {o1}
+MCOnlyOther == {o1}
 
 =============================================================================

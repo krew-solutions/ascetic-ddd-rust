@@ -33,6 +33,11 @@
 (* of ADR-0035 run, and old ones may go on in a rolling deploy until they  *)
 (* retire, on the old pair the new relays keep up.                         *)
 (*                                                                         *)
+(* The ring of ADR-0033: rows live in K generations by their transaction's *)
+(* window of R ids; a reclaimer empties a generation whole once its checks  *)
+(* pass, statement by statement, and records two bounds.  A group may be   *)
+(* created later, and rewinds and new groups keep above `intact_from`.     *)
+(*                                                                         *)
 (* Switches name the designs the reviews of ADR-0035 refuted, and today's  *)
 (* rule; each must-fail configuration sets one and names the property it   *)
 (* breaks (check.sh).                                                      *)
@@ -76,6 +81,20 @@ CONSTANTS
   Conversion,       \* "exact"; "delivered": 'L:L:' alone; "toofar": 'L+1:L+1:' alone
   OldPair,          \* "kept"; "frozen": not written; "shared": the epoch's offset in the old column
   RetireAtMigration,\* every old relay stops when the positions are converted
+  Ring,             \* the outbox is ADR-0033's ring
+  R,                \* ids a window holds
+  K,                \* generations
+  Margin,           \* windows a generation's newest must lie below the next id's
+  OtherDb,          \* SUBSET Txs: transactions of another database
+  LateSels,         \* SUBSET Sels: groups created later
+  NewGroupForm,     \* "below": the current snapshot below intact_from; "naive": 'F:F:'
+  RewindFloor,      \* a rewind below intact_from is refused
+  ClosedCheck,      \* the reclaimer checks no open transaction of this database is in it
+  PassedFirst,      \* "passed" read before "closed"
+  Recheck,          \* "passed" read again under the partition's lock
+  OneBound,         \* one bound for both meanings: intact_from is gone_below
+  NamesEarly,       \* an epoch's generations named before its snapshot
+  RecordConverted,  \* a converted epoch's generations: "next" look computes them, or "none"
   None              \* a model value
 
 ASSUME BatchSize \in Nat \ {0}
@@ -87,6 +106,9 @@ ASSUME DrainTo \in {"epoch", "now"}
 ASSUME RewindForm \in {"intersect", "naive"}
 ASSUME Conversion \in {"exact", "delivered", "toofar"}
 ASSUME OldPair \in {"kept", "frozen", "shared"}
+ASSUME R \in Nat \ {0} /\ K \in Nat \ {0}
+ASSUME NewGroupForm \in {"below", "naive"}
+ASSUME RecordConverted \in {"next", "none"}
 
 VARIABLES
   \* PostgreSQL
@@ -118,13 +140,27 @@ VARIABLES
   received,  \* [Sels -> Seq(Msgs)], in order, repeats included
   since,     \* [Sels -> SUBSET Msgs], received since the last rewind
   crashes,
-  rewinds
+  rewinds,
+  \* the ring
+  gone,      \* SUBSET Msgs: rows emptied with their generation
+  goneBelow, \* no row is left, or will be written, below it
+  intactFrom,\* every row written from it is kept
+  exists,    \* [Sels -> BOOLEAN]: the group's position rows exist
+  hist,      \* [Sels -> SUBSET Msgs]: rows a late group started past
+  rpc,       \* the reclaimer: "idle", or how far its pass has got
+  rg,        \* the generation it works on
+  gens,      \* [Sels -> SUBSET Gens]: the epoch's generations, recorded
+  gensSet,   \* [Sels -> BOOLEAN]: recorded
+  wGens, wGensSet  \* the same, as the dispatcher's transaction holds them
 
 pg == <<txState, xid, nextXid, latest, written, pos, nextPos, cNext, cEnd>>
 rows == <<dlv, ep, off, endp, old, lock, migrated, retired>>
 work == <<pc, stmt, wDlv, wEp, wOff, wEnd, wOld, drain, batch>>
 ghost == <<received, since, crashes, rewinds>>
-vars == <<pg, rows, work, ghost>>
+ringv == <<gone, goneBelow, intactFrom, exists, hist, rpc, rg>>
+genv == <<gens, gensSet>>
+wgenv == <<wGens, wGensSet>>
+vars == <<pg, rows, work, ghost, ringv, genv, wgenv>>
 
 NoSnap == [xmin |-> 0, xmax |-> 0, xip |-> {}]
 \* Nothing delivered: '1:1:' ('0:0:' is not a valid snapshot).
@@ -138,6 +174,11 @@ Max(S) == CHOOSE x \in S : \A y \in S : x >= y
 
 MaxXid == Cardinality(Txs)
 Ids == 1..MaxXid
+
+\* A transaction's window, and the generation it falls in.
+Win(x) == x \div R
+Gen(x) == (x \div R) % K
+Gens == 0..(K - 1)
 
 (* ------------------------------------------------------------------------ *)
 (* PostgreSQL                                                                 *)
@@ -155,7 +196,7 @@ Vis(x, s) == x # 0 /\ (x < s.xmin \/ (x < s.xmax /\ x \notin s.xip))
 
 XidOf(m) == xid[TxOf[m]]
 Committed(m) == txState[TxOf[m]] = "committed"
-Readable(m, s) == written[m] /\ Committed(m) /\ Vis(XidOf(m), s)
+Readable(m, s) == written[m] /\ m \notin gone /\ Committed(m) /\ Vis(XidOf(m), s)
 InSel(m, s) == LaneOf[m] \in SelLanes[s]
 
 Key(m) == <<XidOf(m), pos[m]>>
@@ -197,6 +238,12 @@ Init ==
   /\ batch = [d \in Dispatchers |-> <<>>]
   /\ received = [s \in Sels |-> <<>>] /\ since = [s \in Sels |-> {}]
   /\ crashes = 0 /\ rewinds = 0
+  /\ gone = {} /\ goneBelow = 1 /\ intactFrom = 1
+  /\ exists = [s \in Sels |-> s \notin LateSels]
+  /\ hist = [s \in Sels |-> {}]
+  /\ rpc = "idle" /\ rg = 0
+  /\ gens = [s \in Sels |-> {}] /\ gensSet = [s \in Sels |-> TRUE]
+  /\ wGens = [d \in Dispatchers |-> {}] /\ wGensSet = [d \in Dispatchers |-> TRUE]
 
 (* ------------------------------------------------------------------------ *)
 (* Producers                                                                  *)
@@ -205,7 +252,7 @@ Begin(t) ==
   /\ txState[t] = "idle"
   /\ txState' = [txState EXCEPT ![t] = "open"]
   /\ UNCHANGED <<xid, nextXid, latest, written, pos, nextPos, cNext, cEnd>>
-  /\ UNCHANGED <<rows, work, ghost>>
+  /\ UNCHANGED <<rows, work, ghost, ringv, genv, wgenv>>
 
 \* A write before any outbox row assigns the id: the inbox's take, a permit.
 TakeXid(t) ==
@@ -213,7 +260,7 @@ TakeXid(t) ==
   /\ txState[t] = "open" /\ xid[t] = 0
   /\ xid' = [xid EXCEPT ![t] = nextXid] /\ nextXid' = nextXid + 1
   /\ UNCHANGED <<txState, latest, written, pos, nextPos, cNext, cEnd>>
-  /\ UNCHANGED <<rows, work, ghost>>
+  /\ UNCHANGED <<rows, work, ghost, ringv, genv, wgenv>>
 
 Predecessors(m) == {n \in Msgs : StreamOf[n] = StreamOf[m] /\ VersionOf[n] < VersionOf[m]}
 Serialised(m) == \A n \in Predecessors(m) : Committed(n)
@@ -242,7 +289,7 @@ Write(m) ==
      THEN xid' = [xid EXCEPT ![t] = nextXid] /\ nextXid' = nextXid + 1
      ELSE UNCHANGED <<xid, nextXid>>
   /\ UNCHANGED <<txState, latest>>
-  /\ UNCHANGED <<rows, work, ghost>>
+  /\ UNCHANGED <<rows, work, ghost, ringv, genv, wgenv>>
 
 Completed(t) == IF xid[t] # 0 /\ xid[t] > latest THEN xid[t] ELSE latest
 
@@ -252,7 +299,7 @@ Commit(t) ==
   /\ txState' = [txState EXCEPT ![t] = "committed"]
   /\ latest' = Completed(t)
   /\ UNCHANGED <<xid, nextXid, written, pos, nextPos, cNext, cEnd>>
-  /\ UNCHANGED <<rows, work, ghost>>
+  /\ UNCHANGED <<rows, work, ghost, ringv, genv, wgenv>>
 
 Abort(t) ==
   /\ t \in MayAbort
@@ -260,7 +307,7 @@ Abort(t) ==
   /\ txState' = [txState EXCEPT ![t] = "aborted"]
   /\ latest' = Completed(t)
   /\ UNCHANGED <<xid, nextXid, written, pos, nextPos, cNext, cEnd>>
-  /\ UNCHANGED <<rows, work, ghost>>
+  /\ UNCHANGED <<rows, work, ghost, ringv, genv, wgenv>>
 
 (* ------------------------------------------------------------------------ *)
 (* A dispatcher's transaction, statement by statement                         *)
@@ -268,9 +315,9 @@ Abort(t) ==
 IsOld(d) == d \in OldDispatchers
 RuleOf(d) == IF IsOld(d) THEN "xmin" ELSE Rule
 \* Only a design that reads under the lock's statement's snapshot keeps it.
-KeepsStmt(d) == OneStatement \/ RuleOf(d) = "xmin"
+KeepsStmt(d) == OneStatement \/ NamesEarly \/ RuleOf(d) = "xmin"
 \* New relays wait for the migration; old ones run until they retire.
-Active(d) == IF IsOld(d) THEN d \notin retired ELSE migrated
+Active(d) == exists[SelOf[d]] /\ IF IsOld(d) THEN d \notin retired ELSE migrated
 
 \* The transaction ends: the lock goes, the working copy with it.
 Release(d) ==
@@ -286,7 +333,7 @@ Snap(d) ==
   /\ stmt' = [stmt EXCEPT ![d] = Now]
   /\ pc' = [pc EXCEPT ![d] = "snapped"]
   /\ UNCHANGED <<wDlv, wEp, wOff, wEnd, wOld, drain, batch>>
-  /\ UNCHANGED <<pg, rows, ghost>>
+  /\ UNCHANGED <<pg, rows, ghost, ringv, genv, wgenv>>
 
 \* ADR-0007: the batch in the lock's own statement, below its xmin, in
 \* (transaction id, position) order, past the old pair.
@@ -303,17 +350,19 @@ Lock(d) ==
   /\ pc[d] = IF KeepsStmt(d) THEN "snapped" ELSE "idle"
   /\ IF lock[s] # None
      THEN /\ pc' = [pc EXCEPT ![d] = "idle"]
-          /\ UNCHANGED <<lock, wDlv, wEp, wOff, wEnd, wOld, batch>>
+          /\ UNCHANGED <<lock, wDlv, wEp, wOff, wEnd, wOld, batch, wgenv>>
      ELSE /\ lock' = [lock EXCEPT ![s] = d]
           /\ wDlv' = [wDlv EXCEPT ![d] = dlv[s]] /\ wEp' = [wEp EXCEPT ![d] = ep[s]]
           /\ wOff' = [wOff EXCEPT ![d] = OffOf(s)] /\ wEnd' = [wEnd EXCEPT ![d] = endp[s]]
           /\ wOld' = [wOld EXCEPT ![d] = old[s]]
+          /\ wGens' = [wGens EXCEPT ![d] = gens[s]]
+          /\ wGensSet' = [wGensSet EXCEPT ![d] = gensSet[s]]
           /\ IF RuleOf(d) = "epoch"
              THEN pc' = [pc EXCEPT ![d] = "locked"] /\ UNCHANGED batch
              ELSE /\ batch' = [batch EXCEPT ![d] = OldBatch(d, s)]
                   /\ pc' = [pc EXCEPT ![d] = "batched"]
   /\ UNCHANGED <<stmt, drain, dlv, ep, off, endp, old, migrated, retired>>
-  /\ UNCHANGED <<pg, ghost>>
+  /\ UNCHANGED <<pg, ghost, ringv, genv>>
 
 \* Decision 3: new in the epoch -- or a refuted form of it.
 IsNew(m, dd, e) ==
@@ -332,7 +381,19 @@ Read(d) ==
       fresh == wEp[d] = NoSnap
       e == IF fresh THEN r ELSE wEp[d]
       dd == wDlv[d]
-      mem == {m \in Msgs : InSel(m, s) /\ Readable(m, r) /\ IsNew(m, dd, e)}
+      \* ADR-0033: the generations an epoch's rows can lie in, from its two
+      \* snapshots -- or from the lock's statement's, taken earlier.
+      ne == IF NamesEarly THEN stmt[d] ELSE e
+      names == {Gen(x) : x \in dd.xmax..(ne.xmax - 1)} \cup {Gen(x) : x \in {y \in dd.xip : Vis(y, ne)}}
+      Named(m) == ~Ring \/ Gen(XidOf(m)) \in names
+      mem == {m \in Msgs : InSel(m, s) /\ Readable(m, r) /\ IsNew(m, dd, e) /\ Named(m)}
+      \* the generations recorded: at a start, those it found rows in; for a
+      \* converted epoch with none recorded, its next look's, or none
+      rec == IF fresh THEN {Gen(XidOf(m)) : m \in mem}
+             ELSE IF wGensSet[d] THEN wGens[d]
+             ELSE IF RecordConverted = "next"
+                  THEN {Gen(XidOf(m)) : m \in {n \in Msgs : InSel(n, s) /\ Readable(n, r) /\ IsNew(n, dd, e)}}
+                  ELSE {}
       o == IF ~fresh THEN wOff[d]
            ELSE IF OffsetCarried THEN wOff[d]
            ELSE IF mem = {} THEN 0 ELSE Min({pos[m] : m \in mem}) - 1
@@ -340,7 +401,8 @@ Read(d) ==
             ELSE IF mem = {} THEN 0 ELSE Max({pos[m] : m \in mem})
       cand == {m \in Msgs : /\ InSel(m, s) /\ Readable(m, r) /\ pos[m] > o
                             /\ (Bounded => pos[m] <= en)
-                            /\ (Filtered => IsNew(m, dd, e))}
+                            /\ (Filtered => IsNew(m, dd, e))
+                            /\ (Ring => Gen(XidOf(m)) \in rec)}
       b == Take(Sorted(cand, Order = "xid"), BatchSize)
   IN
   /\ pc[d] = "locked"
@@ -349,17 +411,18 @@ Read(d) ==
              /\ drain' = [drain EXCEPT ![d] = TRUE]
              /\ batch' = [batch EXCEPT ![d] = <<>>]
              /\ pc' = [pc EXCEPT ![d] = "handed"]
-             /\ UNCHANGED <<lock, wOff, wEnd>>
+             /\ UNCHANGED <<lock, wOff, wEnd, wgenv>>
           \/ /\ Release(d)
-             /\ UNCHANGED <<wEp, wOff, wEnd>>
+             /\ UNCHANGED <<wEp, wOff, wEnd, wgenv>>
      ELSE /\ wEp' = [wEp EXCEPT ![d] = e]
           /\ wOff' = [wOff EXCEPT ![d] = o] /\ wEnd' = [wEnd EXCEPT ![d] = en]
           /\ batch' = [batch EXCEPT ![d] = b]
           /\ drain' = [drain EXCEPT ![d] = Len(b) < BatchSize]
           /\ pc' = [pc EXCEPT ![d] = "batched"]
+          /\ wGens' = [wGens EXCEPT ![d] = rec] /\ wGensSet' = [wGensSet EXCEPT ![d] = TRUE]
           /\ UNCHANGED lock
   /\ UNCHANGED <<stmt, wDlv, wOld>>
-  /\ UNCHANGED <<pg, dlv, ep, off, endp, old, migrated, retired, ghost>>
+  /\ UNCHANGED <<pg, dlv, ep, off, endp, old, migrated, retired, ghost, ringv, genv>>
 
 \* The subscriber takes the batch; what it took stays taken, whatever the
 \* transaction does next.  A broker that is down takes nothing.
@@ -372,7 +435,7 @@ Hand(d) ==
   /\ pc' = [pc EXCEPT ![d] = "handed"]
   /\ UNCHANGED <<crashes, rewinds>>
   /\ UNCHANGED <<stmt, wDlv, wEp, wOff, wEnd, wOld, drain, batch>>
-  /\ UNCHANGED <<pg, rows>>
+  /\ UNCHANGED <<pg, rows, ringv, genv, wgenv>>
 
 \* COMMIT.  An old relay moves the old pair to the batch's last row.  A new
 \* one moves the offset to it; a short batch drains the epoch -- delivered
@@ -399,9 +462,11 @@ Ack(d) ==
              ELSE /\ off' = [off EXCEPT ![s] = newOff]
                   /\ old' = [old EXCEPT ![s] = IF Migration /\ OldPair = "kept"
                                                  THEN <<newDlv.xmin - 1, MaxPos>> ELSE @]
+  /\ gens' = [gens EXCEPT ![s] = IF drain[d] THEN {} ELSE wGens[d]]
+  /\ gensSet' = [gensSet EXCEPT ![s] = IF drain[d] THEN TRUE ELSE wGensSet[d]]
   /\ Release(d)
   /\ UNCHANGED <<stmt, wDlv, wEp, wOff, wEnd, wOld, migrated, retired>>
-  /\ UNCHANGED <<pg, ghost>>
+  /\ UNCHANGED <<pg, ghost, ringv, wgenv>>
 
 \* The dispatcher dies, or its subscriber fails: ROLLBACK.
 Crash(d) ==
@@ -410,6 +475,7 @@ Crash(d) ==
   /\ Release(d)
   /\ UNCHANGED <<stmt, wDlv, wEp, wOff, wEnd, wOld>>
   /\ UNCHANGED <<pg, dlv, ep, off, endp, old, migrated, retired, received, since, rewinds>>
+  /\ UNCHANGED <<ringv, genv, wgenv>>
 
 (* ------------------------------------------------------------------------ *)
 (* The migration of decision 10, and the old relays' end                      *)
@@ -442,16 +508,18 @@ Migrate ==
      THEN /\ retired' = OldDispatchers
           /\ pc' = [d \in Dispatchers |-> IF IsOld(d) THEN "idle" ELSE pc[d]]
      ELSE UNCHANGED <<retired, pc>>
+  /\ gens' = [s \in Sels |-> {}]
+  /\ gensSet' = [s \in Sels |-> Converted(s).e = NoSnap \/ RecordConverted = "none"]
   /\ UNCHANGED <<old, lock>>
   /\ UNCHANGED <<stmt, wDlv, wEp, wOff, wEnd, wOld, drain, batch>>
-  /\ UNCHANGED <<pg, ghost>>
+  /\ UNCHANGED <<pg, ghost, ringv, wgenv>>
 
 \* An old relay stops, between its transactions.
 Retire(d) ==
   /\ IsOld(d) /\ migrated /\ d \notin retired /\ pc[d] = "idle"
   /\ retired' = retired \cup {d}
   /\ UNCHANGED <<dlv, ep, off, endp, old, lock, migrated>>
-  /\ UNCHANGED <<pg, work, ghost>>
+  /\ UNCHANGED <<pg, work, ghost, ringv, genv, wgenv>>
 
 (* ------------------------------------------------------------------------ *)
 (* An operator                                                                *)
@@ -464,14 +532,101 @@ Below(sn, f) == [xmin |-> Min({sn.xmin, f}), xmax |-> Min({sn.xmax, f}),
 \* subscribers received at or above f is owed again.
 Rewind(s, f) ==
   /\ Rule = "epoch" /\ migrated /\ rewinds < MaxRewinds /\ lock[s] = None
+  /\ exists[s]
+  \* the reclaimer's key, exclusively; never below intact_from
+  /\ Ring => rpc = "idle" /\ (RewindFloor => f >= intactFrom)
   /\ rewinds' = rewinds + 1
   /\ dlv' = [dlv EXCEPT ![s] = IF RewindForm = "intersect" THEN Below(@, f) ELSE Upto(f)]
   /\ IF RewindKeepsEpoch THEN UNCHANGED <<ep, off, endp>>
      ELSE /\ ep' = [ep EXCEPT ![s] = NoSnap]
           /\ off' = [off EXCEPT ![s] = 0] /\ endp' = [endp EXCEPT ![s] = 0]
   /\ since' = [since EXCEPT ![s] = {m \in @ : XidOf(m) < f}]
+  /\ gens' = [gens EXCEPT ![s] = {}] /\ gensSet' = [gensSet EXCEPT ![s] = TRUE]
   /\ UNCHANGED <<old, lock, migrated, retired, received, crashes>>
-  /\ UNCHANGED <<pg, work>>
+  /\ UNCHANGED <<pg, work, ringv, wgenv>>
+
+(* ------------------------------------------------------------------------ *)
+(* The ring of ADR-0033: a group created later, and the reclaimer             *)
+
+\* A group's position rows are created under the reclaimer's key, shared:
+\* the current snapshot kept below intact_from -- or 'F:F:'.  What its
+\* position passes then is history it does not receive.
+NewGroup(s) ==
+  LET nd == IF NewGroupForm = "below" THEN Below(Now, intactFrom) ELSE Upto(intactFrom) IN
+  /\ Ring /\ migrated /\ s \in LateSels /\ ~exists[s] /\ rpc = "idle"
+  /\ exists' = [exists EXCEPT ![s] = TRUE]
+  /\ dlv' = [dlv EXCEPT ![s] = nd]
+  /\ hist' = [hist EXCEPT ![s] = {m \in Msgs : written[m] /\ Committed(m) /\ Vis(XidOf(m), nd)}]
+  /\ UNCHANGED <<ep, off, endp, old, lock, migrated, retired>>
+  /\ UNCHANGED <<gone, goneBelow, intactFrom, rpc, rg>>
+  /\ UNCHANGED <<pg, work, ghost, genv, wgenv>>
+
+RowsIn(g) == {m \in Msgs : written[m] /\ m \notin gone /\ Gen(XidOf(m)) = g}
+OpenHere == {xid[t] : t \in {u \in Txs \ OtherDb : txState[u] = "open" /\ xid[u] # 0}}
+
+\* Past: the generation's newest window lies Margin windows below the next id's.
+Past(g) ==
+  LET ws == {Win(XidOf(m)) : m \in RowsIn(g)} IN
+  ws # {} /\ Win(nextXid) - Max(ws) >= Margin
+
+\* Closed: no transaction of this database holds an id in it.
+Closed(g) == ~ClosedCheck \/ \A x \in OpenHere : Gen(x) # g
+
+\* Passed, under the statement's snapshot p: every row of it that p can read
+\* is visible in every group's delivered.
+PassedAt(g, p) ==
+  \A s \in Sels : exists[s] =>
+    \A m \in RowsIn(g) : Readable(m, p) => Vis(XidOf(m), dlv[s])
+
+RecIdle == rpc' = "idle" /\ UNCHANGED rg
+
+\* The candidate: the generation of the oldest row left -- the one holding
+\* gone_below when no transaction holds it lower -- if past.
+RBegin ==
+  LET left == {XidOf(m) : m \in {n \in Msgs : written[n] /\ n \notin gone}}
+      g == Gen(Min(left))
+  IN
+  /\ Ring /\ migrated /\ rpc = "idle" /\ left # {} /\ Past(g)
+  /\ rpc' = "begun" /\ rg' = g
+  /\ UNCHANGED <<gone, goneBelow, intactFrom, exists, hist>>
+  /\ UNCHANGED <<pg, rows, work, ghost, genv, wgenv>>
+
+\* Each check its own statement, in the decided order or the refuted one.
+RFirst ==
+  /\ rpc = "begun"
+  /\ IF (IF PassedFirst THEN PassedAt(rg, Now) ELSE Closed(rg))
+     THEN rpc' = "first" /\ UNCHANGED rg ELSE RecIdle
+  /\ UNCHANGED <<gone, goneBelow, intactFrom, exists, hist>>
+  /\ UNCHANGED <<pg, rows, work, ghost, genv, wgenv>>
+
+RSecond ==
+  /\ rpc = "first"
+  /\ IF (IF PassedFirst THEN Closed(rg) ELSE PassedAt(rg, Now))
+     THEN rpc' = "checked" /\ UNCHANGED rg ELSE RecIdle
+  /\ UNCHANGED <<gone, goneBelow, intactFrom, exists, hist>>
+  /\ UNCHANGED <<pg, rows, work, ghost, genv, wgenv>>
+
+\* The partition's lock waits for every open writer of a row in it -- or the
+\* pass gives up (lock_timeout).  Under it, "passed" is read again, then
+\* TRUNCATE, and both bounds are set.
+RTruncate ==
+  LET g == rg
+      trunc == RowsIn(g)
+      rest == {XidOf(m) : m \in {n \in Msgs : written[n] /\ n \notin gone \cup trunc}}
+      gb == Min(rest \cup OpenHere \cup {nextXid})
+      top == Max({XidOf(m) : m \in trunc} \cup {0})
+  IN
+  /\ rpc = "checked"
+  /\ \/ /\ \A m \in trunc : txState[TxOf[m]] # "open"
+        /\ IF Recheck /\ ~PassedAt(g, Now)
+           THEN RecIdle /\ UNCHANGED <<gone, goneBelow, intactFrom>>
+           ELSE /\ gone' = gone \cup trunc
+                /\ goneBelow' = gb
+                /\ intactFrom' = IF OneBound THEN gb ELSE Max({intactFrom, top + 1})
+                /\ RecIdle
+     \/ RecIdle /\ UNCHANGED <<gone, goneBelow, intactFrom>>
+  /\ UNCHANGED <<exists, hist>>
+  /\ UNCHANGED <<pg, rows, work, ghost, genv, wgenv>>
 
 (* ------------------------------------------------------------------------ *)
 
@@ -483,6 +638,8 @@ Next ==
   \/ \E d \in Dispatchers : Step(d) \/ Crash(d) \/ Retire(d)
   \/ Migrate
   \/ \E s \in Sels, f \in Ids : Rewind(s, f)
+  \/ \E s \in Sels : NewGroup(s)
+  \/ RBegin \/ RFirst \/ RSecond \/ RTruncate
 
 \* Every dispatcher keeps looking; no transaction need ever end.
 Fairness == \A d \in Dispatchers : WF_vars(Step(d))
@@ -525,7 +682,18 @@ Passed(s, m) == IF Rule = "epoch" /\ migrated THEN PassedNew(s, m) ELSE PassedOl
 
 \* No row the position has passed was left unreceived: lost for good.
 NoPassedOver ==
-  \A s \in Sels, m \in Msgs : InSel(m, s) /\ Live(m) /\ Passed(s, m) => m \in ReceivedSet(s)
+  \A s \in Sels, m \in Msgs :
+    exists[s] /\ InSel(m, s) /\ Live(m) /\ Passed(s, m) /\ m \notin hist[s] => m \in ReceivedSet(s)
+
+\* A row emptied with its generation was passed by every group's position:
+\* one it was not can never be received.
+NoPositionBelowGone ==
+  \A s \in Sels, m \in gone : exists[s] /\ InSel(m, s) /\ Committed(m) => Passed(s, m)
+
+\* intact_from: every row written from it is kept.  gone_below: no row is
+\* left below it.
+IntactFromSound == \A m \in gone : XidOf(m) < intactFrom
+GoneBelowSound == \A m \in Msgs : written[m] /\ m \notin gone => XidOf(m) >= goneBelow
 
 \* During a migration the old pair, which old relays still read, passes
 \* nothing unreceived either.
@@ -534,7 +702,8 @@ OldPairSound ==
 
 \* After a rewind, every row the position passes again was received again.
 RewindReplays ==
-  \A s \in Sels, m \in Msgs : InSel(m, s) /\ Live(m) /\ Passed(s, m) => m \in since[s]
+  \A s \in Sels, m \in Msgs :
+    exists[s] /\ InSel(m, s) /\ Live(m) /\ Passed(s, m) /\ m \notin hist[s] => m \in since[s]
 
 \* A stream's versions are first received in their order (decision 8).
 VersionOrder ==

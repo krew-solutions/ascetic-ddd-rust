@@ -307,7 +307,12 @@ Measured on the host's drill:
      3. **The candidate** is the generation holding `gone_below`. Its newest
         id is read on its primary key.
      4. **The checks, without its partition's lock, each in a statement of
-        its own, in this order:**
+        its own.** They spare a lock queued in vain: an `ACCESS EXCLUSIVE`
+        waiting behind an open writer holds back every fetch naming the
+        partition. They do not keep rows; the recheck of step 5 does
+        (`OutboxPg.tla`: without "closed", or with "passed" read first, no
+        row is lost while the recheck stands). In this order, so that a pass
+        rarely queues for nothing:
         - past — its newest window lies `margin` windows below the next
           id's, so no id can be assigned in its windows any more;
         - closed — no transaction of this database that could still write
@@ -334,7 +339,14 @@ Measured on the host's drill:
           scans the generation (§ Context).
      5. **Only then the partition's lock,** under `SET LOCAL lock_timeout`.
         "Passed" is read again in a statement after it; then `TRUNCATE`, and
-        both bounds and the generation's time are recorded.
+        both bounds and the generation's time are recorded. This recheck
+        keeps the rows. The lock waits for every open writer of a row in
+        the generation, so its snapshot reads them committed or gone; a
+        transaction that holds an id in the generation and has written
+        nothing yet writes after the `TRUNCATE`, into the emptied partition,
+        and an epoch's exact names find its row (ADR-0035 decision 3).
+        Without the recheck, a row committed after the checks is emptied
+        unreceived.
 
      A lock not granted, a statement cancelled, or any other error of the
      reclamation is reported and retried at the next interval. It never
@@ -777,7 +789,21 @@ confirmed in `pg_locks`, as `verify/pg/lost-wake` does.
   - A changed rule applies to rows already processed.
   - The grace is re-armed after an outage of the database.
 
-**TLA+.**
+**TLA+.** Built (2026-11-04) in `OutboxPg.tla`, with two generations of one
+id each.
+- **Must hold:** the ring with one group, a transaction of another database
+  holding an id; with a group created later; with a rewind.
+- **Must fail, each with its property:** no recheck under the lock
+  (`NoPositionBelowGone`); an epoch's names computed before its snapshot
+  (`NoPassedOver`); one bound for both meanings (`IntactFromSound`); a new
+  group at `'F:F:'` (`NoPassedOver`); a rewind below `intact_from`
+  (`NoPositionBelowGone`); a converted epoch with no generations recorded
+  (`NoPassedOver`).
+- **Found to hold, against this record's first reading:** "closed" dropped,
+  and "passed" read before "closed", while the recheck stands. Both fail
+  only with the recheck gone.
+
+As planned:
 - **ADR-0035's statement-level `OutboxPg.tla` gains:**
   - generations at small `R` and `K` that lap;
   - a reclaimed set that the fetch skips;
@@ -968,3 +994,7 @@ On a scratch database, each with the result that changes the decision:
 - 2026-11-04 — From ADR-0034's review of roles: the ring's guard takes the
   part already, by `coalesce`, so that ADR-0034 rebuilds nothing over the
   ring; M5 is decided before ADR-0034, the key changing once.
+- 2026-11-04 — Checked by `OutboxPg.tla`: the recheck of "passed" under the
+  partition's lock keeps the rows; "closed" and the order of the checks
+  before the lock only spare a lock queued in vain. Every refuted form of the
+  ring fails on its property.
