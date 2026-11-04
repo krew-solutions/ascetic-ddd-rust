@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use crate::error::{BoxError, Error};
-use crate::message::{OutboxMessage, Position};
+use crate::message::{OutboxMessage, Snapshot};
 
 /// What the outbox knows about a message once it is written: the id of the
 /// writing transaction and the message's position in the table.
@@ -33,24 +33,35 @@ pub struct Published<'a> {
     pub receipt: Receipt,
 }
 
-/// A dispatcher read a batch, or found no slot with work.
+/// A dispatcher read a batch of an epoch, or found no slot with work
+/// (ADR-0035).
 pub struct Fetched<'a> {
     /// The consumer group.
     pub group: &'a str,
-    /// The slot whose position row the statement locked; `None` when no slot
-    /// of the selection had visible work.
+    /// The slot whose position row the dispatcher locked; `None` when no
+    /// slot of the selection had work.
     pub slot: Option<u32>,
     /// How many slots the table is cut into.
     pub slots: u32,
-    /// The visibility horizon of the statement that read the batch,
-    /// `pg_snapshot_xmin`: every transaction below it had ended, so every
-    /// message of the batch has a smaller transaction id.
+    /// The `xmin` of the snapshot the batch was read under: kept for the
+    /// trace tools, which do not follow epochs yet.
     pub horizon: u64,
-    /// The most the statement would return: the batch is shorter only when
-    /// nothing more was eligible.
+    /// The snapshot the batch was read under, taken after the lock; `None`
+    /// when no slot had work.
+    pub statement: Option<&'a Snapshot>,
+    /// What the slot's group had delivered before this batch.
+    pub delivered: Option<&'a Snapshot>,
+    /// The epoch the batch belongs to.
+    pub epoch: Option<&'a Snapshot>,
+    /// The last position handed on within the epoch before this batch.
+    pub epoch_offset: i64,
+    /// The epoch's highest position.
+    pub epoch_end: i64,
+    /// The most the statement would return: a shorter batch drains the
+    /// epoch.
     pub limit: usize,
-    /// The batch, in `(transaction_id, position)` order; empty when there was
-    /// nothing to dispatch.
+    /// The batch, in the order its positions were drawn; empty when there was
+    /// nothing to hand on.
     pub messages: &'a [OutboxMessage],
 }
 
@@ -73,8 +84,11 @@ pub struct Acked<'a> {
     pub group: &'a str,
     /// The slot whose position moved.
     pub slot: u32,
-    /// The last message of the batch.
-    pub position: Position,
+    /// The last message of the batch; `None` for an epoch with nothing of
+    /// the selection's, delivered at once.
+    pub last: Option<Receipt>,
+    /// Whether the batch drained its epoch, so that delivered became it.
+    pub drained: bool,
 }
 
 /// The dispatcher's transaction closed: committed, with whether there was a

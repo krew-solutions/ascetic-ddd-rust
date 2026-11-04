@@ -26,6 +26,19 @@ pub enum Error {
     /// one as a redelivery of it. Named from the message refused; the
     /// transaction is aborted, so nothing of it commits.
     IdentityTaken(Identity),
+    /// The position sequence does not draw one value at a time: no sequence
+    /// is owned by the `position` column, or its cache is not one. A relay's
+    /// order rests on positions drawn in real time (ADR-0035 decision 6); the
+    /// service's own role repairs it with `ALTER SEQUENCE … CACHE 1`.
+    SequenceCache(String),
+    /// The position rows are in a format newer than this binary knows: a
+    /// later release wrote them, and this one would misread them.
+    Format {
+        /// The format the table is in.
+        found: i32,
+        /// The newest this binary knows.
+        known: i32,
+    },
 }
 
 /// A message's identity on a channel (`ascetic_ddd_bus::identity`), as its
@@ -67,7 +80,9 @@ impl Error {
             Error::Subscriber(_)
             | Error::Malformed(_)
             | Error::Migration(_)
-            | Error::IdentityTaken(_) => false,
+            | Error::IdentityTaken(_)
+            | Error::SequenceCache(_)
+            | Error::Format { .. } => false,
         }
     }
 }
@@ -85,6 +100,14 @@ impl fmt::Display for Error {
                 "the transaction already wrote a message under this one's identity ({identity}): \
                  the inbox would drop it as a repeat of the first"
             ),
+            Error::SequenceCache(what) => write!(
+                f,
+                "the outbox's positions are not drawn one at a time, which its order rests on: {what}"
+            ),
+            Error::Format { found, known } => write!(
+                f,
+                "the outbox's positions are in format {found}; this binary knows up to {known}"
+            ),
         }
     }
 }
@@ -95,7 +118,10 @@ impl std::error::Error for Error {
             Error::Session(error) => Some(error),
             Error::Database(error) => Some(error),
             Error::Subscriber(error) => Some(error.as_ref()),
-            Error::Malformed(_) | Error::IdentityTaken(_) => None,
+            Error::Malformed(_)
+            | Error::IdentityTaken(_)
+            | Error::SequenceCache(_)
+            | Error::Format { .. } => None,
             Error::Migration(error) => Some(error),
         }
     }

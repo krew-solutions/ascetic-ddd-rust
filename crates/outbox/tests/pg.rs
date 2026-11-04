@@ -19,7 +19,8 @@ use ascetic_ddd_outbox::observer::{
     Acked, Dispatched, Fetched, Handled, OutboxObserver, Published, Receipt,
 };
 use ascetic_ddd_outbox::{
-    BoxError, Error, Identity, Loops, Outbox, OutboxMessage, PgOutbox, Position, Selection,
+    BoxError, Error, Identity, Loops, Move, Outbox, OutboxMessage, PgOutbox, Position, Selection,
+    Snapshot,
 };
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -131,6 +132,52 @@ impl<O: OutboxObserver> Fixture<O> {
                 .unwrap();
         }
         self.wait_visible().await;
+    }
+
+    /// Publishes each message in a transaction of its own, without waiting:
+    /// for a test that holds a transaction open, under which the table would
+    /// never be older than every running one.
+    async fn publish_now(&self, messages: &[OutboxMessage]) {
+        for message in messages {
+            self.sessions
+                .session(async |session| {
+                    session
+                        .atomic(async |tx| self.outbox.publish(&tx, message).await)
+                        .await
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    /// The writing transaction of the message whose payload is `id`.
+    async fn xid_of(&self, id: u64) -> u64 {
+        let sql = format!(
+            "SELECT transaction_id::text FROM {} WHERE payload = $1",
+            self.tables.0
+        );
+        let payload = id.to_string().into_bytes();
+        self.sessions
+            .session(async |session| {
+                let row = session.connection().query_one(&sql, &[&payload]).await?;
+                Ok::<u64, Error>(row.get::<_, String>(0).parse().unwrap())
+            })
+            .await
+            .unwrap()
+    }
+
+    /// Dispatches until nothing is left.
+    async fn drain<F, Fut>(&self, subscriber: F, selection: &Selection)
+    where
+        F: Fn(&OutboxMessage) -> Fut + Send + Sync,
+        Fut: std::future::Future<Output = Result<(), BoxError>> + Send,
+    {
+        for _ in 0..20 {
+            if !self.outbox.dispatch(&subscriber, selection).await.unwrap() {
+                return;
+            }
+        }
+        panic!("the outbox never ran dry");
     }
 
     /// Waits until everything in the table is older than every running
@@ -271,15 +318,17 @@ async fn the_position_follows_the_last_acknowledged_message_and_can_be_moved() {
     let (seen, subscriber) = collector();
     f.outbox.dispatch(&subscriber, &selection).await.unwrap();
 
-    let position = f.positions(&selection).await[0];
-    assert!(position.transaction_id > 0);
-    assert_eq!(position.offset, 2);
+    // A batch shorter than its size drained the epoch: delivered sees both.
+    let position = f.positions(&selection).await[0].clone();
+    assert!(position.epoch.is_none());
+    assert!(position.delivered.sees(f.xid_of(1).await));
+    assert!(position.delivered.sees(f.xid_of(2).await));
 
-    // Back to the beginning: everything is delivered again.
+    // Back to the start: everything is delivered again.
     f.sessions
         .session(async |session| {
             f.outbox
-                .set_position(&session, &selection, Position::default())
+                .set_position(&session, &selection, Move::Start)
                 .await
         })
         .await
@@ -316,11 +365,11 @@ async fn a_uri_selects_itself_and_everything_under_it() {
     assert_eq!(*orders_seen.lock().unwrap(), [1, 2]);
     assert_eq!(*payments_seen.lock().unwrap(), [3]);
     // Each (group, uri) has a position of its own.
-    assert_eq!(
+    assert!(
         f.positions(&Selection::group("broker").uri("kafka://payments"))
             .await[0]
-            .offset,
-        3
+            .delivered
+            .sees(f.xid_of(3).await)
     );
     assert!(f.positions(&Selection::group("broker")).await.is_empty());
 }
@@ -352,7 +401,7 @@ async fn a_batch_is_at_most_batch_size_messages() {
 /// would be lost otherwise.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
-async fn nothing_is_dispatched_past_an_open_transaction() {
+async fn an_open_transaction_delays_only_its_own_rows() {
     let f = fixture("visibility").await;
     let (seen, subscriber) = collector();
     let selection = Selection::group("broker");
@@ -374,7 +423,10 @@ async fn nothing_is_dispatched_past_an_open_transaction() {
                                 .await
                         })
                         .await?;
-                    assert!(!f.outbox.dispatch(&subscriber, &selection).await?);
+                    // ADR-0007 handed nothing on past it; an epoch hands on
+                    // the committed one (ADR-0035).
+                    assert!(f.outbox.dispatch(&subscriber, &selection).await?);
+                    assert_eq!(*seen.lock().unwrap(), [2]);
                     Ok::<_, Error>(())
                 })
                 .await
@@ -382,9 +434,8 @@ async fn nothing_is_dispatched_past_an_open_transaction() {
         .await
         .unwrap();
 
-    f.wait_visible().await;
     assert!(f.outbox.dispatch(&subscriber, &selection).await.unwrap());
-    assert_eq!(*seen.lock().unwrap(), [1, 2]);
+    assert_eq!(*seen.lock().unwrap(), [2, 1]);
 }
 
 #[tokio::test]
@@ -405,7 +456,7 @@ async fn a_failing_subscriber_rolls_the_batch_back() {
         f.positions(&selection)
             .await
             .iter()
-            .all(|p| *p == Position::default())
+            .all(|p| p.delivered == Snapshot::nothing() && p.epoch.is_none())
     );
 
     let (seen, subscriber) = collector();
@@ -602,7 +653,7 @@ async fn slots_share_the_uris_without_gaps_or_overlap() {
     assert_eq!(batches, 3, "one batch per slot with work");
     let positions = f.positions(&selection).await;
     assert_eq!(positions.len(), 3);
-    assert!(positions.iter().all(|p| p.offset > 0));
+    assert!(positions.iter().all(|p| p.delivered != Snapshot::nothing()));
 }
 
 /// `run` dispatches until told to stop, and stops between batches; two loops
@@ -761,13 +812,23 @@ async fn the_port_is_implementable_without_a_database() {
     assert_eq!(*fake.0.lock().unwrap(), ["kafka://orders"]);
 }
 
-/// Records what the outbox reports, in the words of the protocol model.
+/// What a fetch reported: the snapshot its batch was read under, the epoch,
+/// what was delivered before it, and its rows' transactions.
+#[derive(Clone)]
+struct Fetch {
+    statement: Option<Snapshot>,
+    epoch: Option<Snapshot>,
+    delivered: Option<Snapshot>,
+    xids: Vec<u64>,
+}
+
+/// Records what the outbox reports, in the words of the protocol.
 #[derive(Default)]
 struct Recorder {
     events: Mutex<Vec<String>>,
     receipts: Mutex<Vec<Receipt>>,
-    fetches: Mutex<Vec<(Option<u64>, Option<u64>)>>,
-    acked: Mutex<Vec<Position>>,
+    fetches: Mutex<Vec<Fetch>>,
+    acked: Mutex<Vec<Option<Receipt>>>,
 }
 
 impl Recorder {
@@ -782,11 +843,16 @@ impl OutboxObserver for Recorder {
         self.note(format!("published {}", id_of(event.message)));
     }
     fn on_fetched(&self, event: &Fetched<'_>) {
-        let newest = event.messages.iter().filter_map(|m| m.transaction_id).max();
-        self.fetches
-            .lock()
-            .unwrap()
-            .push((Some(event.horizon), newest));
+        self.fetches.lock().unwrap().push(Fetch {
+            statement: event.statement.cloned(),
+            epoch: event.epoch.cloned(),
+            delivered: event.delivered.cloned(),
+            xids: event
+                .messages
+                .iter()
+                .filter_map(|m| m.transaction_id)
+                .collect(),
+        });
         let ids: Vec<u64> = event.messages.iter().map(id_of).collect();
         self.note(format!("fetched {ids:?}"));
     }
@@ -799,7 +865,7 @@ impl OutboxObserver for Recorder {
         self.note(format!("handled {} {outcome}", id_of(event.message)));
     }
     fn on_acked(&self, event: &Acked<'_>) {
-        self.acked.lock().unwrap().push(event.position);
+        self.acked.lock().unwrap().push(event.last);
         self.note("acked");
     }
     fn on_dispatched(&self, event: &Dispatched<'_>) {
@@ -811,11 +877,10 @@ impl OutboxObserver for Recorder {
     }
 }
 
-/// The observer sees the protocol the model in verify/tla/Outbox.tla is
-/// written in: publish with the writing transaction's id, fetch with the
-/// visibility horizon, one handling per message, the acknowledgement, the
-/// close of the transaction — a rollback when the subscriber failed, and the
-/// batch again afterwards.
+/// The observer sees the protocol: publish with the writing transaction's
+/// id, fetch with the epoch and what was delivered, one handling per
+/// message, the acknowledgement, the close of the transaction — a rollback
+/// when the subscriber failed, and the batch again afterwards.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn the_observer_sees_the_protocol() {
@@ -865,18 +930,19 @@ async fn the_observer_sees_the_protocol() {
         ]
     );
 
-    // Every batch was read below a horizon past its newest transaction: the
-    // visibility rule, as the dispatcher saw it.
+    // Every batch's rows are new in its epoch — visible in it, not in what
+    // was delivered — and readable under the batch's own snapshot (ADR-0035).
     let fetches = recorder.fetches.lock().unwrap().clone();
     assert_eq!(fetches.len(), 3);
-    assert!(
-        fetches
-            .iter()
-            .all(|(horizon, newest)| match (horizon, newest) {
-                (Some(horizon), Some(newest)) => newest < horizon,
-                _ => false,
-            })
-    );
+    assert!(fetches.iter().all(|fetch| {
+        match (&fetch.statement, &fetch.epoch, &fetch.delivered) {
+            (Some(statement), Some(epoch), Some(delivered)) => fetch
+                .xids
+                .iter()
+                .all(|x| statement.sees(*x) && epoch.sees(*x) && !delivered.sees(*x)),
+            _ => false,
+        }
+    }));
 
     // The receipt names the row the dispatcher later acknowledges.
     let receipts = recorder.receipts.lock().unwrap().clone();
@@ -887,19 +953,7 @@ async fn the_observer_sees_the_protocol() {
             .windows(2)
             .all(|pair| pair[0].position < pair[1].position)
     );
-    assert_eq!(
-        acked,
-        [
-            Position {
-                transaction_id: receipts[1].transaction_id,
-                offset: receipts[1].position
-            },
-            Position {
-                transaction_id: receipts[2].transaction_id,
-                offset: receipts[2].position
-            },
-        ]
-    );
+    assert_eq!(acked, [Some(receipts[1]), Some(receipts[2])]);
 }
 
 /// A message under the identity `(tenant-1, orders.Order, {"id": stream},
@@ -1095,6 +1149,412 @@ async fn the_guard_s_migration_names_what_a_transaction_wrote_twice_before_it() 
     }
 }
 
+/// A stream's versions leave in their writers' commit order, whatever took
+/// its transaction id first (ADR-0035). A transaction that takes its id
+/// early — the inbox's take writes its slot first — and writes version 6
+/// after another wrote version 5 and committed: ADR-0007 handed 6 on first,
+/// by transaction id.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_stream_s_versions_leave_in_commit_order_whatever_took_its_id_first() {
+    let f = fixture("commit_order").await;
+    let (seen, subscriber) = collector();
+    let selection = Selection::group("broker");
+
+    f.sessions
+        .session(async |session| {
+            session
+                .atomic(async |early| {
+                    early
+                        .connection()
+                        .query_one("SELECT pg_current_xact_id()", &[])
+                        .await?;
+                    f.publish_now(&[message("kafka://orders", 5)]).await;
+                    f.outbox
+                        .publish(&early, &message("kafka://orders", 6))
+                        .await
+                })
+                .await
+        })
+        .await
+        .unwrap();
+
+    // The writer of 6 holds the lower id: ADR-0007's order would be 6, 5.
+    assert!(f.xid_of(6).await < f.xid_of(5).await);
+    f.drain(&subscriber, &selection).await;
+    assert_eq!(*seen.lock().unwrap(), [5, 6]);
+}
+
+/// A transaction that commits while an epoch is handed on in several
+/// batches is handed on once, in a later epoch: the drain stores the epoch,
+/// not the snapshot of the moment (ADR-0035 decision 4).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_transaction_committing_between_an_epoch_s_batches_is_handed_on_once() {
+    let f = fixture("between").await.with_batch_size(1);
+    let (seen, subscriber) = collector();
+    let selection = Selection::group("broker");
+
+    f.sessions
+        .session(async |session| {
+            session
+                .atomic(async |open| {
+                    open.connection()
+                        .query_one("SELECT pg_current_xact_id()", &[])
+                        .await?;
+                    f.publish_now(&[message("kafka://orders", 1), message("kafka://orders", 2)])
+                        .await;
+                    assert!(f.outbox.dispatch(&subscriber, &selection).await?);
+                    f.outbox.publish(&open, &message("kafka://orders", 3)).await
+                })
+                .await
+        })
+        .await
+        .unwrap();
+
+    f.drain(&subscriber, &selection).await;
+    assert_eq!(*seen.lock().unwrap(), [1, 2, 3]);
+}
+
+/// The sequence must draw one position at a time (ADR-0035 decision 6):
+/// `migrate` refuses a cache of two, and so does an epoch's start, so that
+/// an `ALTER SEQUENCE` made while the service runs stops the relay; and
+/// `migrate` refuses a `position` that owns no sequence.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_sequence_must_draw_one_position_at_a_time() {
+    let f = fixture("sequence").await;
+    let selection = Selection::group("broker");
+    let sequence_sql = format!(
+        "SELECT pg_get_serial_sequence('{}', 'position')",
+        f.tables.0
+    );
+    let sequence: String = f
+        .sessions
+        .session(async |session| {
+            Ok::<_, Error>(
+                session
+                    .connection()
+                    .query_one(&sequence_sql, &[])
+                    .await?
+                    .get(0),
+            )
+        })
+        .await
+        .unwrap();
+    let alter = async |change: &str| {
+        let sql = format!("ALTER SEQUENCE {sequence} {change}");
+        f.sessions
+            .session(async |session| {
+                Ok::<_, Error>(session.connection().batch_execute(&sql).await?)
+            })
+            .await
+            .unwrap();
+    };
+
+    alter("CACHE 2").await;
+    assert!(matches!(
+        f.outbox.migrate().await,
+        Err(Error::SequenceCache(_))
+    ));
+    f.publish(&[message("kafka://orders", 1)]).await;
+    let (seen, subscriber) = collector();
+    assert!(matches!(
+        f.outbox.dispatch(&subscriber, &selection).await,
+        Err(Error::SequenceCache(_))
+    ));
+    assert!(seen.lock().unwrap().is_empty());
+
+    alter("CACHE 1").await;
+    f.outbox.migrate().await.unwrap();
+    let owner = format!("{}.position", f.tables.0);
+    alter("OWNED BY NONE").await;
+    assert!(matches!(
+        f.outbox.migrate().await,
+        Err(Error::SequenceCache(_))
+    ));
+    alter(&format!("OWNED BY {owner}")).await;
+    f.outbox.migrate().await.unwrap();
+}
+
+/// ADR-0007's tables, as its released baseline made them.
+const RELEASED_BASELINE: &str = r#"
+    CREATE TABLE IF NOT EXISTS {outbox} (
+        "position" BIGSERIAL,
+        "uri" VARCHAR(255) NOT NULL,
+        "payload" BYTEA NOT NULL,
+        "metadata" JSONB NOT NULL,
+        "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        "transaction_id" xid8 NOT NULL,
+        "slot" SMALLINT GENERATED ALWAYS AS ((hashtext("uri") & 2147483647) % 1) STORED,
+        PRIMARY KEY ("transaction_id", "position")
+    );
+    CREATE INDEX IF NOT EXISTS {outbox}_slot_idx ON {outbox} ("slot", "transaction_id", "position");
+    CREATE INDEX IF NOT EXISTS {outbox}_uri_position_idx
+        ON {outbox} ("uri" varchar_pattern_ops, "transaction_id", "position");
+    CREATE UNIQUE INDEX IF NOT EXISTS {outbox}_message_id_uniq
+        ON {outbox} (((metadata->>'message_id')::uuid));
+    CREATE TABLE IF NOT EXISTS {outbox}_meta ("slots" INTEGER NOT NULL);
+    INSERT INTO {outbox}_meta ("slots") SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM {outbox}_meta);
+    CREATE TABLE IF NOT EXISTS {offsets} (
+        "consumer_group" VARCHAR(255) NOT NULL,
+        "uri" VARCHAR(255) NOT NULL DEFAULT '',
+        "slot" SMALLINT NOT NULL,
+        "offset_acked" BIGINT NOT NULL DEFAULT 0,
+        "last_processed_transaction_id" xid8 NOT NULL DEFAULT '0',
+        "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY ("consumer_group", "uri", "slot")
+    );
+"#;
+
+/// ADR-0007's fetch, as its released binary runs it: a relay of the old rule
+/// still running in a rolling deploy.
+const RELEASED_FETCH: &str = r#"
+    WITH taken AS (
+        SELECT o.slot, o.offset_acked, o.last_processed_transaction_id
+        FROM {offsets} o
+        WHERE o.consumer_group = $1 AND o.uri = $2
+          AND (SELECT m."position" FROM {outbox} m
+               WHERE m.slot = o.slot
+                 AND (m.transaction_id, m."position") > (o.last_processed_transaction_id, o.offset_acked)
+                 AND m.transaction_id < pg_snapshot_xmin(pg_current_snapshot())
+                 AND ($2 = '' OR m.uri = $2 OR m.uri LIKE $3)
+               ORDER BY m.transaction_id, m."position"
+               LIMIT 1) IS NOT NULL
+        ORDER BY o.updated_at
+        LIMIT 1
+        FOR UPDATE OF o SKIP LOCKED
+    )
+    SELECT convert_from(m.payload, 'UTF8'), m.transaction_id::text
+    FROM (SELECT 1) AS one
+    LEFT JOIN taken t ON true
+    LEFT JOIN LATERAL (
+        SELECT "position", transaction_id, payload
+        FROM {outbox}
+        WHERE slot = t.slot
+          AND (transaction_id, "position") > (t.last_processed_transaction_id, t.offset_acked)
+          AND transaction_id < pg_snapshot_xmin(pg_current_snapshot())
+          AND ($2 = '' OR uri = $2 OR uri LIKE $3)
+        ORDER BY transaction_id, "position"
+        LIMIT 100
+    ) AS m ON true
+    WHERE m."position" IS NOT NULL
+    ORDER BY m.transaction_id, m."position"
+"#;
+
+/// ADR-0007's positions convert exactly (ADR-0035 decision 10): `(L, off)`
+/// hands on the rest of transaction `L` and what came after, nothing again;
+/// a position never acknowledged, `L = 0`, hands on everything. Then a relay
+/// of the old rule still running hands on from the pair the new one keeps
+/// up, `(xmin(delivered) - 1, i64::MAX)`: nothing delivered, and what comes
+/// later.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn adr_0007_s_positions_convert_exactly_and_its_relay_still_runs() {
+    let tables = (
+        "outbox_convert".to_owned(),
+        "outbox_convert_offsets".to_owned(),
+    );
+    let sessions = PgSessionPool::new(pool());
+    let outbox = PgOutbox::new(PgSessionPool::new(pool())).with_tables(
+        Identifier::new(&tables.0).unwrap(),
+        Identifier::new(&tables.1).unwrap(),
+    );
+    outbox.teardown().await.unwrap();
+    let execute = async |sql: String| {
+        sessions
+            .session(async |session| {
+                Ok::<_, Error>(session.connection().batch_execute(&sql).await?)
+            })
+            .await
+            .unwrap();
+    };
+    execute(
+        RELEASED_BASELINE
+            .replace("{outbox}", &tables.0)
+            .replace("{offsets}", &tables.1),
+    )
+    .await;
+
+    // Transaction L writes 1 and 2; a later one writes 3.
+    sessions
+        .session(async |session| {
+            session
+                .atomic(async |tx| {
+                    outbox.publish(&tx, &message("kafka://orders", 1)).await?;
+                    outbox.publish(&tx, &message("kafka://orders", 2)).await
+                })
+                .await
+        })
+        .await
+        .unwrap();
+    sessions
+        .session(async |session| {
+            session
+                .atomic(async |tx| outbox.publish(&tx, &message("kafka://orders", 3)).await)
+                .await
+        })
+        .await
+        .unwrap();
+    // The old relay of `broker` acknowledged 1 and stopped; `fresh` never
+    // acknowledged anything.
+    execute(format!(
+        "INSERT INTO {offsets} (consumer_group, uri, slot, offset_acked, last_processed_transaction_id) \
+         SELECT 'broker', '', 0, \"position\", transaction_id FROM {outbox} \
+         WHERE payload = convert_to('1', 'UTF8'); \
+         INSERT INTO {offsets} (consumer_group, uri, slot) VALUES ('fresh', '', 0);",
+        outbox = tables.0,
+        offsets = tables.1
+    ))
+    .await;
+
+    outbox.migrate().await.unwrap();
+    let f = Fixture {
+        sessions,
+        outbox: outbox.observed_by(((), TraceFile::off().recorder())),
+        tables,
+        _trace: TraceFile::off(),
+    };
+    let (broker, broker_seen) = {
+        let (seen, subscriber) = collector();
+        (subscriber, seen)
+    };
+    f.drain(&broker, &Selection::group("broker")).await;
+    assert_eq!(*broker_seen.lock().unwrap(), [2, 3]);
+    let (fresh, fresh_seen) = {
+        let (seen, subscriber) = collector();
+        (subscriber, seen)
+    };
+    f.drain(&fresh, &Selection::group("fresh")).await;
+    assert_eq!(*fresh_seen.lock().unwrap(), [1, 2, 3]);
+
+    // The old relay, on the pair kept up: it takes nothing below delivered's
+    // xmin — every transaction below it was handed on whole — and loses
+    // nothing after; what it hands on again, identities drop.
+    let from = f.positions(&Selection::group("broker")).await[0]
+        .delivered
+        .xmin;
+    let fetch = RELEASED_FETCH
+        .replace("{outbox}", &f.tables.0)
+        .replace("{offsets}", &f.tables.1);
+    let old_relay = async || {
+        f.sessions
+            .session(async |session| {
+                let rows = session
+                    .connection()
+                    .query(&fetch, &[&"broker", &"", &"/%"])
+                    .await?;
+                Ok::<Vec<(String, u64)>, Error>(
+                    rows.iter()
+                        .map(|row| (row.get(0), row.get::<_, String>(1).parse().unwrap()))
+                        .collect(),
+                )
+            })
+            .await
+            .unwrap()
+    };
+    assert!(old_relay().await.iter().all(|(_, xid)| *xid >= from));
+    f.publish(&[message("kafka://orders", 4)]).await;
+    let later = old_relay().await;
+    assert!(later.iter().all(|(_, xid)| *xid >= from));
+    assert!(later.iter().any(|(id, _)| id == "4"));
+}
+
+/// A rewind keeps of what was delivered only what lies below the
+/// transaction it goes back to (ADR-0035 decision 11): a lower transaction
+/// still running stays owed, where `'F:F:'` would mark it delivered.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_rewind_keeps_a_lower_transaction_still_running_owed() {
+    let f = fixture("rewind_open").await;
+    let (seen, subscriber) = collector();
+    let selection = Selection::group("broker");
+
+    f.sessions
+        .session(async |session| {
+            session
+                .atomic(async |open| {
+                    open.connection()
+                        .query_one("SELECT pg_current_xact_id()", &[])
+                        .await?;
+                    f.publish_now(&[message("kafka://orders", 1)]).await;
+                    assert!(f.outbox.dispatch(&subscriber, &selection).await?);
+                    let from = f.xid_of(1).await;
+                    f.sessions
+                        .session(async |session| {
+                            f.outbox
+                                .set_position(&session, &selection, Move::From(from))
+                                .await
+                        })
+                        .await?;
+                    f.outbox.publish(&open, &message("kafka://orders", 2)).await
+                })
+                .await
+        })
+        .await
+        .unwrap();
+
+    f.drain(&subscriber, &selection).await;
+    assert_eq!(*seen.lock().unwrap(), [1, 1, 2]);
+}
+
+/// A rewind clears the epoch in flight (ADR-0035 decision 11): left, the
+/// epoch would drain and mark delivered what the rewind owes again.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_rewind_during_an_epoch_clears_it() {
+    let f = fixture("rewind_epoch").await.with_batch_size(1);
+    let (seen, subscriber) = collector();
+    let selection = Selection::group("broker");
+
+    f.publish(&[message("kafka://orders", 1), message("kafka://orders", 2)])
+        .await;
+    assert!(f.outbox.dispatch(&subscriber, &selection).await.unwrap());
+    assert!(f.positions(&selection).await[0].epoch.is_some());
+    let from = f.xid_of(1).await;
+    f.sessions
+        .session(async |session| {
+            f.outbox
+                .set_position(&session, &selection, Move::From(from))
+                .await
+        })
+        .await
+        .unwrap();
+    assert!(f.positions(&selection).await[0].epoch.is_none());
+
+    f.drain(&subscriber, &selection).await;
+    assert_eq!(*seen.lock().unwrap(), [1, 1, 2]);
+}
+
+/// A look that finds nothing writes nothing (ADR-0035 decision 5): the
+/// position row keeps its version.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn an_idle_look_writes_nothing() {
+    let f = fixture("idle").await;
+    let (_, subscriber) = collector();
+    let selection = Selection::group("broker");
+    f.publish(&[message("kafka://orders", 1)]).await;
+    f.drain(&subscriber, &selection).await;
+
+    let sql = format!(
+        "SELECT xmin::text, updated_at::text FROM {} WHERE consumer_group = 'broker'",
+        f.tables.1
+    );
+    let version = async || {
+        f.sessions
+            .session(async |session| {
+                let row = session.connection().query_one(&sql, &[]).await?;
+                Ok::<(String, String), Error>((row.get(0), row.get(1)))
+            })
+            .await
+            .unwrap()
+    };
+    let before = version().await;
+    assert!(!f.outbox.dispatch(&subscriber, &selection).await.unwrap());
+    assert_eq!(version().await, before);
+}
+
 /// A released migration is never edited (ADR-0029): every database that
 /// applied it would refuse to start. A new shape is a new migration,
 /// written here with its checksum when it is released.
@@ -1117,6 +1577,14 @@ fn the_released_migrations_keep_their_checksums() {
             (
                 "20261027T120000Z_one_message_per_identity".to_owned(),
                 "fnv1a64:77bd7c9c075ddfa7:1511".to_owned()
+            ),
+            (
+                "20261104T000000Z_positions_as_snapshots".to_owned(),
+                "fnv1a64:688e10e1ac7109ee:780".to_owned()
+            ),
+            (
+                "20261104T000100Z_format".to_owned(),
+                "fnv1a64:7c51ffb5c37066b8:79".to_owned()
             )
         ]
     );

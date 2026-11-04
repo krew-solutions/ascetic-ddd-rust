@@ -544,6 +544,28 @@ Until they do, a mutation held by a model alone also gets a test.
 - the batch's plan on `(slot, position)`, at a size where the planner would
   choose it.
 
+**Built (2026-11-04),** in `crates/outbox/tests/pg.rs`, each mutation of the
+implementation listed caught by its test:
+- the measured interleaving, the early writer's lower id checked first —
+  batches ordered by transaction id;
+- an open transaction delaying only its own rows (ADR-0007's test of the
+  opposite, replaced);
+- a transaction holding an id across an epoch, committing between two
+  batches — the drain storing the current snapshot; the in-progress list's
+  branch dropped;
+- the sequence's cache refused by `migrate` and by an epoch's start, and no
+  owned sequence refused — the epoch's check removed;
+- ADR-0007's tables built by its released baseline, converted: `(L, off)` and
+  `L = 0`; its released fetch then run against them — the conversion without
+  the epoch;
+- a rewind keeping a lower running transaction owed — `'F:F:'`; a rewind
+  during an epoch — the epoch kept;
+- an idle look leaving the position row's version — every look writing.
+
+Still owed: a second dispatcher behind the first's stored epoch, which only
+the model holds today; an id held in another database; the batch's plan,
+with ADR-0033's index.
+
 **The host.**
 - Two requests for one Device's projection — one from a tile — the first held
   at a barrier after its slot's claim: its projections leave in version order

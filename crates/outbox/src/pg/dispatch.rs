@@ -9,8 +9,8 @@ use super::{Loops, PgOutbox, Selection};
 use ascetic_ddd_session::SessionError;
 
 use crate::error::{BoxError, Error};
-use crate::message::{OutboxMessage, Position};
-use crate::observer::{Acked, Dispatched, Fetched, Handled, OutboxObserver};
+use crate::message::{Epoch, Move, OutboxMessage, Position};
+use crate::observer::{Acked, Dispatched, Fetched, Handled, OutboxObserver, Receipt};
 
 /// What ended a dispatch transaction in failure, with the slot it had taken,
 /// so that the observer learns which batch rolled back.
@@ -35,15 +35,22 @@ where
     O: OutboxObserver,
 {
     /// Dispatches the next batch of `selection` to `subscriber`: the batch of
-    /// whichever slot has visible work and is held by nobody, least recently
-    /// served first.
+    /// whichever slot has work and is held by nobody, least recently served
+    /// first (ADR-0035).
     ///
-    /// Returns whether there was anything to dispatch. The subscriber runs
-    /// inside the dispatcher's transaction, under the lock of the slot's
-    /// position; if it fails, the batch is rolled back and redelivered. A
-    /// dispatcher has no identity: any number of them, in any number of
-    /// processes, share a selection through the locks alone, and one that
-    /// dies releases its slot with its transaction.
+    /// One transaction: the look that takes the slot's position row; the
+    /// epoch's start, unless one is in flight; its next batch, by position;
+    /// the subscriber, given each message; the position moved past the batch,
+    /// and, when the batch is shorter than its size, `delivered` moved to the
+    /// epoch. Every read after the lock runs under a snapshot taken after it,
+    /// so a stored epoch is read whole. An epoch with nothing of this
+    /// selection's is delivered at once.
+    ///
+    /// Returns whether a position moved. If the subscriber fails, the batch
+    /// is rolled back and comes again. A dispatcher has no identity: any
+    /// number of them, in any number of processes, share a selection through
+    /// the locks alone, and one that dies releases its slot with its
+    /// transaction.
     pub async fn dispatch<F, Fut>(
         &self,
         subscriber: F,
@@ -54,36 +61,139 @@ where
         Fut: Future<Output = Result<(), BoxError>> + Send,
     {
         let (group, uri) = (&selection.consumer_group, &selection.uri);
+        let limit = self.batch_size as usize;
         let before_slot = |error: Error| Failed { slot: None, error };
         let outcome: Result<Option<u32>, Failed> = self
             .pool
             .session(async |session| {
                 session
                     .atomic(async |tx| {
-                        let mut batch = self.fetch(&tx, group, uri).await.map_err(before_slot)?;
-                        if !batch.known {
+                        let mut taken = self.take(&tx, group, uri).await.map_err(before_slot)?;
+                        if !taken.known {
                             // the first contact of this selection: its position rows
                             self.ensure_positions(&tx, group, uri)
                                 .await
                                 .map_err(before_slot)?;
-                            batch = self.fetch(&tx, group, uri).await.map_err(before_slot)?;
+                            taken = self.take(&tx, group, uri).await.map_err(before_slot)?;
                         }
-                        self.observer.on_fetched(&Fetched {
-                            group,
-                            slot: batch.slot,
-                            slots: batch.slots,
-                            horizon: batch.horizon,
-                            limit: self.batch_size as usize,
-                            messages: &batch.messages,
-                        });
-                        let (Some(slot), Some(last)) = (batch.slot, batch.messages.last()) else {
+                        let Some(slot) = taken.slot else {
+                            self.observer.on_fetched(&Fetched {
+                                group,
+                                slot: None,
+                                slots: taken.slots,
+                                horizon: 0,
+                                statement: None,
+                                delivered: None,
+                                epoch: None,
+                                epoch_offset: 0,
+                                epoch_end: 0,
+                                limit,
+                                messages: &[],
+                            });
                             return Ok(None);
                         };
                         let in_slot = |error: Error| Failed {
                             slot: Some(slot),
                             error,
                         };
-                        for message in &batch.messages {
+                        let delivered = taken.position.delivered;
+                        let (epoch, started) = match taken.position.epoch {
+                            Some(epoch @ Epoch { end: Some(_), .. }) => (epoch, false),
+                            Some(Epoch {
+                                snapshot, offset, ..
+                            }) => {
+                                // converted from ADR-0007's positions: its end, now
+                                let start = self
+                                    .start_epoch(&tx, slot, uri, &delivered, Some(&snapshot))
+                                    .await
+                                    .map_err(in_slot)?;
+                                let end = start.last.map_or(offset, |last| last.max(offset));
+                                (
+                                    Epoch {
+                                        snapshot,
+                                        offset,
+                                        end: Some(end),
+                                    },
+                                    false,
+                                )
+                            }
+                            None => {
+                                let start = self
+                                    .start_epoch(&tx, slot, uri, &delivered, None)
+                                    .await
+                                    .map_err(in_slot)?;
+                                let (Some(first), Some(last)) = (start.first, start.last) else {
+                                    // nothing of this selection's is new: delivered at once,
+                                    // so that the next look does not walk the same rows
+                                    self.observer.on_fetched(&Fetched {
+                                        group,
+                                        slot: Some(slot),
+                                        slots: taken.slots,
+                                        horizon: start.epoch.xmin,
+                                        statement: Some(&start.epoch),
+                                        delivered: Some(&delivered),
+                                        epoch: Some(&start.epoch),
+                                        epoch_offset: 0,
+                                        epoch_end: 0,
+                                        limit,
+                                        messages: &[],
+                                    });
+                                    self.ack(
+                                        &tx,
+                                        group,
+                                        uri,
+                                        slot,
+                                        Some(&start.epoch),
+                                        None,
+                                        false,
+                                    )
+                                    .await
+                                    .map_err(in_slot)?;
+                                    self.observer.on_acked(&Acked {
+                                        group,
+                                        slot,
+                                        last: None,
+                                        drained: true,
+                                    });
+                                    return Ok(Some(slot));
+                                };
+                                (
+                                    Epoch {
+                                        snapshot: start.epoch,
+                                        offset: first - 1,
+                                        end: Some(last),
+                                    },
+                                    true,
+                                )
+                            }
+                        };
+                        let end = epoch.end.unwrap_or(epoch.offset);
+                        let read = self
+                            .read_batch(
+                                &tx,
+                                slot,
+                                uri,
+                                epoch.offset,
+                                end,
+                                &epoch.snapshot,
+                                &delivered,
+                            )
+                            .await
+                            .map_err(in_slot)?;
+                        self.observer.on_fetched(&Fetched {
+                            group,
+                            slot: Some(slot),
+                            slots: taken.slots,
+                            horizon: read.statement.xmin,
+                            statement: Some(&read.statement),
+                            delivered: Some(&delivered),
+                            epoch: Some(&epoch.snapshot),
+                            epoch_offset: epoch.offset,
+                            epoch_end: end,
+                            limit,
+                            messages: &read.messages,
+                        });
+                        for message in &read.messages {
                             let handled = subscriber(message).await;
                             self.observer.on_handled(&Handled {
                                 group,
@@ -93,17 +203,31 @@ where
                             });
                             handled.map_err(Error::Subscriber).map_err(in_slot)?;
                         }
-                        let acked = Position {
-                            transaction_id: last.transaction_id.unwrap_or_default(),
-                            offset: last.position.unwrap_or_default(),
-                        };
-                        self.ack(&tx, group, uri, slot, acked)
-                            .await
-                            .map_err(in_slot)?;
+                        let last = read.messages.last().map(|message| Receipt {
+                            transaction_id: message.transaction_id.unwrap_or_default(),
+                            position: message.position.unwrap_or_default(),
+                        });
+                        // a short batch: nothing of the epoch is left, since its
+                        // snapshot is contained in the batch's
+                        let drained = read.messages.len() < limit;
+                        if drained {
+                            self.ack(&tx, group, uri, slot, Some(&epoch.snapshot), None, started)
+                                .await
+                                .map_err(in_slot)?;
+                        } else {
+                            let moved = Epoch {
+                                offset: last.map_or(epoch.offset, |last| last.position),
+                                ..epoch
+                            };
+                            self.ack(&tx, group, uri, slot, None, Some(&moved), started)
+                                .await
+                                .map_err(in_slot)?;
+                        }
                         self.observer.on_acked(&Acked {
                             group,
                             slot,
-                            position: acked,
+                            last,
+                            drained,
                         });
                         Ok(Some(slot))
                     })
@@ -200,10 +324,9 @@ where
         Ok(())
     }
 
-    /// Where `selection` is, by slot: the last acknowledged transaction and
-    /// offset of each, zero before anything was acknowledged; empty before
-    /// the first dispatch. The minimum over the slots is a watermark for the
-    /// whole selection.
+    /// Where `selection` is, by slot: what it delivered, and the epoch in
+    /// flight; empty before the first dispatch. Snapshots have no order, so
+    /// the positions of several slots have no minimum.
     pub async fn positions(
         &self,
         session: &P::Session,
@@ -213,16 +336,18 @@ where
             .await
     }
 
-    /// Moves every slot of `selection` to `position`: back to zero to replay,
-    /// or ahead to skip. Creates the position rows if the selection has none.
+    /// Moves every slot of `selection` (ADR-0035 decision 11): back to the
+    /// start, back to a transaction, or ahead to now; see [`Move`]. The epoch
+    /// in flight is cleared, and each row's lock waited for. Creates the
+    /// position rows if the selection has none.
     pub async fn set_position(
         &self,
         session: &P::Session,
         selection: &Selection,
-        position: Position,
+        to: Move,
     ) -> Result<(), Error> {
         let (group, uri) = (&selection.consumer_group, &selection.uri);
         self.ensure_positions(session, group, uri).await?;
-        self.move_all(session, group, uri, position).await
+        self.move_all(session, group, uri, to).await
     }
 }
