@@ -92,8 +92,16 @@ A database moved by dump and restore restarts its transaction ids below
 what the positions delivered: every row written meanwhile would count as
 delivered. A look that finds a position delivered past the server's ids
 records the refusal in the meta table and stops; the refusal sticks, also
-once the ids pass the old ones again, until an operator rebases the
-positions and calls `clear_counter_reset` (ADR-0035 decision 12). A
+once the ids pass the old ones again, until an operator calls `rebase()`
+(ADR-0035 decision 12, ADR-0033 decision 3). The rebase keeps, in position
+order, what no position handed on — the rows written since the restore, and
+the restored rows some group's `delivered` does not see, the first of each
+identity — writes them again under its own id, owed to every group, sets
+every position to its snapshot, taken before it wrote anything, and moves
+the ring's bounds back. Once the server's ids reach the restored ring's,
+the two kinds of rows cannot be told apart, and it refuses.
+`clear_counter_reset` lifts the refusal alone, for an operator who moved the
+positions by other means. A
 sequence that caches positions, or a format newer than the binary, stops it
 too. Each is an error, not a moment: logged at `error`, for the host's alarm.
 
@@ -171,11 +179,29 @@ relays first, which keeps the bound near the head. A rewind below the ring's
 and a new group starts there. A lane starts where its group's selection of
 everything stands, so that switching a relay to lanes hands nothing on again.
 
-## What is not here
+## Emptying the ring
 
-Nothing empties a generation yet: the ring is made and read, and ADR-0033's
-reclamation, which truncates a generation every group has passed, is still
-to come. Until then the outbox keeps every row it stored.
+A dispatcher's loops work a pass of the reclamation between their batches,
+once an interval of the process, `with_reclaiming(Reclaiming { interval,
+margin, margin_age, lock_timeout })`; `reclaim()` works one on demand. A
+pass takes the generation of the oldest row left and empties it, by
+`TRUNCATE`, once it is
+- past: its newest window lies `margin` windows below the next id's;
+- closed: no transaction of this database holding an id in it is open — one
+  left open in another database holds nothing;
+- passed: every position's `delivered` sees every row of it;
+- old enough: every group passed it `margin_age` ago, so that a row relayed
+  a moment ago can still be re-injected.
+
+Under the partition's lock, taken within `lock_timeout`, it reads "passed"
+again — this is what keeps the rows — then records `gone_below`, the least
+row left, and `intact_from`, one past the highest id emptied. Its outcome
+goes to the observer, `on_reclamation`: a generation emptied, or the pass
+skipped and why, the position pinning the ring among the reasons. A group
+that pins it for good is dropped with `forget_group`, which refuses one that
+moved a position within the margin's age. Its errors are logged and never
+stop dispatch; a counter reset stops it as it stops the relay.
+
 
 ## Deviations from the Python source
 

@@ -65,6 +65,7 @@
 //! `dispatch`.
 
 mod dispatch;
+mod reclaim;
 mod ring;
 mod store;
 
@@ -123,6 +124,47 @@ pub struct Backlog {
     pub delivered_age: Option<Duration>,
 }
 
+/// How the ring is emptied (ADR-0033 decision 3): how often a process's
+/// dispatcher tries, between its batches; how far below the next id's
+/// window a generation's newest must lie; how long after every group passed
+/// it the generation is kept, so that a row relayed a moment ago can still
+/// be re-injected; and how long a pass waits for the partition's lock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reclaiming {
+    /// How often a process's dispatcher tries.
+    pub interval: Duration,
+    /// How many windows below the next id's a generation's newest must lie.
+    pub margin: u32,
+    /// How long after every group passed it a generation is kept.
+    pub margin_age: Duration,
+    /// How long a pass waits for the partition's lock; a pass that waits
+    /// longer gives up until the next.
+    pub lock_timeout: Duration,
+}
+
+impl Default for Reclaiming {
+    fn default() -> Self {
+        Reclaiming {
+            interval: Duration::from_secs(60),
+            margin: 1,
+            margin_age: Duration::from_secs(3600),
+            lock_timeout: Duration::from_secs(1),
+        }
+    }
+}
+
+/// What [`PgOutbox::rebase`] did after a counter reset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rebased {
+    /// The rows it wrote again, owed to every group.
+    pub kept: u64,
+    /// The rows it emptied: every group had handed them on, or they repeated
+    /// an identity kept.
+    pub emptied: u64,
+    /// Both bounds of the ring after it.
+    pub bound: u64,
+}
+
 /// How [`PgOutbox::run`] runs: `concurrency` loops in this process, each
 /// taking whatever slot has work. Processes need no identity and no count;
 /// start as many as the slots make useful.
@@ -168,6 +210,7 @@ pub struct PgOutbox<P, O = ()> {
     loops: Loops,
     slots: u32,
     ring: Ring,
+    reclaiming: Reclaiming,
 }
 
 impl<P> PgOutbox<P> {
@@ -183,6 +226,7 @@ impl<P> PgOutbox<P> {
             loops: Loops::default(),
             slots: 1,
             ring: Ring::default(),
+            reclaiming: Reclaiming::default(),
         }
     }
 }
@@ -199,6 +243,7 @@ impl<P, O> PgOutbox<P, O> {
             loops: self.loops,
             slots: self.slots,
             ring: self.ring,
+            reclaiming: self.reclaiming,
         }
     }
 
@@ -254,6 +299,11 @@ impl<P, O> PgOutbox<P, O> {
     /// The ring this outbox's table is cut into.
     pub fn ring(&self) -> Ring {
         self.ring
+    }
+
+    /// The same outbox, its ring emptied as `reclaiming` says.
+    pub fn with_reclaiming(self, reclaiming: Reclaiming) -> Self {
+        PgOutbox { reclaiming, ..self }
     }
 
     pub(crate) fn loops(&self) -> Loops {

@@ -369,7 +369,7 @@ where
     /// exclusively and new groups shared, so that no emptying of the ring
     /// commits between their read of `intact_from` and their write
     /// (ADR-0033 decision 3).
-    fn reclamation_key(&self) -> String {
+    pub(super) fn reclamation_key(&self) -> String {
         format!("hashtextextended('{} reclamation', 0)", self.outbox_table)
     }
 
@@ -526,7 +526,11 @@ where
                 let partitions: i64 = row.get(0);
                 let check: Option<String> = row.get(1);
                 let window = check.as_deref().and_then(|check| {
-                    let after = check.split("bigint / ").nth(1)?;
+                    // a window past 2³¹ prints as a quoted bigint literal
+                    let after = check
+                        .split("bigint / ")
+                        .nth(1)?
+                        .trim_start_matches(['\'', '(']);
                     let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
                     digits.parse::<u64>().ok()
                 });
@@ -864,6 +868,14 @@ where
             refused: row.get(8),
             reset: row.get(9),
         })
+    }
+
+    /// Forgets when each generation was first found passed: a rewind owes
+    /// their rows again (ADR-0033 decision 3).
+    pub(super) async fn clear_passed(&self, session: &P::Session) -> Result<(), Error> {
+        let sql = format!("UPDATE {}_meta SET passed_at = NULL", self.outbox_table);
+        session.connection().execute(&sql, &[]).await?;
+        Ok(())
     }
 
     /// Records a counter reset in the meta table, in a transaction of its
@@ -1274,7 +1286,7 @@ fn identity_of(message: &OutboxMessage) -> Identity {
 }
 
 /// `xid8` has no driver type; it travels as decimal text and is unsigned.
-fn transaction_id(text: String) -> Result<u64, Error> {
+pub(super) fn transaction_id(text: String) -> Result<u64, Error> {
     text.parse()
         .map_err(|_| Error::Malformed(format!("transaction id `{text}`")))
 }
@@ -1364,7 +1376,7 @@ fn below(snapshot: &str, xid: &str) -> String {
 /// The SQL of a 32-bit transaction id `xid`, as `pg_stat_activity` and
 /// `pg_prepared_xacts` show it, widened to the full id nearest the next one,
 /// `n.next`: an open transaction's id lies within 2³¹ of it.
-fn widened(xid: &str) -> String {
+pub(super) fn widened(xid: &str) -> String {
     format!(
         "(n.next + (({xid}::text::bigint - n.next % 4294967296 + 6442450944) % 4294967296) \
           - 2147483648)"

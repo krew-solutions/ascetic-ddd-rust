@@ -48,6 +48,14 @@ pub enum Error {
         /// The lowest one a rewind may go back to.
         intact_from: u64,
     },
+    /// A group asked to be forgotten moved a position within the ring's
+    /// margin of age: it is not abandoned (ADR-0033 decision 3).
+    GroupActive {
+        /// The group.
+        group: String,
+        /// How long ago it last moved a position.
+        moved: std::time::Duration,
+    },
     /// The position rows are in a format newer than this binary knows: a
     /// later release wrote them, and this one would misread them.
     Format {
@@ -101,6 +109,7 @@ impl Error {
             | Error::SequenceCache(_)
             | Error::CounterReset(_)
             | Error::Reclaimed { .. }
+            | Error::GroupActive { .. }
             | Error::Format { .. } => false,
         }
     }
@@ -135,6 +144,10 @@ impl fmt::Display for Error {
                 "rows below transaction {intact_from} may be gone from the outbox's ring: \
                  a rewind to {requested} would replay short"
             ),
+            Error::GroupActive { group, moved } => write!(
+                f,
+                "group `{group}` moved a position {moved:?} ago: it is not abandoned"
+            ),
             Error::Format { found, known } => write!(
                 f,
                 "the outbox's positions are in format {found}; this binary knows up to {known}"
@@ -154,6 +167,7 @@ impl std::error::Error for Error {
             | Error::SequenceCache(_)
             | Error::CounterReset(_)
             | Error::Reclaimed { .. }
+            | Error::GroupActive { .. }
             | Error::Format { .. } => None,
             Error::Migration(error) => Some(error),
         }

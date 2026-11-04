@@ -824,10 +824,47 @@ confirmed in `pg_locks`, as `verify/pg/lost-wake` does.
 - a converted epoch on the ring hands on the rest of its transaction — its
   generations not recorded.
 
-Not yet told apart by a test: back to the start landing on `intact_from`
-rather than on nothing, and a new group starting below it rather than at
-nothing. They differ only once an emptying leaves rows below `intact_from`,
-which the reclamation brings.
+**Built (2026-11-04), the reclamation**, each red under the mutation named:
+- generations every group passed go one by one, the oldest row's first,
+  every lap of it; every row from `intact_from` on kept, none below
+  `gone_below`; a rewind below `intact_from` refused; back to the start,
+  and a group created after, receive what lies from it on and not the older
+  laps left below it — the newest generation first, `gone_below` one past
+  the emptied, `intact_from` not raised, back to the start at nothing, a new
+  group at nothing;
+- a generation kept while written into; while a transaction of this
+  database holding an id in it is open; while a group has not passed it,
+  the group named; while passed for less than the margin's age, a rewind
+  restarting the time; a reader holding the partition past the lock's
+  timeout skips the pass and dispatch goes on — "closed" dropped, "passed"
+  read only under the lock, "old enough" dropped, the lock's timeout an
+  error, a rewind keeping the times;
+- an id of `delivered`'s in-progress list that committed a row into the
+  generation keeps it, and the row is handed on — the in-progress list
+  ignored;
+- an abandoned group forgotten, a live one refused — the margin's check
+  dropped;
+- a counter reset found by the reclamation itself stops it and is recorded
+  — the check dropped;
+- a dispatcher's loops work passes — never working one.
+
+Not forced by a test: a row committing between the checks and the lock,
+which the recheck under the lock keeps, and which "closed" in its order
+already prevents; `OutboxPg.tla` holds the race. Prepared transactions are
+read, but the stand allows none (`max_prepared_transactions` is zero).
+**Built (2026-11-04), the rebase**, each red under the mutation named: after
+a dump and restore — simulated, rows and positions in ids the server has not
+reached — it keeps, in position order, the rows written since the restore
+and the restored rows some `delivered` does not see, the first of an
+identity, under its own id, owed to every group, the bounds at it — `S`
+taken after its first write (with transactions committing all along, so
+that one commits after that write: measured, a transaction's own id is left
+out of its snapshot's in-progress list, and is visible in it once a later
+one has committed), every row of an identity kept, the rows since the
+restore dropped, a restored row kept only when owed to every group; and it
+refuses once the new ids reach the restored ring's — the refusal dropped.
+
+Still owed: the observer's events in the traces.
 
 **TLA+.** Built (2026-11-04) in `OutboxPg.tla`, with two generations of one
 id each.
@@ -1048,3 +1085,13 @@ On a scratch database, each with the result that changes the decision:
   - **The guard nests the part,** so that an array part is not spliced into
     the identity.
   - **A lane starts where its own group's selection of everything stands.**
+- 2026-11-04 — The reclamation built: a pass between a dispatcher's batches,
+  the candidate the generation of the oldest row left, the checks in their
+  order, the emptying and its bounds in a savepoint so that a lock not
+  granted keeps the time recorded; `forget_group`. Found building it: the
+  ring's `CHECK` prints a window past 2³¹ as a quoted literal, which the
+  start's check now reads.
+- 2026-11-04 — The rebase built, in the order decision 3 gives. Measured
+  for it: a transaction's own id is left out of its snapshot's in-progress
+  list, so a snapshot taken after its first write sees its own rows once a
+  later transaction has committed — the reason `S` comes first.

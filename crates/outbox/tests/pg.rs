@@ -19,8 +19,8 @@ use ascetic_ddd_outbox::observer::{
     Acked, Dispatched, EpochStarted, Fetched, Handled, OutboxObserver, Published, Receipt,
 };
 use ascetic_ddd_outbox::{
-    BoxError, Error, Identity, Loops, Move, Outbox, OutboxMessage, PgOutbox, Position, Ring,
-    Selection, Snapshot,
+    BoxError, Error, Identity, Loops, Move, Outbox, OutboxMessage, PgOutbox, Position, Reclaiming,
+    Reclamation, Ring, Selection, Skipped, Snapshot,
 };
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -130,6 +130,48 @@ impl<O: OutboxObserver> Fixture<O> {
             outbox: self.outbox.with_batch_size(size),
             ..self
         }
+    }
+
+    fn with_reclaiming(self, reclaiming: Reclaiming) -> Self {
+        Fixture {
+            outbox: self.outbox.with_reclaiming(reclaiming),
+            ..self
+        }
+    }
+
+    /// The ids of the messages the table holds, each with its writing
+    /// transaction.
+    async fn held(&self) -> Vec<(u64, u64)> {
+        let mut held: Vec<(u64, u64)> = self
+            .texts(
+                "SELECT convert_from(payload, 'UTF8') || ' ' || transaction_id::text FROM {outbox}",
+            )
+            .await
+            .iter()
+            .map(|row| {
+                let (id, xid) = row.split_once(' ').unwrap();
+                (id.parse().unwrap(), xid.parse().unwrap())
+            })
+            .collect();
+        held.sort_unstable();
+        held
+    }
+
+    /// The ring's two bounds, as the meta table holds them.
+    async fn bounds(&self) -> (u64, u64) {
+        let row = &self
+            .texts("SELECT gone_below::text || ' ' || intact_from::text FROM {outbox}_meta")
+            .await[0];
+        let (gone_below, intact_from) = row.split_once(' ').unwrap();
+        (gone_below.parse().unwrap(), intact_from.parse().unwrap())
+    }
+
+    /// The next transaction id the server will assign, about.
+    async fn next_xid(&self) -> u64 {
+        self.texts("SELECT pg_snapshot_xmax(pg_current_snapshot())::text")
+            .await[0]
+            .parse()
+            .unwrap()
     }
 
     /// Publishes each message in a transaction of its own, then waits until
@@ -2099,4 +2141,613 @@ async fn a_lane_starts_where_its_group_s_selection_of_everything_stands() {
     f.drain(&other, &Selection::group("other").uri("kafka:"))
         .await;
     assert_eq!(*other_seen.lock().unwrap(), [1, 3]);
+}
+
+/// A pass of `outbox`'s reclamation, tried again while a transaction of
+/// another test is open: "closed" is judged per database, and the tests
+/// share one.
+async fn reclaim_settled<O: OutboxObserver>(outbox: &PgOutbox<PgSessionPool, O>) -> Reclamation {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let outcome = outbox.reclaim().await.unwrap();
+        if !matches!(outcome, Reclamation::Skipped(Skipped::NotClosed { .. }))
+            || std::time::Instant::now() >= deadline
+        {
+            return outcome;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// How the reclamation's tests empty the ring: at once, a pass waiting a
+/// fifth of a second for a partition's lock.
+fn eager(margin: u32) -> Reclaiming {
+    Reclaiming {
+        interval: Duration::from_millis(10),
+        margin,
+        margin_age: Duration::ZERO,
+        lock_timeout: Duration::from_millis(200),
+    }
+}
+
+/// Generations every group passed go one by one, the generation of the
+/// oldest row left first, until the generation still written into. A
+/// generation holds every lap that wrote into it, so emptying it leaves
+/// older windows of the others below `intact_from`: `gone_below` is the
+/// least row left, `intact_from` one past the highest emptied, and every row
+/// from it on is kept. A rewind below it is refused; back to the start, and
+/// a group created after, receive what lies from it on and nothing below
+/// (ADR-0033 decision 3).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn generations_every_group_passed_go_in_order_and_the_bounds_hold() {
+    let ring = Ring::new(3, 2);
+    let f = fixture_ring("reclaim_laps", ring)
+        .await
+        .with_reclaiming(eager(1));
+    let batch = |ids: std::ops::RangeInclusive<u64>| {
+        ids.map(|id| message("kafka://orders", id))
+            .collect::<Vec<_>>()
+    };
+    f.publish(&batch(1..=30)).await;
+    // the id written into now in another generation than the oldest row's
+    let mut next_id = 31;
+    loop {
+        let oldest = f.held().await.iter().map(|(_, xid)| *xid).min().unwrap();
+        if ring.generation_of(f.next_xid().await) != ring.generation_of(oldest) {
+            break;
+        }
+        f.publish(&batch(next_id..=next_id)).await;
+        next_id += 1;
+    }
+    let (a_seen, a) = collector();
+    let (b_seen, b) = collector();
+    let (first, second) = (Selection::group("a"), Selection::group("b"));
+    f.drain(&a, &first).await;
+    f.drain(&b, &second).await;
+
+    // one generation emptied: the oldest row's, every lap of it
+    let reclaim_checked = async || {
+        let before = f.held().await;
+        let oldest = before.iter().map(|(_, xid)| *xid).min();
+        let outcome = reclaim_settled(&f.outbox).await;
+        if let Reclamation::Emptied {
+            generation,
+            gone_below,
+            intact_from,
+            ..
+        } = outcome
+        {
+            assert_eq!(Some(generation), oldest.map(|xid| ring.generation_of(xid)));
+            let after = f.held().await;
+            assert!(
+                after
+                    .iter()
+                    .all(|(_, xid)| ring.generation_of(*xid) != generation)
+            );
+            assert!(
+                before
+                    .iter()
+                    .filter(|(_, xid)| *xid >= intact_from)
+                    .all(|row| after.contains(row))
+            );
+            assert!(after.iter().all(|(_, xid)| gone_below <= *xid));
+            assert_eq!(f.bounds().await, (gone_below, intact_from));
+        }
+        outcome
+    };
+    let first_pass = reclaim_checked().await;
+    assert!(
+        matches!(first_pass, Reclamation::Emptied { .. }),
+        "{first_pass:?}"
+    );
+
+    let (_, intact_from) = f.bounds().await;
+    let held = f.held().await;
+    let kept: Vec<u64> = held
+        .iter()
+        .filter(|(_, xid)| *xid >= intact_from)
+        .map(|(id, _)| *id)
+        .collect();
+    assert!(
+        held.iter().any(|(_, xid)| *xid < intact_from),
+        "no older lap left below intact_from to tell the forms apart"
+    );
+    let below = f
+        .sessions
+        .session(async |session| {
+            f.outbox
+                .set_position(&session, &first, Move::From(intact_from - 1))
+                .await
+        })
+        .await;
+    assert!(matches!(below, Err(Error::Reclaimed { .. })));
+    f.sessions
+        .session(async |session| f.outbox.set_position(&session, &first, Move::Start).await)
+        .await
+        .unwrap();
+    a_seen.lock().unwrap().clear();
+    f.drain(&a, &first).await;
+    assert_eq!(*a_seen.lock().unwrap(), kept);
+    let (late_seen, late) = collector();
+    let late_group = Selection::group("late");
+    f.drain(&late, &late_group).await;
+    assert_eq!(*late_seen.lock().unwrap(), kept);
+
+    // the rest go in the same order, each the oldest row's, as the ids pass
+    for _ in 0..6 {
+        match reclaim_checked().await {
+            Reclamation::Emptied { .. } => {}
+            Reclamation::Skipped(Skipped::NotPast { .. } | Skipped::Empty) => break,
+            other => panic!("{other:?}"),
+        }
+    }
+    drop(b_seen);
+}
+
+/// A generation is kept while a transaction of this database holding an id
+/// in it is open, while a group has not handed on its rows — the group
+/// named — and while every group passed it for less than the margin's age,
+/// a rewind restarting that time; a reader holding its partition past the
+/// lock's timeout skips the pass, and dispatch goes on (ADR-0033
+/// decision 3).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_generation_is_kept_while_open_unpassed_young_or_held() {
+    let f = fixture_ring("reclaim_kept", Ring::new(2, 1 << 40))
+        .await
+        .with_reclaiming(eager(0));
+    let (a_seen, a) = collector();
+    let (_, b) = collector();
+    let (first, second) = (Selection::group("a"), Selection::group("b"));
+    f.publish(&[message("kafka://orders", 1), message("kafka://orders", 2)])
+        .await;
+    f.drain(&a, &first).await;
+    f.sessions
+        .session(async |session| f.outbox.set_position(&session, &second, Move::Start).await)
+        .await
+        .unwrap();
+    // still written into: every row lies in the window of the next id
+    let distant = beside(&f, Ring::new(2, 1 << 40)).with_reclaiming(eager(1));
+    let near = distant.reclaim().await.unwrap();
+    assert!(
+        matches!(
+            near,
+            Reclamation::Skipped(Skipped::NotPast { generation: 0, .. })
+        ),
+        "{near:?}"
+    );
+    let pinned = reclaim_settled(&f.outbox).await;
+    assert!(
+        matches!(&pinned, Reclamation::Skipped(Skipped::NotPassed { group, .. }) if group == "b"),
+        "{pinned:?}"
+    );
+    f.drain(&b, &second).await;
+
+    // an open transaction holding an id in the generation
+    let opened = Arc::new(tokio::sync::Notify::new());
+    let close = Arc::new(tokio::sync::Notify::new());
+    let holder = async {
+        f.sessions
+            .session(async |session| {
+                session
+                    .atomic(async |tx| {
+                        let xid: String = tx
+                            .connection()
+                            .query_one("SELECT pg_current_xact_id()::text", &[])
+                            .await?
+                            .get(0);
+                        opened.notify_one();
+                        close.notified().await;
+                        Ok::<u64, Error>(xid.parse().unwrap())
+                    })
+                    .await
+            })
+            .await
+            .unwrap()
+    };
+    let check = async {
+        opened.notified().await;
+        let outcome = f.outbox.reclaim().await.unwrap();
+        close.notify_one();
+        outcome
+    };
+    let (_, outcome) = tokio::join!(holder, check);
+    assert!(
+        matches!(
+            outcome,
+            Reclamation::Skipped(Skipped::NotClosed { generation: 0, .. })
+        ),
+        "{outcome:?}"
+    );
+
+    // passed, but not long enough; a rewind restarts the time
+    let patient = beside(&f, Ring::new(2, 1 << 40)).with_reclaiming(Reclaiming {
+        margin_age: Duration::from_secs(3600),
+        ..eager(0)
+    });
+    let young = |outcome: Reclamation| match outcome {
+        Reclamation::Skipped(Skipped::NotOldEnough { passed_for, .. }) => passed_for,
+        other => panic!("{other:?}"),
+    };
+    young(reclaim_settled(&patient).await);
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let rewound_from = f.xid_of(1).await;
+    patient_rewind(&f, &patient, &first, rewound_from).await;
+    f.drain(&a, &first).await;
+    assert!(young(reclaim_settled(&patient).await) < Duration::from_secs(1));
+
+    // a reader holding the partition: the pass gives up, dispatch goes on
+    let partition = format!("{}_g0", f.tables.0);
+    let reading = Arc::new(tokio::sync::Notify::new());
+    let done = Arc::new(tokio::sync::Notify::new());
+    let reader = async {
+        f.sessions
+            .session(async |session| {
+                session
+                    .atomic(async |tx| {
+                        tx.connection()
+                            .query(&format!("SELECT 1 FROM {partition} LIMIT 1"), &[])
+                            .await?;
+                        reading.notify_one();
+                        done.notified().await;
+                        Ok::<(), Error>(())
+                    })
+                    .await
+            })
+            .await
+            .unwrap()
+    };
+    let attempt = async {
+        reading.notified().await;
+        let outcome = reclaim_settled(&f.outbox).await;
+        f.publish_now(&[message("kafka://orders", 3)]).await;
+        a_seen.lock().unwrap().clear();
+        let dispatched = f.outbox.dispatch(&a, &first).await.unwrap();
+        done.notify_one();
+        (outcome, dispatched)
+    };
+    let ((), (outcome, dispatched)) = tokio::join!(reader, attempt);
+    assert_eq!(
+        outcome,
+        Reclamation::Skipped(Skipped::Held { generation: 0 })
+    );
+    assert!(dispatched);
+    assert_eq!(*a_seen.lock().unwrap(), [3]);
+
+    // nothing holds it any more
+    f.drain(&b, &second).await;
+    let emptied = reclaim_settled(&f.outbox).await;
+    assert!(
+        matches!(emptied, Reclamation::Emptied { generation: 0, .. }),
+        "{emptied:?}"
+    );
+    assert!(f.held().await.is_empty());
+    f.publish(&[message("kafka://orders", 4)]).await;
+    a_seen.lock().unwrap().clear();
+    f.drain(&a, &first).await;
+    assert_eq!(*a_seen.lock().unwrap(), [4]);
+}
+
+/// Another outbox on the fixture's tables, of the same `ring`.
+fn beside<O>(f: &Fixture<O>, ring: Ring) -> PgOutbox<PgSessionPool> {
+    PgOutbox::new(PgSessionPool::new(pool()))
+        .with_tables(
+            Identifier::new(&f.tables.0).unwrap(),
+            Identifier::new(&f.tables.1).unwrap(),
+        )
+        .with_ring(ring)
+}
+
+/// A rewind of `selection` to `from` through `outbox`.
+async fn patient_rewind<O: OutboxObserver>(
+    f: &Fixture,
+    outbox: &PgOutbox<PgSessionPool, O>,
+    selection: &Selection,
+    from: u64,
+) {
+    f.sessions
+        .session(async |session| {
+            outbox
+                .set_position(&session, selection, Move::From(from))
+                .await
+        })
+        .await
+        .unwrap();
+}
+
+/// An id of `delivered`'s in-progress list that committed a row into the
+/// generation after it was taken: the generation is not passed, whatever
+/// `delivered`'s `xmax` says, and the row is still handed on.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn an_in_progress_id_that_committed_into_the_generation_keeps_it() {
+    let f = fixture_ring("reclaim_xip", Ring::new(2, 1 << 40))
+        .await
+        .with_reclaiming(eager(0));
+    let (seen, subscriber) = collector();
+    let selection = Selection::group("a");
+    f.publish(&[message("kafka://orders", 1)]).await;
+    f.drain(&subscriber, &selection).await;
+
+    let written = Arc::new(tokio::sync::Notify::new());
+    let commit = Arc::new(tokio::sync::Notify::new());
+    let writer = async {
+        f.sessions
+            .session(async |session| {
+                session
+                    .atomic(async |tx| {
+                        f.outbox.publish(&tx, &message("kafka://orders", 2)).await?;
+                        written.notify_one();
+                        commit.notified().await;
+                        Ok::<(), Error>(())
+                    })
+                    .await
+            })
+            .await
+            .unwrap()
+    };
+    let relay = async {
+        written.notified().await;
+        f.publish_now(&[message("kafka://orders", 3)]).await;
+        f.drain(&subscriber, &selection).await;
+        let delivered = f.positions(&selection).await[0].delivered.clone();
+        commit.notify_one();
+        delivered
+    };
+    let ((), delivered) = tokio::join!(writer, relay);
+    assert!(delivered.xip.contains(&f.xid_of(2).await));
+    let outcome = reclaim_settled(&f.outbox).await;
+    assert!(
+        matches!(outcome, Reclamation::Skipped(Skipped::NotPassed { .. })),
+        "{outcome:?}"
+    );
+    f.drain(&subscriber, &selection).await;
+    assert_eq!(*seen.lock().unwrap(), [1, 3, 2]);
+}
+
+/// An abandoned group is forgotten, so that it no longer pins the ring; a
+/// group that moved a position within the margin's age is refused.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn an_abandoned_group_is_forgotten_and_a_live_one_refused() {
+    let f = fixture_ring("reclaim_forget", Ring::new(2, 1 << 40))
+        .await
+        .with_reclaiming(eager(0));
+    let (_, subscriber) = collector();
+    f.publish(&[message("kafka://orders", 1)]).await;
+    f.drain(&subscriber, &Selection::group("live")).await;
+    f.sessions
+        .session(async |session| {
+            f.outbox
+                .set_position(&session, &Selection::group("gone"), Move::Start)
+                .await
+        })
+        .await
+        .unwrap();
+    let patient = beside(&f, Ring::new(2, 1 << 40)).with_reclaiming(Reclaiming {
+        margin_age: Duration::from_secs(3600),
+        ..eager(0)
+    });
+    let refused = f
+        .sessions
+        .session(async |session| patient.forget_group(&session, "gone").await)
+        .await;
+    assert!(matches!(refused, Err(Error::GroupActive { .. })));
+    f.sessions
+        .session(async |session| f.outbox.forget_group(&session, "gone").await)
+        .await
+        .unwrap();
+    assert!(f.positions(&Selection::group("gone")).await.is_empty());
+    let outcome = reclaim_settled(&f.outbox).await;
+    assert!(
+        matches!(outcome, Reclamation::Emptied { .. }),
+        "{outcome:?}"
+    );
+}
+
+/// A counter reset stops the reclamation as it stops the relay, found by
+/// the reclamation itself, and recorded so that it sticks.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_counter_reset_stops_the_reclamation_without_a_relay_s_report() {
+    let f = fixture_ring("reclaim_reset", Ring::new(2, 1 << 40))
+        .await
+        .with_reclaiming(eager(0));
+    let (_, subscriber) = collector();
+    f.publish(&[message("kafka://orders", 1)]).await;
+    f.drain(&subscriber, &Selection::group("a")).await;
+    f.execute(&format!(
+        "UPDATE {} SET delivered = '900000000000:900000000000:'",
+        f.tables.1
+    ))
+    .await
+    .unwrap();
+    assert!(matches!(
+        f.outbox.reclaim().await,
+        Err(Error::CounterReset(_))
+    ));
+    assert_eq!(
+        f.texts("SELECT (refused IS NOT NULL)::text FROM {outbox}_meta")
+            .await,
+        ["true"]
+    );
+    assert_eq!(f.held().await.len(), 1);
+}
+
+/// A dispatcher's loops work the reclamation between their batches.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_dispatcher_s_loops_work_the_reclamation() {
+    #[derive(Default)]
+    struct Passes(AtomicUsize);
+    impl OutboxObserver for Passes {
+        fn on_reclamation(&self, _: &Reclamation) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let passes = Arc::new(Passes::default());
+    let f = fixture_observed("reclaim_run", passes.clone(), 1)
+        .await
+        .with_reclaiming(eager(0));
+    let (_, subscriber) = collector();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let selection = Selection::group("a");
+    let run = f.outbox.run(
+        &subscriber,
+        &selection,
+        Loops {
+            concurrency: 2,
+            poll_interval: Duration::from_millis(20),
+            max_pause: Duration::from_millis(100),
+        },
+        async {
+            let _ = stopped.await;
+        },
+    );
+    let stopper = async {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while passes.0.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let _ = stop.send(());
+    };
+    let (ran, ()) = tokio::join!(run, stopper);
+    ran.unwrap();
+    assert!(passes.0.load(Ordering::SeqCst) >= 2);
+}
+
+/// After a dump and restore — simulated: rows and positions in ids the
+/// server has not reached — the rebase keeps what no position handed on, in
+/// position order: the rows written since the restore, and the restored rows
+/// some group's `delivered` does not see, the first of each identity; it
+/// writes them again under its own id, owed to every group, restarts every
+/// group at its snapshot, and lifts the refusal (ADR-0033 decision 3).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_rebase_keeps_what_no_position_handed_on_and_owes_it_to_every_group() {
+    let f = fixture_ring("rebase", Ring::new(2, 1 << 40))
+        .await
+        .with_reclaiming(eager(0));
+    let (first, second) = (Selection::group("a"), Selection::group("b"));
+    for selection in [&first, &second] {
+        f.sessions
+            .session(async |session| {
+                f.outbox
+                    .set_position(&session, selection, Move::Start)
+                    .await
+            })
+            .await
+            .unwrap();
+    }
+    // the restored table: its rows in the old ids, its positions past them
+    let restored = |id: u64, xid: u64, identity: &str| {
+        format!(
+            "INSERT INTO {{outbox}} (uri, payload, metadata, transaction_id) VALUES \
+             ('kafka://orders', convert_to('{id}', 'UTF8'), \
+              '{{\"message_id\": \"00000000-0000-4000-9000-{id:012}\"{identity}}}', '{xid}');"
+        )
+    };
+    let same =
+        r#", "tenant_id": "t", "stream_type": "Order", "stream_id": "7", "stream_position": 1"#;
+    f.execute(&format!(
+        "{}{}{}{}",
+        restored(3, 900_000_000_003, ""),
+        restored(7, 900_000_000_007, ""),
+        restored(12, 900_000_000_012, same),
+        restored(13, 900_000_000_013, same),
+    ))
+    .await
+    .unwrap();
+    f.execute(&format!(
+        "UPDATE {offsets} SET delivered = '900000000010:900000000010:' WHERE consumer_group = 'a'; \
+         UPDATE {offsets} SET delivered = '900000000005:900000000005:' WHERE consumer_group = 'b'; \
+         UPDATE {{outbox}}_meta SET gone_below = '900000000000', intact_from = '900000000000';",
+        offsets = f.tables.1
+    ))
+    .await
+    .unwrap();
+    // a row written in the new ids since the restore; the restored ids are
+    // never older than the running transactions, so it is not waited for
+    f.publish_now(&[message("kafka://orders", 1)]).await;
+    let (seen_a, a) = collector();
+    let (seen_b, b) = collector();
+    assert!(matches!(
+        f.outbox.dispatch(&a, &first).await,
+        Err(Error::CounterReset(_))
+    ));
+
+    // transactions committing all along: one that commits after the
+    // rebase's first write would make its own id visible in a snapshot it
+    // took after that write, and its rows count as delivered
+    let rebasing = std::sync::atomic::AtomicBool::new(true);
+    let rebase = async {
+        let rebased = f.outbox.rebase().await;
+        rebasing.store(false, Ordering::SeqCst);
+        rebased
+    };
+    let others = async {
+        let mut committed = 0u32;
+        while rebasing.load(Ordering::SeqCst) {
+            f.texts("SELECT pg_current_xact_id()::text").await;
+            committed += 1;
+        }
+        committed
+    };
+    let (rebased, committed) = tokio::join!(rebase, others);
+    assert!(committed > 0);
+    let rebased = rebased.unwrap().unwrap();
+    assert_eq!((rebased.kept, rebased.emptied), (3, 2));
+    let held = f.held().await;
+    let ids: Vec<u64> = {
+        let mut by_position = f
+            .texts("SELECT convert_from(payload, 'UTF8') FROM {outbox} ORDER BY \"position\"")
+            .await;
+        by_position.dedup();
+        by_position.iter().map(|id| id.parse().unwrap()).collect()
+    };
+    assert_eq!(ids, [7, 12, 1]);
+    let xids: std::collections::BTreeSet<u64> = held.iter().map(|(_, xid)| *xid).collect();
+    assert_eq!(xids.len(), 1, "written again under one id");
+    assert_eq!(f.bounds().await, (rebased.bound, rebased.bound));
+    assert!(rebased.bound <= *xids.first().unwrap());
+
+    f.drain(&a, &first).await;
+    f.drain(&b, &second).await;
+    assert_eq!(*seen_a.lock().unwrap(), [7, 12, 1]);
+    assert_eq!(*seen_b.lock().unwrap(), [7, 12, 1]);
+    assert_eq!(f.outbox.rebase().await.unwrap(), None);
+}
+
+/// Once the server's ids reach the restored ring's, the rows written since
+/// the restore cannot be told from the restored ones: the rebase refuses and
+/// changes nothing.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_rebase_refuses_once_the_new_ids_reach_the_restored_ones() {
+    let f = fixture_ring("rebase_late", Ring::new(2, 1 << 40))
+        .await
+        .with_reclaiming(eager(0));
+    let selection = Selection::group("a");
+    f.sessions
+        .session(async |session| {
+            f.outbox
+                .set_position(&session, &selection, Move::Start)
+                .await
+        })
+        .await
+        .unwrap();
+    f.publish(&[message("kafka://orders", 1)]).await;
+    f.execute(&format!(
+        "UPDATE {} SET delivered = '900000000010:900000000010:'; \
+         UPDATE {{outbox}}_meta SET gone_below = '3';",
+        f.tables.1
+    ))
+    .await
+    .unwrap();
+    assert!(matches!(
+        f.outbox.rebase().await,
+        Err(Error::CounterReset(_))
+    ));
+    assert_eq!(f.held().await.len(), 1);
 }

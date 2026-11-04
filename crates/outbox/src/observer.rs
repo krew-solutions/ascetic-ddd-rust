@@ -4,13 +4,15 @@
 //! composed as tuples, fixed when the outbox is built. An observer observes;
 //! one that has to do IO enqueues and lets a task of its own do the awaiting.
 //!
-//! The five events are the actions of the protocol model in
+//! Five events are the actions of the protocol model in
 //! `verify/tla/Outbox.tla` — publish, fetch, handle, acknowledge, and the
 //! close of the dispatcher's transaction — so a recording observer yields a
-//! trace the model can be checked against. A dispatcher is named by the
-//! slot it holds, not by who runs it: it has no other identity.
+//! trace the model can be checked against; an epoch's start and a pass of
+//! the ring's reclamation are reported beside them. A dispatcher is named by
+//! the slot it holds, not by who runs it: it has no other identity.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::error::{BoxError, Error};
 use crate::message::{OutboxMessage, Snapshot};
@@ -125,6 +127,87 @@ pub struct Dispatched<'a> {
     pub outcome: Result<bool, &'a Error>,
 }
 
+/// A pass of the ring's reclamation (ADR-0033 decision 3), and how it ended.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Reclamation {
+    /// A generation was emptied.
+    Emptied {
+        /// The generation.
+        generation: u32,
+        /// The lowest and highest windows of its rows, `id / window`: every
+        /// lap it held.
+        windows: (u64, u64),
+        /// About how many rows it held, as the planner estimates them.
+        rows: i64,
+        /// No row is left below it, and none will be written.
+        gone_below: u64,
+        /// Every row from it on is kept.
+        intact_from: u64,
+    },
+    /// Nothing was emptied, and why.
+    Skipped(Skipped),
+}
+
+/// Why a pass of the reclamation emptied nothing.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Skipped {
+    /// Another pass holds the reclamation's key.
+    Busy,
+    /// The ring holds no row.
+    Empty,
+    /// The generation of the oldest row left may still be written: its newest
+    /// window lies within the margin of the next id's.
+    NotPast {
+        /// The candidate.
+        generation: u32,
+        /// Its newest row's window.
+        newest_window: u64,
+        /// The next id's.
+        next_window: u64,
+    },
+    /// A transaction of this database that holds an id in the generation is
+    /// open, and could still write into it.
+    NotClosed {
+        /// The candidate.
+        generation: u32,
+        /// The open transaction.
+        transaction: u64,
+    },
+    /// A position has not handed on every row of the generation: the group
+    /// pinning the ring.
+    NotPassed {
+        /// The candidate.
+        generation: u32,
+        /// The pinning position's group.
+        group: String,
+        /// Its selection.
+        uri: String,
+        /// Its slot.
+        slot: u32,
+        /// How long ago its `delivered` last moved; `None` if it never did.
+        since: Option<Duration>,
+    },
+    /// Every group passed the generation less than the margin's age ago: a
+    /// row relayed a moment ago can still be re-injected.
+    NotOldEnough {
+        /// The candidate.
+        generation: u32,
+        /// How long since a pass first found it passed.
+        passed_for: Duration,
+    },
+    /// A reader held the partition past the lock's timeout.
+    Held {
+        /// The candidate.
+        generation: u32,
+    },
+    /// Read again under the partition's lock, the generation was not passed:
+    /// a row committed between the checks and the lock.
+    PassedNoMore {
+        /// The candidate.
+        generation: u32,
+    },
+}
+
 /// What an outbox reports. Every method has an empty default, so an observer
 /// implements only what it cares about.
 pub trait OutboxObserver: Send + Sync {
@@ -140,6 +223,8 @@ pub trait OutboxObserver: Send + Sync {
     fn on_acked(&self, _event: &Acked<'_>) {}
     /// The dispatcher's transaction closed.
     fn on_dispatched(&self, _event: &Dispatched<'_>) {}
+    /// A pass of the ring's reclamation ended.
+    fn on_reclamation(&self, _event: &Reclamation) {}
 }
 
 /// Observes nothing.
@@ -171,6 +256,10 @@ impl<A: OutboxObserver, B: OutboxObserver> OutboxObserver for (A, B) {
         self.0.on_dispatched(event);
         self.1.on_dispatched(event);
     }
+    fn on_reclamation(&self, event: &Reclamation) {
+        self.0.on_reclamation(event);
+        self.1.on_reclamation(event);
+    }
 }
 
 impl<O: OutboxObserver + ?Sized> OutboxObserver for Arc<O> {
@@ -191,6 +280,9 @@ impl<O: OutboxObserver + ?Sized> OutboxObserver for Arc<O> {
     }
     fn on_dispatched(&self, event: &Dispatched<'_>) {
         (**self).on_dispatched(event);
+    }
+    fn on_reclamation(&self, event: &Reclamation) {
+        (**self).on_reclamation(event);
     }
 }
 
@@ -213,5 +305,8 @@ impl<O: OutboxObserver> OutboxObserver for Vec<O> {
     }
     fn on_dispatched(&self, event: &Dispatched<'_>) {
         self.iter().for_each(|o| o.on_dispatched(event));
+    }
+    fn on_reclamation(&self, event: &Reclamation) {
+        self.iter().for_each(|o| o.on_reclamation(event));
     }
 }
