@@ -173,8 +173,10 @@ the numbers checked against the table's; a transaction of its own that fixes
 the copy's bound — every position with no epoch and nothing new of its
 selection advanced first, as an idle look would, so that a slot never
 matched does not pull it down — and logs how many rows the step will copy;
-then the ring's step, copying the rows from the bound on. A host drains its
-relays first, which keeps the bound near the head. A rewind below the ring's
+then the ring's step, copying the rows from the bound on. The copy runs under
+the outbox's lock, about 55 µs a row measured, publishers waiting: a host
+drains its relays first, which keeps the bound near the head, and `migrate`
+refuses a copy past `with_copy_limit` rows, 20 000 by default. A rewind below the ring's
 `intact_from` is refused, `Error::Reclaimed`; back to the start lands on it,
 and a new group starts there. A producer that declares its replay horizon,
 `with_replay_horizon(d)`, has a rewind refused, `Error::BeyondReplayHorizon`,

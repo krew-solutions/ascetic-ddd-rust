@@ -80,6 +80,10 @@ use crate::observer::OutboxObserver;
 /// Messages fetched per dispatch by default.
 pub const DEFAULT_BATCH_SIZE: usize = 100;
 
+/// The most rows the ring's step copies by default: about a second under the
+/// outbox's lock, at the 55 µs a row measured (ADR-0033, M9).
+pub const DEFAULT_COPY_LIMIT: u64 = 20_000;
+
 /// What a dispatcher takes: a consumer group, and optionally one URI with
 /// everything under it (`kafka://orders` covers `kafka://orders/order-1`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -212,6 +216,7 @@ pub struct PgOutbox<P, O = ()> {
     ring: Ring,
     reclaiming: Reclaiming,
     replay_horizon: Option<Duration>,
+    copy_limit: u64,
 }
 
 impl<P> PgOutbox<P> {
@@ -229,6 +234,7 @@ impl<P> PgOutbox<P> {
             ring: Ring::default(),
             reclaiming: Reclaiming::default(),
             replay_horizon: None,
+            copy_limit: DEFAULT_COPY_LIMIT,
         }
     }
 }
@@ -247,6 +253,7 @@ impl<P, O> PgOutbox<P, O> {
             ring: self.ring,
             reclaiming: self.reclaiming,
             replay_horizon: self.replay_horizon,
+            copy_limit: self.copy_limit,
         }
     }
 
@@ -313,6 +320,19 @@ impl<P, O> PgOutbox<P, O> {
     pub fn with_replay_horizon(self, horizon: Duration) -> Self {
         PgOutbox {
             replay_horizon: Some(horizon),
+            ..self
+        }
+    }
+
+    /// The same outbox, letting the ring's step copy up to `rows` rows
+    /// ([`DEFAULT_COPY_LIMIT`] by default): it copies under the outbox's
+    /// lock, and [`PgOutbox::migrate`] refuses more,
+    /// [`Error::CopyTooLarge`](crate::Error::CopyTooLarge), so that a host
+    /// that forgot to drain its relays does not stop its publishers for
+    /// minutes.
+    pub fn with_copy_limit(self, rows: u64) -> Self {
+        PgOutbox {
+            copy_limit: rows,
             ..self
         }
     }

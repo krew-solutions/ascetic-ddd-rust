@@ -559,7 +559,8 @@ where
     /// against the next. Every row some position has not handed on, then or
     /// at the ring's step, has an id at or above it: from its commit a
     /// rewind below it is refused and a new group starts at it. Recorded as
-    /// both bounds, each only ever moved the way it stays true.
+    /// both bounds, each only ever moved the way it stays true. Refused,
+    /// with nothing recorded, when the step would copy more than the limit.
     async fn fix_copy_bound(&self, component: &str) -> Result<Option<u64>, Error> {
         let (outbox, offsets) = (&self.outbox_table, &self.offsets_table);
         let selected = "(o.uri = '' OR m.uri = o.uri OR m.uri LIKE o.uri || '/%')";
@@ -637,6 +638,12 @@ where
                         connection.execute(&advance, &[]).await?;
                         let row = connection.query_one(&bound, &[]).await?;
                         let (bound, copied): (i64, i64) = (row.get(0), row.get(1));
+                        if copied as u64 > self.copy_limit {
+                            return Err(Error::CopyTooLarge {
+                                rows: copied as u64,
+                                limit: self.copy_limit,
+                            });
+                        }
                         connection
                             .execute(&record, &[&bound.to_string()])
                             .await?;
