@@ -48,6 +48,43 @@ fi
 grep -q "Invariant NoPassedOver is violated" "${TMPDIR:-/tmp}/tlc-outbox-rehash.log"
 echo "   violation found, as expected"
 
+# A configuration that must fail, and the property it must break.
+must_fail() {
+  log="${TMPDIR:-/tmp}/tlc-$1.log"
+  if tlc -config "$1.cfg" "$2" > "$log" 2>&1; then
+    echo "unexpected: $1 broke nothing"; exit 1
+  fi
+  grep -q "$3" "$log" || { echo "unexpected: $1 broke something else:"; grep -E "^Error" "$log" | head -3; exit 1; }
+  echo "   $3, as expected"
+}
+
+echo "== outbox, statement by statement: the relay of ADR-0035 as decided, every property holds"
+tlc -config OutboxPg.cfg MCOutboxPg.tla
+echo "== outbox, statement by statement: rewinds as decided, every property holds"
+tlc -config OutboxPgRewind.cfg MCOutboxPg.tla
+echo "== outbox, statement by statement: a transaction open for ever holds no other row back"
+tlc -config OutboxPgLive.cfg MCOutboxPg.tla
+echo "== outbox, statement by statement: in lanes, the inbox's flows while the broker is down"
+tlc -config OutboxPgLanes.cfg MCOutboxPg.tla
+for case in \
+  "OutboxPgMixedDown:Temporal properties were violated" \
+  "OutboxPgXmin:Invariant VersionOrder is violated" \
+  "OutboxPgXminOpen:Temporal properties were violated" \
+  "OutboxPgOneStatement:Invariant NoPassedOver is violated" \
+  "OutboxPgByXid:Invariant VersionOrder is violated" \
+  "OutboxPgNoXip:Invariant NoPassedOver is violated" \
+  "OutboxPgRange:Invariant NoPassedOver is violated" \
+  "OutboxPgUnfiltered:Invariant NoRedeliveryWithoutFailure is violated" \
+  "OutboxPgUnbounded:Invariant VersionOrder is violated" \
+  "OutboxPgDrainNow:Invariant NoPassedOver is violated" \
+  "OutboxPgOffsetCarried:Invariant NoPassedOver is violated" \
+  "OutboxPgNaiveRewind:Invariant NoPassedOver is violated" \
+  "OutboxPgRewindKeepsEpoch:Invariant RewindReplays is violated" \
+  "OutboxPgDrawEarly:Invariant VersionOrder is violated"; do
+  echo "== outbox, statement by statement: ${case%%:*}, a refuted design, must fail"
+  must_fail "${case%%:*}" MCOutboxPg.tla "${case#*:}"
+done
+
 echo "== outbox: recorded runs of the tests fit the model"
 for trace in traces/outbox-*.jsonl; do
   check_trace "$trace"

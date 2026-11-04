@@ -448,7 +448,19 @@ and on a scratch outbox of 4 million rows, about a thousand per transaction:
 
 ## Executors
 
-Owed, with the implementation.
+Owed, with the implementation, but for the model's first part.
+
+**Built (2026-11-04): `verify/tla/OutboxPg.tla`,** the relay of this record
+statement by statement, with its lanes and rewinds.
+- **Must hold:** the decision, two dispatchers racing; rewinds; a
+  transaction of another database open for ever; two lanes with the broker
+  down for good.
+- **Must fail:** every configuration of the table below, each with its
+  property, and one selection of everything with the broker down,
+  breaking `NoHeadOfLineBlocking`. `check.sh` greps each one.
+- **Still owed in it:** the migration from `(L, off)`, `L = 0` included; a
+  new group; the sequence's cache; ADR-0033's ring; and the refinement to
+  `Outbox.tla`, once that module is restated over versions.
 
 **A statement-level model.** `OutboxPg.tla`, refining the abstract
 `Outbox.tla` as `InboxPg.tla` refines `Inbox.tla`. It models:
@@ -551,6 +563,9 @@ Until they do, a mutation held by a model alone also gets a test.
   today against epochs.
 - **An inventory of the host's outbox writers** against decision 7.
 - **The model checker's time** with aggregates, locks and snapshots added.
+  First measured: the decision with two dispatchers racing, about 6.6
+  million states in two and a half minutes; liveness, minutes on tens of
+  thousands of states. The ring is still to be added.
 
 ## References
 
