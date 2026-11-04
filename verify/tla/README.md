@@ -61,6 +61,97 @@ a slot whose position is already past its message. That is the deployment
 level loss made visible, and the reason a row carries its slot for good;
 `check.sh` requires the violation.
 
+## Outbox, statement by statement — `OutboxPg.tla`
+
+`Outbox.tla` is the relay as implemented today: released below `xmin`, in
+`(transaction_id, position)` order. ADR-0035 replaces both, and
+`OutboxPg.tla` is its relay one level down: the statements of a
+dispatcher's transaction against PostgreSQL under READ COMMITTED.
+
+- **Snapshots** are `xmin:xmax:xip` as `GetSnapshotData` computes them, and
+  visibility is `pg_visible_in_snapshot`'s arithmetic. An epoch's rows —
+  visible in the epoch, not in `delivered` — are found as the implementation
+  finds them, in-progress lists included.
+- **A statement's snapshot is taken before the lock it asks for,** and
+  `FOR UPDATE` returns the position row's latest committed version.
+- **A transaction takes its id at its first write,** or earlier, when it
+  writes something else first (the inbox's take). A stream's version `v` is
+  written once `v - 1` has committed (ADR-0035 decision 7). One transaction
+  may hold an id for ever and write nothing here: one of another database.
+- **Selections:** one of everything, raced by two dispatchers, or two lanes
+  (ADR-0033), each with its own position row.
+
+Left out:
+- the probe of decision 2, which decides whether a look happens, not what
+  it does;
+- the ring of ADR-0033 and the migration of the positions — the next step;
+- the sequence's cache;
+- the refinement to `Outbox.tla`, which waits for that module to be restated
+  over versions.
+
+`MCOutboxPg.tla` fixes the instance: two versions of one stream, to the
+inbox, written by two transactions; one row of another stream, to the
+broker, by a third that may roll back; a fourth transaction of another
+database.
+
+| property | kind | meaning |
+| --- | --- | --- |
+| `NoPassedOver` | invariant | a live row the position has passed — visible in `delivered`, or an epoch's row at or below its offset — was received |
+| `RewindReplays` | invariant | after a rewind, every row the position passes again was received again |
+| `VersionOrder` | invariant | a stream's versions are first received in their order |
+| `NoRedeliveryWithoutFailure` | invariant | a row is received twice only after a rollback or a rewind |
+| `EpochCoversDelivered` | invariant | an epoch in flight sees everything delivered |
+| `DeliveredMonotone` | action | `delivered` only grows, but at a rewind |
+| `NoHeadOfLineBlocking` | liveness | a committed row is received whatever transaction stays open for ever, unless its own lane's destination is down |
+
+Must hold:
+- `OutboxPg.cfg`: as decided, two dispatchers racing, one rollback. About
+  6.6 million states, two and a half minutes.
+- `OutboxPgRewind.cfg`: rewinds as decided. About 2.5 million states, under
+  a minute.
+- `OutboxPgLive.cfg`: a transaction of another database open for ever;
+  `NoHeadOfLineBlocking` holds. Four minutes: TLC checks liveness slowly.
+- `OutboxPgLanes.cfg`: two lanes, the broker down for good; the inbox's lane
+  still flows. Without early ids or rollbacks, which the others hold: about
+  48 000 states, a minute and a half.
+
+Must fail, each with the property it breaks (`check.sh` greps it):
+
+| configuration | the design | breaks |
+| --- | --- | --- |
+| `OutboxPgXmin` | ADR-0007's rule | `VersionOrder` |
+| `OutboxPgXminOpen` | the same, a transaction open for ever | `NoHeadOfLineBlocking` |
+| `OutboxPgOneStatement` | the epoch read in the lock's statement | `NoPassedOver` |
+| `OutboxPgByXid` | an epoch handed on by transaction id | `VersionOrder` |
+| `OutboxPgNoXip` | `delivered`'s in-progress list ignored | `NoPassedOver` |
+| `OutboxPgRange` | membership by a range of ids alone | `NoPassedOver` |
+| `OutboxPgUnfiltered` | a batch not kept to the epoch's rows | `NoRedeliveryWithoutFailure` |
+| `OutboxPgUnbounded` | nor to its end | `VersionOrder` |
+| `OutboxPgDrainNow` | a drain storing the current snapshot | `NoPassedOver` |
+| `OutboxPgOffsetCarried` | a new epoch keeping the last one's offset | `NoPassedOver` |
+| `OutboxPgNaiveRewind` | a rewind to `'F:F:'` | `NoPassedOver` |
+| `OutboxPgRewindKeepsEpoch` | a rewind leaving the epoch in flight | `RewindReplays` |
+| `OutboxPgDrawEarly` | a row written before its predecessor committed | `VersionOrder` |
+| `OutboxPgMixedDown` | one selection, the broker down | `NoHeadOfLineBlocking` |
+
+Two of the traces, as TLC prints them:
+
+- **`OutboxPgOneStatement`** is the review's finding, found by the model.
+  1. Dispatcher 1's statement takes its snapshot (`2:2:`) while transaction
+     2 is open.
+  2. Transaction 2 commits.
+  3. Dispatcher 2 starts the epoch `3:3:`, hands row 1 on, and commits
+     offset 1.
+  4. Dispatcher 1 reaches the lock and reads the stored epoch under its old
+     snapshot. Row 2 is invisible to it, so the batch is empty and drains
+     the epoch: `delivered` becomes `3:3:`, and row 2 is lost.
+- **`OutboxPgNoXip`.**
+  1. Transaction 1 is open and transaction 2 rolled back.
+  2. An empty epoch is delivered as `1:3:{1}`.
+  3. Transaction 1 commits.
+  4. The next epoch counts only ids from `delivered`'s `xmax` on, so it
+     misses transaction 1, and drains to `3:3:`. Its row is lost.
+
 ## Inbox — `Inbox.tla`
 
 Messages arrive under an identity, in some order, each in a slot; a
