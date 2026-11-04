@@ -86,6 +86,17 @@ pub(super) struct Step {
     pub(super) snapshot: Snapshot,
 }
 
+/// The mark's time, and an index over it by channel — the destination
+/// without its key — for the processed rows alone, which the sweep walks
+/// (ADR-0033 decision 4). Rows processed before carry none and are kept
+/// until [`PgInbox::stamp_processed`] stamps them; the index starts empty.
+const PROCESSED_AT: &str = r#"
+    ALTER TABLE {table} ADD COLUMN processed_at timestamptz NULL;
+    CREATE INDEX {table}__forgettable_idx ON {table}
+        ((split_part(uri, '/', 1) || '//' || split_part(uri, '/', 3)), processed_at)
+        WHERE processed_at IS NOT NULL;
+"#;
+
 impl<P, O> PgInbox<P, O>
 where
     P: SessionPool + Send + Sync,
@@ -95,7 +106,8 @@ where
     /// The inbox's tables as a component of the database's ledger
     /// (ADR-0029), `inbox:<table>`: its baseline is the sequence, the
     /// tables and the indexes below, its checksum over their template,
-    /// whatever the names, the cut and the key.
+    /// whatever the names, the cut and the key; its second step gives the
+    /// mark its time (ADR-0033).
     ///
     /// The head index, `(slot, received_position)` over the queue — the rows
     /// neither processed, parked nor waiting — is the walk's order: the
@@ -128,9 +140,15 @@ where
             vec![
                 Migration::new("20261027T000000Z_baseline", sql)
                     .checked_over(&BASELINE.replace("{queue}", QUEUE)),
+                Migration::new(
+                    "20261104T000000Z_processed_at",
+                    PROCESSED_AT.replace("{table}", self.table.as_str()),
+                )
+                .on(self.table.clone())
+                .checked_over(PROCESSED_AT),
             ],
         )
-        .unwrap_or_else(|_| unreachable!("one migration with an id, under a name"))
+        .unwrap_or_else(|_| unreachable!("two migrations with ids, under a name"))
     }
 
     /// Brings the inbox's tables up to its migrations — a read of the
@@ -397,7 +415,8 @@ where
     ) -> Result<(i64, Vec<InboxMessage>), Error> {
         let sql = format!(
             "WITH marked AS ( \
-                UPDATE {table} SET processed_position = nextval('{sequence}') \
+                UPDATE {table} SET processed_position = nextval('{sequence}'), \
+                    processed_at = statement_timestamp() \
                 WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4 \
                 RETURNING processed_position \
              ), woken AS ( \
@@ -508,7 +527,8 @@ where
     ) -> Result<Option<(i64, Vec<InboxMessage>)>, Error> {
         let sql = format!(
             "WITH resolved AS ( \
-                UPDATE {table} SET parked_at = NULL, processed_position = nextval('{sequence}') \
+                UPDATE {table} SET parked_at = NULL, processed_position = nextval('{sequence}'), \
+                    processed_at = statement_timestamp() \
                 WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4 \
                   AND parked_at IS NOT NULL \
                 RETURNING processed_position \
@@ -550,7 +570,8 @@ where
     /// which message (ADR-0030). The holder is read by a second statement,
     /// on the conflict alone: under `READ COMMITTED` it takes a snapshot of
     /// its own, which sees a holder that committed while the insert waited
-    /// on it — the insert's own snapshot does not.
+    /// on it — the insert's own snapshot does not. A holder the sweep forgot
+    /// between the two is reported unknown, not absent.
     async fn publish(&self, message: &InboxMessage) -> Result<(), Error> {
         let sql = format!(
             "INSERT INTO {} (tenant_id, stream_type, stream_id, stream_position, uri, payload, metadata) \
@@ -564,7 +585,7 @@ where
              WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4",
             self.table
         );
-        let (receipt, held_by) = self
+        let (receipt, held_by, holder_unknown) = self
             .pool
             .session(async |session| {
                 session
@@ -585,7 +606,7 @@ where
                             )
                             .await?;
                         let Some(row) = row else {
-                            let held_by = tx
+                            let holder = tx
                                 .connection()
                                 .query_opt(
                                     &holder,
@@ -596,16 +617,17 @@ where
                                         &message.stream_position,
                                     ],
                                 )
-                                .await?
-                                .and_then(|row| row.get::<_, Option<String>>(0));
-                            return Ok::<_, Error>((None, held_by));
+                                .await?;
+                            let unknown = holder.is_none();
+                            let held_by = holder.and_then(|row| row.get::<_, Option<String>>(0));
+                            return Ok::<_, Error>((None, held_by, unknown));
                         };
                         let receipt = Receipt {
                             transaction_id: transaction_id(row.get::<_, String>(0))?,
                             received_position: row.get::<_, i64>(1),
                             slot: row.get::<_, i16>(2) as u32,
                         };
-                        Ok((Some(receipt), None))
+                        Ok((Some(receipt), None, false))
                     })
                     .await
             })
@@ -614,6 +636,7 @@ where
             message,
             receipt,
             held_by: held_by.as_deref(),
+            holder_unknown,
         });
         Ok(())
     }

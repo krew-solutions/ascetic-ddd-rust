@@ -211,6 +211,7 @@ pub struct PgOutbox<P, O = ()> {
     slots: u32,
     ring: Ring,
     reclaiming: Reclaiming,
+    replay_horizon: Option<Duration>,
 }
 
 impl<P> PgOutbox<P> {
@@ -227,6 +228,7 @@ impl<P> PgOutbox<P> {
             slots: 1,
             ring: Ring::default(),
             reclaiming: Reclaiming::default(),
+            replay_horizon: None,
         }
     }
 }
@@ -244,6 +246,7 @@ impl<P, O> PgOutbox<P, O> {
             slots: self.slots,
             ring: self.ring,
             reclaiming: self.reclaiming,
+            replay_horizon: self.replay_horizon,
         }
     }
 
@@ -299,6 +302,19 @@ impl<P, O> PgOutbox<P, O> {
     /// The ring this outbox's table is cut into.
     pub fn ring(&self) -> Ring {
         self.ring
+    }
+
+    /// The same outbox, declaring how far back a rewind may replay its rows
+    /// (ADR-0033 decision 4): [`PgOutbox::set_position`] refuses a rewind to
+    /// a transaction whose first row is older. Its consumers' inboxes keep a
+    /// processed message for a window that covers it, so that a replay
+    /// within it is dropped as a repeat. None, the default, refuses nothing,
+    /// and its consumers cannot bound their windows.
+    pub fn with_replay_horizon(self, horizon: Duration) -> Self {
+        PgOutbox {
+            replay_horizon: Some(horizon),
+            ..self
+        }
     }
 
     /// The same outbox, its ring emptied as `reclaiming` says.

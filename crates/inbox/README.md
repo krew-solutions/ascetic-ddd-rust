@@ -18,7 +18,9 @@ inbox.run(|tx, message| handle(tx, message), Loops::default(), ctrl_c).await?;
 * **Idempotency.** A message's identity is
   `(tenant_id, stream_type, stream_id, stream_position)` and is the primary
   key; receiving it again is `ON CONFLICT DO NOTHING`. A `message_id` in the
-  metadata is unique in the table as well.
+  metadata is unique in the table as well. A channel with a window remembers
+  a processed message for that long; a repeat that arrives after is
+  processed again (below).
 * **Once, with the work.** The subscriber runs inside the transaction that
   marks the message processed, and is given that transaction. Its writes and
   the mark commit together or not at all.
@@ -219,6 +221,32 @@ neither processed, parked nor waiting, is the only index in
 column the planner walked that one from the first row, past the whole
 processed history, 89 ms at sixteen slots.
 
+## Forgetting
+
+Rows of a channel — the destination without its key — that a host gives a
+window are forgotten once processed longer ago than it, by a sweep that runs
+beside the loops of `run`, on a session of its own (ADR-0033 decision 4):
+
+```rust
+let inbox = inbox.with_retention(
+    InboxRetention::keep_everything().window("kafka://orders", Duration::from_secs(9 * 86_400)),
+);
+```
+
+Every other channel keeps its rows, as it must when its stream types are
+named as causal dependencies, or when a host cannot bound its repeats. A
+window covers the longest a repeat can take to arrive: the broker's whole
+retention, tiers included, the time a segment outlives it, and the
+producer's replay horizon, which the outbox enforces on rewinds. The sweep
+forgets in statements of `batch` rows under a try-lock, never an
+unprocessed, parked or waiting row, nor one a waiting row names; it starts
+each statement where the last one of its channel stopped, forgets nothing for
+its `grace` after the start or after a pass that could not reach the
+database, and its errors never touch the loops. The mark keeps its time,
+`processed_at`; rows processed before it did are kept until
+`stamp_processed()`, a one-time pass, stamps them. `sweep()` runs one pass on
+demand.
+
 ## Observing the inbox
 
 `PgInbox::observed_by(observer)` attaches an `InboxObserver`, in the shape of
@@ -233,7 +261,8 @@ the mark, with its order of processing and the rows it woke; the attempt
 recorded after a failure, with whether it parked the message; rows whose
 wait ran out, parked; the dispatcher's transaction closed, committed or
 rolled back; a message unparked or resolved by an operator, with the rows
-the resolve woke. A dispatcher's events name the slot it holds, which is
+the resolve woke; rows a sweep forgot, per channel; and, beside a message
+ignored, whether the row holding its identity went before it could be read. A dispatcher's events name the slot it holds, which is
 what tells one dispatcher's events from another's when several run at once:
 a slot has one holder at a time. A stored message comes with the id of the
 transaction that stored it, and every step of a walk over the table with the

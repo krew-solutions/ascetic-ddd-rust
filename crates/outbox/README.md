@@ -176,7 +176,11 @@ matched does not pull it down — and logs how many rows the step will copy;
 then the ring's step, copying the rows from the bound on. A host drains its
 relays first, which keeps the bound near the head. A rewind below the ring's
 `intact_from` is refused, `Error::Reclaimed`; back to the start lands on it,
-and a new group starts there. A lane starts where its group's selection of
+and a new group starts there. A producer that declares its replay horizon,
+`with_replay_horizon(d)`, has a rewind refused, `Error::BeyondReplayHorizon`,
+when the first row it would replay is older: its consumers' inboxes remember
+a processed message only for a window that covers the horizon (ADR-0033
+decision 4). A lane starts where its group's selection of
 everything stands, so that switching a relay to lanes hands nothing on again.
 
 ## Emptying the ring

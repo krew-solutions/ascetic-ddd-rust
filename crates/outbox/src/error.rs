@@ -48,6 +48,19 @@ pub enum Error {
         /// The lowest one a rewind may go back to.
         intact_from: u64,
     },
+    /// A rewind to a transaction whose first row at or after it is older
+    /// than the producer's declared replay horizon (ADR-0033 decision 4):
+    /// the consumers' inboxes keep a processed message for a window that
+    /// covers the horizon, and a replay past it would be processed again.
+    BeyondReplayHorizon {
+        /// The transaction the rewind asked for.
+        requested: u64,
+        /// How old its first row is: its transaction's start, so a little
+        /// older than its commit.
+        age: std::time::Duration,
+        /// The horizon declared.
+        horizon: std::time::Duration,
+    },
     /// A group asked to be forgotten moved a position within the ring's
     /// margin of age: it is not abandoned (ADR-0033 decision 3).
     GroupActive {
@@ -109,6 +122,7 @@ impl Error {
             | Error::SequenceCache(_)
             | Error::CounterReset(_)
             | Error::Reclaimed { .. }
+            | Error::BeyondReplayHorizon { .. }
             | Error::GroupActive { .. }
             | Error::Format { .. } => false,
         }
@@ -144,6 +158,15 @@ impl fmt::Display for Error {
                 "rows below transaction {intact_from} may be gone from the outbox's ring: \
                  a rewind to {requested} would replay short"
             ),
+            Error::BeyondReplayHorizon {
+                requested,
+                age,
+                horizon,
+            } => write!(
+                f,
+                "a rewind to transaction {requested} replays rows {age:?} old, past the producer's \
+                 replay horizon of {horizon:?}: its consumers would process them again"
+            ),
             Error::GroupActive { group, moved } => write!(
                 f,
                 "group `{group}` moved a position {moved:?} ago: it is not abandoned"
@@ -167,6 +190,7 @@ impl std::error::Error for Error {
             | Error::SequenceCache(_)
             | Error::CounterReset(_)
             | Error::Reclaimed { .. }
+            | Error::BeyondReplayHorizon { .. }
             | Error::GroupActive { .. }
             | Error::Format { .. } => None,
             Error::Migration(error) => Some(error),

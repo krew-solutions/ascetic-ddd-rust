@@ -66,6 +66,13 @@
 //! server broke, a connection lost — waits and goes on, one that meets a
 //! defect stops every loop (ADR-0010).
 //!
+//! # Forgetting
+//!
+//! A channel that a host gives a window, [`InboxRetention`], forgets its
+//! processed rows once they are older than it, by a sweep beside the loops;
+//! every other channel keeps them. Within the window a repeat is a duplicate;
+//! after it, it is processed again (ADR-0033 decision 4).
+//!
 //! # Observing
 //!
 //! [`PgInbox::observed_by`] attaches an [`InboxObserver`]: it is told of
@@ -75,9 +82,11 @@
 
 mod dispatch;
 mod store;
+mod sweep;
 
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ascetic_ddd_session::pg::Identifier;
@@ -203,6 +212,71 @@ impl fmt::Debug for Retries {
     }
 }
 
+/// How long the inbox remembers a processed message, by channel — the
+/// destination without its key, `kafka://orders` (ADR-0033 decision 4).
+///
+/// A channel's window runs from the message's processing. A host sets it at
+/// least to the longest a repeat can reach the inbox: the broker's whole
+/// retention, tiers included, the time a segment outlives it, and the
+/// producer's replay horizon. A channel without a window keeps its rows, as
+/// must one whose stream types a message names as causal dependencies, and
+/// one whose repeats a host cannot bound. Within its window a repeat is
+/// dropped; after it, it is processed again. The rule in force when the
+/// sweep runs applies, to rows processed before it changed too.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InboxRetention {
+    windows: BTreeMap<String, Duration>,
+    /// How often the sweep runs.
+    pub interval: Duration,
+    /// How many rows a statement of the sweep forgets at most.
+    pub batch: u32,
+    /// Nothing is forgotten for this long after the process starts, nor
+    /// after the sweep could not reach the database: intakes and relays
+    /// rejoining after an outage redeliver first.
+    pub grace: Duration,
+    /// How long a statement of the sweep waits for a lock.
+    pub lock_timeout: Duration,
+}
+
+impl InboxRetention {
+    /// Every row kept: the default.
+    pub fn keep_everything() -> Self {
+        InboxRetention {
+            windows: BTreeMap::new(),
+            interval: Duration::from_secs(60),
+            batch: 1000,
+            grace: Duration::from_secs(600),
+            lock_timeout: Duration::from_secs(1),
+        }
+    }
+
+    /// The same, `channel`'s processed rows forgotten `window` after they
+    /// were processed.
+    pub fn window(mut self, channel: impl Into<String>, window: Duration) -> Self {
+        self.windows.insert(channel.into(), window);
+        self
+    }
+
+    /// The same, `channel`'s rows kept.
+    pub fn keep(mut self, channel: &str) -> Self {
+        self.windows.remove(channel);
+        self
+    }
+
+    /// The channels with a window, and their windows.
+    pub fn windows(&self) -> impl Iterator<Item = (&str, Duration)> {
+        self.windows
+            .iter()
+            .map(|(channel, window)| (channel.as_str(), *window))
+    }
+}
+
+impl Default for InboxRetention {
+    fn default() -> Self {
+        InboxRetention::keep_everything()
+    }
+}
+
 /// The inbox over a PostgreSQL session pool, watched by `O`.
 pub struct PgInbox<P, O = ()> {
     pool: P,
@@ -214,6 +288,11 @@ pub struct PgInbox<P, O = ()> {
     retries: Retries,
     max_wait: Option<Duration>,
     slots: u32,
+    retention: InboxRetention,
+    /// Per channel, the latest `processed_at` the sweep forgot: where its
+    /// next statement starts, so that dead index entries a held vacuum
+    /// horizon keeps are not walked again.
+    swept_to: Mutex<HashMap<String, String>>,
 }
 
 impl<P> PgInbox<P> {
@@ -231,6 +310,8 @@ impl<P> PgInbox<P> {
             retries: Retries::default(),
             max_wait: None,
             slots: 1,
+            retention: InboxRetention::default(),
+            swept_to: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -248,6 +329,8 @@ impl<P, O> PgInbox<P, O> {
             retries: self.retries,
             max_wait: self.max_wait,
             slots: self.slots,
+            retention: self.retention,
+            swept_to: self.swept_to,
         }
     }
 
@@ -301,6 +384,11 @@ impl<P, O> PgInbox<P, O> {
     /// The same inbox, treating a failed message as `retries` says.
     pub fn with_retries(self, retries: Retries) -> Self {
         PgInbox { retries, ..self }
+    }
+
+    /// The same inbox, forgetting processed messages as `retention` says.
+    pub fn with_retention(self, retention: InboxRetention) -> Self {
+        PgInbox { retention, ..self }
     }
 
     /// The same inbox, parking a message that has waited longer than

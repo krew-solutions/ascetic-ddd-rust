@@ -864,7 +864,31 @@ one has committed), every row of an identity kept, the rows since the
 restore dropped, a restored row kept only when owed to every group; and it
 refuses once the new ids reach the restored ring's — the refusal dropped.
 
-Still owed: the observer's events in the traces.
+**Built (2026-11-04), the inbox's windows and the producer's horizon**,
+each red under the mutation named:
+- a channel's processed rows go once its window has passed, in statements
+  of the batch's size, another channel's stay, and a repeat after is
+  processed again — every channel swept, the mark keeping no time, one
+  batch a pass;
+- within its window a repeat is dropped — the window ignored;
+- an unprocessed, parked or waiting row, and a processed row a waiting row
+  names, are never forgotten; a parked row resolved goes with its window — a
+  named row forgotten, a resolve keeping no time;
+- a changed rule applies to rows processed before it;
+- rows processed before the mark kept its time are kept until the one-time
+  pass stamps them, page by page — the stamp stopping at its first page;
+- the inbox's run sweeps beside its loops, and nothing within its grace — run
+  never sweeping, the grace ignored; the grace started again after a failed
+  pass, a unit of its own;
+- a rewind deeper than the producer's replay horizon refused, one within it
+  allowed — the horizon ignored.
+
+Not forced by a test: a holder read racing the sweep, reported unknown; a
+lane's Commands to self dropped as repeats within the window across a
+broker's outage (each lane's rows and the inbox's de-duplication are tested
+apart).
+
+Still owed: the observer's events in the traces; the host's gates.
 
 **TLA+.** Built (2026-11-04) in `OutboxPg.tla`, with two generations of one
 id each.
@@ -1095,3 +1119,8 @@ On a scratch database, each with the result that changes the decision:
   for it: a transaction's own id is left out of its snapshot's in-progress
   list, so a snapshot taken after its first write sees its own rows once a
   later transaction has committed — the reason `S` comes first.
+- 2026-11-04 — The inbox's windows built: the mark's time, the sweep beside
+  the loops with its keyset start and grace, the one-time stamp of rows
+  processed before, a holder gone reported unknown; and the producer's replay
+  horizon held by `set_position`. The one-time stamp is a call a host makes,
+  not a part of the sweep: it walks the whole table once.
