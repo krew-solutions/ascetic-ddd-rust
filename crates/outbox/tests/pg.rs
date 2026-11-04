@@ -2785,3 +2785,59 @@ async fn a_rewind_deeper_than_the_replay_horizon_is_refused() {
     f.drain(&subscriber, &selection).await;
     assert_eq!(*seen.lock().unwrap(), [1]);
 }
+
+/// The ring's step copies under the outbox's lock, publishers waiting: a
+/// copy past the limit is refused before the step, nothing changed, and the
+/// same tables migrate once the limit allows it (ADR-0033, M9).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_ring_copy_past_its_limit_is_refused_before_the_step() {
+    let tables = (
+        "outbox_copy_limit".to_owned(),
+        "outbox_copy_limit_offsets".to_owned(),
+    );
+    let sessions = PgSessionPool::new(pool());
+    let outbox = |limit: u64| {
+        PgOutbox::new(PgSessionPool::new(pool()))
+            .with_tables(
+                Identifier::new(&tables.0).unwrap(),
+                Identifier::new(&tables.1).unwrap(),
+            )
+            .with_copy_limit(limit)
+    };
+    outbox(0).teardown().await.unwrap();
+    let f = Fixture {
+        sessions,
+        outbox: outbox(3).observed_by(((), TraceFile::off().recorder())),
+        tables: tables.clone(),
+        _trace: TraceFile::off(),
+    };
+    f.execute(&RELEASED_BASELINE.replace("{offsets}", &f.tables.1))
+        .await
+        .unwrap();
+    f.publish_now(
+        &(1..=5)
+            .map(|id| message("kafka://orders", id))
+            .collect::<Vec<_>>(),
+    )
+    .await;
+    // a group that handed nothing on: every row is owed, every row copied
+    f.execute(&format!(
+        "INSERT INTO {} (consumer_group, uri, slot) VALUES ('broker', '', 0)",
+        f.tables.1
+    ))
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        f.outbox.migrate().await,
+        Err(Error::CopyTooLarge { rows: 5, limit: 3 })
+    ));
+    assert_eq!(
+        f.texts("SELECT relkind::text FROM pg_class WHERE relname = '{outbox}'")
+            .await,
+        ["r"]
+    );
+    outbox(5).migrate().await.unwrap();
+    assert_eq!(f.texts("SELECT count(*)::text FROM {outbox}").await, ["5"]);
+}

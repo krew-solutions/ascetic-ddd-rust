@@ -969,14 +969,30 @@ On a scratch database, each with the result that changes the decision:
 - **M8.** The inbox at 410 inserts, marks and deletes a second for an hour,
   and again with the vacuum horizon held for ten minutes: whether dead
   tuples and size level off.
-- **M9.** The ring's migration copying 5 million rows, ADR-0035's index
-  built in it: how long publishers wait, against the host's one-second
-  write budget (its ADR-0083). Above it, the copy's bound is what keeps the
-  upgrade within budget, and a host drains its relays first.
-- **M11.** The fetch on the ring under epochs — an epoch's start over its
-  named windows, a batch over its per-generation branches with their limits,
-  on ADR-0035's `(slot, position)` index — against ADR-0035's figures on one
-  table.
+- **M9 — measured (2026-11-04).** The ring's step, rendered from the
+  library's template, under the runner's lock, on the scratch server: a
+  million rows of about 1.3 KB (1.84 GB with indexes), in ADR-0007's shape,
+  copied into eight generations in 41 s and 53 s (two runs), its six
+  indexes built in 13 s more: about 55 µs a row in all, every publisher
+  waiting. The host's one-second write budget (its ADR-0083) holds about
+  18 000 rows. So the copy's bound is what keeps an upgrade within budget,
+  and `migrate` refuses a copy past a limit, 20 000 rows by default
+  (`with_copy_limit`): a host drains its relays first, and forgets an
+  abandoned group that pins them.
+- **M11 — measured (2026-11-04).** The same million rows on the ring,
+  windows of 2 048 ids, 64 slots, an epoch of 100 000 rows across two
+  generations:
+  - a batch of 100 from the epoch's middle, a branch per generation with
+    its own limit: Merge Append over the `(slot, position)` index of each,
+    100 rows read, 0.36 ms; the branches without their limits, 838 rows,
+    1.05 ms (and 464 200 rows, 108 ms, on the fuller epoch of § Context);
+  - an epoch's start in one slot, 1 579 rows, its two generations named:
+    11.9 ms, beside ADR-0035's 58–64 ms for a million-row epoch on one
+    table;
+  - a look over 64 slots each 781 index entries behind: 11.8 ms, and
+    5.3 ms planning it — every look is planned afresh, its generations
+    being constants. At the relay's 100 to 300 ms a batch, a few per cent;
+    M12 measures the rest of the cost of naming.
 - **M12.** Waits on the server's lock manager (`LWLock:lock_manager`) at the
   launch's concurrency, with fetches naming two generations of six indexes:
   above a few per cent of a fetch's time, the ring drops an index or a
@@ -1132,3 +1148,7 @@ On a scratch database, each with the result that changes the decision:
   window that covers the horizon of repeats and keeps dependency targets
   holds every property; a shorter window and a window over dependency
   targets each fail theirs.
+- 2026-11-04 — M9 and M11 measured. The ring's copy costs about 55 µs a row
+  under the outbox's lock, so `migrate` now refuses a copy past a limit,
+  20 000 rows by default; a batch's per-generation branches read 100 rows
+  in 0.36 ms.

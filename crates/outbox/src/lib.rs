@@ -64,7 +64,8 @@ pub use crate::error::{BoxError, Error, Identity};
 pub use crate::message::{Epoch, Generation, Move, OutboxMessage, Position, Snapshot};
 pub use crate::observer::{OutboxObserver, Receipt, Reclamation, Skipped};
 pub use crate::pg::{
-    Backlog, DEFAULT_BATCH_SIZE, Loops, PgOutbox, Rebased, Reclaiming, Ring, Selection,
+    Backlog, DEFAULT_BATCH_SIZE, DEFAULT_COPY_LIMIT, Loops, PgOutbox, Rebased, Reclaiming, Ring,
+    Selection,
 };
 pub use crate::port::Outbox;
 

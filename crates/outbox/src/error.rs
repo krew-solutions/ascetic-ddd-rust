@@ -61,6 +61,16 @@ pub enum Error {
         /// The horizon declared.
         horizon: std::time::Duration,
     },
+    /// The ring's step would copy more rows than the limit, under the
+    /// outbox's lock, every publisher waiting meanwhile (ADR-0033 § Open
+    /// measurements, M9: about 55 µs a row). The relays are drained first,
+    /// and an abandoned group that pins them forgotten; or the limit raised.
+    CopyTooLarge {
+        /// The rows the step would copy.
+        rows: u64,
+        /// The limit.
+        limit: u64,
+    },
     /// A group asked to be forgotten moved a position within the ring's
     /// margin of age: it is not abandoned (ADR-0033 decision 3).
     GroupActive {
@@ -123,6 +133,7 @@ impl Error {
             | Error::CounterReset(_)
             | Error::Reclaimed { .. }
             | Error::BeyondReplayHorizon { .. }
+            | Error::CopyTooLarge { .. }
             | Error::GroupActive { .. }
             | Error::Format { .. } => false,
         }
@@ -167,6 +178,12 @@ impl fmt::Display for Error {
                 "a rewind to transaction {requested} replays rows {age:?} old, past the producer's \
                  replay horizon of {horizon:?}: its consumers would process them again"
             ),
+            Error::CopyTooLarge { rows, limit } => write!(
+                f,
+                "the outbox's ring would be made by copying {rows} rows under the table's lock, \
+                 publishers waiting, past the limit of {limit}: drain the relays first, forgetting \
+                 an abandoned group that pins them, or raise the limit"
+            ),
             Error::GroupActive { group, moved } => write!(
                 f,
                 "group `{group}` moved a position {moved:?} ago: it is not abandoned"
@@ -191,6 +208,7 @@ impl std::error::Error for Error {
             | Error::CounterReset(_)
             | Error::Reclaimed { .. }
             | Error::BeyondReplayHorizon { .. }
+            | Error::CopyTooLarge { .. }
             | Error::GroupActive { .. }
             | Error::Format { .. } => None,
             Error::Migration(error) => Some(error),
