@@ -65,6 +65,23 @@ pub struct Fetched<'a> {
     pub messages: &'a [OutboxMessage],
 }
 
+/// A dispatcher started an epoch with rows of its selection (ADR-0035
+/// decision 3), inside its transaction.
+pub struct EpochStarted<'a> {
+    /// The consumer group.
+    pub group: &'a str,
+    /// The slot.
+    pub slot: u32,
+    /// The epoch's snapshot.
+    pub epoch: &'a Snapshot,
+    /// What the slot's group had delivered.
+    pub delivered: &'a Snapshot,
+    /// The lowest position of its rows.
+    pub first: i64,
+    /// The highest: its end.
+    pub last: i64,
+}
+
 /// The subscriber was handed a message of the batch.
 pub struct Handled<'a> {
     /// The consumer group.
@@ -89,6 +106,10 @@ pub struct Acked<'a> {
     pub last: Option<Receipt>,
     /// Whether the batch drained its epoch, so that delivered became it.
     pub drained: bool,
+    /// The epoch drained before its end: its last row was not found, which
+    /// only a row deleted by hand explains. Reported, not waited for: waiting
+    /// would wedge the slot.
+    pub short: bool,
 }
 
 /// The dispatcher's transaction closed: committed, with whether there was a
@@ -111,6 +132,8 @@ pub trait OutboxObserver: Send + Sync {
     fn on_published(&self, _event: &Published<'_>) {}
     /// A dispatcher read a batch.
     fn on_fetched(&self, _event: &Fetched<'_>) {}
+    /// A dispatcher started an epoch.
+    fn on_epoch_started(&self, _event: &EpochStarted<'_>) {}
     /// A message was handed to the subscriber.
     fn on_handled(&self, _event: &Handled<'_>) {}
     /// The position was moved past the batch.
@@ -131,6 +154,10 @@ impl<A: OutboxObserver, B: OutboxObserver> OutboxObserver for (A, B) {
     fn on_fetched(&self, event: &Fetched<'_>) {
         self.0.on_fetched(event);
         self.1.on_fetched(event);
+    }
+    fn on_epoch_started(&self, event: &EpochStarted<'_>) {
+        self.0.on_epoch_started(event);
+        self.1.on_epoch_started(event);
     }
     fn on_handled(&self, event: &Handled<'_>) {
         self.0.on_handled(event);
@@ -153,6 +180,9 @@ impl<O: OutboxObserver + ?Sized> OutboxObserver for Arc<O> {
     fn on_fetched(&self, event: &Fetched<'_>) {
         (**self).on_fetched(event);
     }
+    fn on_epoch_started(&self, event: &EpochStarted<'_>) {
+        (**self).on_epoch_started(event);
+    }
     fn on_handled(&self, event: &Handled<'_>) {
         (**self).on_handled(event);
     }
@@ -171,6 +201,9 @@ impl<O: OutboxObserver> OutboxObserver for Vec<O> {
     }
     fn on_fetched(&self, event: &Fetched<'_>) {
         self.iter().for_each(|o| o.on_fetched(event));
+    }
+    fn on_epoch_started(&self, event: &EpochStarted<'_>) {
+        self.iter().for_each(|o| o.on_epoch_started(event));
     }
     fn on_handled(&self, event: &Handled<'_>) {
         self.iter().for_each(|o| o.on_handled(event));

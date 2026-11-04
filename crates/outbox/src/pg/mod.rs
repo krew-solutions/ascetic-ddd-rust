@@ -95,6 +95,22 @@ impl Selection {
     }
 }
 
+/// Where a selection stands in one slot, for an operator: see
+/// [`PgOutbox::backlog`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct Backlog {
+    /// The slot.
+    pub slot: u32,
+    /// How long the epoch in flight has been handed on; `None` when none is.
+    pub epoch_age: Option<Duration>,
+    /// The last position handed on within it.
+    pub epoch_offset: i64,
+    /// Its highest position.
+    pub epoch_end: Option<i64>,
+    /// How long ago `delivered` last moved; `None` before it ever did.
+    pub delivered_age: Option<Duration>,
+}
+
 /// How [`PgOutbox::run`] runs: `concurrency` loops in this process, each
 /// taking whatever slot has work. Processes need no identity and no count;
 /// start as many as the slots make useful.

@@ -75,15 +75,42 @@ index. The dispatcher is a task on the tokio runtime; cancel the subscription
 to stop it. `with_loops` on the outbox says how it runs — how many loops in
 this process, how long one waits — the same `Loops` that `run` takes.
 
+## Lanes
+
+`bus.consumer("outbox://all", group, …)` takes every row;
+`outbox://<scheme>` takes the rows addressed to that scheme —
+`outbox://inbox` those to `inbox://…`, `outbox://kafka` those to
+`kafka://…` — with positions of their own. A destination that is down then
+holds back its own lane only: a service's Commands to itself are not
+retried behind a broker's outage, and its events do not wait behind its own
+fan-out (ADR-0033). A lane reads the other lanes' rows once, as it passes
+them.
+
+## When the relay stops
+
+A database moved by dump and restore restarts its transaction ids below
+what the positions delivered: every row written meanwhile would count as
+delivered. A look that finds a position delivered past the server's ids
+records the refusal in the meta table and stops; the refusal sticks, also
+once the ids pass the old ones again, until an operator rebases the
+positions and calls `clear_counter_reset` (ADR-0035 decision 12). A
+sequence that caches positions, or a format newer than the binary, stops it
+too. Each is an error, not a moment: logged at `error`, for the host's alarm.
+
+`backlog(session, selection)` tells, per slot, how long the epoch in flight
+has been handed on and how far, and how long ago `delivered` last moved:
+the lag, since snapshots have no minimum.
+
 ## Observing the outbox
 
 `PgOutbox::observed_by(observer)` attaches an `OutboxObserver`, in the shape of
 the session observers: a synchronous, infallible value, composed as a tuple,
-fixed when the outbox is built. It is told of five things — a message
+fixed when the outbox is built. It is told of six things — a message
 published, with the id of the writing transaction and the row's position; a
 batch fetched, with the epoch, what was delivered before it and the snapshot
 it was read under; a message handed to the subscriber, with the outcome; the
-position acknowledged, with whether the epoch drained; the dispatcher's
+position acknowledged, with whether the epoch drained and whether short of
+its end; an epoch started, with its range of positions; the dispatcher's
 transaction closed, committed or rolled back. They were the actions of the
 protocol model in `verify/tla/Outbox.tla`, written for ADR-0007's rule; the
 statement-level model of the epochs is `verify/tla/OutboxPg.tla`, and the

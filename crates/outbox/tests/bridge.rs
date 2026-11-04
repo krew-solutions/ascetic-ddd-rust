@@ -205,3 +205,93 @@ async fn a_failing_subscriber_gets_the_batch_again() {
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     subscription.cancel().await;
 }
+
+/// Lanes (ADR-0033): `outbox://<scheme>` takes only the rows addressed to
+/// that scheme, with positions of its own, so a lane whose destination
+/// fails holds back no other lane's rows.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_lane_takes_its_scheme_s_rows_and_another_lane_s_outage_holds_it_not() {
+    let sessions = PgSessionPool::new(pool());
+    let outbox = Arc::new(
+        PgOutbox::new(PgSessionPool::new(pool()))
+            .with_tables(
+                Identifier::new("outbox_lanes").unwrap(),
+                Identifier::new("outbox_lanes_offsets").unwrap(),
+            )
+            .with_loops(Loops {
+                poll_interval: Duration::from_millis(20),
+                ..Loops::default()
+            }),
+    );
+    outbox.teardown().await.unwrap();
+    outbox.migrate().await.unwrap();
+
+    let mut bus = Bus::new();
+    bus.register(OUTBOX_SCHEME, outbox.channel()).unwrap();
+    bus.register("own", InMemoryBroker::new()).unwrap();
+    let bus = Arc::new(bus);
+    let own = bus
+        .consumer("own://commands", "service", |m: &Message| Ok(m.clone()))
+        .unwrap();
+    let (seen, mut received) = mpsc::unbounded_channel();
+    own.subscribe(move |message: Message| {
+        let seen = seen.clone();
+        async move {
+            seen.send(message).ok();
+        }
+    })
+    .unwrap();
+
+    let bridge = Bridge::new(Arc::clone(&bus));
+    // The broker's lane: its destination is down for good.
+    let down = bridge
+        .run(
+            "outbox://broker",
+            "relay",
+            Target::Fixed("nowhere://events".into()),
+        )
+        .unwrap();
+    let lane = bridge
+        .run(
+            "outbox://own",
+            "relay",
+            Target::Header("destination".into()),
+        )
+        .unwrap();
+
+    let event = outbox.producer("broker://events/e-1", |text: &String| {
+        Message::new(text.as_bytes())
+            .with_header("message_id", "00000000-0000-4000-8000-0000000000e1")
+    });
+    let command = outbox.producer("own://commands", |text: &String| {
+        Message::new(text.as_bytes())
+            .with_header("message_id", "00000000-0000-4000-8000-0000000000c1")
+    });
+    sessions
+        .session(async |session| {
+            session
+                .atomic(async |tx| {
+                    event.publish(&tx, &"event".to_owned()).await.unwrap();
+                    command.publish(&tx, &"command".to_owned()).await.unwrap();
+                    Ok::<(), ascetic_ddd_outbox::Error>(())
+                })
+                .await
+        })
+        .await
+        .unwrap();
+
+    let message = tokio::time::timeout(Duration::from_secs(20), received.recv())
+        .await
+        .expect("the own lane hands its row on, the broker's outage notwithstanding")
+        .unwrap();
+    assert_eq!(message.payload(), b"command");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), received.recv())
+            .await
+            .is_err(),
+        "the own lane takes no row of the broker's"
+    );
+    down.cancel().await;
+    lane.cancel().await;
+}
