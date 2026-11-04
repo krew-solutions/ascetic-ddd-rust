@@ -38,6 +38,16 @@ pub enum Error {
     /// ([`PgOutbox::clear_counter_reset`](crate::PgOutbox::clear_counter_reset))
     /// after rebasing the positions (ADR-0035 decision 12).
     CounterReset(String),
+    /// A rewind to a transaction below the ring's `intact_from`
+    /// (ADR-0033): from there on every row is kept, below it rows may be
+    /// gone, and the replay would come up short without a word. Back to the
+    /// start lands on `intact_from` itself.
+    Reclaimed {
+        /// The transaction the rewind asked for.
+        requested: u64,
+        /// The lowest one a rewind may go back to.
+        intact_from: u64,
+    },
     /// The position rows are in a format newer than this binary knows: a
     /// later release wrote them, and this one would misread them.
     Format {
@@ -90,6 +100,7 @@ impl Error {
             | Error::IdentityTaken(_)
             | Error::SequenceCache(_)
             | Error::CounterReset(_)
+            | Error::Reclaimed { .. }
             | Error::Format { .. } => false,
         }
     }
@@ -116,6 +127,14 @@ impl fmt::Display for Error {
                 f,
                 "the database's transaction ids restarted below the outbox's positions: {what}"
             ),
+            Error::Reclaimed {
+                requested,
+                intact_from,
+            } => write!(
+                f,
+                "rows below transaction {intact_from} may be gone from the outbox's ring: \
+                 a rewind to {requested} would replay short"
+            ),
             Error::Format { found, known } => write!(
                 f,
                 "the outbox's positions are in format {found}; this binary knows up to {known}"
@@ -134,6 +153,7 @@ impl std::error::Error for Error {
             | Error::IdentityTaken(_)
             | Error::SequenceCache(_)
             | Error::CounterReset(_)
+            | Error::Reclaimed { .. }
             | Error::Format { .. } => None,
             Error::Migration(error) => Some(error),
         }

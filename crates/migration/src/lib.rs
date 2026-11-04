@@ -17,8 +17,10 @@
 //!   `ACCESS EXCLUSIVE` mode first, so that it waits only while it holds
 //!   nothing live traffic asks for; it runs; and before it commits the runner
 //!   reads its own locks and refuses it when it locked any other pre-existing
-//!   table — the shape that deadlocks a live transaction. A component's first
-//!   migration, its baseline, creates its tables and is exempt.
+//!   table — the shape that deadlocks a live transaction. A partition of the
+//!   target, and its indexes, count as the target: a lock on a partitioned
+//!   table reaches them all. A component's first migration, its baseline,
+//!   creates its tables and is exempt.
 //! - Blocked (`55P03`, `40P01`), it is rolled back and retried after a
 //!   jittered backoff, within a budget.
 //! - A migration applied under another text is refused: the database is
@@ -518,6 +520,8 @@ async fn step<S: Session + PgAccess>(
         .await
         .map_err(failed)?;
     if !baseline {
+        // a partition counts as its root's, the target found by name after
+        // the step, so that a step replacing it is judged by the new table
         let target = migration.target.as_ref().map(Identifier::as_str);
         let others: Vec<String> = connection
             .query(
@@ -527,7 +531,8 @@ async fn step<S: Session + PgAccess>(
                  JOIN pg_class t ON t.oid = coalesce(i.indrelid, r.oid) \
                  WHERE l.pid = pg_backend_pid() AND l.locktype = 'relation' \
                    AND t.oid = ANY($1) AND t.relname <> $2 \
-                   AND ($3::text IS NULL OR t.oid <> to_regclass($3::text)) \
+                   AND ($3::text IS NULL \
+                        OR coalesce(pg_partition_root(t.oid), t.oid) <> to_regclass($3::text)) \
                  ORDER BY 1",
                 &[&before, &LEDGER, &target],
             )

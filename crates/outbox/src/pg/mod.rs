@@ -42,6 +42,15 @@
 //! position per group and the order of the whole selection; more slots are
 //! parallelism, and order within a URI still, since a URI is in one slot.
 //!
+//! # The ring
+//!
+//! The table is a ring of partitions by generation, [`Ring`] (ADR-0033): a
+//! transaction's rows land in generation `(id / window) % generations`. A
+//! look, an epoch's start and a batch each name the generations they read,
+//! as constants worked out from the snapshots, so that the planner reads
+//! and locks those alone; a rewind below the ring's `intact_from` is
+//! refused, and a new group starts there.
+//!
 //! # Delivery
 //!
 //! At least once. The subscriber runs inside the dispatcher's transaction
@@ -56,7 +65,10 @@
 //! `dispatch`.
 
 mod dispatch;
+mod ring;
 mod store;
+
+pub use ring::Ring;
 
 use std::time::Duration;
 
@@ -155,6 +167,7 @@ pub struct PgOutbox<P, O = ()> {
     batch_size: i64,
     loops: Loops,
     slots: u32,
+    ring: Ring,
 }
 
 impl<P> PgOutbox<P> {
@@ -169,6 +182,7 @@ impl<P> PgOutbox<P> {
             batch_size: DEFAULT_BATCH_SIZE as i64,
             loops: Loops::default(),
             slots: 1,
+            ring: Ring::default(),
         }
     }
 }
@@ -184,6 +198,7 @@ impl<P, O> PgOutbox<P, O> {
             batch_size: self.batch_size,
             loops: self.loops,
             slots: self.slots,
+            ring: self.ring,
         }
     }
 
@@ -226,6 +241,19 @@ impl<P, O> PgOutbox<P, O> {
     /// How many slots this outbox cuts its table into.
     pub fn slots(&self) -> u32 {
         self.slots
+    }
+
+    /// The same outbox with its table as `ring` (ADR-0033). Read by
+    /// [`PgOutbox::migrate`] when it makes the ring; a ring already made
+    /// otherwise is refused, because the rows carry their generation for
+    /// good.
+    pub fn with_ring(self, ring: Ring) -> Self {
+        PgOutbox { ring, ..self }
+    }
+
+    /// The ring this outbox's table is cut into.
+    pub fn ring(&self) -> Ring {
+        self.ring
     }
 
     pub(crate) fn loops(&self) -> Loops {
