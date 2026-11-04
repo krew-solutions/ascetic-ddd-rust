@@ -2,7 +2,12 @@
 
 ## Status
 
-Proposed (2026-11-03), not implemented. Decided in two rounds:
+Accepted (2026-11-05, by the owner). Implemented (2026-11-04): positions as
+snapshots and their exact conversion, the look, the epoch's start and its
+batches by position, the sticky counter reset, the backlog, the observer's
+epochs (`crates/outbox`), and `OutboxPg.tla`. Owed beside it: the refinement
+to `Outbox.tla` and its traces, and the tests § Executors names. Decided in
+two rounds:
 - **A blind solver and a discriminator.** The solver worked from the problem
   alone. The discriminator checked the proof against PostgreSQL 14's source
   and the batch rule against PgQ's (Skytools).
@@ -648,3 +653,4 @@ ADR-0033's ring.
 - 2026-11-04 — ADR-0033's lanes: a look that finds only another selection's
   rows new delivers its empty epoch at once, so that lanes sharing a table
   read each other's rows once, not on every poll.
+- 2026-11-05 — Accepted by the owner, implemented as § Status lists.

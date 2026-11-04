@@ -2,7 +2,13 @@
 
 ## Status
 
-Proposed (2026-11-03), not implemented. Decided in three rounds:
+Accepted (2026-11-05, by the owner). Implemented (2026-11-04): the ring, its
+migration with a copy bound and limit, the reclamation, the rebase after a
+counter reset, `forget_group` and `forget_selection` (`crates/outbox`); the
+inbox's windows and sweep, the producer's replay horizon, the lanes; the
+models of § Executors. Owed beside it: the host's rules and gates, the
+traces, `Bridge.tla`'s composition with a rewind, and the measurements left
+open. Decided in three rounds:
 - **A blind solver and a discriminator.** The solver worked from the problem
   alone. The discriminator was given the solver's answer and the owner's
   direction: rotation over deletion for an append-only log, and a window for
@@ -1179,3 +1185,4 @@ On a scratch database, each with the result that changes the decision:
   not the `CHECK`: `pg_get_constraintdef` takes the table's lock, and a
   host's test of a boot beside held tables waited on it. The library has
   that test of its own now.
+- 2026-11-05 — Accepted by the owner, implemented as § Status lists.
