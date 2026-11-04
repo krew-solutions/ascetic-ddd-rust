@@ -790,9 +790,11 @@ where
     /// worked out by a statement before it from the selection's positions
     /// and the current snapshot, so that the planner reads and locks those
     /// alone (ADR-0033 decision 3). A relation's lock is held to the
-    /// transaction's end, through the batch: a look naming every generation
-    /// would hold off an emptying's lock for as long as the relay is busy. A
-    /// row of a window opened after that statement waits for the next look.
+    /// transaction's end, through the batch, and requests queue behind a
+    /// waiting `ACCESS EXCLUSIVE`: a look naming every generation would make
+    /// each emptying wait for every batch in flight, the relay queued behind
+    /// it. A row of a window opened after that statement waits for the next
+    /// look.
     pub(super) async fn take(
         &self,
         session: &P::Session,

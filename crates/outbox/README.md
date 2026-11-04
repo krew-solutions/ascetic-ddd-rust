@@ -165,8 +165,9 @@ The table is a ring of `K` partitions by generation (ADR-0033), eight of
 held there by a `CHECK`, and the ring is fixed for the table's life, as the
 slots are. Every look, epoch start and batch names the generations it reads,
 as constants, so that it reads and locks those alone: a relation's lock
-lasts to the dispatcher's commit, and a fetch naming them all would hold off
-the emptying of a generation for as long as the relay is busy.
+lasts to the dispatcher's commit, and requests queue behind a waiting
+`ACCESS EXCLUSIVE`, so a fetch naming them all would make every emptying
+stall the relay until the batches in flight end.
 
 `migrate` makes the ring of an existing table: the steps before its own;
 the numbers checked against the table's; a transaction of its own that fixes
