@@ -34,7 +34,7 @@ outbox.run(send_to_broker, &Selection::group("broker"), Workers::default(), ctrl
 * **At least once.** The subscriber runs inside the dispatcher's transaction
   and the position is acknowledged after the batch. A crash in between
   redelivers; consumers deduplicate on `metadata.message_id`, which is unique
-  in the table.
+  within a generation of the ring.
 * **One dispatcher at a time per slot.** A slot's position row is locked for
   the length of a batch, and a dispatcher is whoever holds that lock.
 * **Slots.** `kafka://orders/order-7` names a key; the messages of one full
@@ -149,13 +149,33 @@ The fetch is one statement. On 200,000 rows, with work at three quarters of
 the table: 0.06 ms for one slot, 0.20 ms for sixteen, 0.26 ms for
 sixty-four; idle, 0.03, 0.10 and 0.11 ms.
 
+## The ring
+
+The table is a ring of `K` partitions by generation (ADR-0033), eight of
+2²³ transaction ids by default, `with_ring(Ring::new(K, R))` before
+`migrate` makes it: a transaction's rows land in generation `(id / R) % K`,
+held there by a `CHECK`, and the ring is fixed for the table's life, as the
+slots are. Every look, epoch start and batch names the generations it reads,
+as constants, so that it reads and locks those alone: a relation's lock
+lasts to the dispatcher's commit, and a fetch naming them all would hold off
+the emptying of a generation for as long as the relay is busy.
+
+`migrate` makes the ring of an existing table: the steps before its own;
+the numbers checked against the table's; a transaction of its own that fixes
+the copy's bound — every position with no epoch and nothing new of its
+selection advanced first, as an idle look would, so that a slot never
+matched does not pull it down — and logs how many rows the step will copy;
+then the ring's step, copying the rows from the bound on. A host drains its
+relays first, which keeps the bound near the head. A rewind below the ring's
+`intact_from` is refused, `Error::Reclaimed`; back to the start lands on it,
+and a new group starts there. A lane starts where its group's selection of
+everything stands, so that switching a relay to lanes hands nothing on again.
+
 ## What is not here
 
-The outbox keeps every row it ever stored; nothing deletes acknowledged
-messages. Retention is the deployment's: the table is meant to be rotated by
-partitions, which is simpler and cheaper than a cleaner inside the library.
-A look reads from what a group delivered on, through the index on `(slot,
-transaction_id, position)`; ADR-0033 bounds the history.
+Nothing empties a generation yet: the ring is made and read, and ADR-0033's
+reclamation, which truncates a generation every group has passed, is still
+to come. Until then the outbox keeps every row it stored.
 
 ## Deviations from the Python source
 

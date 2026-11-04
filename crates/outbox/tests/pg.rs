@@ -19,8 +19,8 @@ use ascetic_ddd_outbox::observer::{
     Acked, Dispatched, EpochStarted, Fetched, Handled, OutboxObserver, Published, Receipt,
 };
 use ascetic_ddd_outbox::{
-    BoxError, Error, Identity, Loops, Move, Outbox, OutboxMessage, PgOutbox, Position, Selection,
-    Snapshot,
+    BoxError, Error, Identity, Loops, Move, Outbox, OutboxMessage, PgOutbox, Position, Ring,
+    Selection, Snapshot,
 };
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -83,10 +83,25 @@ async fn fixture_concurrent(name: &str, slots: u32) -> Fixture {
     fixture_built(name, (), slots, TraceFile::off()).await
 }
 
+/// The same, its table a ring of its own numbers (ADR-0033).
+async fn fixture_ring(name: &str, ring: Ring) -> Fixture {
+    fixture_shaped(name, (), 1, ring, TraceFile::off()).await
+}
+
 async fn fixture_built<O: OutboxObserver>(
     name: &str,
     observer: O,
     slots: u32,
+    trace: TraceFile,
+) -> Fixture<O> {
+    fixture_shaped(name, observer, slots, Ring::default(), trace).await
+}
+
+async fn fixture_shaped<O: OutboxObserver>(
+    name: &str,
+    observer: O,
+    slots: u32,
+    ring: Ring,
     trace: TraceFile,
 ) -> Fixture<O> {
     let tables = (format!("outbox_{name}"), format!("outbox_{name}_offsets"));
@@ -97,6 +112,7 @@ async fn fixture_built<O: OutboxObserver>(
             Identifier::new(&tables.1).unwrap(),
         )
         .with_slots(slots)
+        .with_ring(ring)
         .observed_by((observer, trace.recorder()));
     outbox.teardown().await.unwrap();
     outbox.migrate().await.unwrap();
@@ -234,6 +250,29 @@ impl<O: OutboxObserver> Fixture<O> {
             }
         }
         unreachable!("a second slot has some URI")
+    }
+
+    /// Runs `sql`, `{outbox}` standing for the outbox's table.
+    async fn execute(&self, sql: &str) -> Result<(), Error> {
+        let sql = sql.replace("{outbox}", &self.tables.0);
+        self.sessions
+            .session(async |session| {
+                Ok::<_, Error>(session.connection().batch_execute(&sql).await?)
+            })
+            .await
+    }
+
+    /// The first column of every row of `sql`, as text, `{outbox}` standing
+    /// for the outbox's table.
+    async fn texts(&self, sql: &str) -> Vec<String> {
+        let sql = sql.replace("{outbox}", &self.tables.0);
+        self.sessions
+            .session(async |session| {
+                let rows = session.connection().query(&sql, &[]).await?;
+                Ok::<_, Error>(rows.iter().map(|row| row.get(0)).collect())
+            })
+            .await
+            .unwrap()
     }
 
     async fn positions(&self, selection: &Selection) -> Vec<Position> {
@@ -1702,7 +1741,362 @@ fn the_released_migrations_keep_their_checksums() {
             (
                 "20261104T000200Z_refusal".to_owned(),
                 "fnv1a64:8424073d750527ed:58".to_owned()
+            ),
+            (
+                "20261104T000300Z_ring_meta".to_owned(),
+                "fnv1a64:0a15fafee48cbcc5:293".to_owned()
+            ),
+            (
+                "20261104T000400Z_epoch_generations".to_owned(),
+                "fnv1a64:7505d909673d5216:65".to_owned()
+            ),
+            (
+                "20261104T000500Z_ring".to_owned(),
+                "fnv1a64:ff56d83b01572fb8:3084".to_owned()
             )
         ]
     );
+}
+
+/// Each row lands in its transaction's generation, in the partition named
+/// after it, and a row stamped with another is refused (ADR-0033 decision 3).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_ring_holds_each_row_to_its_transaction_s_generation() {
+    let ring = Ring::new(3, 2);
+    let f = fixture_ring("ring_check", ring).await;
+    f.publish(&[
+        message("kafka://orders", 1),
+        message("kafka://orders", 2),
+        message("kafka://orders", 3),
+    ])
+    .await;
+    let rows = f
+        .texts(
+            "SELECT transaction_id::text || ' ' || \"generation\" || ' ' || tableoid::regclass::text \
+             FROM {outbox}",
+        )
+        .await;
+    assert_eq!(rows.len(), 3);
+    for row in rows {
+        let [xid, generation, partition] = row.split(' ').collect::<Vec<_>>()[..] else {
+            panic!("{row}");
+        };
+        let expected = ring.generation_of(xid.parse().unwrap());
+        assert_eq!(generation, expected.to_string());
+        assert_eq!(partition, format!("{}_g{expected}", f.tables.0));
+    }
+    let refused = f
+        .execute(
+            "INSERT INTO {outbox} (uri, payload, metadata, transaction_id, \"generation\") \
+             VALUES ('kafka://orders', '\\x', '{}', pg_current_xact_id(), \
+                     (pg_current_xact_id()::text::bigint / 2 + 1) % 3)",
+        )
+        .await;
+    let Err(Error::Database(error)) = refused else {
+        panic!("{refused:?}");
+    };
+    assert_eq!(
+        error.code(),
+        Some(&ascetic_ddd_session::pg::tokio_postgres::error::SqlState::CHECK_VIOLATION)
+    );
+}
+
+/// The ring is fixed for the table's life: a process asking for other
+/// numbers is refused at its start, against the meta table and against the
+/// ring itself, each alone.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_process_with_another_ring_is_refused_at_start() {
+    let f = fixture_ring("ring_refused", Ring::new(3, 4)).await;
+    let other = |ring: Ring| {
+        PgOutbox::new(PgSessionPool::new(pool()))
+            .with_tables(
+                Identifier::new(&f.tables.0).unwrap(),
+                Identifier::new(&f.tables.1).unwrap(),
+            )
+            .with_ring(ring)
+    };
+    assert!(matches!(
+        other(Ring::new(2, 4)).migrate().await,
+        Err(Error::Malformed(_))
+    ));
+    assert!(matches!(
+        other(Ring::new(3, 8)).migrate().await,
+        Err(Error::Malformed(_))
+    ));
+    f.outbox.migrate().await.unwrap();
+
+    f.execute("UPDATE {outbox}_meta SET window_ids = 8")
+        .await
+        .unwrap();
+    assert!(matches!(f.outbox.migrate().await, Err(Error::Malformed(_))));
+    f.execute("UPDATE {outbox}_meta SET window_ids = 4")
+        .await
+        .unwrap();
+    f.execute("ALTER TABLE {outbox} DETACH PARTITION {outbox}_g2")
+        .await
+        .unwrap();
+    let detached = f.outbox.migrate().await;
+    f.execute("ALTER TABLE {outbox} ATTACH PARTITION {outbox}_g2 FOR VALUES IN (2)")
+        .await
+        .unwrap();
+    assert!(matches!(detached, Err(Error::Malformed(_))));
+    f.outbox.migrate().await.unwrap();
+}
+
+/// A ring's names stay within PostgreSQL's 63 bytes, or the table is
+/// refused before anything is made: the server would cut them short.
+#[tokio::test]
+async fn a_table_name_too_long_for_its_ring_s_names_is_refused() {
+    let outbox = PgOutbox::new(PgSessionPool::new(pool()))
+        .with_tables(
+            Identifier::new("o".repeat(40)).unwrap(),
+            Identifier::new("o_offsets").unwrap(),
+        )
+        .with_ring(Ring::new(10_000, 1));
+    assert!(matches!(outbox.migrate().await, Err(Error::Malformed(_))));
+}
+
+/// A group that lags a full lap of the ring, and more, still receives every
+/// message, in order: an epoch spanning every window names every
+/// generation, and each batch reads its generations from their first
+/// positions.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_group_lagging_a_full_lap_receives_every_message() {
+    let f = fixture_ring("ring_lap", Ring::new(2, 2))
+        .await
+        .with_batch_size(3);
+    let (seen_ahead, ahead) = collector();
+    let (seen_behind, behind) = collector();
+    let (first, second) = (Selection::group("ahead"), Selection::group("behind"));
+    f.publish(&[message("kafka://orders", 1)]).await;
+    f.drain(&ahead, &first).await;
+    f.drain(&behind, &second).await;
+    let batch = |ids: std::ops::RangeInclusive<u64>| {
+        ids.map(|id| message("kafka://orders", id))
+            .collect::<Vec<_>>()
+    };
+    f.publish(&batch(2..=12)).await;
+    f.drain(&ahead, &first).await;
+    f.publish(&batch(13..=20)).await;
+    f.drain(&ahead, &first).await;
+    f.drain(&behind, &second).await;
+    let all: Vec<u64> = (1..=20).collect();
+    assert_eq!(*seen_ahead.lock().unwrap(), all);
+    assert_eq!(*seen_behind.lock().unwrap(), all);
+}
+
+/// A look and its batch name the generations they read: a relation's lock
+/// is held to the end of the dispatcher's transaction, and a fetch naming
+/// every generation would hold off an emptying for as long as the relay is
+/// busy (ADR-0033 decision 3).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_look_and_its_batch_lock_the_generations_they_name_alone() {
+    let ring = Ring::new(4, 1 << 23);
+    let f = fixture_ring("ring_locks", ring).await;
+    f.publish(&[message("kafka://orders", 1)]).await;
+    let named = format!("{}_g{}", f.tables.0, ring.generation_of(f.xid_of(1).await));
+    let inside = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let subscriber = {
+        let (inside, release) = (inside.clone(), release.clone());
+        move |_: &OutboxMessage| {
+            let (inside, release) = (inside.clone(), release.clone());
+            async move {
+                inside.notify_one();
+                release.notified().await;
+                Ok::<(), BoxError>(())
+            }
+        }
+    };
+    let pattern = format!("^{}_g[0-9]+$", f.tables.0);
+    let watch = async {
+        inside.notified().await;
+        let locked = f
+            .sessions
+            .session(async |session| {
+                let rows = session
+                    .connection()
+                    .query(
+                        "SELECT DISTINCT c.relname::text FROM pg_locks l \
+                         JOIN pg_class c ON c.oid = l.relation \
+                         WHERE l.granted AND c.relname ~ $1 ORDER BY 1",
+                        &[&pattern],
+                    )
+                    .await?;
+                Ok::<Vec<String>, Error>(rows.iter().map(|row| row.get(0)).collect())
+            })
+            .await
+            .unwrap();
+        release.notify_one();
+        locked
+    };
+    let broker = Selection::group("broker");
+    let (dispatched, locked) = tokio::join!(f.outbox.dispatch(&subscriber, &broker), watch);
+    assert!(dispatched.unwrap());
+    assert_eq!(locked, [named]);
+}
+
+/// ADR-0007's tables become the ring from a bound fixed before its step
+/// (ADR-0033 § Consequences): every row below it is gone, every row from
+/// it on kept, in its own generation, with its position; a slot its
+/// selection never matched does not pull the bound down to nothing; a
+/// rewind below it is refused, and back to the start lands on it; a group
+/// created after it receives what the ring holds; the new table owns the
+/// position sequence.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_ring_is_copied_from_a_bound_fixed_before_its_step() {
+    let tables = (
+        "outbox_ring_copy".to_owned(),
+        "outbox_ring_copy_offsets".to_owned(),
+    );
+    let sessions = PgSessionPool::new(pool());
+    let outbox = PgOutbox::new(PgSessionPool::new(pool()))
+        .with_tables(
+            Identifier::new(&tables.0).unwrap(),
+            Identifier::new(&tables.1).unwrap(),
+        )
+        .with_slots(2);
+    outbox.teardown().await.unwrap();
+    let f = Fixture {
+        sessions,
+        outbox: outbox.observed_by(((), TraceFile::off().recorder())),
+        tables,
+        _trace: TraceFile::off(),
+    };
+    f.execute(
+        &RELEASED_BASELINE
+            .replace("% 1)", "% 2)")
+            .replace("SELECT 1 WHERE", "SELECT 2 WHERE")
+            .replace("{offsets}", &f.tables.1),
+    )
+    .await
+    .unwrap();
+    let (uri, _) = f.uris_in_different_slots().await;
+    f.publish_now(&[message(&uri, 1), message(&uri, 2), message(&uri, 3)])
+        .await;
+    let slot: i32 = f
+        .texts(&format!(
+            "SELECT ((hashtext('{uri}') & 2147483647) % 2)::text"
+        ))
+        .await[0]
+        .parse()
+        .unwrap();
+    // `broker` handed on the first two; its other slot never matched a row
+    f.execute(&format!(
+        "INSERT INTO {offsets} (consumer_group, uri, slot, offset_acked, last_processed_transaction_id) \
+         SELECT 'broker', '', {slot}, 9223372036854775807, transaction_id FROM {{outbox}} \
+         WHERE payload = convert_to('2', 'UTF8'); \
+         INSERT INTO {offsets} (consumer_group, uri, slot) VALUES ('broker', '', {other});",
+        offsets = f.tables.1,
+        other = 1 - slot,
+    ))
+    .await
+    .unwrap();
+    let last_position: i64 = f
+        .texts("SELECT max(\"position\")::text FROM {outbox}")
+        .await[0]
+        .parse()
+        .unwrap();
+
+    f.outbox.migrate().await.unwrap();
+    let intact_from: u64 = f.texts("SELECT intact_from::text FROM {outbox}_meta").await[0]
+        .parse()
+        .unwrap();
+    assert!(intact_from > 1, "the idle slot pulled the bound to nothing");
+    assert!(
+        intact_from <= f.xid_of(2).await,
+        "the bound passed a row owed"
+    );
+    let mut kept = Vec::new();
+    for id in 1..=3 {
+        let left = f
+            .texts(&format!(
+                "SELECT count(*)::text FROM {{outbox}} WHERE payload = convert_to('{id}', 'UTF8')"
+            ))
+            .await[0]
+            == "1";
+        let xid = if left { f.xid_of(id).await } else { 0 };
+        assert_eq!(left, left && xid >= intact_from);
+        if left {
+            kept.push(id);
+        }
+    }
+    assert!(kept.ends_with(&[2, 3]));
+    let gone_below: u64 = f.texts("SELECT gone_below::text FROM {outbox}_meta").await[0]
+        .parse()
+        .unwrap();
+    assert!(gone_below <= intact_from);
+
+    let (seen, subscriber) = collector();
+    let broker = Selection::group("broker");
+    f.drain(&subscriber, &broker).await;
+    assert_eq!(*seen.lock().unwrap(), [3]);
+    let below = f
+        .sessions
+        .session(async |session| {
+            f.outbox
+                .set_position(&session, &broker, Move::From(intact_from - 1))
+                .await
+        })
+        .await;
+    assert!(
+        matches!(below, Err(Error::Reclaimed { intact_from: bound, .. }) if bound == intact_from)
+    );
+    f.sessions
+        .session(async |session| f.outbox.set_position(&session, &broker, Move::Start).await)
+        .await
+        .unwrap();
+    seen.lock().unwrap().clear();
+    f.drain(&subscriber, &broker).await;
+    assert_eq!(*seen.lock().unwrap(), kept);
+
+    let (fresh_seen, fresh) = collector();
+    f.drain(&fresh, &Selection::group("fresh")).await;
+    assert_eq!(*fresh_seen.lock().unwrap(), kept);
+
+    f.publish(&[message(&uri, 4)]).await;
+    let position: i64 = f
+        .texts("SELECT \"position\"::text FROM {outbox} WHERE payload = convert_to('4', 'UTF8')")
+        .await[0]
+        .parse()
+        .unwrap();
+    assert!(position > last_position);
+    assert_eq!(
+        f.texts(
+            "SELECT coalesce(pg_get_serial_sequence('{outbox}', 'position'), '') \
+             WHERE to_regclass('{outbox}_ring') IS NULL"
+        )
+        .await
+        .len(),
+        1
+    );
+}
+
+/// A lane — a selection of some URIs — starts where its group's selection
+/// of everything stands: switching a relay to lanes hands nothing on again
+/// (ADR-0033 decision 4). A group with no selection of everything starts
+/// its lane at the beginning.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_lane_starts_where_its_group_s_selection_of_everything_stands() {
+    let f = fixture("lane_start").await;
+    let (seen, everything) = collector();
+    f.publish(&[message("kafka://orders", 1), message("inbox://own", 2)])
+        .await;
+    f.drain(&everything, &Selection::group("relay")).await;
+    assert_eq!(*seen.lock().unwrap(), [1, 2]);
+    f.publish(&[message("kafka://orders", 3)]).await;
+    let (lane_seen, lane) = collector();
+    f.drain(&lane, &Selection::group("relay").uri("kafka:"))
+        .await;
+    assert_eq!(*lane_seen.lock().unwrap(), [3]);
+    let (other_seen, other) = collector();
+    f.drain(&other, &Selection::group("other").uri("kafka:"))
+        .await;
+    assert_eq!(*other_seen.lock().unwrap(), [1, 3]);
 }

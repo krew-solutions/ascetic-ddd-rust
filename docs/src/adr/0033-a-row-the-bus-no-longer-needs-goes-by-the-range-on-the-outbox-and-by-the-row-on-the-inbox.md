@@ -252,9 +252,13 @@ Measured on the host's drill:
      `(slot, position) INCLUDE (transaction_id)` is built on the ring, its
      leaves named too.
    - **The guard takes ADR-0034's part already,** as
-     `coalesce(metadata->'part', '""')`: a no-op until a sender writes a
+     `coalesce(metadata->'part', '""')` nested in an array of one
+     (`jsonb_set('[null]', '{0}', …)`): a no-op until a sender writes a
      part, and ADR-0034 then needs no rebuild of its own over the whole ring
      (measured: a naive `||` guards no row, since `jsonb || NULL` is NULL).
+     Nested, because `||` splices an array into the identity: a part
+     `["x"]` and a part `"x"` would be one (`jsonb_build_array` would nest
+     it too, but is not immutable).
    - **Two bounds, recorded in `{outbox}_meta`.** A generation holds every
      lap that wrote into it, so emptying it removes windows above older ones
      still kept. One number cannot say both "below it all is gone" and "from
@@ -281,10 +285,17 @@ Measured on the host's drill:
      - **An epoch's start names exactly the windows its rows can lie in,**
        worked out after `epoch` is taken, in a statement of its own: those of
        `[delivered.xmax, epoch.xmax)`, and those of `delivered`'s in-progress
-       ids that `epoch` sees. All `K` when they span `K − 1` windows or more.
+       ids that `epoch` sees.
        Neither bound nor `delivered`'s `xmin` enters it: that is the server's
        oldest transaction, and would name — and lock — the partitions an
-       emptying is waiting for.
+       emptying is waiting for. All `K` once they span `K` windows.
+     - **A look names them too,** from a statement before it that reads the
+       selection's positions and the current snapshot. A relation's lock
+       lasts to the transaction's end, through the subscriber's batch: a
+       look naming none would hold `ACCESS SHARE` on every partition for as
+       long as the relay is busy, and an emptying's lock would never be
+       granted (found building it). A row of a window opened after that
+       statement waits for the next look.
      - **It records the generations it found rows in,** each with its first
        and last position in the epoch, in the position row beside the epoch.
        A converted epoch (ADR-0035 decision 10) is recorded at the relay's
@@ -453,8 +464,8 @@ Measured on the host's drill:
          of its lane's, delivers that epoch at once (ADR-0035 decision 5), so
          that the next look does not walk them again. Reading the outbox
          twice is the lanes' price (M14).
-       - **Switching:** the lanes start at the position the selection of
-         everything holds, not from the ring's start, and its positions are
+       - **Switching:** a group's lanes start at the position its selection
+         of everything holds, not from the ring's start, and its positions are
          forgotten once no old binary relays them. Until then both relay, and
          identities drop the repeats.
    - **What de-duplication then means.** A repeat that arrives after its row
@@ -789,6 +800,35 @@ confirmed in `pg_locks`, as `verify/pg/lost-wake` does.
   - A changed rule applies to rows already processed.
   - The grace is re-armed after an outage of the database.
 
+**Built (2026-11-04), the ring made and read** (`crates/outbox/tests/pg.rs`,
+`crates/migration/tests/pg.rs`), each red under the mutation named:
+- a row lands in its transaction's generation and partition, another
+  refused by the `CHECK`;
+- a process asking for another `K` or `R` refused, against the meta table
+  alone and against the ring alone — either check dropped;
+- a table name whose ring's names pass 63 bytes refused;
+- a group lagging more than a lap receives every message in order — a
+  branch scanned from its first position, not the offset;
+- a look and its batch lock only the generation they name — the look
+  naming all, the batch's branch not naming its own;
+- ADR-0007's tables copied from a bound fixed before the ring's step: rows
+  below it gone, rows from it kept; a slot never matched does not pull it
+  to nothing; a rewind below it refused; a group created after receives
+  what the ring holds; the new table owns the sequence — the copy from
+  zero, idle positions not advanced, the rewind's check dropped;
+- a lane starts where its group's selection of everything stands — at the
+  beginning;
+- ADR-0030's refusal named by a partition's index — by the parent's;
+- a later migration of a partitioned table accepted by the runner, a second
+  table still refused — partitions counted as other tables;
+- a converted epoch on the ring hands on the rest of its transaction — its
+  generations not recorded.
+
+Not yet told apart by a test: back to the start landing on `intact_from`
+rather than on nothing, and a new group starting below it rather than at
+nothing. They differ only once an emptying leaves rows below `intact_from`,
+which the reclamation brings.
+
 **TLA+.** Built (2026-11-04) in `OutboxPg.tla`, with two generations of one
 id each.
 - **Must hold:** the ring with one group, a transaction of another database
@@ -998,3 +1038,13 @@ On a scratch database, each with the result that changes the decision:
   partition's lock keeps the rows; "closed" and the order of the checks
   before the lock only spare a lock queued in vain. Every refuted form of the
   ring fails on its property.
+- 2026-11-04 — The ring made and read, the reclamation still to come. Found
+  building it:
+  - **A look names its generations too:** a relation's lock lasts to the
+    dispatcher's commit, and a look naming none would hold off every
+    emptying while the relay is busy.
+  - **An epoch's names are exact:** all `K` once they span `K` windows,
+    not `K − 1`.
+  - **The guard nests the part,** so that an array part is not spliced into
+    the identity.
+  - **A lane starts where its own group's selection of everything stands.**

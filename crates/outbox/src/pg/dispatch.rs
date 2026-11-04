@@ -113,7 +113,8 @@ where
                             Some(Epoch {
                                 snapshot, offset, ..
                             }) => {
-                                // converted from ADR-0007's positions: its end, now
+                                // converted from ADR-0007's positions: its end and its
+                                // generations, now
                                 let start = self
                                     .start_epoch(&tx, slot, uri, &delivered, Some(&snapshot))
                                     .await
@@ -124,6 +125,7 @@ where
                                         snapshot,
                                         offset,
                                         end: Some(end),
+                                        generations: start.generations,
                                     },
                                     false,
                                 )
@@ -182,6 +184,7 @@ where
                                         snapshot: start.epoch,
                                         offset: first - 1,
                                         end: Some(last),
+                                        generations: start.generations,
                                     },
                                     true,
                                 )
@@ -189,15 +192,7 @@ where
                         };
                         let end = epoch.end.unwrap_or(epoch.offset);
                         let read = self
-                            .read_batch(
-                                &tx,
-                                slot,
-                                uri,
-                                epoch.offset,
-                                end,
-                                &epoch.snapshot,
-                                &delivered,
-                            )
+                            .read_batch(&tx, slot, uri, &epoch, &delivered)
                             .await
                             .map_err(in_slot)?;
                         self.observer.on_fetched(&Fetched {
@@ -363,6 +358,12 @@ where
     /// start, back to a transaction, or ahead to now; see [`Move`]. The epoch
     /// in flight is cleared, and each row's lock waited for. Creates the
     /// position rows if the selection has none.
+    ///
+    /// On the ring (ADR-0033), a rewind below `intact_from` is refused,
+    /// [`Error::Reclaimed`], and back to the start lands on it: below it,
+    /// rows may be gone. The bound is read and the positions written under
+    /// the reclamation's key, held exclusively, so that no emptying commits
+    /// between them.
     pub async fn set_position(
         &self,
         session: &P::Session,
@@ -370,7 +371,21 @@ where
         to: Move,
     ) -> Result<(), Error> {
         let (group, uri) = (&selection.consumer_group, &selection.uri);
-        self.ensure_positions(session, group, uri).await?;
-        self.move_all(session, group, uri, to).await
+        session
+            .atomic(async |tx| {
+                let to = match (to, self.hold_reclamation(&tx, true).await?) {
+                    (Move::From(requested), Some(intact_from)) if requested < intact_from => {
+                        return Err(Error::Reclaimed {
+                            requested,
+                            intact_from,
+                        });
+                    }
+                    (Move::Start, Some(intact_from)) => Move::From(intact_from),
+                    (to, _) => to,
+                };
+                self.ensure_positions(&tx, group, uri).await?;
+                self.move_all(&tx, group, uri, to).await
+            })
+            .await
     }
 }

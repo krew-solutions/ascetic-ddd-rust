@@ -129,6 +129,22 @@ pub struct Epoch {
     /// Its highest position; `None` until a relay computes it, after a
     /// conversion from the positions of ADR-0007.
     pub end: Option<i64>,
+    /// The generations of the ring it found rows in (ADR-0033), in order:
+    /// a batch reads those alone. Empty while `end` is `None`.
+    pub generations: Vec<Generation>,
+}
+
+/// A generation of the ring an epoch found rows in, and the lowest and
+/// highest positions of its rows there: a batch reads it from the later of
+/// the epoch's offset and `first`, up to `last`, and passes it by after.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Generation {
+    /// The generation.
+    pub generation: u32,
+    /// The lowest position of the epoch's rows in it.
+    pub first: i64,
+    /// The highest.
+    pub last: i64,
 }
 
 /// Where a consumer group is in one slot: every row visible in `delivered`
@@ -147,7 +163,7 @@ pub struct Position {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Move {
     /// Back to the start: nothing delivered, every row the table keeps
-    /// handed on again.
+    /// handed on again — on the ring, from its `intact_from` (ADR-0033).
     Start,
     /// Back to transaction `xid`: of what was delivered, only what lies below
     /// it is kept, so every row of `xid` and of later transactions is handed

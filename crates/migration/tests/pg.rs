@@ -361,6 +361,61 @@ async fn a_step_that_locks_a_second_table_is_refused_and_leaves_nothing() {
     drop_all(&name, &[&a, &b]).await;
 }
 
+/// A lock on a partitioned table reaches every partition and its indexes:
+/// they count as the target (ADR-0033 decision 6). A second table is still
+/// refused beside them.
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn a_step_on_a_partitioned_table_counts_its_partitions_as_the_target() {
+    let (name, a, b) = (unique("ring"), unique("a"), unique("b"));
+    let baseline = Migration::new(
+        "0001_baseline",
+        format!(
+            "CREATE TABLE {a} (g INT NOT NULL, id INT NOT NULL, PRIMARY KEY (g, id)) \
+                 PARTITION BY LIST (g); \
+             CREATE TABLE {a}_g0 PARTITION OF {a} FOR VALUES IN (0); \
+             CREATE TABLE {a}_g1 PARTITION OF {a} FOR VALUES IN (1); \
+             CREATE TABLE {b} (id INT);"
+        ),
+    );
+    let ring = Component::new(
+        &name,
+        vec![
+            baseline.clone(),
+            Migration::new(
+                "0002_note",
+                format!(
+                    "ALTER TABLE {a} ADD COLUMN note TEXT; CREATE INDEX {a}_note ON {a} (note);"
+                ),
+            )
+            .on(table(&a)),
+        ],
+    )
+    .expect("a component");
+    migrate(&sessions(), &ring, &quick())
+        .await
+        .expect("the partitions are the target's");
+    let both = Component::new(
+        &name,
+        vec![
+            baseline,
+            Migration::new(
+                "0003_both",
+                format!("ALTER TABLE {a} ADD COLUMN x INT; ALTER TABLE {b} ADD COLUMN y INT;"),
+            )
+            .on(table(&a)),
+        ],
+    )
+    .expect("a component");
+    match migrate(&sessions(), &both, &quick()).await {
+        Err(MigrationError::TwoTables { tables, .. }) => {
+            assert_eq!(tables.as_slice(), std::slice::from_ref(&b));
+        }
+        other => panic!("{other:?}"),
+    }
+    drop_all(&name, &[&a, &b]).await;
+}
+
 #[tokio::test]
 #[ignore = "needs a live PostgreSQL"]
 async fn a_live_reader_then_writer_commits_while_its_table_is_migrated() {
