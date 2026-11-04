@@ -848,7 +848,8 @@ confirmed in `pg_locks`, as `verify/pg/lost-wake` does.
   generation keeps it, and the row is handed on — the in-progress list
   ignored;
 - an abandoned group forgotten, a live one refused — the margin's check
-  dropped;
+  dropped; the selection of everything forgotten alone once its lanes took
+  over, the lanes kept — the whole group forgotten;
 - a counter reset found by the reclamation itself stops it and is recorded
   — the check dropped;
 - a dispatcher's loops work passes — never working one.
@@ -1168,3 +1169,6 @@ On a scratch database, each with the result that changes the decision:
   out when one outlasts the lock's timeout. Found by a test that a mutation
   naming every generation passed; the tests now hold the corrected claim,
   and the case of a group quiet since its last epoch is recorded.
+- 2026-11-04 — `forget_selection`: the selection of everything a host
+  switched to lanes from would pin the ring for good, and `forget_group`
+  drops the lanes with it. Found adopting the lanes in the host.

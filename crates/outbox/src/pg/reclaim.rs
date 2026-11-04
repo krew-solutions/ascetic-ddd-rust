@@ -408,7 +408,33 @@ where
     /// refused, [`Error::GroupActive`]. Under the reclamation's key, held
     /// exclusively.
     pub async fn forget_group(&self, session: &P::Session, group: &str) -> Result<(), Error> {
+        self.forget_positions(session, group, None).await
+    }
+
+    /// Drops the positions of one selection of a group, the others kept: a
+    /// selection a relay no longer runs — the selection of everything,
+    /// once its lanes have taken over and no older binary relays it
+    /// (ADR-0033 decision 4) — would otherwise pin the ring for good. One
+    /// that moved within the margin's age is refused,
+    /// [`Error::GroupActive`]. Under the reclamation's key, held
+    /// exclusively.
+    pub async fn forget_selection(
+        &self,
+        session: &P::Session,
+        selection: &super::Selection,
+    ) -> Result<(), Error> {
+        self.forget_positions(session, &selection.consumer_group, Some(&selection.uri))
+            .await
+    }
+
+    async fn forget_positions(
+        &self,
+        session: &P::Session,
+        group: &str,
+        uri: Option<&str>,
+    ) -> Result<(), Error> {
         let offsets = &self.offsets_table;
+        let selected = "consumer_group = $1 AND ($2::text IS NULL OR uri = $2)";
         session
             .atomic(async |tx: P::Session| {
                 self.hold_reclamation(&tx, true).await?;
@@ -417,9 +443,9 @@ where
                     .query_one(
                         &format!(
                             "SELECT extract(epoch FROM CURRENT_TIMESTAMP - max(updated_at))::float8 \
-                             FROM {offsets} WHERE consumer_group = $1"
+                             FROM {offsets} WHERE {selected}"
                         ),
-                        &[&group],
+                        &[&group, &uri],
                     )
                     .await?
                     .get(0);
@@ -433,8 +459,8 @@ where
                 }
                 tx.connection()
                     .execute(
-                        &format!("DELETE FROM {offsets} WHERE consumer_group = $1"),
-                        &[&group],
+                        &format!("DELETE FROM {offsets} WHERE {selected}"),
+                        &[&group, &uri],
                     )
                     .await?;
                 Ok(())
