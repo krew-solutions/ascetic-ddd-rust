@@ -62,8 +62,8 @@ mod port;
 
 pub use crate::error::{BoxError, Error, Identity};
 pub use crate::message::{Epoch, Generation, Move, OutboxMessage, Position, Snapshot};
-pub use crate::observer::{OutboxObserver, Receipt};
-pub use crate::pg::{Backlog, DEFAULT_BATCH_SIZE, Loops, PgOutbox, Ring, Selection};
+pub use crate::observer::{OutboxObserver, Receipt, Reclamation, Skipped};
+pub use crate::pg::{Backlog, DEFAULT_BATCH_SIZE, Loops, PgOutbox, Reclaiming, Ring, Selection};
 pub use crate::port::Outbox;
 
 pub use crate::channel::{OUTBOX_SCHEME, OutboxChannel};

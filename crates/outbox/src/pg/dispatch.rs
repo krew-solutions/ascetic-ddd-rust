@@ -277,6 +277,11 @@ where
     /// failure in a row up to `loops.max_pause`, and goes on. On any other
     /// error of the database, a defect, the loops are all stopped and the
     /// error is returned (ADR-0010).
+    ///
+    /// Between its batches, a loop works a pass of the ring's reclamation
+    /// once every [`Reclaiming::interval`](super::Reclaiming) of this
+    /// process (ADR-0033 decision 3). Its outcome goes to the observer; its
+    /// errors are logged and never stop, delay or restart dispatch.
     pub async fn run<F, Fut>(
         &self,
         subscriber: F,
@@ -289,6 +294,8 @@ where
         Fut: Future<Output = Result<(), BoxError>> + Send,
     {
         let (stop, _) = watch::channel(false);
+        let next_pass = std::sync::Mutex::new(std::time::Instant::now());
+        let next_pass = &next_pass;
         let futures = (0..loops.concurrency.max(1)).map(|_| {
             let mut stopped = stop.subscribe();
             let stop = stop.clone();
@@ -300,6 +307,7 @@ where
                     if *stopped.borrow() {
                         return Ok(());
                     }
+                    self.reclaim_when_due(next_pass).await;
                     let pause = match self.dispatch(subscriber, selection).await {
                         Ok(true) => {
                             failures = 0;
@@ -342,6 +350,32 @@ where
         Ok(())
     }
 
+    /// A pass of the reclamation, if this process's interval has run out
+    /// since the last; its errors logged, never returned.
+    async fn reclaim_when_due(&self, next_pass: &std::sync::Mutex<std::time::Instant>) {
+        let due = {
+            let mut at = next_pass
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let now = std::time::Instant::now();
+            let due = now >= *at;
+            if due {
+                *at = now + self.reclaiming.interval;
+            }
+            due
+        };
+        if !due {
+            return;
+        }
+        match self.reclaim().await {
+            Ok(_) => {}
+            Err(error @ Error::CounterReset(_)) => {
+                log::error!("outbox: the ring's reclamation stopped: {error}");
+            }
+            Err(error) => log::warn!("outbox: a pass of the ring's reclamation failed: {error}"),
+        }
+    }
+
     /// Where `selection` is, by slot: what it delivered, and the epoch in
     /// flight; empty before the first dispatch. Snapshots have no order, so
     /// the positions of several slots have no minimum.
@@ -363,7 +397,8 @@ where
     /// [`Error::Reclaimed`], and back to the start lands on it: below it,
     /// rows may be gone. The bound is read and the positions written under
     /// the reclamation's key, held exclusively, so that no emptying commits
-    /// between them.
+    /// between them. A rewind restarts every generation's time since it was
+    /// found passed: its rows are owed again.
     pub async fn set_position(
         &self,
         session: &P::Session,
@@ -384,7 +419,11 @@ where
                     (to, _) => to,
                 };
                 self.ensure_positions(&tx, group, uri).await?;
-                self.move_all(&tx, group, uri, to).await
+                self.move_all(&tx, group, uri, to).await?;
+                if !matches!(to, Move::Now) {
+                    self.clear_passed(&tx).await?;
+                }
+                Ok(())
             })
             .await
     }

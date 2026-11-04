@@ -171,11 +171,33 @@ relays first, which keeps the bound near the head. A rewind below the ring's
 and a new group starts there. A lane starts where its group's selection of
 everything stands, so that switching a relay to lanes hands nothing on again.
 
+## Emptying the ring
+
+A dispatcher's loops work a pass of the reclamation between their batches,
+once an interval of the process, `with_reclaiming(Reclaiming { interval,
+margin, margin_age, lock_timeout })`; `reclaim()` works one on demand. A
+pass takes the generation of the oldest row left and empties it, by
+`TRUNCATE`, once it is
+- past: its newest window lies `margin` windows below the next id's;
+- closed: no transaction of this database holding an id in it is open — one
+  left open in another database holds nothing;
+- passed: every position's `delivered` sees every row of it;
+- old enough: every group passed it `margin_age` ago, so that a row relayed
+  a moment ago can still be re-injected.
+
+Under the partition's lock, taken within `lock_timeout`, it reads "passed"
+again — this is what keeps the rows — then records `gone_below`, the least
+row left, and `intact_from`, one past the highest id emptied. Its outcome
+goes to the observer, `on_reclamation`: a generation emptied, or the pass
+skipped and why, the position pinning the ring among the reasons. A group
+that pins it for good is dropped with `forget_group`, which refuses one that
+moved a position within the margin's age. Its errors are logged and never
+stop dispatch; a counter reset stops it as it stops the relay.
+
 ## What is not here
 
-Nothing empties a generation yet: the ring is made and read, and ADR-0033's
-reclamation, which truncates a generation every group has passed, is still
-to come. Until then the outbox keeps every row it stored.
+The rebase after a counter reset (ADR-0033 decision 3) is still to come:
+until then an operator moves the positions before `clear_counter_reset`.
 
 ## Deviations from the Python source
 
