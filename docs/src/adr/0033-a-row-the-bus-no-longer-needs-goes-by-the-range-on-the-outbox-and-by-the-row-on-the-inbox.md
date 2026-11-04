@@ -928,13 +928,17 @@ As planned:
   - a rewind racing a reclamation;
   - a rewind into a lap emptied together with an older one;
   - one bound for both meanings.
-- **`Inbox.tla` gains:**
-  - re-arrival after `Forget`;
-  - a ghost of everything ever processed, over which `WaitingIsAside` and
-    `CausalOrder` are restated.
-- **Its configurations that must fail:**
-  - forgetting early;
-  - forgetting a dependency target.
+- **The inbox's forgetting — built (2026-11-04) as `InboxForget.tla`,** over
+  `Inbox.tla` unchanged, so that `InboxPg.tla`, the traces and the bridge
+  keep theirs: re-arrival of a forgotten identity while its horizon is open,
+  the horizon closing for good, a ghost of everything ever processed over
+  which `EffectsIffProcessed`, `CausalOrder` and `WaitingIsAside` are
+  restated. Forgetting by the window holds; forgetting before the horizon
+  closes fails `EffectsOnce`; forgetting a dependency target fails
+  `WaitingIsAsideEver`. The model abstracts every source of repeats — a
+  relay's retry, a broker's retention, a producer's rewind — into one
+  horizon per message; the composition with the outbox's rewind below is
+  still owed.
 - **`Bridge.tla`:** an outbox `Rewind` with an inbox `Forget` at the mark must
   fail `EffectsOnce`, and hold when the window covers the producer's horizon
   and a deeper `Rewind` is refused; a mixed selection retried across a
@@ -1124,3 +1128,7 @@ On a scratch database, each with the result that changes the decision:
   processed before, a holder gone reported unknown; and the producer's replay
   horizon held by `set_position`. The one-time stamp is a call a host makes,
   not a part of the sweep: it walks the whole table once.
+- 2026-11-04 — The inbox's forgetting modelled, `InboxForget.tla`: the
+  window that covers the horizon of repeats and keeps dependency targets
+  holds every property; a shorter window and a window over dependency
+  targets each fail theirs.
