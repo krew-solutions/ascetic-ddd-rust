@@ -2841,3 +2841,205 @@ async fn a_ring_copy_past_its_limit_is_refused_before_the_step() {
     outbox(5).migrate().await.unwrap();
     assert_eq!(f.texts("SELECT count(*)::text FROM {outbox}").await, ["5"]);
 }
+
+/// While the relay works — four slots, a batch outlasting the emptying's
+/// lock timeout — and a transaction stays open in another database of the
+/// server, the reclamation empties every generation in turn, a full lap:
+/// "closed" is judged in this database alone (ADR-0033 decision 3; M13 in
+/// small).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_reclamation_laps_the_ring_while_the_relay_is_busy() {
+    #[derive(Default)]
+    struct Emptied(Mutex<Vec<u32>>);
+    impl OutboxObserver for Emptied {
+        fn on_reclamation(&self, event: &Reclamation) {
+            if let Reclamation::Emptied { generation, .. } = event {
+                self.0.lock().unwrap().push(*generation);
+            }
+        }
+    }
+    let ring = Ring::new(4, 16);
+    let emptied = Arc::new(Emptied::default());
+    let f = fixture_shaped(
+        "reclaim_busy",
+        Arc::clone(&emptied),
+        4,
+        ring,
+        TraceFile::off(),
+    )
+    .await
+    .with_reclaiming(Reclaiming {
+        interval: Duration::from_millis(50),
+        margin: 1,
+        margin_age: Duration::ZERO,
+        lock_timeout: Duration::from_millis(100),
+    });
+
+    // a transaction left open in another database, holding an id
+    let url = std::env::var("ASCETIC_DDD_TEST_PG_URL").unwrap_or_else(|_| DEFAULT_URL.to_owned());
+    let mut elsewhere = Config::from_str(&url).unwrap();
+    elsewhere.dbname("postgres");
+    let (other, connection) = elsewhere.connect(NoTls).await.unwrap();
+    tokio::spawn(connection);
+    other.batch_execute("BEGIN").await.unwrap();
+    let other_xid: u64 = other
+        .query_one("SELECT pg_current_xact_id()::text", &[])
+        .await
+        .unwrap()
+        .get::<_, String>(0)
+        .parse()
+        .unwrap();
+
+    let publishing = std::sync::atomic::AtomicBool::new(true);
+    // slower than each slot hands on, so that no slot lags and pins the ring
+    let publisher = async {
+        let mut id = 0;
+        while publishing.load(Ordering::SeqCst) {
+            id += 1;
+            f.publish_now(&[message(&format!("kafka://orders/o{}", id % 16), id)])
+                .await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    };
+    // a batch of a single message outlasts the emptying's lock timeout
+    let subscriber = |_: &OutboxMessage| async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        Ok::<(), BoxError>(())
+    };
+    let selection = Selection::group("busy");
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let relay = f.outbox.run(
+        &subscriber,
+        &selection,
+        Loops {
+            concurrency: 4,
+            poll_interval: Duration::from_millis(5),
+            max_pause: Duration::from_millis(50),
+        },
+        async {
+            let _ = stopped.await;
+        },
+    );
+    let watch = async {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let laps = {
+                let emptied = emptied.0.lock().unwrap();
+                (0..ring.generations).all(|g| emptied.contains(&g))
+            };
+            if laps || std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        publishing.store(false, Ordering::SeqCst);
+        let _ = stop.send(());
+    };
+    let ((), ran, ()) = tokio::join!(publisher, relay, watch);
+    ran.unwrap();
+    other.batch_execute("ROLLBACK").await.unwrap();
+
+    let emptied = emptied.0.lock().unwrap().clone();
+    assert!(
+        (0..ring.generations).all(|g| emptied.contains(&g)),
+        "a lap of emptyings while the relay was busy and transaction {other_xid} stayed open \
+         elsewhere (generation {}); emptied: {emptied:?}",
+        ring.generation_of(other_xid)
+    );
+}
+
+/// An emptying waiting for the oldest generation's lock — a reader holds it
+/// — holds back no dispatch of a group whose positions have moved past that
+/// generation's windows: its look and its batch lock only the generations
+/// they name. Requests queue behind a waiting `ACCESS EXCLUSIVE`, so a look
+/// that touched every generation would wait with the emptying, the whole
+/// relay with it (ADR-0033 decision 3). A group that has been quiet since
+/// then still names it — an idle look does not move `delivered` — and may
+/// wait, at most the emptying's lock timeout.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn an_emptying_waiting_for_its_lock_holds_back_no_dispatch() {
+    let ring = Ring::new(8, 64);
+    let f = fixture_ring("reclaim_beside", ring)
+        .await
+        .with_reclaiming(Reclaiming {
+            interval: Duration::from_secs(60),
+            margin: 0,
+            margin_age: Duration::ZERO,
+            lock_timeout: Duration::from_secs(3),
+        });
+    let (seen, subscriber) = collector();
+    let selection = Selection::group("relay");
+    f.publish(&[message("kafka://orders", 1)]).await;
+    f.drain(&subscriber, &selection).await;
+    let oldest = ring.generation_of(f.xid_of(1).await);
+    // the ids move on to another generation, and the group with them
+    while ring.generation_of(f.next_xid().await) == oldest {
+        f.texts("SELECT pg_current_xact_id()::text").await;
+    }
+    f.publish(&[message("kafka://orders", 2)]).await;
+    f.drain(&subscriber, &selection).await;
+    assert_ne!(ring.generation_of(f.xid_of(2).await), oldest);
+
+    let partition = format!("{}_g{oldest}", f.tables.0);
+    let reading = Arc::new(tokio::sync::Notify::new());
+    let done = Arc::new(tokio::sync::Notify::new());
+    let reader = async {
+        f.sessions
+            .session(async |session| {
+                session
+                    .atomic(async |tx| {
+                        tx.connection()
+                            .query(&format!("SELECT 1 FROM {partition} LIMIT 1"), &[])
+                            .await?;
+                        reading.notify_one();
+                        done.notified().await;
+                        Ok::<(), Error>(())
+                    })
+                    .await
+            })
+            .await
+            .unwrap()
+    };
+    let emptying = async {
+        reading.notified().await;
+        f.outbox.reclaim().await.unwrap()
+    };
+    let relay = async {
+        // the emptying's lock is queued behind the reader
+        let waiting = format!(
+            "SELECT count(*)::text FROM pg_locks l JOIN pg_class c ON c.oid = l.relation \
+             WHERE c.relname = '{partition}' AND l.mode = 'AccessExclusiveLock' AND NOT l.granted"
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while f.texts(&waiting).await != ["1"] {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the emptying never queued"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        f.publish_now(&[message("kafka://orders", 3)]).await;
+        let started = std::time::Instant::now();
+        let dispatched = f.outbox.dispatch(&subscriber, &selection).await.unwrap();
+        let took = started.elapsed();
+        done.notify_one();
+        (dispatched, took)
+    };
+    let ((), outcome, (dispatched, took)) = tokio::join!(reader, emptying, relay);
+    assert!(dispatched);
+    assert!(
+        took < Duration::from_secs(1),
+        "the dispatch waited {took:?}"
+    );
+    assert_eq!(*seen.lock().unwrap(), [1, 2, 3]);
+    assert!(
+        matches!(
+            outcome,
+            Reclamation::Emptied { generation, .. } | Reclamation::Skipped(Skipped::Held { generation })
+                if generation == oldest
+        ),
+        "{outcome:?}"
+    );
+}

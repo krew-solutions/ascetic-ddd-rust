@@ -291,10 +291,15 @@ Measured on the host's drill:
        emptying is waiting for. All `K` once they span `K` windows.
      - **A look names them too,** from a statement before it that reads the
        selection's positions and the current snapshot. A relation's lock
-       lasts to the transaction's end, through the subscriber's batch: a
-       look naming none would hold `ACCESS SHARE` on every partition for as
-       long as the relay is busy, and an emptying's lock would never be
-       granted (found building it). A row of a window opened after that
+       lasts to the transaction's end, through the subscriber's batch, and
+       requests queue behind a waiting `ACCESS EXCLUSIVE`. A look naming
+       every generation would make each emptying wait for every batch in
+       flight, the whole relay queued behind it, and time out whenever a
+       batch outlasts the lock's timeout. Named, an active group's look and
+       batch do not touch the generation being emptied, which every
+       position has passed. A group quiet since its last epoch still names
+       it — an idle look does not move `delivered` — and its look may wait,
+       at most the lock's timeout. A row of a window opened after that
        statement waits for the next look.
      - **It records the generations it found rows in,** each with its first
        and last position in the epoch, in the position row beside the epoch.
@@ -1000,7 +1005,11 @@ On a scratch database, each with the result that changes the decision:
 - **M13.** Eight loops relaying, a transaction held open in another
   database, the reclamation passing: emptyings at their usual rate and the
   fetch's p99 unchanged, or the coupling to the server's oldest transaction
-  is back.
+  is back. In small, a test now (2026-11-04): four slots relaying, a batch
+  outlasting the lock's timeout, a transaction open in another database —
+  every generation emptied in turn; and an emptying queued behind a reader
+  holds back no active group's dispatch. The rate and the p99 at the
+  launch's size stay to measure.
 - **M10.** The cluster's rate of transaction ids at the launch's load, every
   context's database on one server: the margin in generations against
   `margin_age`.
@@ -1152,3 +1161,10 @@ On a scratch database, each with the result that changes the decision:
   under the outbox's lock, so `migrate` now refuses a copy past a limit,
   20 000 rows by default; a batch's per-generation branches read 100 rows
   in 0.36 ms.
+- 2026-11-04 — Corrected: the reason a look names its generations. A
+  waiting `ACCESS EXCLUSIVE` queues the requests behind it, so a look
+  naming every generation would not starve an emptying; it would make each
+  emptying stall the whole relay until the batches in flight end, and time
+  out when one outlasts the lock's timeout. Found by a test that a mutation
+  naming every generation passed; the tests now hold the corrected claim,
+  and the case of a group quiet since its last epoch is recorded.
