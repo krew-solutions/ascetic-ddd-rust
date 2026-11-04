@@ -251,6 +251,10 @@ Measured on the host's drill:
      transaction. `message_id` is unique within a generation. ADR-0035's
      `(slot, position) INCLUDE (transaction_id)` is built on the ring, its
      leaves named too.
+   - **The guard takes ADR-0034's part already,** as
+     `coalesce(metadata->'part', '""')`: a no-op until a sender writes a
+     part, and ADR-0034 then needs no rebuild of its own over the whole ring
+     (measured: a naive `||` guards no row, since `jsonb || NULL` is NULL).
    - **Two bounds, recorded in `{outbox}_meta`.** A generation holds every
      lap that wrote into it, so emptying it removes windows above older ones
      still kept. One number cannot say both "below it all is gone" and "from
@@ -823,7 +827,10 @@ explained away as an aborted transaction.
 On a scratch database, each with the result that changes the decision:
 - **M5.** The inbox's primary key as a 16-byte digest of the identity:
   adopted if the index shrinks more than tenfold with no slower publish,
-  mark or dependency lookup.
+  mark or dependency lookup. Decided before ADR-0034, which changes the key,
+  so that it changes once, the digest over its five fields. ADR-0034's
+  review measured an analogue: the unique index on the 16-byte `message_id`
+  is 15 times smaller than the key, and sorts in a tenth of the time.
 - **M6.** The relay writing its own inbox's rows in its own transaction,
   against today's about 680 rows a second: it would make the inbox's own
   selection hand on exactly once, ending even a database error's
@@ -958,3 +965,6 @@ On a scratch database, each with the result that changes the decision:
   - **Recorded as alternatives:** Commands to self through the broker, with
     the owner's reasons for it; lanes in separate tables or slots, taken up
     if M14 shows the double read matters.
+- 2026-11-04 — From ADR-0034's review of roles: the ring's guard takes the
+  part already, by `coalesce`, so that ADR-0034 rebuilds nothing over the
+  ring; M5 is decided before ADR-0034, the key changing once.

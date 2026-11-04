@@ -80,19 +80,23 @@ dispatcher's transaction against PostgreSQL under READ COMMITTED.
   may hold an id for ever and write nothing here: one of another database.
 - **Selections:** one of everything, raced by two dispatchers, or two lanes
   (ADR-0033), each with its own position row.
+- **The migration of decision 10:** before it, relays of ADR-0007 run on the
+  old pair; it converts every position at once; after it, old relays may go
+  on beside new ones until they retire, on the old pair the new ones keep up.
+- **The position sequence** hands each session a block of `Cache` values.
 
 Left out:
 - the probe of decision 2, which decides whether a look happens, not what
   it does;
-- the ring of ADR-0033 and the migration of the positions — the next step;
-- the sequence's cache;
+- the ring of ADR-0033 — the next step;
 - the refinement to `Outbox.tla`, which waits for that module to be restated
   over versions.
 
 `MCOutboxPg.tla` fixes the instance: two versions of one stream, to the
 inbox, written by two transactions; one row of another stream, to the
 broker, by a third that may roll back; a fourth transaction of another
-database.
+database. For the migration, one transaction writes two rows, so that an old
+relay can acknowledge it halfway, and one new relay runs beside one old.
 
 | property | kind | meaning |
 | --- | --- | --- |
@@ -102,6 +106,7 @@ database.
 | `NoRedeliveryWithoutFailure` | invariant | a row is received twice only after a rollback or a rewind |
 | `EpochCoversDelivered` | invariant | an epoch in flight sees everything delivered |
 | `DeliveredMonotone` | action | `delivered` only grows, but at a rewind |
+| `OldPairSound` | invariant | during a migration, the old pair, which old relays read, passes no row unreceived |
 | `NoHeadOfLineBlocking` | liveness | a committed row is received whatever transaction stays open for ever, unless its own lane's destination is down |
 
 Must hold:
@@ -114,6 +119,10 @@ Must hold:
 - `OutboxPgLanes.cfg`: two lanes, the broker down for good; the inbox's lane
   still flows. Without early ids or rollbacks, which the others hold: about
   48 000 states, a minute and a half.
+- `OutboxPgMigrate.cfg`: the migration as decided, an old relay going on
+  beside a new one until it retires; nothing lost, by either position.
+- `OutboxPgMigrateExact.cfg`: the old relay stopping at the migration;
+  nothing handed on twice, and the order holds across it.
 
 Must fail, each with the property it breaks (`check.sh` greps it):
 
@@ -133,6 +142,10 @@ Must fail, each with the property it breaks (`check.sh` greps it):
 | `OutboxPgRewindKeepsEpoch` | a rewind leaving the epoch in flight | `RewindReplays` |
 | `OutboxPgDrawEarly` | a row written before its predecessor committed | `VersionOrder` |
 | `OutboxPgMixedDown` | one selection, the broker down | `NoHeadOfLineBlocking` |
+| `OutboxPgCache2` | the sequence's cache of two, two sessions | `VersionOrder` |
+| `OutboxPgMigrateDelivered` | positions converted to `'L:L:'` alone | `NoRedeliveryWithoutFailure` |
+| `OutboxPgMigrateTooFar` | positions converted to `'L+1:L+1:'` alone | `NoPassedOver` |
+| `OutboxPgMigrateShared` | the epoch's offset in the old column, which an old relay moves | `NoPassedOver` |
 
 Two of the traces, as TLC prints them:
 

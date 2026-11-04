@@ -66,6 +66,10 @@ echo "== outbox, statement by statement: a transaction open for ever holds no ot
 tlc -config OutboxPgLive.cfg MCOutboxPg.tla
 echo "== outbox, statement by statement: in lanes, the inbox's flows while the broker is down"
 tlc -config OutboxPgLanes.cfg MCOutboxPg.tla
+echo "== outbox, statement by statement: the migration, an old relay beside a new one, loses nothing"
+tlc -config OutboxPgMigrate.cfg MCOutboxPg.tla
+echo "== outbox, statement by statement: the migration, the old relay stopping, hands nothing on twice"
+tlc -config OutboxPgMigrateExact.cfg MCOutboxPg.tla
 for case in \
   "OutboxPgMixedDown:Temporal properties were violated" \
   "OutboxPgXmin:Invariant VersionOrder is violated" \
@@ -80,7 +84,11 @@ for case in \
   "OutboxPgOffsetCarried:Invariant NoPassedOver is violated" \
   "OutboxPgNaiveRewind:Invariant NoPassedOver is violated" \
   "OutboxPgRewindKeepsEpoch:Invariant RewindReplays is violated" \
-  "OutboxPgDrawEarly:Invariant VersionOrder is violated"; do
+  "OutboxPgDrawEarly:Invariant VersionOrder is violated" \
+  "OutboxPgCache2:Invariant VersionOrder is violated" \
+  "OutboxPgMigrateDelivered:Invariant NoRedeliveryWithoutFailure is violated" \
+  "OutboxPgMigrateTooFar:Invariant NoPassedOver is violated" \
+  "OutboxPgMigrateShared:Invariant NoPassedOver is violated"; do
   echo "== outbox, statement by statement: ${case%%:*}, a refuted design, must fail"
   must_fail "${case%%:*}" MCOutboxPg.tla "${case#*:}"
 done
