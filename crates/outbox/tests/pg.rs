@@ -3088,3 +3088,48 @@ async fn the_selection_of_everything_is_forgotten_once_its_lanes_took_over() {
         Reclamation::Emptied { .. }
     ));
 }
+
+/// A process starts beside live traffic (ADR-0029): over a current ring,
+/// `migrate` finishes while another session holds the outbox, its
+/// partitions and its positions in `ACCESS EXCLUSIVE` mode — it reads the
+/// ledger and the catalogue, and waits on no table.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_start_over_a_current_ring_waits_on_no_table() {
+    let ring = Ring::new(3, 1 << 23);
+    let f = fixture_ring("ring_boot", ring).await;
+    let mut tables = vec![f.tables.0.clone(), f.tables.1.clone()];
+    tables.extend((0..ring.generations).map(|g| format!("{}_g{g}", f.tables.0)));
+    let held = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let holder = async {
+        f.sessions
+            .session(async |session| {
+                session
+                    .atomic(async |tx| {
+                        for table in &tables {
+                            tx.connection()
+                                .batch_execute(&format!(
+                                    "LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE"
+                                ))
+                                .await?;
+                        }
+                        held.notify_one();
+                        release.notified().await;
+                        Ok::<(), Error>(())
+                    })
+                    .await
+            })
+            .await
+            .unwrap()
+    };
+    let start = async {
+        held.notified().await;
+        let started =
+            tokio::time::timeout(Duration::from_secs(5), beside(&f, ring).migrate()).await;
+        release.notify_one();
+        started
+    };
+    let ((), started) = tokio::join!(holder, start);
+    started.expect("the start waited on a held table").unwrap();
+}
