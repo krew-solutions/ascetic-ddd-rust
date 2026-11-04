@@ -118,6 +118,11 @@ impl OutboxObserver for JsonTrace {
             "slot": event.slot,
             "slots": event.slots,
             "horizon": event.horizon,
+            "statement": event.statement.map(ToString::to_string),
+            "delivered": event.delivered.map(ToString::to_string),
+            "epoch": event.epoch.map(ToString::to_string),
+            "epoch_offset": event.epoch_offset,
+            "epoch_end": event.epoch_end,
             "limit": event.limit,
             "messages": event.messages.iter().map(outbox_id).collect::<Vec<_>>(),
         }));
@@ -138,8 +143,9 @@ impl OutboxObserver for JsonTrace {
             "event": "acked",
             "group": event.group,
             "slot": event.slot,
-            "xid": event.position.transaction_id,
-            "position": event.position.offset,
+            "xid": event.last.map(|last| last.transaction_id),
+            "position": event.last.map(|last| last.position),
+            "drained": event.drained,
         }));
     }
     fn on_dispatched(&self, event: &outbox::Dispatched<'_>) {

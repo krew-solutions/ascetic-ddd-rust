@@ -20,10 +20,17 @@ outbox.run(send_to_broker, &Selection::group("broker"), Workers::default(), ctrl
 
 * **Atomicity.** `publish` writes into the caller's transaction. Either the
   state change and the message are committed, or neither is.
-* **Order.** Rows carry the inserting transaction's id (`xid8`) and are read
-  only once that transaction is older than every running one, in
-  `(transaction_id, position)` order. A serial alone cannot do this: a slow
-  transaction commits after a fast one that took the next number.
+* **Order** (ADR-0035). Rows carry the inserting transaction's id (`xid8`). A
+  dispatcher hands rows on by epochs: an epoch is what became visible between
+  the snapshot it last delivered and the current one, handed on in the order
+  the positions were drawn. So each stream's messages on one URI first leave
+  in their writers' commit order — for an aggregate, its versions' order —
+  whatever each writer wrote first, provided its rows are written after the
+  point that serialises it with the stream's other writers (decision 7); and
+  a transaction left open delays its own rows only. A serial alone cannot do
+  this: a slow transaction commits after a fast one that took the next
+  number. The position sequence must draw one value at a time (`CACHE 1`),
+  which `migrate` and every epoch's start check.
 * **At least once.** The subscriber runs inside the dispatcher's transaction
   and the position is acknowledged after the batch. A crash in between
   redelivers; consumers deduplicate on `metadata.message_id`, which is unique
@@ -74,11 +81,14 @@ this process, how long one waits — the same `Loops` that `run` takes.
 the session observers: a synchronous, infallible value, composed as a tuple,
 fixed when the outbox is built. It is told of five things — a message
 published, with the id of the writing transaction and the row's position; a
-batch fetched, with the visibility horizon of the statement that read it; a
-message handed to the subscriber, with the outcome; the position acknowledged;
-the dispatcher's transaction closed, committed or rolled back. These are the
-actions of the protocol model in `verify/tla/Outbox.tla`, so a recording
-observer yields a trace the model can be checked against. The tests do
+batch fetched, with the epoch, what was delivered before it and the snapshot
+it was read under; a message handed to the subscriber, with the outcome; the
+position acknowledged, with whether the epoch drained; the dispatcher's
+transaction closed, committed or rolled back. They were the actions of the
+protocol model in `verify/tla/Outbox.tla`, written for ADR-0007's rule; the
+statement-level model of the epochs is `verify/tla/OutboxPg.tla`, and the
+trace tools follow epochs once that model refines the protocol's. A recording
+observer yields a trace. The tests do
 exactly that, through the recorder of `ascetic-ddd-trace`: with
 `ASCETIC_DDD_TRACE_DIR` set they write one JSON line per event, and
 `verify/tla/check.sh` replays those files through the model.
@@ -117,8 +127,8 @@ sixty-four; idle, 0.03, 0.10 and 0.11 ms.
 The outbox keeps every row it ever stored; nothing deletes acknowledged
 messages. Retention is the deployment's: the table is meant to be rotated by
 partitions, which is simpler and cheaper than a cleaner inside the library.
-The fetch does not slow down with the history, because it reads from the
-group's position on.
+A look reads from what a group delivered on, through the index on `(slot,
+transaction_id, position)`; ADR-0033 bounds the history.
 
 ## Deviations from the Python source
 

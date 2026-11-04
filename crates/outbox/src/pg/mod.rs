@@ -4,12 +4,27 @@
 //!
 //! A `BIGSERIAL` position does not order messages across concurrent
 //! transactions: a transaction may take position 1, run for a while, and
-//! commit after the one that took position 2. A dispatcher that has passed
-//! position 2 would never see 1. So every row also records the inserting
-//! transaction, `pg_current_xact_id()`, and a dispatcher reads only rows
-//! whose transaction is older than every transaction still running —
-//! `transaction_id < pg_snapshot_xmin(pg_current_snapshot())` — in
-//! `(transaction_id, position)` order.
+//! commit after the one that took position 2. And a transaction's id is
+//! assigned at its first write, not at its commit, so ordering by it puts
+//! a writer that wrote something else first ahead of one that committed
+//! before it (ADR-0035). So a row records the inserting transaction,
+//! `pg_current_xact_id()`, and a dispatcher hands rows on by epochs.
+//!
+//! Each position row holds `delivered`, a snapshot in which every visible
+//! row was handed on, and the epoch in flight: a later snapshot, the rows
+//! visible in it and not in `delivered`, handed on in the order their
+//! positions were drawn, `epoch_offset` the last handed on. A dispatcher's
+//! transaction locks the row in one statement — finding none with work, it
+//! locks nothing and writes nothing — and reads the epoch's start and its
+//! batch in later statements, under snapshots taken after the lock, so that
+//! a stored epoch is read whole. A batch shorter than its size drains the
+//! epoch: `delivered` becomes it. One transaction's rows, and a stream's
+//! versions written each after the last was committed, leave in commit
+//! order; a transaction left open delays its own rows only.
+//!
+//! For a relay of ADR-0007 still running in a rolling deploy, the pair it
+//! reads, `(last_processed_transaction_id, offset_acked)`, is kept up as
+//! `(xmin(delivered) - 1, i64::MAX)`: it hands on again, never loses.
 //!
 //! # Consumer groups and slots
 //!
