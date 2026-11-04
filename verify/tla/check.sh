@@ -161,6 +161,23 @@ fi
 grep -q "Invariant WaitingIsAside is violated" "${TMPDIR:-/tmp}/tlc-inbox-splitwait.log"
 echo "   violation found, as expected"
 
+echo "== inbox forgetting by its window (ADR-0033 decision 4): every property holds"
+tlc -config InboxForget.cfg MCInboxForget.tla
+
+echo "== inbox: a window shorter than the horizon of repeats, TLC must find a message processed twice"
+if tlc -config InboxForgetEarly.cfg MCInboxForget.tla > "${TMPDIR:-/tmp}/tlc-inbox-forget-early.log" 2>&1; then
+  echo "unexpected: no repeat processed twice"; exit 1
+fi
+grep -q "Invariant EffectsOnce is violated" "${TMPDIR:-/tmp}/tlc-inbox-forget-early.log"
+echo "   violation found, as expected"
+
+echo "== inbox: a window over dependency targets, TLC must find a wait nothing will wake"
+if tlc -config InboxForgetTarget.cfg MCInboxForget.tla > "${TMPDIR:-/tmp}/tlc-inbox-forget-target.log" 2>&1; then
+  echo "unexpected: no wait for a forgotten dependency"; exit 1
+fi
+grep -q "Invariant WaitingIsAsideEver is violated" "${TMPDIR:-/tmp}/tlc-inbox-forget-target.log"
+echo "   violation found, as expected"
+
 echo "== inbox, statement by statement: as implemented, every step refines Inbox.tla and every property holds"
 tlc -config InboxPg.cfg MCInboxPg.tla
 

@@ -276,6 +276,24 @@ Attempts are counted in the model only where the count decides something:
 with `MaxAttempts = 0` an unbounded counter would make the state space
 infinite.
 
+## Inbox forgetting — `InboxForget.tla`
+
+The inbox of `Inbox.tla`, forgetting processed rows by its channel's window
+(ADR-0033 decision 4), in a module of its own over `Inbox.tla` unchanged. An
+identity may arrive again while its horizon is open — a relay's retry, a
+broker's retention, a producer's rewind within its replay horizon — and a
+repeat of a forgotten identity is a new row, processed again; the horizon
+closes once, for good. A ghost of everything ever processed restates the
+properties that speak of what was processed. `MCInboxForget.tla` fixes the
+instance: three messages, the second depending on the first, all of them
+able to arrive again; two slots.
+
+| Configuration | Rule | Expected |
+| --- | --- | --- |
+| `InboxForget.cfg` | after the horizon closes, dependency targets kept | every invariant holds |
+| `InboxForgetEarly.cfg` | before the horizon closes | `EffectsOnce` violated |
+| `InboxForgetTarget.cfg` | dependency targets forgotten | `WaitingIsAsideEver` violated |
+
 ## Inbox, statement by statement — `InboxPg.tla`
 
 `Inbox.tla` has one step per protocol action and assumes what the
