@@ -562,9 +562,15 @@ implementation listed caught by its test:
   during an epoch — the epoch kept;
 - an idle look leaving the position row's version — every look writing.
 
+And for decisions 12 and 13, and ADR-0033's lanes: a counter reset stopping
+the relay and sticking until cleared — the refusal checked afresh only; the
+backlog, and a drain short of its end reported — never reported; a lane
+taking its scheme's rows and running beside a lane whose destination is
+down — every lane taking everything.
+
 Still owed: a second dispatcher behind the first's stored epoch, which only
 the model holds today; an id held in another database; the batch's plan,
-with ADR-0033's index.
+with ADR-0033's index; the library's rebase after a counter reset.
 
 **The host.**
 - Two requests for one Device's projection — one from a tile — the first held

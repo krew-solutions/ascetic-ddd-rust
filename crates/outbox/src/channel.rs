@@ -12,8 +12,13 @@
 //!
 //! Headers become `metadata`: each header is a string field of the JSONB
 //! object, so `message_id` keeps its unique index, and every metadata field
-//! comes back as a header. The channel name after `outbox://` is not read
-//! yet: the whole outbox is one channel.
+//! comes back as a header.
+//!
+//! The channel name after `outbox://` is the consumer's selection: `all`
+//! takes every row; a scheme takes the rows addressed to it,
+//! `outbox://inbox` those to `inbox://…`. Each is a lane with positions of
+//! its own, so that a destination's outage holds back no other lane's rows
+//! (ADR-0033).
 
 use std::sync::Arc;
 
@@ -106,11 +111,13 @@ where
     P::Session: PgAccess + Sync,
     O: OutboxObserver + 'static,
 {
-    /// A consumer of the outbox channel: the dispatcher for `group`.
-    fn consumer(&self, _uri: &str, group: &str) -> Result<Box<dyn WireConsumer>, BusError> {
+    /// A consumer of the outbox channel: the dispatcher for `group`, over
+    /// the lane `uri` names.
+    fn consumer(&self, uri: &str, group: &str) -> Result<Box<dyn WireConsumer>, BusError> {
         Ok(Box::new(OutboxConsumer {
             outbox: Arc::clone(&self.0),
             group: group.to_owned(),
+            lane: lane_of(uri)?,
         }))
     }
 
@@ -128,6 +135,16 @@ where
 struct OutboxConsumer<P, O> {
     outbox: Arc<PgOutbox<P, O>>,
     group: String,
+    lane: String,
+}
+
+/// The selection's URI prefix a consumer of `uri` takes: `outbox://all`,
+/// every row; `outbox://<scheme>`, the rows addressed to `<scheme>://…`.
+fn lane_of(uri: &str) -> Result<String, BusError> {
+    Ok(match uri::channel(uri)? {
+        "all" => String::new(),
+        scheme => format!("{scheme}:"),
+    })
 }
 
 impl<P, O> WireConsumer for OutboxConsumer<P, O>
@@ -142,15 +159,16 @@ where
     /// handler accepted. Outside a runtime this is an error, not a panic.
     fn subscribe(&self, handler: Handler) -> Result<Subscription, BusError> {
         let stop = Arc::new(Notify::new());
-        let (outbox, group, stopped) = (
+        let (outbox, group, lane, stopped) = (
             Arc::clone(&self.outbox),
             self.group.clone(),
+            self.lane.clone(),
             Arc::clone(&stop),
         );
         let runtime =
             Handle::try_current().map_err(|error| BusError::Transport(Box::new(error)))?;
         let task = async move {
-            let selection = Selection::group(&group);
+            let selection = Selection::group(&group).uri(lane);
             let loops = outbox.loops();
             let subscriber = |row: &OutboxMessage| {
                 let handler = Arc::clone(&handler);
@@ -164,7 +182,13 @@ where
                 match outcome {
                     Ok(()) => break,
                     Err(error) => {
-                        log::warn!("outbox[{group}]: dispatch failed, retrying: {error}");
+                        // a defect, not a moment: it persists across polls until
+                        // someone acts, so it is logged for the host's alarm
+                        if error.is_transient() {
+                            log::warn!("outbox[{group}]: dispatch failed, retrying: {error}");
+                        } else {
+                            log::error!("outbox[{group}]: dispatch stopped, retrying: {error}");
+                        }
                         tokio::select! {
                             _ = stopped.notified() => break,
                             _ = tokio::time::sleep(loops.poll_interval) => {}

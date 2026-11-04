@@ -29,6 +29,10 @@ pub(super) struct Taken {
     pub(super) position: Position,
     pub(super) slots: u32,
     pub(super) known: bool,
+    /// A counter reset recorded earlier, which sticks.
+    pub(super) refused: Option<String>,
+    /// A position delivered past the server's ids: a counter reset, now.
+    pub(super) reset: bool,
 }
 
 /// An epoch's start, or the end of one converted from ADR-0007's positions:
@@ -109,6 +113,14 @@ const FORMAT_COLUMN: &str = r#"
     ALTER TABLE {outbox}_meta ADD COLUMN "format" INTEGER NOT NULL DEFAULT 2;
 "#;
 
+/// A counter reset, once found, is recorded in the meta table and sticks:
+/// the server's ids pass a restored position's again in time, and a check
+/// made afresh would then let every row written meanwhile count as
+/// delivered (ADR-0035 decision 12).
+const REFUSAL_COLUMN: &str = r#"
+    ALTER TABLE {outbox}_meta ADD COLUMN "refused" TEXT;
+"#;
+
 /// One message per identity and channel in a transaction (ADR-0030): a
 /// unique index on the writing transaction and a digest of the channel —
 /// the destination without its key — and the four identity fields as one
@@ -183,6 +195,7 @@ where
         let identity = IDENTITY.replace("{outbox}", self.outbox_table.as_str());
         let positions = POSITIONS.replace("{offsets}", self.offsets_table.as_str());
         let format = FORMAT_COLUMN.replace("{outbox}", self.outbox_table.as_str());
+        let refusal = REFUSAL_COLUMN.replace("{outbox}", self.outbox_table.as_str());
         Component::new(
             format!("outbox:{}", self.outbox_table),
             vec![
@@ -196,9 +209,12 @@ where
                 Migration::new("20261104T000100Z_format", format)
                     .on(self.meta_table())
                     .checked_over(FORMAT_COLUMN),
+                Migration::new("20261104T000200Z_refusal", refusal)
+                    .on(self.meta_table())
+                    .checked_over(REFUSAL_COLUMN),
             ],
         )
-        .unwrap_or_else(|_| unreachable!("four migrations with ids, under a name"))
+        .unwrap_or_else(|_| unreachable!("five migrations with ids, under a name"))
     }
 
     /// Whether `error` is the refusal of a second message under an identity
@@ -397,7 +413,10 @@ where
             )
             SELECT t.slot, t.delivered::text, t.epoch::text, t.epoch_offset, t.epoch_end,
                    (SELECT slots FROM {outbox}_meta),
-                   EXISTS (SELECT 1 FROM {offsets} WHERE consumer_group = $1 AND uri = $2)
+                   EXISTS (SELECT 1 FROM {offsets} WHERE consumer_group = $1 AND uri = $2),
+                   (SELECT refused FROM {outbox}_meta),
+                   EXISTS (SELECT 1 FROM {offsets}
+                           WHERE pg_snapshot_xmax(delivered) > pg_snapshot_xmax(pg_current_snapshot()))
             FROM (SELECT 1) AS one
             LEFT JOIN taken t ON true
             "#,
@@ -421,7 +440,70 @@ where
             position,
             slots: row.get::<_, i32>(5) as u32,
             known: row.get(6),
+            refused: row.get(7),
+            reset: row.get(8),
         })
+    }
+
+    /// Records a counter reset in the meta table, in a transaction of its
+    /// own, so that it sticks whatever the dispatcher's does.
+    pub(super) async fn refuse(&self, reason: &str) -> Result<(), Error> {
+        let sql = format!(
+            "UPDATE {}_meta SET refused = $1 WHERE refused IS NULL",
+            self.outbox_table
+        );
+        self.pool
+            .session(async |session: P::Session| {
+                session.connection().execute(&sql, &[&reason]).await?;
+                Ok::<_, Error>(())
+            })
+            .await
+    }
+
+    /// Clears a recorded counter reset, once an operator has rebased the
+    /// positions; the relay resumes at its next look.
+    pub async fn clear_counter_reset(&self, session: &P::Session) -> Result<(), Error> {
+        let sql = format!("UPDATE {}_meta SET refused = NULL", self.outbox_table);
+        session.connection().execute(&sql, &[]).await?;
+        Ok(())
+    }
+
+    /// Where `selection` stands, by slot, for an operator: how long the
+    /// epoch in flight has been handed on and how far, and how long ago
+    /// `delivered` last moved. Snapshots have no order, so the positions of
+    /// several slots have no minimum; ages are the lag (ADR-0035
+    /// decision 13).
+    pub async fn backlog(
+        &self,
+        session: &P::Session,
+        selection: &super::Selection,
+    ) -> Result<Vec<super::Backlog>, Error> {
+        let sql = format!(
+            "SELECT slot, \
+                    CASE WHEN epoch IS NULL THEN NULL \
+                         ELSE extract(epoch FROM CURRENT_TIMESTAMP - epoch_at)::float8 END, \
+                    epoch_offset, epoch_end, \
+                    extract(epoch FROM CURRENT_TIMESTAMP - delivered_at)::float8 \
+             FROM {} WHERE consumer_group = $1 AND uri = $2 ORDER BY slot",
+            self.offsets_table
+        );
+        let age = |seconds: Option<f64>| {
+            seconds.map(|seconds| std::time::Duration::from_secs_f64(seconds.max(0.0)))
+        };
+        let rows = session
+            .connection()
+            .query(&sql, &[&selection.consumer_group, &selection.uri])
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|row| super::Backlog {
+                slot: row.get::<_, i16>(0) as u32,
+                epoch_age: age(row.get(1)),
+                epoch_offset: row.get(2),
+                epoch_end: row.get(3),
+                delivered_age: age(row.get(4)),
+            })
+            .collect())
     }
 
     /// An epoch's start (ADR-0035 decision 3): `pg_current_snapshot()`,

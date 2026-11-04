@@ -146,6 +146,7 @@ impl OutboxObserver for JsonTrace {
             "xid": event.last.map(|last| last.transaction_id),
             "position": event.last.map(|last| last.position),
             "drained": event.drained,
+            "short": event.short,
         }));
     }
     fn on_dispatched(&self, event: &outbox::Dispatched<'_>) {

@@ -10,7 +10,7 @@ use ascetic_ddd_session::SessionError;
 
 use crate::error::{BoxError, Error};
 use crate::message::{Epoch, Move, OutboxMessage, Position};
-use crate::observer::{Acked, Dispatched, Fetched, Handled, OutboxObserver, Receipt};
+use crate::observer::{Acked, Dispatched, EpochStarted, Fetched, Handled, OutboxObserver, Receipt};
 
 /// What ended a dispatch transaction in failure, with the slot it had taken,
 /// so that the observer learns which batch rolled back.
@@ -75,6 +75,17 @@ where
                                 .await
                                 .map_err(before_slot)?;
                             taken = self.take(&tx, group, uri).await.map_err(before_slot)?;
+                        }
+                        // a counter reset: refused until an operator rebases (decision 12)
+                        if let Some(reason) = taken.refused {
+                            return Err(before_slot(Error::CounterReset(reason)));
+                        }
+                        if taken.reset {
+                            let reason = "a position delivered past the server's transaction \
+                                          ids: the database was moved by dump and restore"
+                                .to_owned();
+                            self.refuse(&reason).await.map_err(before_slot)?;
+                            return Err(before_slot(Error::CounterReset(reason)));
                         }
                         let Some(slot) = taken.slot else {
                             self.observer.on_fetched(&Fetched {
@@ -154,9 +165,18 @@ where
                                         slot,
                                         last: None,
                                         drained: true,
+                                        short: false,
                                     });
                                     return Ok(Some(slot));
                                 };
+                                self.observer.on_epoch_started(&EpochStarted {
+                                    group,
+                                    slot,
+                                    epoch: &start.epoch,
+                                    delivered: &delivered,
+                                    first,
+                                    last,
+                                });
                                 (
                                     Epoch {
                                         snapshot: start.epoch,
@@ -223,11 +243,14 @@ where
                                 .await
                                 .map_err(in_slot)?;
                         }
+                        // drained before its end: its last row was not found
+                        let reached = last.map_or(epoch.offset, |last| last.position);
                         self.observer.on_acked(&Acked {
                             group,
                             slot,
                             last,
                             drained,
+                            short: drained && reached < end,
                         });
                         Ok(Some(slot))
                     })

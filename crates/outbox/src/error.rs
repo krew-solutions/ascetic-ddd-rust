@@ -31,6 +31,13 @@ pub enum Error {
     /// order rests on positions drawn in real time (ADR-0035 decision 6); the
     /// service's own role repairs it with `ALTER SEQUENCE … CACHE 1`.
     SequenceCache(String),
+    /// The database's transaction ids restarted below what a position
+    /// delivered — it was moved by dump and restore — or an earlier look found
+    /// so and recorded it: every row written meanwhile would count as
+    /// delivered. The refusal sticks until an operator clears it
+    /// ([`PgOutbox::clear_counter_reset`](crate::PgOutbox::clear_counter_reset))
+    /// after rebasing the positions (ADR-0035 decision 12).
+    CounterReset(String),
     /// The position rows are in a format newer than this binary knows: a
     /// later release wrote them, and this one would misread them.
     Format {
@@ -82,6 +89,7 @@ impl Error {
             | Error::Migration(_)
             | Error::IdentityTaken(_)
             | Error::SequenceCache(_)
+            | Error::CounterReset(_)
             | Error::Format { .. } => false,
         }
     }
@@ -104,6 +112,10 @@ impl fmt::Display for Error {
                 f,
                 "the outbox's positions are not drawn one at a time, which its order rests on: {what}"
             ),
+            Error::CounterReset(what) => write!(
+                f,
+                "the database's transaction ids restarted below the outbox's positions: {what}"
+            ),
             Error::Format { found, known } => write!(
                 f,
                 "the outbox's positions are in format {found}; this binary knows up to {known}"
@@ -121,6 +133,7 @@ impl std::error::Error for Error {
             Error::Malformed(_)
             | Error::IdentityTaken(_)
             | Error::SequenceCache(_)
+            | Error::CounterReset(_)
             | Error::Format { .. } => None,
             Error::Migration(error) => Some(error),
         }

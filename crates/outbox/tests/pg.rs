@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ascetic_ddd_outbox::observer::{
-    Acked, Dispatched, Fetched, Handled, OutboxObserver, Published, Receipt,
+    Acked, Dispatched, EpochStarted, Fetched, Handled, OutboxObserver, Published, Receipt,
 };
 use ascetic_ddd_outbox::{
     BoxError, Error, Identity, Loops, Move, Outbox, OutboxMessage, PgOutbox, Position, Selection,
@@ -856,6 +856,9 @@ impl OutboxObserver for Recorder {
         let ids: Vec<u64> = event.messages.iter().map(id_of).collect();
         self.note(format!("fetched {ids:?}"));
     }
+    fn on_epoch_started(&self, _event: &EpochStarted<'_>) {
+        self.note("epoch started");
+    }
     fn on_handled(&self, event: &Handled<'_>) {
         let outcome = if event.outcome.is_ok() {
             "ok"
@@ -914,15 +917,18 @@ async fn the_observer_sees_the_protocol() {
         [
             "published 1",
             "published 2",
+            "epoch started",
             "fetched [1, 2]",
             "handled 1 ok",
             "handled 2 ok",
             "acked",
             "dispatched a batch",
             "published 3",
+            "epoch started",
             "fetched [3]",
             "handled 3 failed",
             "rolled back",
+            "epoch started",
             "fetched [3]",
             "handled 3 ok",
             "acked",
@@ -1555,6 +1561,113 @@ async fn an_idle_look_writes_nothing() {
     assert_eq!(version().await, before);
 }
 
+/// A counter reset (ADR-0035 decision 12): a position delivered past the
+/// server's transaction ids stops the relay, and the refusal sticks — the
+/// positions set right again do not lift it — until an operator clears it.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_counter_reset_stops_the_relay_until_an_operator_clears_it() {
+    let f = fixture("reset").await;
+    let (seen, subscriber) = collector();
+    let selection = Selection::group("broker");
+    f.publish(&[message("kafka://orders", 1)]).await;
+    f.drain(&subscriber, &selection).await;
+    let set = async |delivered: &str| {
+        let sql = format!(
+            "UPDATE {} SET delivered = '{delivered}'::pg_snapshot",
+            f.tables.1
+        );
+        f.sessions
+            .session(async |session| {
+                Ok::<_, Error>(session.connection().batch_execute(&sql).await?)
+            })
+            .await
+            .unwrap();
+    };
+
+    // As if restored into a server whose ids are far younger.
+    set("4000000000:4000000000:").await;
+    f.publish(&[message("kafka://orders", 2)]).await;
+    assert!(matches!(
+        f.outbox.dispatch(&subscriber, &selection).await,
+        Err(Error::CounterReset(_))
+    ));
+    // Rebased by hand: still refused, until cleared.
+    set("1:1:").await;
+    assert!(matches!(
+        f.outbox.dispatch(&subscriber, &selection).await,
+        Err(Error::CounterReset(_))
+    ));
+    f.sessions
+        .session(async |session| f.outbox.clear_counter_reset(&session).await)
+        .await
+        .unwrap();
+    f.drain(&subscriber, &selection).await;
+    assert_eq!(*seen.lock().unwrap(), [1, 1, 2]);
+}
+
+/// The backlog an operator reads: the epoch in flight with its age and
+/// progress, and when delivered last moved (ADR-0035 decision 13). A drain
+/// that finds the epoch's last row gone is reported, not waited for.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_backlog_shows_the_epoch_and_a_drain_short_of_its_end_is_reported() {
+    #[derive(Default)]
+    struct Shorts(Mutex<Vec<bool>>);
+    impl OutboxObserver for Shorts {
+        fn on_acked(&self, event: &Acked<'_>) {
+            self.0.lock().unwrap().push(event.short);
+        }
+    }
+    let shorts = Arc::new(Shorts::default());
+    let f = fixture_observed("backlog", Arc::clone(&shorts), 1)
+        .await
+        .with_batch_size(1);
+    let (seen, subscriber) = collector();
+    let selection = Selection::group("broker");
+    f.publish(&[
+        message("kafka://orders", 1),
+        message("kafka://orders", 2),
+        message("kafka://orders", 3),
+    ])
+    .await;
+    assert!(f.outbox.dispatch(&subscriber, &selection).await.unwrap());
+
+    let backlog = f
+        .sessions
+        .session(async |session| f.outbox.backlog(&session, &selection).await)
+        .await
+        .unwrap();
+    assert_eq!(backlog.len(), 1);
+    assert!(backlog[0].epoch_age.is_some());
+    assert!(backlog[0].epoch_end.unwrap() > backlog[0].epoch_offset);
+
+    // The epoch's last row deleted by hand: the drain reaches short of it.
+    let sql = format!("DELETE FROM {} WHERE payload = $1", f.tables.0);
+    f.sessions
+        .session(async |session| {
+            Ok::<_, Error>(
+                session
+                    .connection()
+                    .execute(&sql, &[&b"3".to_vec()])
+                    .await?,
+            )
+        })
+        .await
+        .unwrap();
+    f.drain(&subscriber, &selection).await;
+    assert_eq!(*seen.lock().unwrap(), [1, 2]);
+    assert!(shorts.0.lock().unwrap().contains(&true));
+
+    let backlog = f
+        .sessions
+        .session(async |session| f.outbox.backlog(&session, &selection).await)
+        .await
+        .unwrap();
+    assert!(backlog[0].epoch_age.is_none());
+    assert!(backlog[0].delivered_age.is_some());
+}
+
 /// A released migration is never edited (ADR-0029): every database that
 /// applied it would refuse to start. A new shape is a new migration,
 /// written here with its checksum when it is released.
@@ -1585,6 +1698,10 @@ fn the_released_migrations_keep_their_checksums() {
             (
                 "20261104T000100Z_format".to_owned(),
                 "fnv1a64:7c51ffb5c37066b8:79".to_owned()
+            ),
+            (
+                "20261104T000200Z_refusal".to_owned(),
+                "fnv1a64:8424073d750527ed:58".to_owned()
             )
         ]
     );
