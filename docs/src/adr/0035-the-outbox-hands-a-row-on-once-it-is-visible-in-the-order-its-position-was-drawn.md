@@ -570,7 +570,8 @@ down — every lane taking everything.
 
 Still owed: a second dispatcher behind the first's stored epoch, which only
 the model holds today; an id held in another database; the batch's plan,
-with ADR-0033's index; the library's rebase after a counter reset.
+with ADR-0033's index. The rebase after a counter reset is built with
+ADR-0033's ring.
 
 **The host.**
 - Two requests for one Device's projection — one from a tile — the first held

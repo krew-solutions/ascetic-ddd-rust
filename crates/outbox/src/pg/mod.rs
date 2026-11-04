@@ -153,6 +153,18 @@ impl Default for Reclaiming {
     }
 }
 
+/// What [`PgOutbox::rebase`] did after a counter reset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rebased {
+    /// The rows it wrote again, owed to every group.
+    pub kept: u64,
+    /// The rows it emptied: every group had handed them on, or they repeated
+    /// an identity kept.
+    pub emptied: u64,
+    /// Both bounds of the ring after it.
+    pub bound: u64,
+}
+
 /// How [`PgOutbox::run`] runs: `concurrency` loops in this process, each
 /// taking whatever slot has work. Processes need no identity and no count;
 /// start as many as the slots make useful.

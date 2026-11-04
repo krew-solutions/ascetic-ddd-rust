@@ -852,8 +852,19 @@ Not forced by a test: a row committing between the checks and the lock,
 which the recheck under the lock keeps, and which "closed" in its order
 already prevents; `OutboxPg.tla` holds the race. Prepared transactions are
 read, but the stand allows none (`max_prepared_transactions` is zero).
-Still owed: the rebase after a counter reset; the observer's events in the
-traces.
+**Built (2026-11-04), the rebase**, each red under the mutation named: after
+a dump and restore — simulated, rows and positions in ids the server has not
+reached — it keeps, in position order, the rows written since the restore
+and the restored rows some `delivered` does not see, the first of an
+identity, under its own id, owed to every group, the bounds at it — `S`
+taken after its first write (with transactions committing all along, so
+that one commits after that write: measured, a transaction's own id is left
+out of its snapshot's in-progress list, and is visible in it once a later
+one has committed), every row of an identity kept, the rows since the
+restore dropped, a restored row kept only when owed to every group; and it
+refuses once the new ids reach the restored ring's — the refusal dropped.
+
+Still owed: the observer's events in the traces.
 
 **TLA+.** Built (2026-11-04) in `OutboxPg.tla`, with two generations of one
 id each.
@@ -1080,3 +1091,7 @@ On a scratch database, each with the result that changes the decision:
   granted keeps the time recorded; `forget_group`. Found building it: the
   ring's `CHECK` prints a window past 2³¹ as a quoted literal, which the
   start's check now reads.
+- 2026-11-04 — The rebase built, in the order decision 3 gives. Measured
+  for it: a transaction's own id is left out of its snapshot's in-progress
+  list, so a snapshot taken after its first write sees its own rows once a
+  later transaction has committed — the reason `S` comes first.

@@ -92,8 +92,16 @@ A database moved by dump and restore restarts its transaction ids below
 what the positions delivered: every row written meanwhile would count as
 delivered. A look that finds a position delivered past the server's ids
 records the refusal in the meta table and stops; the refusal sticks, also
-once the ids pass the old ones again, until an operator rebases the
-positions and calls `clear_counter_reset` (ADR-0035 decision 12). A
+once the ids pass the old ones again, until an operator calls `rebase()`
+(ADR-0035 decision 12, ADR-0033 decision 3). The rebase keeps, in position
+order, what no position handed on — the rows written since the restore, and
+the restored rows some group's `delivered` does not see, the first of each
+identity — writes them again under its own id, owed to every group, sets
+every position to its snapshot, taken before it wrote anything, and moves
+the ring's bounds back. Once the server's ids reach the restored ring's,
+the two kinds of rows cannot be told apart, and it refuses.
+`clear_counter_reset` lifts the refusal alone, for an operator who moved the
+positions by other means. A
 sequence that caches positions, or a format newer than the binary, stops it
 too. Each is an error, not a moment: logged at `error`, for the host's alarm.
 
@@ -194,10 +202,6 @@ that pins it for good is dropped with `forget_group`, which refuses one that
 moved a position within the margin's age. Its errors are logged and never
 stop dispatch; a counter reset stops it as it stops the relay.
 
-## What is not here
-
-The rebase after a counter reset (ADR-0033 decision 3) is still to come:
-until then an operator moves the positions before `clear_counter_reset`.
 
 ## Deviations from the Python source
 

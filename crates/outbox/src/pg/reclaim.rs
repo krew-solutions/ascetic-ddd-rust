@@ -7,8 +7,8 @@ use std::time::Duration;
 use ascetic_ddd_session::{PgAccess, Session, SessionPool};
 use tokio_postgres::error::SqlState;
 
-use super::PgOutbox;
 use super::store::{transaction_id, widened};
+use super::{PgOutbox, Rebased};
 use crate::error::Error;
 use crate::observer::{OutboxObserver, Reclamation, Skipped};
 
@@ -438,6 +438,169 @@ where
                     )
                     .await?;
                 Ok(())
+            })
+            .await
+    }
+
+    /// Rebases the outbox after a counter reset (ADR-0033 decision 3): the
+    /// database was moved by dump and restore, its transaction ids restarted
+    /// below the restored positions', and relay and reclamation stopped.
+    /// None when no counter reset is recorded or found. In one transaction,
+    /// under the reclamation's key:
+    /// 1. the outbox locked, so that no publish lands while it works;
+    /// 2. its snapshot `S` taken before it writes anything, so that its own id
+    ///    is not visible in `S` — a transaction's snapshot leaves its own id
+    ///    out of the in-progress list;
+    /// 3. the rows no position handed on kept: those written in the new ids
+    ///    since the restore, below the restored `gone_below`, and the
+    ///    restored rows some `delivered` does not see. Once the new ids reach
+    ///    the restored `gone_below`, the two cannot be told apart: refused;
+    /// 4. of rows sharing an identity and a channel, the first kept: the
+    ///    guard admits one per transaction, and the inbox drops the rest as
+    ///    repeats;
+    /// 5. they are written again under its own id, in their positions'
+    ///    order, and everything else emptied, the current generation
+    ///    included;
+    /// 6. every `delivered` set to `S`, every epoch cleared, both bounds set
+    ///    to the least of its own id and this database's oldest open id —
+    ///    the bounds move back here, and only here — and the refusal cleared.
+    pub async fn rebase(&self) -> Result<Option<Rebased>, Error> {
+        let (outbox, offsets) = (&self.outbox_table, &self.offsets_table);
+        let kept_rows = format!(
+            "CREATE TEMP TABLE {outbox}_rebase ON COMMIT DROP AS \
+             SELECT DISTINCT ON (k) uri, payload, metadata, created_at, \"position\" FROM ( \
+                 SELECT m.uri, m.payload, m.metadata, m.created_at, m.\"position\", \
+                        coalesce(split_part(m.uri, '/', 1) || '//' || split_part(m.uri, '/', 3) || ' ' \
+                                 || ((m.metadata->'tenant_id') || (m.metadata->'stream_type') \
+                                     || (m.metadata->'stream_id') || (m.metadata->'stream_position') \
+                                     || jsonb_set('[null]', '{{0}}', coalesce(m.metadata->'part', '\"\"')))::text, \
+                                 '#' || m.\"position\") AS k \
+                 FROM {outbox} m \
+                 WHERE m.transaction_id < $1::text::xid8 \
+                    OR EXISTS (SELECT 1 FROM {offsets} o \
+                               WHERE NOT pg_visible_in_snapshot(m.transaction_id, o.delivered)) \
+             ) AS r \
+             ORDER BY k, \"position\""
+        );
+        self.pool
+            .session(async |session: P::Session| {
+                session
+                    .atomic(async |tx: P::Session| {
+                        let connection = tx.connection();
+                        connection
+                            .execute(
+                                &format!("SELECT pg_advisory_xact_lock({})", self.reclamation_key()),
+                                &[],
+                            )
+                            .await?;
+                        connection
+                            .batch_execute(&format!("LOCK TABLE {outbox} IN EXCLUSIVE MODE"))
+                            .await?;
+                        // S, before anything is written
+                        let row = connection
+                            .query_one(
+                                &format!(
+                                    "SELECT pg_current_snapshot()::text, \
+                                            (SELECT refused FROM {outbox}_meta), \
+                                            (SELECT gone_below::text FROM {outbox}_meta), \
+                                            EXISTS (SELECT 1 FROM {offsets} \
+                                                    WHERE pg_snapshot_xmax(delivered) \
+                                                          > pg_snapshot_xmax(pg_current_snapshot()))"
+                                ),
+                                &[],
+                            )
+                            .await?;
+                        let s: String = row.get(0);
+                        let (refused, restored, reset): (Option<String>, Option<String>, bool) =
+                            (row.get(1), row.get(2), row.get(3));
+                        if refused.is_none() && !reset {
+                            return Ok(None);
+                        }
+                        let next = s
+                            .split(':')
+                            .nth(1)
+                            .and_then(|xmax| xmax.parse::<u64>().ok())
+                            .ok_or_else(|| Error::Malformed(format!("snapshot `{s}`")))?;
+                        let restored = restored.map(transaction_id).transpose()?;
+                        let Some(restored) = restored.filter(|restored| next < *restored) else {
+                            return Err(Error::CounterReset(
+                                "the server's transaction ids have reached the restored ring's: \
+                                 rows written since the restore cannot be told from restored ones"
+                                    .to_owned(),
+                            ));
+                        };
+                        connection
+                            .execute(&kept_rows, &[&restored.to_string()])
+                            .await?;
+                        let emptied: i64 = connection
+                            .query_one(
+                                &format!(
+                                    "SELECT (SELECT count(*) FROM {outbox}) \
+                                            - (SELECT count(*) FROM {outbox}_rebase)"
+                                ),
+                                &[],
+                            )
+                            .await?
+                            .get(0);
+                        connection
+                            .batch_execute(&format!("TRUNCATE {outbox}"))
+                            .await?;
+                        let kept = connection
+                            .execute(
+                                &format!(
+                                    "INSERT INTO {outbox} (uri, payload, metadata, created_at, transaction_id) \
+                                     SELECT uri, payload, metadata, created_at, pg_current_xact_id() \
+                                     FROM {outbox}_rebase ORDER BY \"position\""
+                                ),
+                                &[],
+                            )
+                            .await?;
+                        connection
+                            .execute(
+                                &format!(
+                                    "UPDATE {offsets} SET \
+                                        delivered = $1::text::pg_snapshot, epoch = NULL, epoch_offset = 0, \
+                                        epoch_end = NULL, epoch_generations = NULL, \
+                                        delivered_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP, \
+                                        last_processed_transaction_id = \
+                                            (pg_snapshot_xmin($1::text::pg_snapshot)::text::bigint - 1)::text::xid8, \
+                                        offset_acked = 9223372036854775807"
+                                ),
+                                &[&s],
+                            )
+                            .await?;
+                        let own: u64 = transaction_id(
+                            connection
+                                .query_one("SELECT pg_current_xact_id()::text", &[])
+                                .await?
+                                .get(0),
+                        )?;
+                        let bound = self
+                            .open_here(&tx)
+                            .await?
+                            .into_iter()
+                            .min()
+                            .map_or(own, |open| open.min(own));
+                        connection
+                            .execute(
+                                &format!(
+                                    "UPDATE {outbox}_meta SET gone_below = $1::text::xid8, \
+                                        intact_from = $1::text::xid8, passed_at = NULL, refused = NULL"
+                                ),
+                                &[&bound.to_string()],
+                            )
+                            .await?;
+                        log::info!(
+                            "outbox {outbox}: rebased after a counter reset: {kept} rows kept, \
+                             {emptied} emptied, the ring's bounds at {bound}"
+                        );
+                        Ok(Some(Rebased {
+                            kept,
+                            emptied: emptied.max(0) as u64,
+                            bound,
+                        }))
+                    })
+                    .await
             })
             .await
     }

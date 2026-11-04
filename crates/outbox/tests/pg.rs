@@ -2616,3 +2616,138 @@ async fn the_dispatcher_s_loops_work_the_reclamation() {
     ran.unwrap();
     assert!(passes.0.load(Ordering::SeqCst) >= 2);
 }
+
+/// After a dump and restore — simulated: rows and positions in ids the
+/// server has not reached — the rebase keeps what no position handed on, in
+/// position order: the rows written since the restore, and the restored rows
+/// some group's `delivered` does not see, the first of each identity; it
+/// writes them again under its own id, owed to every group, restarts every
+/// group at its snapshot, and lifts the refusal (ADR-0033 decision 3).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_rebase_keeps_what_no_position_handed_on_and_owes_it_to_every_group() {
+    let f = fixture_ring("rebase", Ring::new(2, 1 << 40))
+        .await
+        .with_reclaiming(eager(0));
+    let (first, second) = (Selection::group("a"), Selection::group("b"));
+    for selection in [&first, &second] {
+        f.sessions
+            .session(async |session| {
+                f.outbox
+                    .set_position(&session, selection, Move::Start)
+                    .await
+            })
+            .await
+            .unwrap();
+    }
+    // the restored table: its rows in the old ids, its positions past them
+    let restored = |id: u64, xid: u64, identity: &str| {
+        format!(
+            "INSERT INTO {{outbox}} (uri, payload, metadata, transaction_id) VALUES \
+             ('kafka://orders', convert_to('{id}', 'UTF8'), \
+              '{{\"message_id\": \"00000000-0000-4000-9000-{id:012}\"{identity}}}', '{xid}');"
+        )
+    };
+    let same =
+        r#", "tenant_id": "t", "stream_type": "Order", "stream_id": "7", "stream_position": 1"#;
+    f.execute(&format!(
+        "{}{}{}{}",
+        restored(3, 900_000_000_003, ""),
+        restored(7, 900_000_000_007, ""),
+        restored(12, 900_000_000_012, same),
+        restored(13, 900_000_000_013, same),
+    ))
+    .await
+    .unwrap();
+    f.execute(&format!(
+        "UPDATE {offsets} SET delivered = '900000000010:900000000010:' WHERE consumer_group = 'a'; \
+         UPDATE {offsets} SET delivered = '900000000005:900000000005:' WHERE consumer_group = 'b'; \
+         UPDATE {{outbox}}_meta SET gone_below = '900000000000', intact_from = '900000000000';",
+        offsets = f.tables.1
+    ))
+    .await
+    .unwrap();
+    // a row written in the new ids since the restore; the restored ids are
+    // never older than the running transactions, so it is not waited for
+    f.publish_now(&[message("kafka://orders", 1)]).await;
+    let (seen_a, a) = collector();
+    let (seen_b, b) = collector();
+    assert!(matches!(
+        f.outbox.dispatch(&a, &first).await,
+        Err(Error::CounterReset(_))
+    ));
+
+    // transactions committing all along: one that commits after the
+    // rebase's first write would make its own id visible in a snapshot it
+    // took after that write, and its rows count as delivered
+    let rebasing = std::sync::atomic::AtomicBool::new(true);
+    let rebase = async {
+        let rebased = f.outbox.rebase().await;
+        rebasing.store(false, Ordering::SeqCst);
+        rebased
+    };
+    let others = async {
+        let mut committed = 0u32;
+        while rebasing.load(Ordering::SeqCst) {
+            f.texts("SELECT pg_current_xact_id()::text").await;
+            committed += 1;
+        }
+        committed
+    };
+    let (rebased, committed) = tokio::join!(rebase, others);
+    assert!(committed > 0);
+    let rebased = rebased.unwrap().unwrap();
+    assert_eq!((rebased.kept, rebased.emptied), (3, 2));
+    let held = f.held().await;
+    let ids: Vec<u64> = {
+        let mut by_position = f
+            .texts("SELECT convert_from(payload, 'UTF8') FROM {outbox} ORDER BY \"position\"")
+            .await;
+        by_position.dedup();
+        by_position.iter().map(|id| id.parse().unwrap()).collect()
+    };
+    assert_eq!(ids, [7, 12, 1]);
+    let xids: std::collections::BTreeSet<u64> = held.iter().map(|(_, xid)| *xid).collect();
+    assert_eq!(xids.len(), 1, "written again under one id");
+    assert_eq!(f.bounds().await, (rebased.bound, rebased.bound));
+    assert!(rebased.bound <= *xids.first().unwrap());
+
+    f.drain(&a, &first).await;
+    f.drain(&b, &second).await;
+    assert_eq!(*seen_a.lock().unwrap(), [7, 12, 1]);
+    assert_eq!(*seen_b.lock().unwrap(), [7, 12, 1]);
+    assert_eq!(f.outbox.rebase().await.unwrap(), None);
+}
+
+/// Once the server's ids reach the restored ring's, the rows written since
+/// the restore cannot be told from the restored ones: the rebase refuses and
+/// changes nothing.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_rebase_refuses_once_the_new_ids_reach_the_restored_ones() {
+    let f = fixture_ring("rebase_late", Ring::new(2, 1 << 40))
+        .await
+        .with_reclaiming(eager(0));
+    let selection = Selection::group("a");
+    f.sessions
+        .session(async |session| {
+            f.outbox
+                .set_position(&session, &selection, Move::Start)
+                .await
+        })
+        .await
+        .unwrap();
+    f.publish(&[message("kafka://orders", 1)]).await;
+    f.execute(&format!(
+        "UPDATE {} SET delivered = '900000000010:900000000010:'; \
+         UPDATE {{outbox}}_meta SET gone_below = '3';",
+        f.tables.1
+    ))
+    .await
+    .unwrap();
+    assert!(matches!(
+        f.outbox.rebase().await,
+        Err(Error::CounterReset(_))
+    ));
+    assert_eq!(f.held().await.len(), 1);
+}
