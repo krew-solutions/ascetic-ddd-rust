@@ -458,9 +458,16 @@ statement by statement, with its lanes and rewinds.
 - **Must fail:** every configuration of the table below, each with its
   property, and one selection of everything with the broker down,
   breaking `NoHeadOfLineBlocking`. `check.sh` greps each one.
-- **Still owed in it:** the migration from `(L, off)`, `L = 0` included; a
-  new group; the sequence's cache; ADR-0033's ring; and the refinement to
-  `Outbox.tla`, once that module is restated over versions.
+- **Then the migration** — exact, from `L = 0` too, an old relay beside a new
+  one on the old pair kept up — and the sequence's cache, with their own
+  must-fail configurations: `'L:L:'` alone, `'L+1:L+1:'` alone, the epoch's
+  offset in the old column, a cache of two.
+- **Then ADR-0033's ring** under this relay: an epoch's exact names and its
+  recorded generations, a group created later, rewinds held above
+  `intact_from` — each refuted form failing on its property (ADR-0033
+  § Executors).
+- **Still owed in it:** the refinement to `Outbox.tla`, once that module is
+  restated over versions, and the traces with it.
 
 **A statement-level model.** `OutboxPg.tla`, refining the abstract
 `Outbox.tla` as `InboxPg.tla` refines `Inbox.tla`. It models:
