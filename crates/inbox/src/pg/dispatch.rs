@@ -249,6 +249,10 @@ where
     /// other error of the database, a defect, the loops are all stopped and
     /// the error is returned (ADR-0010). A failing subscriber is neither: it
     /// is an [`Outcome`].
+    ///
+    /// Beside the loops, on a session of its own, the sweep forgets the
+    /// processed rows whose channel's window has passed, once an interval of
+    /// [`InboxRetention`](super::InboxRetention); see [`PgInbox::sweep`].
     pub async fn run<F, Fut>(
         &self,
         subscriber: F,
@@ -298,9 +302,10 @@ where
                 }
             }
         });
-        let futures = join_all(futures);
+        let sweeper = self.sweep_until(stop.subscribe());
+        let futures = futures::future::join(join_all(futures), sweeper);
         tokio::pin!(futures);
-        let outcomes = tokio::select! {
+        let (outcomes, ()) = tokio::select! {
             outcomes = &mut futures => outcomes,
             _ = shutdown => {
                 let _ = stop.send(true);

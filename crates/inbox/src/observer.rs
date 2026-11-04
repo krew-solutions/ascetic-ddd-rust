@@ -56,6 +56,10 @@ pub struct Received<'a> {
     /// and one that republishes for a repeat. `None` when stored, or when
     /// the stored row names no id.
     pub held_by: Option<&'a str>,
+    /// The row that held the identity went before it could be read:
+    /// forgotten by the sweep between the insert and the read (ADR-0033
+    /// decision 4). The holder is unknown, not absent.
+    pub holder_unknown: bool,
 }
 
 /// A dispatcher found the head of its queue depending on a message not yet
@@ -192,6 +196,17 @@ pub trait InboxObserver: Send + Sync {
     fn on_unparked(&self, _event: &Unparked<'_>) {}
     /// A parked message was marked processed by hand.
     fn on_resolved(&self, _event: &Resolved<'_>) {}
+    /// The sweep forgot processed rows of a channel.
+    fn on_swept(&self, _event: &Swept<'_>) {}
+}
+
+/// The sweep forgot processed rows of a channel whose window had passed
+/// (ADR-0033 decision 4).
+pub struct Swept<'a> {
+    /// The channel: the destination without its key.
+    pub channel: &'a str,
+    /// How many rows it forgot in this pass.
+    pub forgotten: u64,
 }
 
 /// Observes nothing.
@@ -233,4 +248,5 @@ forward_to_each! {
     on_dispatched: Dispatched,
     on_unparked: Unparked,
     on_resolved: Resolved,
+    on_swept: Swept,
 }

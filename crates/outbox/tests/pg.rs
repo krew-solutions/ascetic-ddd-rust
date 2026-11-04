@@ -2751,3 +2751,37 @@ async fn a_rebase_refuses_once_the_new_ids_reach_the_restored_ones() {
     ));
     assert_eq!(f.held().await.len(), 1);
 }
+
+/// A rewind deeper than the producer's replay horizon is refused: its
+/// consumers keep a processed message only for a window that covers the
+/// horizon (ADR-0033 decision 4). Within it, the rewind goes ahead.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_rewind_deeper_than_the_replay_horizon_is_refused() {
+    let f = fixture("replay_horizon").await;
+    let (seen, subscriber) = collector();
+    let selection = Selection::group("broker");
+    f.publish(&[message("kafka://orders", 1)]).await;
+    f.drain(&subscriber, &selection).await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let from = f.xid_of(1).await;
+    let rewind = async |outbox: PgOutbox<PgSessionPool>| {
+        f.sessions
+            .session(async |session| {
+                outbox
+                    .set_position(&session, &selection, Move::From(from))
+                    .await
+            })
+            .await
+    };
+    let near = beside(&f, Ring::default()).with_replay_horizon(Duration::from_secs(1));
+    assert!(matches!(
+        rewind(near).await,
+        Err(Error::BeyondReplayHorizon { requested, .. }) if requested == from
+    ));
+    let far = beside(&f, Ring::default()).with_replay_horizon(Duration::from_secs(3600));
+    rewind(far).await.unwrap();
+    seen.lock().unwrap().clear();
+    f.drain(&subscriber, &selection).await;
+    assert_eq!(*seen.lock().unwrap(), [1]);
+}

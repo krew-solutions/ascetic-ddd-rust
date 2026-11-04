@@ -61,6 +61,6 @@ pub use crate::error::{BoxError, Error, Failure};
 pub use crate::message::{CausalDependency, InboxMessage};
 pub use crate::observer::{InboxObserver, Receipt};
 pub use crate::partition::{ByStream, ByUri, PartitionKey};
-pub use crate::pg::{Loops, Outcome, PgInbox, Retries};
+pub use crate::pg::{InboxRetention, Loops, Outcome, PgInbox, Retries};
 pub use crate::port::Inbox;
 pub use crate::snapshot::Snapshot;

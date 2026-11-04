@@ -398,7 +398,9 @@ where
     /// rows may be gone. The bound is read and the positions written under
     /// the reclamation's key, held exclusively, so that no emptying commits
     /// between them. A rewind restarts every generation's time since it was
-    /// found passed: its rows are owed again.
+    /// found passed: its rows are owed again. With a replay horizon declared,
+    /// a rewind whose first row is older than it is refused,
+    /// [`Error::BeyondReplayHorizon`].
     pub async fn set_position(
         &self,
         session: &P::Session,
@@ -418,6 +420,16 @@ where
                     (Move::Start, Some(intact_from)) => Move::From(intact_from),
                     (to, _) => to,
                 };
+                if let (Some(horizon), Move::From(requested)) = (self.replay_horizon, to)
+                    && let Some(age) = self.first_row_age(&tx, requested).await?
+                    && age > horizon
+                {
+                    return Err(Error::BeyondReplayHorizon {
+                        requested,
+                        age,
+                        horizon,
+                    });
+                }
                 self.ensure_positions(&tx, group, uri).await?;
                 self.move_all(&tx, group, uri, to).await?;
                 if !matches!(to, Move::Now) {

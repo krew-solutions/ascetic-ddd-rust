@@ -870,6 +870,25 @@ where
         })
     }
 
+    /// How old the first row at or after transaction `xid` is, by its
+    /// `created_at`, its transaction's start; none when no row lies there.
+    pub(super) async fn first_row_age(
+        &self,
+        session: &P::Session,
+        xid: u64,
+    ) -> Result<Option<std::time::Duration>, Error> {
+        let sql = format!(
+            "SELECT extract(epoch FROM CURRENT_TIMESTAMP - created_at)::float8 FROM {} \
+             WHERE transaction_id >= $1::text::xid8 ORDER BY transaction_id, \"position\" LIMIT 1",
+            self.outbox_table
+        );
+        let row = session
+            .connection()
+            .query_opt(&sql, &[&xid.to_string()])
+            .await?;
+        Ok(row.map(|row| std::time::Duration::from_secs_f64(row.get::<_, f64>(0).max(0.0))))
+    }
+
     /// Forgets when each generation was first found passed: a rewind owes
     /// their rows again (ADR-0033 decision 3).
     pub(super) async fn clear_passed(&self, session: &P::Session) -> Result<(), Error> {

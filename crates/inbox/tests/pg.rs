@@ -19,11 +19,11 @@ use std::time::Duration;
 
 use ascetic_ddd_inbox::observer::{
     Dispatched, Expired, Failed, Fetched, Handled, InboxObserver, Marked, Received, Resolved,
-    Unparked, Waiting,
+    Swept, Unparked, Waiting,
 };
 use ascetic_ddd_inbox::{
-    ByStream, CausalDependency, Error, Failure, Inbox, InboxMessage, Loops, Outcome, PartitionKey,
-    PgInbox, Receipt, Retries,
+    ByStream, CausalDependency, Error, Failure, Inbox, InboxMessage, InboxRetention, Loops,
+    Outcome, PartitionKey, PgInbox, Receipt, Retries,
 };
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -124,6 +124,53 @@ impl<O: InboxObserver> Fixture<O> {
             inbox: self.inbox.with_max_wait(max_wait),
             ..self
         }
+    }
+
+    fn with_retention(self, retention: InboxRetention) -> Self {
+        Fixture {
+            inbox: self.inbox.with_retention(retention),
+            ..self
+        }
+    }
+
+    /// Runs `sql`, `{table}` standing for the inbox's table.
+    async fn execute(&self, sql: &str) {
+        let sql = sql.replace("{table}", &self.table);
+        self.sessions
+            .session(async |session| {
+                Ok::<_, Error>(session.connection().batch_execute(&sql).await?)
+            })
+            .await
+            .unwrap();
+    }
+
+    /// The labels of the rows the table holds, in order of arrival.
+    async fn held(&self) -> Vec<String> {
+        let sql = format!(
+            "SELECT stream_id->>'id' || '@' || stream_position FROM {} ORDER BY received_position",
+            self.table
+        );
+        self.sessions
+            .session(async |session| {
+                let rows = session.connection().query(&sql, &[]).await?;
+                Ok::<Vec<String>, Error>(rows.iter().map(|row| row.get(0)).collect())
+            })
+            .await
+            .unwrap()
+    }
+
+    /// Dispatches until nothing is left.
+    async fn drain<F, Fut>(&self, subscriber: F)
+    where
+        F: Fn(&PgSession, &InboxMessage) -> Fut + Send + Sync,
+        Fut: std::future::Future<Output = Result<(), Failure>> + Send,
+    {
+        for _ in 0..50 {
+            if self.dispatch(&subscriber).await == Outcome::Nothing {
+                return;
+            }
+        }
+        panic!("the inbox never ran dry");
     }
 
     /// One `dispatch` call that must not fail on the database.
@@ -1569,9 +1616,225 @@ fn the_released_migrations_keep_their_checksums() {
         .collect();
     assert_eq!(
         checksums,
-        [(
-            "20261027T000000Z_baseline".to_owned(),
-            "fnv1a64:e803015b7116f1bd:1917".to_owned()
-        )]
+        [
+            (
+                "20261027T000000Z_baseline".to_owned(),
+                "fnv1a64:e803015b7116f1bd:1917".to_owned()
+            ),
+            (
+                "20261104T000000Z_processed_at".to_owned(),
+                "fnv1a64:6452eff40ba9b9ec:245".to_owned()
+            )
+        ]
     );
+}
+
+/// A message of `stream` on the channel `kafka://audit`, which the tests'
+/// windows leave alone.
+fn audited(stream: &str, position: i32) -> InboxMessage {
+    InboxMessage {
+        uri: format!("kafka://audit/{stream}"),
+        ..message(stream, position)
+    }
+}
+
+/// Forgetting at once: no window on `kafka://orders`, no grace, two rows a
+/// statement.
+fn forgetful() -> InboxRetention {
+    let mut retention = InboxRetention::keep_everything().window("kafka://orders", Duration::ZERO);
+    retention.interval = Duration::from_millis(20);
+    retention.batch = 2;
+    retention.grace = Duration::ZERO;
+    retention
+}
+
+/// Another inbox on the fixture's table, forgetting as `retention` says.
+fn beside<O>(f: &Fixture<O>, retention: InboxRetention) -> PgInbox<PgSessionPool> {
+    PgInbox::new(PgSessionPool::new(pool()))
+        .with_table(
+            Identifier::new(&f.table).unwrap(),
+            Identifier::new(format!("{}_seq", f.table)).unwrap(),
+        )
+        .partitioned_by(ByStream)
+        .with_retention(retention)
+}
+
+/// A channel's processed rows go once its window has passed, in statements
+/// of the batch's size; another channel's stay. A repeat that arrives after
+/// is processed again: that is the window's meaning (ADR-0033 decision 4).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_channel_s_rows_go_after_its_window_and_a_later_repeat_is_processed_again() {
+    let f = fixture("window_passed").await.with_retention(forgetful());
+    let orders: Vec<InboxMessage> = (1..=5).map(|n| message(&format!("o{n}"), 1)).collect();
+    f.publish(&orders).await;
+    f.publish(&[audited("a1", 1)]).await;
+    let (seen, subscriber) = collector();
+    f.drain(&subscriber).await;
+    assert_eq!(f.processed().await, 6);
+
+    assert_eq!(f.inbox.sweep().await.unwrap(), 5);
+    assert_eq!(f.held().await, ["a1@1"]);
+
+    seen.lock().unwrap().clear();
+    f.publish(&[orders[0].clone()]).await;
+    f.drain(&subscriber).await;
+    assert_eq!(*seen.lock().unwrap(), ["o1@1"]);
+}
+
+/// Within its window a repeat is dropped, as before.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn within_its_window_a_repeat_is_dropped() {
+    let mut retention =
+        InboxRetention::keep_everything().window("kafka://orders", Duration::from_secs(3600));
+    retention.grace = Duration::ZERO;
+    let f = fixture("window_open").await.with_retention(retention);
+    let first = message("o1", 1);
+    f.publish(std::slice::from_ref(&first)).await;
+    let (seen, subscriber) = collector();
+    f.drain(&subscriber).await;
+    assert_eq!(f.inbox.sweep().await.unwrap(), 0);
+    f.publish(&[first]).await;
+    f.drain(&subscriber).await;
+    assert_eq!(*seen.lock().unwrap(), ["o1@1"]);
+    assert_eq!(f.rows().await, 1);
+}
+
+/// The sweep never forgets an unprocessed, parked or waiting row, nor a
+/// processed row that a waiting row names; a parked row resolved by hand is
+/// processed, and goes with its window.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn unprocessed_parked_waiting_and_named_rows_are_never_forgotten() {
+    let f = fixture("window_kept")
+        .await
+        .with_retention(forgetful())
+        .with_retries(Retries::up_to(1));
+    let named = message("t", 1);
+    let parked = message("p", 1);
+    f.publish(&[named.clone(), message("x", 1), parked.clone()])
+        .await;
+    let (_, subscriber) = failing_on("p@1");
+    f.drain(&subscriber).await;
+    assert_eq!(f.parked().await, ["p@1"]);
+    // a row set aside for a dependency not yet received, then made to name
+    // the processed row `t@1`, as a mark racing the sweep would leave it
+    let waiting = message("w", 1).depending_on(&[CausalDependency::on(&message("d", 1))]);
+    f.publish(&[waiting]).await;
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::SetAside);
+    f.execute(
+        "UPDATE {table} SET waiting_for = jsonb_build_object( \
+            'tenant_id', 'tenant-1', 'stream_type', 'orders.Order', \
+            'stream_id', '{\"id\": \"t\"}'::jsonb, 'stream_position', 1) \
+         WHERE stream_id = '{\"id\": \"w\"}'",
+    )
+    .await;
+    f.publish(&[message("u", 1)]).await;
+
+    assert_eq!(f.inbox.sweep().await.unwrap(), 1);
+    assert_eq!(f.held().await, ["t@1", "p@1", "w@1", "u@1"]);
+
+    assert!(
+        f.sessions
+            .session(async |session| f.inbox.resolve(&session, &parked).await)
+            .await
+            .unwrap()
+    );
+    assert_eq!(f.inbox.sweep().await.unwrap(), 1);
+    assert_eq!(f.held().await, ["t@1", "w@1", "u@1"]);
+}
+
+/// The rule in force when the sweep runs applies, to rows processed before
+/// it changed too.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_changed_rule_applies_to_rows_already_processed() {
+    let f = fixture("window_changed").await;
+    f.publish(&[message("o1", 1)]).await;
+    let (_, subscriber) = collector();
+    f.drain(&subscriber).await;
+    assert_eq!(f.inbox.sweep().await.unwrap(), 0);
+    assert_eq!(beside(&f, forgetful()).sweep().await.unwrap(), 1);
+    assert_eq!(f.rows().await, 0);
+}
+
+/// Rows processed before the mark kept its time carry none and are kept
+/// until the one-time pass stamps them, page by page; then they go with
+/// their window.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn rows_processed_before_the_mark_s_time_are_kept_until_stamped() {
+    let f = fixture("window_stamped").await.with_retention(forgetful());
+    let orders: Vec<InboxMessage> = (1..=5).map(|n| message(&format!("o{n}"), 1)).collect();
+    f.publish(&orders).await;
+    f.publish(&[message("u", 1)]).await;
+    let (_, subscriber) = failing_on("u@1");
+    f.dispatch(&subscriber).await;
+    f.dispatch(&subscriber).await;
+    f.dispatch(&subscriber).await;
+    f.dispatch(&subscriber).await;
+    f.dispatch(&subscriber).await;
+    f.execute("UPDATE {table} SET processed_at = NULL").await;
+    assert_eq!(f.inbox.sweep().await.unwrap(), 0);
+    assert_eq!(f.inbox.stamp_processed().await.unwrap(), 5);
+    assert_eq!(f.inbox.stamp_processed().await.unwrap(), 0);
+    assert_eq!(f.inbox.sweep().await.unwrap(), 5);
+    assert_eq!(f.held().await, ["u@1"]);
+}
+
+/// The inbox's run sweeps beside its loops, and forgets nothing within its
+/// grace.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_inbox_s_run_sweeps_beside_its_loops_after_its_grace() {
+    #[derive(Default)]
+    struct Sweeps(AtomicUsize);
+    impl InboxObserver for Sweeps {
+        fn on_swept(&self, event: &Swept<'_>) {
+            self.0.fetch_add(event.forgotten as usize, Ordering::SeqCst);
+        }
+    }
+    let run_for = async |inbox: &PgInbox<PgSessionPool, (Arc<Sweeps>, Arc<JsonTrace>)>,
+                         sweeps: &Sweeps,
+                         until: usize| {
+        let (_, subscriber) = collector();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let run = inbox.run(
+            &subscriber,
+            Loops {
+                concurrency: 1,
+                poll_interval: Duration::from_millis(10),
+                max_pause: Duration::from_millis(50),
+            },
+            async {
+                let _ = stopped.await;
+            },
+        );
+        let stopper = async {
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            while sweeps.0.load(Ordering::SeqCst) < until && std::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let _ = stop.send(());
+        };
+        let (ran, ()) = tokio::join!(run, stopper);
+        ran.unwrap();
+    };
+
+    let sweeps = Arc::new(Sweeps::default());
+    let mut patient = forgetful();
+    patient.grace = Duration::from_secs(3600);
+    let f = fixture_observed("window_run", Arc::clone(&sweeps))
+        .await
+        .with_retention(patient);
+    f.publish(&[message("o1", 1)]).await;
+    run_for(&f.inbox, &sweeps, usize::MAX).await;
+    assert_eq!(f.processed().await, 1);
+    assert_eq!(f.rows().await, 1, "forgotten within the grace");
+
+    let f = f.with_retention(forgetful());
+    run_for(&f.inbox, &sweeps, 1).await;
+    assert_eq!(sweeps.0.load(Ordering::SeqCst), 1);
+    assert_eq!(f.rows().await, 0);
 }
