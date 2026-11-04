@@ -372,8 +372,11 @@ Measured on the host's drill:
      lap's rows as well. The table grows, as today; no insert is ever
      refused for want of a partition.
    - **`K` and `R` are checked against the ring itself** — its partitions and
-     its `CHECK` — as well as against the meta table: one component's steps
-     may be applied by processes configured apart.
+     the generation's default, which the ring's step writes beside its
+     `CHECK` — as well as against the meta table: one component's steps may
+     be applied by processes configured apart. Not the `CHECK`'s text:
+     `pg_get_constraintdef` locks the table (measured), and a process starts
+     beside live traffic waiting on no table (ADR-0029).
    - **A counter reset** (ADR-0035 decision 12) stops relay and reclamation
      alike, and the refusal sticks until the rebase. The rebase, in one
      transaction:
@@ -1172,3 +1175,7 @@ On a scratch database, each with the result that changes the decision:
 - 2026-11-04 — `forget_selection`: the selection of everything a host
   switched to lanes from would pin the ring for good, and `forget_group`
   drops the lanes with it. Found adopting the lanes in the host.
+- 2026-11-04 — The start's check of the ring reads the generation's default,
+  not the `CHECK`: `pg_get_constraintdef` takes the table's lock, and a
+  host's test of a boot beside held tables waited on it. The library has
+  that test of its own now.

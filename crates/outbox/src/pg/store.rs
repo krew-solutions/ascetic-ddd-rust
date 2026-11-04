@@ -503,9 +503,12 @@ where
             .await
     }
 
-    /// Refuses a ring whose partitions or `CHECK` are not this outbox's
+    /// Refuses a ring whose partitions or window are not this outbox's
     /// numbers: one component's steps may be applied by processes
-    /// configured apart.
+    /// configured apart. The window is read off the generation's default,
+    /// which the ring's step writes beside its `CHECK`: reading the
+    /// `CHECK`'s text locks the table (measured), and a start beside live
+    /// traffic waits on no table (ADR-0029).
     async fn check_ring(&self) -> Result<(), Error> {
         let (outbox, ring) = (&self.outbox_table, self.ring);
         self.pool
@@ -516,18 +519,20 @@ where
                         &format!(
                             "SELECT (SELECT count(*) FROM pg_inherits \
                                      WHERE inhparent = '{outbox}'::regclass), \
-                                    (SELECT pg_get_constraintdef(oid) FROM pg_constraint \
-                                     WHERE conrelid = '{outbox}'::regclass \
-                                       AND conname = '{outbox}_generation_check')"
+                                    (SELECT pg_get_expr(d.adbin, 0) FROM pg_attrdef d \
+                                     JOIN pg_attribute a \
+                                       ON a.attrelid = d.adrelid AND a.attnum = d.adnum \
+                                     WHERE d.adrelid = '{outbox}'::regclass \
+                                       AND a.attname = 'generation')"
                         ),
                         &[],
                     )
                     .await?;
                 let partitions: i64 = row.get(0);
-                let check: Option<String> = row.get(1);
-                let window = check.as_deref().and_then(|check| {
+                let default: Option<String> = row.get(1);
+                let window = default.as_deref().and_then(|default| {
                     // a window past 2³¹ prints as a quoted bigint literal
-                    let after = check
+                    let after = default
                         .split("bigint / ")
                         .nth(1)?
                         .trim_start_matches(['\'', '(']);
@@ -536,9 +541,9 @@ where
                 });
                 if partitions as u32 != ring.generations || window != Some(ring.window) {
                     return Err(Error::Malformed(format!(
-                        "table `{outbox}` has {partitions} partitions and the check `{}`, \
+                        "table `{outbox}` has {partitions} partitions and the generation `{}`, \
                          this outbox asks for {} generations of {} ids",
-                        check.unwrap_or_default(),
+                        default.unwrap_or_default(),
                         ring.generations,
                         ring.window
                     )));
