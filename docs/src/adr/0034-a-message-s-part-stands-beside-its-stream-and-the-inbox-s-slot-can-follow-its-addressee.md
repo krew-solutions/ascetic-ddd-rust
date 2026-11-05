@@ -4,6 +4,17 @@
 
 Proposed (2026-11-03), not implemented.
 
+**Deferred (2026-11-05) by the host's measurement** (§ Open measurements).
+In the one host, at a launch Tenant's load, the messages for one aggregate
+meet almost never. The cut would remove none of the waits measured, and
+the identity's change alone moves no message. Decision 2 lands when a host
+measures its loops meeting on one aggregate: waits or retries between one
+aggregate's messages, past what its retries absorb.
+
+**Decision 1 withdrawn (2026-11-05):** under it, a causal dependency on a
+message of many parts has no completion (§ Why decision 1 is withdrawn).
+Decision 2 does not rest on it.
+
 **The first draft** came from a dialogue between the owner and the author:
 - **the owner:** a cause's part has no business in the hash that picks a
   message's slot, and belongs in the identity's key;
@@ -86,7 +97,7 @@ lives (`aggregate_version`, an optimistic offline lock).
   for another.
 
 The host's drill retried no inbox row. Which pairs of message types meet at
-a launch Tenant's load is unmeasured (§ Open measurements).
+a launch Tenant's load was measured on 2026-11-05 (§ Open measurements).
 
 **Measured by the review, on the host's drill and a scratch server:**
 - **One change's 800 tiles** occupy 64 slots under `ByStream`, and one slot
@@ -243,7 +254,7 @@ a launch Tenant's load is unmeasured (§ Open measurements).
      header today (`buf breaking` covers payloads), so the change is owed a
      check of its own.
    - **It cuts its inbox by the key** where the measurement below shows its
-     loops meet on one aggregate.
+     loops meet on one aggregate. The host's own does not (2026-11-05).
 
 ## Consequences
 
@@ -263,6 +274,48 @@ a launch Tenant's load is unmeasured (§ Open measurements).
   apart until the old ones drain.
 - **No order on the wire.** This record promises nothing about it; ADR-0035
   does.
+
+## Why decision 1 is withdrawn
+
+Found by the owner on 2026-11-05, after the deferral, and checked against
+the code.
+
+**A dependency names a stream position, and the inbox resolves it by one
+row.** `CausalDependency` holds `tenant_id`, `stream_type`, `stream_id` and
+`stream_position` (`crates/inbox/src/message.rs:128-137`). `is_processed`
+looks for one processed row with those four values (`LIMIT 1`,
+`crates/inbox/src/pg/store.rs:383-389`).
+
+**Today a position names one message.** A cause's siblings differ in
+`stream_id`, which holds the part (§ Context). A dependency on one sibling
+names that sibling's whole stream id. A dependency on the fan-out as a whole
+cannot be written, and nothing pretends it can.
+
+**Under decision 1, a position names a set.** Every sibling of a cause shares
+`(stream_type, stream_id, stream_position)` and differs in `part` alone. A
+dependency on the cause has no part; it is the natural way to write "after
+that message". It then has no completion:
+- **Resolved by today's four-column lookup,** it is satisfied by the first
+  sibling processed while the others are not: woken early.
+- **Resolved part-aware,** with an absent part read as `""` (decision 1), it
+  waits for a sibling that does not exist, since a fan-out's siblings all
+  have parts. It waits until `max_wait` expires it, and is then parked
+  (ADR-0006 decision 4).
+- **To be satisfied correctly** it needs the number or the list of the
+  cause's parts: a barrier. Neither the dependency nor the siblings carry
+  one. The sender knows its parts only while it writes them: a range's part
+  is cut from a set read at run time (§ Alternatives, the ordinal).
+
+§ Consequences' "a dependency that names no part … still parses and waits"
+is the second failure stated as compatibility. So decision 1 makes a stream
+position ambiguous for the one mechanism that reads positions across
+messages (ADR-0006), and it adds nothing a dependency can say: one sibling
+can already be named today.
+
+**Decision 2 stands without it.** With the part inside `stream_id`, the key
+`coalesce(addressee, stream)` spreads a set-writer's fan-out as today and
+puts one aggregate's addressed messages together. It stays deferred under
+its own trigger.
 
 ## Alternatives Considered
 
@@ -347,12 +400,41 @@ Owed, with the implementation.
 
 ## Open measurements
 
-- **Which messages meet, under `ByStream`, at a launch Tenant's load.** Each
-  row-lock wait and version retry between inbox loops, classified by the
-  pair of message types: request with request, event with request, facts
-  with lifecycle, tile with event. If the waits are mostly tile or range
-  pairs, cutting by the key removes none of them, and a host gains nothing
-  by it.
+- **Which messages meet, under `ByStream`, at a launch Tenant's load** —
+  measured 2026-11-05 (the host's ADR-0084 § Owed).
+  - **The setup.** The host's drill ran twice: 100 000 Devices, eight
+    loops, its five waves. Each Device's first facts were reported right
+    after it was managed, and its facts again during a fan-out, meeting
+    its own projection. The server logged every lock wait past 20 ms; a
+    sampler took the waits and their holders every 100 ms.
+  - **The pairs:**
+    - **Tile with tile:** 398 waits (263 s and 270 s), at the compile hold
+      of the one cohort every tile entered. A set-writer's lock, which no
+      key moves.
+    - **Request with tile:** 32 waits in one run, at a Device's assignment
+      row that a tile held.
+    - **Tile or placement with a change:** three or four a run, at the
+      Tenant's partition.
+    - **Event with request, one Device:** once a run, 11 ms and 21 ms, at
+      the Device's context.
+    - **Request with request, one Device:** one version conflict a run, of
+      516 000 and 706 000 rows, at the stand's start; retried.
+  - **Order.** 53% of the first facts reports were processed before their
+    Device's lifecycle event, and let go by the host's handler. The next
+    report made them good. A cut by the key would not order these either:
+    the two streams arrive on two channels, and arrival keeps no order
+    between them (§ Context). A causal dependency does (ADR-0006).
+  - **So the waits are tile and range pairs,** the cut removes none of
+    them, and the host keeps `ByStream`.
+  - **Where the order is lost** (measured the same day, 20 000 Devices, each
+    Device's first report published after its awaited `device.managed`):
+    - 19 796 reports were stored in the inbox before their Device's
+      lifecycle event, inverted on the way by two channels and two bridges;
+    - 100 arrived after it and were still processed before it, inverted by
+      two slots.
+
+    A cut by the key orders what arrives in order. An order lost between
+    routes is restored only by what the producer stamps on the message.
 - **The key's build and the slot's expression dropped,** on a copy of an
   inbox at launch size, under the runner's lock: the hold against the
   one-second budget, and the table not rewritten.
@@ -406,3 +488,13 @@ Owed, with the implementation.
     ADR-0033's ring step; a release after ADR-0033 and ADR-0035 are out.
   - **The host's work** extended: its intake's functions, its holds kept,
     no part across contexts until the receiver declares it, its contracts.
+- 2026-11-05 — The host's measurement: one aggregate's messages meet
+  almost never at a launch Tenant's load. The waits are set-writers'. The
+  record is deferred until a host measures otherwise, or a dependency must
+  name one sibling of a fan-out.
+- 2026-11-05 — Decision 1 withdrawn. Under it, a dependency on a message of
+  many parts has no completion: woken by its first sibling, or waiting for
+  a sibling that does not exist. Found by the owner. Also:
+  - the deferral's second trigger dropped, since one sibling can already be
+    named;
+  - where the order is lost was measured: on the routes, not in the slots.
