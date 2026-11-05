@@ -312,10 +312,67 @@ position ambiguous for the one mechanism that reads positions across
 messages (ADR-0006), and it adds nothing a dependency can say: one sibling
 can already be named today.
 
+**The premise the defect follows from: decision 1 puts a fan-out into one
+stream.**
+- With the part out of `stream_id`, every sibling of a cause has one stream
+  identity. A key by the stream alone then gives the whole fan-out one slot,
+  and one loop works it.
+- The four-role review measured this on 2026-11-04: one change's 800 tiles
+  went from 64 slots to one (§ Context; § Alternatives, the first draft).
+- So the record had to put the part back into the key of a message without
+  an addressee: the identity removes what the key must restore. With the
+  part inside `stream_id`, as today, the stream and the key agree.
+- The same single stream is what turns a dependency on the cause into a
+  dependency on a set (above). The owner reasoned from it to the defect.
+
 **Decision 2 stands without it.** With the part inside `stream_id`, the key
 `coalesce(addressee, stream)` spreads a set-writer's fan-out as today and
 puts one aggregate's addressed messages together. It stays deferred under
 its own trigger.
+
+## The second review (2026-11-05): a blind solver and a discriminator
+
+The question put to them was the host's, not this record's: how the
+platform keeps the causal order of one entity's messages, across channels
+and inside an inbox. The solver was given the question alone; the
+discriminator was given the solver's answer and the author's, which leaned
+on this record's cut. The host's measurement of the same day was the fact
+both answered to (§ Open measurements, where the order is lost). What they
+found against this record:
+- **A cut by a key orders only what arrives in order** (the solver). The
+  messages of one entity on two channels of different Kafka keys arrive in
+  no order. In the drill, 19 796 of 20 000 were inverted on the way. A key
+  that puts them in one slot therefore invites a reliance on order that the
+  transport does not give. The order must come from what the producer
+  stamps on each message. Concurrency between streams stays the aggregate's
+  version conflict, retried.
+- **A host's own Commands that serve the present are order-free by
+  construction** (the solver). The host's projection reads the committed
+  present. Its Command says which projection to make (the Device and its
+  assignment), not what to project: the bundle version it carries is never
+  read. Two of them
+  for one Device conflict once in about 500 000 rows, and the retry
+  absorbs it. For such a fan-out, decision 2 buys fewer retries, not
+  correctness.
+- **A cut and a wait are levers of isolation, never premises of
+  correctness** (the discriminator). Both answers' cuts were about
+  isolation, and decision 3 already promises no order. The structure both
+  answers share puts the receiver's correctness in the producer's stamps:
+  stream positions, and the entity's life. An inbox cut is chosen for
+  throughput, by measurement.
+- **"The cut is fixed for the table's life" is a rule of the library,**
+  enforced at setup (ADR-0008), and not a property of the store (the
+  discriminator). Decision 4's change in place stands as designed.
+- **The host's record overstated the cut's uselessness** (the
+  discriminator). A cut by the Device would remove none of the compile-hold
+  waits, but it would remove the one version conflict a run and the two
+  meetings at a Device's context. That is minor, and it is the measure of
+  what decision 2 buys the host.
+- **Found beside it** (the discriminator): a `causal_dependencies` header
+  that does not parse is dropped silently (`crates/inbox/src/message.rs`,
+  `filter_map(...ok())`), so a producer's typo means no wait at all. It is
+  owed under the library's gate: refused and parked as permanent, never
+  holding its slot. It is not this record's.
 
 ## Alternatives Considered
 
@@ -498,3 +555,8 @@ Owed, with the implementation.
   - the deferral's second trigger dropped, since one sibling can already be
     named;
   - where the order is lost was measured: on the routes, not in the slots.
+- 2026-11-05 — The second review recorded: the solver's and the
+  discriminator's findings against the cut, attributed. The parallelism
+  premise behind decision 1's defect is stated: decision 1 puts a fan-out
+  into one stream (measured 2026-11-04), and the key must restore the part
+  it removed.
