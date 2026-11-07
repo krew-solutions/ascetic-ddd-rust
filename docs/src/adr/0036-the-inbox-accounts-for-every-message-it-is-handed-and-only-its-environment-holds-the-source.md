@@ -4,8 +4,9 @@
 
 Accepted (2026-11-07, by the owner), after its revision by the roles'
 review and with the owner (§ Revision after the roles' review, § Change
-Log). Part A, the intake and the surface of what it sets aside, is being
-built. Part B, the parked rows, waits on what § Revision names.
+Log). Part A, the intake and the surface of what it sets aside, is built
+in the library (2026-11-07, A1 to A5 of § Change Log); the host adopts it
+next. Part B, the parked rows, waits on what § Revision names.
 
 It is the output of two rounds of a blind solver and a discriminator, run
 for the host project that uses this library (its ADR-0086, S3b-4):
@@ -928,3 +929,5 @@ This ADR's own:
     and stores the message when it rolls back. Many intakes of one message
     at once store it once. Mutations caught: the intake under REPEATABLE
     READ, and a plain insert.
+- 2026-11-08 — Part A merged into the library's `main`; the host's
+  adoption, A6, begins.

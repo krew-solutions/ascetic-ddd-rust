@@ -109,7 +109,8 @@ Read them before changing the bus, the outbox or the inbox. ADR-0036
   message ahead of its dependency waits out of the queue, and is woken by the
   dependency's mark *(the wait's transaction is amended by ADR-0009)*.
 - [ADR-0007](docs/src/adr/0007-a-dispatcher-owns-a-slot-by-locking-its-position.md) — a
-  dispatcher owns a slot by locking its position, and has no identity.
+  dispatcher owns a slot by locking its position, and has no identity
+  *(the relay's order is superseded by ADR-0035)*.
 - [ADR-0008](docs/src/adr/0008-the-inbox-takes-a-slot-by-locking-its-row.md) — the
   inbox takes a slot by locking its row, and its dispatcher has no identity
   *(the head's read is amended by ADR-0009)*.
@@ -149,6 +150,59 @@ Read them before changing the bus, the outbox or the inbox. ADR-0036
   managed keys nothing that uses a key makes one; a rotation never makes the
   first version, and a retirement keeps the latest and never lowers the
   floor *(Proposed)*.
+- [ADR-0021](docs/src/adr/0021-a-member-is-read-where-the-mapping-puts-it-and-a-document-as-its-layout-says.md) —
+  a member is read where the mapping puts it, and a document as its layout
+  says *(amended by ADR-0022, ADR-0023 and ADR-0027)*.
+- [ADR-0022](docs/src/adr/0022-an-equality-where-only-truth-counts-is-containment-where-the-document-has-a-gin-index.md) —
+  an equality where only truth counts is containment, where the document
+  has a GIN index *(amended by ADR-0027)*.
+- [ADR-0023](docs/src/adr/0023-an-element-of-a-collection-of-values-is-the-item-itself.md) —
+  an element of a collection of values is the item itself *(amended by
+  ADR-0024 and ADR-0025)*.
+- [ADR-0024](docs/src/adr/0024-a-gin-index-on-a-path-of-a-document-serves-containment-of-the-value-there.md) —
+  a GIN index on a path of a document serves containment of the value
+  there.
+- [ADR-0025](docs/src/adr/0025-an-element-is-what-the-mapping-says-from-the-collections-predicate.md) —
+  an element is what the mapping says it is, from the collection's
+  predicate.
+- [ADR-0026](docs/src/adr/0026-the-typed-terms-quantify-a-collection-with-a-boolean-term.md) —
+  the typed terms quantify a collection with a boolean term.
+- [ADR-0027](docs/src/adr/0027-a-collection-of-a-document-that-is-not-an-array-has-no-items-and-a-containment-pattern-folds-under-a-custom-plan-alone.md) —
+  a collection of a document that is not an array has no items, and a
+  containment pattern folds under a custom plan alone *(decision 3
+  deferred, the owner's to decide)*.
+- [ADR-0028](docs/src/adr/0028-a-scope-that-absorbed-a-failed-statement-is-aborted-not-committed.md) —
+  a scope that absorbed a failed statement is aborted, not committed
+  *(Proposed, implemented)*.
+- [ADR-0029](docs/src/adr/0029-a-schema-moves-by-migrations-each-taking-its-one-table-first.md) —
+  a schema moves by migrations, each taking its one table first
+  *(Proposed, implemented)*.
+- [ADR-0030](docs/src/adr/0030-a-transaction-writes-one-message-per-identity-and-the-inbox-names-who-holds-one-it-ignores.md) —
+  a transaction writes one message per identity, and the inbox names who
+  holds one it ignores *(Proposed, implemented)*.
+- [ADR-0031](docs/src/adr/0031-a-broker-s-driver-settings-go-to-the-role-they-are-for.md) —
+  a broker's driver settings go to the role they are for *(Proposed,
+  implemented)*.
+- [ADR-0032](docs/src/adr/0032-a-broker-s-producers-share-one-driver-client-and-a-bridge-publishes-a-channel-through-one-producer.md) —
+  a broker's producers share one driver client, and a bridge publishes a
+  channel through one producer *(Proposed, implemented)*.
+- [ADR-0033](docs/src/adr/0033-a-row-the-bus-no-longer-needs-goes-by-the-range-on-the-outbox-and-by-the-row-on-the-inbox.md) —
+  a row the bus no longer needs goes, by the range on the outbox and by the
+  row on the inbox: the outbox's ring, the inbox's windows and sweep, the
+  producer's replay horizon.
+- [ADR-0034](docs/src/adr/0034-a-message-s-part-stands-beside-its-stream-and-the-inbox-s-slot-can-follow-its-addressee.md) —
+  a message's part stands beside its stream, and the inbox's slot can
+  follow its addressee *(Proposed, deferred by the host's measurement)*.
+- [ADR-0035](docs/src/adr/0035-the-outbox-hands-a-row-on-once-it-is-visible-in-the-order-its-position-was-drawn.md) —
+  the outbox hands a row on once it is visible, in the order its position
+  was drawn: the relay's epochs *(supersedes the relay's order of
+  ADR-0007)*.
+- [ADR-0036](docs/src/adr/0036-the-inbox-accounts-for-every-message-it-is-handed-and-only-its-environment-holds-the-source.md) —
+  the inbox accounts for every message it is handed, and only its
+  environment holds the source: the intake sets aside what it can never
+  store, the adapters deliver again what was not taken, and the operator's
+  surface disposes of the rows set aside *(Part A built; Part B, the parked
+  rows, waits)*.
 
 ## Specifications
 
