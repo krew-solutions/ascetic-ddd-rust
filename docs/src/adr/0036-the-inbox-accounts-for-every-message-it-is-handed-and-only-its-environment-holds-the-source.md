@@ -2,10 +2,10 @@
 
 ## Status
 
-Proposed (2026-11-07), revised the same day after the roles' review
-(§ Revision after the roles' review). Part A, the intake and the surface of
-what it sets aside, is to be built. Part B, the parked rows, waits on what
-§ Revision names.
+Accepted (2026-11-07, by the owner), after its revision by the roles'
+review and with the owner (§ Revision after the roles' review, § Change
+Log). Part A, the intake and the surface of what it sets aside, is being
+built. Part B, the parked rows, waits on what § Revision names.
 
 It is the output of two rounds of a blind solver and a discriminator, run
 for the host project that uses this library (its ADR-0086, S3b-4):
@@ -777,4 +777,4 @@ This ADR's own:
     - the rollout's order: the gauge and its page before setting aside;
     - the line between a row set aside and a parked row.
   - **The library's key sources added** to § References.
-
+- 2026-11-07 — Accepted by the owner; Part A's implementation begun.
