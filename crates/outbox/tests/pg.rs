@@ -49,7 +49,11 @@ fn pool() -> Pool {
 /// The tests share one server, and one of them holds its horizon on
 /// purpose for as long as it runs — a transaction open in another database
 /// and a relay busy in this one — which every other test would wait out
-/// past its deadlines. That one runs alone; the others share the lane.
+/// past its deadlines. And a reclamation judges a generation closed when no
+/// transaction of the database holds an id in it: a test whose ring's
+/// generation spans every id waits for a moment with no writing
+/// transaction at all, which the other tests, running beside it, may never
+/// leave it. Those run alone; the others share the lane.
 static LANE: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 
 /// A test's hold on the lane, kept for as long as the test runs.
@@ -108,6 +112,12 @@ async fn fixture_concurrent(name: &str, slots: u32) -> Fixture {
 /// The same, its table a ring of its own numbers (ADR-0033).
 async fn fixture_ring(name: &str, ring: Ring) -> Fixture {
     fixture_shaped(name, (), 1, ring, TraceFile::off(), shared().await).await
+}
+
+/// The same, for a test that reclaims a generation spanning every id: it
+/// runs alone.
+async fn fixture_ring_alone(name: &str, ring: Ring) -> Fixture {
+    fixture_shaped(name, (), 1, ring, TraceFile::off(), alone().await).await
 }
 
 async fn fixture_built<O: OutboxObserver>(
@@ -2331,7 +2341,7 @@ async fn generations_every_group_passed_go_in_order_and_the_bounds_hold() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_generation_is_kept_while_open_unpassed_young_or_held() {
-    let f = fixture_ring("reclaim_kept", Ring::new(2, 1 << 40))
+    let f = fixture_ring_alone("reclaim_kept", Ring::new(2, 1 << 40))
         .await
         .with_reclaiming(eager(0));
     let (a_seen, a) = collector();
@@ -2499,7 +2509,7 @@ async fn patient_rewind<O: OutboxObserver>(
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn an_in_progress_id_that_committed_into_the_generation_keeps_it() {
-    let f = fixture_ring("reclaim_xip", Ring::new(2, 1 << 40))
+    let f = fixture_ring_alone("reclaim_xip", Ring::new(2, 1 << 40))
         .await
         .with_reclaiming(eager(0));
     let (seen, subscriber) = collector();
@@ -2548,7 +2558,7 @@ async fn an_in_progress_id_that_committed_into_the_generation_keeps_it() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn an_abandoned_group_is_forgotten_and_a_live_one_refused() {
-    let f = fixture_ring("reclaim_forget", Ring::new(2, 1 << 40))
+    let f = fixture_ring_alone("reclaim_forget", Ring::new(2, 1 << 40))
         .await
         .with_reclaiming(eager(0));
     let (_, subscriber) = collector();
@@ -2588,7 +2598,7 @@ async fn an_abandoned_group_is_forgotten_and_a_live_one_refused() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_counter_reset_stops_the_reclamation_without_a_relay_s_report() {
-    let f = fixture_ring("reclaim_reset", Ring::new(2, 1 << 40))
+    let f = fixture_ring_alone("reclaim_reset", Ring::new(2, 1 << 40))
         .await
         .with_reclaiming(eager(0));
     let (_, subscriber) = collector();
@@ -3091,7 +3101,7 @@ async fn an_emptying_waiting_for_its_lock_holds_back_no_dispatch() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn the_selection_of_everything_is_forgotten_once_its_lanes_took_over() {
-    let f = fixture_ring("forget_selection", Ring::new(2, 1 << 40))
+    let f = fixture_ring_alone("forget_selection", Ring::new(2, 1 << 40))
         .await
         .with_reclaiming(eager(0));
     let (seen, subscriber) = collector();
