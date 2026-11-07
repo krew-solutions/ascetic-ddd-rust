@@ -1043,8 +1043,8 @@ async fn loops_over_slots_with_dependencies_across_them_lose_no_wake() {
 /// Two streams in two slots, four messages each, two loops, a subscriber
 /// that takes its time and notes when it ran: the messages of one stream
 /// are never in the subscriber at the same time, while the two streams are
-/// — the run is shorter than the sum of the pauses, so the check could have
-/// seen an overlap. One partition key, one dispatcher at a time.
+/// — a run of one overlaps a run of the other, so the check could have seen
+/// an overlap. One partition key, one dispatcher at a time.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn messages_of_one_stream_are_never_processed_at_once() {
@@ -1082,7 +1082,6 @@ async fn messages_of_one_stream_are_never_processed_at_once() {
         ..Loops::default()
     };
 
-    let started = std::time::Instant::now();
     tokio::time::timeout(
         Duration::from_secs(10),
         f.inbox
@@ -1091,7 +1090,6 @@ async fn messages_of_one_stream_are_never_processed_at_once() {
     .await
     .expect("run stops after shutdown")
     .unwrap();
-    let elapsed = started.elapsed();
 
     let spans = spans.lock().unwrap().clone();
     for stream in [&first, &second] {
@@ -1105,9 +1103,17 @@ async fn messages_of_one_stream_are_never_processed_at_once() {
             );
         }
     }
+    // Measured by the runs themselves, not by the run's length: the length
+    // bound held the dispatch's overhead too, and failed alone three times
+    // in four (2026-11-07).
+    let side_by_side = spans.iter().any(|(one, started, ended)| {
+        spans
+            .iter()
+            .any(|(other, from, to)| one != other && started < to && from < ended)
+    });
     assert!(
-        elapsed < PAUSE * 7,
-        "the two streams did not run side by side: {elapsed:?} for 8 pauses of {PAUSE:?}"
+        side_by_side,
+        "the two streams never ran side by side, so no overlap could have been seen: {spans:?}"
     );
 }
 
