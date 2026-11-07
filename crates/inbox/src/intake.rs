@@ -284,11 +284,18 @@ pub(crate) fn identity_digest(row: &InboxMessage) -> String {
     digest(&out)
 }
 
-/// A header's value as the text a derived column keeps: UTF-8, without a
-/// NUL, at most `width` characters; none when it is not UTF-8.
+/// A header's value as the text a derived column keeps, and an observer and
+/// a log are handed as an identifier: UTF-8, without a NUL, CR and LF
+/// escaped so that it cannot start a line of its own (ADR-0036 R9), at most
+/// `width` characters; none when it is not UTF-8.
 pub(crate) fn sanitized(bytes: Option<&[u8]>, width: usize) -> Option<String> {
     let text = std::str::from_utf8(bytes?).ok()?;
-    Some(text.chars().filter(|c| *c != '\0').take(width).collect())
+    let escaped = text.chars().filter(|c| *c != '\0').flat_map(|c| match c {
+        '\r' => vec!['\\', 'r'],
+        '\n' => vec!['\\', 'n'],
+        c => vec![c],
+    });
+    Some(escaped.take(width).collect())
 }
 
 /// The widths of the derived columns of the rows set aside.
@@ -457,12 +464,13 @@ mod tests {
     }
 
     #[test]
-    fn derived_text_is_bounded_without_a_nul() {
+    fn derived_text_is_bounded_without_a_nul_or_a_line_break() {
         assert_eq!(sanitized(Some(b"a\0b"), 8).as_deref(), Some("ab"));
         assert_eq!(
             sanitized(Some("ü".repeat(10).as_bytes()), 3).as_deref(),
             Some("üüü")
         );
+        assert_eq!(sanitized(Some(b"a\r\nb"), 8).as_deref(), Some("a\\r\\nb"));
         assert_eq!(sanitized(Some(&[0xff]), 8), None);
         assert_eq!(sanitized(None, 8), None);
     }
@@ -503,6 +511,7 @@ mod tests {
                 proptest::collection::vec(any::<u8>(), 0..24),
                 any::<String>().prop_map(String::into_bytes),
                 "[a-z\\x00]{0,300}".prop_map(String::into_bytes),
+                "[a-z\\r\\n]{0,40}".prop_map(String::into_bytes),
                 Just(br#"["\u0000"]"#.to_vec()),
                 Just(br#"{"a\u0000":1}"#.to_vec()),
                 Just(b"[1e999]".to_vec()),
@@ -607,7 +616,7 @@ mod tests {
             ) {
                 match sanitized(bytes.as_deref(), width) {
                     Some(text) => {
-                        prop_assert!(!text.contains('\0'));
+                        prop_assert!(!text.contains(['\0', '\r', '\n']));
                         prop_assert!(text.chars().count() <= width);
                     }
                     None => prop_assert!(

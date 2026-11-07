@@ -778,3 +778,30 @@ This ADR's own:
     - the line between a row set aside and a parked row.
   - **The library's key sources added** to § References.
 - 2026-11-07 — Accepted by the owner; Part A's implementation begun.
+- 2026-11-07 — A1 built, and what building it found.
+  - **A NUL in the destination's key** passed the reading in Rust, and only
+    the server's backstop (22021) caught it. The destination can come off
+    the wire through a bridge's header target, so it is refused in Rust, as
+    every other field is. A property test over arbitrary messages found it.
+  - **The frame's round trip** moves to A3, where readmit needs to read a
+    frame back.
+- 2026-11-07 — A4, the inbox's part, built, and what building it found.
+  - **The driver logs every value.** `tokio_postgres` logs each statement
+    with its parameters at `Debug`: the Tenant, the stream id, the
+    `message_id`, every header and the payload's bytes. The library cannot
+    stop it, so the rule is the host's: keep the target `tokio_postgres` at
+    `Info` or above wherever real data runs. `inbox/tests/logs.rs` holds
+    that nothing the driver logs above `Debug` carries a value, the bound
+    the rule rests on. Owed in A6: the host's logger holds it.
+  - **The library's error shows no outside text.** A database refusal shows
+    its SQLSTATE and constraint, without the server's message. A
+    subscriber's failure shows that it failed. The text stays reachable
+    through `source()`.
+  - **The observer is declared from one list,** its trait and its
+    compositions together. A method can no longer be left out of a composed
+    observer.
+  - **Beyond this ADR's reach, owed to their own decisions:**
+    - the session crate's `AbortCause` shows the server's primary message,
+      which may quote a refused value;
+    - the outbox's and the session's observers compose by hand, the gap the
+      inbox's had.

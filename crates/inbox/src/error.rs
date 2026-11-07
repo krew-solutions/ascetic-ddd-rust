@@ -90,12 +90,31 @@ impl Error {
     }
 }
 
+/// The library's words and the server's codes, never text from outside it:
+/// a refusal is named by its SQLSTATE and its constraint, without the
+/// server's message, whose DETAIL echoes a key's values and whose primary
+/// line may quote a refused value; a subscriber's failure is its source,
+/// not its text. The text stays reachable through
+/// [`std::error::Error::source`], for a host that judges it safe to print
+/// (ADR-0036 R9).
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Session(error) => write!(f, "session: {error}"),
-            Error::Database(error) => write!(f, "database: {error}"),
-            Error::Subscriber(error) => write!(f, "subscriber: {error}"),
+            Error::Database(error) => {
+                write!(f, "database: {error}")?;
+                if let Some(code) = error.code() {
+                    write!(f, ", SQLSTATE {}", code.code())?;
+                }
+                match error.as_db_error().and_then(|db| db.constraint()) {
+                    Some(constraint) => write!(f, ", on {constraint}"),
+                    None => Ok(()),
+                }
+            }
+            Error::Subscriber(failure) if failure.is_permanent() => {
+                f.write_str("the subscriber failed, for good")
+            }
+            Error::Subscriber(_) => f.write_str("the subscriber failed"),
             Error::Malformed(what) => write!(f, "malformed inbox: {what}"),
             Error::Migration(error) => write!(f, "{error}"),
             Error::Conflict(what) => write!(f, "conflict: {what}"),
