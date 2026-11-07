@@ -312,10 +312,11 @@ section holds.
 - The message is acknowledged only when the cause is positively known:
   - a holder at its own identity with its own `message_id`: a duplicate;
   - the same with other bytes: set aside as *differs* (R1);
-  - a holder of its `message_id` at another identity, read through the
-    index's own expression `(metadata->>'message_id')::uuid` (measured: an
-    Index Scan, 0.03 ms warm; a text comparison scans the table): set aside
-    as *identity taken*;
+  - a holder of its `message_id` at another identity of its Tenant and
+    stream type (R5), read through the index's own expression
+    `(tenant_id, stream_type, (metadata->>'message_id')::uuid)` (measured on
+    the table-wide form: an Index Scan, 0.03 ms warm; a text comparison scans
+    the table): set aside as *identity taken*;
   - a forgotten Tenant (Part B).
 - **Anything else is an error, and the source retries.** That covers a
   holder swept between the insert and the reads, and a conflict on an index
@@ -354,28 +355,72 @@ section holds.
 - The holder of an *identity taken* is recorded as its channel and its
   received position, never as another Tenant's identity.
 
-**R5. A channel declares the stream types it carries, and a `message_id`
-is unique within a channel.**
-- **The fact.** One inbox table serves every channel of a service, its
-  primary key has no channel, and `message_id` is unique across channels
-  and Tenants. A producer of one channel can therefore take another
-  channel's identities or `message_id`s:
-  - it can turn the other channel's real messages into shadows;
-  - it can set them aside;
-  - with a supersede, it could replace them.
-- **The concrete case.** In the host, a service that reads `tenancy.access`
-  sees its identities and `message_id`s in clear text, and Access Versions
-  are predictable. Once it also produces a Device channel bridged into the
-  same inbox, it could hold back revocations. The host's Device channels
-  have no producer yet.
-- **The fix.**
-  - The intake sets aside as *foreign* a message whose stream type its
-    arrival channel does not declare. The host's consumed catalogues
-    already declare their stream headers.
-  - The `message_id` index is over the channel and the `message_id`.
-  - The holder read and the state read are scoped to the row's channel.
-- **Executor:** a PostgreSQL test for each vector. Removing the channel
-  predicate turns it red.
+**R5. A message is admitted only from the service that owns its stream, and
+a `message_id` is unique within its stream type.** Revised on 2026-11-07
+with the owner (§ Change Log). The first wording, "a channel declares the
+stream types it carries", was withdrawn.
+- **A stream type has nothing to do with channels.** It is the type of the
+  aggregate, the source of the events. Together with the Tenant, the stream
+  id and the position it names an event, and causal dependencies are built
+  on that identity ([Lloyd et al.], [Bailis et al.], [Schwarz, Mattern]).
+  One aggregate publishes to several channels. The identity is therefore
+  global and independent of the channel, and must stay so. A row that waits
+  on a dependency waits for "event p of aggregate X", whichever channel
+  brings it, including across a loop of routes (A→B→C beside A→C). The
+  stream type is prefixed with the owning service's name (`device.Device`),
+  so no two services' names can collide by accident.
+- **The fact: nothing checks a claim.** The intake deduplicates by the
+  identity its producer wrote in clear-text headers, and nothing checks
+  that the producer may claim it.
+  - A producer of one channel bridged into an inbox (defective or
+    compromised) can write another service's stream type. Its message is
+    stored under that service's identity, and the real message, arriving
+    later, is a shadow and dropped. The host's concrete case: a service
+    that reads `tenancy.access` sees its identities in clear text, and
+    Access Versions are predictable. Once it also produces a Device channel
+    bridged into the same inbox, it could hold back revocations. The
+    host's Device channels have no producer yet.
+  - The same producer can also write another service's `message_id` under
+    its own identity, so that the real message conflicts on the
+    `message_id`.
+- **The fix enforces the convention the names already follow.**
+  - The prefix of a stream type names the service that owns the aggregate.
+  - The host's topology names the service that produces each channel.
+  - The intake admits a message only when the two agree. Anything else is
+    set aside as *foreign*.
+  - The library takes the admission as a predicate the host gives, derived
+    from its topology, never written by hand. It knows nothing of services.
+- **A `message_id` is unique within its Tenant and stream type**: the index
+  is over `(tenant_id, stream_type, (metadata->>'message_id')::uuid)`.
+  - **Why the uniqueness stays.** It is the only guard on the consuming side
+    against applying one message twice when it comes back under another
+    identity. The producer's outbox keeps a `message_id` unique only within
+    a generation of its ring (`outbox/src/pg/store.rs`). A host's check that
+    the headers' stream agrees with the sealed payload's (ADR-0086 decision
+    7) catches only a disagreement, not a consistent re-stamp: an old event
+    published again at a new position with its `event_id`, which a fold by
+    positions would apply as new. Kept, such a duplicate is set aside as
+    *identity taken* and pages, and is never processed twice. That is fail
+    fast on the consuming side, without stopping the channel; only the
+    reaction to 23505 that this ADR removes made it a stop.
+  - **Why the stream type, not the channel or the URI.** The uniqueness
+    serves idempotency, which is a property of the message, not of its
+    route. Scoped by the URI, one event arriving on two channels would fall
+    into two scopes, and a re-stamped copy on one of them would pass. A
+    channel renamed or re-keyed, or an aggregate's events moved to another
+    channel, would change what is deduplicated.
+  - Under R5's admission a producer can take only its own aggregates'
+    `message_id`s, which harms no one else.
+  - Own Commands keep the rule: their stream type is the command's, prefixed
+    by the service that sends it to itself.
+- **Executors:**
+  - a PostgreSQL test for each vector: a foreign stream type set aside; a
+    `message_id` of another stream type stored; a re-stamped duplicate set
+    aside as *identity taken*. Removing the admission, or widening the
+    index's scope back to the table, turns them red;
+  - a test that a misstamp is repaired: the correction is set aside, the
+    misstamped parked row is discarded, which releases its `message_id`
+    (Part B), and the correction is readmitted.
 
 **R6. Every row set aside has a bounded life, open rows included.**
 - A row lives for its channel's window, or for a host's bound when it has
@@ -454,8 +499,9 @@ is unique within a channel.**
   replica's dispatch, every channel's intake, the sampler.
 - Its time grows with the heap: 9.5 s over 4.3 GB, and about 80–100 s at a
   launch's size (an estimate).
-- Two indexes come with this ADR: R5's per-channel `message_id` index, and
-  Part B's parked index.
+- Two indexes come with this ADR: R5's `message_id` index scoped to the
+  Tenant and the stream type, which replaces the table-wide one, and Part
+  B's parked index.
   - Both land before the host's Device channels have a producer. The host's
     `tests/release_order.rs` holds that.
   - Each is measured under the bus drill's load on the host's drill
@@ -474,6 +520,17 @@ is unique within a channel.**
 
 It consists of decisions 1 to 5, as R1 to R4, R6, R7 and R9 to R11 revise
 them, together with R5 and R8.
+
+**Rejected versus parked.**
+- A row set aside was never stored as an inbox row. Its identity could not
+  be formed, or PostgreSQL refused its values, or its `message_id` was held.
+- A parked row was stored, and its subscriber failed. The intake never
+  parses a payload: it is opaque, often sealed bytes. A payload that does
+  not open or decode is a failure of processing, and parks.
+
+**The order of the rollout.** The gauge of the rows set aside and its page
+work before setting aside is switched on. A quarantine that nobody watches
+would hide what the stop used to show.
 
 ### Part B, waiting
 
@@ -571,6 +628,25 @@ its correction.
   the two are separate states, and decision 4 gives them one surface.
 - **A savepoint around the insert.** It was unnecessary, and two round trips
   dearer for every message.
+- **Hold the channel once more than N messages are set aside in a window.**
+  Considered and rejected on 2026-11-07, as a fail-fast for a flood.
+  - Under a producer's flood (a release that drops a header from every
+    message) the bad bytes stay in the topic for good. A hold would end only
+    with an offset moved by hand, the silent loss this ADR removes, and it
+    would stop the channel for every Tenant again.
+  - Under a consumer's regression (a check that wrongly refuses valid
+    messages) a hold would avoid holes. But a bulk readmit of the fixed
+    intake (R7) and the wake of expired dependents (R8) already repair that.
+  - The gain is in a case already covered, and the cost is a second mode of
+    the intake with thresholds nothing measures.
+- **Drop the inbox's unique `message_id` index.** Considered and rejected on
+  2026-11-07. It would remove the 23505 class and the squatting of a
+  `message_id` at a stroke, but it is the only guard on the consuming side
+  against a consistent re-stamp (R5). R5 keeps it, scoped, and R2 turns its
+  conflict from a stop into a row set aside.
+- **A channel declares the stream types it carries.** Withdrawn (R5): it
+  conflates the aggregate's identity with the transport, and one aggregate
+  publishes to several channels.
 - **Default to setting aside, and list the codes that hold.** Rejected:
   several codes that are not transient still pass with the environment
   (57014, 55P03, 25006, 42P01, 42501), and diverting a storable message
@@ -632,6 +708,36 @@ Owed, with the implementation.
 
 ## References
 
+The library's key sources, from which its design grows. Agents working on
+the library read them before changing the bus, the outbox or the inbox:
+
+- [Lloyd et al.] "[Don't Settle for Eventual Consistency. Stronger
+  properties for low-latency geo-replicated storage](https://queue.acm.org/detail.cfm?id=2610533)"
+  ([pdf](https://dl.acm.org/ft_gateway.cfm?id=2610533&ftid=1449165&dwn=1)) by
+  Wyatt Lloyd (Facebook), Michael J. Freedman (Princeton University), Michael
+  Kaminsky (Intel Labs) and David G. Andersen (Carnegie Mellon University).
+- [Bailis et al.] "[Bolt-on Causal Consistency](http://www.bailis.org/papers/bolton-sigmod2013.pdf)"
+  by Peter Bailis, Ali Ghodsi, Joseph M. Hellerstein and Ion Stoica (UC
+  Berkeley, KTH/Royal Institute of Technology).
+- [Schwarz, Mattern] "[Detecting Causal Relationships in Distributed
+  Computations: In Search of the Holy Grail](https://disco.ethz.ch/courses/hs08/seminar/papers/mattern4.pdf)"
+  by Reinhard Schwarz and Friedemann Mattern.
+- [Burckhardt] "[Principles of Eventual Consistency](https://www.microsoft.com/en-us/research/publication/principles-of-eventual-consistency/)"
+  ([pdf](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/final-printversion-10-5-14.pdf))
+  by Sebastian Burckhardt (Microsoft Research).
+- [Vernon] "[Reactive Messaging Patterns with the Actor Model: Applications
+  and Integration in Scala and Akka](https://kalele.io/books/)" by Vaughn
+  Vernon. Chapter 9, Message Endpoints: Transactional Client/Actor.
+  Chapter 10, System Management and Infrastructure: Message Metadata/History,
+  Message Journal Store.
+- [Zakrevsky, Domain Events] "[Domain Events in DDD](https://dckms.github.io/system-architecture/emacsway/it/ddd/tactical-design/domain-model/domain-events/domain-events-in-ddd.html)"
+  by Ivan Zakrevsky.
+- [Zakrevsky, Message race] "[About the message race in terms of competing
+  subscribers](https://dckms.github.io/system-architecture/emacsway/it/integration/asynchronous/message-ordering-in-competing-consumers.html)"
+  by Ivan Zakrevsky.
+
+This ADR's own:
+
 - The host's ADR-0086 (§ Owed, S3b-4; § Change Log, 2026-11-07) and its
   `tests/poison_drill.rs`.
 - ADR-0028, ADR-0029, ADR-0030, ADR-0033, ADR-0035 of this library.
@@ -655,4 +761,20 @@ Owed, with the implementation.
   declare their stream types, and `message_id` is unique within a channel.
   Rows set aside have a bounded life. The ShareLock stated in decision 6
   was corrected to ACCESS EXCLUSIVE.
+- 2026-11-07 — Revised with the owner, in a discussion of the revision
+  above.
+  - **R5 rewritten.** A stream type is the aggregate's type, part of the
+    causal identity and independent of channels. So "a channel declares its
+    stream types" and "a `message_id` unique within a channel" were
+    withdrawn. The intake now admits a message only from the service its
+    stream type's prefix names, as the host's topology has it.
+  - **The `message_id` uniqueness is kept,** scoped to the Tenant and the
+    stream type. Dropping it was weighed and rejected: it is the only guard
+    on the consuming side against a consistent re-stamp.
+  - **Considered and rejected:** holding the channel past N messages set
+    aside in a window.
+  - **Added:**
+    - the rollout's order: the gauge and its page before setting aside;
+    - the line between a row set aside and a parked row.
+  - **The library's key sources added** to § References.
 
