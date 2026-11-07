@@ -428,3 +428,103 @@ async fn a_lock_on_the_rows_set_aside_holds_a_poison_then_sets_it_aside_once() {
     assert_eq!(f.count("SELECT seen::bigint FROM {table}_rejects").await, 1);
     assert_eq!(f.seen.0.lock().unwrap().len(), 1, "told once");
 }
+
+/// A message whose identity another intake is storing at that moment — a
+/// rebalance handing it to two members at once — waits for that intake's
+/// transaction: committed, the message is a duplicate; rolled back, it is
+/// stored. Never set aside, never an error, never two rows.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn an_intake_waits_for_another_storing_the_same_identity() {
+    for commit in [true, false] {
+        let f = fixture(if commit {
+            "racing_commit"
+        } else {
+            "racing_rollback"
+        })
+        .await;
+        let message = order("1", ID_1, "p");
+        assert!(matches!(f.intake(&message).await, Admission::Stored(_)));
+        // the row as an intake writes it, written again by another
+        // transaction, in flight: the copy kept, the row gone, then the insert
+        let (holder, connection) = config().connect(NoTls).await.unwrap();
+        tokio::spawn(connection);
+        // Two queries: statements of one query before a BEGIN share its
+        // transaction, and the rollback would restore the row.
+        holder
+            .batch_execute(&format!(
+                "CREATE TEMP TABLE held AS SELECT * FROM {t}; DELETE FROM {t}",
+                t = f.table
+            ))
+            .await
+            .unwrap();
+        holder
+            .batch_execute(&format!(
+                "BEGIN; \
+                 INSERT INTO {t} (tenant_id, stream_type, stream_id, stream_position, uri, payload, metadata) \
+                 SELECT tenant_id, stream_type, stream_id, stream_position, uri, payload, metadata FROM held",
+                t = f.table
+            ))
+            .await
+            .unwrap();
+        let racing = {
+            let inbox = Arc::clone(&f.inbox);
+            let message = message.clone();
+            tokio::spawn(async move { inbox.intake("inbox://orders/k", &message).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !racing.is_finished(),
+            "the intake waits for the transaction in flight"
+        );
+        holder
+            .batch_execute(if commit { "COMMIT" } else { "ROLLBACK" })
+            .await
+            .unwrap();
+        let admission = racing.await.unwrap().unwrap();
+        if commit {
+            assert_eq!(admission, Admission::Duplicate);
+        } else {
+            assert!(matches!(admission, Admission::Stored(_)), "{admission:?}");
+        }
+        assert_eq!(f.rows().await, 1);
+        assert_eq!(f.count("SELECT count(*) FROM {table}_rejects").await, 0);
+    }
+}
+
+/// Many intakes of one message at once, for many identities: each is stored
+/// once, every other intake finds it a duplicate, and none is set aside or
+/// fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn many_intakes_of_one_message_at_once_store_it_once() {
+    let f = fixture("racing_many").await;
+    let mut stored = 0;
+    let mut duplicates = 0;
+    for position in 1..=20 {
+        let message = order(
+            &position.to_string(),
+            &format!("0190a01a-7e5b-7d80-a000-{position:012}"),
+            "p",
+        );
+        let racing: Vec<_> = (0..8)
+            .map(|_| {
+                let (inbox, message) = (Arc::clone(&f.inbox), message.clone());
+                tokio::spawn(async move { inbox.intake("inbox://orders/k", &message).await })
+            })
+            .collect();
+        let mut stored_here = 0;
+        for task in racing {
+            match task.await.unwrap() {
+                Ok(Admission::Stored(_)) => stored_here += 1,
+                Ok(Admission::Duplicate) => duplicates += 1,
+                other => panic!("position {position}: {other:?}"),
+            }
+        }
+        assert_eq!(stored_here, 1, "position {position} stored once");
+        stored += stored_here;
+    }
+    assert_eq!((stored, duplicates), (20, 140));
+    assert_eq!(f.rows().await, 20);
+    assert_eq!(f.count("SELECT count(*) FROM {table}_rejects").await, 0);
+}
