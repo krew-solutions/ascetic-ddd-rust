@@ -187,6 +187,12 @@ echo "   violation found, as expected"
 echo "== inbox, statement by statement: as implemented, every step refines Inbox.tla and every property holds"
 tlc -config InboxPg.cfg MCInboxPg.tla
 
+echo "== inbox, statement by statement: with waits that run out beside the dispatchers, every step refines Inbox.tla and every property holds"
+tlc -config InboxPgExpires.cfg MCInboxPg.tla
+
+echo "== inbox, statement by statement: an expiry clearing the identity waited for, TLC must find a message never processed"
+must_fail InboxPgExpiresForgets MCInboxPg.tla "Temporal properties were violated"
+
 echo "== inbox, statement by statement: without the advisory lock, TLC must find a message waiting for a processed dependency"
 if tlc -config InboxPgNoLock.cfg MCInboxPg.tla > "${TMPDIR:-/tmp}/tlc-inboxpg-nolock.log" 2>&1; then
   echo "unexpected: no lost wake without the lock"; exit 1

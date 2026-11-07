@@ -354,6 +354,21 @@ Three switches name the designs the module was written to tell apart, and
   ADR-0009. Two slots of two messages each, every head depending on a
   message that never arrives, crosswise: TLC finds `NoDeadlock` violated,
   each dispatcher holding the lock the other wants.
+- `InboxPgExpires.cfg`: as implemented, with waits that run out (`Expires =
+  TRUE`): the expiry's statement runs beside the dispatchers, FOR UPDATE
+  SKIP LOCKED, so that a row an in-flight transaction holds — its wait being
+  set, its wake by a mark — is skipped, and any other is re-checked against
+  its latest version. A parked row keeps the identity it waited for
+  (ADR-0036 R8). A mark that meets the expiry in flight waits for its
+  commit and re-checks the row the same way, so the expiry first, as the
+  model has it, covers that interleaving. `Refines` holds with `parked` and
+  `expired` read through the mapping, and `EventuallyProcessed` holds: a
+  message parked when its wait ran out is woken by its dependency's mark.
+  About 2.4 million states, six and a half minutes.
+- `InboxPgExpiresForgets.cfg`: the same with `ForgetsOnExpiry = TRUE`, the
+  expiry as it was before R8, clearing `waiting_for`. TLC finds
+  `EventuallyProcessed` violated: the second message parked when its wait
+  ran out, the first marked, and the second never woken.
 
 ## Bridge — `Bridge.tla`
 

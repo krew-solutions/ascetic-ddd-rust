@@ -914,3 +914,17 @@ This ADR's own:
     holds in `InboxLateDep.cfg`; `InboxLateDepForgets.cfg`, the expiry as
     it was, is refuted. `InboxPg.tla` refines the inbox without expiry, and
     is unchanged.
+- 2026-11-07 — Two claims of the build checked further, asked by the owner.
+  - **R8 statement by statement.** `InboxPg.tla` gains the expiry as a
+    statement of its own beside the dispatchers (`Expires`). The model
+    refines `Inbox.tla` with parked and expired rows read through the
+    mapping, and `EventuallyProcessed` holds with waits that run out.
+    `InboxPgExpiresForgets.cfg`, the expiry clearing `waiting_for` as it
+    did, is refuted: the dependent parked for good after its hole is
+    marked.
+  - **Two intakes of one identity at once**, a rebalance handing a message
+    to two members. A test holds a transaction that writes the row, in
+    flight: the intake waits for it, and finds a duplicate when it commits,
+    and stores the message when it rolls back. Many intakes of one message
+    at once store it once. Mutations caught: the intake under REPEATABLE
+    READ, and a plain insert.
