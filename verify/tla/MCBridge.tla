@@ -17,4 +17,9 @@ MCOneMsg == {m1}
 MCOneUri == {u1}
 MCOneDst == {v1}
 
+\* What the intake can never store: one message among the three, between the
+\* others; none; and the one message of the small instance.
+MCUnstorable == {m2}
+MCStorable == {}
+
 =============================================================================

@@ -67,7 +67,10 @@ XidOf == [m \in Arrives |-> Stored(m).xid]
 PosOf == [m \in Arrives |-> Stored(m).pos]
 \* A dependency that never arrives is a message all the same: it is what the
 \* dependent one waits for.
-Msgs == Arrives \cup UNION {Range(r.deps) : r \in Receives}
+\* A message the intake set aside, in a bridge trace, is a message of the
+\* instance that never arrives as well (ADR-0036).
+SetAside == {r.msg : r \in {r \in Events : r.side = "bridge" /\ r.event = "set_aside"}}
+Msgs == Arrives \cup UNION {Range(r.deps) : r \in Receives} \cup SetAside
 Deps == [m \in Msgs |-> IF m \in Arrives THEN Range((CHOOSE r \in Receives : r.msg = m).deps) ELSE {}]
 Slots == IF Dispatching = {} THEN {0} ELSE 0..((CHOOSE r \in Dispatching : TRUE).of - 1)
 MaxCrashes == Cardinality({j \in 1..Len(Trace) : Trace[j].side = "inbox" /\ Trace[j].event \in {"crash", "fail"}})

@@ -360,11 +360,22 @@ instance: three messages over two URIs, one source slot, two destination
 partitions with a dispatcher each, batches of two, one crash per side; which
 URI a message has and which partition a URI lands on are left open.
 
+The intake takes every message (ADR-0036). One message of the instance is
+one it can never store: it is set aside, its row committed in a transaction
+of its own, and only then does the subscriber return, a step of its own, so
+that a death falls between the two and the message, delivered again, is the
+same row set aside. An environment hold, the inbox's database out of reach
+once, stops both the store and the setting aside until it passes, with
+fairness to the recovery.
+
 | property | kind | meaning |
 | --- | --- | --- |
 | `SourceInvariants`, `DestinationInvariants` | invariants | everything the outbox and the inbox proved alone still holds in the composition |
 | `ReceivedWasCommitted` | invariant | the inbox holds rows only for messages committed at the source |
-| `EventuallyProcessed` | liveness | every message committed at the source is eventually processed at the destination |
+| `EventuallyProcessed` | liveness | every message committed at the source that the intake can store is eventually processed at the destination |
+| `EventuallySetAside` | liveness | every committed message the intake can never store is eventually set aside |
+| `SetAsideOnlyUnstorable` | invariant | only a message the intake can never store is set aside: an environment hold diverts nothing |
+| `SetAsideNeverStored` | invariant | a message set aside was never stored as a row |
 | `EndToEndOrder` | invariant | messages of one URI are processed in the order they were published |
 
 `EventuallyProcessed` with the inbox's `EffectsOnce` is the theorem the whole
@@ -379,10 +390,17 @@ URI goes through, which `Inbox.tla` allows.
 handled on delivery and stores it afterwards, the shape of the channel API in
 the earlier Go port. TLC finds the loss on a single message: delivered,
 acknowledged, the process dies, the store never happens. `check.sh` requires
-that violation.
+that violation, and three more, one for each way the setting aside could be
+wrong:
 
-The main configuration explores three quarters of a million states and takes
-a few minutes; the rest run in seconds.
+| configuration | the mutation | what TLC finds |
+| --- | --- | --- |
+| `BridgeAckWithoutSetAside.cfg` | the subscriber returns on an unstorable message without setting it aside | a committed message set nowhere (`EventuallySetAside`) |
+| `BridgeSetAsideOnHold.cfg` | a message is set aside because the inbox's database holds | a storable message diverted (`SetAsideOnlyUnstorable`) |
+| `BridgeAckBeforeReject.cfg` | the subscriber returns before the row set aside commits | acknowledged, the position moved, the process dies before the commit: a message set nowhere (`EventuallySetAside`) |
+
+The main configuration explores 1.6 million distinct states and takes about
+seven minutes; the rest run in seconds.
 
 
 ## Trace validation — `TraceOutbox.tla`, `TraceInbox.tla`, `TraceBridge.tla`
@@ -470,22 +488,31 @@ returns, and the outbox counts it handled. The trace shows two events, the
 inbox's receive and the outbox's handle, and `trace2tla.py` joins them into
 one step placed where the store happened. A handle without a store, or a
 store outside a handling, is refused: with the store before the
-acknowledgement those are not steps of the bridge.
+acknowledgement those are not steps of the bridge. A message the intake set
+aside is two steps of the model, `SetAside` and `Acknowledge`; the trace shows
+the inbox's rejection, which names no message — its identity may be what
+could not be read — and the outbox's next handling with no store, which is
+the message set aside. `trace2tla.py` names them `set_aside` and
+`acknowledge`, and a rejection no handling follows, or a handling before its
+rejection, is refused. A message set aside is a message of the instance that
+never arrives, as a dependency that never arrives is.
 
 A fetch that took no slot names the group only, and the check then speaks for
 every slot: none may have had visible work. `traces/` holds one recorded run
 per test: the outbox and inbox tests, the
 inbox's bridge tests from an in-memory broker, and the one run of an outbox
-feeding an inbox. Two outbox tests are not recorded there, because what they
+feeding an inbox, and the one where the inbox sets aside a row the outbox
+holds without a position. Two outbox tests are not recorded there, because what they
 exercise the model does not describe: moving the position by hand
 (`set_position`), and the URI filter of a selection. `traces/forged/` holds
-four runs edited by hand: an outbox dispatcher without the visibility rule,
+five runs edited by hand: an outbox dispatcher without the visibility rule,
 fetching the later, committed transaction while the earlier one is open; an
 inbox dispatcher that takes a message before the one it depends on; an inbox
 fetch that returns a row its snapshot could not have seen; a bridge that
 stores the message after acknowledging the batch, the shape
-`BridgeAckFirst.cfg` shows loses messages. `check.sh` requires TLC to refuse
-all four.
+`BridgeAckFirst.cfg` shows loses messages; a bridge that counts a message
+handled before the inbox set it aside, the shape `BridgeAckBeforeReject.cfg`
+shows loses messages. `check.sh` requires TLC to refuse all five.
 
 What a trace check cannot see: the order of lines is the order the observer
 was called in, on one thread, and two tasks' lines may come in the other order

@@ -64,6 +64,14 @@ on both sides and one step of its own:
                               -> forward   (d, msg, dup, pos, xid, slot, deps): Bridge's Forward, at the store
     a handled ok with no store, or a store no handling follows
                               -> handle / receive, as above: not steps of the bridge, refused
+    inbox rejected + the outbox's next handled ok with no store
+                              -> set_aside (d, msg), at the rejection, and acknowledge (d, msg), at the
+                                 handling: Bridge's SetAside and Acknowledge, two steps (ADR-0036)
+    a rejected no handling follows, or a handling before its rejection
+                              -> rejected / handle: not steps of the bridge, refused
+
+A message set aside never became a row, so the inbox's own mapping skips a
+`rejected`: the inbox's model has nothing of it to check.
 """
 import json
 import pathlib
@@ -188,6 +196,8 @@ def inbox_steps(events, names=None, by_message_id=False):
 
     for e in events:
         kind = e["event"]
+        if kind == "rejected":
+            continue
         if kind == "unparked":
             yield record(side="inbox", event="unpark", msg=row(e["id"], "an unpark"))
             continue
@@ -272,10 +282,14 @@ def bridge_steps(events):
     Line by line: each side's mapping is re-run on its lines so far and the
     newly produced steps are appended, so the two sides interleave as they
     did; a receive stays a placeholder until the handling of the same message
-    joins it, and one nothing joins is refused by the model."""
+    joins it, and one nothing joins is refused by the model. A rejection
+    names no message, its identity being perhaps what could not be read: it
+    stays a placeholder until the outbox's next handling with no store joins
+    it, which is the message the intake set aside."""
     names = Names()
     out = []
     stores = {}
+    asides = []  # the places of rejections no handling has joined yet
     outbox_seen, inbox_seen = [], []
     produced_outbox = produced_inbox = 0
     for e in events:
@@ -284,6 +298,10 @@ def bridge_steps(events):
             steps = list(outbox_steps(outbox_seen, names))
             new = steps[produced_outbox:]
             produced_outbox = len(steps)
+        elif e["event"] == "rejected":
+            asides.append(len(out))
+            out.append(record(side="inbox", event="rejected"))
+            continue
         else:
             inbox_seen.append(e)
             steps = list(inbox_steps(inbox_seen, names, by_message_id=True))
@@ -300,6 +318,9 @@ def bridge_steps(events):
                 out[at] = record(side="bridge", event="forward", d=fields["d"], msg=fields["msg"],
                                  dup=store["event"] == "duplicate", pos=store.get("pos", 0),
                                  xid=store.get("xid", 0), slot=store.get("slot", 0), deps=store.get("deps", []))
+            elif fields["side"] == "outbox" and fields["event"] == "handle" and asides:
+                out[asides.pop(0)] = record(side="bridge", event="set_aside", d=fields["d"], msg=fields["msg"])
+                out.append(record(side="bridge", event="acknowledge", d=fields["d"], msg=fields["msg"]))
             else:
                 out.append(step)
     return out
@@ -313,7 +334,7 @@ CHECKERS = {
                "ProcessedWasReceived", "ParkedIsAside", "NotFinished"]),
     "bridge": (bridge_steps, "TraceBridge",
                ["TypeOK", "SourceInvariants", "DestinationInvariants", "ReceivedWasCommitted",
-                "EndToEndOrder", "NotFinished"]),
+                "EndToEndOrder", "SetAsideNeverStored", "NotFinished"]),
 }
 
 

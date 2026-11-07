@@ -242,3 +242,19 @@ if tlc -config BridgeAckFirst.cfg MCBridge.tla > "${TMPDIR:-/tmp}/tlc-bridge-ack
 fi
 grep -q "Temporal properties were violated" "${TMPDIR:-/tmp}/tlc-bridge-ackfirst.log"
 echo "   violation found, as expected"
+
+echo "== bridge: an unstorable message acknowledged without being set aside, TLC must find it set nowhere"
+must_fail BridgeAckWithoutSetAside MCBridge.tla "Temporal properties were violated"
+
+echo "== bridge: a message set aside because the inbox's database holds, TLC must find a storable one diverted"
+must_fail BridgeSetAsideOnHold MCBridge.tla "Invariant SetAsideOnlyUnstorable is violated"
+
+echo "== bridge: acknowledged before the row set aside commits, TLC must find a message set nowhere"
+must_fail BridgeAckBeforeReject MCBridge.tla "Temporal properties were violated"
+
+echo "== bridge: a forged run, handling a message before its rejection, must not fit"
+if check_trace traces/forged/bridge-ack-before-reject.jsonl > "${TMPDIR:-/tmp}/tlc-bridge-forged-reject.log" 2>&1; then
+  echo "unexpected: the forged run fits the model"; exit 1
+fi
+grep -q "Deadlock reached" "${TMPDIR:-/tmp}/tlc-bridge-forged-reject.log" || { cat "${TMPDIR:-/tmp}/tlc-bridge-forged-reject.log"; exit 1; }
+echo "   refused, as expected"
