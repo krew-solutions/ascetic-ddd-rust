@@ -219,7 +219,8 @@ cut is checked, including dependencies across slots.
 | `CausalOrder` | invariant | a message is processed only after everything it depends on |
 | `HeldOnce` | invariant | a row is held by one slot at a time, and a slot holds one row |
 | `ParkedIsAside` | invariant | a parked message is out of the queue, unprocessed, and got there by exhausting its attempts or its wait |
-| `WaitingIsAside` | invariant | a message set aside waits for a dependency of its own that is not processed, and is neither processed nor parked meanwhile |
+| `WaitingIsAside` | invariant | a message set aside waits for a dependency of its own that is not processed, and is neither processed nor parked meanwhile, unless its wait ran out: then it is parked and keeps the identity |
+| `WokenAfterExpiry` | liveness | a row whose wait ran out does not stay parked once what it depends on is processed: the mark of the hole unparks it (ADR-0036 R8) |
 | `ArrivalOrder` | invariant | messages without dependencies of one slot are processed in order of arrival |
 | `EventuallyProcessed` | liveness | a received message whose dependencies are processed is eventually processed, unless its subscriber never succeeds |
 | `EventuallyParked` | liveness | with parking on, a message whose subscriber never succeeds is eventually parked or resolved |
@@ -241,6 +242,13 @@ waited for it, in the same step. Three configurations pin the decisions:
   message is parked with its dependency named, `Expire`, and
   `EventuallyAside` holds: every received message ends up processed or
   parked.
+- `InboxLateDep.cfg`: waits run out and the first message arrives all the
+  same, perhaps after the second's wait ran out. The second keeps the
+  identity it waited for while parked, the first's mark unparks it, and
+  `WokenAfterExpiry` holds with every property above (ADR-0036 R8).
+- `InboxLateDepForgets.cfg`: the same with the expiry as it was before R8,
+  forgetting the identity (`Expire <- ExpireForgetting`). TLC finds the
+  second message parked for good once the first is processed.
 - `InboxNoWaiting.cfg`: the head is not set aside but waits in place. TLC
   finds the slot held: the second message arrives before the first,
   sits at the head, and nothing behind it, its own dependency included, is

@@ -896,3 +896,21 @@ This ADR's own:
     readmit after a fix on the consuming side, a bulk readmit, discard and
     retention; seven mutations caught, among them every channel
     readmitting by default.
+- 2026-11-07 — R8 built, with its model; A3 is complete.
+  - **The expiry keeps the identity waited for.** A row parked when its
+    wait runs out keeps `waiting_for`, without the time of its wait, so it
+    does not expire again; the mark or the resolve of that identity
+    unparks it with the rows that still wait. An unpark and a resolve
+    clear it, so that an unparked row waits afresh and its wait runs out
+    afresh.
+  - **Executors:** a hole that arrives after its dependent's wait ran out
+    wakes the dependent, processed without an unpark (mutations caught:
+    the expiry forgetting the identity; the mark leaving it parked); a row
+    unparked by hand while its hole is missing waits again and runs out
+    again (mutation caught: the unpark keeping the wait).
+  - **`Inbox.tla`:** `Expire` keeps the identity, `Commit` and `Resolve`
+    unpark what it names, `Unpark` and `Resolve` clear it, and
+    `WaitingIsAside` admits a parked row that waited. `WokenAfterExpiry`
+    holds in `InboxLateDep.cfg`; `InboxLateDepForgets.cfg`, the expiry as
+    it was, is refuted. `InboxPg.tla` refines the inbox without expiry, and
+    is unchanged.

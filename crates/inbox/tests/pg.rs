@@ -1554,6 +1554,67 @@ async fn the_observer_sees_the_protocol() {
     assert!(marked.windows(2).all(|pair| pair[0].1 < pair[1].1));
 }
 
+/// A hole filled after its dependent's wait ran out — readmitted, or
+/// arrived late — wakes the dependent, parked with the identity it waited
+/// for: it is processed without an unpark (ADR-0036 R8). Before, the expiry
+/// forgot the identity, and the dependent stayed parked for good.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_hole_filled_after_the_wait_ran_out_wakes_its_dependent() {
+    let f = fixture("hole_after_expiry")
+        .await
+        .with_max_wait(Duration::from_millis(300));
+    let cause = message("user", 5);
+    let effect = message("order", 1).depending_on(&[CausalDependency::on(&cause)]);
+    f.publish(std::slice::from_ref(&effect)).await;
+    let (seen, subscriber) = collector();
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::SetAside);
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
+    assert_eq!(f.parked().await, ["order@1"], "the wait ran out");
+
+    f.publish(std::slice::from_ref(&cause)).await;
+    while f.dispatch(&subscriber).await != Outcome::Nothing {}
+
+    assert_eq!(*seen.lock().unwrap(), ["user@5", "order@1"]);
+    assert!(f.parked().await.is_empty(), "woken, not unparked by hand");
+}
+
+/// A row whose wait ran out, unparked by hand while its dependency is still
+/// missing, waits again, and its wait runs out again: the unpark clears the
+/// identity it kept (ADR-0036 R8), or the row would be neither in the queue
+/// nor parked nor waiting with a time.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn an_unparked_row_whose_wait_ran_out_waits_again() {
+    let f = fixture("unparked_after_expiry")
+        .await
+        .with_max_wait(Duration::from_millis(300));
+    let cause = message("user", 5);
+    let effect = message("order", 1).depending_on(&[CausalDependency::on(&cause)]);
+    f.publish(std::slice::from_ref(&effect)).await;
+    let (_, subscriber) = collector();
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::SetAside);
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
+    assert_eq!(f.parked().await, ["order@1"]);
+
+    let unparked = f
+        .sessions
+        .session(async |session| f.inbox.unpark(&session, &effect).await)
+        .await
+        .unwrap();
+    assert!(unparked);
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::SetAside,
+        "waits again"
+    );
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
+    assert_eq!(f.parked().await, ["order@1"], "and runs out again");
+}
+
 /// A message whose dependency never arrives waits out of the queue, costing
 /// the walk nothing, and with `max_wait` set is parked with the dependency
 /// named (ADR-0006).

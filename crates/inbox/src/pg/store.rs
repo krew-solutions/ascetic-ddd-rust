@@ -414,7 +414,11 @@ where
     }
 
     /// Parks the rows that have waited longer than `max_wait`, naming the
-    /// dependency in their `last_error`, and returns them, oldest first.
+    /// dependency in their `last_error`, and returns them, oldest first. A
+    /// row parked so keeps the identity it waited for, so that the mark of
+    /// that identity — the hole readmitted, or arrived late — puts it back
+    /// in the queue (ADR-0036 R8); without the time of its wait, it does not
+    /// expire again.
     pub(super) async fn expire_waiting(
         &self,
         session: &P::Session,
@@ -423,7 +427,7 @@ where
         let sql = format!(
             "UPDATE {table} SET parked_at = CURRENT_TIMESTAMP, \
                 last_error = 'dependency ' || waiting_for::text || ' never arrived', \
-                waiting_for = NULL, waiting_since = NULL \
+                waiting_since = NULL \
              WHERE ctid IN ( \
                 SELECT ctid FROM {table} \
                 WHERE waiting_for IS NOT NULL \
@@ -481,7 +485,7 @@ where
                 WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4 \
                 RETURNING processed_position \
              ), woken AS ( \
-                UPDATE {table} SET waiting_for = NULL, waiting_since = NULL \
+                UPDATE {table} SET waiting_for = NULL, waiting_since = NULL, parked_at = NULL \
                 WHERE waiting_for = $5::jsonb \
                 RETURNING {COLUMNS} \
              ) \
@@ -567,7 +571,8 @@ where
         message: &InboxMessage,
     ) -> Result<bool, Error> {
         let sql = format!(
-            "UPDATE {} SET parked_at = NULL, attempts = 0, next_attempt_at = NULL \
+            "UPDATE {} SET parked_at = NULL, attempts = 0, next_attempt_at = NULL, \
+                 waiting_for = NULL, waiting_since = NULL \
              WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4 \
                AND parked_at IS NOT NULL",
             self.table
@@ -589,12 +594,12 @@ where
         let sql = format!(
             "WITH resolved AS ( \
                 UPDATE {table} SET parked_at = NULL, processed_position = nextval('{sequence}'), \
-                    processed_at = statement_timestamp() \
+                    processed_at = statement_timestamp(), waiting_for = NULL, waiting_since = NULL \
                 WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4 \
                   AND parked_at IS NOT NULL \
                 RETURNING processed_position \
              ), woken AS ( \
-                UPDATE {table} SET waiting_for = NULL, waiting_since = NULL \
+                UPDATE {table} SET waiting_for = NULL, waiting_since = NULL, parked_at = NULL \
                 WHERE waiting_for = $5::jsonb AND EXISTS (SELECT 1 FROM resolved) \
                 RETURNING {COLUMNS} \
              ) \

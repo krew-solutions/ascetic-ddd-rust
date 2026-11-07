@@ -195,6 +195,10 @@ Settle(d) ==
 \* A wait not committed yet -- its row still held -- is not seen.
 Woken(m) == [n \in Msgs |-> IF waiting[n] = m /\ (AtomicWait \/ n \notin Locked) THEN None ELSE waiting[n]]
 
+\* What was parked when its wait for m ran out, keeping m: the same
+\* statement unparks it (ADR-0036 R8).
+WokenFromExpiry(m) == {n \in expired : waiting[n] = m}
+
 \* The subscriber ran with the dispatcher's transaction; its writes, the
 \* mark and the waking of what waited for the message commit together.  A
 \* poison message never gets here.
@@ -206,8 +210,10 @@ Commit(d) ==
   /\ effects' = [effects EXCEPT ![holding[d]] = @ + 1]
   /\ procOrder' = Append(procOrder, holding[d])
   /\ waiting' = Woken(holding[d])
+  /\ parked' = parked \ WokenFromExpiry(holding[d])
+  /\ expired' = expired \ WokenFromExpiry(holding[d])
   /\ holding' = [holding EXCEPT ![d] = None]
-  /\ UNCHANGED <<part, received, recvPos, nextRecv, crashes, attempts, due, parked, resolved, admin, expired>>
+  /\ UNCHANGED <<part, received, recvPos, nextRecv, crashes, attempts, due, resolved, admin>>
 
 \* The subscriber returned an error: its writes roll back to the savepoint,
 \* the attempt is recorded in the same transaction, and the row is not due
@@ -237,10 +243,25 @@ Elapse(m) ==
                 attempts, parked, resolved, admin, waiting, expired>>
 
 \* The wait of a row set aside has run out: it is parked, with the
-\* dependency named, and the partition owes it nothing more.
+\* dependency named, and the partition owes it nothing more.  It keeps the
+\* identity it waited for, so that the mark of that identity -- the hole
+\* readmitted, or arrived late -- unparks it (ADR-0036 R8).
 Expire(m) ==
   /\ WaitExpires
   /\ waiting[m] # None
+  /\ m \notin expired
+  /\ parked' = parked \cup {m}
+  /\ expired' = expired \cup {m}
+  /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
+                attempts, due, resolved, admin, waiting>>
+
+\* The expiry as it was before ADR-0036 R8, forgetting the identity waited
+\* for: InboxLateDepForgets.cfg puts it in Expire's place, and TLC finds the
+\* dependent parked for good once the hole is filled.
+ExpireForgetting(m) ==
+  /\ WaitExpires
+  /\ waiting[m] # None
+  /\ m \notin expired
   /\ waiting' = [waiting EXCEPT ![m] = None]
   /\ parked' = parked \cup {m}
   /\ expired' = expired \cup {m}
@@ -262,8 +283,8 @@ Crash(d) ==
 (* Operators                                                                  *)
 
 \* A parked row is given another go: attempts reset, due at once, back in
-\* the queue; one whose wait ran out waits again if its dependency is still
-\* unprocessed.
+\* the queue, the identity it waited for cleared; one whose wait ran out
+\* waits again if its dependency is still unprocessed.
 Unpark(m) ==
   /\ m \in parked
   /\ admin < MaxAdmin
@@ -272,7 +293,8 @@ Unpark(m) ==
   /\ expired' = expired \ {m}
   /\ attempts' = [attempts EXCEPT ![m] = 0]
   /\ due' = [due EXCEPT ![m] = TRUE]
-  /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes, resolved, waiting>>
+  /\ waiting' = [waiting EXCEPT ![m] = None]
+  /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes, resolved>>
 
 \* A parked row is marked processed by hand, without the subscriber's
 \* effects; what waited for it comes back into the queue.
@@ -280,12 +302,12 @@ Resolve(m) ==
   /\ m \in parked
   /\ admin < MaxAdmin
   /\ admin' = admin + 1
-  /\ parked' = parked \ {m}
-  /\ expired' = expired \ {m}
+  /\ parked' = (parked \ {m}) \ WokenFromExpiry(m)
+  /\ expired' = (expired \ {m}) \ WokenFromExpiry(m)
   /\ processed' = processed \cup {m}
   /\ resolved' = resolved \cup {m}
   /\ procOrder' = Append(procOrder, m)
-  /\ waiting' = Woken(m)
+  /\ waiting' = [Woken(m) EXCEPT ![m] = None]
   /\ UNCHANGED <<part, received, recvPos, nextRecv, effects, holding, crashes, attempts, due>>
 
 (* ------------------------------------------------------------------------ *)
@@ -341,11 +363,17 @@ ParkedIsAside ==
 
 \* A message set aside waits for a dependency of its own that is not yet
 \* processed — never for one already processed, which nothing would wake it
-\* from — and is neither processed nor parked meanwhile.
+\* from — and is neither processed nor parked meanwhile, unless its wait ran
+\* out: then it is parked, keeping the identity (ADR-0036 R8).
 WaitingIsAside ==
   \A m \in Msgs : waiting[m] # None =>
     /\ waiting[m] \in Deps[m] /\ waiting[m] \notin processed
-    /\ m \notin processed /\ m \notin parked
+    /\ m \notin processed /\ (m \notin parked \/ m \in expired)
+
+\* A row whose wait ran out does not stay parked once what it depends on is
+\* processed: the hole filled, it is back in the queue (ADR-0036 R8).
+WokenAfterExpiry ==
+  \A m \in Msgs : (m \in expired /\ Deps[m] \subseteq processed) ~> (m \notin expired)
 
 \* A message is processed only after everything it depends on.
 CausalOrder == \A m \in processed : Deps[m] \subseteq processed
