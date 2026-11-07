@@ -63,6 +63,36 @@ others behind features, so that `ascetic_ddd::saga` keeps working as one import
 | [`ascetic-ddd-session`](crates/session) | `ascetic_ddd/session` | Unit of Work: session scopes, savepoints, identity map, REST and composite sessions, PostgreSQL adapter *(in progress)* |
 | [`ascetic-ddd-trace`](crates/trace) | — | Recorders of what the outbox and the inbox report, for trace validation against the TLA+ models |
 
+## Sources
+
+The library's design grows from these sources, and its ADRs cite them.
+Read them before changing the bus, the outbox or the inbox. ADR-0036
+§ References keeps the same list.
+
+- "[Don't Settle for Eventual Consistency. Stronger properties for
+  low-latency geo-replicated storage](https://queue.acm.org/detail.cfm?id=2610533)"
+  ([pdf](https://dl.acm.org/ft_gateway.cfm?id=2610533&ftid=1449165&dwn=1)) by
+  Wyatt Lloyd (Facebook), Michael J. Freedman (Princeton University), Michael
+  Kaminsky (Intel Labs) and David G. Andersen (Carnegie Mellon University).
+- "[Bolt-on Causal Consistency](http://www.bailis.org/papers/bolton-sigmod2013.pdf)"
+  by Peter Bailis, Ali Ghodsi, Joseph M. Hellerstein and Ion Stoica (UC
+  Berkeley, KTH/Royal Institute of Technology).
+- "[Detecting Causal Relationships in Distributed Computations: In Search
+  of the Holy Grail](https://disco.ethz.ch/courses/hs08/seminar/papers/mattern4.pdf)"
+  by Reinhard Schwarz and Friedemann Mattern.
+- "[Principles of Eventual Consistency](https://www.microsoft.com/en-us/research/publication/principles-of-eventual-consistency/)"
+  ([pdf](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/final-printversion-10-5-14.pdf))
+  by Sebastian Burckhardt (Microsoft Research).
+- "[Reactive Messaging Patterns with the Actor Model: Applications and
+  Integration in Scala and Akka](https://kalele.io/books/)" by Vaughn Vernon:
+  - Chapter 9, Message Endpoints: Transactional Client/Actor;
+  - Chapter 10, System Management and Infrastructure: Message
+    Metadata/History, Message Journal Store.
+- "[Domain Events in DDD](https://dckms.github.io/system-architecture/emacsway/it/ddd/tactical-design/domain-model/domain-events/domain-events-in-ddd.html)"
+  by Ivan Zakrevsky.
+- "[About the message race in terms of competing subscribers](https://dckms.github.io/system-architecture/emacsway/it/integration/asynchronous/message-ordering-in-competing-consumers.html)"
+  by Ivan Zakrevsky.
+
 ## Architecture decisions
 
 - [ADR-0001](docs/src/adr/0001-session-is-a-cloneable-handle.md) — a session is a
@@ -79,7 +109,8 @@ others behind features, so that `ascetic_ddd::saga` keeps working as one import
   message ahead of its dependency waits out of the queue, and is woken by the
   dependency's mark *(the wait's transaction is amended by ADR-0009)*.
 - [ADR-0007](docs/src/adr/0007-a-dispatcher-owns-a-slot-by-locking-its-position.md) — a
-  dispatcher owns a slot by locking its position, and has no identity.
+  dispatcher owns a slot by locking its position, and has no identity
+  *(the relay's order is superseded by ADR-0035)*.
 - [ADR-0008](docs/src/adr/0008-the-inbox-takes-a-slot-by-locking-its-row.md) — the
   inbox takes a slot by locking its row, and its dispatcher has no identity
   *(the head's read is amended by ADR-0009)*.
@@ -119,6 +150,59 @@ others behind features, so that `ascetic_ddd::saga` keeps working as one import
   managed keys nothing that uses a key makes one; a rotation never makes the
   first version, and a retirement keeps the latest and never lowers the
   floor *(Proposed)*.
+- [ADR-0021](docs/src/adr/0021-a-member-is-read-where-the-mapping-puts-it-and-a-document-as-its-layout-says.md) —
+  a member is read where the mapping puts it, and a document as its layout
+  says *(amended by ADR-0022, ADR-0023 and ADR-0027)*.
+- [ADR-0022](docs/src/adr/0022-an-equality-where-only-truth-counts-is-containment-where-the-document-has-a-gin-index.md) —
+  an equality where only truth counts is containment, where the document
+  has a GIN index *(amended by ADR-0027)*.
+- [ADR-0023](docs/src/adr/0023-an-element-of-a-collection-of-values-is-the-item-itself.md) —
+  an element of a collection of values is the item itself *(amended by
+  ADR-0024 and ADR-0025)*.
+- [ADR-0024](docs/src/adr/0024-a-gin-index-on-a-path-of-a-document-serves-containment-of-the-value-there.md) —
+  a GIN index on a path of a document serves containment of the value
+  there.
+- [ADR-0025](docs/src/adr/0025-an-element-is-what-the-mapping-says-from-the-collections-predicate.md) —
+  an element is what the mapping says it is, from the collection's
+  predicate.
+- [ADR-0026](docs/src/adr/0026-the-typed-terms-quantify-a-collection-with-a-boolean-term.md) —
+  the typed terms quantify a collection with a boolean term.
+- [ADR-0027](docs/src/adr/0027-a-collection-of-a-document-that-is-not-an-array-has-no-items-and-a-containment-pattern-folds-under-a-custom-plan-alone.md) —
+  a collection of a document that is not an array has no items, and a
+  containment pattern folds under a custom plan alone *(decision 3
+  deferred, the owner's to decide)*.
+- [ADR-0028](docs/src/adr/0028-a-scope-that-absorbed-a-failed-statement-is-aborted-not-committed.md) —
+  a scope that absorbed a failed statement is aborted, not committed
+  *(Proposed, implemented)*.
+- [ADR-0029](docs/src/adr/0029-a-schema-moves-by-migrations-each-taking-its-one-table-first.md) —
+  a schema moves by migrations, each taking its one table first
+  *(Proposed, implemented)*.
+- [ADR-0030](docs/src/adr/0030-a-transaction-writes-one-message-per-identity-and-the-inbox-names-who-holds-one-it-ignores.md) —
+  a transaction writes one message per identity, and the inbox names who
+  holds one it ignores *(Proposed, implemented)*.
+- [ADR-0031](docs/src/adr/0031-a-broker-s-driver-settings-go-to-the-role-they-are-for.md) —
+  a broker's driver settings go to the role they are for *(Proposed,
+  implemented)*.
+- [ADR-0032](docs/src/adr/0032-a-broker-s-producers-share-one-driver-client-and-a-bridge-publishes-a-channel-through-one-producer.md) —
+  a broker's producers share one driver client, and a bridge publishes a
+  channel through one producer *(Proposed, implemented)*.
+- [ADR-0033](docs/src/adr/0033-a-row-the-bus-no-longer-needs-goes-by-the-range-on-the-outbox-and-by-the-row-on-the-inbox.md) —
+  a row the bus no longer needs goes, by the range on the outbox and by the
+  row on the inbox: the outbox's ring, the inbox's windows and sweep, the
+  producer's replay horizon.
+- [ADR-0034](docs/src/adr/0034-a-message-s-part-stands-beside-its-stream-and-the-inbox-s-slot-can-follow-its-addressee.md) —
+  a message's part stands beside its stream, and the inbox's slot can
+  follow its addressee *(Proposed, deferred by the host's measurement)*.
+- [ADR-0035](docs/src/adr/0035-the-outbox-hands-a-row-on-once-it-is-visible-in-the-order-its-position-was-drawn.md) —
+  the outbox hands a row on once it is visible, in the order its position
+  was drawn: the relay's epochs *(supersedes the relay's order of
+  ADR-0007)*.
+- [ADR-0036](docs/src/adr/0036-the-inbox-accounts-for-every-message-it-is-handed-and-only-its-environment-holds-the-source.md) —
+  the inbox accounts for every message it is handed, and only its
+  environment holds the source: the intake sets aside what it can never
+  store, the adapters deliver again what was not taken, and the operator's
+  surface disposes of the rows set aside *(Part A built; Part B, the parked
+  rows, waits)*.
 
 ## Specifications
 

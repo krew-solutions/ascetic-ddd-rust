@@ -1,10 +1,12 @@
 //! Tests for the in-memory adapter. Each test builds a bus and a broker of
 //! its own, so tests run in parallel without sharing state.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ascetic_ddd_bus::adapters::in_memory::InMemoryBroker;
-use ascetic_ddd_bus::{BoxError, Bus, Consumer, Error, Message, Producer};
+use ascetic_ddd_bus::adapters::in_memory::{DEFAULT_RETRY_AFTER, InMemoryBroker};
+use ascetic_ddd_bus::{BoxError, Bus, Consumer, Error, Message, Producer, Subscription};
 use tokio::sync::mpsc;
 
 fn setup() -> Bus {
@@ -281,21 +283,26 @@ async fn a_key_in_the_uri_selects_the_channel_and_keys_the_message() {
     assert_eq!(message.key(), Some(&b"order-7"[..]));
 }
 
-/// A handler that fails does not stop delivery of what follows.
-#[tokio::test]
-async fn a_failing_handler_does_not_stop_delivery() {
+/// A handler's error means the message was not taken: it is tried again,
+/// in order, and what follows waits until it is taken (ADR-0036 decision 3).
+#[tokio::test(start_paused = true)]
+async fn a_failing_handler_is_retried_and_holds_what_follows() {
     let bus = setup();
     let consumer = consumer(&bus, "in-memory://test.t1", "g");
+    let attempts = Arc::new(AtomicUsize::new(0));
     let (seen, mut inbox) = mpsc::unbounded_channel();
     consumer
-        .subscribe(move |value: String| {
-            let seen = seen.clone();
-            async move {
-                if value == "bad" {
-                    return Err::<(), BoxError>("refused".into());
+        .subscribe({
+            let attempts = Arc::clone(&attempts);
+            move |value: String| {
+                let (seen, attempts) = (seen.clone(), Arc::clone(&attempts));
+                async move {
+                    if value == "bad" && attempts.fetch_add(1, Ordering::SeqCst) < 3 {
+                        return Err::<(), BoxError>("refused".into());
+                    }
+                    seen.send(value).ok();
+                    Ok(())
                 }
-                seen.send(value).ok();
-                Ok(())
             }
         })
         .unwrap();
@@ -304,5 +311,203 @@ async fn a_failing_handler_does_not_stop_delivery() {
     producer.publish(&"bad".to_owned()).await.unwrap();
     producer.publish(&"good".to_owned()).await.unwrap();
 
+    assert_eq!(next(&mut inbox).await.as_deref(), Some("bad"));
     assert_eq!(next(&mut inbox).await.as_deref(), Some("good"));
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        4,
+        "three failures and a success"
+    );
+}
+
+/// A broker of `capacity`.
+fn small(capacity: usize) -> Bus {
+    let mut bus = Bus::new();
+    bus.register("in-memory", InMemoryBroker::with_capacity(capacity))
+        .unwrap();
+    bus
+}
+
+/// Subscribes a handler that notes what it is given and fails, for good.
+fn failing_for_good(consumer: &Consumer<String>) -> (Arc<Mutex<Vec<String>>>, Subscription) {
+    let tried = Arc::new(Mutex::new(Vec::new()));
+    let subscription = consumer
+        .subscribe({
+            let tried = Arc::clone(&tried);
+            move |value: String| {
+                tried.lock().unwrap().push(value);
+                async { Err::<(), BoxError>("down".into()) }
+            }
+        })
+        .unwrap();
+    (tried, subscription)
+}
+
+/// A group whose head fails for good holds itself alone: another group of
+/// the topic gets every message, in order, and producers are not held,
+/// however far past the capacity they publish.
+#[tokio::test(start_paused = true)]
+async fn a_group_failing_for_good_holds_neither_another_group_nor_producers() {
+    let bus = small(4);
+    let failing = consumer(&bus, "in-memory://orders", "failing");
+    let (tried, _held) = failing_for_good(&failing);
+    let healthy = consumer(&bus, "in-memory://orders", "healthy");
+    let mut inbox = collect(&healthy);
+    let producer = producer(&bus, "in-memory://orders");
+
+    for i in 0..17 {
+        tokio::time::timeout(Duration::from_secs(1), producer.publish(&i.to_string()))
+            .await
+            .expect("a producer is not held by a group that fails")
+            .unwrap();
+    }
+
+    for i in 0..17 {
+        assert_eq!(next(&mut inbox).await, Some(i.to_string()));
+    }
+    let tried = tried.lock().unwrap().clone();
+    assert!(
+        !tried.is_empty() && tried.iter().all(|value| value == "0"),
+        "the failing group is tried on its head alone: {tried:?}"
+    );
+}
+
+/// A handler that does not return holds the producers, once its group's
+/// backlog and the topic's queue are full: the back-pressure the queue
+/// exists for.
+#[tokio::test(start_paused = true)]
+async fn a_slow_handler_holds_producers_back() {
+    let bus = small(4);
+    let blocked = consumer(&bus, "in-memory://orders", "blocked");
+    let _subscription = blocked
+        .subscribe(|_: String| std::future::pending::<()>())
+        .unwrap();
+    let producer = producer(&bus, "in-memory://orders");
+
+    let mut published = 0;
+    while published < 32
+        && tokio::time::timeout(
+            Duration::from_secs(1),
+            producer.publish(&published.to_string()),
+        )
+        .await
+        .is_ok()
+    {
+        published += 1;
+    }
+
+    assert!(
+        (4..=10).contains(&published),
+        "{published} published before the producer waited"
+    );
+}
+
+/// Waits until `calls` has counted at least `n`.
+async fn called(calls: &AtomicUsize, n: usize) {
+    while calls.load(Ordering::SeqCst) < n {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// A cancel during the pause between two tries returns at once and makes no
+/// further call; the message in hand stays with the group, and the next
+/// handler is given it first, then what followed it.
+#[tokio::test(start_paused = true)]
+async fn a_cancel_in_the_pause_leaves_the_message_in_hand_to_the_next_handler() {
+    let bus = setup();
+    let consumer = consumer(&bus, "in-memory://orders", "g");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let first = consumer
+        .subscribe({
+            let calls = Arc::clone(&calls);
+            move |_: String| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Err::<(), BoxError>("down".into()) }
+            }
+        })
+        .unwrap();
+    let producer = producer(&bus, "in-memory://orders");
+    producer.publish(&"head".to_owned()).await.unwrap();
+    producer.publish(&"next".to_owned()).await.unwrap();
+    called(&calls, 1).await;
+
+    tokio::time::timeout(Duration::from_millis(1), first.cancel())
+        .await
+        .expect("nothing is in flight in the pause");
+    let after_cancel = calls.load(Ordering::SeqCst);
+    tokio::time::sleep(DEFAULT_RETRY_AFTER * 5).await;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        after_cancel,
+        "no call after the cancel"
+    );
+
+    let mut inbox = collect(&consumer);
+    assert_eq!(next(&mut inbox).await.as_deref(), Some("head"));
+    assert_eq!(next(&mut inbox).await.as_deref(), Some("next"));
+}
+
+/// A handler that replaces a failing one is given the message in hand at
+/// once, not after the pause; cancelling the earlier subscription leaves the
+/// later one attached.
+#[tokio::test(start_paused = true)]
+async fn a_replacing_handler_takes_the_message_in_hand_at_once() {
+    let bus = setup();
+    let consumer = consumer(&bus, "in-memory://orders", "g");
+    let (tried, earlier) = failing_for_good(&consumer);
+    let producer = producer(&bus, "in-memory://orders");
+    producer.publish(&"head".to_owned()).await.unwrap();
+    while tried.lock().unwrap().is_empty() {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+
+    let replaced_at = tokio::time::Instant::now();
+    let mut inbox = collect(&consumer);
+    assert_eq!(next(&mut inbox).await.as_deref(), Some("head"));
+    assert!(
+        replaced_at.elapsed() < DEFAULT_RETRY_AFTER / 10,
+        "tried after {:?}",
+        replaced_at.elapsed()
+    );
+
+    earlier.cancel().await;
+    producer.publish(&"after".to_owned()).await.unwrap();
+    assert_eq!(next(&mut inbox).await.as_deref(), Some("after"));
+}
+
+/// A consumer dropped with its handler attached goes on delivering, as a
+/// subscription made at the composition root does; once the subscription is
+/// cancelled as well, the group ends and its name is free again.
+#[tokio::test(start_paused = true)]
+async fn a_group_ends_with_both_its_subscription_and_its_consumer() {
+    let bus = setup();
+    let (seen, mut inbox) = mpsc::unbounded_channel();
+    let subscription = consumer(&bus, "in-memory://orders", "g")
+        .subscribe(move |value: String| {
+            let seen = seen.clone();
+            async move {
+                seen.send(value).ok();
+            }
+        })
+        .unwrap();
+    producer(&bus, "in-memory://orders")
+        .publish(&"kept".to_owned())
+        .await
+        .unwrap();
+    assert_eq!(next(&mut inbox).await.as_deref(), Some("kept"));
+    assert!(
+        bus.consumer("in-memory://orders", "g", as_text).is_err(),
+        "the group lives with its subscription"
+    );
+
+    subscription.cancel().await;
+    let mut freed = false;
+    for _ in 0..10 {
+        if bus.consumer("in-memory://orders", "g", as_text).is_ok() {
+            freed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert!(freed, "the group's name is free once both are gone");
 }

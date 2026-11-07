@@ -130,6 +130,12 @@ tlc -config InboxMissingDep.cfg MCInbox.tla
 echo "== inbox: with waits that run out, every received message ends up processed or parked"
 tlc -config InboxMissingDepExpires.cfg MCInbox.tla
 
+echo "== inbox: a dependency that arrives after the wait ran out wakes the dependent, every property holds"
+tlc -config InboxLateDep.cfg MCInbox.tla
+
+echo "== inbox: an expiry forgetting the identity waited for, TLC must find the dependent parked for good"
+must_fail InboxLateDepForgets MCInbox.tla "Temporal properties were violated"
+
 echo "== inbox: without setting a message aside for its dependency, TLC must find the slot held"
 if tlc -config InboxNoWaiting.cfg MCInbox.tla > "${TMPDIR:-/tmp}/tlc-inbox-nowaiting.log" 2>&1; then
   echo "unexpected: no violation without waiting"; exit 1
@@ -180,6 +186,12 @@ echo "   violation found, as expected"
 
 echo "== inbox, statement by statement: as implemented, every step refines Inbox.tla and every property holds"
 tlc -config InboxPg.cfg MCInboxPg.tla
+
+echo "== inbox, statement by statement: with waits that run out beside the dispatchers, every step refines Inbox.tla and every property holds"
+tlc -config InboxPgExpires.cfg MCInboxPg.tla
+
+echo "== inbox, statement by statement: an expiry clearing the identity waited for, TLC must find a message never processed"
+must_fail InboxPgExpiresForgets MCInboxPg.tla "Temporal properties were violated"
 
 echo "== inbox, statement by statement: without the advisory lock, TLC must find a message waiting for a processed dependency"
 if tlc -config InboxPgNoLock.cfg MCInboxPg.tla > "${TMPDIR:-/tmp}/tlc-inboxpg-nolock.log" 2>&1; then
@@ -242,3 +254,19 @@ if tlc -config BridgeAckFirst.cfg MCBridge.tla > "${TMPDIR:-/tmp}/tlc-bridge-ack
 fi
 grep -q "Temporal properties were violated" "${TMPDIR:-/tmp}/tlc-bridge-ackfirst.log"
 echo "   violation found, as expected"
+
+echo "== bridge: an unstorable message acknowledged without being set aside, TLC must find it set nowhere"
+must_fail BridgeAckWithoutSetAside MCBridge.tla "Temporal properties were violated"
+
+echo "== bridge: a message set aside because the inbox's database holds, TLC must find a storable one diverted"
+must_fail BridgeSetAsideOnHold MCBridge.tla "Invariant SetAsideOnlyUnstorable is violated"
+
+echo "== bridge: acknowledged before the row set aside commits, TLC must find a message set nowhere"
+must_fail BridgeAckBeforeReject MCBridge.tla "Temporal properties were violated"
+
+echo "== bridge: a forged run, handling a message before its rejection, must not fit"
+if check_trace traces/forged/bridge-ack-before-reject.jsonl > "${TMPDIR:-/tmp}/tlc-bridge-forged-reject.log" 2>&1; then
+  echo "unexpected: the forged run fits the model"; exit 1
+fi
+grep -q "Deadlock reached" "${TMPDIR:-/tmp}/tlc-bridge-forged-reject.log" || { cat "${TMPDIR:-/tmp}/tlc-bridge-forged-reject.log"; exit 1; }
+echo "   refused, as expected"

@@ -1,8 +1,10 @@
 //! The sweep: processed rows forgotten once their channel's window has
-//! passed (ADR-0033 decision 4). The rules are in [`InboxRetention`].
+//! passed (ADR-0033 decision 4), and the rows set aside given a bounded life
+//! (ADR-0036 R6). The rules are in [`InboxRetention`].
 
 use std::time::{Duration, Instant};
 
+use ascetic_ddd_session::pg::tokio_postgres::types::ToSql;
 use ascetic_ddd_session::{PgAccess, Session, SessionPool};
 
 use super::{InboxRetention, PgInbox};
@@ -75,8 +77,87 @@ where
                 });
             }
             forgotten += swept;
+            self.forget_set_aside(Some(channel), window).await?;
+        }
+        if let Some(bound) = self.retention.untenanted {
+            self.forget_set_aside(None, bound).await?;
         }
         Ok(forgotten)
+    }
+
+    /// The rows set aside of `channel` — or, with none, those without a
+    /// Tenant, of every channel — given their bounded life (ADR-0036 R6): an
+    /// open row first seen longer ago than `window` is closed as expired,
+    /// its bytes gone, a tombstone; a closed row is forgotten `window` after
+    /// it closed. Under the sweep's try-lock, in transactions of at most
+    /// [`InboxRetention::batch`] rows each. Returns how many rows it closed
+    /// or forgot.
+    async fn forget_set_aside(
+        &self,
+        channel: Option<&str>,
+        window: Duration,
+    ) -> Result<u64, Error> {
+        let table = &self.table;
+        let whose =
+            "(($1::text IS NOT NULL AND channel = $1) OR ($1::text IS NULL AND tenant_id IS NULL))";
+        let past = "statement_timestamp() - make_interval(secs => $2::double precision)";
+        let expire = format!(
+            "UPDATE {table}_rejects SET disposed_at = statement_timestamp(),                  disposition = 'expired', message = NULL              WHERE ctid IN (SELECT ctid FROM {table}_rejects                             WHERE {whose} AND disposed_at IS NULL AND first_seen_at < {past}                             LIMIT $3 FOR UPDATE SKIP LOCKED)"
+        );
+        let forget = format!(
+            "DELETE FROM {table}_rejects              WHERE ctid IN (SELECT ctid FROM {table}_rejects                             WHERE {whose} AND disposed_at < {past}                             LIMIT $3 FOR UPDATE SKIP LOCKED)"
+        );
+        let batch = i64::from(self.retention.batch.max(1));
+        let mut done = 0;
+        for sql in [&expire, &forget] {
+            for _ in 0..BATCHES_PER_PASS {
+                let rows = self
+                    .under_the_sweep_lock(sql, &[&channel, &window.as_secs_f64(), &batch])
+                    .await?;
+                done += rows;
+                if rows < u64::try_from(batch).unwrap_or(u64::MAX) {
+                    break;
+                }
+            }
+        }
+        Ok(done)
+    }
+
+    /// Executes `sql` in a transaction of its own under a try-lock of the
+    /// inbox's sweep — another holder skips it, and it reports nothing done
+    /// — and the configured lock timeout. Returns the rows it touched.
+    async fn under_the_sweep_lock(
+        &self,
+        sql: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<u64, Error> {
+        let key = format!("{} sweep", self.table);
+        self.pool
+            .session(async |session: P::Session| {
+                session
+                    .atomic(async |tx: P::Session| {
+                        let connection = tx.connection();
+                        connection
+                            .batch_execute(&format!(
+                                "SET LOCAL lock_timeout = '{}ms'",
+                                self.retention.lock_timeout.as_millis()
+                            ))
+                            .await?;
+                        let held: bool = connection
+                            .query_one(
+                                "SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))",
+                                &[&key],
+                            )
+                            .await?
+                            .get(0);
+                        if !held {
+                            return Ok(0);
+                        }
+                        Ok::<_, Error>(connection.execute(sql, params).await?)
+                    })
+                    .await
+            })
+            .await
     }
 
     /// One statement of a channel's sweep: how many rows it forgot, and

@@ -27,10 +27,15 @@
 (* With all three as implemented, the module refines Inbox.tla: the        *)
 (* mapping at the end, checked by TLC as a property.                       *)
 (*                                                                         *)
+(* Expires turns on the expiry of waits, a statement of its own beside the *)
+(* dispatchers', so that its race with a mark is checked statement by      *)
+(* statement (ADR-0036 R8); ForgetsOnExpiry makes it forget the identity   *)
+(* waited for, the expiry as it was before R8.                             *)
+(*                                                                         *)
 (* Left out, as protocol-level matters Inbox.tla settles: failures,        *)
-(* backoff, parking, expiring waits, operators.  The dependency check is   *)
-(* taken with the head's snapshot; in the implementation it is a later     *)
-(* statement, which can only see more marks, never fewer.                  *)
+(* backoff, operators.  The dependency check is taken with the head's      *)
+(* snapshot; in the implementation it is a later statement, which can only *)
+(* see more marks, never fewer.                                            *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -45,6 +50,8 @@ CONSTANTS
   WithLock,       \* the advisory lock on the dependency's identity, both sides
   HeadInTake,     \* the head read in the take's own statement
   WalkOn,         \* after a set-aside, the next head in the same transaction
+  Expires,        \* waits run out: the expiry's statement runs beside the dispatchers
+  ForgetsOnExpiry, \* the expiry clears waiting_for, as before ADR-0036 R8
   None            \* a model value
 
 ASSUME \A m \in Msgs : Cardinality(Deps[m]) <= 1
@@ -60,6 +67,8 @@ VARIABLES
   waitAt,     \* [Msgs -> Nat], the stamp of the row's wait; 0: never set aside
   waitDep,    \* [Msgs -> Msgs \cup {None}], what it waits for
   wokeAt,     \* [Msgs -> Nat], the stamp of the wake; 0: not woken
+  parkAt,     \* [Msgs -> Nat], the stamp of the expiry that parked the row; 0: never
+  forgotAt,   \* [Msgs -> Nat], the stamp of an expiry that cleared the wait (ForgetsOnExpiry)
   \* the dispatchers' transactions
   pc,         \* [Dispatchers -> STRING], where each one is
   slot,       \* [Dispatchers -> Slots \cup {None}], the slot held
@@ -73,9 +82,9 @@ VARIABLES
   dead,       \* SUBSET Dispatchers: stopped by a database error
   crashes
 
-vars == <<clock, recvAt, pos, nextPos, procAt, procOrder, waitAt, waitDep, wokeAt,
+vars == <<clock, recvAt, pos, nextPos, procAt, procOrder, waitAt, waitDep, wokeAt, parkAt, forgotAt,
           pc, slot, snap, msg, dep, pendWait, pendWoken, slotLock, adv, dead, crashes>>
-table == <<clock, recvAt, pos, nextPos, procAt, procOrder, waitAt, waitDep, wokeAt>>
+table == <<clock, recvAt, pos, nextPos, procAt, procOrder, waitAt, waitDep, wokeAt, parkAt, forgotAt>>
 
 VARIABLE part  \* [Msgs -> Slots], the cut, fixed at the start
 
@@ -87,14 +96,17 @@ Seen(t, at) == at > 0 /\ at <= t
 
 ReceivedAt(t) == {m \in Msgs : Seen(t, recvAt[m])}
 ProcessedAt(t) == {m \in Msgs : Seen(t, procAt[m])}
-WaitingAt(t, m) == IF Seen(t, waitAt[m]) /\ ~Seen(t, wokeAt[m]) THEN waitDep[m] ELSE None
+WaitingAt(t, m) == IF Seen(t, waitAt[m]) /\ ~Seen(t, wokeAt[m]) /\ ~Seen(t, forgotAt[m])
+                   THEN waitDep[m] ELSE None
+\* Parked when its wait ran out, and not woken since: the wake unparks it.
+ParkedAt(t, m) == Seen(t, parkAt[m]) /\ ~Seen(t, wokeAt[m])
 
 \* The queue of slot s as dispatcher d's statement under snapshot t sees it:
 \* committed rows neither processed nor waiting, and not what d's own
 \* transaction has set aside or marked -- a transaction sees its own writes.
 QueueAt(t, s, d) ==
   {m \in ReceivedAt(t) : /\ part[m] = s
-                         /\ m \notin ProcessedAt(t) /\ WaitingAt(t, m) = None
+                         /\ m \notin ProcessedAt(t) /\ WaitingAt(t, m) = None /\ ~ParkedAt(t, m)
                          /\ m \notin pendWait[d] /\ ~(pc[d] \in {"marked"} /\ msg[d] = m)}
 Oldest(S) == CHOOSE m \in S : \A n \in S : pos[m] <= pos[n]
 HeadAt(t, s, d) == IF QueueAt(t, s, d) = {} THEN None ELSE Oldest(QueueAt(t, s, d))
@@ -109,6 +121,7 @@ Init ==
   /\ recvAt = [m \in Msgs |-> 0] /\ pos = [m \in Msgs |-> 0] /\ nextPos = 1
   /\ procAt = [m \in Msgs |-> 0] /\ procOrder = <<>>
   /\ waitAt = [m \in Msgs |-> 0] /\ waitDep = [m \in Msgs |-> None] /\ wokeAt = [m \in Msgs |-> 0]
+  /\ parkAt = [m \in Msgs |-> 0] /\ forgotAt = [m \in Msgs |-> 0]
   /\ pc = [d \in Dispatchers |-> "idle"]
   /\ slot = [d \in Dispatchers |-> None] /\ snap = [d \in Dispatchers |-> 0]
   /\ msg = [d \in Dispatchers |-> None] /\ dep = [d \in Dispatchers |-> None]
@@ -124,7 +137,7 @@ Receive(m) ==
   /\ clock' = clock + 1
   /\ recvAt' = [recvAt EXCEPT ![m] = clock']
   /\ pos' = [pos EXCEPT ![m] = nextPos] /\ nextPos' = nextPos + 1
-  /\ UNCHANGED <<procAt, procOrder, waitAt, waitDep, wokeAt, part>>
+  /\ UNCHANGED <<procAt, procOrder, waitAt, waitDep, wokeAt, parkAt, forgotAt, part>>
   /\ UNCHANGED Dispatching
 
 (* ------------------------------------------------------------------------ *)
@@ -238,7 +251,7 @@ CommitWait(d) ==
   /\ waitAt' = [m \in Msgs |-> IF m \in pendWait[d] THEN clock' ELSE waitAt[m]]
   /\ waitDep' = [m \in Msgs |-> IF m \in pendWait[d] THEN dep[d] ELSE waitDep[m]]
   /\ Release(d, "idle")
-  /\ UNCHANGED <<recvAt, pos, nextPos, procAt, procOrder, wokeAt, snap, dead, crashes, part>>
+  /\ UNCHANGED <<recvAt, pos, nextPos, procAt, procOrder, wokeAt, snap, dead, crashes, parkAt, forgotAt, part>>
 
 \* With WalkOn the rows set aside have different dependencies: the wait of
 \* each is the dependency it was decided on.  This module keeps one `dep`
@@ -278,7 +291,25 @@ CommitMark(d) ==
   /\ procOrder' = Append(procOrder, msg[d])
   /\ wokeAt' = [n \in Msgs |-> IF n \in pendWoken[d] THEN clock' ELSE wokeAt[n]]
   /\ Release(d, "idle")
-  /\ UNCHANGED <<recvAt, pos, nextPos, waitAt, waitDep, snap, dead, crashes, part>>
+  /\ UNCHANGED <<recvAt, pos, nextPos, waitAt, waitDep, snap, dead, crashes, parkAt, forgotAt, part>>
+
+\* The expiry's UPDATE ... WHERE waiting_for IS NOT NULL AND waiting_since is
+\* old ... FOR UPDATE SKIP LOCKED, in a transaction of its own, committed at
+\* once.  A row an in-flight transaction holds -- its wait being set, or its
+\* wake by a mark -- is skipped; any other is re-checked against its latest
+\* committed version, so a row woken meanwhile is not parked.  Parked, the
+\* row keeps waiting_for (ADR-0036 R8), or, with ForgetsOnExpiry, loses it.
+\* A mark's statement that meets the expiry in flight waits for its commit
+\* and re-checks the row the same way: the expiry first, as here.
+Expire(m) ==
+  /\ Expires
+  /\ WaitingAt(Now, m) # None /\ ~ParkedAt(Now, m)
+  /\ \A d \in Dispatchers : m \notin pendWait[d] /\ m \notin pendWoken[d]
+  /\ clock' = clock + 1
+  /\ parkAt' = [parkAt EXCEPT ![m] = clock']
+  /\ forgotAt' = IF ForgetsOnExpiry THEN [forgotAt EXCEPT ![m] = clock'] ELSE forgotAt
+  /\ UNCHANGED <<recvAt, pos, nextPos, procAt, procOrder, waitAt, waitDep, wokeAt, part>>
+  /\ UNCHANGED Dispatching
 
 \* ROLLBACK of a processing transaction: the dispatcher died, or the commit
 \* failed.  Pending writes vanish, locks go.
@@ -289,7 +320,7 @@ Abort(d) ==
   /\ UNCHANGED <<snap, dead, part>> /\ UNCHANGED table
 
 Next ==
-  \/ \E m \in Msgs : Receive(m)
+  \/ \E m \in Msgs : Receive(m) \/ Expire(m)
   \/ \E d \in Dispatchers : TakeSnap(d) \/ Take(d) \/ ReadHead(d) \/ Decide(d) \/ LockDep(d) \/ SetWait(d)
                             \/ CommitWait(d) \/ Handle(d) \/ LockOwn(d) \/ Mark(d) \/ CommitMark(d) \/ Abort(d)
 
@@ -309,6 +340,7 @@ TypeOK ==
   /\ clock \in Nat /\ nextPos \in Nat /\ crashes \in Nat
   /\ recvAt \in [Msgs -> Nat] /\ pos \in [Msgs -> Nat] /\ procAt \in [Msgs -> Nat]
   /\ waitAt \in [Msgs -> Nat] /\ wokeAt \in [Msgs -> Nat] /\ waitDep \in [Msgs -> Msgs \cup {None}]
+  /\ parkAt \in [Msgs -> Nat] /\ forgotAt \in [Msgs -> Nat]
   /\ procOrder \in Seq(Msgs)
   /\ pc \in [Dispatchers -> {"idle", "snapped", "taken", "headed", "ready", "aside", "locked", "waitset",
                              "handled", "ownlocked", "marked", "dead"}]
@@ -349,13 +381,15 @@ Waiting == [m \in Msgs |-> IF WaitingAt(Now, m) # None THEN WaitingAt(Now, m)
                            ELSE None]
 Zero == [m \in Msgs |-> 0]
 AllDue == [m \in Msgs |-> TRUE]
+\* Parked only when a wait ran out: there are no failures at this level.
+Parked == {m \in Msgs : ParkedAt(Now, m)}
 
 Abstract == INSTANCE Inbox WITH
-  Arrives <- Arrives, WaitsOnDependencies <- TRUE, WaitExpires <- FALSE, Poison <- {},
+  Arrives <- Arrives, WaitsOnDependencies <- TRUE, WaitExpires <- Expires, Poison <- {},
   MaxAttempts <- 0, BlockOnBackoff <- TRUE, MaxAdmin <- 0, AtomicWait <- TRUE,
   received <- Received, recvPos <- pos, nextRecv <- nextPos, processed <- Processed,
   effects <- Effects, holding <- Holding, waiting <- Waiting,
-  attempts <- Zero, due <- AllDue, parked <- {}, resolved <- {}, admin <- 0, expired <- {}
+  attempts <- Zero, due <- AllDue, parked <- Parked, resolved <- {}, admin <- 0, expired <- Parked
 
 \* Every step here is a step, or a stutter, of Inbox.tla.
 Refines == Abstract!Init /\ [][Abstract!Next]_(Abstract!vars)

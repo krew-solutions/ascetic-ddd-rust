@@ -6,6 +6,14 @@
 //! message only after the target accepted it: a failed publish is an error
 //! of the handler, and the source keeps the message for another try.
 //!
+//! A message the bridge can never forward — no header naming a destination,
+//! one that is not text, a scheme no adapter serves — is an error as well,
+//! and holds the source (ADR-0036 decision 3): the bridge has no store to
+//! set it aside in. Every bridge of a header target reads an outbox, which
+//! writes the destination of every row, so the case is a defect to stop on;
+//! a bridge of a header target over a broker channel would owe a channel to
+//! set such messages aside in.
+//!
 //! An outbox dispatcher is a bridge from the outbox channel to the
 //! destination each message names; an inbox intake is a bridge from a broker
 //! channel to the inbox channel.

@@ -25,4 +25,4 @@ rdkafka = { version = "0.39", optional = true }
 tokio = { version = "1.53.1", features = ["macros", "rt", "sync", "time"] }
 
 [dev-dependencies]
-tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "test-util", "time"] }

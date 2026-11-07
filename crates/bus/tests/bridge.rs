@@ -105,10 +105,11 @@ async fn a_bridge_forwards_to_a_fixed_target() {
     assert_eq!(next(&mut mirror).await.unwrap().payload(), b"x");
 }
 
-/// A message without a destination cannot be forwarded: the handler fails,
-/// and nothing is published anywhere.
+/// A message without a destination cannot be forwarded: the handler fails
+/// and the source holds it, so nothing is published anywhere, the message
+/// after it included (ADR-0036 decision 3).
 #[tokio::test]
-async fn a_message_without_a_destination_is_not_forwarded() {
+async fn a_message_without_a_destination_holds_the_source() {
     let bus = two_brokers();
     let mut orders = collect(&bus, "b://orders");
     let bridge = Bridge::new(Arc::clone(&bus));
@@ -120,9 +121,10 @@ async fn a_message_without_a_destination_is_not_forwarded() {
         )
         .unwrap();
 
-    bus.producer("a://outbox", |m: &Message| m.clone())
-        .unwrap()
-        .publish(&Message::new("lost"))
+    let outbox = bus.producer("a://outbox", |m: &Message| m.clone()).unwrap();
+    outbox.publish(&Message::new("held")).await.unwrap();
+    outbox
+        .publish(&Message::new("behind it").with_header("destination", "b://orders"))
         .await
         .unwrap();
 

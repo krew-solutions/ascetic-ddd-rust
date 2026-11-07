@@ -389,10 +389,8 @@ async fn a_received_message_is_processed_once_in_its_transaction() {
 async fn receiving_the_same_message_twice_stores_it_once() {
     let f = fixture("idempotent").await;
     let once = message("a", 1);
-    let mut again = once.clone();
-    again.payload = b"a duplicate with a different payload".to_vec();
 
-    f.publish(&[once, again]).await;
+    f.publish(&[once.clone(), once]).await;
 
     assert_eq!(f.rows().await, 1);
 }
@@ -462,17 +460,16 @@ async fn the_holder_committed_while_the_insert_waited_is_named() {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
+/// A `message_id` held at another identity of its stream type is set aside,
+/// never an error that would hold the source (ADR-0036 R2, R5).
 async fn an_message_id_is_stored_once() {
     let f = fixture("message_id").await;
     let first = message("a", 1);
     let mut other = message("a", 2);
     other.metadata = first.metadata.clone();
-    f.publish(&[first]).await;
+    f.publish(&[first, other]).await;
 
-    assert!(matches!(
-        f.inbox.publish(&other).await,
-        Err(Error::Database(_))
-    ));
+    assert_eq!(f.rows().await, 1);
 }
 
 #[tokio::test]
@@ -815,29 +812,47 @@ async fn run_processes_until_shutdown() {
 }
 
 /// Two slots, two dispatchers, a subscriber that takes its time: the locks
-/// are per slot, so the two run side by side, not one after the other.
+/// are per slot, so the two run side by side, not one after the other —
+/// seen by the two runs overlapping, not by how long the pair took, a bound
+/// that held the dispatchers' overhead too and failed on a busy machine
+/// (2026-11-07).
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn two_slots_are_worked_at_once() {
     let f = fixture_concurrent("parallel", 2).await;
     let (first, second) = f.streams_in_different_slots().await;
     f.publish(&[message(&first, 1), message(&second, 1)]).await;
-    let slow = |_: &PgSession, _: &InboxMessage| async {
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        Ok::<(), Failure>(())
+    let spans: Arc<Mutex<Vec<(std::time::Instant, std::time::Instant)>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let slow = {
+        let spans = Arc::clone(&spans);
+        move |_: &PgSession, _: &InboxMessage| {
+            let spans = Arc::clone(&spans);
+            async move {
+                let started = std::time::Instant::now();
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                spans
+                    .lock()
+                    .unwrap()
+                    .push((started, std::time::Instant::now()));
+                Ok::<(), Failure>(())
+            }
+        }
     };
 
-    let started = std::time::Instant::now();
-    let (a, b) = tokio::join!(f.inbox.dispatch(slow), f.inbox.dispatch(slow));
-    let elapsed = started.elapsed();
+    let (a, b) = tokio::join!(f.inbox.dispatch(&slow), f.inbox.dispatch(&slow));
 
     assert_eq!(
         (a.unwrap(), b.unwrap()),
         (Outcome::Processed, Outcome::Processed)
     );
+    let spans = spans.lock().unwrap().clone();
+    let [(a_from, a_to), (b_from, b_to)] = spans[..] else {
+        panic!("two runs: {spans:?}");
+    };
     assert!(
-        elapsed < Duration::from_millis(550),
-        "two slots took {elapsed:?}: one after the other"
+        a_from < b_to && b_from < a_to,
+        "the two slots ran one after the other: {spans:?}"
     );
 }
 
@@ -1046,8 +1061,8 @@ async fn loops_over_slots_with_dependencies_across_them_lose_no_wake() {
 /// Two streams in two slots, four messages each, two loops, a subscriber
 /// that takes its time and notes when it ran: the messages of one stream
 /// are never in the subscriber at the same time, while the two streams are
-/// — the run is shorter than the sum of the pauses, so the check could have
-/// seen an overlap. One partition key, one dispatcher at a time.
+/// — a run of one overlaps a run of the other, so the check could have seen
+/// an overlap. One partition key, one dispatcher at a time.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn messages_of_one_stream_are_never_processed_at_once() {
@@ -1085,7 +1100,6 @@ async fn messages_of_one_stream_are_never_processed_at_once() {
         ..Loops::default()
     };
 
-    let started = std::time::Instant::now();
     tokio::time::timeout(
         Duration::from_secs(10),
         f.inbox
@@ -1094,7 +1108,6 @@ async fn messages_of_one_stream_are_never_processed_at_once() {
     .await
     .expect("run stops after shutdown")
     .unwrap();
-    let elapsed = started.elapsed();
 
     let spans = spans.lock().unwrap().clone();
     for stream in [&first, &second] {
@@ -1108,9 +1121,17 @@ async fn messages_of_one_stream_are_never_processed_at_once() {
             );
         }
     }
+    // Measured by the runs themselves, not by the run's length: the length
+    // bound held the dispatch's overhead too, and failed alone three times
+    // in four (2026-11-07).
+    let side_by_side = spans.iter().any(|(one, started, ended)| {
+        spans
+            .iter()
+            .any(|(other, from, to)| one != other && started < to && from < ended)
+    });
     assert!(
-        elapsed < PAUSE * 7,
-        "the two streams did not run side by side: {elapsed:?} for 8 pauses of {PAUSE:?}"
+        side_by_side,
+        "the two streams never ran side by side, so no overlap could have been seen: {spans:?}"
     );
 }
 
@@ -1533,6 +1554,67 @@ async fn the_observer_sees_the_protocol() {
     assert!(marked.windows(2).all(|pair| pair[0].1 < pair[1].1));
 }
 
+/// A hole filled after its dependent's wait ran out — readmitted, or
+/// arrived late — wakes the dependent, parked with the identity it waited
+/// for: it is processed without an unpark (ADR-0036 R8). Before, the expiry
+/// forgot the identity, and the dependent stayed parked for good.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_hole_filled_after_the_wait_ran_out_wakes_its_dependent() {
+    let f = fixture("hole_after_expiry")
+        .await
+        .with_max_wait(Duration::from_millis(300));
+    let cause = message("user", 5);
+    let effect = message("order", 1).depending_on(&[CausalDependency::on(&cause)]);
+    f.publish(std::slice::from_ref(&effect)).await;
+    let (seen, subscriber) = collector();
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::SetAside);
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
+    assert_eq!(f.parked().await, ["order@1"], "the wait ran out");
+
+    f.publish(std::slice::from_ref(&cause)).await;
+    while f.dispatch(&subscriber).await != Outcome::Nothing {}
+
+    assert_eq!(*seen.lock().unwrap(), ["user@5", "order@1"]);
+    assert!(f.parked().await.is_empty(), "woken, not unparked by hand");
+}
+
+/// A row whose wait ran out, unparked by hand while its dependency is still
+/// missing, waits again, and its wait runs out again: the unpark clears the
+/// identity it kept (ADR-0036 R8), or the row would be neither in the queue
+/// nor parked nor waiting with a time.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn an_unparked_row_whose_wait_ran_out_waits_again() {
+    let f = fixture("unparked_after_expiry")
+        .await
+        .with_max_wait(Duration::from_millis(300));
+    let cause = message("user", 5);
+    let effect = message("order", 1).depending_on(&[CausalDependency::on(&cause)]);
+    f.publish(std::slice::from_ref(&effect)).await;
+    let (_, subscriber) = collector();
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::SetAside);
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
+    assert_eq!(f.parked().await, ["order@1"]);
+
+    let unparked = f
+        .sessions
+        .session(async |session| f.inbox.unpark(&session, &effect).await)
+        .await
+        .unwrap();
+    assert!(unparked);
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::SetAside,
+        "waits again"
+    );
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
+    assert_eq!(f.parked().await, ["order@1"], "and runs out again");
+}
+
 /// A message whose dependency never arrives waits out of the queue, costing
 /// the walk nothing, and with `max_wait` set is parked with the dependency
 /// named (ADR-0006).
@@ -1624,6 +1706,14 @@ fn the_released_migrations_keep_their_checksums() {
             (
                 "20261104T000000Z_processed_at".to_owned(),
                 "fnv1a64:6452eff40ba9b9ec:245".to_owned()
+            ),
+            (
+                "20261107T000000Z_rejects".to_owned(),
+                "fnv1a64:b8887c3ee7dc490a:1046".to_owned()
+            ),
+            (
+                "20261107T010000Z_indexes_before_launch".to_owned(),
+                "fnv1a64:85998ae59b7e3b60:366".to_owned()
             )
         ]
     );

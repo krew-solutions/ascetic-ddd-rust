@@ -27,6 +27,21 @@
 //! `ascetic_ddd.inbox` (Python); see the `pg` module for what the table
 //! and queries guarantee.
 //!
+//! # Logs
+//!
+//! What the inbox writes to the `log` facade names a row by its channel and
+//! its place in the inbox, a message set aside by its digest, and an error
+//! by the library's words and the server's codes: never a stream id, a
+//! Tenant, a `message_id`, a header's value or a subscriber's text, which
+//! may be personal data or the very value refused. That text is kept on the
+//! row and handed to the [`InboxObserver`] (ADR-0036 R9).
+//!
+//! The driver is the host's to configure: `tokio_postgres` logs every
+//! statement with its parameters, a message's values among them, at
+//! `Debug`. Keep the target `tokio_postgres` at `Info` or above wherever
+//! real data runs; `tests/logs.rs` holds that nothing it logs above `Debug`
+//! carries a value.
+//!
 //! # Deviations from the Python source
 //!
 //! * A causal dependency is a type, [`CausalDependency`], not a dictionary
@@ -49,6 +64,7 @@
 
 pub mod channel;
 mod error;
+pub mod intake;
 mod message;
 pub mod observer;
 mod partition;
@@ -58,9 +74,13 @@ mod snapshot;
 
 pub use crate::channel::{INBOX_SCHEME, InboxChannel};
 pub use crate::error::{BoxError, Error, Failure};
+pub use crate::intake::Reason;
 pub use crate::message::{CausalDependency, InboxMessage};
 pub use crate::observer::{InboxObserver, Receipt};
 pub use crate::partition::{ByStream, ByUri, PartitionKey};
-pub use crate::pg::{InboxRetention, Loops, Outcome, PgInbox, Retries};
+pub use crate::pg::{
+    Admission, InboxRetention, Loops, Outcome, PgInbox, Readmission, Readmitted, Retries,
+    SetAsideCount, SetAsideCursor, SetAsidePage, SetAsideRow,
+};
 pub use crate::port::Inbox;
 pub use crate::snapshot::Snapshot;

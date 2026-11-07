@@ -40,30 +40,22 @@ use ascetic_ddd_bus::{
 };
 use ascetic_ddd_session::{PgAccess, SessionPool};
 use futures::future::BoxFuture;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use tokio::runtime::Handle;
 use tokio::sync::Notify;
 
 use crate::error::Failure;
+use crate::intake::DESTINATION;
 use crate::message::InboxMessage;
 use crate::observer::InboxObserver;
 use crate::pg::PgInbox;
-use crate::port::Inbox;
 
 /// The scheme the inbox is registered under.
 pub const INBOX_SCHEME: &str = "inbox";
 
-// The headers that are columns of the inbox: its identity (the bus's,
-// ADR-0030), and the channel the message was sent to, which the outbox
-// stamps.
-const DESTINATION: &str = "destination";
-const COLUMNS: [&str; 5] = [
-    TENANT_ID,
-    STREAM_TYPE,
-    STREAM_ID,
-    STREAM_POSITION,
-    DESTINATION,
-];
+/// The longest channel an intake takes: its rows' `uri` is 255 characters,
+/// and a channel past them would set every message aside (ADR-0036 R3).
+const CHANNEL_WIDTH: usize = 200;
 
 impl<P, O> PgInbox<P, O>
 where
@@ -106,8 +98,15 @@ where
         ))
     }
 
-    /// A producer into the inbox: the intake of `uri`.
+    /// A producer into the inbox: the intake of `uri`. A channel too long
+    /// for the inbox's rows is refused here, once, rather than every
+    /// message of it set aside.
     fn producer(&self, uri: &str) -> Result<Box<dyn WireProducer>, BusError> {
+        if uri::without_key(uri).chars().count() > CHANNEL_WIDTH {
+            return Err(BusError::Transport(
+                format!("an inbox channel is at most {CHANNEL_WIDTH} characters").into(),
+            ));
+        }
         Ok(Box::new(InboxProducer {
             inbox: Arc::clone(&self.0),
             uri: uri.to_owned(),
@@ -126,12 +125,16 @@ where
     P::Session: PgAccess + Sync,
     O: InboxObserver + 'static,
 {
-    /// Stores the message in a transaction of its own; the same identity
-    /// again is ignored.
+    /// Takes the message through the intake (ADR-0036): stored, found
+    /// already stored, or set aside beside the inbox. An error, which holds
+    /// the source, only when the environment fails.
     fn publish(&self, message: Message) -> BoxFuture<'_, Result<(), BusError>> {
         Box::pin(async move {
-            let row = inbox_message_of(&self.uri, &message)?;
-            self.inbox.publish(&row).await.map_err(transport)
+            self.inbox
+                .intake(&self.uri, &message)
+                .await
+                .map(|_| ())
+                .map_err(transport)
         })
     }
 }
@@ -189,51 +192,9 @@ where
     }
 }
 
-/// The row a wire message becomes, published to `channel`.
-fn inbox_message_of(channel: &str, message: &Message) -> Result<InboxMessage, BusError> {
-    let column = |name: &str| {
-        message
-            .header(name)
-            .ok_or_else(|| malformed(format!("the inbox needs a `{name}` header")))
-            .and_then(text)
-    };
-    let stream_id = column(STREAM_ID)?;
-    let stream_id =
-        serde_json::from_str(stream_id).unwrap_or_else(|_| Value::String(stream_id.to_owned()));
-    let stream_position = column(STREAM_POSITION)?
-        .parse::<i32>()
-        .map_err(|error| malformed(format!("`{STREAM_POSITION}` is not an integer: {error}")))?;
-    // The intake's name for the row: the channel this producer was built
-    // for, with the message's key, or the channel's own (ADR-0018). A
-    // `destination` header the producer stamped is its address, not ours.
-    let key = match message.key() {
-        Some(key) => Some(text(key)?),
-        None => uri::key(channel),
-    };
-    let uri = match key {
-        Some(key) => format!("{}/{key}", uri::without_key(channel)),
-        None => channel.to_owned(),
-    };
-    let metadata = message
-        .headers()
-        .iter()
-        .filter(|(name, _)| !COLUMNS.contains(&name.as_str()))
-        .map(|(name, value)| Ok((name.clone(), structured(text(value)?))))
-        .collect::<Result<Map<_, _>, BusError>>()?;
-    Ok(InboxMessage::new(
-        column(TENANT_ID)?,
-        column(STREAM_TYPE)?,
-        stream_id,
-        stream_position,
-        uri,
-        message.payload(),
-    )
-    .with_metadata(Value::Object(metadata)))
-}
-
 /// The wire message of a row: payload, key from the URI, the columns and
 /// the metadata as headers.
-fn wire_of(row: &InboxMessage) -> Message {
+pub(crate) fn wire_of(row: &InboxMessage) -> Message {
     let message = Message::new(row.payload.clone())
         .with_header(TENANT_ID, row.tenant_id.as_bytes())
         .with_header(STREAM_TYPE, row.stream_type.as_bytes())
@@ -252,15 +213,6 @@ fn wire_of(row: &InboxMessage) -> Message {
     }
 }
 
-/// A header's text as a metadata field: structured again when it is a JSON
-/// array or object, text otherwise.
-fn structured(text: &str) -> Value {
-    match serde_json::from_str::<Value>(text) {
-        Ok(value @ (Value::Array(_) | Value::Object(_))) => value,
-        _ => Value::String(text.to_owned()),
-    }
-}
-
 /// A metadata value as header text: a string as it is, anything else as
 /// JSON.
 fn header_text(value: &Value) -> String {
@@ -268,15 +220,6 @@ fn header_text(value: &Value) -> String {
         Value::String(text) => text.clone(),
         other => other.to_string(),
     }
-}
-
-fn text(bytes: &[u8]) -> Result<&str, BusError> {
-    std::str::from_utf8(bytes)
-        .map_err(|_| malformed("the inbox keeps headers and keys as UTF-8 text".to_owned()))
-}
-
-fn malformed(reason: String) -> BusError {
-    BusError::Transport(reason.into())
 }
 
 fn transport(error: impl std::error::Error + Send + Sync + 'static) -> BusError {

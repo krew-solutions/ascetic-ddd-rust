@@ -274,6 +274,80 @@ async fn the_outbox_feeds_the_inbox_without_a_broker() {
     processing.cancel().await;
 }
 
+/// An outbox row to the inbox without a position can never be stored: the
+/// intake sets it aside and acknowledges it, and the lane moves past it to
+/// the row after it (ADR-0036 decision 1). Before, the intake's error held
+/// the lane on that row for ever.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_row_the_intake_cannot_store_does_not_stop_the_lane() {
+    let fixture = fixture("outbox_unplaced", "bridge-outbox-set-aside").await;
+    let outbox = Arc::new(
+        PgOutbox::new(PgSessionPool::new(pool()))
+            .with_tables(
+                Identifier::new("inbox_bridge_unplaced_out").unwrap(),
+                Identifier::new("inbox_bridge_unplaced_out_offsets").unwrap(),
+            )
+            .with_loops(ascetic_ddd_outbox::Loops {
+                poll_interval: Duration::from_millis(20),
+                ..ascetic_ddd_outbox::Loops::default()
+            })
+            .observed_by(fixture.trace.recorder()),
+    );
+    outbox.teardown().await.unwrap();
+    outbox.migrate().await.unwrap();
+    let mut bus = Bus::new();
+    bus.register(OUTBOX_SCHEME, outbox.channel()).unwrap();
+    bus.register(INBOX_SCHEME, fixture.inbox.channel()).unwrap();
+    let bus = Arc::new(bus);
+    let dispatcher = Bridge::new(Arc::clone(&bus))
+        .run(
+            "outbox://all",
+            "dispatcher",
+            Target::Header("destination".into()),
+        )
+        .unwrap();
+    let (mut received, processing) = fixture.consume();
+
+    let unplaced = outbox.producer("inbox://orders/order-7", |payload: &String| {
+        Message::new(payload.as_str())
+            .with_key("order-7")
+            .with_header("tenant_id", "t1")
+            .with_header("stream_type", "orders.Order")
+            .with_header("stream_id", "7")
+            .with_header("message_id", "00000000-0000-4000-8000-000000000001")
+    });
+    let shipped = outbox.producer("inbox://orders/order-7", |payload: &String| {
+        order(payload, 2, "00000000-0000-4000-8000-000000000002")
+    });
+    for (producer, payload) in [(&unplaced, "unplaced"), (&shipped, "shipped")] {
+        fixture
+            .sessions
+            .session(async |session| {
+                session
+                    .atomic(async |tx| {
+                        producer.publish(&tx, &payload.to_owned()).await.unwrap();
+                        Ok::<(), ascetic_ddd_outbox::Error>(())
+                    })
+                    .await
+            })
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(next(&mut received).await, "shipped");
+    assert_eq!(fixture.processed_soon(1).await, 1);
+    let set_aside: i64 = fixture
+        .one(format!(
+            "SELECT count(*) FROM {}_rejects WHERE reason = 'malformed'",
+            fixture.table
+        ))
+        .await;
+    assert_eq!(set_aside, 1, "the row without a position, set aside");
+    dispatcher.cancel().await;
+    processing.cancel().await;
+}
+
 /// A message from a broker that carries a `destination` header — a
 /// producer on this seedwork stamps its topic on it, and the broker
 /// forwards headers — lands under the intake's name all the same: the

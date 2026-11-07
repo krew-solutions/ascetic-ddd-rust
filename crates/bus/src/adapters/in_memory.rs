@@ -10,18 +10,36 @@
 //! configuration bug. Kafka has no such rule — there a group *is* several
 //! instances sharing the work.
 //!
-//! Delivery is a task per topic: it takes messages off a bounded queue and
-//! hands each, in order, to the handler of every group. A handler that panics
-//! is reported and the next message is delivered; a handler that is slow
-//! holds the topic, which is the back-pressure the queue exists for.
+//! Delivery (ADR-0036 decision 3): a task per topic takes messages off a
+//! bounded queue and adds each to the backlog of every group that has a
+//! handler attached; a task per group hands its backlog, in order, to the
+//! handler attached at each try. A handler's error means the message was not
+//! taken: the group tries it again after a pause, and what follows waits. A
+//! handler that panics is reported and the next message is delivered.
+//!
+//! A group holds only itself. Producers wait while a group that is taking
+//! its messages has `capacity` of them in its backlog: a handler that is
+//! slow holds the topic, which is the back-pressure the queue exists for. A
+//! group whose head keeps failing stops counting, and its backlog grows
+//! until the head is taken; past `capacity`, and at each doubling after, it
+//! is reported.
+//!
+//! The message in hand and the backlog belong to the group, not to a
+//! subscription: a cancel leaves them to the next handler of the group, which
+//! is tried at once. What is published while no handler is attached is not
+//! delivered to the group — unlike Kafka, where a group's position waits on
+//! the log. A group ends when its handler is detached and its consumer
+//! dropped, which frees its name, or when its topic is gone and its backlog
+//! delivered.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use futures::FutureExt;
 use futures::future::BoxFuture;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
 use crate::adapter::{Adapter, Handler, Subscription, WireConsumer, WireProducer};
 use crate::error::Error;
@@ -29,18 +47,16 @@ use crate::handling::{self, InFlight};
 use crate::message::Message;
 use crate::uri;
 
-/// Messages a topic queues before producers wait.
+/// Messages a topic queues, and a group taking its messages holds in its
+/// backlog, before producers wait.
 pub const DEFAULT_CAPACITY: usize = 1024;
 
-/// A group's handler, with the calls of it in flight.
-struct Attached {
-    handler: Handler,
-    in_flight: InFlight,
-}
+/// How long a group waits before it tries again a message whose handler
+/// failed.
+pub const DEFAULT_RETRY_AFTER: Duration = Duration::from_millis(100);
 
-type Groups = Arc<Mutex<HashMap<String, Option<Attached>>>>;
-
-/// A process-local broker: a registry of topics with a delivery task each.
+/// A process-local broker: a registry of topics, each with a task that
+/// fans its messages out and a task per group that delivers them.
 ///
 /// Cloning a broker gives a second handle on the same topics; use
 /// [`InMemoryBroker::new`] for an isolated one.
@@ -51,12 +67,52 @@ pub struct InMemoryBroker {
 
 struct Inner {
     capacity: usize,
+    retry_after: Duration,
     topics: Mutex<HashMap<String, Topic>>,
 }
 
 struct Topic {
     queue: mpsc::Sender<Message>,
-    groups: Groups,
+    shared: Arc<Shared>,
+}
+
+/// What a topic's task and its groups' tasks share.
+struct Shared {
+    uri: String,
+    capacity: usize,
+    retry_after: Duration,
+    state: Mutex<State>,
+    /// A group took a message, let one go, stopped counting or ended: the
+    /// topic's task may add the next.
+    room: Notify,
+    /// What a group's task waits for changed: a message, a handler, the end.
+    changed: Notify,
+}
+
+struct State {
+    groups: HashMap<String, Group>,
+    /// The topic's task is still running: messages may come.
+    open: bool,
+}
+
+/// A group of a topic: its backlog, the message in hand first, and the
+/// handler of its subscription, if one is attached.
+struct Group {
+    backlog: VecDeque<Arc<Message>>,
+    attached: Option<Attached>,
+    /// Its head failed and has not been taken since: it does not hold
+    /// producers back.
+    holding: bool,
+    /// Its consumer has not been dropped.
+    consumer: bool,
+    /// The backlog's length when it was last reported, while holding.
+    reported: usize,
+}
+
+/// A group's handler, with the calls of it in flight.
+struct Attached {
+    handler: Handler,
+    in_flight: InFlight,
 }
 
 impl InMemoryBroker {
@@ -70,24 +126,48 @@ impl InMemoryBroker {
         InMemoryBroker {
             inner: Arc::new(Inner {
                 capacity: capacity.max(1),
+                retry_after: DEFAULT_RETRY_AFTER,
+                topics: Mutex::new(HashMap::new()),
+            }),
+        }
+    }
+
+    /// The same broker, its groups waiting `pause` before they try a failed
+    /// message again. Set before the broker is used: topics opened before
+    /// are not carried over.
+    pub fn retrying_after(self, pause: Duration) -> Self {
+        InMemoryBroker {
+            inner: Arc::new(Inner {
+                capacity: self.inner.capacity,
+                retry_after: pause,
                 topics: Mutex::new(HashMap::new()),
             }),
         }
     }
 
     /// The topic for `uri` — its channel, whatever key the URI carries —
-    /// started on first use. Must be called on a Tokio runtime: the delivery
+    /// started on first use. Must be called on a Tokio runtime: the topic's
     /// task is spawned here.
-    fn topic(&self, uri: &str) -> (mpsc::Sender<Message>, Groups) {
+    fn topic(&self, uri: &str) -> (mpsc::Sender<Message>, Arc<Shared>) {
         let uri = uri::without_key(uri);
         let mut topics = lock(&self.inner.topics);
         let topic = topics.entry(uri.to_owned()).or_insert_with(|| {
-            let (queue, inbox) = mpsc::channel(self.inner.capacity);
-            let groups: Groups = Arc::new(Mutex::new(HashMap::new()));
-            tokio::spawn(deliver(uri.to_owned(), inbox, Arc::clone(&groups)));
-            Topic { queue, groups }
+            let (queue, received) = mpsc::channel(self.inner.capacity);
+            let shared = Arc::new(Shared {
+                uri: uri.to_owned(),
+                capacity: self.inner.capacity,
+                retry_after: self.inner.retry_after,
+                state: Mutex::new(State {
+                    groups: HashMap::new(),
+                    open: true,
+                }),
+                room: Notify::new(),
+                changed: Notify::new(),
+            });
+            tokio::spawn(fan_out(received, Arc::clone(&shared)));
+            Topic { queue, shared }
         });
-        (topic.queue.clone(), Arc::clone(&topic.groups))
+        (topic.queue.clone(), Arc::clone(&topic.shared))
     }
 }
 
@@ -97,50 +177,190 @@ impl Default for InMemoryBroker {
     }
 }
 
-/// The delivery task of one topic. Ends when the last producer and the
-/// broker are gone, because the queue closes.
-async fn deliver(uri: String, mut inbox: mpsc::Receiver<Message>, groups: Groups) {
-    while let Some(message) = inbox.recv().await {
-        // Admitted under the lock handlers are detached under: a call is
-        // either waited for by a cancel, or not made.
-        let calls: Vec<_> = lock(&groups)
-            .iter()
-            .filter_map(|(group, attached)| {
-                attached
-                    .as_ref()
-                    .map(|a| (group.clone(), a.handler.clone(), a.in_flight.admit()))
-            })
-            .collect();
-        for (group, handler, admitted) in calls {
-            match AssertUnwindSafe(handling::within(handler(message.clone())))
-                .catch_unwind()
-                .await
+/// The task of one topic: each message to the backlog of every group with a
+/// handler attached, once no group taking its messages has a full one. Ends
+/// when the last producer and the broker are gone, because the queue closes.
+async fn fan_out(mut received: mpsc::Receiver<Message>, shared: Arc<Shared>) {
+    while let Some(message) = received.recv().await {
+        let message = Arc::new(message);
+        loop {
+            // Registered before the look, so that room made after it wakes us.
+            let room = shared.room.notified();
+            tokio::pin!(room);
+            room.as_mut().enable();
             {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => log::warn!("in-memory[{uri}/{group}]: handler failed: {error}"),
-                Err(_) => log::warn!("in-memory[{uri}/{group}]: handler panicked"),
+                let mut state = lock(&shared.state);
+                let full = state.groups.values().any(|group| {
+                    group.attached.is_some()
+                        && !group.holding
+                        && group.backlog.len() >= shared.capacity
+                });
+                if !full {
+                    for (name, group) in state.groups.iter_mut() {
+                        if group.attached.is_some() {
+                            group.backlog.push_back(Arc::clone(&message));
+                            report_backlog(&shared, name, group);
+                        }
+                    }
+                    break;
+                }
             }
-            drop(admitted);
+            room.await;
         }
+        shared.changed.notify_waiters();
+    }
+    lock(&shared.state).open = false;
+    shared.changed.notify_waiters();
+}
+
+/// A holding group's backlog past the capacity, and at each doubling after.
+fn report_backlog(shared: &Shared, name: &str, group: &mut Group) {
+    let next = group.reported.max(shared.capacity / 2).max(1) * 2;
+    if group.holding && group.backlog.len() >= next {
+        group.reported = group.backlog.len();
+        log::warn!(
+            "in-memory[{}/{name}]: {} messages wait behind the message in hand",
+            shared.uri,
+            group.backlog.len() - 1
+        );
+    }
+}
+
+/// The task of one group: the head of its backlog to the handler attached,
+/// until it is taken, then the next.
+async fn deliver(shared: Arc<Shared>, name: String) {
+    let mut failures: u32 = 0;
+    loop {
+        let changed = shared.changed.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        let call = {
+            let mut state = lock(&shared.state);
+            let open = state.open;
+            let Some(group) = state.groups.get_mut(&name) else {
+                return;
+            };
+            if group.attached.is_none() && !group.consumer {
+                state.groups.remove(&name);
+                drop(state);
+                shared.room.notify_waiters();
+                return;
+            }
+            if group.backlog.is_empty() && !open {
+                return;
+            }
+            // Admitted under the lock handlers are detached under: a call is
+            // either waited for by a cancel, or not made.
+            match (group.backlog.front(), &group.attached) {
+                (Some(message), Some(attached)) => Some((
+                    Arc::clone(message),
+                    attached.handler.clone(),
+                    attached.in_flight.admit(),
+                    attached.in_flight.clone(),
+                )),
+                _ => None,
+            }
+        };
+        let Some((message, handler, admitted, by)) = call else {
+            changed.await;
+            continue;
+        };
+        let outcome = AssertUnwindSafe(handling::within(handler(Message::clone(&message))))
+            .catch_unwind()
+            .await;
+        drop(admitted);
+        let failed = match outcome {
+            Ok(Ok(())) => false,
+            Ok(Err(_)) => true,
+            Err(_) => {
+                log::warn!(
+                    "in-memory[{}/{name}]: handler panicked, the message is skipped",
+                    shared.uri
+                );
+                false
+            }
+        };
+        {
+            let mut state = lock(&shared.state);
+            let Some(group) = state.groups.get_mut(&name) else {
+                return;
+            };
+            if failed {
+                group.holding = true;
+                failures += 1;
+            } else {
+                // Only this task takes from the front: the head is the message tried.
+                group.backlog.pop_front();
+                group.holding = false;
+                group.reported = 0;
+                failures = 0;
+            }
+        }
+        shared.room.notify_waiters();
+        if failed {
+            // The handler's own error is the handler's to report: it may
+            // carry the message's values (ADR-0036 R9).
+            if failures.is_power_of_two() {
+                log::warn!(
+                    "in-memory[{}/{name}]: handler failed {failures} times on the message in \
+                     hand, retrying every {:?}",
+                    shared.uri,
+                    shared.retry_after
+                );
+            }
+            tokio::select! {
+                () = tokio::time::sleep(shared.retry_after) => {}
+                () = replaced(&shared, &name, &by) => {}
+            }
+        }
+    }
+}
+
+/// Returns once a handler other than `by` is attached to the group: the
+/// pause before the next try ends, and the new handler is tried at once.
+async fn replaced(shared: &Shared, name: &str, by: &InFlight) {
+    loop {
+        let changed = shared.changed.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        let other = lock(&shared.state)
+            .groups
+            .get(name)
+            .and_then(|group| group.attached.as_ref())
+            .is_some_and(|attached| !attached.in_flight.same(by));
+        if other {
+            return;
+        }
+        changed.await;
     }
 }
 
 impl Adapter for InMemoryBroker {
     /// Joins `group` on `uri`; refuses a second consumer in the same group.
     fn consumer(&self, uri: &str, group: &str) -> Result<Box<dyn WireConsumer>, Error> {
-        let (_, groups) = self.topic(uri);
+        let (_, shared) = self.topic(uri);
         {
-            let mut groups = lock(&groups);
-            if groups.contains_key(group) {
+            let mut state = lock(&shared.state);
+            if state.groups.contains_key(group) {
                 return Err(Error::AlreadyInGroup {
                     uri: uri::without_key(uri).to_owned(),
                     group: group.to_owned(),
                 });
             }
-            groups.insert(group.to_owned(), None);
+            state.groups.insert(
+                group.to_owned(),
+                Group {
+                    backlog: VecDeque::new(),
+                    attached: None,
+                    holding: false,
+                    consumer: true,
+                    reported: 0,
+                },
+            );
         }
+        tokio::spawn(deliver(Arc::clone(&shared), group.to_owned()));
         Ok(Box::new(InMemoryConsumer {
-            groups,
+            shared,
             group: group.to_owned(),
         }))
     }
@@ -155,37 +375,54 @@ impl Adapter for InMemoryBroker {
 }
 
 struct InMemoryConsumer {
-    groups: Groups,
+    shared: Arc<Shared>,
     group: String,
 }
 
 impl WireConsumer for InMemoryConsumer {
     fn subscribe(&self, handler: Handler) -> Result<Subscription, Error> {
         let in_flight = InFlight::new();
-        lock(&self.groups).insert(
-            self.group.clone(),
-            Some(Attached {
+        if let Some(group) = lock(&self.shared.state).groups.get_mut(&self.group) {
+            group.attached = Some(Attached {
                 handler,
                 in_flight: in_flight.clone(),
-            }),
-        );
-        let groups = Arc::clone(&self.groups);
+            });
+        }
+        self.shared.changed.notify_waiters();
+        let shared = Arc::clone(&self.shared);
         let group = self.group.clone();
         let mine = in_flight.clone();
         Ok(Subscription::with_quiesce(
             // Only this subscription's handler: a later one of the group stays.
             move || {
-                if let Some(slot) = lock(&groups).get_mut(&group)
-                    && slot.as_ref().is_some_and(|a| a.in_flight.same(&mine))
+                if let Some(slot) = lock(&shared.state).groups.get_mut(&group)
+                    && slot
+                        .attached
+                        .as_ref()
+                        .is_some_and(|a| a.in_flight.same(&mine))
                 {
-                    *slot = None;
+                    slot.attached = None;
                 }
+                shared.changed.notify_waiters();
+                shared.room.notify_waiters();
             },
             move || {
                 let in_flight = in_flight.clone();
                 Box::pin(async move { in_flight.quiesce().await })
             },
         ))
+    }
+}
+
+/// A consumer dropped with its handler attached goes on delivering — a
+/// subscription made at the composition root outlives the consumer it was
+/// made on; with none attached, its group ends.
+impl Drop for InMemoryConsumer {
+    fn drop(&mut self) {
+        if let Some(group) = lock(&self.shared.state).groups.get_mut(&self.group) {
+            group.consumer = false;
+        }
+        self.shared.changed.notify_waiters();
     }
 }
 

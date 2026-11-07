@@ -46,12 +46,38 @@ fn pool() -> Pool {
         .expect("the pool can be built")
 }
 
+/// The tests share one server, and one of them holds its horizon on
+/// purpose for as long as it runs — a transaction open in another database
+/// and a relay busy in this one — which every other test would wait out
+/// past its deadlines. And a reclamation judges a generation closed when no
+/// transaction of the database holds an id in it: a test whose ring's
+/// generation spans every id waits for a moment with no writing
+/// transaction at all, which the other tests, running beside it, may never
+/// leave it. Those run alone; the others share the lane.
+static LANE: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+
+/// A test's hold on the lane, kept for as long as the test runs.
+#[expect(dead_code, reason = "a guard, held only to be dropped with the test")]
+enum Lane {
+    Shared(tokio::sync::RwLockReadGuard<'static, ()>),
+    Alone(tokio::sync::RwLockWriteGuard<'static, ()>),
+}
+
+async fn shared() -> Lane {
+    Lane::Shared(LANE.read().await)
+}
+
+async fn alone() -> Lane {
+    Lane::Alone(LANE.write().await)
+}
+
 struct Fixture<O = ()> {
     sessions: PgSessionPool,
     outbox: PgOutbox<PgSessionPool, (O, Arc<JsonTrace>)>,
     tables: (String, String),
     /// Written when the fixture is dropped, if a trace directory is set.
     _trace: TraceFile,
+    _lane: Lane,
 }
 
 /// Tables of its own per test, so tests run in parallel; one slot.
@@ -85,7 +111,13 @@ async fn fixture_concurrent(name: &str, slots: u32) -> Fixture {
 
 /// The same, its table a ring of its own numbers (ADR-0033).
 async fn fixture_ring(name: &str, ring: Ring) -> Fixture {
-    fixture_shaped(name, (), 1, ring, TraceFile::off()).await
+    fixture_shaped(name, (), 1, ring, TraceFile::off(), shared().await).await
+}
+
+/// The same, for a test that reclaims a generation spanning every id: it
+/// runs alone.
+async fn fixture_ring_alone(name: &str, ring: Ring) -> Fixture {
+    fixture_shaped(name, (), 1, ring, TraceFile::off(), alone().await).await
 }
 
 async fn fixture_built<O: OutboxObserver>(
@@ -94,7 +126,15 @@ async fn fixture_built<O: OutboxObserver>(
     slots: u32,
     trace: TraceFile,
 ) -> Fixture<O> {
-    fixture_shaped(name, observer, slots, Ring::default(), trace).await
+    fixture_shaped(
+        name,
+        observer,
+        slots,
+        Ring::default(),
+        trace,
+        shared().await,
+    )
+    .await
 }
 
 async fn fixture_shaped<O: OutboxObserver>(
@@ -103,6 +143,7 @@ async fn fixture_shaped<O: OutboxObserver>(
     slots: u32,
     ring: Ring,
     trace: TraceFile,
+    lane: Lane,
 ) -> Fixture<O> {
     let tables = (format!("outbox_{name}"), format!("outbox_{name}_offsets"));
     let sessions = PgSessionPool::new(pool());
@@ -121,6 +162,7 @@ async fn fixture_shaped<O: OutboxObserver>(
         outbox,
         tables,
         _trace: trace,
+        _lane: lane,
     }
 }
 
@@ -839,6 +881,7 @@ async fn run_outlives_a_failing_subscriber() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn two_migrations_at_once_agree() {
+    let _lane = shared().await;
     let (outbox, offsets) = ("outbox_twice", "outbox_twice_offsets");
     let sessions = PgSessionPool::new(pool());
     let build = || {
@@ -1438,6 +1481,7 @@ const RELEASED_FETCH: &str = r#"
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn adr_0007_s_positions_convert_exactly_and_its_relay_still_runs() {
+    let lane = shared().await;
     let tables = (
         "outbox_convert".to_owned(),
         "outbox_convert_offsets".to_owned(),
@@ -1501,6 +1545,7 @@ async fn adr_0007_s_positions_convert_exactly_and_its_relay_still_runs() {
         outbox: outbox.observed_by(((), TraceFile::off().recorder())),
         tables,
         _trace: TraceFile::off(),
+        _lane: lane,
     };
     let (broker, broker_seen) = {
         let (seen, subscriber) = collector();
@@ -1992,6 +2037,7 @@ async fn a_look_and_its_batch_lock_the_generations_they_name_alone() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn the_ring_is_copied_from_a_bound_fixed_before_its_step() {
+    let lane = shared().await;
     let tables = (
         "outbox_ring_copy".to_owned(),
         "outbox_ring_copy_offsets".to_owned(),
@@ -2009,6 +2055,7 @@ async fn the_ring_is_copied_from_a_bound_fixed_before_its_step() {
         outbox: outbox.observed_by(((), TraceFile::off().recorder())),
         tables,
         _trace: TraceFile::off(),
+        _lane: lane,
     };
     f.execute(
         &RELEASED_BASELINE
@@ -2294,7 +2341,7 @@ async fn generations_every_group_passed_go_in_order_and_the_bounds_hold() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_generation_is_kept_while_open_unpassed_young_or_held() {
-    let f = fixture_ring("reclaim_kept", Ring::new(2, 1 << 40))
+    let f = fixture_ring_alone("reclaim_kept", Ring::new(2, 1 << 40))
         .await
         .with_reclaiming(eager(0));
     let (a_seen, a) = collector();
@@ -2462,7 +2509,7 @@ async fn patient_rewind<O: OutboxObserver>(
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn an_in_progress_id_that_committed_into_the_generation_keeps_it() {
-    let f = fixture_ring("reclaim_xip", Ring::new(2, 1 << 40))
+    let f = fixture_ring_alone("reclaim_xip", Ring::new(2, 1 << 40))
         .await
         .with_reclaiming(eager(0));
     let (seen, subscriber) = collector();
@@ -2511,7 +2558,7 @@ async fn an_in_progress_id_that_committed_into_the_generation_keeps_it() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn an_abandoned_group_is_forgotten_and_a_live_one_refused() {
-    let f = fixture_ring("reclaim_forget", Ring::new(2, 1 << 40))
+    let f = fixture_ring_alone("reclaim_forget", Ring::new(2, 1 << 40))
         .await
         .with_reclaiming(eager(0));
     let (_, subscriber) = collector();
@@ -2551,7 +2598,7 @@ async fn an_abandoned_group_is_forgotten_and_a_live_one_refused() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_counter_reset_stops_the_reclamation_without_a_relay_s_report() {
-    let f = fixture_ring("reclaim_reset", Ring::new(2, 1 << 40))
+    let f = fixture_ring_alone("reclaim_reset", Ring::new(2, 1 << 40))
         .await
         .with_reclaiming(eager(0));
     let (_, subscriber) = collector();
@@ -2792,6 +2839,7 @@ async fn a_rewind_deeper_than_the_replay_horizon_is_refused() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_ring_copy_past_its_limit_is_refused_before_the_step() {
+    let lane = shared().await;
     let tables = (
         "outbox_copy_limit".to_owned(),
         "outbox_copy_limit_offsets".to_owned(),
@@ -2811,6 +2859,7 @@ async fn a_ring_copy_past_its_limit_is_refused_before_the_step() {
         outbox: outbox(3).observed_by(((), TraceFile::off().recorder())),
         tables: tables.clone(),
         _trace: TraceFile::off(),
+        _lane: lane,
     };
     f.execute(&RELEASED_BASELINE.replace("{offsets}", &f.tables.1))
         .await
@@ -2867,6 +2916,7 @@ async fn the_reclamation_laps_the_ring_while_the_relay_is_busy() {
         4,
         ring,
         TraceFile::off(),
+        alone().await,
     )
     .await
     .with_reclaiming(Reclaiming {
@@ -3051,7 +3101,7 @@ async fn an_emptying_waiting_for_its_lock_holds_back_no_dispatch() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn the_selection_of_everything_is_forgotten_once_its_lanes_took_over() {
-    let f = fixture_ring("forget_selection", Ring::new(2, 1 << 40))
+    let f = fixture_ring_alone("forget_selection", Ring::new(2, 1 << 40))
         .await
         .with_reclaiming(eager(0));
     let (seen, subscriber) = collector();

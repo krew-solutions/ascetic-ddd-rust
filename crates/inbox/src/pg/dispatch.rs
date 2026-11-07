@@ -1,12 +1,14 @@
 //! The dispatcher: one message inside one transaction, and the loops of a
 //! process around it. The SQL is in `store`.
 
+use ascetic_ddd_bus::uri;
 use ascetic_ddd_session::{PgAccess, Session, SessionError, SessionPool};
 use futures::future::join_all;
 use tokio::sync::watch;
 
 use super::{Loops, Outcome, PgInbox};
 use crate::error::{Error, Failure};
+use crate::intake;
 use crate::message::{CausalDependency, InboxMessage};
 use crate::observer::{
     Dispatched, Expired, Failed, Fetched, Handled, InboxObserver, Marked, Resolved, Unparked,
@@ -187,24 +189,34 @@ where
                                 // parked message must not be silent when no
                                 // observer of ours is attached. An attempt is
                                 // expected and repeats; parking needs a person.
-                                let identity = format!(
-                                    "{}/{}/{}/{}",
-                                    message.tenant_id,
-                                    message.stream_type,
-                                    message.stream_id,
-                                    message.stream_position
+                                // A line names the row by its channel and its
+                                // place in the inbox: never by its stream, whose
+                                // id and Tenant are the producer's values, and
+                                // never with the subscriber's text, which the
+                                // row keeps and the observer is handed
+                                // (ADR-0036 R9).
+                                let place = format!(
+                                    "{} at {} in slot {slot}",
+                                    intake::sanitized(
+                                        Some(uri::without_key(&message.uri).as_bytes()),
+                                        intake::CHANNEL_WIDTH,
+                                    )
+                                    .unwrap_or_default(),
+                                    message
+                                        .received_position
+                                        .map_or_else(|| "?".to_owned(), |position| position.to_string()),
                                 );
                                 if failure.is_permanent() {
                                     log::error!(
-                                        "inbox: {identity} parked, the subscriber's verdict is permanent: {failure}"
+                                        "inbox: the message of {place} parked, the subscriber's verdict is permanent"
                                     );
                                 } else if parked {
                                     log::error!(
-                                        "inbox: {identity} parked after {attempts} failed attempts: {failure}"
+                                        "inbox: the message of {place} parked after {attempts} failed attempts"
                                     );
                                 } else {
                                     log::warn!(
-                                        "inbox: attempt {attempts} on {identity} failed, next in {retry_after:?}: {failure}"
+                                        "inbox: attempt {attempts} on the message of {place} failed, next in {retry_after:?}"
                                     );
                                 }
                                 self.observer.on_failed(&Failed {

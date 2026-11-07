@@ -116,7 +116,12 @@ impl Bus {
 
     /// A consumer of `uri` in `group`, reading values with `decode`.
     ///
-    /// A message that `decode` rejects is reported and skipped.
+    /// A message that `decode` rejects is reported and acknowledged without
+    /// a handler: lost, since a plain consumer has no store to set it aside
+    /// in, and holding it would stop the channel for every message behind it
+    /// (ADR-0036 R10). A channel that must account for every message goes
+    /// through a bridge into an inbox, whose intake sets aside what it cannot
+    /// store and parks what its subscriber cannot read.
     pub fn consumer<T, D>(&self, uri: &str, group: &str, decode: D) -> Result<Consumer<T>, Error>
     where
         D: Fn(&Message) -> Result<T, BoxError> + Send + Sync + 'static,
@@ -178,8 +183,11 @@ impl<T: 'static> Consumer<T> {
     /// cancelled. Subscribing again replaces the handler.
     ///
     /// A handler that cannot fail returns `()`; one that can returns a
-    /// `Result`, and an error means the message was not handled — a transport
-    /// that can, redelivers it. So does a stage that fails on the way in.
+    /// `Result`, and an error means the message was not taken: the transport
+    /// delivers it again, in order, until it is taken or the subscription is
+    /// cancelled, and what follows waits (ADR-0036 decision 3). So does a
+    /// stage that fails on the way in, however lasting its verdict: a sealed
+    /// channel belongs on an inbox, which parks what it cannot open.
     pub fn subscribe<F, Fut, O>(&self, handler: F) -> Result<Subscription, Error>
     where
         F: Fn(T) -> Fut + Send + Sync + 'static,
@@ -201,8 +209,13 @@ impl<T: 'static> Consumer<T> {
                 // lives across it.
                 let handling = match decode(&message) {
                     Ok(value) => handler(value),
-                    Err(error) => {
-                        log::warn!("bus[{uri}/{group}]: decoding failed: {error}");
+                    // The decoder's error is the decoder's to report: it may
+                    // carry the message's values (ADR-0036 R9).
+                    Err(_) => {
+                        log::warn!(
+                            "bus[{uri}/{group}]: a message could not be decoded and is acknowledged \
+                             unread"
+                        );
                         return Ok(());
                     }
                 };
@@ -345,10 +358,10 @@ impl<T: 'static, S: Send + 'static> TransactionalConsumer<T, S> {
     /// Runs `handler` for every message, with the transaction the message is
     /// acknowledged in, until the subscription is cancelled.
     ///
-    /// A message that `decode` rejects is reported and acknowledged without a
-    /// handler, as [`Consumer::subscribe`] does: a poison message must not
-    /// stop the rest. A stage that fails on the way in fails the handling
-    /// instead, so the message is kept and tried again.
+    /// A message that `decode` rejects will not be read on a retry either:
+    /// its verdict is permanent, and the inbox parks it where an operator
+    /// sees it. A stage that fails on the way in fails the handling instead,
+    /// with the stage's own verdict.
     pub fn subscribe<F, Fut, O>(&self, handler: F) -> Result<Subscription, Error>
     where
         F: Fn(S, T) -> Fut + Send + Sync + 'static,
@@ -369,8 +382,12 @@ impl<T: 'static, S: Send + 'static> TransactionalConsumer<T, S> {
                 // it processed as if it had been handled.
                 let handling = match decode(&message) {
                     Ok(value) => handler(session, value),
+                    // The error goes with the parked row, where access is
+                    // controlled; the log names no value (ADR-0036 R9).
                     Err(error) => {
-                        log::warn!("bus[transactional]: decoding failed, parking: {error}");
+                        log::warn!(
+                            "bus[transactional]: a message could not be decoded and is parked"
+                        );
                         return Err(Permanent::new(error).into());
                     }
                 };

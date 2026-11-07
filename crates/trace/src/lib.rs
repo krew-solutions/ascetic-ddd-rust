@@ -266,6 +266,18 @@ impl InboxObserver for JsonTrace {
             "woken": event.woken.iter().map(inbox_id).collect::<Vec<_>>(),
         }));
     }
+    /// A message set aside is named by its digest alone: its identity may be
+    /// what could not be read (ADR-0036).
+    fn on_rejected(&self, event: &inbox::Rejected<'_>) {
+        self.record(json!({
+            "observer": "inbox",
+            "event": "rejected",
+            "channel": event.channel,
+            "reason": event.reason.as_str(),
+            "digest": event.digest,
+            "repeat": event.repeat,
+        }));
+    }
 }
 
 /// A recorder whose lines go to `$ASCETIC_DDD_TRACE_DIR/<stem>.jsonl` when
