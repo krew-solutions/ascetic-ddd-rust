@@ -41,9 +41,8 @@ SHELL := bash
 .ONESHELL:
 .DEFAULT_GOAL := help
 MAKEFLAGS += --no-builtin-rules --no-builtin-variables
-# The tiers share cargo's build lock and one database, and the live tests
-# of the inbox assert on time: one of them fails when the machine is busy
-# with something else, TLC say. One tier at a time, whatever `-j` asks.
+# The tiers share cargo's build lock and one database, and TLC takes every
+# core. One tier at a time, whatever `-j` asks.
 .NOTPARALLEL:
 
 CARGO ?= cargo

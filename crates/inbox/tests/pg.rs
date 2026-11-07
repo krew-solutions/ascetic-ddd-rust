@@ -812,29 +812,47 @@ async fn run_processes_until_shutdown() {
 }
 
 /// Two slots, two dispatchers, a subscriber that takes its time: the locks
-/// are per slot, so the two run side by side, not one after the other.
+/// are per slot, so the two run side by side, not one after the other —
+/// seen by the two runs overlapping, not by how long the pair took, a bound
+/// that held the dispatchers' overhead too and failed on a busy machine
+/// (2026-11-07).
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn two_slots_are_worked_at_once() {
     let f = fixture_concurrent("parallel", 2).await;
     let (first, second) = f.streams_in_different_slots().await;
     f.publish(&[message(&first, 1), message(&second, 1)]).await;
-    let slow = |_: &PgSession, _: &InboxMessage| async {
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        Ok::<(), Failure>(())
+    let spans: Arc<Mutex<Vec<(std::time::Instant, std::time::Instant)>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let slow = {
+        let spans = Arc::clone(&spans);
+        move |_: &PgSession, _: &InboxMessage| {
+            let spans = Arc::clone(&spans);
+            async move {
+                let started = std::time::Instant::now();
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                spans
+                    .lock()
+                    .unwrap()
+                    .push((started, std::time::Instant::now()));
+                Ok::<(), Failure>(())
+            }
+        }
     };
 
-    let started = std::time::Instant::now();
-    let (a, b) = tokio::join!(f.inbox.dispatch(slow), f.inbox.dispatch(slow));
-    let elapsed = started.elapsed();
+    let (a, b) = tokio::join!(f.inbox.dispatch(&slow), f.inbox.dispatch(&slow));
 
     assert_eq!(
         (a.unwrap(), b.unwrap()),
         (Outcome::Processed, Outcome::Processed)
     );
+    let spans = spans.lock().unwrap().clone();
+    let [(a_from, a_to), (b_from, b_to)] = spans[..] else {
+        panic!("two runs: {spans:?}");
+    };
     assert!(
-        elapsed < Duration::from_millis(550),
-        "two slots took {elapsed:?}: one after the other"
+        a_from < b_to && b_from < a_to,
+        "the two slots ran one after the other: {spans:?}"
     );
 }
 
