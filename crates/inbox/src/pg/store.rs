@@ -122,10 +122,13 @@ const REJECTS: &str = r#"
         last_seen_at timestamptz NOT NULL DEFAULT statement_timestamp(),
         disposed_at timestamptz NULL,
         disposition text NULL,
-        disposed_by text NULL
+        disposed_by text NULL,
+        disposed_because text NULL
     );
     CREATE INDEX {table}_rejects__open_idx ON {table}_rejects (channel, reason, first_seen_at)
         WHERE disposed_at IS NULL;
+    CREATE INDEX {table}_rejects__closed_idx ON {table}_rejects (channel, disposed_at)
+        WHERE disposed_at IS NOT NULL;
     CREATE INDEX {table}_rejects__identity_idx ON {table}_rejects (identity)
         WHERE identity IS NOT NULL;
 "#;

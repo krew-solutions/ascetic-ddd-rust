@@ -869,3 +869,30 @@ This ADR's own:
     that follows it. A recorded run fits; a forged one, handled before its
     rejection, does not.
   - R8's wake from expiry in `Inbox.tla` comes with R8, in A3.
+- 2026-11-07 — A3's surface and retention built; R8 comes next, with its
+  models.
+  - **The surface:** `set_aside_counts`; `set_aside_page`, a keyset page of
+    the open rows by channel and reason that gives the metadata keys asked
+    for, never the payload, and refuses the data key's fields;
+    `set_aside_message`, the kept bytes, a call of its own; `readmit`,
+    `readmit_all` and `discard`. Every call names its principal, reads
+    included, and is told to the observer (`on_operated`) once it has
+    committed. Each disposition runs in transactions of the inbox's own:
+    the intake's, then the row's close.
+  - **Readmit is a disposition the channel declares**
+    (`PgInbox::readmitting`); no channel readmits unless told. A readmit
+    that the intake takes closes the row, its bytes gone; one set aside
+    again leaves it open, seen once more.
+  - **A discard is a tombstone** with its principal and reason; a repeat of
+    the same bytes stays discarded, and is counted.
+  - **Retention (R6):** the sweep closes an open row past its channel's
+    window as expired, its bytes gone, and forgets a closed row a window
+    after it closed; a row without a Tenant lives the host's bound
+    (`InboxRetention::untenanted`), whatever its channel.
+  - **The frame reads back** (`unframe`), held by a round-trip property.
+  - The rows set aside gained `disposed_because` and an index of closed
+    rows by channel, in their own migration, not yet released.
+  - Executors: a PostgreSQL test each for the counts and pages, the bytes,
+    readmit after a fix on the consuming side, a bulk readmit, discard and
+    retention; seven mutations caught, among them every channel
+    readmitting by default.

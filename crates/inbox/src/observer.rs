@@ -60,6 +60,37 @@ pub struct Received<'a> {
     pub held_by: Option<&'a str>,
 }
 
+/// A call of the operator's surface of the rows set aside, reads included,
+/// told once it has committed, so that a host audits who did what
+/// (ADR-0036 R7).
+pub struct Operated<'a> {
+    /// Who called, as the host named them.
+    pub principal: &'a str,
+    /// What was done.
+    pub operation: Operation,
+    /// The channel, when the call named one.
+    pub channel: Option<&'a str>,
+    /// The row's digest, when the call named one.
+    pub digest: Option<&'a str>,
+    /// How many rows the call read or changed.
+    pub rows: u64,
+}
+
+/// What a call of the operator's surface did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Operation {
+    /// Counted the open rows set aside.
+    Counted,
+    /// Read a page of them.
+    Paged,
+    /// Read one row's kept bytes.
+    Read,
+    /// Took a row's message through the intake again.
+    Readmitted,
+    /// Closed a row as discarded, a tombstone.
+    Discarded,
+}
+
 /// The intake set a message aside beside the inbox, never storing it as a
 /// row (ADR-0036): told once the row set aside commits.
 pub struct Rejected<'a> {
@@ -265,6 +296,8 @@ observer! {
     fn on_swept(&self, _event: &Swept<'_>);
     /// The intake set a message aside.
     fn on_rejected(&self, _event: &Rejected<'_>);
+    /// The operator's surface of the rows set aside was called.
+    fn on_operated(&self, _event: &Operated<'_>);
 }
 }
 
@@ -296,6 +329,7 @@ mod tests {
         on_handled: Handled, on_marked: Marked, on_failed: Failed,
         on_expired: Expired, on_dispatched: Dispatched, on_unparked: Unparked,
         on_resolved: Resolved, on_swept: Swept, on_rejected: Rejected,
+        on_operated: Operated,
     }
 
     /// Tells `observer` one event of each kind, in the trait's order.
@@ -365,9 +399,16 @@ mod tests {
             digest: "d",
             repeat: false,
         });
+        observer.on_operated(&Operated {
+            principal: "p",
+            operation: Operation::Counted,
+            channel: None,
+            digest: None,
+            rows: 0,
+        });
     }
 
-    const METHODS: [&str; 12] = [
+    const METHODS: [&str; 13] = [
         "on_received",
         "on_waiting",
         "on_fetched",
@@ -380,6 +421,7 @@ mod tests {
         "on_resolved",
         "on_swept",
         "on_rejected",
+        "on_operated",
     ];
 
     /// What `labels`, told in order, note for each event in turn.

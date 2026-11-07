@@ -83,8 +83,12 @@
 mod dispatch;
 mod intake;
 mod store;
+mod surface;
 
 pub use intake::Admission;
+pub use surface::{
+    Readmission, Readmitted, SetAsideCount, SetAsideCursor, SetAsidePage, SetAsideRow,
+};
 mod sweep;
 
 use std::collections::{BTreeMap, HashMap};
@@ -229,6 +233,9 @@ impl fmt::Debug for Retries {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InboxRetention {
     windows: BTreeMap<String, Duration>,
+    /// How long a row set aside without a Tenant lives, whatever its
+    /// channel: no forgetting of a Tenant reaches it (ADR-0036 R6).
+    untenanted: Option<Duration>,
     /// How often the sweep runs.
     pub interval: Duration,
     /// How many rows a statement of the sweep forgets at most.
@@ -246,6 +253,7 @@ impl InboxRetention {
     pub fn keep_everything() -> Self {
         InboxRetention {
             windows: BTreeMap::new(),
+            untenanted: None,
             interval: Duration::from_secs(60),
             batch: 1000,
             grace: Duration::from_secs(600),
@@ -257,6 +265,13 @@ impl InboxRetention {
     /// were processed.
     pub fn window(mut self, channel: impl Into<String>, window: Duration) -> Self {
         self.windows.insert(channel.into(), window);
+        self
+    }
+
+    /// The same, a row set aside without a Tenant living `bound` from its
+    /// first sight, whatever its channel (ADR-0036 R6).
+    pub fn untenanted(mut self, bound: Duration) -> Self {
+        self.untenanted = Some(bound);
         self
     }
 
@@ -299,11 +314,17 @@ pub struct PgInbox<P, O = ()> {
     /// Whether a message of a stream type may arrive on a channel (ADR-0036
     /// R5): [`PgInbox::admitting`].
     admission: Admits,
+    /// Whether a channel's rows set aside may be readmitted (ADR-0036
+    /// decision 4): [`PgInbox::readmitting`].
+    readmission: Readmits,
 }
 
 /// The rule [`PgInbox::admitting`] holds a message to: the channel it
 /// arrived on, without its key, and the stream type its headers name.
 type Admits = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
+
+/// The rule [`PgInbox::readmitting`] holds a channel to.
+type Readmits = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 impl<P> PgInbox<P> {
     /// An inbox in table `inbox`, one slot partitioned by URI, observed by
@@ -323,6 +344,7 @@ impl<P> PgInbox<P> {
             retention: InboxRetention::default(),
             swept_to: Mutex::new(HashMap::new()),
             admission: Arc::new(|_, _| true),
+            readmission: Arc::new(|_| false),
         }
     }
 }
@@ -343,6 +365,7 @@ impl<P, O> PgInbox<P, O> {
             retention: self.retention,
             swept_to: self.swept_to,
             admission: self.admission,
+            readmission: self.readmission,
         }
     }
 
@@ -359,6 +382,18 @@ impl<P, O> PgInbox<P, O> {
         admits: impl Fn(&str, &str) -> bool + Send + Sync + 'static,
     ) -> Self {
         self.admission = Arc::new(admits);
+        self
+    }
+
+    /// The same inbox, letting the operator readmit the rows set aside of a
+    /// channel only when `readmits(channel)` holds (ADR-0036 decision 4). A
+    /// readmit is a disposition the channel declares: one folded by its
+    /// producer's positions readmits over a higher position, one that depends
+    /// on the order of arrival may refuse it. No channel readmits unless
+    /// told.
+    #[must_use]
+    pub fn readmitting(mut self, readmits: impl Fn(&str) -> bool + Send + Sync + 'static) -> Self {
+        self.readmission = Arc::new(readmits);
         self
     }
 

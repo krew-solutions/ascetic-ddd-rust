@@ -1630,7 +1630,7 @@ fn the_released_migrations_keep_their_checksums() {
             ),
             (
                 "20261107T000000Z_rejects".to_owned(),
-                "fnv1a64:f2b425791ef27fb1:884".to_owned()
+                "fnv1a64:b8887c3ee7dc490a:1046".to_owned()
             ),
             (
                 "20261107T010000Z_indexes_before_launch".to_owned(),

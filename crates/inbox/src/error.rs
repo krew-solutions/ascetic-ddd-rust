@@ -69,6 +69,9 @@ pub enum Error {
     Malformed(String),
     /// The tables could not be migrated (ADR-0029).
     Migration(ascetic_ddd_migration::MigrationError),
+    /// The operator's call is refused: what it asks for the surface does not
+    /// give (ADR-0036 R7).
+    Refused(&'static str),
     /// A message's insert met a conflict whose holder was gone before it
     /// could be read: forgotten by the sweep between the two statements.
     /// The message is tried again, and the retry stores it (ADR-0036 R2).
@@ -85,7 +88,10 @@ impl Error {
             Error::Session(error) => error.is_transient(),
             Error::Database(error) => ascetic_ddd_session::pg::transient(error),
             Error::Conflict(_) => true,
-            Error::Subscriber(_) | Error::Malformed(_) | Error::Migration(_) => false,
+            Error::Subscriber(_)
+            | Error::Malformed(_)
+            | Error::Migration(_)
+            | Error::Refused(_) => false,
         }
     }
 }
@@ -118,6 +124,7 @@ impl fmt::Display for Error {
             Error::Malformed(what) => write!(f, "malformed inbox: {what}"),
             Error::Migration(error) => write!(f, "{error}"),
             Error::Conflict(what) => write!(f, "conflict: {what}"),
+            Error::Refused(what) => write!(f, "refused: {what}"),
         }
     }
 }
@@ -128,7 +135,7 @@ impl std::error::Error for Error {
             Error::Session(error) => Some(error),
             Error::Database(error) => Some(error),
             Error::Subscriber(failure) => Some(failure.error().as_ref()),
-            Error::Malformed(_) | Error::Conflict(_) => None,
+            Error::Malformed(_) | Error::Conflict(_) | Error::Refused(_) => None,
             Error::Migration(error) => Some(error),
         }
     }

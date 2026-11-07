@@ -78,6 +78,20 @@ impl Reason {
             Reason::IdentityTaken => "identity_taken",
         }
     }
+
+    /// The reason the table names `text`, if it names one.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Reason> {
+        [
+            Reason::Malformed,
+            Reason::Unstorable,
+            Reason::Foreign,
+            Reason::Differs,
+            Reason::IdentityTaken,
+        ]
+        .into_iter()
+        .find(|reason| reason.as_str() == text)
+    }
 }
 
 /// A message's identity read from its headers, the checks passed, as the
@@ -251,6 +265,60 @@ pub(crate) fn frame(destination: &str, message: &Message) -> Vec<u8> {
     }
     put(&mut out, message.payload());
     out
+}
+
+/// A frame read back: the destination and the message, as [`frame`] wrote
+/// them, so that a readmit takes the very message set aside; none when the
+/// bytes are not a whole frame.
+pub(crate) fn unframe(bytes: &[u8]) -> Option<(String, Message)> {
+    struct Reader<'a>(&'a [u8]);
+    impl<'a> Reader<'a> {
+        fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+            let (head, rest) = self.0.split_at_checked(n)?;
+            self.0 = rest;
+            Some(head)
+        }
+        fn length(&mut self) -> Option<usize> {
+            let bytes = self.take(4)?;
+            usize::try_from(u32::from_be_bytes(bytes.try_into().ok()?)).ok()
+        }
+        fn part(&mut self) -> Option<&'a [u8]> {
+            let n = self.length()?;
+            self.take(n)
+        }
+        fn text(&mut self) -> Option<String> {
+            String::from_utf8(self.part()?.to_vec()).ok()
+        }
+    }
+    let mut reader = Reader(bytes);
+    let destination = reader.text()?;
+    let key = match reader.take(1)? {
+        [0] => None,
+        [1] => Some(reader.part()?),
+        _ => return None,
+    };
+    let count = reader.length()?;
+    let mut headers = Vec::new();
+    for _ in 0..count {
+        let name = reader.text()?;
+        headers.push((name, reader.part()?));
+    }
+    let payload = reader.part()?;
+    if !reader.0.is_empty() {
+        return None;
+    }
+    let message = headers
+        .into_iter()
+        .fold(Message::new(payload), |message, (name, value)| {
+            message.with_header(name, value)
+        });
+    Some((
+        destination,
+        match key {
+            Some(key) => message.with_key(key),
+            None => message,
+        },
+    ))
 }
 
 /// A digest as the UUID text PostgreSQL's `uuid` takes: the first 16 bytes
@@ -628,6 +696,30 @@ mod tests {
             #[test]
             fn a_digest_is_a_uuid_postgresql_takes(bytes in proptest::collection::vec(any::<u8>(), 0..64)) {
                 prop_assert!(is_uuid(&digest(&bytes)));
+            }
+
+            #[test]
+            fn a_frame_reads_back_as_the_message_it_was(
+                destination in any::<String>(),
+                key in proptest::option::of(proptest::collection::vec(any::<u8>(), 0..16)),
+                headers in proptest::collection::vec((any::<String>(), hostile()), 0..4),
+                payload in proptest::collection::vec(any::<u8>(), 0..64),
+            ) {
+                let message = headers
+                    .into_iter()
+                    .fold(Message::new(payload), |message, (name, value)| message.with_header(name, value));
+                let message = match key {
+                    Some(key) => message.with_key(key),
+                    None => message,
+                };
+                prop_assert_eq!(unframe(&frame(&destination, &message)), Some((destination, message)));
+            }
+
+            #[test]
+            fn bytes_that_are_no_frame_read_as_none_without_a_panic(
+                bytes in proptest::collection::vec(any::<u8>(), 0..64),
+            ) {
+                let _ = unframe(&bytes);
             }
         }
 
