@@ -69,6 +69,10 @@ pub enum Error {
     Malformed(String),
     /// The tables could not be migrated (ADR-0029).
     Migration(ascetic_ddd_migration::MigrationError),
+    /// A message's insert met a conflict whose holder was gone before it
+    /// could be read: forgotten by the sweep between the two statements.
+    /// The message is tried again, and the retry stores it (ADR-0036 R2).
+    Conflict(String),
 }
 
 impl Error {
@@ -80,6 +84,7 @@ impl Error {
         match self {
             Error::Session(error) => error.is_transient(),
             Error::Database(error) => ascetic_ddd_session::pg::transient(error),
+            Error::Conflict(_) => true,
             Error::Subscriber(_) | Error::Malformed(_) | Error::Migration(_) => false,
         }
     }
@@ -93,6 +98,7 @@ impl fmt::Display for Error {
             Error::Subscriber(error) => write!(f, "subscriber: {error}"),
             Error::Malformed(what) => write!(f, "malformed inbox: {what}"),
             Error::Migration(error) => write!(f, "{error}"),
+            Error::Conflict(what) => write!(f, "conflict: {what}"),
         }
     }
 }
@@ -103,7 +109,7 @@ impl std::error::Error for Error {
             Error::Session(error) => Some(error),
             Error::Database(error) => Some(error),
             Error::Subscriber(failure) => Some(failure.error().as_ref()),
-            Error::Malformed(_) => None,
+            Error::Malformed(_) | Error::Conflict(_) => None,
             Error::Migration(error) => Some(error),
         }
     }

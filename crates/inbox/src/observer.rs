@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::{BoxError, Error};
+use crate::intake::Reason;
 use crate::message::{CausalDependency, InboxMessage};
 use crate::pg::Outcome;
 use crate::snapshot::Snapshot;
@@ -54,12 +55,28 @@ pub struct Received<'a> {
     /// for a second message the producer gave one identity — which a
     /// channel whose producers never reuse an identity takes for a defect,
     /// and one that republishes for a repeat. `None` when stored, or when
-    /// the stored row names no id.
+    /// the stored row names no id. A holder gone before it could be read
+    /// is no longer reported: the message is tried again (ADR-0036 R2).
     pub held_by: Option<&'a str>,
-    /// The row that held the identity went before it could be read:
-    /// forgotten by the sweep between the insert and the read (ADR-0033
-    /// decision 4). The holder is unknown, not absent.
-    pub holder_unknown: bool,
+}
+
+/// The intake set a message aside beside the inbox, never storing it as a
+/// row (ADR-0036): told once the row set aside commits.
+pub struct Rejected<'a> {
+    /// The channel it arrived on, without its key.
+    pub channel: &'a str,
+    /// Its Tenant's header, as the derived column keeps it: UTF-8, no NUL,
+    /// bounded; none when it was missing or not UTF-8. It is the producer's
+    /// claim: an observer that names it checks it is a Tenant's id first.
+    pub tenant_id: Option<&'a str>,
+    /// Its stream type's header, likewise.
+    pub stream_type: Option<&'a str>,
+    /// Why it was set aside.
+    pub reason: Reason,
+    /// The digest it is kept under.
+    pub digest: &'a str,
+    /// Whether the same bytes had been set aside before.
+    pub repeat: bool,
 }
 
 /// A dispatcher found the head of its queue depending on a message not yet
@@ -198,6 +215,8 @@ pub trait InboxObserver: Send + Sync {
     fn on_resolved(&self, _event: &Resolved<'_>) {}
     /// The sweep forgot processed rows of a channel.
     fn on_swept(&self, _event: &Swept<'_>) {}
+    /// The intake set a message aside.
+    fn on_rejected(&self, _event: &Rejected<'_>) {}
 }
 
 /// The sweep forgot processed rows of a channel whose window had passed
@@ -249,4 +268,5 @@ forward_to_each! {
     on_unparked: Unparked,
     on_resolved: Resolved,
     on_swept: Swept,
+    on_rejected: Rejected,
 }

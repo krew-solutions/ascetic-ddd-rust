@@ -12,7 +12,7 @@ use tokio_postgres::Row;
 use super::PgInbox;
 use crate::error::{Error, Failure};
 use crate::message::{CausalDependency, InboxMessage};
-use crate::observer::{InboxObserver, Receipt, Received};
+use crate::observer::{InboxObserver, Receipt};
 use crate::port::Inbox;
 use crate::snapshot::Snapshot;
 
@@ -97,6 +97,52 @@ const PROCESSED_AT: &str = r#"
         WHERE processed_at IS NOT NULL;
 "#;
 
+/// What the intake sets aside beside the inbox, never stored as a row
+/// (ADR-0036 decisions 2 and R4): the message's frame as `bytea`, under the
+/// digest of the frame; the columns derived from it as bounded text without
+/// a NUL, never `jsonb`, `uuid` or a bounded `varchar` of its text, so that
+/// what the inbox refused this table takes; its identity as a digest of it;
+/// the holder of a `message_id` taken as its channel and received position.
+/// A row keeps its bytes until it is disposed of or its life ends, and its
+/// tombstone after.
+const REJECTS: &str = r#"
+    CREATE TABLE {table}_rejects (
+        digest uuid PRIMARY KEY,
+        channel text NOT NULL,
+        tenant_id text NULL,
+        stream_type text NULL,
+        identity uuid NULL,
+        reason text NOT NULL,
+        detail text NOT NULL,
+        holder_channel text NULL,
+        holder_position bigint NULL,
+        message bytea NULL,
+        seen integer NOT NULL DEFAULT 1,
+        first_seen_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+        last_seen_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+        disposed_at timestamptz NULL,
+        disposition text NULL,
+        disposed_by text NULL
+    );
+    CREATE INDEX {table}_rejects__open_idx ON {table}_rejects (channel, reason, first_seen_at)
+        WHERE disposed_at IS NULL;
+    CREATE INDEX {table}_rejects__identity_idx ON {table}_rejects (identity)
+        WHERE identity IS NOT NULL;
+"#;
+
+/// The indexes the live inbox gets while it is small (ADR-0036 R11): the
+/// `message_id` unique within its Tenant and stream type (R5), and the
+/// parked rows by channel, for the gauge and the operator's page of Part B.
+/// The runner holds the table in ACCESS EXCLUSIVE mode for both builds.
+const INDEXES_BEFORE_LAUNCH: &str = r#"
+    DROP INDEX {table}__message_id_uniq;
+    CREATE UNIQUE INDEX {table}__message_id_uniq
+        ON {table} (tenant_id, stream_type, ((metadata->>'message_id')::uuid));
+    CREATE INDEX {table}__parked_idx ON {table}
+        ((split_part(uri, '/', 1) || '//' || split_part(uri, '/', 3)), received_position)
+        INCLUDE (parked_at) WHERE parked_at IS NOT NULL;
+"#;
+
 impl<P, O> PgInbox<P, O>
 where
     P: SessionPool + Send + Sync,
@@ -146,9 +192,20 @@ where
                 )
                 .on(self.table.clone())
                 .checked_over(PROCESSED_AT),
+                Migration::new(
+                    "20261107T000000Z_rejects",
+                    REJECTS.replace("{table}", self.table.as_str()),
+                )
+                .checked_over(REJECTS),
+                Migration::new(
+                    "20261107T010000Z_indexes_before_launch",
+                    INDEXES_BEFORE_LAUNCH.replace("{table}", self.table.as_str()),
+                )
+                .on(self.table.clone())
+                .checked_over(INDEXES_BEFORE_LAUNCH),
             ],
         )
-        .unwrap_or_else(|_| unreachable!("two migrations with ids, under a name"))
+        .unwrap_or_else(|_| unreachable!("four migrations with ids, under a name"))
     }
 
     /// Brings the inbox's tables up to its migrations — a read of the
@@ -175,7 +232,7 @@ where
                          asks for {slots} by `{key}`; both are fixed for the life of the table"
                     )));
                 }
-                Ok(())
+                refuse_what_the_intake_cannot_read(&session, table.as_str()).await
             })
             .await?;
         Ok(applied)
@@ -191,7 +248,8 @@ where
                     .connection()
                     .batch_execute(&format!(
                         "DROP TABLE IF EXISTS {table}; DROP SEQUENCE IF EXISTS {sequence}; \
-                         DROP TABLE IF EXISTS {table}_meta; DROP TABLE IF EXISTS {table}_slots;"
+                         DROP TABLE IF EXISTS {table}_meta; DROP TABLE IF EXISTS {table}_slots; \
+                         DROP TABLE IF EXISTS {table}_rejects;"
                     ))
                     .await?;
                 Ok::<_, Error>(())
@@ -559,33 +617,104 @@ where
     }
 }
 
-impl<P, O> Inbox for PgInbox<P, O>
+/// What the insert of a row came to, before the intake tells the observer
+/// and sets aside what it must (ADR-0036 R2).
+pub(super) enum Admitted {
+    /// Stored, where it landed.
+    Stored(Receipt),
+    /// Held by itself: its identity, its `message_id` and its payload.
+    Redelivered,
+    /// Held under its identity by a message with another `message_id`, or
+    /// none: a republication or one fact in two forms (ADR-0030).
+    Shadowed(Option<String>),
+    /// Held under its identity with its own `message_id` and another
+    /// payload: a re-emission (R1).
+    Differs,
+    /// Its `message_id` is held at another identity of its Tenant and stream
+    /// type: the holder's channel and received position (R5).
+    IdentityTaken {
+        channel: String,
+        received_position: i64,
+    },
+    /// PostgreSQL refused a value of its own, in the library's words.
+    Unstorable(&'static str),
+}
+
+/// What nothing stored comes to, on positive evidence alone (ADR-0036 R2):
+/// the holder of the identity — its `message_id`, and whether its payload
+/// is the message's — or else the holder of the `message_id` in the
+/// message's Tenant and stream type. Neither means the holder went before
+/// it could be read, and the message is tried again: never acknowledged as
+/// stored when it is stored nowhere.
+pub(super) fn verdict(
+    holder: Option<(Option<String>, bool)>,
+    own: Option<&str>,
+    taken: Option<(String, i64)>,
+) -> Result<Admitted, Error> {
+    match (holder, taken) {
+        (Some((held_by, _)), _) if held_by.as_deref() != own => Ok(Admitted::Shadowed(held_by)),
+        (Some((_, true)), _) => Ok(Admitted::Redelivered),
+        (Some((_, false)), _) => Ok(Admitted::Differs),
+        (None, Some((channel, received_position))) => Ok(Admitted::IdentityTaken {
+            channel,
+            received_position,
+        }),
+        (None, None) => Err(Error::Conflict(
+            "the holder of the conflict was gone before it could be read".to_owned(),
+        )),
+    }
+}
+
+/// A message set aside, as its row is written (ADR-0036 R4).
+pub(super) struct Aside<'a> {
+    pub(super) digest: &'a str,
+    pub(super) channel: &'a str,
+    pub(super) tenant_id: Option<&'a str>,
+    pub(super) stream_type: Option<&'a str>,
+    pub(super) identity: Option<&'a str>,
+    pub(super) reason: &'static str,
+    pub(super) detail: &'static str,
+    pub(super) holder_channel: Option<&'a str>,
+    pub(super) holder_position: Option<i64>,
+    pub(super) message: &'a [u8],
+}
+
+impl<P, O> PgInbox<P, O>
 where
     P: SessionPool + Send + Sync,
     P::Session: PgAccess + Sync,
     O: InboxObserver,
 {
-    /// Stores the message in a transaction of its own and tells the
-    /// observer where it landed, or that it was already there and under
-    /// which message (ADR-0030). The holder is read by a second statement,
-    /// on the conflict alone: under `READ COMMITTED` it takes a snapshot of
-    /// its own, which sees a holder that committed while the insert waited
-    /// on it — the insert's own snapshot does not. A holder the sweep forgot
-    /// between the two is reported unknown, not absent.
-    async fn publish(&self, message: &InboxMessage) -> Result<(), Error> {
-        let sql = format!(
-            "INSERT INTO {} (tenant_id, stream_type, stream_id, stream_position, uri, payload, metadata) \
+    /// Inserts the row in a transaction of its own, under no conflict
+    /// target: every unique index is an arbiter, so that a `message_id` held
+    /// elsewhere, or a duplicate arriving at once, is no error (ADR-0036
+    /// R2). Where nothing was stored the cause is read, and acknowledged only
+    /// on positive evidence: the holder of its identity, by a second
+    /// statement that, under `READ COMMITTED`, sees a holder that committed
+    /// while the insert waited on it; else the holder of its `message_id` in
+    /// its Tenant and stream type, through the index's own expression. With
+    /// neither, the holder went before it could be read, and the message is
+    /// tried again. A value of its own that PostgreSQL refuses is
+    /// `Unstorable`: the failed transaction is gone, and the intake writes
+    /// the row set aside in another.
+    pub(super) async fn admit(&self, message: &InboxMessage) -> Result<Admitted, Error> {
+        let table = self.table.as_str();
+        let insert = format!(
+            "INSERT INTO {table} (tenant_id, stream_type, stream_id, stream_position, uri, payload, metadata) \
              VALUES ($1, $2, $3, $4, $5, $6, $7) \
-             ON CONFLICT (tenant_id, stream_type, stream_id, stream_position) DO NOTHING \
-             RETURNING pg_current_xact_id()::text, received_position, slot",
-            self.table
+             ON CONFLICT DO NOTHING \
+             RETURNING pg_current_xact_id()::text, received_position, slot"
         );
         let holder = format!(
-            "SELECT metadata->>'message_id' FROM {} \
-             WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4",
-            self.table
+            "SELECT metadata->>'message_id', payload = $5 FROM {table} \
+             WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4"
         );
-        let (receipt, held_by, holder_unknown) = self
+        let taken = format!(
+            "SELECT uri, received_position FROM {table} \
+             WHERE tenant_id = $1 AND stream_type = $2 \
+               AND (metadata->>'message_id')::uuid = $3::text::uuid"
+        );
+        let admitted = self
             .pool
             .session(async |session| {
                 session
@@ -593,7 +722,7 @@ where
                         let row = tx
                             .connection()
                             .query_opt(
-                                &sql,
+                                &insert,
                                 &[
                                     &message.tenant_id,
                                     &message.stream_type,
@@ -605,41 +734,181 @@ where
                                 ],
                             )
                             .await?;
-                        let Some(row) = row else {
-                            let holder = tx
+                        if let Some(row) = row {
+                            return Ok(Admitted::Stored(Receipt {
+                                transaction_id: transaction_id(row.get::<_, String>(0))?,
+                                received_position: row.get::<_, i64>(1),
+                                slot: row.get::<_, i16>(2) as u32,
+                            }));
+                        }
+                        let found = tx
+                            .connection()
+                            .query_opt(
+                                &holder,
+                                &[
+                                    &message.tenant_id,
+                                    &message.stream_type,
+                                    &message.stream_id,
+                                    &message.stream_position,
+                                    &message.payload,
+                                ],
+                            )
+                            .await?;
+                        let holder = found.map(|found| {
+                            (found.get::<_, Option<String>>(0), found.get::<_, bool>(1))
+                        });
+                        let taken = match (&holder, message.message_id()) {
+                            (None, Some(id)) => tx
                                 .connection()
-                                .query_opt(
-                                    &holder,
-                                    &[
-                                        &message.tenant_id,
-                                        &message.stream_type,
-                                        &message.stream_id,
-                                        &message.stream_position,
-                                    ],
-                                )
-                                .await?;
-                            let unknown = holder.is_none();
-                            let held_by = holder.and_then(|row| row.get::<_, Option<String>>(0));
-                            return Ok::<_, Error>((None, held_by, unknown));
+                                .query_opt(&taken, &[&message.tenant_id, &message.stream_type, &id])
+                                .await?
+                                .map(|row| {
+                                    (
+                                        ascetic_ddd_bus::uri::without_key(row.get::<_, &str>(0))
+                                            .to_owned(),
+                                        row.get::<_, i64>(1),
+                                    )
+                                }),
+                            _ => None,
                         };
-                        let receipt = Receipt {
-                            transaction_id: transaction_id(row.get::<_, String>(0))?,
-                            received_position: row.get::<_, i64>(1),
-                            slot: row.get::<_, i16>(2) as u32,
-                        };
-                        Ok((Some(receipt), None, false))
+                        verdict(holder, message.message_id(), taken)
                     })
                     .await
             })
-            .await?;
-        self.observer.on_received(&Received {
-            message,
-            receipt,
-            held_by: held_by.as_deref(),
-            holder_unknown,
-        });
-        Ok(())
+            .await;
+        match admitted {
+            Err(Error::Database(error)) => {
+                let own = error.as_db_error().and_then(|db| {
+                    crate::intake::unstorable(db.code().code(), db.constraint(), table)
+                });
+                match own {
+                    Some(why) => Ok(Admitted::Unstorable(why)),
+                    None => Err(Error::Database(error)),
+                }
+            }
+            other => other,
+        }
     }
+
+    /// Writes a row set aside, in a transaction of its own: a repeat of the
+    /// same bytes, the same digest, counts once more and keeps the row as it
+    /// is, disposed of or not. Whether it was a repeat.
+    pub(super) async fn set_aside(&self, aside: &Aside<'_>) -> Result<bool, Error> {
+        let table = self.table.as_str();
+        let sql = format!(
+            "INSERT INTO {table}_rejects (digest, channel, tenant_id, stream_type, identity, reason, \
+                 detail, holder_channel, holder_position, message) \
+             VALUES ($1::text::uuid, $2, $3, $4, $5::text::uuid, $6, $7, $8, $9, $10) \
+             ON CONFLICT (digest) DO UPDATE SET seen = {table}_rejects.seen + 1, \
+                 last_seen_at = statement_timestamp() \
+             RETURNING seen > 1"
+        );
+        self.pool
+            .session(async |session| {
+                session
+                    .atomic(async |tx| {
+                        let row = tx
+                            .connection()
+                            .query_one(
+                                &sql,
+                                &[
+                                    &aside.digest,
+                                    &aside.channel,
+                                    &aside.tenant_id,
+                                    &aside.stream_type,
+                                    &aside.identity,
+                                    &aside.reason,
+                                    &aside.detail,
+                                    &aside.holder_channel,
+                                    &aside.holder_position,
+                                    &aside.message,
+                                ],
+                            )
+                            .await?;
+                        Ok::<_, Error>(row.get::<_, bool>(0))
+                    })
+                    .await
+            })
+            .await
+    }
+}
+
+impl<P, O> Inbox for PgInbox<P, O>
+where
+    P: SessionPool + Send + Sync,
+    P::Session: PgAccess + Sync,
+    O: InboxObserver,
+{
+    /// Takes the message through the intake, as a wire message would come
+    /// (ADR-0036): stored, found already stored, or set aside beside the
+    /// inbox. An error only when the environment fails.
+    async fn publish(&self, message: &InboxMessage) -> Result<(), Error> {
+        self.intake(&message.uri, &crate::channel::wire_of(message))
+            .await
+            .map(|_| ())
+    }
+}
+
+/// Refuses a table the intake cannot read the conflicts of (ADR-0036 R2):
+/// a unique or exclusion index the inbox does not own, whose conflict would
+/// leave a message stored nowhere and acknowledged; a deferrable constraint,
+/// which an untargeted conflict cannot arbitrate (55000 on every insert);
+/// and a server encoding other than UTF8, under which 22P05 is the
+/// environment's, not the message's.
+async fn refuse_what_the_intake_cannot_read<S: PgAccess>(
+    session: &S,
+    table: &str,
+) -> Result<(), Error> {
+    let connection = session.connection();
+    let encoding: String = connection
+        .query_one("SELECT current_setting('server_encoding')", &[])
+        .await?
+        .get(0);
+    if encoding != "UTF8" {
+        return Err(Error::Malformed(format!(
+            "the server encoding is {encoding}: the inbox reads PostgreSQL's refusals as UTF8's"
+        )));
+    }
+    let foreign: Vec<String> = connection
+        .query(
+            "SELECT i.relname::text FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid \
+             WHERE x.indrelid = $1::text::regclass AND (x.indisunique OR x.indisexclusion) \
+               AND i.relname NOT IN ($2, $3)",
+            &[
+                &table,
+                &format!("{table}_pk"),
+                &format!("{table}__message_id_uniq"),
+            ],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    if !foreign.is_empty() {
+        return Err(Error::Malformed(format!(
+            "table `{table}` carries unique or exclusion indexes the inbox does not own ({}): \
+             their conflicts would leave a message stored nowhere",
+            foreign.join(", ")
+        )));
+    }
+    let deferrable: Vec<String> = connection
+        .query(
+            "SELECT conname::text FROM pg_constraint \
+             WHERE conrelid = $1::text::regclass AND condeferrable",
+            &[&table],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    if !deferrable.is_empty() {
+        return Err(Error::Malformed(format!(
+            "table `{table}` carries deferrable constraints ({}): an untargeted conflict cannot \
+             arbitrate them",
+            deferrable.join(", ")
+        )));
+    }
+    Ok(())
 }
 
 /// `xid8` has no driver type; it travels as decimal text and is unsigned.
@@ -699,4 +968,39 @@ fn woken_of(rows: &[Row], at: usize) -> Vec<InboxMessage> {
         .collect();
     woken.sort_by_key(|message| message.received_position);
     woken
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nothing_stored_is_acknowledged_only_on_positive_evidence() {
+        let own = Some("m-1");
+        let held = |id: &str, same| Some((Some(id.to_owned()), same));
+        assert!(matches!(
+            verdict(held("m-1", true), own, None),
+            Ok(Admitted::Redelivered)
+        ));
+        assert!(matches!(
+            verdict(held("m-1", false), own, None),
+            Ok(Admitted::Differs)
+        ));
+        assert!(matches!(
+            verdict(held("m-2", true), own, None),
+            Ok(Admitted::Shadowed(Some(_)))
+        ));
+        assert!(matches!(
+            verdict(None, own, Some(("inbox://orders".to_owned(), 7))),
+            Ok(Admitted::IdentityTaken {
+                received_position: 7,
+                ..
+            })
+        ));
+        assert!(
+            matches!(verdict(None, own, None), Err(Error::Conflict(_))),
+            "a holder gone before it was read is tried again"
+        );
+        assert!(matches!(verdict(None, None, None), Err(Error::Conflict(_))));
+    }
 }

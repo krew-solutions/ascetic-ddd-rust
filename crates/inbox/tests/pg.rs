@@ -389,10 +389,8 @@ async fn a_received_message_is_processed_once_in_its_transaction() {
 async fn receiving_the_same_message_twice_stores_it_once() {
     let f = fixture("idempotent").await;
     let once = message("a", 1);
-    let mut again = once.clone();
-    again.payload = b"a duplicate with a different payload".to_vec();
 
-    f.publish(&[once, again]).await;
+    f.publish(&[once.clone(), once]).await;
 
     assert_eq!(f.rows().await, 1);
 }
@@ -462,17 +460,16 @@ async fn the_holder_committed_while_the_insert_waited_is_named() {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
+/// A `message_id` held at another identity of its stream type is set aside,
+/// never an error that would hold the source (ADR-0036 R2, R5).
 async fn an_message_id_is_stored_once() {
     let f = fixture("message_id").await;
     let first = message("a", 1);
     let mut other = message("a", 2);
     other.metadata = first.metadata.clone();
-    f.publish(&[first]).await;
+    f.publish(&[first, other]).await;
 
-    assert!(matches!(
-        f.inbox.publish(&other).await,
-        Err(Error::Database(_))
-    ));
+    assert_eq!(f.rows().await, 1);
 }
 
 #[tokio::test]
@@ -1624,6 +1621,14 @@ fn the_released_migrations_keep_their_checksums() {
             (
                 "20261104T000000Z_processed_at".to_owned(),
                 "fnv1a64:6452eff40ba9b9ec:245".to_owned()
+            ),
+            (
+                "20261107T000000Z_rejects".to_owned(),
+                "fnv1a64:f2b425791ef27fb1:884".to_owned()
+            ),
+            (
+                "20261107T010000Z_indexes_before_launch".to_owned(),
+                "fnv1a64:85998ae59b7e3b60:366".to_owned()
             )
         ]
     );

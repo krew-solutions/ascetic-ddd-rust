@@ -81,7 +81,10 @@
 //! `dispatch`.
 
 mod dispatch;
+mod intake;
 mod store;
+
+pub use intake::Admission;
 mod sweep;
 
 use std::collections::{BTreeMap, HashMap};
@@ -293,7 +296,14 @@ pub struct PgInbox<P, O = ()> {
     /// next statement starts, so that dead index entries a held vacuum
     /// horizon keeps are not walked again.
     swept_to: Mutex<HashMap<String, String>>,
+    /// Whether a message of a stream type may arrive on a channel (ADR-0036
+    /// R5): [`PgInbox::admitting`].
+    admission: Admits,
 }
+
+/// The rule [`PgInbox::admitting`] holds a message to: the channel it
+/// arrived on, without its key, and the stream type its headers name.
+type Admits = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
 
 impl<P> PgInbox<P> {
     /// An inbox in table `inbox`, one slot partitioned by URI, observed by
@@ -312,6 +322,7 @@ impl<P> PgInbox<P> {
             slots: 1,
             retention: InboxRetention::default(),
             swept_to: Mutex::new(HashMap::new()),
+            admission: Arc::new(|_, _| true),
         }
     }
 }
@@ -331,7 +342,24 @@ impl<P, O> PgInbox<P, O> {
             slots: self.slots,
             retention: self.retention,
             swept_to: self.swept_to,
+            admission: self.admission,
         }
+    }
+
+    /// The same inbox, admitting a message only when `admits(channel,
+    /// stream_type)` holds — the channel it arrived on, without its key, and
+    /// the stream type its headers name — and setting it aside as *foreign*
+    /// otherwise (ADR-0036 R5). A stream type is its aggregate's, named by
+    /// the service that owns it; a host passes its topology's rule, that the
+    /// owner is a producer of the channel, so that no producer claims
+    /// another's identities. Every message is admitted unless told.
+    #[must_use]
+    pub fn admitting(
+        mut self,
+        admits: impl Fn(&str, &str) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.admission = Arc::new(admits);
+        self
     }
 
     /// The same inbox, whose consumer on the bus runs `loops`: how many
