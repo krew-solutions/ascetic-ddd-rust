@@ -63,6 +63,36 @@ others behind features, so that `ascetic_ddd::saga` keeps working as one import
 | [`ascetic-ddd-session`](crates/session) | `ascetic_ddd/session` | Unit of Work: session scopes, savepoints, identity map, REST and composite sessions, PostgreSQL adapter *(in progress)* |
 | [`ascetic-ddd-trace`](crates/trace) | — | Recorders of what the outbox and the inbox report, for trace validation against the TLA+ models |
 
+## Sources
+
+The library's design grows from these sources, and its ADRs cite them.
+Read them before changing the bus, the outbox or the inbox. ADR-0036
+§ References keeps the same list.
+
+- "[Don't Settle for Eventual Consistency. Stronger properties for
+  low-latency geo-replicated storage](https://queue.acm.org/detail.cfm?id=2610533)"
+  ([pdf](https://dl.acm.org/ft_gateway.cfm?id=2610533&ftid=1449165&dwn=1)) by
+  Wyatt Lloyd (Facebook), Michael J. Freedman (Princeton University), Michael
+  Kaminsky (Intel Labs) and David G. Andersen (Carnegie Mellon University).
+- "[Bolt-on Causal Consistency](http://www.bailis.org/papers/bolton-sigmod2013.pdf)"
+  by Peter Bailis, Ali Ghodsi, Joseph M. Hellerstein and Ion Stoica (UC
+  Berkeley, KTH/Royal Institute of Technology).
+- "[Detecting Causal Relationships in Distributed Computations: In Search
+  of the Holy Grail](https://disco.ethz.ch/courses/hs08/seminar/papers/mattern4.pdf)"
+  by Reinhard Schwarz and Friedemann Mattern.
+- "[Principles of Eventual Consistency](https://www.microsoft.com/en-us/research/publication/principles-of-eventual-consistency/)"
+  ([pdf](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/final-printversion-10-5-14.pdf))
+  by Sebastian Burckhardt (Microsoft Research).
+- "[Reactive Messaging Patterns with the Actor Model: Applications and
+  Integration in Scala and Akka](https://kalele.io/books/)" by Vaughn Vernon:
+  - Chapter 9, Message Endpoints: Transactional Client/Actor;
+  - Chapter 10, System Management and Infrastructure: Message
+    Metadata/History, Message Journal Store.
+- "[Domain Events in DDD](https://dckms.github.io/system-architecture/emacsway/it/ddd/tactical-design/domain-model/domain-events/domain-events-in-ddd.html)"
+  by Ivan Zakrevsky.
+- "[About the message race in terms of competing subscribers](https://dckms.github.io/system-architecture/emacsway/it/integration/asynchronous/message-ordering-in-competing-consumers.html)"
+  by Ivan Zakrevsky.
+
 ## Architecture decisions
 
 - [ADR-0001](docs/src/adr/0001-session-is-a-cloneable-handle.md) — a session is a
