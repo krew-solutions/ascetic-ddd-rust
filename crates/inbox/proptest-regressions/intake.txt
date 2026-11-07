@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 8f4d2a211f3789cb7a8fe64738f1d9a7a18c8da641c6ffe2c557dbe824fd1e43 # shrinks to (destination, message) = ("inbox://a/\0", Message { key: None, payload: [], headers: [("tenant_id", [97]), ("stream_type", [97, 46, 65, 97]), ("stream_id", [45]), ("stream_position", [48])] })
+cc 310c8ec75cf8029b2d63d70854add08ebeedf280b50a76a4bc8f7e5fc825a127 # shrinks to (destination, message) = ("inbox://a/\0", Message { key: None, payload: [], headers: [("tenant_id", [97]), ("stream_type", [97, 46, 65, 97]), ("stream_id", [97]), ("stream_position", [48])] })
+cc 856d7563e122e6e8910f0ed5b197ef0927df50e19a16f3150b6976e6ade9f975 # shrinks to (destination, message) = ("inbox://a", Message { key: None, payload: [], headers: [("tenant_id", [97, 97, 97, 97, 48, 97, 97, 97, 97, 48, 97, 97, 48, 48, 97, 48, 48, 97, 97, 97, 48, 97, 48, 97, 97, 48, 48, 97, 48, 48, 48, 48, 97, 97, 48, 48, 48, 48, 97, 97, 48, 48, 97, 48, 97, 48, 97, 97, 97, 97, 48, 48, 97, 48, 97, 48, 48, 97, 97, 97, 97, 48, 97, 48, 48, 97, 97, 48, 48, 97, 97, 48, 97, 97, 48, 97, 48, 97, 97, 97, 97, 48, 48, 48, 48, 97, 48, 48, 97, 48, 48, 97, 48, 97, 97, 48, 97, 97, 97, 48, 48, 97, 97, 97, 97, 97, 48, 97, 97, 97, 97, 48, 97, 48, 97, 48, 48, 48, 97, 97, 48, 48, 97, 97, 48, 48, 97, 48, 97]), ("stream_type", [97, 46, 65, 97]), ("stream_id", [97]), ("stream_position", [48])] })
+cc 7f6c713914222a20acf06f5b09001382a3e6b6f40362acdcb355cdae9ea946f2 # shrinks to bytes = Some([0]), width = 1
+cc 1685811c5314688ac848312d8b750b1d1ac1888851b560d5f49af83698270cc1 # shrinks to (destination, message) = ("inbox://a", Message { key: None, payload: [], headers: [("tenant_id", [97]), ("stream_type", [97, 46, 65, 97]), ("stream_id", [97]), ("stream_position", [48]), ("_", [91, 34, 92, 117, 48, 48, 48, 48, 34, 93])] })

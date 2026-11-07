@@ -122,6 +122,9 @@ pub(crate) fn row_of(destination: &str, message: &Message) -> Result<InboxMessag
     if uri.chars().count() > URI_WIDTH {
         return Err("the destination is longer than its column");
     }
+    if uri.contains('\0') {
+        return Err("the destination holds a NUL");
+    }
     let metadata = message
         .headers()
         .iter()
@@ -479,6 +482,163 @@ mod tests {
             assert!(
                 unstorable(environment, None, "inbox").is_none(),
                 "{environment}"
+            );
+        }
+    }
+
+    /// Properties over arbitrary messages (ADR-0036 § Executors): the
+    /// intake's reading never panics, and what it makes a row of is what
+    /// PostgreSQL stores.
+    mod properties {
+        use proptest::prelude::*;
+        use proptest::strategy::ValueTree;
+        use proptest::test_runner::TestRunner;
+
+        use super::*;
+
+        /// Bytes no column takes, or text past the bounds, or text that
+        /// JSON reads as a value `jsonb` refuses.
+        fn hostile() -> impl Strategy<Value = Vec<u8>> {
+            prop_oneof![
+                proptest::collection::vec(any::<u8>(), 0..24),
+                any::<String>().prop_map(String::into_bytes),
+                "[a-z\\x00]{0,300}".prop_map(String::into_bytes),
+                Just(br#"["\u0000"]"#.to_vec()),
+                Just(br#"{"a\u0000":1}"#.to_vec()),
+                Just(b"[1e999]".to_vec()),
+            ]
+        }
+
+        /// A header's value: as a producer writes it, mostly, else hostile.
+        fn header(plausible: &'static str) -> impl Strategy<Value = Vec<u8>> {
+            prop_oneof![
+                6 => plausible.prop_map(String::into_bytes),
+                1 => hostile(),
+            ]
+        }
+
+        fn message() -> impl Strategy<Value = (String, Message)> {
+            (
+                prop_oneof![
+                    6 => "inbox://[a-z]{1,8}(/[a-z0-9]{0,40})?",
+                    1 => "inbox://[a-z]{1,8}/[a-z0-9\\x00]{0,260}",
+                ],
+                proptest::option::of(header("[a-z0-9\\-]{1,40}")),
+                (
+                    header("[a-z0-9]{1,130}"),
+                    header("[a-z]{1,8}\\.[A-Z][a-z]{1,124}"),
+                    header("[a-z0-9\\-]{1,64}|\\[[0-9]{1,6},\"[a-z]{1,8}\"\\]"),
+                    header("-?[0-9]{1,10}"),
+                    proptest::option::of(header(
+                        "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                    )),
+                ),
+                proptest::collection::vec(
+                    (
+                        prop_oneof![8 => "[a-z_]{1,12}", 1 => "[a-z_\\x00]{1,12}"],
+                        header("[ -~]{0,40}"),
+                    ),
+                    0..3,
+                ),
+                proptest::collection::vec(any::<u8>(), 0..16),
+            )
+                .prop_map(
+                    |(
+                        destination,
+                        key,
+                        (tenant, stream_type, stream_id, position, id),
+                        extra,
+                        payload,
+                    )| {
+                        let mut message = Message::new(payload)
+                            .with_header(TENANT_ID, tenant)
+                            .with_header(STREAM_TYPE, stream_type)
+                            .with_header(STREAM_ID, stream_id)
+                            .with_header(STREAM_POSITION, position);
+                        if let Some(key) = key {
+                            message = message.with_key(key);
+                        }
+                        if let Some(id) = id {
+                            message = message.with_header("message_id", id);
+                        }
+                        let message = extra.into_iter().fold(message, |message, (name, value)| {
+                            message.with_header(name, value)
+                        });
+                        (destination, message)
+                    },
+                )
+        }
+
+        /// The oracle, apart from [`storable`]: `jsonb` takes no `\u0000`
+        /// in a string or a key (22P05).
+        fn jsonb_takes(value: &Value) -> bool {
+            match value {
+                Value::String(text) => !text.contains('\0'),
+                Value::Array(items) => items.iter().all(jsonb_takes),
+                Value::Object(fields) => fields
+                    .iter()
+                    .all(|(name, field)| !name.contains('\0') && jsonb_takes(field)),
+                _ => true,
+            }
+        }
+
+        proptest! {
+            #[test]
+            fn a_row_the_intake_makes_is_one_postgresql_stores((destination, message) in message()) {
+                if let Ok(row) = row_of(&destination, &message) {
+                    for (text, width) in [
+                        (&row.tenant_id, TENANT_ID_WIDTH),
+                        (&row.stream_type, STREAM_TYPE_WIDTH),
+                        (&row.uri, URI_WIDTH),
+                    ] {
+                        prop_assert!(!text.contains('\0'), "{text:?}");
+                        prop_assert!(text.chars().count() <= width, "{text:?}");
+                    }
+                    prop_assert!(jsonb_takes(&row.stream_id));
+                    prop_assert!(row.metadata.as_ref().is_none_or(jsonb_takes));
+                    prop_assert!(row.message_id().is_none_or(is_uuid));
+                }
+            }
+
+            #[test]
+            fn derived_text_has_no_nul_and_fits_its_column(
+                bytes in proptest::option::of(hostile()),
+                width in 0usize..300,
+            ) {
+                match sanitized(bytes.as_deref(), width) {
+                    Some(text) => {
+                        prop_assert!(!text.contains('\0'));
+                        prop_assert!(text.chars().count() <= width);
+                    }
+                    None => prop_assert!(
+                        bytes.as_deref().is_none_or(|b| std::str::from_utf8(b).is_err())
+                    ),
+                }
+            }
+
+            #[test]
+            fn a_digest_is_a_uuid_postgresql_takes(bytes in proptest::collection::vec(any::<u8>(), 0..64)) {
+                prop_assert!(is_uuid(&digest(&bytes)));
+            }
+        }
+
+        /// The message strategy reaches both sides: rows made and messages
+        /// refused, each in a good share of the cases, so that the property
+        /// over rows is not passed by refusing everything.
+        #[test]
+        fn the_messages_reach_rows_and_refusals_alike() {
+            let mut runner = TestRunner::deterministic();
+            let strategy = message();
+            let cases = 1_000;
+            let rows = (0..cases)
+                .filter(|_| {
+                    let (destination, message) = strategy.new_tree(&mut runner).unwrap().current();
+                    row_of(&destination, &message).is_ok()
+                })
+                .count();
+            assert!(
+                (cases / 5..=cases * 4 / 5).contains(&rows),
+                "{rows} rows of {cases}"
             );
         }
     }

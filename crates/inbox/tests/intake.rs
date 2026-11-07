@@ -16,15 +16,32 @@ use ascetic_ddd_inbox::observer::{InboxObserver, Rejected};
 use ascetic_ddd_inbox::{Admission, ByStream, Error, PgInbox, Reason};
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
-use ascetic_ddd_session::pg::tokio_postgres::{Config, NoTls};
+use ascetic_ddd_session::pg::tokio_postgres::error::SqlState;
+use ascetic_ddd_session::pg::tokio_postgres::{Client, Config, NoTls};
 use ascetic_ddd_session::{PgAccess, PgSessionPool, SessionPool};
 
 const DEFAULT_URL: &str = "postgresql://devel:devel@localhost:5432/devel_karmabot_test";
 
-fn pool() -> Pool {
+fn config() -> Config {
     let url = std::env::var("ASCETIC_DDD_TEST_PG_URL").unwrap_or_else(|_| DEFAULT_URL.to_owned());
+    Config::from_str(&url).expect("a valid PostgreSQL URL")
+}
+
+fn pool() -> Pool {
+    pool_of(config())
+}
+
+/// A pool whose statements give up on a lock after a fifth of a second, as
+/// a host's `lock_timeout` has them do.
+fn impatient_pool() -> Pool {
+    let mut config = config();
+    config.options("-c lock_timeout=200ms");
+    pool_of(config)
+}
+
+fn pool_of(config: Config) -> Pool {
     let manager = Manager::from_config(
-        Config::from_str(&url).expect("a valid PostgreSQL URL"),
+        config,
         NoTls,
         ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
@@ -64,9 +81,14 @@ struct Fixture {
 
 /// A table of its own per test; admitting only `orders.*` on `orders`.
 async fn fixture(name: &str) -> Fixture {
+    fixture_on(name, pool()).await
+}
+
+/// The same, its inbox on the pool given.
+async fn fixture_on(name: &str, on: Pool) -> Fixture {
     let table = format!("intake_{name}");
     let seen = Arc::new(Seen::default());
-    let inbox = PgInbox::new(PgSessionPool::new(pool()))
+    let inbox = PgInbox::new(PgSessionPool::new(on))
         .with_table(
             Identifier::new(&table).unwrap(),
             Identifier::new(format!("{table}_seq")).unwrap(),
@@ -130,6 +152,26 @@ fn order(position: &str, message_id: &str, payload: &str) -> Message {
 const ID_1: &str = "0190a01a-7e5b-7d80-a000-000000000001";
 const ID_2: &str = "0190a01a-7e5b-7d80-a000-000000000002";
 
+/// A transaction of its own that takes `lock` and keeps it until rolled
+/// back.
+async fn holding(lock: &str) -> Client {
+    let (client, connection) = config().connect(NoTls).await.unwrap();
+    tokio::spawn(connection);
+    client
+        .batch_execute(&format!("BEGIN; {lock}"))
+        .await
+        .unwrap();
+    client
+}
+
+/// The SQLSTATE of a refusal from the database, if it is one.
+fn code_of(error: &Error) -> Option<&str> {
+    match error {
+        Error::Database(error) => error.code().map(SqlState::code),
+        _ => None,
+    }
+}
+
 fn reason_of(admission: &Admission) -> Option<Reason> {
     match admission {
         Admission::SetAside { reason, .. } => Some(*reason),
@@ -163,6 +205,16 @@ async fn a_message_that_can_never_be_stored_is_set_aside_and_the_next_is_stored(
             .with_header(STREAM_TYPE, "orders.Order")
             .with_header(STREAM_ID, "o-1")
             .with_header(STREAM_POSITION, "1"),
+        Message::new("p")
+            .with_header(TENANT_ID, vec![b't', 0xff])
+            .with_header(STREAM_TYPE, "orders.Order")
+            .with_header(STREAM_ID, "o-1")
+            .with_header(STREAM_POSITION, "1"),
+        Message::new("p".repeat(1 << 20))
+            .with_header(TENANT_ID, "t1")
+            .with_header(STREAM_TYPE, "orders.Order")
+            .with_header(STREAM_ID, "o-1")
+            .with_header(STREAM_POSITION, "x"),
     ];
     for poison in &poisons {
         assert_eq!(reason_of(&f.intake(poison).await), Some(Reason::Malformed));
@@ -173,6 +225,12 @@ async fn a_message_that_can_never_be_stored_is_set_aside_and_the_next_is_stored(
     ));
     assert_eq!(f.rows().await, 1);
     assert_eq!(f.set_aside("malformed").await, poisons.len() as i64);
+    assert!(
+        f.count("SELECT max(octet_length(message))::bigint FROM {table}_rejects")
+            .await
+            > 1 << 20,
+        "a megabyte's bytes kept whole"
+    );
     let seen = f.seen.0.lock().unwrap();
     assert_eq!(seen.len(), poisons.len(), "the observer told once each");
     assert!(seen.iter().all(|(channel, reason, _, repeat)| {
@@ -321,4 +379,52 @@ async fn a_table_with_an_index_the_inbox_does_not_own_is_refused() {
         .unwrap();
     let refused = f.inbox.migrate().await.unwrap_err();
     assert!(refused.to_string().contains("does not own"), "{refused}");
+}
+
+/// A lock held on the inbox's table past `lock_timeout` is the environment:
+/// the message is held, an error to its source, and nothing is set aside.
+/// Once the lock is gone the same message is stored.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_lock_on_the_inbox_holds_the_message_and_sets_nothing_aside() {
+    let f = fixture_on("locked", impatient_pool()).await;
+    let holder = holding(&format!("LOCK TABLE {} IN SHARE MODE", f.table)).await;
+    let message = order("1", ID_1, "p");
+    let held = f.inbox.intake("inbox://orders/k", &message).await;
+    assert_eq!(
+        held.as_ref().err().and_then(code_of),
+        Some(SqlState::LOCK_NOT_AVAILABLE.code()),
+        "{held:?}"
+    );
+    holder.batch_execute("ROLLBACK").await.unwrap();
+    assert!(matches!(f.intake(&message).await, Admission::Stored(_)));
+    assert_eq!(f.rows().await, 1);
+    assert_eq!(f.count("SELECT count(*) FROM {table}_rejects").await, 0);
+    assert!(f.seen.0.lock().unwrap().is_empty());
+}
+
+/// A lock held on the rows set aside holds a message that can never be
+/// stored as well: an error to its source, nothing recorded and the
+/// observer told nothing. Once the lock is gone it is set aside, once.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_lock_on_the_rows_set_aside_holds_a_poison_then_sets_it_aside_once() {
+    let f = fixture_on("rejects_locked", impatient_pool()).await;
+    let holder = holding(&format!("LOCK TABLE {}_rejects IN SHARE MODE", f.table)).await;
+    let poison = order("x", ID_1, "p");
+    let held = f.inbox.intake("inbox://orders/k", &poison).await;
+    assert_eq!(
+        held.as_ref().err().and_then(code_of),
+        Some(SqlState::LOCK_NOT_AVAILABLE.code()),
+        "{held:?}"
+    );
+    assert_eq!(f.count("SELECT count(*) FROM {table}_rejects").await, 0);
+    assert!(
+        f.seen.0.lock().unwrap().is_empty(),
+        "told nothing while held"
+    );
+    holder.batch_execute("ROLLBACK").await.unwrap();
+    assert_eq!(reason_of(&f.intake(&poison).await), Some(Reason::Malformed));
+    assert_eq!(f.count("SELECT seen::bigint FROM {table}_rejects").await, 1);
+    assert_eq!(f.seen.0.lock().unwrap().len(), 1, "told once");
 }
