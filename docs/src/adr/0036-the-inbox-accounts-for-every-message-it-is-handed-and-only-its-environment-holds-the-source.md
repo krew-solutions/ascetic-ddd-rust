@@ -805,3 +805,67 @@ This ADR's own:
       which may quote a refused value;
     - the outbox's and the session's observers compose by hand, the gap the
       inbox's had.
+- 2026-11-07 — A2 built, from a blind solver and a discriminator, and A4's
+  part in the bus.
+  - **R10's re-subscription is superseded.** "Waits until the retry ends, or
+    is refused" waits for ever on a handler that fails for good, the very
+    one a re-subscription replaces, and leaves a cancel followed by a
+    subscription losing the message. Two more defects stood behind it: the
+    new task started before the old one ended, two calls in flight on one
+    partition; and the stop's stored permit made a first call that failed
+    after a replacement abandon its message. Now one loop per Kafka
+    consumer and per in-memory group delivers, and it owns the message in
+    hand; a subscription is the handler the loop calls at each try. A
+    replaced or cancelled subscription leaves the message to the next
+    handler, tried at once. The loop ends once no handler is attached and
+    the consumer is dropped: `Bridge::run` drops its consumer with its
+    handler attached.
+  - **The in-memory back-pressure is kept.** Producers wait while a group
+    taking its messages has `capacity` of them; a group whose head keeps
+    failing stops counting, and its backlog grows, reported at each
+    doubling. A group dropped with no handler ends, and its name is free.
+  - **Measured on Redpanda: a member held past `max.poll.interval.ms`
+    while another joins is removed without its assignment marked lost.**
+    The driver learns of the revoke only when polled, and the member does
+    not poll while it holds the message. So a check of `assignment_lost()`
+    had no executor that could fail on it and was taken out. The partition
+    moves with the message, the committed offset passes it, and the member
+    removed takes it once more, a duplicate. The per-partition pause, so
+    that the member stays in the group, remains owed.
+  - **The bridge holds a message it can never forward.** Setting it aside
+    needs a store, which the bridge lacks; every bridge of a header target
+    reads an outbox, which writes every row's destination. A bridge of a
+    header target over a broker would owe a channel to set aside in.
+  - **A plain consumer's decode failure stays a documented loss** (R10); a
+    stage's failure on one holds. Owed in A6: the host's test collector
+    puts a sealing stage on a plain consumer.
+  - **A panic stays skipped and reported** (decision 3): holding it would
+    turn a deterministic panic into the measured stop. Its message is lost,
+    seen only in the log.
+  - **Logs.** The adapters' and the typed consumers' lines name the channel,
+    the group and the count of tries, never the handler's or the decoder's
+    text, which may carry the message's values (R9).
+  - **Executors**, each with the mutation it catches:
+    - in-memory, over paused time: a retry in order (the drop restored), a
+      group failing for good past the capacity (holding groups counted),
+      producers held by a slow handler (no back-pressure), a cancel in the
+      pause (the head lost), a replacement at once (the pause waited out),
+      a group's end (it ends with its consumer; it never ends);
+    - Kafka, on Redpanda: a retry in order, a replacement while retrying
+      and a fresh member past it (the message dropped on replacement), a
+      subscription after a cancel, a message never taken going to the next
+      member (its offset stored on failure), a member held past the poll
+      interval; and the loop ending with the consumer while attached.
+- 2026-11-07 — A5's bridge model built.
+  - `Bridge.tla` has the set aside, the acknowledgement after it as a step
+    of its own, and an environment hold with fairness to the recovery.
+    `SetAsideOnlyUnstorable`, `SetAsideNeverStored`, `EventuallySetAside`
+    and `EventuallyProcessed` for what the intake can store hold, with
+    `EndToEndOrder`, over 1.6 million states.
+  - TLC refutes the three mutations: acknowledging without setting aside,
+    setting aside on a hold, and acknowledging before the row set aside
+    commits.
+  - The trace check joins a recorded rejection with the outbox's handling
+    that follows it. A recorded run fits; a forged one, handled before its
+    rejection, does not.
+  - R8's wake from expiry in `Inbox.tla` comes with R8, in A3.
