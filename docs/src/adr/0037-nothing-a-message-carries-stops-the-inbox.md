@@ -792,3 +792,42 @@ The host adopts them in one pin, after quoting its stream ids.
       sets them aside as identity taken, and the row takes the second
       reason with its first sight kept.
   - **Mutations caught:** either counter overflowing, and the reason kept.
+- 2026-11-08 — Slice 7 built: the Kafka adapter. Decision 3's fetch caps
+  are withdrawn by a measurement.
+  - **The measurement**, on the stand's Redpanda: a record of 200 MiB of
+    zeros, gzip and then lz4, a few hundred KB on the wire.
+    - It was handed on whole with the driver's defaults. It was handed on
+      whole again with `receive.message.max.bytes` and `fetch.max.bytes`
+      at 16 MiB.
+    - Those settings bound the response on the wire, not what a record
+      unfolds to.
+    - This build of librdkafka has no zstd, so a zstd record does not
+      unfold at all here.
+    - So the caps would bound nothing that matters, and could risk a
+      refetch of their own. They are not set.
+  - **The bound is the consumer's** (`RecordBounds`,
+    `KafkaBroker::with_record_bounds`; the inbox's defaults). A record past
+    it is handed on as a 1 KiB prefix of its payload, with the marker
+    header `PAST_ITS_BOUNDS`, whose name holds a NUL. The intake sets it
+    aside as malformed, and nothing after the driver copies the record.
+  - **A header's name that is not UTF-8**, on which rdkafka panics in
+    `to_str().unwrap()`, is caught around reading the headers. The record
+    is handed on with its payload and key and the marker
+    `UNREADABLE_HEADERS`. The panic stays in rdkafka's code, never across
+    the FFI.
+  - **Residual, owed.** The driver's own decompression stays bounded only
+    by the broker's batch size times the codec's ratio: about 1 GB for a
+    1 MiB gzip batch of zeros. The broker's `message.max.bytes`, and the
+    producers its ACLs admit, are the host's to keep small.
+  - **Executors:**
+    - unit tests of the assembly: whole within the bounds, a marked prefix
+      past either, and marked when the headers could not be read;
+    - the 200 MiB gzip record handed on as a 1024-byte marked prefix, and
+      the next record after it, on the stand's Redpanda.
+
+    A producer cannot give a header a name that is not UTF-8 through
+    rdkafka's safe API, and the unsafe way would be undefined behaviour in
+    a test. So the panic's path is held by the unit test and by
+    rdkafka 0.39's source (`message.rs:284`).
+  - **Mutations caught:** the bound dropped (the unit test and the
+    regression), and the marker dropped (the unit test).
