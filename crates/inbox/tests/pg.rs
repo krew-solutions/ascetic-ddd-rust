@@ -2074,8 +2074,11 @@ async fn the_largest_identity_admitted_is_stored_waited_for_and_woken() {
         (
             "a tenant and a stream type at their columns",
             at_the_bound(
-                &"t".repeat(128),
-                &format!("orders.{}", "O".repeat(121)),
+                &"t".repeat(ascetic_ddd_bus::identity::TENANT_ID_WIDTH),
+                &format!(
+                    "orders.{}",
+                    "O".repeat(ascetic_ddd_bus::identity::STREAM_TYPE_WIDTH - "orders.".len())
+                ),
                 &|room| incompressible(&alnum, room, 13),
             ),
         ),

@@ -26,6 +26,21 @@ pub enum Error {
     /// one as a redelivery of it. Named from the message refused; the
     /// transaction is aborted, so nothing of it commits.
     IdentityTaken(Identity),
+    /// The message was refused at its commit (ADR-0038): its identity is not
+    /// the bus's one spelling of it, or it carries what the inbox would set
+    /// aside — a header named twice, `destination`, `part` or as one of
+    /// serde_json's own, a header or key that is not UTF-8. The transaction
+    /// is aborted, so a caller that ignores this commits nothing of it.
+    /// Named by the channel, the message's id and the reason, never the
+    /// refused text, which may be personal data or the very value refused.
+    Refused {
+        /// The channel: the destination without its key.
+        channel: String,
+        /// The message's id, when it carries a readable one.
+        message_id: Option<String>,
+        /// Why, in the library's words.
+        reason: &'static str,
+    },
     /// The position sequence does not draw one value at a time: no sequence
     /// is owned by the `position` column, or its cache is not one. A relay's
     /// order rests on positions drawn in real time (ADR-0035 decision 6); the
@@ -129,6 +144,7 @@ impl Error {
             | Error::Malformed(_)
             | Error::Migration(_)
             | Error::IdentityTaken(_)
+            | Error::Refused { .. }
             | Error::SequenceCache(_)
             | Error::CounterReset(_)
             | Error::Reclaimed { .. }
@@ -148,6 +164,15 @@ impl fmt::Display for Error {
             Error::Subscriber(error) => write!(f, "subscriber: {error}"),
             Error::Malformed(what) => write!(f, "malformed value in the outbox: {what}"),
             Error::Migration(error) => write!(f, "{error}"),
+            Error::Refused {
+                channel,
+                message_id,
+                reason,
+            } => write!(
+                f,
+                "a message to {channel} ({}) was refused at its commit: {reason}",
+                message_id.as_deref().unwrap_or("no message id")
+            ),
             Error::IdentityTaken(identity) => write!(
                 f,
                 "the transaction already wrote a message under this one's identity ({identity}): \
@@ -204,6 +229,7 @@ impl std::error::Error for Error {
             Error::Subscriber(error) => Some(error.as_ref()),
             Error::Malformed(_)
             | Error::IdentityTaken(_)
+            | Error::Refused { .. }
             | Error::SequenceCache(_)
             | Error::CounterReset(_)
             | Error::Reclaimed { .. }

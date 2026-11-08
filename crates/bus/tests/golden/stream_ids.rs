@@ -10,7 +10,10 @@
 //! reads to the same value in every build: integers within 64 bits, strings,
 //! and containers of them.
 
-use ascetic_ddd_bus::identity::{STREAM_ID_DEPTH, read_stream_id, write_stream_id};
+use ascetic_ddd_bus::identity::{
+    Identity, STREAM_ID_DEPTH, canonical_json, is_canonical_stream_id, read_stream_id,
+    read_stream_position, write_stream_id,
+};
 use proptest::prelude::*;
 use serde_json::{Map, Value};
 
@@ -127,6 +130,112 @@ pub fn check() {
     }
 }
 
+/// The writer's exact text for a value (ADR-0038), the same in every build:
+/// a top-level string raw unless it would read as JSON; anything else
+/// compact, every member in the order of its key's bytes — `aa` before `b`,
+/// which a sort by length would put after.
+pub const WRITTEN: &[(&str, &str)] = &[
+    ("\"o-1\"", "o-1"),
+    ("\"12345\"", "\"12345\""),
+    ("12345", "12345"),
+    ("{\"b\":1,\"a\":2}", "{\"a\":2,\"b\":1}"),
+    ("{\"b\":2,\"aa\":1}", "{\"aa\":1,\"b\":2}"),
+    (
+        "{\"part\":\"p\",\"after\":{\"stream_type\":\"t\",\"stream_id\":\"d\"}}",
+        "{\"after\":{\"stream_id\":\"d\",\"stream_type\":\"t\"},\"part\":\"p\"}",
+    ),
+    (
+        "[\"x\",{\"z\":null,\"y\":true}]",
+        "[\"x\",{\"y\":true,\"z\":null}]",
+    ),
+    (
+        "{\"k\":\"a\\\"b\\\\c\\n\\u0001\"}",
+        "{\"k\":\"a\\\"b\\\\c\\n\\u0001\"}",
+    ),
+    ("{\"é\":1,\"e\":2}", "{\"e\":2,\"é\":1}"),
+];
+
+/// Texts and whether each is its identity's one spelling.
+pub const CANONICAL: &[(&str, bool)] = &[
+    ("o-1", true),
+    ("\"o-1\"", false),
+    ("1", true),
+    (" 1", false),
+    ("{\"a\":2,\"b\":1}", true),
+    ("{\"b\":1,\"a\":2}", false),
+    ("{ \"a\":2,\"b\":1}", false),
+    ("\"12345\"", true),
+];
+
+/// A position's texts, and the position each names.
+pub const POSITIONS: &[(&str, Option<i32>)] = &[
+    ("5", Some(5)),
+    ("-5", Some(-5)),
+    ("0", Some(0)),
+    ("2147483647", Some(i32::MAX)),
+    ("-2147483648", Some(i32::MIN)),
+    ("05", None),
+    ("+5", None),
+    ("-0", None),
+    (" 5", None),
+    ("5 ", None),
+    ("2147483648", None),
+    ("", None),
+];
+
+/// The writer writes each value as [`WRITTEN`] says, a text is canonical as
+/// [`CANONICAL`] says, and a position reads as [`POSITIONS`] says; and one
+/// identity has one framed text whatever its object's members' order.
+///
+/// # Panics
+/// On the first row that reads otherwise.
+pub fn check_written() {
+    for (json, text) in WRITTEN {
+        let value: Value = serde_json::from_str(json).expect("a row's value is JSON");
+        assert_eq!(write_stream_id(&value), *text, "{json}");
+    }
+    for (text, canonical) in CANONICAL {
+        assert_eq!(is_canonical_stream_id(text), *canonical, "{text:?}");
+    }
+    for (text, position) in POSITIONS {
+        assert_eq!(read_stream_position(text).ok(), *position, "{text:?}");
+    }
+    let of = |json: &str| Identity {
+        tenant_id: "t".to_owned(),
+        stream_type: "orders.Order".to_owned(),
+        stream_id: serde_json::from_str(json).expect("JSON"),
+        stream_position: 1,
+    };
+    assert_eq!(
+        of("{\"b\":1,\"a\":2}").framed(),
+        of("{\"a\":2,\"b\":1}").framed(),
+        "one identity, one framed text"
+    );
+    assert_eq!(canonical_json(&Value::String("o-1".to_owned())), "\"o-1\"");
+}
+
+/// `value` written with every object's members in the reverse of the order
+/// its map iterates them: under `preserve_order` a value read back from it
+/// is equal and holds its members in another order.
+fn reversed(value: &Value) -> String {
+    match value {
+        Value::Array(items) => format!(
+            "[{}]",
+            items.iter().map(reversed).collect::<Vec<_>>().join(",")
+        ),
+        Value::Object(fields) => format!(
+            "{{{}}}",
+            fields
+                .iter()
+                .rev()
+                .map(|(key, field)| format!("{}:{}", Value::String(key.clone()), reversed(field)))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        other => other.to_string(),
+    }
+}
+
 /// Strings whose text a reader could take for JSON, beside arbitrary ones:
 /// the writer must quote exactly these.
 fn string() -> impl Strategy<Value = String> {
@@ -185,5 +294,17 @@ proptest! {
     #[test]
     fn a_stream_id_written_reads_back_as_itself(id in identity()) {
         prop_assert_eq!(read_stream_id(&write_stream_id(&id)), Ok(id));
+    }
+
+    /// One value, one text, whatever order its objects' members were read
+    /// in (ADR-0038): the same value read from a text with every object
+    /// reversed is written the same, and that text is canonical.
+    #[test]
+    fn one_value_is_written_one_way(id in identity()) {
+        let other = read_stream_id(&reversed(&id));
+        prop_assert_eq!(other.as_ref(), Ok(&id));
+        let written = write_stream_id(&id);
+        prop_assert_eq!(other.map(|other| write_stream_id(&other)), Ok(written.clone()));
+        prop_assert!(is_canonical_stream_id(&written));
     }
 }

@@ -29,7 +29,7 @@ use ascetic_ddd_bus::{Message, uri};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::message::{self, CausalDependency, InboxMessage, MAX_DEPENDENCIES, MAX_IDENTITY_BYTES};
+use crate::message::{CausalDependency, InboxMessage, MAX_DEPENDENCIES, MAX_IDENTITY_BYTES};
 
 /// The header the outbox stamps with the channel a message was sent to.
 pub(crate) const DESTINATION: &str = "destination";
@@ -45,8 +45,7 @@ pub(crate) const COLUMNS: [&str; 5] = [
 ];
 
 /// The widths of the inbox's columns, in characters (`store.rs`).
-const TENANT_ID_WIDTH: usize = 128;
-const STREAM_TYPE_WIDTH: usize = 128;
+use ascetic_ddd_bus::identity::{STREAM_TYPE_WIDTH, TENANT_ID_WIDTH};
 const URI_WIDTH: usize = 255;
 
 /// Why a message was set aside beside the inbox.
@@ -117,22 +116,20 @@ pub(crate) fn row_of(destination: &str, message: &Message) -> Result<InboxMessag
     {
         return Err("a header is named twice");
     }
-    let tenant_id = column(TENANT_ID)?;
-    let stream_type = column(STREAM_TYPE)?;
-    let stream_id_text = column(STREAM_ID)?;
-    if tenant_id.chars().count() > TENANT_ID_WIDTH {
-        return Err("the tenant is longer than its column");
-    }
-    if stream_type.chars().count() > STREAM_TYPE_WIDTH {
-        return Err("the stream type is longer than its column");
-    }
-    let stream_id = identity::read_stream_id(stream_id_text).map_err(identity::Refused::as_str)?;
-    let stream_position = column(STREAM_POSITION)?
-        .parse::<i32>()
-        .map_err(|_| "the position is not an integer")?;
-    if message::identity_bytes(tenant_id, stream_type, &stream_id) > MAX_IDENTITY_BYTES {
-        return Err("the identity is past what a dependency on it can index");
-    }
+    // The identity, read by the one function both ends of the bus read it
+    // with (ADR-0038).
+    let identity::Identity {
+        tenant_id,
+        stream_type,
+        stream_id,
+        stream_position,
+    } = identity::read_identity(
+        column(TENANT_ID)?,
+        column(STREAM_TYPE)?,
+        column(STREAM_ID)?,
+        column(STREAM_POSITION)?,
+    )
+    .map_err(identity::Refused::as_str)?;
     // The intake's name for the row: the channel this producer was built
     // for, with the message's key, or the channel's own (ADR-0018). A
     // `destination` header the producer stamped is its address, not ours.
@@ -470,19 +467,19 @@ pub(crate) fn digest(bytes: &[u8]) -> String {
 }
 
 /// The digest of a row's identity, by which a read by identity finds the
-/// message set aside (ADR-0036 R4): the identity's columns, framed.
+/// message set aside (ADR-0036 R4): the identity's framed text, its stream
+/// id canonical, so that one identity has one digest in every build
+/// (ADR-0038).
 pub(crate) fn identity_digest(row: &InboxMessage) -> String {
-    let mut out = Vec::new();
-    for part in [
-        row.tenant_id.as_bytes(),
-        row.stream_type.as_bytes(),
-        row.stream_id.to_string().as_bytes(),
-        &row.stream_position.to_be_bytes(),
-    ] {
-        out.extend(u32::try_from(part.len()).unwrap_or(u32::MAX).to_be_bytes());
-        out.extend(part);
-    }
-    digest(&out)
+    digest(
+        &identity::Identity {
+            tenant_id: row.tenant_id.clone(),
+            stream_type: row.stream_type.clone(),
+            stream_id: row.stream_id.clone(),
+            stream_position: row.stream_position,
+        }
+        .framed(),
+    )
 }
 
 /// A header's value as the text a derived column keeps, and an observer and
@@ -634,7 +631,24 @@ mod tests {
                 "\\u0000 in the stream id",
                 identified(r#"{"id":"a\u0000"}"#),
             ),
-            ("a tenant too long", with(TENANT_ID, "t".repeat(129))),
+            (
+                "a tenant too long",
+                with(TENANT_ID, "t".repeat(TENANT_ID_WIDTH + 1)),
+            ),
+            (
+                "a tenant of two-byte characters past its column",
+                with(TENANT_ID, "é".repeat(TENANT_ID_WIDTH + 1)),
+            ),
+            (
+                "a stream type past its column",
+                with(STREAM_TYPE, "s".repeat(STREAM_TYPE_WIDTH + 1)),
+            ),
+            (
+                "a position with a zero before it",
+                with(STREAM_POSITION, "05"),
+            ),
+            ("a position with a sign", with(STREAM_POSITION, "+5")),
+            ("a position of minus zero", with(STREAM_POSITION, "-0")),
             (
                 "a key past the row",
                 identified(&format!("\"{}\"", "k".repeat(3_000))),
@@ -649,6 +663,22 @@ mod tests {
             assert!(
                 row_of("inbox://orders", &message).is_err(),
                 "{case} must be refused"
+            );
+        }
+        // At their columns' widths, counted in characters, they are taken.
+        for (case, message) in [
+            (
+                "a tenant at its column",
+                with(TENANT_ID, "é".repeat(TENANT_ID_WIDTH)),
+            ),
+            (
+                "a stream type at its column",
+                with(STREAM_TYPE, "s".repeat(STREAM_TYPE_WIDTH)),
+            ),
+        ] {
+            assert!(
+                row_of("inbox://orders", &message).is_ok(),
+                "{case} must be taken"
             );
         }
     }
@@ -871,10 +901,10 @@ mod tests {
     #[test]
     fn an_identity_is_bounded_by_what_a_dependency_on_it_indexes() {
         let at = |length: usize| Value::String("k".repeat(length));
-        let base = message::identity_bytes("t1", "orders.Order", &at(0));
+        let base = identity::identity_bytes("t1", "orders.Order", &at(0));
         let largest = MAX_IDENTITY_BYTES - base;
         assert_eq!(
-            message::identity_bytes("t1", "orders.Order", &at(largest)),
+            identity::identity_bytes("t1", "orders.Order", &at(largest)),
             MAX_IDENTITY_BYTES
         );
         assert!(row_of("inbox://orders", &identified(&"k".repeat(largest))).is_ok());
@@ -1091,6 +1121,10 @@ mod tests {
                         "no metadata key is serde_json's own"
                     );
                     prop_assert!(row.message_id().is_none_or(is_uuid));
+                    // One position, one text (ADR-0038): `05`, `+5` and `-0`,
+                    // which the generator draws, are refused.
+                    let position = row.stream_position.to_string();
+                    prop_assert_eq!(message.header(STREAM_POSITION), Some(position.as_bytes()));
                 }
             }
 
