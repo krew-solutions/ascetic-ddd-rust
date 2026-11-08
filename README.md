@@ -207,8 +207,8 @@ Read them before changing the bus, the outbox or the inbox. ADR-0036
   nothing a message carries stops the inbox: a stream's id is JSON text read
   by one function, metadata is the headers' text, a message's size and its
   dependencies are bounded before they are read, and the dispatcher parks a
-  row it cannot read or write for its own values *(Accepted, being
-  built; revises ADR-0036 R3)*.
+  row it cannot read or write for its own values *(Accepted, built in
+  the library; the host's adoption next; revises ADR-0036 R3)*.
 
 ## Specifications
 

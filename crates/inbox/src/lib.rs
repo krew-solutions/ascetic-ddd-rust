@@ -79,8 +79,8 @@ pub use crate::message::{CausalDependency, InboxMessage, MAX_DEPENDENCIES, MAX_I
 pub use crate::observer::{InboxObserver, Receipt};
 pub use crate::partition::{ByStream, ByUri, PartitionKey};
 pub use crate::pg::{
-    Admission, InboxRetention, Loops, Outcome, Parked, PgInbox, Readmission, Readmitted, Retries,
-    SetAsideCount, SetAsideCursor, SetAsidePage, SetAsideRow,
+    Admission, Census, InboxRetention, Loops, Outcome, Parked, PgInbox, Readmission, Readmitted,
+    Retries, SetAsideCount, SetAsideCursor, SetAsidePage, SetAsideRow,
 };
 pub use crate::port::Inbox;
 pub use crate::snapshot::Snapshot;

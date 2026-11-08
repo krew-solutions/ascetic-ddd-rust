@@ -1326,7 +1326,7 @@ fn message_checked(row: &Row, at: usize) -> Result<InboxMessage, &'static str> {
 
 /// Whether `stream_id`, read back, is in the bus's domain: it writes and
 /// reads back as itself.
-fn in_domain(stream_id: &serde_json::Value) -> bool {
+pub(super) fn in_domain(stream_id: &serde_json::Value) -> bool {
     let text = ascetic_ddd_bus::identity::write_stream_id(stream_id);
     ascetic_ddd_bus::identity::read_stream_id(&text).as_ref() == Ok(stream_id)
 }

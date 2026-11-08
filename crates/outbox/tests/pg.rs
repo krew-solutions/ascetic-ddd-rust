@@ -676,9 +676,11 @@ async fn two_slots_are_dispatched_at_once() {
 
 /// Two URIs in two slots, four messages each, two loops, a subscriber that
 /// takes its time and notes when it ran: the messages of one URI are never
-/// in the subscriber at the same time, while the two URIs are — the run is
-/// shorter than the sum of the pauses, so the check could have seen an
-/// overlap. One partition key, one dispatcher at a time.
+/// in the subscriber at the same time, while the two URIs are — a span of
+/// one overlaps a span of the other, so the check could have seen an
+/// overlap within one. One partition key, one dispatcher at a time. The
+/// overlap is the evidence, not the run's length, which a loaded machine
+/// stretches.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn messages_of_one_uri_are_never_dispatched_at_once() {
@@ -720,7 +722,6 @@ async fn messages_of_one_uri_are_never_dispatched_at_once() {
         ..Loops::default()
     };
 
-    let started = std::time::Instant::now();
     let shutdown = async { done.notified().await };
     tokio::time::timeout(
         Duration::from_secs(10),
@@ -729,7 +730,6 @@ async fn messages_of_one_uri_are_never_dispatched_at_once() {
     .await
     .expect("run stops after shutdown")
     .unwrap();
-    let elapsed = started.elapsed();
 
     let spans = spans.lock().unwrap().clone();
     for uri in [&first, &second] {
@@ -743,9 +743,14 @@ async fn messages_of_one_uri_are_never_dispatched_at_once() {
             );
         }
     }
+    let side_by_side = spans.iter().any(|(a, a_started, a_ended)| {
+        spans
+            .iter()
+            .any(|(b, b_started, b_ended)| a != b && a_started < b_ended && b_started < a_ended)
+    });
     assert!(
-        elapsed < PAUSE * 7,
-        "the two URIs did not run side by side: {elapsed:?} for 8 pauses of {PAUSE:?}"
+        side_by_side,
+        "the two URIs did not run side by side: {spans:?}"
     );
 }
 

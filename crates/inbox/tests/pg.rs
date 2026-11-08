@@ -22,7 +22,7 @@ use ascetic_ddd_inbox::observer::{
     Swept, Unparked, Waiting,
 };
 use ascetic_ddd_inbox::{
-    ByStream, CausalDependency, Error, Failure, Inbox, InboxMessage, InboxRetention, Loops,
+    ByStream, CausalDependency, Census, Error, Failure, Inbox, InboxMessage, InboxRetention, Loops,
     MAX_IDENTITY_BYTES, Outcome, Parked, PartitionKey, PgInbox, Receipt, Retries,
 };
 use ascetic_ddd_session::pg::Identifier;
@@ -2638,4 +2638,81 @@ async fn a_failure_past_the_attempts_range_saturates() {
             parked: false
         }
     ));
+}
+
+/// The census counts each ground of ADR-0037 once per row that has it, and
+/// a row that has none nowhere (decision 8).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_census_counts_every_ground_and_nothing_else() {
+    let f = fixture_cut("census", (), 1, TraceFile::off()).await;
+    for (stream_id, metadata) in [
+        // clean
+        (r#"{"id": "clean"}"#.to_owned(), "{}".to_owned()),
+        (
+            r#"{"id": "listed"}"#.to_owned(),
+            r#"{"causal_dependencies": "[]"}"#.to_owned(),
+        ),
+        // a number in the stream id, in the domain and outside it
+        (r#"{"n": 5}"#.to_owned(), "{}".to_owned()),
+        ("12345678901234567890123".to_owned(), "{}".to_owned()),
+        // a list the intake refuses
+        (
+            r#"{"id": "refused"}"#.to_owned(),
+            r#"{"causal_dependencies": "[1]"}"#.to_owned(),
+        ),
+        // metadata stored structured: a number, a depth, a private key
+        (
+            r#"{"id": "number"}"#.to_owned(),
+            r#"{"h": [1.5]}"#.to_owned(),
+        ),
+        (
+            r#"{"id": "deep"}"#.to_owned(),
+            format!(r#"{{"h": {}{}}}"#, "[".repeat(127), "]".repeat(127)),
+        ),
+        (
+            r#"{"id": "token"}"#.to_owned(),
+            r#"{"h": {"$serde_json::private::Number": "5"}}"#.to_owned(),
+        ),
+    ] {
+        stored_before(&f, &stream_id, &metadata).await;
+    }
+    let client = pool().get().await.unwrap();
+    // two waiting rows, at positions of their own: one for a short identity,
+    // one for an identity past the bound
+    let waiting = |position: i32, stream_id: &str| {
+        format!(
+            "INSERT INTO {} (tenant_id, stream_type, stream_id, stream_position, uri, payload, \
+                 metadata, waiting_for, waiting_since) \
+             VALUES ('tenant-1', 'orders.Order', '{{\"id\": \"waits\"}}', {position}, \
+                 'kafka://orders/w', 'w', '{{}}', jsonb_build_object('tenant_id', 'tenant-1', \
+                 'stream_type', 'orders.Order', 'stream_id', {stream_id}, 'stream_position', 1), \
+                 now())",
+            f.table
+        )
+    };
+    client
+        .batch_execute(&waiting(1, "'\"short\"'::jsonb"))
+        .await
+        .unwrap();
+    client
+        .batch_execute(&waiting(2, "to_jsonb(repeat('k', 3000))"))
+        .await
+        .unwrap();
+    let census = f
+        .sessions
+        .session(async |session| f.inbox.census(&session).await)
+        .await
+        .unwrap();
+    assert_eq!(
+        census,
+        Census {
+            numbered_stream_ids: 2,
+            stream_ids_outside: 1,
+            dependencies_refused: 1,
+            structured_metadata: 3,
+            waits_past_bound: 1,
+        }
+    );
+    assert!(!census.is_clear());
 }

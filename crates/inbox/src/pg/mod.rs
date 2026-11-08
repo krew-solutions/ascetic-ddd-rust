@@ -80,11 +80,13 @@
 //! vocabulary of the protocol model. The SQL lives in `store`, the loop in
 //! `dispatch`.
 
+mod census;
 mod dispatch;
 mod intake;
 mod store;
 mod surface;
 
+pub use census::Census;
 pub use intake::Admission;
 pub use surface::{
     Readmission, Readmitted, SetAsideCount, SetAsideCursor, SetAsidePage, SetAsideRow,

@@ -2,8 +2,10 @@
 
 ## Status
 
-Accepted (2026-11-08, by the owner); being built in the order of
-§ Slices.
+Accepted (2026-11-08, by the owner). Built in the library: slices 1 to 7,
+and slice 8's census (§ Change Log). The host's adoption, slice 8's rest,
+is next: it quotes its stream ids, runs the census, and takes the library
+at one pin.
 
 It is the output of one round of a blind solver and a discriminator, whose
 synthesis was then attacked by five roles: distributed systems, database,
@@ -831,3 +833,28 @@ The host adopts them in one pin, after quoting its stream ids.
     rdkafka 0.39's source (`message.rs:284`).
   - **Mutations caught:** the bound dropped (the unit test and the
     regression), and the marker dropped (the unit test).
+- 2026-11-08 — Slice 8's library part built: the census.
+  - `PgInbox::census(session)` returns a `Census` by ground:
+    - rows whose stream id holds a number;
+    - stream ids outside the domain;
+    - dependency lists the intake would refuse;
+    - structured metadata with a number, a private key, or a depth the
+      client cannot read back;
+    - waits past `MAX_IDENTITY_BYTES`.
+
+    `is_clear` is the release's gate. It runs under the caller's session,
+    the role that sees every Tenant.
+  - Path predicates select the rows, so no amplifying value is rendered
+    beyond them, and every value it reads is decoded without panicking.
+  - **Executor:** a table seeded with one row of every ground and two clean
+    rows counts each ground exactly.
+  - **Mutations caught:** the depth and the private keys left out, every
+    numbered id taken as outside, the waits' bound dropped.
+  - The tests and documents § Executors names as contradicted were
+    rewritten with their slices; ADR-0036 R3 points here (its Change Log).
+  - **Found by the gate, beside this ADR.** The outbox's
+    `messages_of_one_uri_are_never_dispatched_at_once` held two URIs
+    "side by side" to a run shorter than seven pauses, and a loaded machine
+    stretched it past (283 ms for 8 pauses of 40 ms). It now holds them to
+    an overlap of their spans, as d160cba did for the inbox. One loop
+    instead of two turns it red.
