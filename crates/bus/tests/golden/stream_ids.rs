@@ -79,7 +79,15 @@ pub const ROWS: &[(&str, Expected)] = &[
         Id("\"0a1b2c3d-0000-4000-8000-000000000000\""),
     ),
     ("01", Id("\"01\"")),
-    ("[1", Id("\"[1\"")),
+    // Text that begins as JSON and is not: its producer meant JSON, and is
+    // refused rather than given another identity in silence.
+    ("[1", Refused),
+    ("{\"a\"", Refused),
+    ("\"a\u{1}b\"", Refused),
+    ("\"\\x41\"", Refused),
+    ("\"\\u12\"", Refused),
+    ("\"\\u12g4\"", Refused),
+    (" \"unterminated", Refused),
     ("a b", Id("\"a b\"")),
     ("", Id("\"\"")),
     // Quoted ids: JSON strings.
@@ -138,6 +146,10 @@ fn string() -> impl Strategy<Value = String> {
             "{\"$serde_json::private::Number\":\"5\"}",
             "o-1",
             "",
+            "[abc",
+            "{x",
+            "\"half",
+            " [1",
         ])
         .prop_map(str::to_owned),
     ]

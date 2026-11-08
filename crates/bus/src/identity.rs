@@ -30,7 +30,11 @@
 //!
 //! A header's text that is not JSON by the grammar is a raw id, the string
 //! of that text: a producer that stamps a UUID unquoted means nothing else.
-//! JSON outside D is refused, never read as a string.
+//! JSON outside D is refused, never read as a string; so is a text that
+//! begins as JSON — a quote, a bracket or a brace — and is not, such as a
+//! string with a raw control character or an escape RFC 8259 does not
+//! know: its producer meant JSON, and reading it as a raw id would give the
+//! stream another identity than the one meant, in silence.
 
 use std::fmt;
 
@@ -85,24 +89,35 @@ impl std::error::Error for Refused {}
 /// is not JSON at all.
 ///
 /// # Errors
-/// [`Refused`] when the text is JSON outside D, or a raw id holding U+0000.
+/// [`Refused`] when the text is JSON outside D, begins as JSON and is not,
+/// or is a raw id holding U+0000.
 pub fn read_stream_id(text: &str) -> Result<Value, Refused> {
     match read_json(text, STREAM_ID_DEPTH)? {
         Some(id) => Ok(id),
+        None if begins_as_json(text) => Err(Refused("the stream id begins as JSON and is not")),
         None if text.contains('\0') => Err(Refused("a raw stream id holds U+0000")),
         None => Ok(Value::String(text.to_owned())),
     }
 }
 
+/// Whether `text`, past its leading whitespace, opens a JSON string, array
+/// or object: what no raw id does. A digit is no such sign, since a UUID
+/// may begin with one.
+fn begins_as_json(text: &str) -> bool {
+    text.trim_start_matches([' ', '\t', '\n', '\r'])
+        .starts_with(['"', '[', '{'])
+}
+
 /// The `stream_id` header's text for `id`, the inverse of
-/// [`read_stream_id`]: a string whose text the reader would take for JSON is
-/// written quoted, any other string as it is, and every other value as
-/// JSON. So `read_stream_id(&write_stream_id(v)) == Ok(v)` for every v in D;
-/// a value outside D is written as JSON, which the reader refuses.
+/// [`read_stream_id`]: a string whose text the reader would take for JSON,
+/// or refuse as beginning as JSON, is written quoted; any other string as
+/// it is, and every other value as JSON. So
+/// `read_stream_id(&write_stream_id(v)) == Ok(v)` for every v in D; a value
+/// outside D is written as JSON, which the reader refuses.
 #[must_use]
 pub fn write_stream_id(id: &Value) -> String {
     match id {
-        Value::String(text) if !is_json(text) => text.clone(),
+        Value::String(text) if !is_json(text) && !begins_as_json(text) => text.clone(),
         other => other.to_string(),
     }
 }

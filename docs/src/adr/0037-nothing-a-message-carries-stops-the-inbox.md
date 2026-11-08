@@ -168,7 +168,8 @@ is bounded.
   - the value's stored size is within decision 4's bound.
 - **Text that is not JSON** by the grammar, a raw UUID for instance, is the
   string of that text. The host stamps raw ids today, and a text that is not
-  JSON can mean nothing else.
+  JSON can mean nothing else — unless it begins as JSON (revised on
+  2026-11-08, § Change Log).
 - **JSON outside D is refused**: the intake sets the message aside as
   malformed. Any failure after the scanner accepted the text is a refusal,
   never the fallback to a string.
@@ -858,3 +859,30 @@ The host adopts them in one pin, after quoting its stream ids.
     stretched it past (283 ms for 8 pauses of 40 ms). It now holds them to
     an overlap of their spans, as d160cba did for the inbox. One loop
     instead of two turns it red.
+- 2026-11-08 — Decision 1 refined, after a probe of the scanner asked for by
+  the owner.
+  - **What the probe showed.** Escapes and NULs are read correctly: every
+    RFC 8259 escape, hex in either case, surrogate pairs joined, lone
+    surrogates refused, U+0000 refused escaped or raw, keys compared once
+    unescaped (a duplicate `"a"` and `"\u0061"`, an escaped private key).
+    But a text that begins as JSON and fails the grammar was read as a raw
+    id, its quotes inside the identity: `"a<U+0001>b"`, `"\x41"`,
+    `"\u12"`, `[1`. Its producer meant JSON, and its stream would have
+    another identity than the one meant, in silence.
+  - **Refined:** a text that, past its leading whitespace, begins with a
+    quote, a bracket or a brace and is not JSON is refused. A digit is no
+    such sign, since a UUID may begin with one. The writer quotes a string
+    that would read so, so the round trip holds.
+  - **Rule of Three:**
+    1. A raw id that begins with one of them is now refused, its stream
+       set aside. The host's producers stamp UUIDs and objects of strings,
+       and the header's contract is JSON text.
+    2. The writer left unchanged would break the round trip for `[abc`.
+       Changed; the property's strings include such texts.
+    3. A row stored before with such a raw id still reads, its value a
+       plain string; a new arrival of the same text is refused, so the
+       stream splits. The census cannot see it, the stored value being a
+       plain string. The host has none.
+  - **Executors:** seven golden rows, in both builds. Mutations caught:
+    the reading rule dropped (the table), the writer's quotes dropped (the
+    round trip, its seed kept).
