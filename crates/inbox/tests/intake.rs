@@ -119,6 +119,16 @@ impl Fixture {
             .unwrap()
     }
 
+    async fn count_text(&self, sql: &str) -> String {
+        let sql = sql.replace("{table}", &self.table);
+        self.sessions
+            .session(async |session| {
+                Ok::<_, Error>(session.connection().query_one(&sql, &[]).await?.get(0))
+            })
+            .await
+            .unwrap()
+    }
+
     async fn rows(&self) -> i64 {
         self.count("SELECT count(*) FROM {table}").await
     }
@@ -699,4 +709,76 @@ async fn a_number_a_host_s_key_overflows_is_set_aside_as_unstorable() {
         inbox.intake("inbox://orders/k", &keyed("5")).await,
         Ok(Admission::Stored(_))
     ));
+}
+
+/// A repeat past `seen`'s range saturates instead of failing the intake,
+/// which would hold the channel (ADR-0037 decision 7).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_repeat_past_the_count_s_range_saturates() {
+    let f = fixture("seen_saturates").await;
+    let poison = order("not-a-position", ID_1, "p");
+    let Admission::SetAside { digest, .. } = f.intake(&poison).await else {
+        panic!("set aside");
+    };
+    altered(
+        &f,
+        &format!("UPDATE {{t}}_rejects SET seen = 2147483647 WHERE digest = '{digest}'"),
+    )
+    .await;
+    assert!(matches!(
+        f.intake(&poison).await,
+        Admission::SetAside { repeat: true, .. }
+    ));
+}
+
+/// The same bytes judged otherwise by another release refresh the open
+/// row's reason, keeping its first sight: the gauge and the readmit by
+/// reason act on today's verdict (ADR-0037 decision 7). Here one inbox
+/// refuses the stream type as foreign, and another on the same table,
+/// admitting it, finds its `message_id` held at another identity.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_repeat_judged_otherwise_refreshes_the_open_row_s_reason() {
+    let f = fixture("verdict_refreshed").await;
+    let admitting_all = PgInbox::new(PgSessionPool::new(pool())).with_table(
+        Identifier::new(&f.table).unwrap(),
+        Identifier::new(format!("{}_seq", f.table)).unwrap(),
+    );
+    let thing = |stream_id: &str| {
+        Message::new("p")
+            .with_header(TENANT_ID, "t1")
+            .with_header(STREAM_TYPE, "other.Thing")
+            .with_header(STREAM_ID, stream_id)
+            .with_header(STREAM_POSITION, "1")
+            .with_header("message_id", ID_1)
+    };
+    assert!(matches!(
+        admitting_all
+            .intake("inbox://orders/k", &thing("held"))
+            .await
+            .unwrap(),
+        Admission::Stored(_)
+    ));
+    let late = thing("late");
+    assert_eq!(reason_of(&f.intake(&late).await), Some(Reason::Foreign));
+    let first_seen: String = f
+        .count_text("SELECT min(first_seen_at)::text FROM {table}_rejects")
+        .await;
+    assert_eq!(
+        reason_of(
+            &admitting_all
+                .intake("inbox://orders/k", &late)
+                .await
+                .unwrap()
+        ),
+        Some(Reason::IdentityTaken)
+    );
+    assert_eq!(f.set_aside("identity_taken").await, 1);
+    assert_eq!(f.set_aside("foreign").await, 0);
+    assert_eq!(
+        f.count_text("SELECT min(first_seen_at)::text FROM {table}_rejects")
+            .await,
+        first_seen
+    );
 }

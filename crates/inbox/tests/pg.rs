@@ -2611,3 +2611,31 @@ fn as_sent(message: &InboxMessage) -> ascetic_ddd_bus::Message {
         None => wire,
     }
 }
+
+/// A failure past `attempts`' range saturates instead of failing the
+/// record, which would stop every loop (ADR-0037 decision 7): the library's
+/// default retries for ever.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_failure_past_the_attempts_range_saturates() {
+    let f = fixture("attempts_saturate").await;
+    f.publish(&[message("a", 1)]).await;
+    let client = pool().get().await.unwrap();
+    client
+        .execute(
+            &format!("UPDATE {} SET attempts = 2147483647", f.table),
+            &[],
+        )
+        .await
+        .unwrap();
+    let failing = |_: &PgSession, _: &InboxMessage| {
+        std::future::ready(Err::<(), Failure>(Failure::Transient("again".into())))
+    };
+    assert!(matches!(
+        f.dispatch(failing).await,
+        Outcome::Failed {
+            attempts: 2_147_483_647,
+            parked: false
+        }
+    ));
+}

@@ -778,3 +778,17 @@ The host adopts them in one pin, after quoting its stream ids.
       identity taken, and the row stays parked.
   - **Mutations caught:** no supersede, the row taken as the holder of its
     own `message_id`, the park leaving no mark.
+- 2026-11-08 — Slice 6 built: what the inbox writes of its own.
+  - **`seen` and `attempts` saturate** at `i32::MAX`, with no DDL. A repeat
+    stays a repeat; a failure is recorded and retried.
+  - **A repeat refreshes an open row's verdict.** It writes the reason,
+    detail and holder this release gives the bytes, and keeps the first
+    sight. A disposed row stays as it was.
+  - The failure's text, NUL-free and bounded, was built with slice 5a.
+  - **Executors:**
+    - a repeat at `seen = i32::MAX` is still a repeat;
+    - a failure at `attempts = i32::MAX` is recorded, not parked;
+    - one inbox sets bytes aside as foreign, another on the same table
+      sets them aside as identity taken, and the row takes the second
+      reason with its first sight kept.
+  - **Mutations caught:** either counter overflowing, and the reason kept.

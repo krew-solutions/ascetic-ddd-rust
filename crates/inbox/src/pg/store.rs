@@ -614,9 +614,10 @@ where
         retry_after: Duration,
     ) -> Result<(u32, bool), Error> {
         let sql = format!(
-            "UPDATE {} SET attempts = attempts + 1, last_error = $2, \
+            "UPDATE {} SET attempts = LEAST(attempts, 2147483646) + 1, last_error = $2, \
                 next_attempt_at = CURRENT_TIMESTAMP + make_interval(secs => $3::double precision), \
-                parked_at = CASE WHEN $5::boolean OR ($4::integer > 0 AND attempts + 1 >= $4::integer) \
+                parked_at = CASE WHEN $5::boolean \
+                                   OR ($4::integer > 0 AND LEAST(attempts, 2147483646) + 1 >= $4::integer) \
                                  THEN CURRENT_TIMESTAMP END \
              WHERE ctid = $1::text::tid \
              RETURNING attempts, parked_at IS NOT NULL",
@@ -995,16 +996,27 @@ where
     }
 
     /// Writes a row set aside, in a transaction of its own: a repeat of the
-    /// same bytes, the same digest, counts once more and keeps the row as it
-    /// is, disposed of or not. Whether it was a repeat.
+    /// same bytes, the same digest, counts once more, saturating, and an open
+    /// row takes the verdict this release gives the bytes — its reason,
+    /// detail and holder — keeping its first sight; a disposed row stays as
+    /// it was (ADR-0037 decision 7). Whether it was a repeat.
     pub(super) async fn set_aside(&self, aside: &Aside<'_>) -> Result<bool, Error> {
         let table = self.table.as_str();
         let sql = format!(
             "INSERT INTO {table}_rejects (digest, channel, tenant_id, stream_type, identity, reason, \
                  detail, holder_channel, holder_position, message) \
              VALUES ($1::text::uuid, $2, $3, $4, $5::text::uuid, $6, $7, $8, $9, $10) \
-             ON CONFLICT (digest) DO UPDATE SET seen = {table}_rejects.seen + 1, \
-                 last_seen_at = statement_timestamp() \
+             ON CONFLICT (digest) DO UPDATE SET \
+                 seen = LEAST({table}_rejects.seen, 2147483646) + 1, \
+                 last_seen_at = statement_timestamp(), \
+                 reason = CASE WHEN {table}_rejects.disposed_at IS NULL \
+                               THEN EXCLUDED.reason ELSE {table}_rejects.reason END, \
+                 detail = CASE WHEN {table}_rejects.disposed_at IS NULL \
+                               THEN EXCLUDED.detail ELSE {table}_rejects.detail END, \
+                 holder_channel = CASE WHEN {table}_rejects.disposed_at IS NULL \
+                               THEN EXCLUDED.holder_channel ELSE {table}_rejects.holder_channel END, \
+                 holder_position = CASE WHEN {table}_rejects.disposed_at IS NULL \
+                               THEN EXCLUDED.holder_position ELSE {table}_rejects.holder_position END \
              RETURNING seen > 1"
         );
         self.pool
