@@ -360,8 +360,10 @@ type Readmits = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 impl<P> PgInbox<P> {
     /// An inbox in table `inbox`, one slot partitioned by URI, observed by
-    /// nobody, retrying a failed message for ever and letting a message wait
-    /// for its dependencies for ever.
+    /// nobody, retrying a failed message for ever and parking a message that
+    /// has waited an hour for its dependencies (ADR-0037 decision 6): a
+    /// dependency refused or set aside is then paged, never waited for in
+    /// silence.
     pub fn new(pool: P) -> Self {
         PgInbox {
             pool,
@@ -371,7 +373,7 @@ impl<P> PgInbox<P> {
             partition: Box::new(ByUri),
             loops: Loops::default(),
             retries: Retries::default(),
-            max_wait: None,
+            max_wait: Some(Duration::from_secs(3600)),
             slots: 1,
             retention: InboxRetention::default(),
             swept_to: Mutex::new(HashMap::new()),

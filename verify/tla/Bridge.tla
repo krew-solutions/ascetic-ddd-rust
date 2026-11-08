@@ -72,7 +72,7 @@ Src == INSTANCE Outbox WITH
 
 \* A destination failure is a crash here; recorded attempts, backoff and
 \* parking are the inbox's own matter, checked in Inbox.tla.
-Dst == INSTANCE Inbox WITH Unreadable <- {}, 
+Dst == INSTANCE Inbox WITH Unreadable <- {}, unread <- {}, 
   Deps <- [m \in Msgs |-> {}], Arrives <- Msgs \ Unstorable, Slots <- DstSlots,
   WaitsOnDependencies <- TRUE, WaitExpires <- FALSE,
   Poison <- {}, MaxAttempts <- 0, BlockOnBackoff <- TRUE, MaxAdmin <- 0, AtomicWait <- TRUE,

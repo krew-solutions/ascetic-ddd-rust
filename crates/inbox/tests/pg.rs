@@ -1737,6 +1737,10 @@ fn the_released_migrations_keep_their_checksums() {
             (
                 "20261107T010000Z_indexes_before_launch".to_owned(),
                 "fnv1a64:85998ae59b7e3b60:366".to_owned()
+            ),
+            (
+                "20261108T000000Z_unreadable_at".to_owned(),
+                "fnv1a64:d9799e13a5481289:68".to_owned()
             )
         ]
     );
@@ -2486,4 +2490,124 @@ async fn an_expiry_parks_a_batch_at_a_time_without_the_payloads() {
     f.dispatch(&subscriber).await;
     f.dispatch(&subscriber).await;
     assert_eq!(*batches.0.lock().unwrap(), [(100, true), (5, true)]);
+}
+
+/// A row parked at once for its own values is superseded by the next
+/// arrival at its identity: the producer's repaired message replaces its
+/// values, is processed, and wakes what waited for it (ADR-0037 decision 6).
+/// Before, a republication at a held identity was acknowledged as a
+/// redelivery or a shadow and dropped, and the row could leave only by a
+/// resolve that skipped its subscriber.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_row_parked_at_once_is_superseded_by_the_next_arrival_at_its_identity() {
+    let f = fixture_cut("superseded", (), 1, TraceFile::off()).await;
+    // the row stored before carries the very message_id its repair will:
+    // the supersede does not take its own row for another's
+    stored_before(
+        &f,
+        r#"{"id": "deep"}"#,
+        &format!(
+            r#"{{"message_id": "00000000-0000-4000-b000-000000000001", "h": {}{}}}"#,
+            "[".repeat(127),
+            "]".repeat(127)
+        ),
+    )
+    .await;
+    let (seen, subscriber) = collector();
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Parked);
+    let waiter = message("waiter", 1).depending_on(&[CausalDependency::on(&InboxMessage::new(
+        "tenant-1",
+        "orders.Order",
+        json!({ "id": "deep" }),
+        1,
+        "kafka://orders/old",
+        "",
+    ))]);
+    f.publish(std::slice::from_ref(&waiter)).await;
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::SetAside,
+        "the waiter waits"
+    );
+
+    let repaired = InboxMessage::new(
+        "tenant-1",
+        "orders.Order",
+        json!({ "id": "deep" }),
+        1,
+        "kafka://orders/old",
+        "repaired",
+    )
+    .with_metadata(json!({ "message_id": "00000000-0000-4000-b000-000000000001" }));
+    f.publish(std::slice::from_ref(&repaired)).await;
+    assert_eq!(f.rows().await, 2, "superseded in place");
+    while f.dispatch(&subscriber).await != Outcome::Nothing {}
+    assert_eq!(*seen.lock().unwrap(), ["deep@1", "waiter@1"]);
+    assert!(f.parked_messages().await.is_empty());
+}
+
+/// A supersede whose `message_id` another identity holds is that
+/// identity's taken, set aside, the row left parked: the supersede claims no
+/// one else's `message_id` (ADR-0036 R5).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_supersede_whose_message_id_is_held_elsewhere_is_set_aside() {
+    let f = fixture_cut("superseded_taken", (), 1, TraceFile::off()).await;
+    stored_before(
+        &f,
+        r#"{"id": "deep"}"#,
+        &format!(r#"{{"h": {}{}}}"#, "[".repeat(127), "]".repeat(127)),
+    )
+    .await;
+    let (_, subscriber) = collector();
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Parked);
+    let holder = message("holder", 1);
+    f.publish(std::slice::from_ref(&holder)).await;
+    let repaired = InboxMessage::new(
+        "tenant-1",
+        "orders.Order",
+        json!({ "id": "deep" }),
+        1,
+        "kafka://orders/old",
+        "repaired",
+    )
+    .with_metadata(json!({ "message_id": message_id(&holder) }));
+    let admission = f
+        .inbox
+        .intake(&repaired.uri, &as_sent(&repaired))
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            admission,
+            ascetic_ddd_inbox::Admission::SetAside {
+                reason: ascetic_ddd_inbox::Reason::IdentityTaken,
+                ..
+            }
+        ),
+        "{admission:?}"
+    );
+    assert_eq!(f.parked_messages().await.len(), 1, "still parked");
+}
+
+/// The wire message of a row, as a producer would send it.
+fn as_sent(message: &InboxMessage) -> ascetic_ddd_bus::Message {
+    use ascetic_ddd_bus::identity::{
+        STREAM_ID, STREAM_POSITION, STREAM_TYPE, TENANT_ID, write_stream_id,
+    };
+    let wire = ascetic_ddd_bus::Message::new(message.payload.clone())
+        .with_header(TENANT_ID, message.tenant_id.as_bytes())
+        .with_header(STREAM_TYPE, message.stream_type.as_bytes())
+        .with_header(STREAM_ID, write_stream_id(&message.stream_id))
+        .with_header(STREAM_POSITION, message.stream_position.to_string());
+    match message
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("message_id"))
+        .and_then(|v| v.as_str())
+    {
+        Some(id) => wire.with_header("message_id", id),
+        None => wire,
+    }
 }

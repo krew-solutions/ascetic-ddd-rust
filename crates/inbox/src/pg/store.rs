@@ -113,6 +113,13 @@ const PROCESSED_AT: &str = r#"
         WHERE processed_at IS NOT NULL;
 "#;
 
+/// When a row was parked at once for its own values (ADR-0037 decision 6):
+/// such a row is superseded by the next arrival at its identity. Nullable,
+/// without a default, as every column the library adds (decision 5).
+const UNREADABLE_AT: &str = r#"
+    ALTER TABLE {table} ADD COLUMN unreadable_at timestamptz NULL;
+"#;
+
 /// What the intake sets aside beside the inbox, never stored as a row
 /// (ADR-0036 decisions 2 and R4): the message's frame as `bytea`, under the
 /// digest of the frame; the columns derived from it as bounded text without
@@ -222,9 +229,15 @@ where
                 )
                 .on(self.table.clone())
                 .checked_over(INDEXES_BEFORE_LAUNCH),
+                Migration::new(
+                    "20261108T000000Z_unreadable_at",
+                    UNREADABLE_AT.replace("{table}", self.table.as_str()),
+                )
+                .on(self.table.clone())
+                .checked_over(UNREADABLE_AT),
             ],
         )
-        .unwrap_or_else(|_| unreachable!("four migrations with ids, under a name"))
+        .unwrap_or_else(|_| unreachable!("five migrations with ids, under a name"))
     }
 
     /// Brings the inbox's tables up to its migrations — a read of the
@@ -392,7 +405,8 @@ where
         reason: &'static str,
     ) -> Result<(), Error> {
         let sql = format!(
-            "UPDATE {table} SET parked_at = CURRENT_TIMESTAMP, last_error = $2 \
+            "UPDATE {table} SET parked_at = CURRENT_TIMESTAMP, unreadable_at = CURRENT_TIMESTAMP, \
+                 last_error = $2 \
              WHERE ctid = $1::text::tid AND {QUEUE}",
             table = self.table
         );
@@ -675,8 +689,8 @@ where
         received_position: i64,
     ) -> Result<Option<InboxMessage>, Error> {
         let sql = format!(
-            "UPDATE {} SET parked_at = NULL, attempts = 0, next_attempt_at = NULL, \
-                 waiting_for = NULL, waiting_since = NULL \
+            "UPDATE {} SET parked_at = NULL, unreadable_at = NULL, attempts = 0, \
+                 next_attempt_at = NULL, waiting_for = NULL, waiting_since = NULL \
              WHERE received_position = $1 AND parked_at IS NOT NULL \
              RETURNING {NARROW}",
             self.table
@@ -717,7 +731,8 @@ where
     ) -> Result<Option<(i64, InboxMessage, Vec<InboxMessage>)>, Error> {
         let sql = format!(
             "WITH resolved AS ( \
-                UPDATE {table} SET parked_at = NULL, processed_position = nextval('{sequence}'), \
+                UPDATE {table} SET parked_at = NULL, unreadable_at = NULL, \
+                    processed_position = nextval('{sequence}'), \
                     processed_at = statement_timestamp(), waiting_for = NULL, waiting_since = NULL \
                 WHERE received_position = $1 AND parked_at IS NOT NULL \
                 RETURNING processed_position, {IDENTITY_OF_ROW} AS identity, {NARROW} \
@@ -831,8 +846,19 @@ where
              RETURNING pg_current_xact_id()::text, received_position, slot"
         );
         let holder = format!(
-            "SELECT metadata->>'message_id', payload = $5 FROM {table} \
+            "SELECT metadata->>'message_id', payload = $5, unreadable_at IS NOT NULL, received_position \
+             FROM {table} \
              WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4"
+        );
+        // A row parked at once for its own values, superseded by this
+        // arrival's (ADR-0037 decision 6): back in the queue, readable.
+        let supersede = format!(
+            "UPDATE {table} SET payload = $5, metadata = $6, parked_at = NULL, unreadable_at = NULL, \
+                 last_error = NULL, attempts = 0, next_attempt_at = NULL, \
+                 waiting_for = NULL, waiting_since = NULL \
+             WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4 \
+               AND unreadable_at IS NOT NULL AND processed_position IS NULL \
+             RETURNING pg_current_xact_id()::text, received_position, slot"
         );
         let taken = format!(
             "SELECT uri, received_position FROM {table} \
@@ -879,9 +905,62 @@ where
                                 ],
                             )
                             .await?;
+                        let unreadable = found
+                            .as_ref()
+                            .filter(|found| found.get::<_, bool>(2))
+                            .map(|found| found.get::<_, i64>(3));
                         let holder = found.map(|found| {
                             (found.get::<_, Option<String>>(0), found.get::<_, bool>(1))
                         });
+                        if let Some(holder_position) = unreadable {
+                            let held_elsewhere = match message.message_id() {
+                                Some(id) => tx
+                                    .connection()
+                                    .query_opt(
+                                        &taken,
+                                        &[&message.tenant_id, &message.stream_type, &id],
+                                    )
+                                    .await?
+                                    .map(|row| {
+                                        (
+                                            ascetic_ddd_bus::uri::without_key(
+                                                row.get::<_, &str>(0),
+                                            )
+                                            .to_owned(),
+                                            row.get::<_, i64>(1),
+                                        )
+                                    })
+                                    .filter(|(_, at)| *at != holder_position),
+                                None => None,
+                            };
+                            if let Some((channel, received_position)) = held_elsewhere {
+                                return Ok(Admitted::IdentityTaken {
+                                    channel,
+                                    received_position,
+                                });
+                            }
+                            if let Some(row) = tx
+                                .connection()
+                                .query_opt(
+                                    &supersede,
+                                    &[
+                                        &message.tenant_id,
+                                        &message.stream_type,
+                                        &message.stream_id,
+                                        &message.stream_position,
+                                        &message.payload,
+                                        &message.metadata,
+                                    ],
+                                )
+                                .await?
+                            {
+                                return Ok(Admitted::Stored(Receipt {
+                                    transaction_id: transaction_id(row.get::<_, String>(0))?,
+                                    received_position: row.get::<_, i64>(1),
+                                    slot: row.get::<_, i16>(2) as u32,
+                                }));
+                            }
+                        }
                         let taken = match (&holder, message.message_id()) {
                             (None, Some(id)) => tx
                                 .connection()
@@ -993,7 +1072,7 @@ async fn refuse_a_page_the_bounds_do_not_fit<S: PgAccess>(session: &S) -> Result
 }
 
 /// The inbox table's columns as this release makes them.
-const INBOX_COLUMNS: [&str; 17] = [
+const INBOX_COLUMNS: [&str; 18] = [
     "tenant_id",
     "stream_type",
     "stream_id",
@@ -1011,6 +1090,7 @@ const INBOX_COLUMNS: [&str; 17] = [
     "waiting_since",
     "slot",
     "processed_at",
+    "unreadable_at",
 ];
 
 /// The rows set aside's columns as this release makes them.

@@ -384,7 +384,7 @@ AllDue == [m \in Msgs |-> TRUE]
 \* Parked only when a wait ran out: there are no failures at this level.
 Parked == {m \in Msgs : ParkedAt(Now, m)}
 
-Abstract == INSTANCE Inbox WITH Unreadable <- {}, 
+Abstract == INSTANCE Inbox WITH Unreadable <- {}, unread <- {}, 
   Arrives <- Arrives, WaitsOnDependencies <- TRUE, WaitExpires <- Expires, Poison <- {},
   MaxAttempts <- 0, BlockOnBackoff <- TRUE, MaxAdmin <- 0, AtomicWait <- TRUE,
   received <- Received, recvPos <- pos, nextRecv <- nextPos, processed <- Processed,

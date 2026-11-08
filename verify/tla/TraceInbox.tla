@@ -93,7 +93,7 @@ VARIABLES part, received, recvPos, nextRecv, processed, effects, holding, procOr
 vars == <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
           attempts, due, parked, resolved, admin, waiting, expired, i>>
 
-O == INSTANCE Inbox WITH Unreadable <- {},  Msgs <- Msgs, Deps <- Deps, Arrives <- Arrives, Slots <- Slots,
+O == INSTANCE Inbox WITH Unreadable <- {}, unread <- {},  Msgs <- Msgs, Deps <- Deps, Arrives <- Arrives, Slots <- Slots,
                          MaxCrashes <- MaxCrashes,
                          WaitsOnDependencies <- WaitsOnDependencies, WaitExpires <- WaitExpires, None <- None,
                          Poison <- Poison, MaxAttempts <- MaxAttempts,

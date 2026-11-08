@@ -744,3 +744,37 @@ The host adopts them in one pin, after quoting its stream ids.
       their payloads.
   - **Mutations caught:** the listing's domain check dropped, the expiry
     unbounded, the resolve waking none.
+- 2026-11-08 — Slice 5c built: supersede, and the default wait.
+  - **The mark of a row parked at once.** A migration adds
+    `unreadable_at`, nullable and without a default (decision 5's rule).
+    `park_at` sets it, and unpark and resolve clear it.
+  - **Supersede.** An arrival at the identity of a row so marked replaces
+    its payload and metadata and puts it back in the queue, readable. It
+    is the intake's own statement under the row's lock, and the arrival
+    is acknowledged as stored, under the row's place.
+    - If the arrival's `message_id` is held at another identity, the
+      arrival is set aside as identity taken and the row stays parked; a
+      `message_id` the row itself holds does not count.
+    - Before, a republication at a held identity was a redelivery or a
+      shadow and was dropped.
+  - **A refused dependency list parks at once.** A row stored before whose
+    list the intake would refuse no longer fails as a permanent failure: it
+    is the row's own value, so it can be superseded too.
+  - **`max_wait` defaults to one hour**, instead of a wait for ever.
+  - **Inbox.tla:**
+    - `unread` becomes a variable, starting at `Unreadable`, and
+      `Supersede(m)` makes a parked unreadable row readable and due again,
+      within the operators' budget, never while a dispatcher holds it;
+    - `ArrivalOrder` leaves the unreadable rows out: like a parked row, a
+      row parked at once steps out of the order, and is processed after
+      the rows behind it once superseded. TLC found that the first time
+      it ran, through the supersede;
+    - `InboxUnreadable.cfg` holds every property with it.
+  - **Executors:**
+    - a 128-deep row parked at once is superseded by its producer's
+      repair, which carries the row's own `message_id`, then processed,
+      waking the row that waited for it;
+    - a repair whose `message_id` another identity holds is set aside as
+      identity taken, and the row stays parked.
+  - **Mutations caught:** no supersede, the row taken as the holder of its
+    own `message_id`, the park leaving no mark.

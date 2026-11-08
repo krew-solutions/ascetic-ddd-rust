@@ -162,9 +162,9 @@ where
                         // A row stored before whose list the intake would refuse
                         // is refused for good, never waited on (ADR-0037
                         // decision 4).
-                        let (dependencies, refused) = match message.checked_causal_dependencies() {
-                            Ok(dependencies) => (dependencies, None),
-                            Err(why) => (Vec::new(), Some(Failure::Permanent(why.into()))),
+                        let dependencies = match message.checked_causal_dependencies() {
+                            Ok(dependencies) => dependencies,
+                            Err(why) => return park(why).await,
                         };
                         if let Some(dependency) = self
                             .first_unprocessed_dependency(&tx, &dependencies)
@@ -209,17 +209,13 @@ where
                             message: Some(&message),
                             snapshot: &snapshot,
                         });
-                        let attempt = match refused {
-                            Some(failure) => Err(Error::Subscriber(failure)),
-                            None => {
-                                tx.atomic(async |inner| {
-                                    subscriber(&inner, &message)
-                                        .await
-                                        .map_err(Error::Subscriber)
-                                })
-                                .await
-                            }
-                        };
+                        let attempt = tx
+                            .atomic(async |inner| {
+                                subscriber(&inner, &message)
+                                    .await
+                                    .map_err(Error::Subscriber)
+                            })
+                            .await;
                         let failure = match attempt {
                             Ok(()) => None,
                             Err(Error::Subscriber(failure)) => Some(failure),
