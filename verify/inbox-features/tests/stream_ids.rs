@@ -17,6 +17,16 @@ fn the_build_is_the_host_s() {
         serde_json::from_str::<Value>("{\"$serde_json::private::Number\":\"5\"}")
             .is_ok_and(|value| value.is_number())
     );
+    // `preserve_order`: an object keeps the order its members were read in,
+    // so a writer that leaves the order to the map writes `{"b":1,"a":2}`
+    // here and `{"a":2,"b":1}` in the default build (ADR-0038).
+    assert_eq!(
+        serde_json::from_str::<Value>("{\"b\":1,\"a\":2}")
+            .map(|value| value.to_string())
+            .ok()
+            .as_deref(),
+        Some("{\"b\":1,\"a\":2}")
+    );
     #[cfg(feature = "raw_value")]
     assert!(serde_json::value::RawValue::from_string("1".to_owned()).is_ok());
 }
@@ -24,4 +34,9 @@ fn the_build_is_the_host_s() {
 #[test]
 fn the_golden_table_reads_as_it_should() {
     golden::check();
+}
+
+#[test]
+fn the_writer_writes_one_text_for_one_value() {
+    golden::check_written();
 }

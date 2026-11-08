@@ -1237,6 +1237,225 @@ async fn an_identity_recurs_on_another_channel_in_another_transaction_or_after_a
     );
 }
 
+/// `message` with its metadata's `changes` made and its `removed` fields
+/// taken out.
+fn altered(
+    message: OutboxMessage,
+    changes: &[(&str, serde_json::Value)],
+    removed: &[&str],
+) -> OutboxMessage {
+    let mut message = message;
+    let metadata = message.metadata.as_object_mut().unwrap();
+    for (name, value) in changes {
+        metadata.insert((*name).to_owned(), value.clone());
+    }
+    for name in removed {
+        metadata.remove(*name);
+    }
+    message
+}
+
+impl<O: OutboxObserver> Fixture<O> {
+    /// A valid message, then `refused` with its refusal ignored, in one
+    /// transaction: what the transaction answered.
+    async fn swallowing(
+        &self,
+        valid: &OutboxMessage,
+        refused: &OutboxMessage,
+    ) -> Result<(), Error> {
+        self.sessions
+            .session(async |session| {
+                session
+                    .atomic(async |tx| {
+                        self.outbox.publish(&tx, valid).await?;
+                        let _ignored = self.outbox.publish(&tx, refused).await;
+                        Ok::<_, Error>(())
+                    })
+                    .await
+            })
+            .await
+    }
+}
+
+/// A message the inbox would key otherwise than the outbox's guard, or set
+/// aside, is refused at its commit, never as a transient failure, and its
+/// transaction is aborted: a caller that ignores the refusal commits
+/// nothing of it (ADR-0038). Each case is readable: what it refuses is the
+/// spelling or the header, not a value outside the domain alone.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_message_the_inbox_would_key_otherwise_is_refused_at_its_commit_and_aborts_it() {
+    use ascetic_ddd_bus::identity::TENANT_ID_WIDTH;
+    let f = fixture("refused").await;
+    let at = |id: u64| identified("kafka://orders", id, &format!("s-{id}"), 1);
+    let cases = [
+        (
+            "a string id quoted, whose raw text is its spelling",
+            altered(at(1), &[("stream_id", json!("\"o-1\""))], &[]),
+        ),
+        (
+            "an object id, its members out of order",
+            altered(at(2), &[("stream_id", json!("{\"b\":1,\"a\":2}"))], &[]),
+        ),
+        (
+            "an id with space before it",
+            altered(at(3), &[("stream_id", json!(" 1"))], &[]),
+        ),
+        (
+            "a position with a zero before it",
+            altered(at(4), &[("stream_position", json!("05"))], &[]),
+        ),
+        (
+            "a position with a sign",
+            altered(at(5), &[("stream_position", json!("+5"))], &[]),
+        ),
+        (
+            "a stream named in part",
+            altered(at(6), &[], &["tenant_id"]),
+        ),
+        (
+            "an identity header that is no text",
+            altered(at(7), &[("stream_position", json!(5))], &[]),
+        ),
+        (
+            "a tenant past its column",
+            altered(
+                at(8),
+                &[("tenant_id", json!("é".repeat(TENANT_ID_WIDTH + 1)))],
+                &[],
+            ),
+        ),
+        (
+            "a header named `part`",
+            altered(at(9), &[("part", json!("p"))], &[]),
+        ),
+        (
+            "a header named `destination`",
+            altered(at(10), &[("destination", json!("kafka://x"))], &[]),
+        ),
+        (
+            "a header named as serde_json's own",
+            altered(at(11), &[("$serde_json::private::Number", json!("5"))], &[]),
+        ),
+    ];
+    for (what, refused) in &cases {
+        let alone = f.publish_together(std::slice::from_ref(refused)).await;
+        let Err(error @ Error::Refused { .. }) = alone else {
+            panic!("{what}: refused at its commit: {alone:?}");
+        };
+        assert!(!error.is_transient(), "{what}: never retried");
+        let swallowed = f.swallowing(&at(100), refused).await;
+        assert!(
+            swallowed.is_err(),
+            "{what}: an ignored refusal commits nothing: {swallowed:?}"
+        );
+    }
+    assert_eq!(
+        f.rows().await,
+        0,
+        "nothing of a refused transaction commits"
+    );
+    // The bus's own spellings are taken, a tenant at its column's width too.
+    f.publish_together(&[
+        altered(at(20), &[("stream_id", json!("o-1"))], &[]),
+        altered(at(21), &[("stream_id", json!("{\"a\":2,\"b\":1}"))], &[]),
+        altered(
+            at(22),
+            &[("tenant_id", json!("é".repeat(TENANT_ID_WIDTH)))],
+            &[],
+        ),
+        message("kafka://orders", 23),
+    ])
+    .await
+    .expect("the bus's spellings are taken");
+    assert_eq!(f.rows().await, 4);
+}
+
+/// What only the wire shows — a header named twice, a header or a key that
+/// is not UTF-8 — is refused by the outbox's producer at its commit, as a
+/// refusal at the outbox is, and aborts the transaction: a caller ignoring
+/// it commits nothing (ADR-0038).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn what_only_the_wire_shows_is_refused_by_the_producer_and_aborts_the_transaction() {
+    let f = fixture("refused_wire").await;
+    // The fixture's table, behind a producer of the bus.
+    let outbox = Arc::new(PgOutbox::new(PgSessionPool::new(pool())).with_tables(
+        Identifier::new(&f.tables.0).unwrap(),
+        Identifier::new(&f.tables.1).unwrap(),
+    ));
+    let valid = outbox.producer("kafka://orders", |_: &()| {
+        ascetic_ddd_bus::Message::new("ok")
+            .with_header("message_id", "00000000-0000-4000-8000-0000000000aa")
+    });
+    type Encode = fn(&()) -> ascetic_ddd_bus::Message;
+    let cases: [(&str, Encode); 3] = [
+        ("a header named twice", |_| {
+            ascetic_ddd_bus::Message::new("x")
+                .with_header("message_id", "00000000-0000-4000-8000-0000000000ab")
+                .with_header("h", "1")
+                .with_header("h", "2")
+        }),
+        ("a header not UTF-8", |_| {
+            ascetic_ddd_bus::Message::new("x")
+                .with_header("message_id", "00000000-0000-4000-8000-0000000000ac")
+                .with_header("h", [0xff_u8].as_slice())
+        }),
+        ("a key not UTF-8", |_| {
+            ascetic_ddd_bus::Message::new("x")
+                .with_header("message_id", "00000000-0000-4000-8000-0000000000ad")
+                .with_key([0xff_u8].as_slice())
+        }),
+    ];
+    for (what, encode) in cases {
+        let refusing = outbox.producer("kafka://orders", encode);
+        let alone = f
+            .sessions
+            .session(async |session| {
+                session
+                    .atomic(async |tx| {
+                        refusing
+                            .publish(&tx, &())
+                            .await
+                            .map_err(|e| Error::Subscriber(Box::new(e)))
+                    })
+                    .await
+            })
+            .await;
+        let Err(Error::Subscriber(error)) = alone else {
+            panic!("{what}: refused: {alone:?}");
+        };
+        let refused = match error.downcast_ref::<ascetic_ddd_bus::Error>() {
+            Some(ascetic_ddd_bus::Error::Transport(inner)) => inner.downcast_ref::<Error>(),
+            _ => None,
+        };
+        assert!(
+            matches!(refused, Some(e @ Error::Refused { .. }) if !e.is_transient()),
+            "{what}: the outbox's own refusal, never transient: {error}"
+        );
+        let swallowed = f
+            .sessions
+            .session(async |session| {
+                session
+                    .atomic(async |tx| {
+                        valid
+                            .publish(&tx, &())
+                            .await
+                            .map_err(|e| Error::Subscriber(Box::new(e)))?;
+                        let _ignored = refusing.publish(&tx, &()).await;
+                        Ok::<_, Error>(())
+                    })
+                    .await
+            })
+            .await;
+        assert!(
+            swallowed.is_err(),
+            "{what}: an ignored refusal commits nothing"
+        );
+    }
+    assert_eq!(f.rows().await, 0);
+}
+
 /// An outbox that took two messages under one identity before the guard:
 /// the guard's migration names them — the identity, the channel and both
 /// ids — rather than failing on an index that names a digest.

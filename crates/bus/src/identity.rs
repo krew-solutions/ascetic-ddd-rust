@@ -53,6 +53,19 @@ pub const STREAM_POSITION: &str = "stream_position";
 /// The identity's headers, in the order the inbox's key names them.
 pub const HEADERS: [&str; 4] = [TENANT_ID, STREAM_TYPE, STREAM_ID, STREAM_POSITION];
 
+/// The most characters of a tenant's id: the inbox's column.
+pub const TENANT_ID_WIDTH: usize = 128;
+
+/// The most characters of a stream's type: the inbox's column.
+pub const STREAM_TYPE_WIDTH: usize = 128;
+
+/// The most bytes an identity's stored form may take (ADR-0037 decision 4):
+/// a btree's item on an 8 KiB page is 2704 bytes, the index tuple's header
+/// is 8, and the inbox's `__waiting_idx` indexes a dependency's identity as
+/// `jsonb`. The row's own key is smaller than its waiting form, so an
+/// identity within it can be stored and depended on.
+pub const MAX_IDENTITY_BYTES: usize = 2696;
+
 /// The deepest a stream id nests: the inbox wraps it in a dependency's
 /// object, and its readers read `jsonb` back through serde_json, whose
 /// limit is 128 nested values (ADR-0037).
@@ -121,15 +134,231 @@ fn begins_as_json(text: &str) -> bool {
 /// The `stream_id` header's text for `id`, the inverse of
 /// [`read_stream_id`]: a string whose text the reader would take for JSON,
 /// or refuse as beginning as JSON, is written quoted; any other string as
-/// it is, and every other value as JSON. So
-/// `read_stream_id(&write_stream_id(v)) == Ok(v)` for every v in D; a value
+/// it is, and every other value as canonical JSON ([`canonical_json`]). So
+/// `read_stream_id(&write_stream_id(v)) == Ok(v)` for every v in D, and two
+/// values are equal exactly when their texts are: the text is the
+/// identity's one spelling, the outbox's guard compares (ADR-0038). A value
 /// outside D is written as JSON, which the reader refuses.
 #[must_use]
 pub fn write_stream_id(id: &Value) -> String {
     match id {
         Value::String(text) if !is_json(text) && !begins_as_json(text) => text.clone(),
-        other => other.to_string(),
+        other => canonical_json(other),
     }
+}
+
+/// Whether `text` is the `stream_id` header's one spelling of the identity
+/// it names: it reads, and the writer writes it back as it is (ADR-0038).
+/// ` 1` and `1`, `o-1` and `"o-1"`, `{"b":1,"a":2}` and `{"a":2,"b":1}` each
+/// name one identity; one text of each is canonical.
+#[must_use]
+pub fn is_canonical_stream_id(text: &str) -> bool {
+    read_stream_id(text).is_ok_and(|id| write_stream_id(&id) == text)
+}
+
+/// `value` as canonical JSON: compact, every string quoted, an object's
+/// members in the order of their keys' UTF-8 bytes, a number as serde_json
+/// prints it — for a value in D, an integer in decimal. It is the same text
+/// in every build of serde_json's features: the order is the writer's, never
+/// the map's, which `preserve_order` keeps as it was read (ADR-0038).
+#[must_use]
+pub fn canonical_json(value: &Value) -> String {
+    let mut out = String::new();
+    write_canonical(value, &mut out);
+    out
+}
+
+fn write_canonical(value: &Value, out: &mut String) {
+    match value {
+        Value::Null => out.push_str("null"),
+        Value::Bool(true) => out.push_str("true"),
+        Value::Bool(false) => out.push_str("false"),
+        Value::Number(number) => out.push_str(&number.to_string()),
+        Value::String(text) => write_quoted(text, out),
+        Value::Array(items) => {
+            out.push('[');
+            for (at, item) in items.iter().enumerate() {
+                if at > 0 {
+                    out.push(',');
+                }
+                write_canonical(item, out);
+            }
+            out.push(']');
+        }
+        Value::Object(fields) => {
+            let mut members: Vec<(&String, &Value)> = fields.iter().collect();
+            members.sort_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
+            out.push('{');
+            for (at, (key, field)) in members.into_iter().enumerate() {
+                if at > 0 {
+                    out.push(',');
+                }
+                write_quoted(key, out);
+                out.push(':');
+                write_canonical(field, out);
+            }
+            out.push('}');
+        }
+    }
+}
+
+/// `text` as a JSON string, escaped as RFC 8259 asks and no more: the quote,
+/// the backslash and the control characters, the usual ones by their short
+/// form, the others as `\u00XX`.
+fn write_quoted(text: &str, out: &mut String) {
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if u32::from(c) < 0x20 => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// A message's causal identity, read from its four headers' texts by the
+/// one function both ends of the bus read it with ([`read_identity`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Identity {
+    /// The Tenant.
+    pub tenant_id: String,
+    /// The stream's type.
+    pub stream_type: String,
+    /// The stream's id, a value in the domain D.
+    pub stream_id: Value,
+    /// The position in the stream.
+    pub stream_position: i32,
+}
+
+impl Identity {
+    /// An upper bound on the bytes this identity takes as the `jsonb` datum
+    /// the inbox's waiting index holds, to hold against
+    /// [`MAX_IDENTITY_BYTES`]: its varlena and object headers, four members,
+    /// their keys and values, the position at its largest.
+    #[must_use]
+    pub fn stored_bytes(&self) -> usize {
+        identity_bytes(&self.tenant_id, &self.stream_type, &self.stream_id)
+    }
+
+    /// The identity's framed text, by which a digest of it is the same for
+    /// one identity in every build: each part's length and bytes, the stream
+    /// id as canonical JSON ([`canonical_json`]), the position big-endian.
+    #[must_use]
+    pub fn framed(&self) -> Vec<u8> {
+        let stream_id = canonical_json(&self.stream_id);
+        let mut out = Vec::new();
+        for part in [
+            self.tenant_id.as_bytes(),
+            self.stream_type.as_bytes(),
+            stream_id.as_bytes(),
+            &self.stream_position.to_be_bytes(),
+        ] {
+            out.extend(u32::try_from(part.len()).unwrap_or(u32::MAX).to_be_bytes());
+            out.extend(part);
+        }
+        out
+    }
+}
+
+/// The identity four headers' texts name, checked as both ends check it: the
+/// tenant and the stream type within their columns, the stream id read by
+/// [`read_stream_id`], the position by [`read_stream_position`], the whole
+/// within [`MAX_IDENTITY_BYTES`].
+///
+/// # Errors
+/// [`Refused`], in the library's words, when any of them is not.
+pub fn read_identity(
+    tenant_id: &str,
+    stream_type: &str,
+    stream_id: &str,
+    stream_position: &str,
+) -> Result<Identity, Refused> {
+    if tenant_id.chars().count() > TENANT_ID_WIDTH {
+        return Err(Refused("the tenant is longer than its column"));
+    }
+    if stream_type.chars().count() > STREAM_TYPE_WIDTH {
+        return Err(Refused("the stream type is longer than its column"));
+    }
+    let identity = Identity {
+        tenant_id: tenant_id.to_owned(),
+        stream_type: stream_type.to_owned(),
+        stream_id: read_stream_id(stream_id)?,
+        stream_position: read_stream_position(stream_position)?,
+    };
+    if identity.stored_bytes() > MAX_IDENTITY_BYTES {
+        return Err(Refused(
+            "the identity is past what a dependency on it can index",
+        ));
+    }
+    Ok(identity)
+}
+
+/// The bytes of the identity's four keys.
+const IDENTITY_KEY_BYTES: usize =
+    TENANT_ID.len() + STREAM_TYPE.len() + STREAM_ID.len() + STREAM_POSITION.len();
+
+/// A number's most bytes inside `jsonb`: a `numeric` of up to 20 digits is
+/// 16 bytes, after up to 3 of alignment.
+const NUMBER_BYTES: usize = 3 + 16;
+
+/// A position's most bytes: an `i32` is a `numeric` of at most 12 bytes.
+const POSITION_BYTES: usize = 3 + 12;
+
+/// An upper bound on the bytes of `value` inside a `jsonb` container: a
+/// string its bytes; a number its largest `numeric`; a container its header,
+/// an entry of 4 bytes per element and of 8 per member, alignment, and what
+/// it holds.
+fn stored_bytes(value: &Value) -> usize {
+    match value {
+        Value::String(text) => text.len(),
+        Value::Number(_) => NUMBER_BYTES,
+        Value::Bool(_) | Value::Null => 0,
+        Value::Array(items) => {
+            3 + 4 + 4 * items.len() + items.iter().map(stored_bytes).sum::<usize>()
+        }
+        Value::Object(fields) => {
+            3 + 4
+                + 8 * fields.len()
+                + fields
+                    .iter()
+                    .map(|(name, field)| name.len() + stored_bytes(field))
+                    .sum::<usize>()
+        }
+    }
+}
+
+/// An upper bound on the bytes of an identity as the `jsonb` datum the
+/// inbox's waiting index holds ([`Identity::stored_bytes`]).
+#[must_use]
+pub fn identity_bytes(tenant_id: &str, stream_type: &str, stream_id: &Value) -> usize {
+    4 + 4
+        + 8 * 4
+        + IDENTITY_KEY_BYTES
+        + tenant_id.len()
+        + stream_type.len()
+        + stored_bytes(stream_id)
+        + POSITION_BYTES
+}
+
+/// The position a `stream_position` header's text names: an `i32` written
+/// as Rust prints it, so one position has one text — never `+5`, `05` or
+/// `-0`, which `str::parse` takes for 5, 5 and 0, and which the outbox's
+/// guard would take for other identities (ADR-0038).
+///
+/// # Errors
+/// [`Refused`] when the text is not an `i32` written plainly.
+pub fn read_stream_position(text: &str) -> Result<i32, Refused> {
+    text.parse::<i32>()
+        .ok()
+        .filter(|position| position.to_string() == text)
+        .ok_or(Refused("the stream position is not an i32 written plainly"))
 }
 
 /// The JSON value `text` writes, when it is JSON in the domain D nested at

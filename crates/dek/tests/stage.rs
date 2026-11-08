@@ -361,7 +361,7 @@ async fn the_outbox_and_the_inbox_hold_nothing_but_ciphertext() {
             Message::new(payload.as_bytes())
                 .with_header(TENANT_ID, "tenant-1")
                 .with_header("stream_type", "Order")
-                .with_header("stream_id", "\"order-7\"")
+                .with_header("stream_id", "order-7")
                 .with_header("stream_position", "1")
                 .with_header(MESSAGE_ID, "00000000-0000-4000-8000-000000000007")
         })

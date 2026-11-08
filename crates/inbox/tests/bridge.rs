@@ -277,7 +277,9 @@ async fn the_outbox_feeds_the_inbox_without_a_broker() {
 /// An outbox row to the inbox without a position can never be stored: the
 /// intake sets it aside and acknowledges it, and the lane moves past it to
 /// the row after it (ADR-0036 decision 1). Before, the intake's error held
-/// the lane on that row for ever.
+/// the lane on that row for ever. The outbox now refuses such a message at
+/// its producer's commit (ADR-0038), so the row is written as an older
+/// producer's would be, around it: the lane must still move past it.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_row_the_intake_cannot_store_does_not_stop_the_lane() {
@@ -309,31 +311,46 @@ async fn a_row_the_intake_cannot_store_does_not_stop_the_lane() {
         .unwrap();
     let (mut received, processing) = fixture.consume();
 
-    let unplaced = outbox.producer("inbox://orders/order-7", |payload: &String| {
-        Message::new(payload.as_str())
-            .with_key("order-7")
-            .with_header("tenant_id", "t1")
-            .with_header("stream_type", "orders.Order")
-            .with_header("stream_id", "7")
-            .with_header("message_id", "00000000-0000-4000-8000-000000000001")
-    });
+    fixture
+        .sessions
+        .session(async |session| {
+            session
+                .atomic(async |tx| {
+                    tx.connection()
+                        .execute(
+                            "INSERT INTO inbox_bridge_unplaced_out \
+                                 (uri, payload, metadata, transaction_id) \
+                             VALUES ('inbox://orders/order-7', 'unplaced', $1, pg_current_xact_id())",
+                            &[&serde_json::json!({
+                                "tenant_id": "t1",
+                                "stream_type": "orders.Order",
+                                "stream_id": "7",
+                                "message_id": "00000000-0000-4000-8000-000000000001",
+                            })],
+                        )
+                        .await
+                        .unwrap();
+                    Ok::<(), ascetic_ddd_outbox::Error>(())
+                })
+                .await
+        })
+        .await
+        .unwrap();
     let shipped = outbox.producer("inbox://orders/order-7", |payload: &String| {
         order(payload, 2, "00000000-0000-4000-8000-000000000002")
     });
-    for (producer, payload) in [(&unplaced, "unplaced"), (&shipped, "shipped")] {
-        fixture
-            .sessions
-            .session(async |session| {
-                session
-                    .atomic(async |tx| {
-                        producer.publish(&tx, &payload.to_owned()).await.unwrap();
-                        Ok::<(), ascetic_ddd_outbox::Error>(())
-                    })
-                    .await
-            })
-            .await
-            .unwrap();
-    }
+    fixture
+        .sessions
+        .session(async |session| {
+            session
+                .atomic(async |tx| {
+                    shipped.publish(&tx, &"shipped".to_owned()).await.unwrap();
+                    Ok::<(), ascetic_ddd_outbox::Error>(())
+                })
+                .await
+        })
+        .await
+        .unwrap();
 
     assert_eq!(next(&mut received).await, "shipped");
     assert_eq!(fixture.processed_soon(1).await, 1);

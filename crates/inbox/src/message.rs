@@ -147,59 +147,13 @@ pub struct CausalDependency {
 /// dependencies arriving one by one cost a square of their number.
 pub const MAX_DEPENDENCIES: usize = 64;
 
-/// The most bytes an identity's stored form may take (ADR-0037 decision 4):
-/// a btree's item on an 8 KiB page is 2704 bytes, the index tuple's header
-/// is 8, and `__waiting_idx` indexes a dependency's identity as `jsonb`.
-/// The row's own key is smaller than its waiting form, so an identity
-/// within it can be stored and depended on.
-pub const MAX_IDENTITY_BYTES: usize = 2696;
-
-/// The bytes of the identity's four keys.
-const IDENTITY_KEY_BYTES: usize =
-    "tenant_id".len() + "stream_type".len() + "stream_id".len() + "stream_position".len();
-
-/// A number's most bytes inside `jsonb`: a `numeric` of up to 20 digits is
-/// 16 bytes, after up to 3 of alignment.
-const NUMBER_BYTES: usize = 3 + 16;
-
-/// A position's most bytes: an `i32` is a `numeric` of at most 12 bytes.
-const POSITION_BYTES: usize = 3 + 12;
-
-/// An upper bound on the bytes of `value` inside a `jsonb` container: a
-/// string its bytes; a number its largest `numeric`; a container its header,
-/// an entry of 4 bytes per element and of 8 per member, alignment, and what
-/// it holds.
-fn stored_bytes(value: &Value) -> usize {
-    match value {
-        Value::String(text) => text.len(),
-        Value::Number(_) => NUMBER_BYTES,
-        Value::Bool(_) | Value::Null => 0,
-        Value::Array(items) => {
-            3 + 4 + 4 * items.len() + items.iter().map(stored_bytes).sum::<usize>()
-        }
-        Value::Object(fields) => {
-            3 + 4
-                + 8 * fields.len()
-                + fields
-                    .iter()
-                    .map(|(name, field)| name.len() + stored_bytes(field))
-                    .sum::<usize>()
-        }
-    }
-}
+/// The most bytes an identity's stored form may take (ADR-0037 decision 4),
+/// the bus's: both ends of the bus bound an identity by it (ADR-0038).
+pub use ascetic_ddd_bus::identity::MAX_IDENTITY_BYTES;
 
 /// An upper bound on the bytes of an identity as the `jsonb` datum
-/// `__waiting_idx` indexes: its varlena and object headers, four members,
-/// their keys and values, the position at its largest.
-pub(crate) fn identity_bytes(tenant_id: &str, stream_type: &str, stream_id: &Value) -> usize {
-    4 + 4
-        + 8 * 4
-        + IDENTITY_KEY_BYTES
-        + tenant_id.len()
-        + stream_type.len()
-        + stored_bytes(stream_id)
-        + POSITION_BYTES
-}
+/// `__waiting_idx` indexes, the bus's (ADR-0038).
+pub(crate) use ascetic_ddd_bus::identity::identity_bytes;
 
 impl CausalDependency {
     /// An upper bound on the bytes this identity takes where the inbox

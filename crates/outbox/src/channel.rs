@@ -81,11 +81,32 @@ where
         message: Message,
     ) -> BoxFuture<'a, Result<(), BusError>> {
         Box::pin(async move {
+            // What the outbox would keep otherwise than the inbox reads it is
+            // refused here, the only place that sees the wire's headers, and
+            // aborts the transaction as a refusal at the outbox does
+            // (ADR-0038).
+            let refused = async |reason| {
+                let message_id = message
+                    .header("message_id")
+                    .and_then(|id| std::str::from_utf8(id).ok())
+                    .map(str::to_owned);
+                BusError::Transport(Box::new(
+                    self.outbox
+                        .refuse_message(session, &self.destination, message_id, reason)
+                        .await,
+                ))
+            };
             let destination = match (uri::key(&self.destination), message.key()) {
-                (None, Some(key)) => format!("{}/{}", self.destination, text(key)?),
+                (None, Some(key)) => match std::str::from_utf8(key) {
+                    Ok(key) => format!("{}/{key}", self.destination),
+                    Err(_) => return Err(refused("the key is not UTF-8").await),
+                },
                 _ => self.destination.clone(),
             };
-            let metadata = metadata_of(&message)?;
+            let metadata = match metadata_of(&message) {
+                Ok(metadata) => metadata,
+                Err(reason) => return Err(refused(reason).await),
+            };
             let row = OutboxMessage::new(destination, message.payload().to_vec(), metadata);
             self.outbox
                 .publish(session, &row)
@@ -223,17 +244,19 @@ fn wire_of(row: &OutboxMessage) -> Message {
     }
 }
 
-/// The metadata of a wire message: one string field per header.
-fn metadata_of(message: &Message) -> Result<Value, BusError> {
-    message
-        .headers()
-        .iter()
-        .map(|(name, value)| Ok((name.clone(), Value::String(text(value)?.to_owned()))))
-        .collect::<Result<Map<_, _>, _>>()
-        .map(Value::Object)
-}
-
-fn text(bytes: &[u8]) -> Result<&str, BusError> {
-    std::str::from_utf8(bytes)
-        .map_err(|_| BusError::Transport("the outbox keeps headers and keys as UTF-8 text".into()))
+/// The metadata of a wire message: one string field per header, or why it
+/// cannot be — a header named twice, which the map would keep the last of
+/// and the inbox refuses, or one that is not UTF-8.
+fn metadata_of(message: &Message) -> Result<Value, &'static str> {
+    let mut fields = Map::new();
+    for (name, value) in message.headers() {
+        let text = std::str::from_utf8(value).map_err(|_| "a header is not UTF-8")?;
+        if fields
+            .insert(name.clone(), Value::String(text.to_owned()))
+            .is_some()
+        {
+            return Err("a header is named twice");
+        }
+    }
+    Ok(Value::Object(fields))
 }

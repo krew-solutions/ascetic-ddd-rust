@@ -156,9 +156,9 @@ Two cases are legitimate reuse, and nothing may forbid them:
   must be kept (measured); building without the lock is ADR-0029's deferred
   decision 5.
 - A text spelling the inbox's JSON equality treats as one id — reordered
-  keys, `12` and `12.0` — passes the guard. That needs two writers of one
-  stream type on one channel within one transaction. On a channel where it
-  matters, the receipt observer compares in the inbox's own JSON.
+  keys, `12` and `12.0` — passed the guard. Revised by ADR-0038: the outbox
+  now refuses at commit every identity that is not the bus's one spelling
+  of it, so equal text at the guard is equal value at the inbox.
 
 ## Alternatives Considered
 
@@ -237,3 +237,5 @@ taking its one table first). PostgreSQL 14 documentation: § 9.4 `decode`,
 
 - 2026-10-27 — proposed, with the outbox's guard, the inbox's `held_by` and
   the identity's names in the bus.
+- 2026-11-08 — The consequence on spellings that pass the guard revised by
+  ADR-0038, which refuses them at commit.

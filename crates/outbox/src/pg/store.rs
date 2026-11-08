@@ -1276,6 +1276,11 @@ where
     /// channel is refused, [`Error::IdentityTaken`], and leaves the
     /// transaction aborted (ADR-0030).
     async fn publish(&self, session: &P::Session, message: &OutboxMessage) -> Result<(), Error> {
+        if let Some(reason) = refusal(message) {
+            return Err(self
+                .refuse_message(session, &message.uri, message_id_of(message), reason)
+                .await);
+        }
         let sql = format!(
             "INSERT INTO {} (uri, payload, metadata, transaction_id) \
              VALUES ($1, $2, $3, pg_current_xact_id()) \
@@ -1301,6 +1306,109 @@ where
         Ok(())
     }
 }
+
+/// Why the outbox refuses `message` at its commit, if it does (ADR-0038):
+/// what the inbox would set aside or key otherwise than the guard. A
+/// message naming a stream — any of its type, id or position — carries all
+/// four of its identity's headers, as text, each the bus's one spelling of
+/// it, within the inbox's bounds; no message carries a header the inbox
+/// stamps itself (`destination`), one its identity does not hold (`part`,
+/// which the guard would count and the inbox not), or one named as
+/// serde_json's own.
+pub(super) fn refusal(message: &OutboxMessage) -> Option<&'static str> {
+    let Value::Object(fields) = &message.metadata else {
+        return None;
+    };
+    if fields.keys().any(|name| identity::is_private_key(name)) {
+        return Some("a header's name is one of serde_json's own");
+    }
+    if fields.contains_key(DESTINATION) {
+        return Some("a header is named `destination`, which the inbox stamps");
+    }
+    if fields.contains_key(PART) {
+        return Some("a header is named `part`, which the inbox's identity does not hold");
+    }
+    let names = [
+        identity::STREAM_TYPE,
+        identity::STREAM_ID,
+        identity::STREAM_POSITION,
+    ];
+    if !names.iter().any(|name| fields.contains_key(*name)) {
+        return None;
+    }
+    let text = |name: &str| match fields.get(name) {
+        Some(Value::String(text)) => Some(text.as_str()),
+        _ => None,
+    };
+    let (Some(tenant_id), Some(stream_type), Some(stream_id), Some(stream_position)) = (
+        text(identity::TENANT_ID),
+        text(identity::STREAM_TYPE),
+        text(identity::STREAM_ID),
+        text(identity::STREAM_POSITION),
+    ) else {
+        return Some("a stream is named without all four of its identity's headers as text");
+    };
+    if let Err(refused) =
+        identity::read_identity(tenant_id, stream_type, stream_id, stream_position)
+    {
+        return Some(refused.as_str());
+    }
+    if !identity::is_canonical_stream_id(stream_id) {
+        return Some("the stream id is not the bus's one spelling of it");
+    }
+    None
+}
+
+/// The header the inbox stamps a row's channel under: a producer's would be
+/// the name twice on the wire.
+const DESTINATION: &str = "destination";
+
+/// The header a message's part would travel under: the guard counts it, the
+/// inbox's identity does not (ADR-0034, not adopted).
+const PART: &str = "part";
+
+/// The message's id, when its metadata carries one as text.
+fn message_id_of(message: &OutboxMessage) -> Option<String> {
+    match message.metadata.get("message_id") {
+        Some(Value::String(id)) => Some(id.clone()),
+        _ => None,
+    }
+}
+
+impl<P, O> PgOutbox<P, O>
+where
+    P: SessionPool + Send + Sync,
+    P::Session: PgAccess + Sync,
+    O: OutboxObserver,
+{
+    /// Refuses a message at its commit: the server is made to abort the
+    /// transaction, by a statement of fixed text that names nothing of the
+    /// message, so that a caller ignoring the refusal commits nothing of it
+    /// (ADR-0028, ADR-0038); and the refusal is returned, by the channel of
+    /// `uri`, `message_id` and `reason`.
+    pub(crate) async fn refuse_message(
+        &self,
+        session: &P::Session,
+        uri: &str,
+        message_id: Option<String>,
+        reason: &'static str,
+    ) -> Error {
+        // The statement's own error is the abort: the session remembers it
+        // and refuses the commit (ADR-0028), whatever the caller does next.
+        let _aborted = session.connection().batch_execute(REFUSED).await;
+        log::warn!("outbox: a message refused at its commit: {reason}");
+        Error::Refused {
+            channel: uri::without_key(uri).to_owned(),
+            message_id,
+            reason,
+        }
+    }
+}
+
+/// The statement a refusal aborts its transaction by: fixed text, so that the
+/// server's log names nothing of the message refused.
+const REFUSED: &str = "DO $$ BEGIN RAISE EXCEPTION USING ERRCODE = 'P0001', \
+    MESSAGE = 'outbox: a message refused at its commit (ADR-0038)'; END $$";
 
 /// The identity `message` carries on its channel, as its metadata spells it.
 fn identity_of(message: &OutboxMessage) -> Identity {

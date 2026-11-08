@@ -151,7 +151,9 @@ is bounded.
 ### 1. A stream's id is JSON text, read by one function
 
 - **The contract.** The `stream_id` header carries the stream's id as JSON
-  text. A producer that means a string writes it quoted.
+  text. A producer writes it through the writer, which quotes a string only
+  when its text would read as JSON (revised by ADR-0038: the writer's text
+  is the identity's one spelling, which the outbox holds a producer to).
 - **The function.** `crates/bus/src/identity.rs` owns it, beside the
   contract it documents. It is used for the row's `stream_id` and for every
   causal dependency's.
@@ -939,3 +941,7 @@ The host adopts them in one pin, after quoting its stream ids.
   - **Mutations caught:** the name check dropped (the unit test and the
     property, whose seed is kept), a constant channel returned (the park's
     test).
+- 2026-11-08 — Owed items discharged by ADR-0038: the position's spelling,
+  `identity_digest` and the outbox's guard comparing identities by value.
+  Decision 1's "a producer that means a string writes it quoted" now reads:
+  through the writer, whose text is the one spelling.

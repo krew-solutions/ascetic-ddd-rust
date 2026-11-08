@@ -10,3 +10,8 @@ mod golden;
 fn the_golden_table_reads_as_it_should() {
     golden::check();
 }
+
+#[test]
+fn the_writer_writes_one_text_for_one_value() {
+    golden::check_written();
+}
