@@ -98,6 +98,7 @@ use std::time::Duration;
 
 use ascetic_ddd_session::pg::Identifier;
 
+use crate::intake::Bounds;
 use crate::observer::InboxObserver;
 use crate::partition::{ByUri, PartitionKey};
 
@@ -317,6 +318,9 @@ pub struct PgInbox<P, O = ()> {
     /// Whether a channel's rows set aside may be readmitted (ADR-0036
     /// decision 4): [`PgInbox::readmitting`].
     readmission: Readmits,
+    /// The largest message the intake reads (ADR-0037 decision 3):
+    /// [`PgInbox::with_bounds`].
+    bounds: Bounds,
 }
 
 /// The rule [`PgInbox::admitting`] holds a message to: the channel it
@@ -345,6 +349,7 @@ impl<P> PgInbox<P> {
             swept_to: Mutex::new(HashMap::new()),
             admission: Arc::new(|_, _| true),
             readmission: Arc::new(|_| false),
+            bounds: Bounds::default(),
         }
     }
 }
@@ -366,6 +371,7 @@ impl<P, O> PgInbox<P, O> {
             swept_to: self.swept_to,
             admission: self.admission,
             readmission: self.readmission,
+            bounds: self.bounds,
         }
     }
 
@@ -442,6 +448,15 @@ impl<P, O> PgInbox<P, O> {
     /// How many slots this inbox cuts its table into.
     pub fn slots(&self) -> u32 {
         self.slots
+    }
+
+    /// The same inbox, reading no message past `bounds` (ADR-0037 decision
+    /// 3): one past them is set aside as malformed and kept cut. A host
+    /// sets them to what its contracts carry, and its broker's fetch to the
+    /// same.
+    #[must_use]
+    pub fn with_bounds(self, bounds: Bounds) -> Self {
+        PgInbox { bounds, ..self }
     }
 
     /// The same inbox, treating a failed message as `retries` says.

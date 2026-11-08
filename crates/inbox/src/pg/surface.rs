@@ -368,6 +368,11 @@ where
                 "the channel does not readmit its rows set aside",
             ));
         }
+        if bytes.as_deref().is_some_and(intake::is_cut) {
+            return Err(Error::Refused(
+                "the row was past the intake's bounds and is kept cut",
+            ));
+        }
         let (destination, message) = bytes
             .as_deref()
             .and_then(intake::unframe)

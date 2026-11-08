@@ -3,18 +3,26 @@
 //! inbox. Nothing else, so that a message that can never be stored does not
 //! hold its source, and only the environment does.
 //!
-//! This is the pure half. The message's identity is read from its headers
-//! and checked before any statement (R3): a header missing or not UTF-8, a
-//! position that is not an `i32`, a NUL, a number PostgreSQL could not hold,
-//! a value past its column, a key past the index's row, a `message_id` that
-//! is not a UUID. What fails is *malformed*. The checks are PostgreSQL's
-//! own limits, stated here so that a host's `serde_json` features — which
-//! decide what a header's JSON becomes — cannot turn a storable message into
-//! a stall. PostgreSQL's refusal stays a backstop (`unstorable`).
+//! This is the pure half. A message past its size bounds is read no further
+//! (ADR-0037 decision 3). Its identity is read from its headers and checked
+//! before any statement (R3): a header missing, not UTF-8 or named twice, a
+//! position that is not an `i32`, a NUL, a stream id outside the bus's
+//! domain (`identity::read_stream_id`, ADR-0037 decision 1), a value past
+//! its column, a key past the index's row, a `message_id` that is not a
+//! UUID. What fails is *malformed*. The checks are PostgreSQL's own limits,
+//! stated here so that a host's `serde_json` features cannot turn a
+//! storable message into a stall. PostgreSQL's refusal stays a backstop
+//! (`unstorable`).
+//!
+//! Every header that is not a column is kept as its text, never structured
+//! (ADR-0037 decision 2): nothing reads the structure, and a handler gets
+//! the producer's bytes.
 //!
 //! A message set aside is kept as a frame of its bytes — the destination,
 //! the key, the headers and the payload, each length-delimited — under a
 //! digest of that frame, so that a repeat of the same bytes is the same row.
+
+use std::collections::BTreeSet;
 
 use ascetic_ddd_bus::identity::{self, STREAM_ID, STREAM_POSITION, STREAM_TYPE, TENANT_ID};
 use ascetic_ddd_bus::{Message, uri};
@@ -103,6 +111,17 @@ pub(crate) fn row_of(destination: &str, message: &Message) -> Result<InboxMessag
             .ok_or("an identity header is missing")?;
         text(value)
     };
+    // `header` reads a name's first occurrence and the metadata would keep
+    // its last: a dependency list checked here could differ from the one
+    // dispatch reads.
+    let mut names = BTreeSet::new();
+    if !message
+        .headers()
+        .iter()
+        .all(|(name, _)| names.insert(name.as_str()))
+    {
+        return Err("a header is named twice");
+    }
     let tenant_id = column(TENANT_ID)?;
     let stream_type = column(STREAM_TYPE)?;
     let stream_id_text = column(STREAM_ID)?;
@@ -145,9 +164,7 @@ pub(crate) fn row_of(destination: &str, message: &Message) -> Result<InboxMessag
             if name.contains('\0') {
                 return Err("a header's name holds a NUL");
             }
-            let value = structured(text(value)?);
-            storable(&value)?;
-            Ok((name.clone(), value))
+            Ok((name.clone(), Value::String(text(value)?.to_owned())))
         })
         .collect::<Result<Map<_, _>, _>>()?;
     match metadata.get("message_id") {
@@ -174,37 +191,6 @@ fn text(bytes: &[u8]) -> Result<&str, &'static str> {
         return Err("a header holds a NUL");
     }
     Ok(text)
-}
-
-/// A JSON value PostgreSQL can hold as `jsonb`: no `\u0000` in a string,
-/// which `jsonb` refuses (22P05), and no number past what `numeric` takes
-/// (22003). A number is held to a finite `f64`, a bound tighter than
-/// `numeric`'s, since a number past it is no identity a producer means.
-fn storable(value: &Value) -> Result<(), &'static str> {
-    match value {
-        Value::String(text) if text.contains('\0') => Err("a JSON string holds \\u0000"),
-        Value::Number(number) if !number.as_f64().is_some_and(f64::is_finite) => {
-            Err("a JSON number is past what PostgreSQL holds")
-        }
-        Value::Array(items) => items.iter().try_for_each(storable),
-        Value::Object(fields) => fields.iter().try_for_each(|(name, field)| {
-            if name.contains('\0') {
-                Err("a JSON key holds \\u0000")
-            } else {
-                storable(field)
-            }
-        }),
-        _ => Ok(()),
-    }
-}
-
-/// A header's text as a metadata field: structured again when it is a JSON
-/// array or object, text otherwise.
-pub(crate) fn structured(text: &str) -> Value {
-    match serde_json::from_str::<Value>(text) {
-        Ok(value @ (Value::Array(_) | Value::Object(_))) => value,
-        _ => Value::String(text.to_owned()),
-    }
 }
 
 /// Whether PostgreSQL's `uuid` takes `text`: 32 hexadecimal digits, of
@@ -234,35 +220,129 @@ pub(crate) fn is_uuid(text: &str) -> bool {
     digits == 32 && !previous_hyphen
 }
 
+/// The largest message the intake reads (ADR-0037 decision 3): a message
+/// past one bound is set aside as malformed before any header is parsed or
+/// copied, and kept cut: its sizes, a prefix of each part and a digest of
+/// the whole, which a readmit refuses. The broker's adapter
+/// caps what it fetches to the same sizes, so that a compressed record does
+/// not unfold into what no consumer can hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bounds {
+    /// The payload's bytes.
+    pub payload: usize,
+    /// One header's bytes, its name with its value.
+    pub header: usize,
+    /// How many headers.
+    pub headers: usize,
+    /// All the headers' bytes together.
+    pub header_bytes: usize,
+}
+
+impl Default for Bounds {
+    /// 8 MiB of payload; 64 headers of at most 256 KiB, 1 MiB in all: a
+    /// list of 64 causal dependencies at the largest identity fits.
+    fn default() -> Self {
+        Self {
+            payload: 8 << 20,
+            header: 256 << 10,
+            headers: 64,
+            header_bytes: 1 << 20,
+        }
+    }
+}
+
+impl Bounds {
+    /// Which bound `message` is past, if any.
+    pub(crate) fn exceeded(&self, message: &Message) -> Option<&'static str> {
+        let headers = message.headers();
+        let size = |(name, value): &(String, Vec<u8>)| name.len() + value.len();
+        if message.payload().len() > self.payload {
+            Some("its payload is past the intake's bound")
+        } else if headers.len() > self.headers {
+            Some("it carries more headers than the intake's bound")
+        } else if headers.iter().any(|header| size(header) > self.header) {
+            Some("a header is past the intake's bound")
+        } else if headers.iter().map(size).sum::<usize>() > self.header_bytes {
+            Some("its headers together are past the intake's bound")
+        } else {
+            None
+        }
+    }
+}
+
+/// How a cut frame begins: a destination of `u32::MAX` bytes, which no
+/// whole frame has, so that [`unframe`] reads none from it and a readmit is
+/// refused.
+const CUT: [u8; 4] = [0xFF; 4];
+
+/// How many bytes of each part a cut frame keeps.
+const CUT_PREFIX: usize = 1024;
+
+/// Whether `bytes` are a cut frame.
+pub(crate) fn is_cut(bytes: &[u8]) -> bool {
+    bytes.starts_with(&CUT)
+}
+
+/// A message past its bounds as kept beside the inbox (ADR-0037 decision
+/// 3): the mark, the digest of its whole frame — computed as the frame is
+/// written, never held — the destination, the key's and every header's
+/// size with a prefix of each, and the payload's size with its prefix. Two
+/// messages past their bounds frame alike only when their whole frames
+/// are alike; none reads back as a message.
+pub(crate) fn cut_frame(destination: &str, message: &Message) -> Vec<u8> {
+    let mut whole = Sha256::new();
+    write_frame(destination, message, &mut |bytes| whole.update(bytes));
+    let mut out = Vec::with_capacity(CUT_PREFIX * 4);
+    out.extend(CUT);
+    out.extend(whole.finalize());
+    let mut put = |bytes: &[u8]| {
+        out.extend(u32::try_from(bytes.len()).unwrap_or(u32::MAX).to_be_bytes());
+        out.extend(&bytes[..bytes.len().min(CUT_PREFIX)]);
+    };
+    put(destination.as_bytes());
+    put(message.key().unwrap_or_default());
+    for (name, value) in message.headers().iter().take(CUT_PREFIX) {
+        put(name.as_bytes());
+        put(value);
+    }
+    put(message.payload());
+    out
+}
+
 /// The message as kept beside the inbox: the destination, the key — a flag
 /// and its bytes — the headers in order, and the payload, each
 /// length-delimited, so that no two messages frame alike.
 pub(crate) fn frame(destination: &str, message: &Message) -> Vec<u8> {
-    fn put(out: &mut Vec<u8>, bytes: &[u8]) {
-        out.extend(u32::try_from(bytes.len()).unwrap_or(u32::MAX).to_be_bytes());
-        out.extend(bytes);
-    }
     let mut out = Vec::with_capacity(message.payload().len() + 256);
-    put(&mut out, destination.as_bytes());
+    write_frame(destination, message, &mut |bytes| out.extend(bytes));
+    out
+}
+
+/// The frame's bytes, in order, to `sink`.
+fn write_frame(destination: &str, message: &Message, sink: &mut impl FnMut(&[u8])) {
+    fn put(sink: &mut impl FnMut(&[u8]), bytes: &[u8]) {
+        sink(&u32::try_from(bytes.len()).unwrap_or(u32::MAX).to_be_bytes());
+        sink(bytes);
+    }
+    put(sink, destination.as_bytes());
     match message.key() {
         Some(key) => {
-            out.push(1);
-            put(&mut out, key);
+            sink(&[1]);
+            put(sink, key);
         }
-        None => out.push(0),
+        None => sink(&[0]),
     }
     let headers = message.headers();
-    out.extend(
-        u32::try_from(headers.len())
+    sink(
+        &u32::try_from(headers.len())
             .unwrap_or(u32::MAX)
             .to_be_bytes(),
     );
     for (name, value) in headers {
-        put(&mut out, name.as_bytes());
-        put(&mut out, value);
+        put(sink, name.as_bytes());
+        put(sink, value);
     }
-    put(&mut out, message.payload());
-    out
+    put(sink, message.payload());
 }
 
 /// A frame read back: the destination and the message, as [`frame`] wrote
@@ -494,6 +574,113 @@ mod tests {
         assert_eq!(row.stream_id, Value::from(12_345_u64));
     }
 
+    /// Every header that is not a column is kept as its text (ADR-0037
+    /// decision 2): `jsonb` would reorder an object's keys, normalise its
+    /// numbers and drop a key named twice, and nothing reads the structure.
+    #[test]
+    fn a_header_is_kept_as_its_text() {
+        let texts = [
+            "3",
+            "true",
+            "[1]",
+            "\"x\"",
+            "{\"b\":2,\"aa\":1}",
+            "{\"a\":1,\"a\":2}",
+            "[1e-16384]",
+            "[1.0, 1e5]",
+        ];
+        let message = texts
+            .iter()
+            .enumerate()
+            .fold(identified("o"), |message, (at, text)| {
+                message.with_header(format!("h{at}"), *text)
+            });
+        let row = row_of("inbox://orders", &message).unwrap();
+        for (at, text) in texts.iter().enumerate() {
+            assert_eq!(
+                row.metadata.as_ref().and_then(|m| m.get(format!("h{at}"))),
+                Some(&Value::String((*text).to_owned())),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_header_named_twice_is_refused() {
+        let twice = identified("o")
+            .with_header("causal_dependencies", "[]")
+            .with_header("causal_dependencies", "[]");
+        assert_eq!(
+            row_of("inbox://orders", &twice).err(),
+            Some("a header is named twice")
+        );
+        let column_twice = identified("o").with_header(STREAM_ID, "p");
+        assert!(row_of("inbox://orders", &column_twice).is_err());
+    }
+
+    /// Each bound refuses the message past it, and no other.
+    #[test]
+    fn a_message_past_a_bound_is_named_by_it() {
+        // The six headers of `identified` hold 126 bytes, the largest 46.
+        let bounds = Bounds {
+            payload: 8,
+            header: 48,
+            headers: 10,
+            header_bytes: 200,
+        };
+        let within = identified("o");
+        assert_eq!(bounds.exceeded(&within), None);
+        let payload = Message::new(vec![0_u8; 9])
+            .with_header(TENANT_ID, "t")
+            .with_header(STREAM_TYPE, "orders.Order");
+        assert!(
+            bounds
+                .exceeded(&payload)
+                .is_some_and(|why| why.contains("payload"))
+        );
+        let header = within.clone().with_header("x", "y".repeat(48));
+        assert!(
+            bounds
+                .exceeded(&header)
+                .is_some_and(|why| why.contains("a header"))
+        );
+        let many = (0..5).fold(within.clone(), |message, at| {
+            message.with_header(format!("x{at}"), "y")
+        });
+        assert!(
+            bounds
+                .exceeded(&many)
+                .is_some_and(|why| why.contains("more headers"))
+        );
+        let together = (0..3).fold(within, |message, at| {
+            message.with_header(format!("x{at}"), "y".repeat(30))
+        });
+        assert!(
+            bounds
+                .exceeded(&together)
+                .is_some_and(|why| why.contains("together"))
+        );
+    }
+
+    /// A message past its bounds is kept cut: never read back as a
+    /// message, the same for the same bytes, and another for a message that
+    /// differs past the prefix it keeps.
+    #[test]
+    fn a_cut_frame_is_no_message_and_tells_whole_messages_apart() {
+        let big = |last: u8| {
+            let mut payload = vec![b'a'; 3 * CUT_PREFIX];
+            payload.push(last);
+            identified("o").with_payload(payload)
+        };
+        let cut = cut_frame("inbox://orders/k", &big(b'x'));
+        assert!(is_cut(&cut));
+        assert!(unframe(&cut).is_none());
+        assert!(cut.len() < 2 * CUT_PREFIX + 512, "{}", cut.len());
+        assert_eq!(cut, cut_frame("inbox://orders/k", &big(b'x')));
+        assert_ne!(cut, cut_frame("inbox://orders/k", &big(b'y')));
+        assert!(!is_cut(&frame("inbox://orders/k", &big(b'x'))));
+    }
+
     #[test]
     fn a_uuid_is_what_postgresql_takes() {
         for taken in [
@@ -589,6 +776,9 @@ mod tests {
                 Just(br#"["\u0000"]"#.to_vec()),
                 Just(br#"{"a\u0000":1}"#.to_vec()),
                 Just(b"[1e999]".to_vec()),
+                Just(b"1e-16384".to_vec()),
+                Just(b"[1e-16384]".to_vec()),
+                Just(br#"{"$serde_json::private::Number":"5"}"#.to_vec()),
             ]
         }
 
@@ -652,11 +842,13 @@ mod tests {
                 )
         }
 
-        /// The oracle, apart from [`storable`]: `jsonb` takes no `\u0000`
-        /// in a string or a key (22P05).
+        /// The oracle: `jsonb` takes no `\u0000` in a string or a key
+        /// (22P05), and holds exactly only an integer within 64 bits
+        /// (ADR-0037 decision 1).
         fn jsonb_takes(value: &Value) -> bool {
             match value {
                 Value::String(text) => !text.contains('\0'),
+                Value::Number(number) => number.is_i64() || number.is_u64(),
                 Value::Array(items) => items.iter().all(jsonb_takes),
                 Value::Object(fields) => fields
                     .iter()
@@ -679,6 +871,13 @@ mod tests {
                     }
                     prop_assert!(jsonb_takes(&row.stream_id));
                     prop_assert!(row.metadata.as_ref().is_none_or(jsonb_takes));
+                    prop_assert!(
+                        row.metadata
+                            .as_ref()
+                            .and_then(Value::as_object)
+                            .is_none_or(|fields| fields.values().all(Value::is_string)),
+                        "a header is kept as its text"
+                    );
                     prop_assert!(row.message_id().is_none_or(is_uuid));
                 }
             }

@@ -581,3 +581,25 @@ The host adopts them in one pin, after quoting its stream ids.
       low surrogate and the range past u64.
   - Not a mutation: the "written plainly" flag repeats what the integer
     parse already refuses; it is kept for its reason.
+- 2026-11-08 — Slice 2 built.
+  - Every header that is not a column is kept as its text; `structured`
+    and the f64 rule (`storable`) are gone.
+  - A header named twice is malformed.
+  - `Bounds` on `PgInbox::with_bounds`, checked before any header is read.
+    A message past them is set aside as malformed and kept as a cut frame:
+    - a mark that no whole frame has;
+    - the digest of the whole frame, computed as it is written;
+    - sizes and prefixes.
+
+    The same bytes again are the same row, and a readmit is refused.
+  - Executors, each with its mutation caught:
+    - a header reaches the handler byte for byte through PostgreSQL:
+      structuring restored;
+    - a row inserted by SQL with a structured dependency list waits and is
+      woken: the structured arm of `causal_dependencies()` dropped;
+    - a message past the bounds is kept cut and refused at readmit: the
+      check, the cut frame and the readmit's refusal each removed;
+    - the unit tests of text metadata, duplicate names, each bound, and
+      the cut frame's identity.
+    - The intake's property now also holds that every metadata value is a
+      string and every number an integer within 64 bits.

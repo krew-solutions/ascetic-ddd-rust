@@ -1928,3 +1928,49 @@ async fn the_inbox_s_run_sweeps_beside_its_loops_after_its_grace() {
     assert_eq!(sweeps.0.load(Ordering::SeqCst), 1);
     assert_eq!(f.rows().await, 0);
 }
+
+/// A row stored before ADR-0037, its dependency list structured in its
+/// metadata, still waits for its cause and is woken by it: the intake now
+/// keeps the list as text, and dispatch reads both forms.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_row_stored_with_structured_dependencies_still_waits_for_them() {
+    let f = fixture("causal_structured").await;
+    let cause = message("user", 5);
+    let effect = message("order", 1).depending_on(&[CausalDependency::on(&cause)]);
+    assert!(
+        effect
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("causal_dependencies"))
+            .is_some_and(serde_json::Value::is_array),
+        "the list as the intake stored it before"
+    );
+    let client = pool().get().await.unwrap();
+    client
+        .execute(
+            &format!(
+                "INSERT INTO {} (tenant_id, stream_type, stream_id, stream_position, uri, payload, metadata) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                f.table
+            ),
+            &[
+                &effect.tenant_id,
+                &effect.stream_type,
+                &effect.stream_id,
+                &effect.stream_position,
+                &effect.uri,
+                &effect.payload,
+                &effect.metadata,
+            ],
+        )
+        .await
+        .unwrap();
+    let (seen, subscriber) = collector();
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::SetAside, "it waits");
+
+    f.publish(&[cause]).await;
+    while f.dispatch(&subscriber).await != Outcome::Nothing {}
+
+    assert_eq!(*seen.lock().unwrap(), ["user@5", "order@1"]);
+}

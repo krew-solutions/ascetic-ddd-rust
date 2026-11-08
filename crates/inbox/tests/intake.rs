@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use ascetic_ddd_bus::identity::{STREAM_ID, STREAM_POSITION, STREAM_TYPE, TENANT_ID};
 use ascetic_ddd_bus::{Adapter, Message};
 use ascetic_ddd_inbox::observer::{InboxObserver, Rejected};
-use ascetic_ddd_inbox::{Admission, ByStream, Error, PgInbox, Reason};
+use ascetic_ddd_inbox::{Admission, Bounds, ByStream, Error, PgInbox, Reason};
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use ascetic_ddd_session::pg::tokio_postgres::error::SqlState;
@@ -527,4 +527,49 @@ async fn many_intakes_of_one_message_at_once_store_it_once() {
     assert_eq!((stored, duplicates), (20, 140));
     assert_eq!(f.rows().await, 20);
     assert_eq!(f.count("SELECT count(*) FROM {table}_rejects").await, 0);
+}
+
+/// A message past the inbox's bounds is set aside before its headers are
+/// read, and kept cut: the same bytes again are the same row, and a readmit
+/// is refused, since the row is not the message (ADR-0037 decision 3).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_message_past_the_bounds_is_kept_cut_and_never_readmitted() {
+    let table = "intake_bounds";
+    let inbox = PgInbox::new(PgSessionPool::new(pool()))
+        .with_table(
+            Identifier::new(table).unwrap(),
+            Identifier::new(format!("{table}_seq")).unwrap(),
+        )
+        .with_bounds(Bounds {
+            payload: 1 << 10,
+            ..Bounds::default()
+        })
+        .readmitting(|_| true);
+    inbox.teardown().await.unwrap();
+    inbox.migrate().await.unwrap();
+    let big = order("1", ID_1, &"p".repeat(1 << 16));
+
+    let Admission::SetAside {
+        digest,
+        reason: Reason::Malformed,
+        repeat: false,
+    } = inbox.intake("inbox://orders/k", &big).await.unwrap()
+    else {
+        panic!("set aside as malformed");
+    };
+    assert!(matches!(
+        inbox.intake("inbox://orders/k", &big).await.unwrap(),
+        Admission::SetAside { repeat: true, .. }
+    ));
+    let kept = inbox
+        .set_aside_message("ops", &digest)
+        .await
+        .unwrap()
+        .expect("the row's bytes");
+    assert!(kept.len() < 4 << 10, "kept cut: {} bytes", kept.len());
+    assert!(matches!(
+        inbox.readmit("ops", &digest).await,
+        Err(Error::Refused(why)) if why.contains("cut")
+    ));
 }
