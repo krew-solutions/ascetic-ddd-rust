@@ -6,10 +6,10 @@ use ascetic_ddd_session::{PgAccess, Session, SessionError, SessionPool};
 use futures::future::join_all;
 use tokio::sync::watch;
 
-use super::{Loops, Outcome, PgInbox};
+use super::{Loops, Outcome, Parked, PgInbox};
 use crate::error::{Error, Failure};
 use crate::intake;
-use crate::message::{CausalDependency, InboxMessage};
+use crate::message::InboxMessage;
 use crate::observer::{
     Dispatched, Expired, Failed, Fetched, Handled, InboxObserver, Marked, ParkedAtOnce, Resolved,
     Unparked, Waiting,
@@ -413,43 +413,52 @@ where
         Ok(())
     }
 
-    /// The parked messages, oldest first, with their attempts and last error.
-    pub async fn parked(&self, session: &P::Session) -> Result<Vec<InboxMessage>, Error> {
-        self.parked_rows(session).await
+    /// A page of the parked rows, oldest first, after `after`'s order of
+    /// arrival and at most `limit` of them, each by its place and its
+    /// identity when that reads ([`Parked`]).
+    pub async fn parked(
+        &self,
+        session: &P::Session,
+        after: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<Parked>, Error> {
+        self.parked_rows(session, after, limit).await
     }
 
-    /// Gives a parked message another go: attempts reset, due at once.
-    /// Returns whether the message was parked.
+    /// Gives the parked row at `received_position` another go: attempts
+    /// reset, due at once. By its place, so that a row whose values do not
+    /// read can be given one (ADR-0037 decision 6). Returns whether it was
+    /// parked.
     pub async fn unpark(
         &self,
         session: &P::Session,
-        message: &InboxMessage,
+        received_position: i64,
     ) -> Result<bool, Error> {
-        let unparked = self.unpark_row(session, message).await?;
-        if unparked {
+        let unparked = self.unpark_at(session, received_position).await?;
+        if let Some(message) = &unparked {
             self.observer.on_unparked(&Unparked { message });
         }
-        Ok(unparked)
+        Ok(unparked.is_some())
     }
 
-    /// Marks a parked message processed by hand, without the subscriber's
-    /// effects, and puts what waited for it back into the queue. Runs in a
-    /// transaction of `session`, under the lock a mark takes (ADR-0009), so
-    /// a wait for this message set beside it is woken all the same. Returns
-    /// whether the message was parked.
+    /// Marks the parked row at `received_position` processed by hand,
+    /// without the subscriber's effects, and puts what waited for it back
+    /// into the queue. Runs in a transaction of `session`, under the lock a
+    /// mark takes (ADR-0009), its identity read by the server from the row,
+    /// so a wait for it set beside is woken all the same. Returns whether it
+    /// was parked.
     pub async fn resolve(
         &self,
         session: &P::Session,
-        message: &InboxMessage,
+        received_position: i64,
     ) -> Result<bool, Error> {
         let resolved = session
             .atomic(async |tx| {
-                self.lock_identity(&tx, &CausalDependency::on(message))
-                    .await?;
-                self.resolve_row(&tx, message).await
+                self.lock_parked_identity(&tx, received_position).await?;
+                self.resolve_at(&tx, received_position).await
             })
             .await?;
-        if let Some((processed_position, woken)) = &resolved {
+        if let Some((processed_position, message, woken)) = &resolved {
             self.observer.on_resolved(&Resolved {
                 message,
                 processed_position: *processed_position,

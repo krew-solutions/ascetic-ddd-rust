@@ -99,6 +99,7 @@ use std::time::Duration;
 use ascetic_ddd_session::pg::Identifier;
 
 use crate::intake::Bounds;
+use crate::message::CausalDependency;
 use crate::observer::InboxObserver;
 use crate::partition::{ByUri, PartitionKey};
 
@@ -163,6 +164,28 @@ pub enum Outcome {
     /// dispatcher's transaction (ADR-0037 decision 6); the next call takes
     /// the slot's next head.
     Parked,
+}
+
+/// A parked row as the operator's listing gives it (ADR-0037 decision 6):
+/// by its place, and by its identity when that reads — a row stored before
+/// the intake's checks may not, and it is listed all the same, so that one
+/// row does not close the listing for every Tenant. Never its payload or
+/// metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Parked {
+    /// Its order of arrival: what unpark and resolve name it by.
+    pub received_position: i64,
+    /// The slot it is in.
+    pub slot: u32,
+    /// Its failed attempts.
+    pub attempts: u32,
+    /// Why it was parked.
+    pub last_error: Option<String>,
+    /// The channel it arrived on, its key included.
+    pub uri: String,
+    /// Its identity; `None` when its stream id does not read back in the
+    /// bus's domain.
+    pub identity: Option<CausalDependency>,
 }
 
 /// What happens to a message whose subscriber fails (ADR-0005).

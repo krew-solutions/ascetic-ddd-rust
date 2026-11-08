@@ -717,3 +717,30 @@ The host adopts them in one pin, after quoting its stream ids.
     dropped, the raw failure text, a panicking read.
   - **No executor here:** the read's savepoint. Its server-side failure is
     a render past 1 GB, owed with the measurements of § Owed.
+- 2026-11-08 — Slice 5b built: the statements that return rows.
+  - **Narrow.** The expiry, the woken rows of a mark and of a resolve,
+    and the rows unparked and resolved come back without payload or
+    metadata (`NARROW`). They are read without panicking, and a stream id
+    that does not decode reads as null.
+  - **Bounded.** The expiry parks at most 100 rows a statement. A mark
+    must wake every row that waited, so its woken rows are not bounded in
+    number; each is bounded by the identity's size (decision 4).
+  - **The listing is a page**: `parked(session, after, limit)`, keyed by
+    the order of arrival. Each `Parked` gives its place, attempts, last
+    error and channel, and its identity when the stream id reads back in
+    the bus's domain. A row that does not read is listed all the same.
+  - **`unpark` and `resolve` take the order of arrival.** The resolve
+    takes its lock and wakes its waiters under the identity the server
+    reads from the row (`IDENTITY_OF_ROW`). The identity-bound
+    `unpark_row`, `resolve_row` and `message_of` are gone, and with them
+    the last statement binding a row's identity read back into Rust.
+  - **Executors:**
+    - a row past 64 bits and a 128-deep row, both parked at once, are
+      listed: the first with no identity, the second with its own;
+    - the first is resolved by its place and its waiter, stored waiting
+      for it, is woken and processed;
+    - the second is unparked by its place and parked at once again;
+    - 105 rows past their wait expire in batches of 100 and 5, without
+      their payloads.
+  - **Mutations caught:** the listing's domain check dropped, the expiry
+    unbounded, the resolve waking none.

@@ -23,7 +23,7 @@ use ascetic_ddd_inbox::observer::{
 };
 use ascetic_ddd_inbox::{
     ByStream, CausalDependency, Error, Failure, Inbox, InboxMessage, InboxRetention, Loops,
-    MAX_IDENTITY_BYTES, Outcome, PartitionKey, PgInbox, Receipt, Retries,
+    MAX_IDENTITY_BYTES, Outcome, Parked, PartitionKey, PgInbox, Receipt, Retries,
 };
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -182,21 +182,37 @@ impl<O: InboxObserver> Fixture<O> {
         self.inbox.dispatch(subscriber).await.unwrap()
     }
 
-    async fn parked_messages(&self) -> Vec<InboxMessage> {
+    async fn parked_messages(&self) -> Vec<Parked> {
         self.sessions
-            .session(async |session| self.inbox.parked(&session).await)
+            .session(async |session| self.inbox.parked(&session, None, 1000).await)
             .await
             .unwrap()
     }
 
     async fn parked(&self) -> Vec<String> {
-        self.sessions
-            .session(async |session| self.inbox.parked(&session).await)
+        self.parked_messages()
             .await
-            .unwrap()
             .iter()
-            .map(label)
+            .map(|parked| match &parked.identity {
+                Some(identity) => format!(
+                    "{}@{}",
+                    identity.stream_id["id"].as_str().unwrap_or("?"),
+                    identity.stream_position
+                ),
+                None => format!("?@{}", parked.received_position),
+            })
             .collect()
+    }
+
+    /// The order of arrival of `message`, parked.
+    async fn position_of(&self, message: &InboxMessage) -> i64 {
+        let wanted = label(message);
+        let labels = self.parked().await;
+        let at = labels
+            .iter()
+            .position(|parked| *parked == wanted)
+            .unwrap_or_else(|| panic!("{wanted} is not parked: {labels:?}"));
+        self.parked_messages().await[at].received_position
     }
 
     async fn publish(&self, messages: &[InboxMessage]) {
@@ -603,7 +619,7 @@ async fn a_poison_message_is_parked_after_its_attempts_and_the_partition_flows()
     assert_eq!(f.rows().await, 2, "a parked row stays in the table");
     let parked = f
         .sessions
-        .session(async |session| f.inbox.parked(&session).await)
+        .session(async |session| f.inbox.parked(&session, None, 1000).await)
         .await
         .unwrap();
     assert_eq!(parked[0].attempts, 2);
@@ -657,9 +673,10 @@ async fn an_unparked_message_is_tried_again() {
     );
     assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
 
+    let at = f.position_of(&poison).await;
     let unparked = f
         .sessions
-        .session(async |session| f.inbox.unpark(&session, &poison).await)
+        .session(async |session| f.inbox.unpark(&session, at).await)
         .await
         .unwrap();
     assert!(unparked);
@@ -692,9 +709,10 @@ async fn a_resolved_message_releases_its_dependents() {
         "b@1 waits"
     );
 
+    let at = f.position_of(&cause).await;
     let resolved = f
         .sessions
-        .session(async |session| f.inbox.resolve(&session, &cause).await)
+        .session(async |session| f.inbox.resolve(&session, at).await)
         .await
         .unwrap();
     assert!(resolved);
@@ -1022,7 +1040,9 @@ async fn loops_over_slots_with_dependencies_across_them_lose_no_wake() {
             tokio::time::sleep(Duration::from_millis(20)).await;
             for parked in f.parked_messages().await {
                 f.sessions
-                    .session(async |session| f.inbox.resolve(&session, &parked).await)
+                    .session(async |session| {
+                        f.inbox.resolve(&session, parked.received_position).await
+                    })
                     .await
                     .unwrap();
             }
@@ -1600,9 +1620,10 @@ async fn an_unparked_row_whose_wait_ran_out_waits_again() {
     assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
     assert_eq!(f.parked().await, ["order@1"]);
 
+    let at = f.position_of(&effect).await;
     let unparked = f
         .sessions
-        .session(async |session| f.inbox.unpark(&session, &effect).await)
+        .session(async |session| f.inbox.unpark(&session, at).await)
         .await
         .unwrap();
     assert!(unparked);
@@ -1658,7 +1679,7 @@ async fn a_dependency_that_never_arrives_parks_the_message_after_max_wait() {
     assert_eq!(f.parked().await, ["order@1"]);
     let parked = f
         .sessions
-        .session(async |session| f.inbox.parked(&session).await)
+        .session(async |session| f.inbox.parked(&session, None, 1000).await)
         .await
         .unwrap();
     assert!(
@@ -1675,9 +1696,10 @@ async fn a_dependency_that_never_arrives_parks_the_message_after_max_wait() {
     // The dependency arrives after all: unparked, the message waits again,
     // and is woken by the dependency's mark.
     f.publish(std::slice::from_ref(&cause)).await;
+    let at = f.position_of(&effect).await;
     let unparked = f
         .sessions
-        .session(async |session| f.inbox.unpark(&session, &effect).await)
+        .session(async |session| f.inbox.unpark(&session, at).await)
         .await
         .unwrap();
     assert!(unparked);
@@ -1826,9 +1848,10 @@ async fn unprocessed_parked_waiting_and_named_rows_are_never_forgotten() {
     assert_eq!(f.inbox.sweep().await.unwrap(), 1);
     assert_eq!(f.held().await, ["t@1", "p@1", "w@1", "u@1"]);
 
+    let at = f.position_of(&parked).await;
     assert!(
         f.sessions
-            .session(async |session| f.inbox.resolve(&session, &parked).await)
+            .session(async |session| f.inbox.resolve(&session, at).await)
             .await
             .unwrap()
     );
@@ -2344,4 +2367,123 @@ async fn a_failure_with_a_nul_is_recorded_and_the_row_tried_again() {
         .get(0);
     assert!(!kept.contains('\0'));
     assert!(kept.chars().count() <= 4096, "{}", kept.chars().count());
+}
+
+/// A parked row whose values do not read is listed by its place, its
+/// identity none where it does not read back, and is resolved and unparked
+/// by its place; its resolve wakes what waited for it, the identity read by
+/// the server from the row (ADR-0037 decision 6). Before, the listing
+/// decoded every row and one such row failed it for every Tenant, and
+/// unpark and resolve bound an identity read back into Rust.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_parked_row_that_does_not_read_is_listed_resolved_and_unparked_by_its_place() {
+    let f = fixture_cut("unreadable_operated", (), 1, TraceFile::off()).await;
+    stored_before(&f, "12345678901234567890123", "{}").await;
+    stored_before(
+        &f,
+        r#"{"id": "deep"}"#,
+        &format!(r#"{{"h": {}{}}}"#, "[".repeat(127), "]".repeat(127)),
+    )
+    .await;
+    // a row stored before, waiting for the first
+    let client = pool().get().await.unwrap();
+    client
+        .execute(
+            &format!(
+                "INSERT INTO {} (tenant_id, stream_type, stream_id, stream_position, uri, payload, \
+                     metadata, waiting_for, waiting_since) \
+                 VALUES ('tenant-1', 'orders.Order', '{{\"id\": \"waiter\"}}', 1, 'kafka://orders/w', \
+                     'w', '{{}}', jsonb_build_object('tenant_id', 'tenant-1', 'stream_type', 'orders.Order', \
+                     'stream_id', '12345678901234567890123'::jsonb, 'stream_position', 1), now())",
+                f.table
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+    let (seen, subscriber) = collector();
+    while f.dispatch(&subscriber).await != Outcome::Nothing {}
+    let parked = f.parked_messages().await;
+    assert_eq!(parked.len(), 2, "{parked:?}");
+    assert!(
+        parked[0].identity.is_none(),
+        "past 64 bits, it reads back as no identity"
+    );
+    assert!(
+        parked[1].identity.is_some(),
+        "a deep metadata is not read by the listing"
+    );
+    let resolved = f
+        .sessions
+        .session(async |session| f.inbox.resolve(&session, parked[0].received_position).await)
+        .await
+        .unwrap();
+    assert!(resolved);
+    while f.dispatch(&subscriber).await != Outcome::Nothing {}
+    assert_eq!(*seen.lock().unwrap(), ["waiter@1"], "woken by the resolve");
+    let unparked = f
+        .sessions
+        .session(async |session| f.inbox.unpark(&session, parked[1].received_position).await)
+        .await
+        .unwrap();
+    assert!(unparked);
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::Parked,
+        "parked at once again"
+    );
+    assert_eq!(f.parked_messages().await.len(), 1);
+}
+
+/// What an expiry was told: each batch's size, and whether every row came
+/// without its payload.
+#[derive(Default)]
+struct ExpiredBatches(Mutex<Vec<(usize, bool)>>);
+
+impl InboxObserver for ExpiredBatches {
+    fn on_expired(&self, event: &Expired<'_>) {
+        self.0.lock().unwrap().push((
+            event.messages.len(),
+            event
+                .messages
+                .iter()
+                .all(|message| message.payload.is_empty()),
+        ));
+    }
+}
+
+/// An expiry parks at most a batch per statement and returns its rows
+/// without their payloads: rows that wait for what never arrives come back
+/// a batch at a time, never all of them with their payloads at once
+/// (ADR-0037 decision 6).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn an_expiry_parks_a_batch_at_a_time_without_the_payloads() {
+    let batches = Arc::new(ExpiredBatches::default());
+    let f = fixture_observed("expiry_batches", Arc::clone(&batches))
+        .await
+        .with_max_wait(Duration::from_secs(1));
+    let client = pool().get().await.unwrap();
+    client
+        .execute(
+            &format!(
+                "INSERT INTO {} (tenant_id, stream_type, stream_id, stream_position, uri, payload, \
+                     metadata, waiting_for, waiting_since) \
+                 SELECT 'tenant-1', 'orders.Order', jsonb_build_object('id', 'w' || n), 1, \
+                     'kafka://orders/w', repeat('p', 1000)::bytea, '{{}}', \
+                     '{{\"tenant_id\": \"tenant-1\", \"stream_type\": \"orders.Order\", \
+                       \"stream_id\": {{\"id\": \"never\"}}, \"stream_position\": 1}}', \
+                     now() - interval '1 hour' \
+                 FROM generate_series(1, 105) n",
+                f.table
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+    let (_, subscriber) = collector();
+    f.dispatch(&subscriber).await;
+    f.dispatch(&subscriber).await;
+    assert_eq!(*batches.0.lock().unwrap(), [(100, true), (5, true)]);
 }
