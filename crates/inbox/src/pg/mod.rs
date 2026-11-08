@@ -80,11 +80,13 @@
 //! vocabulary of the protocol model. The SQL lives in `store`, the loop in
 //! `dispatch`.
 
+mod census;
 mod dispatch;
 mod intake;
 mod store;
 mod surface;
 
+pub use census::Census;
 pub use intake::Admission;
 pub use surface::{
     Readmission, Readmitted, SetAsideCount, SetAsideCursor, SetAsidePage, SetAsideRow,
@@ -98,6 +100,8 @@ use std::time::Duration;
 
 use ascetic_ddd_session::pg::Identifier;
 
+use crate::intake::Bounds;
+use crate::message::CausalDependency;
 use crate::observer::InboxObserver;
 use crate::partition::{ByUri, PartitionKey};
 
@@ -157,6 +161,33 @@ pub enum Outcome {
         /// out, or the subscriber's verdict was permanent.
         parked: bool,
     },
+    /// The head could not be read, or its wait, its failure or its mark
+    /// written, for its own values, and was parked at once in the
+    /// dispatcher's transaction (ADR-0037 decision 6); the next call takes
+    /// the slot's next head.
+    Parked,
+}
+
+/// A parked row as the operator's listing gives it (ADR-0037 decision 6):
+/// by its place, and by its identity when that reads — a row stored before
+/// the intake's checks may not, and it is listed all the same, so that one
+/// row does not close the listing for every Tenant. Never its payload or
+/// metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Parked {
+    /// Its order of arrival: what unpark and resolve name it by.
+    pub received_position: i64,
+    /// The slot it is in.
+    pub slot: u32,
+    /// Its failed attempts.
+    pub attempts: u32,
+    /// Why it was parked.
+    pub last_error: Option<String>,
+    /// The channel it arrived on, its key included.
+    pub uri: String,
+    /// Its identity; `None` when its stream id does not read back in the
+    /// bus's domain.
+    pub identity: Option<CausalDependency>,
 }
 
 /// What happens to a message whose subscriber fails (ADR-0005).
@@ -317,6 +348,9 @@ pub struct PgInbox<P, O = ()> {
     /// Whether a channel's rows set aside may be readmitted (ADR-0036
     /// decision 4): [`PgInbox::readmitting`].
     readmission: Readmits,
+    /// The largest message the intake reads (ADR-0037 decision 3):
+    /// [`PgInbox::with_bounds`].
+    bounds: Bounds,
 }
 
 /// The rule [`PgInbox::admitting`] holds a message to: the channel it
@@ -328,8 +362,10 @@ type Readmits = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 impl<P> PgInbox<P> {
     /// An inbox in table `inbox`, one slot partitioned by URI, observed by
-    /// nobody, retrying a failed message for ever and letting a message wait
-    /// for its dependencies for ever.
+    /// nobody, retrying a failed message for ever and parking a message that
+    /// has waited an hour for its dependencies (ADR-0037 decision 6): a
+    /// dependency refused or set aside is then paged, never waited for in
+    /// silence.
     pub fn new(pool: P) -> Self {
         PgInbox {
             pool,
@@ -339,12 +375,13 @@ impl<P> PgInbox<P> {
             partition: Box::new(ByUri),
             loops: Loops::default(),
             retries: Retries::default(),
-            max_wait: None,
+            max_wait: Some(Duration::from_secs(3600)),
             slots: 1,
             retention: InboxRetention::default(),
             swept_to: Mutex::new(HashMap::new()),
             admission: Arc::new(|_, _| true),
             readmission: Arc::new(|_| false),
+            bounds: Bounds::default(),
         }
     }
 }
@@ -366,6 +403,7 @@ impl<P, O> PgInbox<P, O> {
             swept_to: self.swept_to,
             admission: self.admission,
             readmission: self.readmission,
+            bounds: self.bounds,
         }
     }
 
@@ -442,6 +480,15 @@ impl<P, O> PgInbox<P, O> {
     /// How many slots this inbox cuts its table into.
     pub fn slots(&self) -> u32 {
         self.slots
+    }
+
+    /// The same inbox, reading no message past `bounds` (ADR-0037 decision
+    /// 3): one past them is set aside as malformed and kept cut. A host
+    /// sets them to what its contracts carry, and its broker's fetch to the
+    /// same.
+    #[must_use]
+    pub fn with_bounds(self, bounds: Bounds) -> Self {
+        PgInbox { bounds, ..self }
     }
 
     /// The same inbox, treating a failed message as `retries` says.

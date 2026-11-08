@@ -18,4 +18,12 @@ MCNoDeps == (m1 :> {}) @@ (m2 :> {}) @@ (m3 :> {})
 MCOneSlot == {w1}
 MCPoisonM1 == {m1}
 
+\* Rows the dispatcher cannot read: none, or m1, stored before the intake's
+\* checks (ADR-0037 decision 6).
+MCNoUnreadable == {}
+MCUnreadableM1 == {m1}
+
+\* The park at once taken away, for InboxUnreadableHolds.cfg.
+MCParkNever(d) == FALSE
+
 =============================================================================

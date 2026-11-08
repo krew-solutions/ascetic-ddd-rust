@@ -6,14 +6,37 @@ use ascetic_ddd_session::{PgAccess, Session, SessionError, SessionPool};
 use futures::future::join_all;
 use tokio::sync::watch;
 
-use super::{Loops, Outcome, PgInbox};
+use super::{Loops, Outcome, Parked, PgInbox};
 use crate::error::{Error, Failure};
 use crate::intake;
-use crate::message::{CausalDependency, InboxMessage};
+use crate::message::InboxMessage;
 use crate::observer::{
-    Dispatched, Expired, Failed, Fetched, Handled, InboxObserver, Marked, Resolved, Unparked,
-    Waiting,
+    Dispatched, Expired, Failed, Fetched, Handled, InboxObserver, Marked, ParkedAtOnce, Resolved,
+    Unparked, Waiting,
 };
+
+/// The outcome of a statement over a row's values, classified (ADR-0037
+/// decision 6): its value; the reason, when PostgreSQL refused it for the
+/// row's own values, which parks the row; or the environment's error.
+fn own<T>(
+    result: Result<T, Error>,
+    table: &str,
+    reading: bool,
+) -> Result<Result<T, &'static str>, Error> {
+    match result {
+        Ok(value) => Ok(Ok(value)),
+        Err(Error::Database(error)) => {
+            let own = error.as_db_error().and_then(|db| {
+                intake::unreadable(db.code().code(), db.constraint(), table, reading)
+            });
+            match own {
+                Some(reason) => Ok(Err(reason)),
+                None => Err(Error::Database(error)),
+            }
+        }
+        Err(other) => Err(other),
+    }
+}
 
 /// What ended a dispatch transaction in failure, with the slot it held, so
 /// that the observer learns which slot's work rolled back.
@@ -92,34 +115,79 @@ where
                             slot: Some(slot),
                             error,
                         };
-                        let step = self.head_of(&tx, slot).await.map_err(in_slot)?;
-                        let snapshot = step.snapshot;
-                        let message = match step.row {
-                            Some((message, false)) => message,
+                        let located = self.locate_head(&tx, slot).await.map_err(in_slot)?;
+                        let snapshot = located.snapshot;
+                        let (received_position, place) = match located.row {
+                            Some((position, place, false)) => (position, place),
                             // the previous holder changed the head after the
                             // take chose the slot: nothing due in it now
-                            Some((_, true)) | None => {
+                            Some((_, _, true)) | None => {
                                 self.observer.on_fetched(&Fetched {
                                     slot: Some(slot),
-                                        slots: taken.slots,
+                                    slots: taken.slots,
                                     message: None,
                                     snapshot: &snapshot,
                                 });
                                 return Ok((Some(slot), Outcome::Nothing));
                             }
                         };
+                        // The row's own failure, parked at once in this
+                        // transaction, under the slot's lease and the row's
+                        // lock, by a statement that binds none of its values
+                        // (ADR-0037 decision 6).
+                        let park = async |reason: &'static str| {
+                            self.park_at(&tx, &place, reason).await.map_err(in_slot)?;
+                            log::error!(
+                                "inbox: the row at {received_position} in slot {slot} parked at once: {reason}"
+                            );
+                            self.observer.on_parked_at_once(&ParkedAtOnce {
+                                slot,
+                                received_position,
+                                reason,
+                                snapshot: &snapshot,
+                            });
+                            Ok((Some(slot), Outcome::Parked))
+                        };
+                        let table = self.table.as_str();
+                        let message = match own(
+                            tx.atomic(async |inner| self.read_at(&inner, &place).await).await,
+                            table,
+                            true,
+                        )
+                        .map_err(in_slot)?
+                        {
+                            Ok(Ok(message)) => message,
+                            Ok(Err(reason)) | Err(reason) => return park(reason).await,
+                        };
+                        // A row stored before whose list the intake would refuse
+                        // is refused for good, never waited on (ADR-0037
+                        // decision 4).
+                        let dependencies = match message.checked_causal_dependencies() {
+                            Ok(dependencies) => dependencies,
+                            Err(why) => return park(why).await,
+                        };
                         if let Some(dependency) = self
-                            .first_unprocessed_dependency(&tx, &message)
+                            .first_unprocessed_dependency(&tx, &dependencies)
                             .await
                             .map_err(in_slot)?
                         {
                             self.lock_identity(&tx, &dependency)
                                 .await
                                 .map_err(in_slot)?;
-                            let set = self
-                                .set_waiting_unless_processed(&tx, &message, &dependency)
-                                .await
-                                .map_err(in_slot)?;
+                            let set = match own(
+                                tx.atomic(async |inner| {
+                                    self.set_waiting_unless_processed(&inner, &place, &dependency)
+                                        .await
+                                })
+                                .await,
+                                table,
+                                false,
+                            )
+                            .map_err(in_slot)?
+                            {
+                                Ok(set) => set,
+                                Err(reason) => return park(reason).await,
+                            };
                             if !set {
                                 // marked between the check and the lock: nothing
                                 // to wait for, and the lock is the one this
@@ -163,12 +231,17 @@ where
                                 if self.slots > 1 {
                                     // with one slot every dispatcher serializes on
                                     // it, and no wait can race the mark
-                                    self.lock_identity(&tx, &CausalDependency::on(&message))
+                                    self.lock_own_identity(&tx, &place)
                                         .await
                                         .map_err(in_slot)?;
                                 }
+                                // No scope of its own: the mark binds none of the
+                                // row's values, and after the subscriber's scope a
+                                // lost connection poisons the session, which a new
+                                // scope would report as a defect rather than the
+                                // moment's (ADR-0037 decision 6).
                                 let (processed_position, woken) = self
-                                    .mark_processed(&tx, &message)
+                                    .mark_processed(&tx, &place)
                                     .await
                                     .map_err(in_slot)?;
                                 self.observer.on_marked(&Marked {
@@ -181,8 +254,11 @@ where
                             }
                             Some(failure) => {
                                 let retry_after = (self.retries.backoff)(message.attempts + 1);
+                                // No scope of its own either: the record binds the
+                                // place and the failure's text made storable
+                                // (ADR-0037 decision 7).
                                 let (attempts, parked) = self
-                                    .record_failure(&tx, &message, &failure, retry_after)
+                                    .record_failure(&tx, &place, &failure, retry_after)
                                     .await
                                     .map_err(in_slot)?;
                                 // The `log` facade is the observer everyone has: a
@@ -288,7 +364,12 @@ where
                         return Ok(());
                     }
                     let pause = match self.dispatch(subscriber).await {
-                        Ok(Outcome::Processed | Outcome::Failed { .. } | Outcome::SetAside) => {
+                        Ok(
+                            Outcome::Processed
+                            | Outcome::Failed { .. }
+                            | Outcome::SetAside
+                            | Outcome::Parked,
+                        ) => {
                             passing = 0;
                             continue;
                         }
@@ -328,43 +409,52 @@ where
         Ok(())
     }
 
-    /// The parked messages, oldest first, with their attempts and last error.
-    pub async fn parked(&self, session: &P::Session) -> Result<Vec<InboxMessage>, Error> {
-        self.parked_rows(session).await
+    /// A page of the parked rows, oldest first, after `after`'s order of
+    /// arrival and at most `limit` of them, each by its place and its
+    /// identity when that reads ([`Parked`]).
+    pub async fn parked(
+        &self,
+        session: &P::Session,
+        after: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<Parked>, Error> {
+        self.parked_rows(session, after, limit).await
     }
 
-    /// Gives a parked message another go: attempts reset, due at once.
-    /// Returns whether the message was parked.
+    /// Gives the parked row at `received_position` another go: attempts
+    /// reset, due at once. By its place, so that a row whose values do not
+    /// read can be given one (ADR-0037 decision 6). Returns whether it was
+    /// parked.
     pub async fn unpark(
         &self,
         session: &P::Session,
-        message: &InboxMessage,
+        received_position: i64,
     ) -> Result<bool, Error> {
-        let unparked = self.unpark_row(session, message).await?;
-        if unparked {
+        let unparked = self.unpark_at(session, received_position).await?;
+        if let Some(message) = &unparked {
             self.observer.on_unparked(&Unparked { message });
         }
-        Ok(unparked)
+        Ok(unparked.is_some())
     }
 
-    /// Marks a parked message processed by hand, without the subscriber's
-    /// effects, and puts what waited for it back into the queue. Runs in a
-    /// transaction of `session`, under the lock a mark takes (ADR-0009), so
-    /// a wait for this message set beside it is woken all the same. Returns
-    /// whether the message was parked.
+    /// Marks the parked row at `received_position` processed by hand,
+    /// without the subscriber's effects, and puts what waited for it back
+    /// into the queue. Runs in a transaction of `session`, under the lock a
+    /// mark takes (ADR-0009), its identity read by the server from the row,
+    /// so a wait for it set beside is woken all the same. Returns whether it
+    /// was parked.
     pub async fn resolve(
         &self,
         session: &P::Session,
-        message: &InboxMessage,
+        received_position: i64,
     ) -> Result<bool, Error> {
         let resolved = session
             .atomic(async |tx| {
-                self.lock_identity(&tx, &CausalDependency::on(message))
-                    .await?;
-                self.resolve_row(&tx, message).await
+                self.lock_parked_identity(&tx, received_position).await?;
+                self.resolve_at(&tx, received_position).await
             })
             .await?;
-        if let Some((processed_position, woken)) = &resolved {
+        if let Some((processed_position, message, woken)) = &resolved {
             self.observer.on_resolved(&Resolved {
                 message,
                 processed_position: *processed_position,

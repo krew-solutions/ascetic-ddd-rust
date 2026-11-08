@@ -165,6 +165,23 @@ pub struct Marked<'a> {
     pub woken: &'a [InboxMessage],
 }
 
+/// The head of a slot was parked at once in the dispatcher's transaction,
+/// under its lock: its values could not be read, or its wait, its failure or
+/// its mark could not be written, for the values themselves (ADR-0037
+/// decision 6). Its subscriber did not run, or its outcome was not kept.
+/// It is named by its place, since its values may be what could not be
+/// read.
+pub struct ParkedAtOnce<'a> {
+    /// The slot the dispatcher holds.
+    pub slot: u32,
+    /// The row's order of arrival.
+    pub received_position: i64,
+    /// Why, in the library's words.
+    pub reason: &'static str,
+    /// The snapshot the head was located under.
+    pub snapshot: &'a Snapshot,
+}
+
 /// Rows whose wait for a dependency ran out were parked, with the dependency
 /// named in their `last_error`, inside the dispatcher's transaction.
 pub struct Expired<'a> {
@@ -284,6 +301,8 @@ observer! {
     fn on_marked(&self, _event: &Marked<'_>);
     /// The attempt was recorded after the subscriber failed.
     fn on_failed(&self, _event: &Failed<'_>);
+    /// The head was parked at once for its own values.
+    fn on_parked_at_once(&self, _event: &ParkedAtOnce<'_>);
     /// Waits ran out; the rows were parked.
     fn on_expired(&self, _event: &Expired<'_>);
     /// The dispatcher's transaction closed.
@@ -329,7 +348,7 @@ mod tests {
         on_handled: Handled, on_marked: Marked, on_failed: Failed,
         on_expired: Expired, on_dispatched: Dispatched, on_unparked: Unparked,
         on_resolved: Resolved, on_swept: Swept, on_rejected: Rejected,
-        on_operated: Operated,
+        on_operated: Operated, on_parked_at_once: ParkedAtOnce,
     }
 
     /// Tells `observer` one event of each kind, in the trait's order.
@@ -406,9 +425,15 @@ mod tests {
             digest: None,
             rows: 0,
         });
+        observer.on_parked_at_once(&ParkedAtOnce {
+            slot: 0,
+            received_position: 1,
+            reason: "unreadable",
+            snapshot: &snapshot,
+        });
     }
 
-    const METHODS: [&str; 13] = [
+    const METHODS: [&str; 14] = [
         "on_received",
         "on_waiting",
         "on_fetched",
@@ -422,6 +447,7 @@ mod tests {
         "on_swept",
         "on_rejected",
         "on_operated",
+        "on_parked_at_once",
     ];
 
     /// What `labels`, told in order, note for each event in turn.

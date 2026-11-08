@@ -92,6 +92,8 @@ pub struct KafkaBroker {
     producer: BTreeMap<String, String>,
     consumer: BTreeMap<String, String>,
     send_timeout: Duration,
+    /// The largest record its consumers hand on whole (ADR-0037 decision 3).
+    bounds: RecordBounds,
     /// The driver client the producers share, made with the first of them.
     client: Arc<Mutex<Option<FutureProducer>>>,
 }
@@ -112,6 +114,7 @@ impl KafkaBroker {
             producer: BTreeMap::new(),
             consumer: BTreeMap::new(),
             send_timeout: Duration::from_secs(30),
+            bounds: RecordBounds::default(),
             client: Arc::default(),
         }
     }
@@ -121,6 +124,19 @@ impl KafkaBroker {
     pub fn set(mut self, key: &str, value: &str) -> Self {
         self.config.set(key, value);
         self.client = Arc::default();
+        self
+    }
+
+    /// Returns a broker whose consumers hand on a record past `bounds` as a
+    /// marked prefix of it, never whole (ADR-0037 decision 3). The driver
+    /// has already decompressed it — measured on 2026-11-08, neither
+    /// `receive.message.max.bytes` nor `fetch.max.bytes` bounds what a
+    /// gzip or lz4 record unfolds to — so the bound saves every copy after
+    /// the driver's, and the inbox sets the marked message aside. A host
+    /// sets it to its inbox's bounds.
+    #[must_use]
+    pub fn with_record_bounds(mut self, bounds: RecordBounds) -> Self {
+        self.bounds = bounds;
         self
     }
 
@@ -197,6 +213,7 @@ impl Adapter for KafkaBroker {
         consumer.subscribe(&[&topic]).map_err(transport)?;
         Ok(Box::new(KafkaConsumer {
             consumer: Arc::new(consumer),
+            bounds: self.bounds,
             uri: uri.to_owned(),
             group: group.to_owned(),
             slot: Arc::new(Slot {
@@ -230,6 +247,7 @@ impl KafkaBroker {
 
 struct KafkaConsumer {
     consumer: Arc<StreamConsumer>,
+    bounds: RecordBounds,
     uri: String,
     group: String,
     /// The handler the delivery loop calls, shared with it.
@@ -286,6 +304,7 @@ impl WireConsumer for KafkaConsumer {
         if start {
             runtime.spawn(deliver(
                 Arc::clone(&self.consumer),
+                self.bounds,
                 Arc::clone(&self.slot),
                 self.uri.clone(),
                 self.group.clone(),
@@ -324,7 +343,13 @@ impl Drop for KafkaConsumer {
 
 /// The delivery loop of one consumer: the message in hand to the handler
 /// attached, until it is taken, then the next off the log.
-async fn deliver(consumer: Arc<StreamConsumer>, slot: Arc<Slot>, uri: String, group: String) {
+async fn deliver(
+    consumer: Arc<StreamConsumer>,
+    bounds: RecordBounds,
+    slot: Arc<Slot>,
+    uri: String,
+    group: String,
+) {
     let mut in_hand: Option<InHand> = None;
     let mut failures: u32 = 0;
     loop {
@@ -356,7 +381,7 @@ async fn deliver(consumer: Arc<StreamConsumer>, slot: Arc<Slot>, uri: String, gr
             match received {
                 Ok(received) => {
                     in_hand = Some(InHand {
-                        message: wire_message(&received),
+                        message: wire_message(&received, bounds),
                         topic: received.topic().to_owned(),
                         partition: received.partition(),
                         offset: received.offset(),
@@ -433,20 +458,102 @@ async fn replaced(slot: &Slot, by: &InFlight) {
 }
 
 /// The driver's message as the bus's: payload, key and headers.
-fn wire_message(received: &rdkafka::message::BorrowedMessage<'_>) -> Message {
-    let message = Message::new(received.payload().unwrap_or_default());
-    let message = match received.key() {
+/// The largest record a consumer hands on whole (ADR-0037 decision 3): its
+/// payload's bytes, and its headers' together, names and values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecordBounds {
+    /// The payload's bytes.
+    pub payload: usize,
+    /// All the headers' bytes together.
+    pub headers: usize,
+}
+
+impl Default for RecordBounds {
+    /// The inbox's defaults: 8 MiB of payload, 1 MiB of headers.
+    fn default() -> Self {
+        Self {
+            payload: 8 << 20,
+            headers: 1 << 20,
+        }
+    }
+}
+
+/// The header a record carries in place of its own when the driver could
+/// not hand them over: its name holds a NUL, which the inbox's intake sets
+/// aside as malformed (ADR-0037 decision 3).
+pub const UNREADABLE_HEADERS: &str = "\0kafka: a header's name is not UTF-8";
+
+/// The header a record past its consumer's bounds carries beside a prefix
+/// of its payload, in place of the rest.
+pub const PAST_ITS_BOUNDS: &str = "\0kafka: the record is past its consumer's bounds";
+
+/// How many bytes of a record past its bounds are handed on.
+const PREFIX: usize = 1024;
+
+/// The wire message of a record, never failing (ADR-0037 decision 3).
+/// rdkafka reads a header's name with `to_str().unwrap()`, so a name that
+/// is not UTF-8 panics in it: the panic is caught here, and [`assembled`]
+/// marks the record.
+fn wire_message(received: &rdkafka::message::BorrowedMessage<'_>, bounds: RecordBounds) -> Message {
+    let headers = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        received
+            .headers()
+            .map(|headers| headers.iter())
+            .into_iter()
+            .flatten()
+            .map(|header| (header.key.to_owned(), header.value.unwrap_or_default()))
+            .collect::<Vec<_>>()
+    }))
+    .ok();
+    assembled(
+        received.payload().unwrap_or_default(),
+        received.key(),
+        headers,
+        bounds,
+    )
+}
+
+/// A record's message from its parts: whole within `bounds`; a prefix of its
+/// payload with [`PAST_ITS_BOUNDS`] past them, copied no further; its
+/// payload and key with [`UNREADABLE_HEADERS`] when its headers could not
+/// be read (`None`).
+fn assembled(
+    payload: &[u8],
+    key: Option<&[u8]>,
+    headers: Option<Vec<(String, &[u8])>>,
+    bounds: RecordBounds,
+) -> Message {
+    let marked = |marker: &str, payload: &[u8]| {
+        let message = Message::new(payload.to_vec()).with_header(marker, Vec::<u8>::new());
+        match key {
+            Some(key) => message.with_key(&key[..key.len().min(PREFIX)]),
+            None => message,
+        }
+    };
+    let Some(headers) = headers else {
+        log::warn!(
+            "kafka: a record's header name is not UTF-8; handed on marked, its headers dropped"
+        );
+        return marked(
+            UNREADABLE_HEADERS,
+            &payload[..payload.len().min(bounds.payload)],
+        );
+    };
+    let header_bytes: usize = headers
+        .iter()
+        .map(|(name, value)| name.len() + value.len())
+        .sum();
+    if payload.len() > bounds.payload || header_bytes > bounds.headers {
+        return marked(PAST_ITS_BOUNDS, &payload[..payload.len().min(PREFIX)]);
+    }
+    let message = Message::new(payload);
+    let message = match key {
         Some(key) => message.with_key(key),
         None => message,
     };
-    received
-        .headers()
-        .map(|headers| headers.iter())
-        .into_iter()
-        .flatten()
-        .fold(message, |message, header| {
-            message.with_header(header.key, header.value.unwrap_or_default())
-        })
+    headers.into_iter().fold(message, |message, (name, value)| {
+        message.with_header(name, value)
+    })
 }
 
 /// How long a consumer waits before it tries again a message whose handler
@@ -579,5 +686,52 @@ mod tests {
         assert_eq!(consumer.get("group.id"), Some("orders"));
         assert_eq!(consumer.get("enable.auto.offset.store"), Some("false"));
         assert_eq!(consumer.get("enable.auto.commit"), Some("true"));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "tests")]
+mod assembled_tests {
+    use super::*;
+
+    const BOUNDS: RecordBounds = RecordBounds {
+        payload: 8,
+        headers: 16,
+    };
+
+    #[test]
+    fn a_record_within_its_bounds_is_handed_on_whole() {
+        let message = assembled(
+            b"payload",
+            Some(b"k"),
+            Some(vec![("h".to_owned(), b"v".as_slice())]),
+            BOUNDS,
+        );
+        assert_eq!(message.payload(), b"payload");
+        assert_eq!(message.key(), Some(b"k".as_slice()));
+        assert_eq!(message.header("h"), Some(b"v".as_slice()));
+    }
+
+    #[test]
+    fn a_record_past_its_bounds_is_a_marked_prefix() {
+        for (payload, headers) in [
+            (vec![b'p'; 2 * PREFIX], vec![]),
+            (b"p".to_vec(), vec![("h".to_owned(), [b'v'; 16].as_slice())]),
+        ] {
+            let message = assembled(&payload, None, Some(headers), BOUNDS);
+            assert!(message.header(PAST_ITS_BOUNDS).is_some());
+            assert!(message.payload().len() <= PREFIX);
+            assert_eq!(message.headers().len(), 1, "its own headers dropped");
+        }
+    }
+
+    /// The driver's panic on a header name that is not UTF-8 reaches here as
+    /// no headers: the record is handed on marked, its payload and key kept.
+    #[test]
+    fn a_record_whose_headers_could_not_be_read_is_marked() {
+        let message = assembled(b"payload", Some(b"k"), None, BOUNDS);
+        assert!(message.header(UNREADABLE_HEADERS).is_some());
+        assert_eq!(message.payload(), b"payload");
+        assert_eq!(message.key(), Some(b"k".as_slice()));
     }
 }

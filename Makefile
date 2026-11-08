@@ -61,9 +61,9 @@ grep -lE '#\[ignore = "($(1))' crates/*/tests/*.rs | while IFS=/ read -r _ crate
 done
 endef
 
-.PHONY: all stand check clippy doc test test-pg test-vault test-kafka proofs fmt help
+.PHONY: all stand check clippy doc test test-pg host-features test-vault test-kafka proofs fmt help
 
-all: check clippy doc test test-pg ## everything CI runs on a push: a PostgreSQL beside it
+all: check clippy doc test test-pg host-features ## everything CI runs on a push: a PostgreSQL beside it
 
 stand: all test-vault test-kafka ## every tier a full stand serves: PostgreSQL, Vault and Kafka
 
@@ -84,6 +84,16 @@ test: ## the workspace tests as `cargo test` runs them; the specification crate'
 
 test-pg: ## the tests ignored for want of PostgreSQL, at ASCETIC_DDD_TEST_PG_URL
 	$(call run_ignored,$(NEEDS_PG))
+
+# The library built as a host builds it (ADR-0037 § Executors): a workspace
+# of its own, since this one tests with `--all-features`.
+HOST_FEATURES := --manifest-path verify/inbox-features/Cargo.toml
+
+host-features: ## the stream id's golden table and properties under serde_json's arbitrary_precision and preserve_order, then raw_value too (verify/inbox-features)
+	$(CARGO) fmt $(HOST_FEATURES) -- --check
+	$(CARGO) clippy $(HOST_FEATURES) --all-targets --all-features -- -D warnings
+	$(CARGO) test $(HOST_FEATURES)
+	$(CARGO) test $(HOST_FEATURES) --features raw_value
 
 test-vault: ## the tests ignored for want of a Vault dev server, at ASCETIC_DDD_TEST_VAULT_ADDR
 	$(call run_ignored,$(NEEDS_VAULT))

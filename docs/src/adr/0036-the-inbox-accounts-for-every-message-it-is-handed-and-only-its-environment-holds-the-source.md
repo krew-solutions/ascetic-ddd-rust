@@ -931,3 +931,8 @@ This ADR's own:
     READ, and a plain insert.
 - 2026-11-08 — Part A merged into the library's `main`; the host's
   adoption, A6, begins.
+- 2026-11-08 — The host's executor of R3 found that R3's rule lets a
+  message stall the channel under `arbitrary_precision` (`1e-16384`: a
+  finite `f64`, past `numeric`'s scale, 22003 taken as the environment's).
+  R3, R4's claim on structured headers and decision 3's premise are revised
+  by ADR-0037 (Proposed).

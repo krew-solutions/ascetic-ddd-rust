@@ -51,7 +51,9 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "log",
+ "proptest",
  "rdkafka",
+ "serde_json",
  "tokio",
 ]
 

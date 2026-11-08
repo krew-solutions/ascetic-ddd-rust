@@ -585,3 +585,57 @@ async fn a_cancel_waits_for_the_message_in_hand_to_be_committed() {
     assert_eq!(fixture.handled().await, 1);
     intake.cancel().await;
 }
+
+/// A header reaches the handler as its producer wrote it (ADR-0037 decision
+/// 2): kept as text, it is never reordered, normalised or merged by `jsonb`.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_header_reaches_the_handler_as_its_producer_wrote_it() {
+    let fixture = fixture("headers", "inbox-bridge-headers").await;
+    let texts = [
+        "3",
+        "true",
+        "[1]",
+        "\"x\"",
+        "{\"b\":2,\"aa\":1}",
+        "{\"a\":1,\"a\":2}",
+        "[1.0, 1e5]",
+    ];
+    let message = texts.iter().enumerate().fold(
+        order("headers", 1, "00000000-0000-4000-8000-000000000009"),
+        |message, (at, text)| message.with_header(format!("h{at}"), *text),
+    );
+    fixture
+        .inbox
+        .intake("inbox://orders/order-7", &message)
+        .await
+        .unwrap();
+    let (seen, mut received) = mpsc::unbounded_channel();
+    let processing = fixture
+        .inbox
+        .consumer(|message: &Message| Ok(message.headers().to_vec()))
+        .subscribe(move |_tx: PgSession, headers: Vec<(String, Vec<u8>)>| {
+            let seen = seen.clone();
+            async move {
+                seen.send(headers).ok();
+                Ok::<(), BoxError>(())
+            }
+        })
+        .unwrap();
+    let headers = tokio::time::timeout(Duration::from_secs(20), received.recv())
+        .await
+        .expect("the message is processed")
+        .unwrap();
+    for (at, text) in texts.iter().enumerate() {
+        let name = format!("h{at}");
+        assert_eq!(
+            headers
+                .iter()
+                .find(|(header, _)| *header == name)
+                .map(|(_, value)| value.as_slice()),
+            Some(text.as_bytes()),
+            "{name}"
+        );
+    }
+    processing.cancel().await;
+}

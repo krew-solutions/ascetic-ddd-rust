@@ -22,8 +22,8 @@ use ascetic_ddd_inbox::observer::{
     Swept, Unparked, Waiting,
 };
 use ascetic_ddd_inbox::{
-    ByStream, CausalDependency, Error, Failure, Inbox, InboxMessage, InboxRetention, Loops,
-    Outcome, PartitionKey, PgInbox, Receipt, Retries,
+    ByStream, CausalDependency, Census, Error, Failure, Inbox, InboxMessage, InboxRetention, Loops,
+    MAX_IDENTITY_BYTES, Outcome, Parked, PartitionKey, PgInbox, Receipt, Retries,
 };
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -182,21 +182,37 @@ impl<O: InboxObserver> Fixture<O> {
         self.inbox.dispatch(subscriber).await.unwrap()
     }
 
-    async fn parked_messages(&self) -> Vec<InboxMessage> {
+    async fn parked_messages(&self) -> Vec<Parked> {
         self.sessions
-            .session(async |session| self.inbox.parked(&session).await)
+            .session(async |session| self.inbox.parked(&session, None, 1000).await)
             .await
             .unwrap()
     }
 
     async fn parked(&self) -> Vec<String> {
-        self.sessions
-            .session(async |session| self.inbox.parked(&session).await)
+        self.parked_messages()
             .await
-            .unwrap()
             .iter()
-            .map(label)
+            .map(|parked| match &parked.identity {
+                Some(identity) => format!(
+                    "{}@{}",
+                    identity.stream_id["id"].as_str().unwrap_or("?"),
+                    identity.stream_position
+                ),
+                None => format!("?@{}", parked.received_position),
+            })
             .collect()
+    }
+
+    /// The order of arrival of `message`, parked.
+    async fn position_of(&self, message: &InboxMessage) -> i64 {
+        let wanted = label(message);
+        let labels = self.parked().await;
+        let at = labels
+            .iter()
+            .position(|parked| *parked == wanted)
+            .unwrap_or_else(|| panic!("{wanted} is not parked: {labels:?}"));
+        self.parked_messages().await[at].received_position
     }
 
     async fn publish(&self, messages: &[InboxMessage]) {
@@ -603,7 +619,7 @@ async fn a_poison_message_is_parked_after_its_attempts_and_the_partition_flows()
     assert_eq!(f.rows().await, 2, "a parked row stays in the table");
     let parked = f
         .sessions
-        .session(async |session| f.inbox.parked(&session).await)
+        .session(async |session| f.inbox.parked(&session, None, 1000).await)
         .await
         .unwrap();
     assert_eq!(parked[0].attempts, 2);
@@ -657,9 +673,10 @@ async fn an_unparked_message_is_tried_again() {
     );
     assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
 
+    let at = f.position_of(&poison).await;
     let unparked = f
         .sessions
-        .session(async |session| f.inbox.unpark(&session, &poison).await)
+        .session(async |session| f.inbox.unpark(&session, at).await)
         .await
         .unwrap();
     assert!(unparked);
@@ -692,9 +709,10 @@ async fn a_resolved_message_releases_its_dependents() {
         "b@1 waits"
     );
 
+    let at = f.position_of(&cause).await;
     let resolved = f
         .sessions
-        .session(async |session| f.inbox.resolve(&session, &cause).await)
+        .session(async |session| f.inbox.resolve(&session, at).await)
         .await
         .unwrap();
     assert!(resolved);
@@ -1022,7 +1040,9 @@ async fn loops_over_slots_with_dependencies_across_them_lose_no_wake() {
             tokio::time::sleep(Duration::from_millis(20)).await;
             for parked in f.parked_messages().await {
                 f.sessions
-                    .session(async |session| f.inbox.resolve(&session, &parked).await)
+                    .session(async |session| {
+                        f.inbox.resolve(&session, parked.received_position).await
+                    })
                     .await
                     .unwrap();
             }
@@ -1433,6 +1453,7 @@ impl InboxObserver for Recorder {
             Ok(Outcome::Processed) => "dispatched a message",
             Ok(Outcome::Failed { .. }) => "dispatched a failure",
             Ok(Outcome::SetAside) => "dispatched a set-aside",
+            Ok(Outcome::Parked) => "dispatched a park",
             Ok(Outcome::Nothing) => "dispatched nothing",
             Err(_) => "rolled back",
         });
@@ -1599,9 +1620,10 @@ async fn an_unparked_row_whose_wait_ran_out_waits_again() {
     assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
     assert_eq!(f.parked().await, ["order@1"]);
 
+    let at = f.position_of(&effect).await;
     let unparked = f
         .sessions
-        .session(async |session| f.inbox.unpark(&session, &effect).await)
+        .session(async |session| f.inbox.unpark(&session, at).await)
         .await
         .unwrap();
     assert!(unparked);
@@ -1657,7 +1679,7 @@ async fn a_dependency_that_never_arrives_parks_the_message_after_max_wait() {
     assert_eq!(f.parked().await, ["order@1"]);
     let parked = f
         .sessions
-        .session(async |session| f.inbox.parked(&session).await)
+        .session(async |session| f.inbox.parked(&session, None, 1000).await)
         .await
         .unwrap();
     assert!(
@@ -1674,9 +1696,10 @@ async fn a_dependency_that_never_arrives_parks_the_message_after_max_wait() {
     // The dependency arrives after all: unparked, the message waits again,
     // and is woken by the dependency's mark.
     f.publish(std::slice::from_ref(&cause)).await;
+    let at = f.position_of(&effect).await;
     let unparked = f
         .sessions
-        .session(async |session| f.inbox.unpark(&session, &effect).await)
+        .session(async |session| f.inbox.unpark(&session, at).await)
         .await
         .unwrap();
     assert!(unparked);
@@ -1714,6 +1737,10 @@ fn the_released_migrations_keep_their_checksums() {
             (
                 "20261107T010000Z_indexes_before_launch".to_owned(),
                 "fnv1a64:85998ae59b7e3b60:366".to_owned()
+            ),
+            (
+                "20261108T000000Z_unreadable_at".to_owned(),
+                "fnv1a64:d9799e13a5481289:68".to_owned()
             )
         ]
     );
@@ -1825,9 +1852,10 @@ async fn unprocessed_parked_waiting_and_named_rows_are_never_forgotten() {
     assert_eq!(f.inbox.sweep().await.unwrap(), 1);
     assert_eq!(f.held().await, ["t@1", "p@1", "w@1", "u@1"]);
 
+    let at = f.position_of(&parked).await;
     assert!(
         f.sessions
-            .session(async |session| f.inbox.resolve(&session, &parked).await)
+            .session(async |session| f.inbox.resolve(&session, at).await)
             .await
             .unwrap()
     );
@@ -1927,4 +1955,764 @@ async fn the_inbox_s_run_sweeps_beside_its_loops_after_its_grace() {
     run_for(&f.inbox, &sweeps, 1).await;
     assert_eq!(sweeps.0.load(Ordering::SeqCst), 1);
     assert_eq!(f.rows().await, 0);
+}
+
+/// A row stored before ADR-0037, its dependency list structured in its
+/// metadata, still waits for its cause and is woken by it: the intake now
+/// keeps the list as text, and dispatch reads both forms.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_row_stored_with_structured_dependencies_still_waits_for_them() {
+    let f = fixture("causal_structured").await;
+    let cause = message("user", 5);
+    let effect = message("order", 1).depending_on(&[CausalDependency::on(&cause)]);
+    assert!(
+        effect
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("causal_dependencies"))
+            .is_some_and(serde_json::Value::is_array),
+        "the list as the intake stored it before"
+    );
+    let client = pool().get().await.unwrap();
+    client
+        .execute(
+            &format!(
+                "INSERT INTO {} (tenant_id, stream_type, stream_id, stream_position, uri, payload, metadata) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                f.table
+            ),
+            &[
+                &effect.tenant_id,
+                &effect.stream_type,
+                &effect.stream_id,
+                &effect.stream_position,
+                &effect.uri,
+                &effect.payload,
+                &effect.metadata,
+            ],
+        )
+        .await
+        .unwrap();
+    let (seen, subscriber) = collector();
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::SetAside, "it waits");
+
+    f.publish(&[cause]).await;
+    while f.dispatch(&subscriber).await != Outcome::Nothing {}
+
+    assert_eq!(*seen.lock().unwrap(), ["user@5", "order@1"]);
+}
+
+/// Text no compression shrinks, `length` characters drawn from `alphabet`
+/// by a fixed sequence: the btree compresses an item over about 510 bytes,
+/// so a repeated filler would pass far past the bound (ADR-0037 decision 4).
+fn incompressible(alphabet: &[char], length: usize, seed: u64) -> String {
+    let mut state = seed | 1;
+    (0..length)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            alphabet[usize::try_from(state % alphabet.len() as u64).unwrap()]
+        })
+        .collect()
+}
+
+/// A message of `tenant`'s stream `stream_id` of `stream_type`, at the
+/// largest position, whose size bound is what the waiting index takes.
+fn cause_of(tenant: &str, stream_type: &str, stream_id: serde_json::Value) -> InboxMessage {
+    static EVENT: AtomicU64 = AtomicU64::new(1);
+    let event = EVENT.fetch_add(1, Ordering::Relaxed);
+    InboxMessage::new(
+        tenant,
+        stream_type,
+        stream_id,
+        i32::MAX,
+        "kafka://orders/cause",
+        "cause",
+    )
+    .with_metadata(json!({ "message_id": format!("00000000-0000-4000-9000-{event:012x}") }))
+}
+
+/// The largest identity the intake admits, of each shape, is stored, waited
+/// for and woken: its stored form fits the waiting index, whatever its
+/// content (ADR-0037 decision 4). Mutation run on 2026-11-08: the bound
+/// loosened by 8 bytes makes the string shape's wait fail with 54000. A
+/// number counted short is not seen here, since the index compresses the
+/// integers' item; the measured test below holds that term.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_largest_identity_admitted_is_stored_waited_for_and_woken() {
+    let f = fixture("identity_bound").await;
+    let alnum: Vec<char> = ('a'..='z').chain('A'..='Z').chain('0'..='9').collect();
+    let cyrillic: Vec<char> = ('\u{0410}'..='\u{044F}').collect();
+    let at_the_bound = |tenant: &str, stream_type: &str, filler: &dyn Fn(usize) -> String| {
+        let empty = CausalDependency::on(&cause_of(tenant, stream_type, json!({ "id": "" })));
+        let room = MAX_IDENTITY_BYTES - empty.stored_bytes();
+        let id = filler(room);
+        assert_eq!(id.len(), room, "the filler is exactly the room");
+        cause_of(tenant, stream_type, json!({ "id": id }))
+    };
+    let shapes = [
+        (
+            "a string",
+            at_the_bound("tenant-1", "orders.Order", &|room| {
+                incompressible(&alnum, room, 7)
+            }),
+        ),
+        (
+            "two-byte characters",
+            at_the_bound("tenant-1", "orders.Order", &|room| {
+                let text = incompressible(&cyrillic, room / 2, 11);
+                if room % 2 == 1 {
+                    format!("{text}x")
+                } else {
+                    text
+                }
+            }),
+        ),
+        (
+            "a tenant and a stream type at their columns",
+            at_the_bound(
+                &"t".repeat(128),
+                &format!("orders.{}", "O".repeat(121)),
+                &|room| incompressible(&alnum, room, 13),
+            ),
+        ),
+        ("integers", {
+            // Twenty digits each, every one another: alike, they compress.
+            let dense = |count: usize| {
+                let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+                let numbers: Vec<u64> = (0..count)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        10_000_000_000_000_000_000 + state % (u64::MAX - 10_000_000_000_000_000_000)
+                    })
+                    .collect();
+                cause_of(
+                    "tenant-1",
+                    "orders.Order",
+                    json!({ "id": "dense", "n": numbers }),
+                )
+            };
+            let count = (1..)
+                .take_while(|count| {
+                    CausalDependency::on(&dense(*count)).stored_bytes() <= MAX_IDENTITY_BYTES
+                })
+                .last()
+                .unwrap();
+            dense(count)
+        }),
+    ];
+    for (at, (shape, cause)) in shapes.into_iter().enumerate() {
+        assert!(
+            CausalDependency::on(&cause).stored_bytes() <= MAX_IDENTITY_BYTES,
+            "{shape}"
+        );
+        let effect =
+            message(&format!("effect{at}"), 1).depending_on(&[CausalDependency::on(&cause)]);
+        let rows = f.rows().await;
+        f.publish(std::slice::from_ref(&effect)).await;
+        assert_eq!(f.rows().await, rows + 1, "{shape}: the effect is stored");
+        let (seen, subscriber) = collector();
+        assert_eq!(
+            f.dispatch(&subscriber).await,
+            Outcome::SetAside,
+            "{shape}: it waits"
+        );
+        f.publish(std::slice::from_ref(&cause)).await;
+        assert_eq!(f.rows().await, rows + 2, "{shape}: the cause is stored");
+        while f.dispatch(&subscriber).await != Outcome::Nothing {}
+        assert_eq!(seen.lock().unwrap().len(), 2, "{shape}: both processed");
+        assert_eq!(
+            seen.lock().unwrap()[1],
+            label(&effect),
+            "{shape}: the effect after"
+        );
+    }
+}
+
+/// One byte past the bound, a message and a message depending on it are
+/// set aside at the intake, never left to fail at dispatch.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn an_identity_past_the_bound_is_set_aside_at_the_intake() {
+    let f = fixture("identity_past").await;
+    let alnum: Vec<char> = ('a'..='z').collect();
+    let empty = CausalDependency::on(&cause_of("tenant-1", "orders.Order", json!({ "id": "" })));
+    let room = MAX_IDENTITY_BYTES - empty.stored_bytes();
+    let past = cause_of(
+        "tenant-1",
+        "orders.Order",
+        json!({ "id": incompressible(&alnum, room + 1, 5) }),
+    );
+    let effect = message("effect", 1).depending_on(&[CausalDependency::on(&past)]);
+    f.publish(&[past, effect]).await;
+    assert_eq!(f.rows().await, 0);
+}
+
+/// A row stored before whose dependency list the intake would refuse is
+/// parked for good, never waited on, and the rows behind it go on.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_row_stored_with_a_list_the_intake_refuses_is_parked_and_the_slot_goes_on() {
+    let f = fixture("causal_refused").await;
+    let legacy = message("legacy", 1).with_metadata(json!({
+        "message_id": "00000000-0000-4000-a000-000000000001",
+        "causal_dependencies": [{ "tenant_id": "tenant-1", "stream_type": "orders.Order",
+                                  "stream_id": 1.5, "stream_position": 1 }],
+    }));
+    let client = pool().get().await.unwrap();
+    client
+        .execute(
+            &format!(
+                "INSERT INTO {} (tenant_id, stream_type, stream_id, stream_position, uri, payload, metadata) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                f.table
+            ),
+            &[
+                &legacy.tenant_id,
+                &legacy.stream_type,
+                &legacy.stream_id,
+                &legacy.stream_position,
+                &legacy.uri,
+                &legacy.payload,
+                &legacy.metadata,
+            ],
+        )
+        .await
+        .unwrap();
+    f.publish(&[message("next", 1)]).await;
+    let (seen, subscriber) = collector();
+    while f.dispatch(&subscriber).await != Outcome::Nothing {}
+    assert_eq!(
+        *seen.lock().unwrap(),
+        ["next@1"],
+        "the subscriber never saw it"
+    );
+    assert_eq!(f.parked().await, ["legacy@1"]);
+}
+
+/// The bound on an identity's stored form dominates what PostgreSQL makes of
+/// it, uncompressed, for every shape: strings of every width of character,
+/// integers of every count of digits, booleans, nulls, containers within
+/// containers, positions at both ends (ADR-0037 decision 4). The waiting
+/// index compresses an item past about 510 bytes, so a wait at the bound
+/// cannot tell a number counted short; this can. For a string the bound is
+/// within a few bytes of the measure, so a looser one would admit an
+/// identity the index refuses.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_bound_on_an_identity_dominates_its_stored_size() {
+    let client = pool().get().await.unwrap();
+    let measured = async |dependency: &CausalDependency| -> usize {
+        let text = serde_json::to_string(dependency).unwrap();
+        let row = client
+            .query_one("SELECT pg_column_size($1::text::jsonb)", &[&text])
+            .await
+            .unwrap();
+        usize::try_from(row.get::<_, i32>(0)).unwrap()
+    };
+    let identity = |stream_id: serde_json::Value, position: i32| CausalDependency {
+        tenant_id: "tenant-1".to_owned(),
+        stream_type: "orders.Order".to_owned(),
+        stream_id,
+        stream_position: position,
+    };
+    let mut shapes = vec![
+        identity(json!("o-1"), 1),
+        identity(json!(""), 0),
+        identity(json!("ж".repeat(300)), i32::MAX),
+        identity(json!("\u{1F600}".repeat(100)), i32::MIN),
+        identity(json!(true), 1),
+        identity(json!(null), 1),
+        identity(json!([]), 1),
+        identity(json!({}), 1),
+        identity(json!([[[[["deep"]]]]]), 1),
+        identity(json!({ "a": { "b": [1, "x", null, { "c": false }] } }), 1),
+    ];
+    for number in [
+        json!(0),
+        json!(1),
+        json!(9999),
+        json!(10000),
+        json!(123_456_789),
+        json!(i64::MIN),
+        json!(i64::MAX),
+        json!(u64::MAX),
+    ] {
+        shapes.push(identity(number.clone(), i32::MAX));
+        shapes.push(identity(json!(vec![number; 50]), i32::MAX));
+    }
+    for dependency in &shapes {
+        let (bound, size) = (dependency.stored_bytes(), measured(dependency).await);
+        assert!(
+            size <= bound,
+            "{dependency:?}: measured {size}, bounded {bound}"
+        );
+    }
+    for length in [0, 1, 100, 2_000] {
+        let dependency = identity(json!("k".repeat(length)), i32::MAX);
+        let (bound, size) = (dependency.stored_bytes(), measured(&dependency).await);
+        assert!(
+            bound - size <= 4,
+            "a string's bound is tight: {bound} against {size}"
+        );
+    }
+}
+
+/// Inserts a row as a release before the bus's domain and ADR-0037 could
+/// have stored it, its values whatever SQL writes.
+async fn stored_before(f: &Fixture, stream_id: &str, metadata: &str) {
+    let client = pool().get().await.unwrap();
+    client
+        .execute(
+            &format!(
+                "INSERT INTO {} (tenant_id, stream_type, stream_id, stream_position, uri, payload, metadata) \
+                 VALUES ('tenant-1', 'orders.Order', $1::text::jsonb, 1, 'kafka://orders/old', 'old', $2::text::jsonb)",
+                f.table
+            ),
+            &[&stream_id, &metadata],
+        )
+        .await
+        .unwrap();
+}
+
+/// The parked rows' order of arrival and last error, read without their
+/// values, which may not decode.
+async fn parked_places(f: &Fixture) -> Vec<(i64, Option<String>)> {
+    let client = pool().get().await.unwrap();
+    client
+        .query(
+            &format!(
+                "SELECT received_position, last_error FROM {} WHERE parked_at IS NOT NULL \
+                 ORDER BY received_position",
+                f.table
+            ),
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect()
+}
+
+/// A head the dispatcher cannot read for its own values is parked at once
+/// in its transaction, its subscriber not run, and the next row of its slot
+/// is processed (ADR-0037 decision 6): a metadata 128 deep, which the
+/// client's reader refuses, and a stream id past 64 bits, which would reach
+/// the handler as another id. Before, the first panicked the dispatcher's
+/// task and the second stopped every loop at its mark.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_head_that_cannot_be_read_is_parked_at_once_and_the_slot_goes_on() {
+    for (ground, stream_id, metadata) in [
+        (
+            "a metadata 128 deep",
+            r#"{"id": "deep"}"#.to_owned(),
+            format!(r#"{{"h": {}{}}}"#, "[".repeat(127), "]".repeat(127)),
+        ),
+        (
+            "a stream id past 64 bits",
+            "12345678901234567890123".to_owned(),
+            "{}".to_owned(),
+        ),
+    ] {
+        // No trace: the row is stored by SQL, and a trace names only rows it
+        // saw received.
+        let f = fixture_cut("unreadable", (), 1, TraceFile::off()).await;
+        stored_before(&f, &stream_id, &metadata).await;
+        f.publish(&[message("next", 1)]).await;
+        let (seen, subscriber) = collector();
+        assert_eq!(f.dispatch(&subscriber).await, Outcome::Parked, "{ground}");
+        while f.dispatch(&subscriber).await != Outcome::Nothing {}
+        assert_eq!(
+            *seen.lock().unwrap(),
+            ["next@1"],
+            "{ground}: the slot goes on"
+        );
+        let parked = parked_places(&f).await;
+        assert_eq!(parked.len(), 1, "{ground}: {parked:?}");
+        assert!(
+            parked[0].1.as_deref().is_some_and(|why| !why.is_empty()),
+            "{ground}: the reason is kept"
+        );
+    }
+}
+
+/// A failure's text is kept without NUL and within its width, never failing
+/// the record: a NUL raised 22021 and stopped every loop at every poll
+/// (ADR-0037 decision 7).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_failure_with_a_nul_is_recorded_and_the_row_tried_again() {
+    let f = fixture("nul_failure").await;
+    f.publish(&[message("a", 1)]).await;
+    let failing = |_: &PgSession, _: &InboxMessage| {
+        std::future::ready(Err::<(), Failure>(Failure::Transient(
+            format!("unknown variant `\0{}`", "x".repeat(10_000)).into(),
+        )))
+    };
+    assert!(matches!(
+        f.dispatch(failing).await,
+        Outcome::Failed {
+            attempts: 1,
+            parked: false
+        }
+    ));
+    let client = pool().get().await.unwrap();
+    let kept: String = client
+        .query_one(&format!("SELECT last_error FROM {}", f.table), &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert!(!kept.contains('\0'));
+    assert!(kept.chars().count() <= 4096, "{}", kept.chars().count());
+}
+
+/// A parked row whose values do not read is listed by its place, its
+/// identity none where it does not read back, and is resolved and unparked
+/// by its place; its resolve wakes what waited for it, the identity read by
+/// the server from the row (ADR-0037 decision 6). Before, the listing
+/// decoded every row and one such row failed it for every Tenant, and
+/// unpark and resolve bound an identity read back into Rust.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_parked_row_that_does_not_read_is_listed_resolved_and_unparked_by_its_place() {
+    let f = fixture_cut("unreadable_operated", (), 1, TraceFile::off()).await;
+    stored_before(&f, "12345678901234567890123", "{}").await;
+    stored_before(
+        &f,
+        r#"{"id": "deep"}"#,
+        &format!(r#"{{"h": {}{}}}"#, "[".repeat(127), "]".repeat(127)),
+    )
+    .await;
+    // a row stored before, waiting for the first
+    let client = pool().get().await.unwrap();
+    client
+        .execute(
+            &format!(
+                "INSERT INTO {} (tenant_id, stream_type, stream_id, stream_position, uri, payload, \
+                     metadata, waiting_for, waiting_since) \
+                 VALUES ('tenant-1', 'orders.Order', '{{\"id\": \"waiter\"}}', 1, 'kafka://orders/w', \
+                     'w', '{{}}', jsonb_build_object('tenant_id', 'tenant-1', 'stream_type', 'orders.Order', \
+                     'stream_id', '12345678901234567890123'::jsonb, 'stream_position', 1), now())",
+                f.table
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+    let (seen, subscriber) = collector();
+    while f.dispatch(&subscriber).await != Outcome::Nothing {}
+    let parked = f.parked_messages().await;
+    assert_eq!(parked.len(), 2, "{parked:?}");
+    assert!(
+        parked[0].identity.is_none(),
+        "past 64 bits, it reads back as no identity"
+    );
+    assert!(
+        parked[1].identity.is_some(),
+        "a deep metadata is not read by the listing"
+    );
+    let resolved = f
+        .sessions
+        .session(async |session| f.inbox.resolve(&session, parked[0].received_position).await)
+        .await
+        .unwrap();
+    assert!(resolved);
+    while f.dispatch(&subscriber).await != Outcome::Nothing {}
+    assert_eq!(*seen.lock().unwrap(), ["waiter@1"], "woken by the resolve");
+    let unparked = f
+        .sessions
+        .session(async |session| f.inbox.unpark(&session, parked[1].received_position).await)
+        .await
+        .unwrap();
+    assert!(unparked);
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::Parked,
+        "parked at once again"
+    );
+    assert_eq!(f.parked_messages().await.len(), 1);
+}
+
+/// What an expiry was told: each batch's size, and whether every row came
+/// without its payload.
+#[derive(Default)]
+struct ExpiredBatches(Mutex<Vec<(usize, bool)>>);
+
+impl InboxObserver for ExpiredBatches {
+    fn on_expired(&self, event: &Expired<'_>) {
+        self.0.lock().unwrap().push((
+            event.messages.len(),
+            event
+                .messages
+                .iter()
+                .all(|message| message.payload.is_empty()),
+        ));
+    }
+}
+
+/// An expiry parks at most a batch per statement and returns its rows
+/// without their payloads: rows that wait for what never arrives come back
+/// a batch at a time, never all of them with their payloads at once
+/// (ADR-0037 decision 6).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn an_expiry_parks_a_batch_at_a_time_without_the_payloads() {
+    let batches = Arc::new(ExpiredBatches::default());
+    let f = fixture_observed("expiry_batches", Arc::clone(&batches))
+        .await
+        .with_max_wait(Duration::from_secs(1));
+    let client = pool().get().await.unwrap();
+    client
+        .execute(
+            &format!(
+                "INSERT INTO {} (tenant_id, stream_type, stream_id, stream_position, uri, payload, \
+                     metadata, waiting_for, waiting_since) \
+                 SELECT 'tenant-1', 'orders.Order', jsonb_build_object('id', 'w' || n), 1, \
+                     'kafka://orders/w', repeat('p', 1000)::bytea, '{{}}', \
+                     '{{\"tenant_id\": \"tenant-1\", \"stream_type\": \"orders.Order\", \
+                       \"stream_id\": {{\"id\": \"never\"}}, \"stream_position\": 1}}', \
+                     now() - interval '1 hour' \
+                 FROM generate_series(1, 105) n",
+                f.table
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+    let (_, subscriber) = collector();
+    f.dispatch(&subscriber).await;
+    f.dispatch(&subscriber).await;
+    assert_eq!(*batches.0.lock().unwrap(), [(100, true), (5, true)]);
+}
+
+/// A row parked at once for its own values is superseded by the next
+/// arrival at its identity: the producer's repaired message replaces its
+/// values, is processed, and wakes what waited for it (ADR-0037 decision 6).
+/// Before, a republication at a held identity was acknowledged as a
+/// redelivery or a shadow and dropped, and the row could leave only by a
+/// resolve that skipped its subscriber.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_row_parked_at_once_is_superseded_by_the_next_arrival_at_its_identity() {
+    let f = fixture_cut("superseded", (), 1, TraceFile::off()).await;
+    // the row stored before carries the very message_id its repair will:
+    // the supersede does not take its own row for another's
+    stored_before(
+        &f,
+        r#"{"id": "deep"}"#,
+        &format!(
+            r#"{{"message_id": "00000000-0000-4000-b000-000000000001", "h": {}{}}}"#,
+            "[".repeat(127),
+            "]".repeat(127)
+        ),
+    )
+    .await;
+    let (seen, subscriber) = collector();
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Parked);
+    let waiter = message("waiter", 1).depending_on(&[CausalDependency::on(&InboxMessage::new(
+        "tenant-1",
+        "orders.Order",
+        json!({ "id": "deep" }),
+        1,
+        "kafka://orders/old",
+        "",
+    ))]);
+    f.publish(std::slice::from_ref(&waiter)).await;
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::SetAside,
+        "the waiter waits"
+    );
+
+    let repaired = InboxMessage::new(
+        "tenant-1",
+        "orders.Order",
+        json!({ "id": "deep" }),
+        1,
+        "kafka://orders/old",
+        "repaired",
+    )
+    .with_metadata(json!({ "message_id": "00000000-0000-4000-b000-000000000001" }));
+    f.publish(std::slice::from_ref(&repaired)).await;
+    assert_eq!(f.rows().await, 2, "superseded in place");
+    while f.dispatch(&subscriber).await != Outcome::Nothing {}
+    assert_eq!(*seen.lock().unwrap(), ["deep@1", "waiter@1"]);
+    assert!(f.parked_messages().await.is_empty());
+}
+
+/// A supersede whose `message_id` another identity holds is that
+/// identity's taken, set aside, the row left parked: the supersede claims no
+/// one else's `message_id` (ADR-0036 R5).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_supersede_whose_message_id_is_held_elsewhere_is_set_aside() {
+    let f = fixture_cut("superseded_taken", (), 1, TraceFile::off()).await;
+    stored_before(
+        &f,
+        r#"{"id": "deep"}"#,
+        &format!(r#"{{"h": {}{}}}"#, "[".repeat(127), "]".repeat(127)),
+    )
+    .await;
+    let (_, subscriber) = collector();
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Parked);
+    let holder = message("holder", 1);
+    f.publish(std::slice::from_ref(&holder)).await;
+    let repaired = InboxMessage::new(
+        "tenant-1",
+        "orders.Order",
+        json!({ "id": "deep" }),
+        1,
+        "kafka://orders/old",
+        "repaired",
+    )
+    .with_metadata(json!({ "message_id": message_id(&holder) }));
+    let admission = f
+        .inbox
+        .intake(&repaired.uri, &as_sent(&repaired))
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            admission,
+            ascetic_ddd_inbox::Admission::SetAside {
+                reason: ascetic_ddd_inbox::Reason::IdentityTaken,
+                ..
+            }
+        ),
+        "{admission:?}"
+    );
+    assert_eq!(f.parked_messages().await.len(), 1, "still parked");
+}
+
+/// The wire message of a row, as a producer would send it.
+fn as_sent(message: &InboxMessage) -> ascetic_ddd_bus::Message {
+    use ascetic_ddd_bus::identity::{
+        STREAM_ID, STREAM_POSITION, STREAM_TYPE, TENANT_ID, write_stream_id,
+    };
+    let wire = ascetic_ddd_bus::Message::new(message.payload.clone())
+        .with_header(TENANT_ID, message.tenant_id.as_bytes())
+        .with_header(STREAM_TYPE, message.stream_type.as_bytes())
+        .with_header(STREAM_ID, write_stream_id(&message.stream_id))
+        .with_header(STREAM_POSITION, message.stream_position.to_string());
+    match message
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("message_id"))
+        .and_then(|v| v.as_str())
+    {
+        Some(id) => wire.with_header("message_id", id),
+        None => wire,
+    }
+}
+
+/// A failure past `attempts`' range saturates instead of failing the
+/// record, which would stop every loop (ADR-0037 decision 7): the library's
+/// default retries for ever.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_failure_past_the_attempts_range_saturates() {
+    let f = fixture("attempts_saturate").await;
+    f.publish(&[message("a", 1)]).await;
+    let client = pool().get().await.unwrap();
+    client
+        .execute(
+            &format!("UPDATE {} SET attempts = 2147483647", f.table),
+            &[],
+        )
+        .await
+        .unwrap();
+    let failing = |_: &PgSession, _: &InboxMessage| {
+        std::future::ready(Err::<(), Failure>(Failure::Transient("again".into())))
+    };
+    assert!(matches!(
+        f.dispatch(failing).await,
+        Outcome::Failed {
+            attempts: 2_147_483_647,
+            parked: false
+        }
+    ));
+}
+
+/// The census counts each ground of ADR-0037 once per row that has it, and
+/// a row that has none nowhere (decision 8).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_census_counts_every_ground_and_nothing_else() {
+    let f = fixture_cut("census", (), 1, TraceFile::off()).await;
+    for (stream_id, metadata) in [
+        // clean
+        (r#"{"id": "clean"}"#.to_owned(), "{}".to_owned()),
+        (
+            r#"{"id": "listed"}"#.to_owned(),
+            r#"{"causal_dependencies": "[]"}"#.to_owned(),
+        ),
+        // a number in the stream id, in the domain and outside it
+        (r#"{"n": 5}"#.to_owned(), "{}".to_owned()),
+        ("12345678901234567890123".to_owned(), "{}".to_owned()),
+        // a list the intake refuses
+        (
+            r#"{"id": "refused"}"#.to_owned(),
+            r#"{"causal_dependencies": "[1]"}"#.to_owned(),
+        ),
+        // metadata stored structured: a number, a depth, a private key
+        (
+            r#"{"id": "number"}"#.to_owned(),
+            r#"{"h": [1.5]}"#.to_owned(),
+        ),
+        (
+            r#"{"id": "deep"}"#.to_owned(),
+            format!(r#"{{"h": {}{}}}"#, "[".repeat(127), "]".repeat(127)),
+        ),
+        (
+            r#"{"id": "token"}"#.to_owned(),
+            r#"{"h": {"$serde_json::private::Number": "5"}}"#.to_owned(),
+        ),
+    ] {
+        stored_before(&f, &stream_id, &metadata).await;
+    }
+    let client = pool().get().await.unwrap();
+    // two waiting rows, at positions of their own: one for a short identity,
+    // one for an identity past the bound
+    let waiting = |position: i32, stream_id: &str| {
+        format!(
+            "INSERT INTO {} (tenant_id, stream_type, stream_id, stream_position, uri, payload, \
+                 metadata, waiting_for, waiting_since) \
+             VALUES ('tenant-1', 'orders.Order', '{{\"id\": \"waits\"}}', {position}, \
+                 'kafka://orders/w', 'w', '{{}}', jsonb_build_object('tenant_id', 'tenant-1', \
+                 'stream_type', 'orders.Order', 'stream_id', {stream_id}, 'stream_position', 1), \
+                 now())",
+            f.table
+        )
+    };
+    client
+        .batch_execute(&waiting(1, "'\"short\"'::jsonb"))
+        .await
+        .unwrap();
+    client
+        .batch_execute(&waiting(2, "to_jsonb(repeat('k', 3000))"))
+        .await
+        .unwrap();
+    let census = f
+        .sessions
+        .session(async |session| f.inbox.census(&session).await)
+        .await
+        .unwrap();
+    assert_eq!(
+        census,
+        Census {
+            numbered_stream_ids: 2,
+            stream_ids_outside: 1,
+            dependencies_refused: 1,
+            structured_metadata: 3,
+            waits_past_bound: 1,
+        }
+    );
+    assert!(!census.is_clear());
 }

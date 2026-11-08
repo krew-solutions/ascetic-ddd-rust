@@ -51,6 +51,11 @@ where
     /// source tries again.
     pub async fn intake(&self, destination: &str, message: &Message) -> Result<Admission, Error> {
         let channel = uri::without_key(destination);
+        if let Some(detail) = self.bounds.exceeded(message) {
+            return self
+                .aside(destination, message, None, Reason::Malformed, detail, None)
+                .await;
+        }
         let row = match intake::row_of(destination, message) {
             Ok(row) => row,
             Err(detail) => {
@@ -146,7 +151,11 @@ where
         detail: &'static str,
         holder: Option<(&str, i64)>,
     ) -> Result<Admission, Error> {
-        let frame = intake::frame(destination, message);
+        // A message past its bounds is kept cut, never copied whole.
+        let frame = match self.bounds.exceeded(message) {
+            Some(_) => intake::cut_frame(destination, message),
+            None => intake::frame(destination, message),
+        };
         let digest = intake::digest(&frame);
         let channel = intake::sanitized(
             Some(uri::without_key(destination).as_bytes()),

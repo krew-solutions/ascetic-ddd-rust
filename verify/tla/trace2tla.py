@@ -198,6 +198,11 @@ def inbox_steps(events, names=None, by_message_id=False):
         kind = e["event"]
         if kind == "rejected":
             continue
+        if kind == "parked_at_once":
+            # its row was stored before the intake's checks, by SQL in the
+            # test, and no receive names it; the model holds the step,
+            # InboxUnreadable.cfg (ADR-0037 decision 6)
+            raise SystemExit("a park at once in a trace: its row was never received, so no step can name it")
         if kind == "unparked":
             yield record(side="inbox", event="unpark", msg=row(e["id"], "an unpark"))
             continue

@@ -11,17 +11,18 @@
 //! it the handler's writes would fall outside that transaction.
 //!
 //! Headers become columns: `tenant_id`, `stream_type`, `stream_id` — the
-//! JSON text of the id, or the id as a string when it is not JSON —
-//! `stream_position`; `uri` is the inbox channel the message was published
+//! JSON text of the id, read and written by the bus's identity function
+//! (ADR-0037 decision 1) — `stream_position`; `uri` is the inbox channel the message was published
 //! to, key included — the intake's name for what it received, and the
 //! `destination` header the row goes out with (ADR-0018). A `destination`
 //! header on the way in is the producer's address and is not kept: for the
 //! relay out of an outbox it equals the channel anyway, since the bridge
 //! builds the producer for it; from a broker it would name the producer's
 //! topic, and two producers of one topic would name one row two ways. Every
-//! other header is a field of `metadata`, as text, or structured again when
-//! the text is a JSON array or object, so `causal_dependencies` come back
-//! as they left. The channel name after `inbox://` is not a filter: the
+//! other header is a field of `metadata`, as its text (ADR-0037 decision
+//! 2), so it comes back as it left, byte for byte; a row stored before
+//! keeps an array or object structured, written back as JSON. The channel
+//! name after `inbox://` is not a filter: the
 //! whole inbox is one channel with one subscriber, which routes by the
 //! row's `destination` and `stream_type` — a consumer that saw one address
 //! would wait for ever on a causal dependency published under another
@@ -33,7 +34,7 @@
 
 use std::sync::Arc;
 
-use ascetic_ddd_bus::identity::{STREAM_ID, STREAM_POSITION, STREAM_TYPE, TENANT_ID};
+use ascetic_ddd_bus::identity::{self, STREAM_ID, STREAM_POSITION, STREAM_TYPE, TENANT_ID};
 use ascetic_ddd_bus::{
     Adapter, BoxError, Error as BusError, Message, Permanent, Subscription, TransactionalConsumer,
     TransactionalHandler, TransactionalWireConsumer, WireConsumer, WireProducer, handling, uri,
@@ -198,7 +199,7 @@ pub(crate) fn wire_of(row: &InboxMessage) -> Message {
     let message = Message::new(row.payload.clone())
         .with_header(TENANT_ID, row.tenant_id.as_bytes())
         .with_header(STREAM_TYPE, row.stream_type.as_bytes())
-        .with_header(STREAM_ID, header_text(&row.stream_id))
+        .with_header(STREAM_ID, identity::write_stream_id(&row.stream_id))
         .with_header(STREAM_POSITION, row.stream_position.to_string())
         .with_header(DESTINATION, row.uri.as_bytes());
     let message = match uri::key(&row.uri) {
@@ -213,8 +214,8 @@ pub(crate) fn wire_of(row: &InboxMessage) -> Message {
     }
 }
 
-/// A metadata value as header text: a string as it is, anything else as
-/// JSON.
+/// A metadata value as header text: a string as it is; a value a row
+/// stored before ADR-0037 keeps structured, as JSON.
 fn header_text(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),

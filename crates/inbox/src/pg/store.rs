@@ -9,7 +9,7 @@ use ascetic_ddd_migration::{
 use ascetic_ddd_session::{PgAccess, Session, SessionPool};
 use tokio_postgres::Row;
 
-use super::PgInbox;
+use super::{Parked, PgInbox};
 use crate::error::{Error, Failure};
 use crate::message::{CausalDependency, InboxMessage};
 use crate::observer::{InboxObserver, Receipt};
@@ -19,8 +19,21 @@ use crate::snapshot::Snapshot;
 /// The columns of a row, in the order `message_of` reads them.
 const COLUMNS: &str = "tenant_id, stream_type, stream_id, stream_position, uri, payload, metadata, \
                        received_position, processed_position, attempts, last_error, waiting_for";
-/// How many columns `COLUMNS` names.
-const WIDTH: usize = 12;
+/// A row's identity, its channel, its order of arrival and what it waits
+/// for, in the order `narrow_of` reads them: never its payload or metadata,
+/// which a statement returning many rows must not carry (ADR-0037 decision
+/// 6).
+const NARROW: &str =
+    "tenant_id, stream_type, stream_id, stream_position, uri, received_position, waiting_for";
+/// How many rows one statement of the expiry parks.
+const EXPIRY_BATCH: i64 = 100;
+/// The most characters of a failure's text a row keeps (ADR-0037 decision
+/// 7): `last_error` is stored unsealed, beside the row.
+const FAILURE_WIDTH: usize = 4096;
+/// A row's identity as the server writes it from the row's own columns:
+/// the form a dependency on it is waited for under.
+const IDENTITY_OF_ROW: &str = "jsonb_build_object('tenant_id', tenant_id, 'stream_type', stream_type, \
+                               'stream_id', stream_id, 'stream_position', stream_position)";
 /// The rows a dispatcher may take: neither processed, parked nor waiting.
 const QUEUE: &str = "processed_position IS NULL AND parked_at IS NULL AND waiting_for IS NULL";
 
@@ -81,8 +94,11 @@ pub(super) struct Taken {
 
 /// What one look at the head of a held slot returned: the row, with whether
 /// it still waits for its backoff, or no row; and the statement's snapshot.
-pub(super) struct Step {
-    pub(super) row: Option<(InboxMessage, bool)>,
+pub(super) struct Located {
+    /// The head's order of arrival, its place in the table (`ctid`), and
+    /// whether it still waits for its backoff; none when the slot's queue
+    /// is empty.
+    pub(super) row: Option<(i64, String, bool)>,
     pub(super) snapshot: Snapshot,
 }
 
@@ -95,6 +111,13 @@ const PROCESSED_AT: &str = r#"
     CREATE INDEX {table}__forgettable_idx ON {table}
         ((split_part(uri, '/', 1) || '//' || split_part(uri, '/', 3)), processed_at)
         WHERE processed_at IS NOT NULL;
+"#;
+
+/// When a row was parked at once for its own values (ADR-0037 decision 6):
+/// such a row is superseded by the next arrival at its identity. Nullable,
+/// without a default, as every column the library adds (decision 5).
+const UNREADABLE_AT: &str = r#"
+    ALTER TABLE {table} ADD COLUMN unreadable_at timestamptz NULL;
 "#;
 
 /// What the intake sets aside beside the inbox, never stored as a row
@@ -206,9 +229,15 @@ where
                 )
                 .on(self.table.clone())
                 .checked_over(INDEXES_BEFORE_LAUNCH),
+                Migration::new(
+                    "20261108T000000Z_unreadable_at",
+                    UNREADABLE_AT.replace("{table}", self.table.as_str()),
+                )
+                .on(self.table.clone())
+                .checked_over(UNREADABLE_AT),
             ],
         )
-        .unwrap_or_else(|_| unreachable!("four migrations with ids, under a name"))
+        .unwrap_or_else(|_| unreachable!("five migrations with ids, under a name"))
     }
 
     /// Brings the inbox's tables up to its migrations — a read of the
@@ -235,6 +264,7 @@ where
                          asks for {slots} by `{key}`; both are fixed for the life of the table"
                     )));
                 }
+                refuse_a_page_the_bounds_do_not_fit(&session).await?;
                 refuse_what_the_intake_cannot_read(&session, table.as_str()).await
             })
             .await?;
@@ -270,7 +300,7 @@ where
     /// whose head waits for its backoff is not taken: the head holds the
     /// slot, and the others go on.
     ///
-    /// The head itself is read by [`Self::head_of`], a statement of its own:
+    /// The head itself is located by [`Self::locate_head`], a statement of its own:
     /// a statement's snapshot predates the lock it takes, and the previous
     /// holder of the slot may commit between the two — a head it processed
     /// then fails the re-check `FOR UPDATE` makes on the latest version, and
@@ -305,16 +335,23 @@ where
         })
     }
 
-    /// The head of a slot the dispatcher holds: the oldest row of its queue,
-    /// locked, with whether it still waits for its backoff, and the
-    /// statement's snapshot; no row when the slot's queue is empty. Read
-    /// after the slot was taken, so that what its previous holder committed
-    /// is in view.
-    pub(super) async fn head_of(&self, session: &P::Session, slot: u32) -> Result<Step, Error> {
+    /// The head of a slot the dispatcher holds, located: the oldest row of
+    /// its queue, locked, by its order of arrival and its place, with
+    /// whether it still waits for its backoff, and the statement's
+    /// snapshot; no row when the slot's queue is empty. Read after the slot
+    /// was taken, so that what its previous holder committed is in view.
+    /// None of the row's values is read here (ADR-0037 decision 6): a value
+    /// that cannot be read fails [`Self::read_at`], a statement of its own,
+    /// for one known row.
+    pub(super) async fn locate_head(
+        &self,
+        session: &P::Session,
+        slot: u32,
+    ) -> Result<Located, Error> {
         let sql = format!(
             r#"
             WITH r AS (
-                SELECT {COLUMNS},
+                SELECT received_position, ctid::text AS place,
                        next_attempt_at IS NOT NULL AND next_attempt_at > CURRENT_TIMESTAMP AS deferred
                 FROM {table}
                 WHERE slot = $1 AND {QUEUE}
@@ -322,7 +359,7 @@ where
                 LIMIT 1
                 FOR UPDATE
             )
-            SELECT r.*, pg_current_snapshot()::text AS snapshot
+            SELECT r.received_position, r.place, r.deferred, pg_current_snapshot()::text AS snapshot
             FROM (SELECT 1) AS one
             LEFT JOIN r ON true
             "#,
@@ -332,23 +369,69 @@ where
             .connection()
             .query_one(&sql, &[&(slot as i16)])
             .await?;
-        let snapshot = snapshot_of(&row, WIDTH + 1)?;
-        let found = row.get::<_, Option<i64>>(7).is_some();
-        Ok(Step {
-            row: found.then(|| (message_of(&row, 0), row.get::<_, bool>(WIDTH))),
-            snapshot,
+        Ok(Located {
+            row: row
+                .get::<_, Option<i64>>(0)
+                .map(|position| (position, row.get(1), row.get(2))),
+            snapshot: snapshot_of(&row, 3)?,
         })
     }
 
-    /// The first causal dependency of `message` without a committed mark.
+    /// The row at `place`, read: the message, or why it cannot be one — a
+    /// value the client cannot decode, or a stream id outside the bus's
+    /// domain, which a row stored before the domain may hold and which
+    /// would reach the handler as another id (ADR-0037 decisions 1 and 6).
+    /// A refusal of the server's is the caller's to classify.
+    pub(super) async fn read_at(
+        &self,
+        session: &P::Session,
+        place: &str,
+    ) -> Result<Result<InboxMessage, &'static str>, Error> {
+        let sql = format!(
+            "SELECT {COLUMNS} FROM {table} WHERE ctid = $1::text::tid",
+            table = self.table
+        );
+        let row = session.connection().query_one(&sql, &[&place]).await?;
+        Ok(message_checked(&row, 0))
+    }
+
+    /// Parks the row at `place`, still in the queue and held by this
+    /// transaction, at once, with `reason` as its last error: a statement
+    /// that neither reads nor binds the row's values (ADR-0037 decision 6).
+    pub(super) async fn park_at(
+        &self,
+        session: &P::Session,
+        place: &str,
+        reason: &'static str,
+    ) -> Result<(), Error> {
+        let sql = format!(
+            "UPDATE {table} SET parked_at = CURRENT_TIMESTAMP, unreadable_at = CURRENT_TIMESTAMP, \
+                 last_error = $2 \
+             WHERE ctid = $1::text::tid AND {QUEUE}",
+            table = self.table
+        );
+        let changed = session
+            .connection()
+            .execute(&sql, &[&place, &reason])
+            .await?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(Error::Malformed(format!(
+                "the row to park was not in the queue: {changed} rows changed"
+            )))
+        }
+    }
+
+    /// The first of `dependencies` without a committed mark.
     pub(super) async fn first_unprocessed_dependency(
         &self,
         session: &P::Session,
-        message: &InboxMessage,
+        dependencies: &[CausalDependency],
     ) -> Result<Option<CausalDependency>, Error> {
-        for dependency in message.causal_dependencies() {
-            if !self.is_processed(session, &dependency).await? {
-                return Ok(Some(dependency));
+        for dependency in dependencies {
+            if !self.is_processed(session, dependency).await? {
+                return Ok(Some(dependency.clone()));
             }
         }
         Ok(None)
@@ -381,27 +464,23 @@ where
     pub(super) async fn set_waiting_unless_processed(
         &self,
         session: &P::Session,
-        message: &InboxMessage,
+        place: &str,
         dependency: &CausalDependency,
     ) -> Result<bool, Error> {
         let sql = format!(
-            "UPDATE {table} SET waiting_for = $5::jsonb, waiting_since = CURRENT_TIMESTAMP \
-             WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4 \
+            "UPDATE {table} SET waiting_for = $2::jsonb, waiting_since = CURRENT_TIMESTAMP \
+             WHERE ctid = $1::text::tid AND {QUEUE} \
                AND NOT EXISTS (SELECT 1 FROM {table} d \
-                               WHERE d.tenant_id = $6 AND d.stream_type = $7 AND d.stream_id = $8 \
-                                 AND d.stream_position = $9 AND d.processed_position IS NOT NULL)",
+                               WHERE d.tenant_id = $3 AND d.stream_type = $4 AND d.stream_id = $5 \
+                                 AND d.stream_position = $6 AND d.processed_position IS NOT NULL)",
             table = self.table
         );
-        let [tenant, stream_type, stream_id, position] = identity(message);
         let changed = session
             .connection()
             .execute(
                 &sql,
                 &[
-                    tenant,
-                    stream_type,
-                    stream_id,
-                    position,
+                    &place,
                     &identity_json(dependency),
                     &dependency.tenant_id,
                     &dependency.stream_type,
@@ -432,15 +511,16 @@ where
                 SELECT ctid FROM {table} \
                 WHERE waiting_for IS NOT NULL \
                   AND waiting_since < CURRENT_TIMESTAMP - make_interval(secs => $1::double precision) \
+                LIMIT $2 \
                 FOR UPDATE SKIP LOCKED) \
-             RETURNING {COLUMNS}",
+             RETURNING {NARROW}",
             table = self.table
         );
         let rows = session
             .connection()
-            .query(&sql, &[&max_wait.as_secs_f64()])
+            .query(&sql, &[&max_wait.as_secs_f64(), &EXPIRY_BATCH])
             .await?;
-        let mut expired: Vec<InboxMessage> = rows.iter().map(|row| message_of(row, 0)).collect();
+        let mut expired: Vec<InboxMessage> = rows.iter().map(|row| narrow_of(row, 0)).collect();
         expired.sort_by_key(|message| message.received_position);
         Ok(expired)
     }
@@ -470,43 +550,52 @@ where
         Ok(row.is_some())
     }
 
-    /// Marks `message` processed and, in the same statement, puts back into
-    /// the queue every row that waited for it. Returns the order of
-    /// processing and the rows woken, oldest first.
+    /// Takes the lock of [`Self::lock_identity`] for the row at `place`, its
+    /// identity read by the server from the row's own columns: a row read
+    /// back otherwise than it is stored would lock another key than its
+    /// waiters take (ADR-0037 decision 6).
+    pub(super) async fn lock_own_identity(
+        &self,
+        session: &P::Session,
+        place: &str,
+    ) -> Result<(), Error> {
+        let sql = format!(
+            "SELECT pg_advisory_xact_lock(hashtext($1), hashtext({IDENTITY_OF_ROW}::text)) \
+             FROM {table} WHERE ctid = $2::text::tid",
+            table = self.table
+        );
+        session
+            .connection()
+            .execute(&sql, &[&self.table.as_str(), &place])
+            .await?;
+        Ok(())
+    }
+
+    /// Marks the row at `place` processed and, in the same statement, puts
+    /// back into the queue every row that waited for it, its identity read
+    /// by the server from the row's own columns (ADR-0037 decision 6).
+    /// Returns the order of processing and the rows woken, oldest first.
     pub(super) async fn mark_processed(
         &self,
         session: &P::Session,
-        message: &InboxMessage,
+        place: &str,
     ) -> Result<(i64, Vec<InboxMessage>), Error> {
         let sql = format!(
             "WITH marked AS ( \
                 UPDATE {table} SET processed_position = nextval('{sequence}'), \
                     processed_at = statement_timestamp() \
-                WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4 \
-                RETURNING processed_position \
+                WHERE ctid = $1::text::tid \
+                RETURNING processed_position, {IDENTITY_OF_ROW} AS identity \
              ), woken AS ( \
                 UPDATE {table} SET waiting_for = NULL, waiting_since = NULL, parked_at = NULL \
-                WHERE waiting_for = $5::jsonb \
-                RETURNING {COLUMNS} \
+                WHERE waiting_for = (SELECT identity FROM marked) \
+                RETURNING {NARROW} \
              ) \
              SELECT marked.processed_position, woken.* FROM marked LEFT JOIN woken ON true",
             table = self.table,
             sequence = self.sequence
         );
-        let [tenant, stream_type, stream_id, position] = identity(message);
-        let rows = session
-            .connection()
-            .query(
-                &sql,
-                &[
-                    tenant,
-                    stream_type,
-                    stream_id,
-                    position,
-                    &identity_json(&CausalDependency::on(message)),
-                ],
-            )
-            .await?;
+        let rows = session.connection().query(&sql, &[&place]).await?;
         let Some(first) = rows.first() else {
             return Err(Error::Malformed("the row to mark is gone".to_owned()));
         };
@@ -520,30 +609,27 @@ where
     pub(super) async fn record_failure(
         &self,
         session: &P::Session,
-        message: &InboxMessage,
+        place: &str,
         failure: &Failure,
         retry_after: Duration,
     ) -> Result<(u32, bool), Error> {
         let sql = format!(
-            "UPDATE {} SET attempts = attempts + 1, last_error = $5, \
-                next_attempt_at = CURRENT_TIMESTAMP + make_interval(secs => $6::double precision), \
-                parked_at = CASE WHEN $8::boolean OR ($7::integer > 0 AND attempts + 1 >= $7::integer) \
+            "UPDATE {} SET attempts = LEAST(attempts, 2147483646) + 1, last_error = $2, \
+                next_attempt_at = CURRENT_TIMESTAMP + make_interval(secs => $3::double precision), \
+                parked_at = CASE WHEN $5::boolean \
+                                   OR ($4::integer > 0 AND LEAST(attempts, 2147483646) + 1 >= $4::integer) \
                                  THEN CURRENT_TIMESTAMP END \
-             WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4 \
+             WHERE ctid = $1::text::tid \
              RETURNING attempts, parked_at IS NOT NULL",
             self.table
         );
-        let [tenant, stream_type, stream_id, position] = identity(message);
         let row = session
             .connection()
             .query_one(
                 &sql,
                 &[
-                    tenant,
-                    stream_type,
-                    stream_id,
-                    position,
-                    &failure.to_string(),
+                    &place,
+                    &crate::intake::storable_text(&failure.to_string(), FAILURE_WIDTH),
                     &retry_after.as_secs_f64(),
                     &(self.retries.max_attempts as i32),
                     &failure.is_permanent(),
@@ -553,75 +639,122 @@ where
         Ok((row.get::<_, i32>(0) as u32, row.get(1)))
     }
 
+    /// A page of the parked rows, after `after`'s order of arrival, at most
+    /// `limit`, oldest first: each by its place and, when it reads, its
+    /// identity — never its values, so that one row that does not decode
+    /// leaves the page whole (ADR-0037 decision 6).
     pub(super) async fn parked_rows(
         &self,
         session: &P::Session,
-    ) -> Result<Vec<InboxMessage>, Error> {
+        after: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<Parked>, Error> {
         let sql = format!(
-            "SELECT {COLUMNS} FROM {} WHERE parked_at IS NOT NULL ORDER BY received_position",
+            "SELECT received_position, slot, attempts, last_error, uri, \
+                    tenant_id, stream_type, stream_id, stream_position \
+             FROM {} WHERE parked_at IS NOT NULL AND received_position > $1 \
+             ORDER BY received_position LIMIT $2",
             self.table
         );
-        let rows = session.connection().query(&sql, &[]).await?;
-        Ok(rows.iter().map(|row| message_of(row, 0)).collect())
-    }
-
-    pub(super) async fn unpark_row(
-        &self,
-        session: &P::Session,
-        message: &InboxMessage,
-    ) -> Result<bool, Error> {
-        let sql = format!(
-            "UPDATE {} SET parked_at = NULL, attempts = 0, next_attempt_at = NULL, \
-                 waiting_for = NULL, waiting_since = NULL \
-             WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4 \
-               AND parked_at IS NOT NULL",
-            self.table
-        );
-        let changed = session
+        let rows = session
             .connection()
-            .execute(&sql, &identity(message))
+            .query(&sql, &[&after.unwrap_or(i64::MIN), &i64::from(limit)])
             .await?;
-        Ok(changed == 1)
+        Ok(rows
+            .iter()
+            .map(|row| Parked {
+                received_position: row.get(0),
+                slot: u32::try_from(row.get::<_, i16>(1)).unwrap_or_default(),
+                attempts: u32::try_from(row.get::<_, i32>(2)).unwrap_or_default(),
+                last_error: row.get(3),
+                uri: row.get(4),
+                identity: row
+                    .try_get::<_, serde_json::Value>(7)
+                    .ok()
+                    .filter(in_domain)
+                    .map(|stream_id| CausalDependency {
+                        tenant_id: row.get(5),
+                        stream_type: row.get(6),
+                        stream_id,
+                        stream_position: row.get(8),
+                    }),
+            })
+            .collect())
     }
 
-    /// Marks a parked row processed by hand and wakes what waited for it, in
-    /// one statement; `None` when the row was not parked.
-    pub(super) async fn resolve_row(
+    /// Gives the parked row at `received_position` another go, the identity
+    /// it waited for cleared; the row, narrow, when it was parked.
+    pub(super) async fn unpark_at(
         &self,
         session: &P::Session,
-        message: &InboxMessage,
-    ) -> Result<Option<(i64, Vec<InboxMessage>)>, Error> {
+        received_position: i64,
+    ) -> Result<Option<InboxMessage>, Error> {
+        let sql = format!(
+            "UPDATE {} SET parked_at = NULL, unreadable_at = NULL, attempts = 0, \
+                 next_attempt_at = NULL, waiting_for = NULL, waiting_since = NULL \
+             WHERE received_position = $1 AND parked_at IS NOT NULL \
+             RETURNING {NARROW}",
+            self.table
+        );
+        let row = session
+            .connection()
+            .query_opt(&sql, &[&received_position])
+            .await?;
+        Ok(row.map(|row| narrow_of(&row, 0)))
+    }
+
+    /// Takes the lock a mark of the parked row at `received_position` takes,
+    /// its identity read by the server from the row's own columns.
+    pub(super) async fn lock_parked_identity(
+        &self,
+        session: &P::Session,
+        received_position: i64,
+    ) -> Result<(), Error> {
+        let sql = format!(
+            "SELECT pg_advisory_xact_lock(hashtext($1), hashtext({IDENTITY_OF_ROW}::text)) \
+             FROM {table} WHERE received_position = $2 AND parked_at IS NOT NULL",
+            table = self.table
+        );
+        session
+            .connection()
+            .execute(&sql, &[&self.table.as_str(), &received_position])
+            .await?;
+        Ok(())
+    }
+
+    /// Marks the parked row at `received_position` processed by hand and
+    /// wakes what waited for it, in one statement, its identity read by the
+    /// server from its own columns; `None` when the row was not parked.
+    pub(super) async fn resolve_at(
+        &self,
+        session: &P::Session,
+        received_position: i64,
+    ) -> Result<Option<(i64, InboxMessage, Vec<InboxMessage>)>, Error> {
         let sql = format!(
             "WITH resolved AS ( \
-                UPDATE {table} SET parked_at = NULL, processed_position = nextval('{sequence}'), \
+                UPDATE {table} SET parked_at = NULL, unreadable_at = NULL, \
+                    processed_position = nextval('{sequence}'), \
                     processed_at = statement_timestamp(), waiting_for = NULL, waiting_since = NULL \
-                WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4 \
-                  AND parked_at IS NOT NULL \
-                RETURNING processed_position \
+                WHERE received_position = $1 AND parked_at IS NOT NULL \
+                RETURNING processed_position, {IDENTITY_OF_ROW} AS identity, {NARROW} \
              ), woken AS ( \
                 UPDATE {table} SET waiting_for = NULL, waiting_since = NULL, parked_at = NULL \
-                WHERE waiting_for = $5::jsonb AND EXISTS (SELECT 1 FROM resolved) \
-                RETURNING {COLUMNS} \
+                WHERE waiting_for = (SELECT identity FROM resolved) \
+                RETURNING {NARROW} \
              ) \
-             SELECT resolved.processed_position, woken.* FROM resolved LEFT JOIN woken ON true",
+             SELECT r.processed_position, r.tenant_id, r.stream_type, r.stream_id, \
+                    r.stream_position, r.uri, r.received_position, r.waiting_for, woken.* \
+             FROM resolved r LEFT JOIN woken ON true",
             table = self.table,
             sequence = self.sequence
         );
-        let [tenant, stream_type, stream_id, position] = identity(message);
         let rows = session
             .connection()
-            .query(
-                &sql,
-                &[
-                    tenant,
-                    stream_type,
-                    stream_id,
-                    position,
-                    &identity_json(&CausalDependency::on(message)),
-                ],
-            )
+            .query(&sql, &[&received_position])
             .await?;
-        Ok(rows.first().map(|first| (first.get(0), woken_of(&rows, 1))))
+        Ok(rows
+            .first()
+            .map(|first| (first.get(0), narrow_of(first, 1), woken_of(&rows, 8))))
     }
 }
 
@@ -714,8 +847,19 @@ where
              RETURNING pg_current_xact_id()::text, received_position, slot"
         );
         let holder = format!(
-            "SELECT metadata->>'message_id', payload = $5 FROM {table} \
+            "SELECT metadata->>'message_id', payload = $5, unreadable_at IS NOT NULL, received_position \
+             FROM {table} \
              WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4"
+        );
+        // A row parked at once for its own values, superseded by this
+        // arrival's (ADR-0037 decision 6): back in the queue, readable.
+        let supersede = format!(
+            "UPDATE {table} SET payload = $5, metadata = $6, parked_at = NULL, unreadable_at = NULL, \
+                 last_error = NULL, attempts = 0, next_attempt_at = NULL, \
+                 waiting_for = NULL, waiting_since = NULL \
+             WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4 \
+               AND unreadable_at IS NOT NULL AND processed_position IS NULL \
+             RETURNING pg_current_xact_id()::text, received_position, slot"
         );
         let taken = format!(
             "SELECT uri, received_position FROM {table} \
@@ -762,9 +906,62 @@ where
                                 ],
                             )
                             .await?;
+                        let unreadable = found
+                            .as_ref()
+                            .filter(|found| found.get::<_, bool>(2))
+                            .map(|found| found.get::<_, i64>(3));
                         let holder = found.map(|found| {
                             (found.get::<_, Option<String>>(0), found.get::<_, bool>(1))
                         });
+                        if let Some(holder_position) = unreadable {
+                            let held_elsewhere = match message.message_id() {
+                                Some(id) => tx
+                                    .connection()
+                                    .query_opt(
+                                        &taken,
+                                        &[&message.tenant_id, &message.stream_type, &id],
+                                    )
+                                    .await?
+                                    .map(|row| {
+                                        (
+                                            ascetic_ddd_bus::uri::without_key(
+                                                row.get::<_, &str>(0),
+                                            )
+                                            .to_owned(),
+                                            row.get::<_, i64>(1),
+                                        )
+                                    })
+                                    .filter(|(_, at)| *at != holder_position),
+                                None => None,
+                            };
+                            if let Some((channel, received_position)) = held_elsewhere {
+                                return Ok(Admitted::IdentityTaken {
+                                    channel,
+                                    received_position,
+                                });
+                            }
+                            if let Some(row) = tx
+                                .connection()
+                                .query_opt(
+                                    &supersede,
+                                    &[
+                                        &message.tenant_id,
+                                        &message.stream_type,
+                                        &message.stream_id,
+                                        &message.stream_position,
+                                        &message.payload,
+                                        &message.metadata,
+                                    ],
+                                )
+                                .await?
+                            {
+                                return Ok(Admitted::Stored(Receipt {
+                                    transaction_id: transaction_id(row.get::<_, String>(0))?,
+                                    received_position: row.get::<_, i64>(1),
+                                    slot: row.get::<_, i16>(2) as u32,
+                                }));
+                            }
+                        }
                         let taken = match (&holder, message.message_id()) {
                             (None, Some(id)) => tx
                                 .connection()
@@ -799,16 +996,27 @@ where
     }
 
     /// Writes a row set aside, in a transaction of its own: a repeat of the
-    /// same bytes, the same digest, counts once more and keeps the row as it
-    /// is, disposed of or not. Whether it was a repeat.
+    /// same bytes, the same digest, counts once more, saturating, and an open
+    /// row takes the verdict this release gives the bytes — its reason,
+    /// detail and holder — keeping its first sight; a disposed row stays as
+    /// it was (ADR-0037 decision 7). Whether it was a repeat.
     pub(super) async fn set_aside(&self, aside: &Aside<'_>) -> Result<bool, Error> {
         let table = self.table.as_str();
         let sql = format!(
             "INSERT INTO {table}_rejects (digest, channel, tenant_id, stream_type, identity, reason, \
                  detail, holder_channel, holder_position, message) \
              VALUES ($1::text::uuid, $2, $3, $4, $5::text::uuid, $6, $7, $8, $9, $10) \
-             ON CONFLICT (digest) DO UPDATE SET seen = {table}_rejects.seen + 1, \
-                 last_seen_at = statement_timestamp() \
+             ON CONFLICT (digest) DO UPDATE SET \
+                 seen = LEAST({table}_rejects.seen, 2147483646) + 1, \
+                 last_seen_at = statement_timestamp(), \
+                 reason = CASE WHEN {table}_rejects.disposed_at IS NULL \
+                               THEN EXCLUDED.reason ELSE {table}_rejects.reason END, \
+                 detail = CASE WHEN {table}_rejects.disposed_at IS NULL \
+                               THEN EXCLUDED.detail ELSE {table}_rejects.detail END, \
+                 holder_channel = CASE WHEN {table}_rejects.disposed_at IS NULL \
+                               THEN EXCLUDED.holder_channel ELSE {table}_rejects.holder_channel END, \
+                 holder_position = CASE WHEN {table}_rejects.disposed_at IS NULL \
+                               THEN EXCLUDED.holder_position ELSE {table}_rejects.holder_position END \
              RETURNING seen > 1"
         );
         self.pool
@@ -857,12 +1065,172 @@ where
     }
 }
 
+/// Refuses a server whose pages are not 8 KiB: the bound on an identity's
+/// stored form (`MAX_IDENTITY_BYTES`) is a btree item's on such a page
+/// (ADR-0037 decision 4).
+async fn refuse_a_page_the_bounds_do_not_fit<S: PgAccess>(session: &S) -> Result<(), Error> {
+    let block_size: String = session
+        .connection()
+        .query_one("SHOW block_size", &[])
+        .await?
+        .get(0);
+    if block_size == "8192" {
+        Ok(())
+    } else {
+        Err(Error::Malformed(format!(
+            "the server's pages are {block_size} bytes; the inbox's bound on an identity rests on 8192"
+        )))
+    }
+}
+
+/// The inbox table's columns as this release makes them.
+const INBOX_COLUMNS: [&str; 18] = [
+    "tenant_id",
+    "stream_type",
+    "stream_id",
+    "stream_position",
+    "uri",
+    "payload",
+    "metadata",
+    "received_position",
+    "processed_position",
+    "attempts",
+    "last_error",
+    "next_attempt_at",
+    "parked_at",
+    "waiting_for",
+    "waiting_since",
+    "slot",
+    "processed_at",
+    "unreadable_at",
+];
+
+/// The rows set aside's columns as this release makes them.
+const REJECTS_COLUMNS: [&str; 17] = [
+    "digest",
+    "channel",
+    "tenant_id",
+    "stream_type",
+    "identity",
+    "reason",
+    "detail",
+    "holder_channel",
+    "holder_position",
+    "message",
+    "seen",
+    "first_seen_at",
+    "last_seen_at",
+    "disposed_at",
+    "disposition",
+    "disposed_by",
+    "disposed_because",
+];
+
+/// Refuses on `relation` what the library did not make and that would
+/// change what the intake's statements can raise (ADR-0037 decision 5): an
+/// index — a conflict on a unique one leaves a message stored nowhere, an
+/// expression raises for its value —, a constraint, a trigger, a rule, a
+/// policy or row security, and a column a row cannot be inserted without.
+/// The library names its own objects `<relation>__…` beside its primary
+/// key, so that an older release starts beside a newer one's (R12); a
+/// release that adds a column adds it nullable, without a default.
+async fn refuse_what_the_library_did_not_make<S: PgAccess>(
+    session: &S,
+    relation: &str,
+    primary_key: &str,
+    columns: &[&str],
+) -> Result<(), Error> {
+    let connection = session.connection();
+    let own = |name: &String| name == primary_key || name.starts_with(&format!("{relation}__"));
+    let names = async |sql: &str| -> Result<Vec<String>, Error> {
+        Ok(connection
+            .query(sql, &[&relation])
+            .await?
+            .iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect())
+    };
+    let kinds = [
+        (
+            "indexes",
+            "SELECT i.relname::text FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid \
+             WHERE x.indrelid = $1::text::regclass",
+        ),
+        (
+            "constraints",
+            "SELECT conname::text FROM pg_constraint WHERE conrelid = $1::text::regclass",
+        ),
+        (
+            "triggers",
+            "SELECT tgname::text FROM pg_trigger \
+             WHERE tgrelid = $1::text::regclass AND NOT tgisinternal",
+        ),
+        (
+            "rules",
+            "SELECT rulename::text FROM pg_rewrite WHERE ev_class = $1::text::regclass",
+        ),
+        (
+            "policies",
+            "SELECT polname::text FROM pg_policy WHERE polrelid = $1::text::regclass",
+        ),
+    ];
+    for (kind, sql) in kinds {
+        let foreign: Vec<String> = names(sql)
+            .await?
+            .into_iter()
+            .filter(|name| !own(name))
+            .collect();
+        if !foreign.is_empty() {
+            return Err(Error::Malformed(format!(
+                "table `{relation}` carries {kind} the inbox does not own ({}): they would change \
+                 what its statements can raise",
+                foreign.join(", ")
+            )));
+        }
+    }
+    let secured: bool = connection
+        .query_one(
+            "SELECT relrowsecurity FROM pg_class WHERE oid = $1::text::regclass",
+            &[&relation],
+        )
+        .await?
+        .get(0);
+    if secured {
+        return Err(Error::Malformed(format!(
+            "table `{relation}` has row security, which the inbox does not own: it would refuse \
+             a row for a session's sake"
+        )));
+    }
+    let binding: Vec<String> = connection
+        .query(
+            "SELECT a.attname::text FROM pg_attribute a \
+             LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+             WHERE a.attrelid = $1::text::regclass AND a.attnum > 0 AND NOT a.attisdropped \
+               AND (a.attnotnull OR d.adbin IS NOT NULL OR a.attgenerated <> '')",
+            &[&relation],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get::<_, String>(0))
+        .filter(|name| !columns.contains(&name.as_str()))
+        .collect();
+    if !binding.is_empty() {
+        return Err(Error::Malformed(format!(
+            "table `{relation}` carries columns the inbox does not own that bind an insert ({}): \
+             not null, defaulted or generated",
+            binding.join(", ")
+        )));
+    }
+    Ok(())
+}
+
 /// Refuses a table the intake cannot read the conflicts of (ADR-0036 R2):
-/// a unique or exclusion index the inbox does not own, whose conflict would
-/// leave a message stored nowhere and acknowledged; a deferrable constraint,
-/// which an untargeted conflict cannot arbitrate (55000 on every insert);
-/// and a server encoding other than UTF8, under which 22P05 is the
-/// environment's, not the message's.
+/// what the library did not make on its tables (ADR-0037 decision 5), a
+/// unique index of a host's among them, whose conflict would leave a
+/// message stored nowhere and acknowledged; a deferrable constraint, which
+/// an untargeted conflict cannot arbitrate (55000 on every insert); and a
+/// server encoding other than UTF8, under which 22P05 is the environment's,
+/// not the message's.
 async fn refuse_what_the_intake_cannot_read<S: PgAccess>(
     session: &S,
     table: &str,
@@ -877,28 +1245,15 @@ async fn refuse_what_the_intake_cannot_read<S: PgAccess>(
             "the server encoding is {encoding}: the inbox reads PostgreSQL's refusals as UTF8's"
         )));
     }
-    let foreign: Vec<String> = connection
-        .query(
-            "SELECT i.relname::text FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid \
-             WHERE x.indrelid = $1::text::regclass AND (x.indisunique OR x.indisexclusion) \
-               AND i.relname NOT IN ($2, $3)",
-            &[
-                &table,
-                &format!("{table}_pk"),
-                &format!("{table}__message_id_uniq"),
-            ],
-        )
-        .await?
-        .iter()
-        .map(|row| row.get(0))
-        .collect();
-    if !foreign.is_empty() {
-        return Err(Error::Malformed(format!(
-            "table `{table}` carries unique or exclusion indexes the inbox does not own ({}): \
-             their conflicts would leave a message stored nowhere",
-            foreign.join(", ")
-        )));
-    }
+    refuse_what_the_library_did_not_make(session, table, &format!("{table}_pk"), &INBOX_COLUMNS)
+        .await?;
+    refuse_what_the_library_did_not_make(
+        session,
+        &format!("{table}_rejects"),
+        &format!("{table}_rejects_pkey"),
+        &REJECTS_COLUMNS,
+    )
+    .await?;
     let deferrable: Vec<String> = connection
         .query(
             "SELECT conname::text FROM pg_constraint \
@@ -931,48 +1286,88 @@ fn snapshot_of(row: &Row, at: usize) -> Result<Snapshot, Error> {
         .map_err(|error: crate::snapshot::MalformedSnapshot| Error::Malformed(error.to_string()))
 }
 
-/// The primary key of `message`, as statement parameters `$1`..`$4`.
-fn identity(message: &InboxMessage) -> [&(dyn tokio_postgres::types::ToSql + Sync); 4] {
-    [
-        &message.tenant_id,
-        &message.stream_type,
-        &message.stream_id,
-        &message.stream_position,
-    ]
-}
-
 /// A row's identity as the `jsonb` a waiting row names it by.
 fn identity_json(dependency: &CausalDependency) -> serde_json::Value {
     serde_json::to_value(dependency).unwrap_or(serde_json::Value::Null)
 }
 
-/// The message in `COLUMNS`, read from column `at` on.
-fn message_of(row: &Row, at: usize) -> InboxMessage {
+/// The message in `COLUMNS`, read from column `at` on, or why it cannot be
+/// one: a value the client cannot decode, or a stream id outside the bus's
+/// domain, which a row stored before the domain may hold (ADR-0037
+/// decisions 1 and 6).
+fn message_checked(row: &Row, at: usize) -> Result<InboxMessage, &'static str> {
+    fn get<'a, T: tokio_postgres::types::FromSql<'a>>(
+        row: &'a Row,
+        at: usize,
+    ) -> Result<T, &'static str> {
+        row.try_get(at)
+            .map_err(|_| "a value of the row does not decode")
+    }
+    let message = InboxMessage {
+        tenant_id: get(row, at)?,
+        stream_type: get(row, at + 1)?,
+        stream_id: get(row, at + 2)?,
+        stream_position: get(row, at + 3)?,
+        uri: get(row, at + 4)?,
+        payload: get(row, at + 5)?,
+        metadata: get(row, at + 6)?,
+        received_position: get(row, at + 7)?,
+        processed_position: get(row, at + 8)?,
+        attempts: u32::try_from(get::<i32>(row, at + 9)?).unwrap_or_default(),
+        last_error: get(row, at + 10)?,
+        waiting_for: get::<Option<serde_json::Value>>(row, at + 11)?
+            .and_then(|value| serde_json::from_value(value).ok()),
+    };
+    if !in_domain(&message.stream_id) {
+        return Err("the row's stream id is outside the bus's domain");
+    }
+    Ok(message)
+}
+
+/// Whether `stream_id`, read back, is in the bus's domain: it writes and
+/// reads back as itself.
+pub(super) fn in_domain(stream_id: &serde_json::Value) -> bool {
+    let text = ascetic_ddd_bus::identity::write_stream_id(stream_id);
+    ascetic_ddd_bus::identity::read_stream_id(&text).as_ref() == Ok(stream_id)
+}
+
+/// The row in `NARROW`, read from column `at` on, never failing: a value that
+/// does not decode reads as its type's empty one, the stream id as null. Its
+/// payload and metadata are not read.
+fn narrow_of(row: &Row, at: usize) -> InboxMessage {
     InboxMessage {
-        tenant_id: row.get(at),
-        stream_type: row.get(at + 1),
-        stream_id: row.get(at + 2),
-        stream_position: row.get(at + 3),
-        uri: row.get(at + 4),
-        payload: row.get(at + 5),
-        metadata: row.get(at + 6),
-        received_position: row.get(at + 7),
-        processed_position: row.get(at + 8),
-        attempts: row.get::<_, i32>(at + 9) as u32,
-        last_error: row.get(at + 10),
+        tenant_id: row.try_get(at).unwrap_or_default(),
+        stream_type: row.try_get(at + 1).unwrap_or_default(),
+        stream_id: row.try_get(at + 2).unwrap_or(serde_json::Value::Null),
+        stream_position: row.try_get(at + 3).unwrap_or_default(),
+        uri: row.try_get(at + 4).unwrap_or_default(),
+        payload: Vec::new(),
+        metadata: None,
+        received_position: row.try_get(at + 5).ok().flatten(),
+        processed_position: None,
+        attempts: 0,
+        last_error: None,
         waiting_for: row
-            .get::<_, Option<serde_json::Value>>(at + 11)
+            .try_get::<_, Option<serde_json::Value>>(at + 6)
+            .ok()
+            .flatten()
             .and_then(|value| serde_json::from_value(value).ok()),
     }
 }
 
-/// The woken rows of a mark or a resolve: the rows of the statement whose
-/// row columns, from `at` on, are not the outer join's nulls; oldest first.
+/// The woken rows of a mark or a resolve, narrow: the rows of the statement
+/// whose row columns, from `at` on, are not the outer join's nulls; oldest
+/// first.
 fn woken_of(rows: &[Row], at: usize) -> Vec<InboxMessage> {
     let mut woken: Vec<InboxMessage> = rows
         .iter()
-        .filter(|row| row.get::<_, Option<i64>>(at + 7).is_some())
-        .map(|row| message_of(row, at))
+        .filter(|row| {
+            row.try_get::<_, Option<i64>>(at + 5)
+                .ok()
+                .flatten()
+                .is_some()
+        })
+        .map(|row| narrow_of(row, at))
         .collect();
     woken.sort_by_key(|message| message.received_position);
     woken

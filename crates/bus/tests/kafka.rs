@@ -472,3 +472,58 @@ async fn a_member_holding_past_the_poll_interval_lets_the_message_go_to_another(
         "the committed offset passed what the healthy member took"
     );
 }
+
+/// A record that unfolds past its consumer's bounds — 200 MiB of zeros,
+/// gzip, a few hundred KB on the wire — is handed on as a marked prefix, and
+/// the next record after it (ADR-0037 decision 3). The driver's own
+/// decompression is not bounded by `receive.message.max.bytes` or
+/// `fetch.max.bytes`, measured on 2026-11-08 with gzip and lz4: the
+/// consumer's bound saves every copy after the driver's.
+#[tokio::test]
+#[ignore = "requires Kafka; run with --ignored"]
+async fn a_record_past_its_consumer_s_bounds_is_handed_on_as_a_marked_prefix() {
+    use ascetic_ddd_bus::adapters::kafka::{PAST_ITS_BOUNDS, RecordBounds};
+    let mut bus = Bus::new();
+    let broker = test_broker()
+        .set_producer("compression.type", "gzip")
+        .set_producer("message.max.bytes", "1000000000")
+        .with_record_bounds(RecordBounds {
+            payload: 1 << 20,
+            headers: 1 << 20,
+        });
+    bus.register("kafka", broker).unwrap();
+    let uri = format!("kafka://{}", unique("unfold"));
+    let producer = bus
+        .producer(&uri, |value: &Vec<u8>| {
+            Message::new(value.clone()).with_key("k")
+        })
+        .unwrap();
+    producer.publish(&vec![0u8; 200 << 20]).await.unwrap();
+    producer.publish(&b"after".to_vec()).await.unwrap();
+    let consumer = bus
+        .consumer(&uri, &unique("g"), |message: &Message| {
+            Ok((
+                message.payload().len(),
+                message.header(PAST_ITS_BOUNDS).is_some(),
+            ))
+        })
+        .unwrap();
+    let (seen, mut received) = mpsc::unbounded_channel();
+    let _subscription = consumer
+        .subscribe(move |got: (usize, bool)| {
+            let seen = seen.clone();
+            async move {
+                seen.send(got).ok();
+            }
+        })
+        .unwrap();
+    let mut got = Vec::new();
+    while got.len() < 2 {
+        let next = tokio::time::timeout(Duration::from_secs(30), received.recv())
+            .await
+            .expect("delivered")
+            .unwrap();
+        got.push(next);
+    }
+    assert_eq!(got, [(1024, true), (5, false)]);
+}

@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 1461a189bd12a3a7234e2b4caf40fe85d16bb9933d6b47fc019675b444fb940a # shrinks to id = String("12345")
+cc 57a460b235eddfe43b76538528cd6d0f451a23f5dc19071fce34da5e65180a8e # shrinks to id = String("[abc")

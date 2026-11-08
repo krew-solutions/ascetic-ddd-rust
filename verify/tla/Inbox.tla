@@ -56,6 +56,8 @@ CONSTANTS
   AtomicWait,     \* TRUE: the check of a dependency and the wait are one step, as under the lock of
                   \* ADR-0009; FALSE: the wait is settled in a later step, and a mark in between cannot see it
   MaxAdmin,       \* unpark and resolve actions, in all
+  Unreadable,     \* SUBSET Msgs: rows stored before the intake's checks that the dispatcher cannot
+                  \* read or write for their own values (ADR-0037 decision 6); parked at once
   None            \* a model value: no row held
 
 ASSUME Deps \in [Msgs -> SUBSET Msgs]
@@ -67,6 +69,7 @@ ASSUME BlockOnBackoff \in BOOLEAN
 ASSUME MaxAdmin \in Nat
 ASSUME WaitsOnDependencies \in BOOLEAN
 ASSUME WaitExpires \in BOOLEAN
+ASSUME Unreadable \subseteq Msgs
 
 VARIABLES
   part,       \* [Msgs -> Slots], fixed at the start: any cut is allowed
@@ -84,10 +87,11 @@ VARIABLES
   resolved,   \* SUBSET Msgs, marked processed by an operator, without effects
   admin,      \* operator actions taken
   waiting,    \* [Msgs -> Msgs \cup {None}], the dependency a row set aside waits for
-  expired     \* SUBSET Msgs, parked because their wait ran out
+  expired,    \* SUBSET Msgs, parked because their wait ran out
+  unread      \* SUBSET Msgs, rows the dispatcher cannot read yet: Unreadable until superseded
 
 vars == <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
-          attempts, due, parked, resolved, admin, waiting, expired>>
+          attempts, due, parked, resolved, admin, waiting, expired, unread>>
 
 Locked == {holding[s] : s \in Slots} \ {None}
 
@@ -108,6 +112,7 @@ Init ==
   /\ admin = 0
   /\ waiting = [m \in Msgs |-> None]
   /\ expired = {}
+  /\ unread = Unreadable
 
 (* ------------------------------------------------------------------------ *)
 (* Receiving                                                                  *)
@@ -124,7 +129,7 @@ ReceiveAs(m, p) ==
   /\ recvPos' = [recvPos EXCEPT ![m] = p]
   /\ nextRecv' = IF p >= nextRecv THEN p + 1 ELSE nextRecv
   /\ UNCHANGED <<part, processed, effects, holding, procOrder, crashes, attempts, due, parked, resolved, admin,
-                waiting, expired>>
+                waiting, expired, unread>>
 
 Receive(m) == ReceiveAs(m, nextRecv)
 
@@ -162,7 +167,7 @@ FetchFrom(d, rows) ==
   /\ TakesIn(d, rows) # {}
   /\ holding' = [holding EXCEPT ![d] = CHOOSE m \in TakesIn(d, rows) : TRUE]
   /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, procOrder, crashes,
-                attempts, due, parked, resolved, admin, waiting, expired>>
+                attempts, due, parked, resolved, admin, waiting, expired, unread>>
 Fetch(d) == FetchFrom(d, received)
 
 \* The head of the queue depends on a message not yet processed: it is set
@@ -179,7 +184,7 @@ WaitIn(d, rows, m, dep) ==
   \* without the lock the wait is not committed yet: the row stays held
   /\ holding' = IF AtomicWait THEN holding ELSE [holding EXCEPT ![d] = m]
   /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, procOrder, crashes,
-                attempts, due, parked, resolved, admin, expired>>
+                attempts, due, parked, resolved, admin, expired, unread>>
 Wait(d) == \E m \in Msgs, dep \in Msgs : WaitIn(d, received, m, dep)
 
 \* The wait commits, whatever was marked in between (AtomicWait = FALSE).
@@ -189,7 +194,7 @@ Settle(d) ==
   /\ waiting[holding[d]] # None
   /\ holding' = [holding EXCEPT ![d] = None]
   /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, procOrder, crashes,
-                attempts, due, parked, resolved, admin, waiting, expired>>
+                attempts, due, parked, resolved, admin, waiting, expired, unread>>
 
 \* What waited for m comes back into the queue: waiting_for IS NULL again.
 \* A wait not committed yet -- its row still held -- is not seen.
@@ -206,6 +211,7 @@ Commit(d) ==
   /\ holding[d] # None
   /\ waiting[holding[d]] = None
   /\ holding[d] \notin Poison
+  /\ holding[d] \notin unread
   /\ processed' = processed \cup {holding[d]}
   /\ effects' = [effects EXCEPT ![holding[d]] = @ + 1]
   /\ procOrder' = Append(procOrder, holding[d])
@@ -213,7 +219,7 @@ Commit(d) ==
   /\ parked' = parked \ WokenFromExpiry(holding[d])
   /\ expired' = expired \ WokenFromExpiry(holding[d])
   /\ holding' = [holding EXCEPT ![d] = None]
-  /\ UNCHANGED <<part, received, recvPos, nextRecv, crashes, attempts, due, resolved, admin>>
+  /\ UNCHANGED <<part, received, recvPos, nextRecv, crashes, attempts, due, resolved, admin, unread>>
 
 \* The subscriber returned an error: its writes roll back to the savepoint,
 \* the attempt is recorded in the same transaction, and the row is not due
@@ -225,6 +231,7 @@ Commit(d) ==
 Fail(d) ==
   /\ holding[d] # None
   /\ waiting[holding[d]] = None
+  /\ holding[d] \notin unread
   /\ LET m == holding[d] IN
      /\ m \in Poison \/ crashes < MaxCrashes
      /\ crashes' = IF m \in Poison THEN crashes ELSE crashes + 1
@@ -233,14 +240,28 @@ Fail(d) ==
      /\ parked' = IF MaxAttempts > 0 /\ attempts[m] + 1 >= MaxAttempts THEN parked \cup {m} ELSE parked
   /\ holding' = [holding EXCEPT ![d] = None]
   /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, procOrder, resolved, admin,
-                waiting, expired>>
+                waiting, expired, unread>>
+
+\* A row the dispatcher cannot read, or whose wait, failure or mark it
+\* cannot write, for the row's own values, is parked at once in the
+\* transaction that holds it, under its lock: the subscriber does not run,
+\* nothing is recorded but the park, and the slot goes on (ADR-0037
+\* decision 6).  One step: the park is a statement of the same transaction.
+ParkAtOnce(d) ==
+  /\ holding[d] # None
+  /\ waiting[holding[d]] = None
+  /\ holding[d] \in unread
+  /\ parked' = parked \cup {holding[d]}
+  /\ holding' = [holding EXCEPT ![d] = None]
+  /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, procOrder, crashes,
+                attempts, due, resolved, admin, waiting, expired, unread>>
 
 \* The backoff of a failed row has passed.
 Elapse(m) ==
   /\ ~due[m]
   /\ due' = [due EXCEPT ![m] = TRUE]
   /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
-                attempts, parked, resolved, admin, waiting, expired>>
+                attempts, parked, resolved, admin, waiting, expired, unread>>
 
 \* The wait of a row set aside has run out: it is parked, with the
 \* dependency named, and the partition owes it nothing more.  It keeps the
@@ -253,7 +274,7 @@ Expire(m) ==
   /\ parked' = parked \cup {m}
   /\ expired' = expired \cup {m}
   /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
-                attempts, due, resolved, admin, waiting>>
+                attempts, due, resolved, admin, waiting, unread>>
 
 \* The expiry as it was before ADR-0036 R8, forgetting the identity waited
 \* for: InboxLateDepForgets.cfg puts it in Expire's place, and TLC finds the
@@ -266,7 +287,7 @@ ExpireForgetting(m) ==
   /\ parked' = parked \cup {m}
   /\ expired' = expired \cup {m}
   /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
-                attempts, due, resolved, admin>>
+                attempts, due, resolved, admin, unread>>
 
 \* The dispatcher dies: the transaction rolls back, writes and mark alike,
 \* nothing is recorded, and the row is free again.
@@ -277,7 +298,7 @@ Crash(d) ==
   /\ crashes' = crashes + 1
   /\ holding' = [holding EXCEPT ![d] = None]
   /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, procOrder,
-                attempts, due, parked, resolved, admin, waiting, expired>>
+                attempts, due, parked, resolved, admin, waiting, expired, unread>>
 
 (* ------------------------------------------------------------------------ *)
 (* Operators                                                                  *)
@@ -294,7 +315,7 @@ Unpark(m) ==
   /\ attempts' = [attempts EXCEPT ![m] = 0]
   /\ due' = [due EXCEPT ![m] = TRUE]
   /\ waiting' = [waiting EXCEPT ![m] = None]
-  /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes, resolved>>
+  /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes, resolved, unread>>
 
 \* A parked row is marked processed by hand, without the subscriber's
 \* effects; what waited for it comes back into the queue.
@@ -308,20 +329,38 @@ Resolve(m) ==
   /\ resolved' = resolved \cup {m}
   /\ procOrder' = Append(procOrder, m)
   /\ waiting' = [Woken(m) EXCEPT ![m] = None]
-  /\ UNCHANGED <<part, received, recvPos, nextRecv, effects, holding, crashes, attempts, due>>
+  /\ UNCHANGED <<part, received, recvPos, nextRecv, effects, holding, crashes, attempts, due, unread>>
+
+\* A row parked at once is superseded by an arrival at its identity: the
+\* producer's repaired message replaces its values, and it is back in the
+\* queue, readable (ADR-0037 decision 6).  The intake's statement takes the
+\* row's lock, so a row a dispatcher holds is not superseded.  An outside
+\* action, within the operators' budget.
+Supersede(m) ==
+  /\ m \in parked
+  /\ m \in unread
+  /\ m \notin Locked
+  /\ admin < MaxAdmin
+  /\ admin' = admin + 1
+  /\ unread' = unread \ {m}
+  /\ parked' = parked \ {m}
+  /\ attempts' = [attempts EXCEPT ![m] = 0]
+  /\ due' = [due EXCEPT ![m] = TRUE]
+  /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
+                resolved, waiting, expired>>
 
 (* ------------------------------------------------------------------------ *)
 
 Next ==
-  \/ \E m \in Msgs : Receive(m) \/ Elapse(m) \/ Expire(m) \/ Unpark(m) \/ Resolve(m)
-  \/ \E d \in Slots : Fetch(d) \/ Wait(d) \/ Settle(d) \/ Commit(d) \/ Fail(d) \/ Crash(d)
+  \/ \E m \in Msgs : Receive(m) \/ Elapse(m) \/ Expire(m) \/ Unpark(m) \/ Resolve(m) \/ Supersede(m)
+  \/ \E d \in Slots : Fetch(d) \/ Wait(d) \/ Settle(d) \/ Commit(d) \/ Fail(d) \/ Crash(d) \/ ParkAtOnce(d)
 
 \* Every message that arrives at all arrives eventually; every backoff
 \* passes, and every wait runs out where waits do; every dispatcher keeps
 \* walking its queue and finishes what it took, one way or the other.
 Fairness ==
   /\ \A m \in Msgs : WF_vars(Receive(m)) /\ WF_vars(Elapse(m)) /\ WF_vars(Expire(m))
-  /\ \A d \in Slots : WF_vars(Fetch(d) \/ Wait(d) \/ Settle(d)) /\ WF_vars(Commit(d) \/ Fail(d))
+  /\ \A d \in Slots : WF_vars(Fetch(d) \/ Wait(d) \/ Settle(d)) /\ WF_vars(Commit(d) \/ Fail(d) \/ ParkAtOnce(d))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -345,6 +384,7 @@ TypeOK ==
   /\ admin \in Nat
   /\ waiting \in [Msgs -> Msgs \cup {None}]
   /\ expired \subseteq parked
+  /\ unread \subseteq Unreadable
 
 \* The subscriber's writes for a message are committed at most once, however
 \* many dispatchers compete and however often the message arrives.
@@ -359,7 +399,7 @@ EffectsIffProcessed == \A m \in Msgs : (m \in processed /\ m \notin resolved) <=
 \* exhausting its attempts or its wait.
 ParkedIsAside ==
   /\ parked \cap processed = {}
-  /\ \A m \in parked : (MaxAttempts > 0 /\ attempts[m] = MaxAttempts) \/ m \in expired
+  /\ \A m \in parked : (MaxAttempts > 0 /\ attempts[m] = MaxAttempts) \/ m \in expired \/ m \in Unreadable
 
 \* A message set aside waits for a dependency of its own that is not yet
 \* processed — never for one already processed, which nothing would wake it
@@ -392,9 +432,11 @@ Index(m) == CHOOSE i \in 1..Len(procOrder) : procOrder[i] = m
 \* dispatcher per slot at a time is what makes this a guarantee rather than
 \* a condition.  A failed message waiting for its backoff holds the slot for
 \* this reason; stepping over it, BlockOnBackoff = FALSE, breaks the order,
-\* which InboxSkipNotDue.cfg shows.
+\* which InboxSkipNotDue.cfg shows.  A row parked at once steps out of the
+\* order as a parked row does: the slot flows past it, and superseded, it is
+\* processed after the rows behind it (ADR-0037 decision 6).
 ArrivalOrder ==
-  \A a, b \in processed \ resolved :
+  \A a, b \in (processed \ resolved) \ Unreadable :
     (part[a] = part[b] /\ Deps[a] = {} /\ Deps[b] = {} /\ recvPos[a] < recvPos[b]) => Index(a) < Index(b)
 
 \* A received message whose dependencies are processed is eventually
