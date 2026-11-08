@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use ascetic_ddd_bus::identity::{STREAM_ID, STREAM_POSITION, STREAM_TYPE, TENANT_ID};
 use ascetic_ddd_bus::{Adapter, Message};
 use ascetic_ddd_inbox::observer::{InboxObserver, Rejected};
-use ascetic_ddd_inbox::{Admission, Bounds, ByStream, Error, PgInbox, Reason};
+use ascetic_ddd_inbox::{Admission, Bounds, ByStream, Error, PartitionKey, PgInbox, Reason};
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use ascetic_ddd_session::pg::tokio_postgres::error::SqlState;
@@ -571,5 +571,132 @@ async fn a_message_past_the_bounds_is_kept_cut_and_never_readmitted() {
     assert!(matches!(
         inbox.readmit("ops", &digest).await,
         Err(Error::Refused(why)) if why.contains("cut")
+    ));
+}
+
+/// Runs `ddl` on the fixture's tables, `{t}` naming the inbox's.
+async fn altered(f: &Fixture, ddl: &str) {
+    let ddl = ddl.replace("{t}", &f.table);
+    f.sessions
+        .session(async |session| {
+            session.connection().batch_execute(&ddl).await?;
+            Ok::<_, Error>(())
+        })
+        .await
+        .unwrap();
+}
+
+/// What the library did not make and that would change what the intake's
+/// statements can raise is refused at `migrate` (ADR-0037 decision 5), on
+/// the inbox's table and on the rows set aside.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_host_object_on_the_inbox_s_tables_is_refused_at_migrate() {
+    for (kind, ddl) in [
+        ("indexes", "CREATE INDEX {t}_host_idx ON {t} (uri)"),
+        (
+            "indexes",
+            "CREATE INDEX {t}_rejects_host_idx ON {t}_rejects (reason)",
+        ),
+        (
+            "constraints",
+            "ALTER TABLE {t} ADD CONSTRAINT {t}_host_check CHECK (stream_position > 0)",
+        ),
+        (
+            "triggers",
+            "CREATE OR REPLACE FUNCTION intake_host_noop() RETURNS trigger LANGUAGE plpgsql \
+             AS $$ BEGIN RETURN NEW; END $$; \
+             CREATE TRIGGER {t}_host_trg BEFORE INSERT ON {t}_rejects \
+             FOR EACH ROW EXECUTE FUNCTION intake_host_noop()",
+        ),
+        (
+            "rules",
+            "CREATE RULE {t}_host_rule AS ON INSERT TO {t} DO ALSO NOTIFY intake_host",
+        ),
+        (
+            "policies",
+            "CREATE POLICY {t}_host_policy ON {t} USING (true)",
+        ),
+        ("row security", "ALTER TABLE {t} ENABLE ROW LEVEL SECURITY"),
+        (
+            "columns",
+            "ALTER TABLE {t} ADD COLUMN host_note text NOT NULL DEFAULT 'x'",
+        ),
+    ] {
+        let f = fixture("host_object").await;
+        altered(&f, ddl).await;
+        let refused = f.inbox.migrate().await.unwrap_err();
+        assert!(refused.to_string().contains(kind), "{kind}: {refused}");
+    }
+}
+
+/// What a newer release makes is the library's: an older one starts beside
+/// it (ADR-0036 R12). Its objects carry the `{table}__` prefix, and a column
+/// it adds is nullable, without a default.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_newer_release_s_objects_on_the_inbox_s_tables_are_the_library_s() {
+    let f = fixture("newer_release").await;
+    altered(
+        &f,
+        "CREATE OR REPLACE FUNCTION intake_newer_noop() RETURNS trigger LANGUAGE plpgsql \
+         AS $$ BEGIN RETURN NEW; END $$; \
+         CREATE TRIGGER {t}__newer_trg BEFORE INSERT ON {t} \
+         FOR EACH ROW EXECUTE FUNCTION intake_newer_noop(); \
+         CREATE UNIQUE INDEX {t}__newer_uniq ON {t} (received_position); \
+         CREATE INDEX {t}_rejects__newer_idx ON {t}_rejects (last_seen_at); \
+         ALTER TABLE {t} ADD COLUMN newer_note text NULL",
+    )
+    .await;
+    f.inbox.migrate().await.unwrap();
+    assert!(matches!(
+        f.intake(&order("1", ID_1, "p")).await,
+        Admission::Stored(_)
+    ));
+}
+
+/// A host's partition key over the stream id, cast to a type the value
+/// overflows: the only 22003 the intake's statements can raise once the
+/// stream id is in its domain. It is the message's own, set aside as
+/// unstorable, never a stall (ADR-0037 decision 5).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_number_a_host_s_key_overflows_is_set_aside_as_unstorable() {
+    struct SmallKey;
+    impl PartitionKey for SmallKey {
+        fn sql_expression(&self) -> &str {
+            "((stream_id->>'n')::int2)::text"
+        }
+    }
+    let table = "intake_small_key";
+    let inbox = PgInbox::new(PgSessionPool::new(pool()))
+        .with_table(
+            Identifier::new(table).unwrap(),
+            Identifier::new(format!("{table}_seq")).unwrap(),
+        )
+        .partitioned_by(SmallKey);
+    inbox.teardown().await.unwrap();
+    inbox.migrate().await.unwrap();
+    let keyed = |n: &str| {
+        Message::new("p")
+            .with_header(TENANT_ID, "t1")
+            .with_header(STREAM_TYPE, "orders.Order")
+            .with_header(STREAM_ID, format!(r#"{{"n":"{n}"}}"#))
+            .with_header(STREAM_POSITION, "1")
+    };
+    let overflowing = inbox.intake("inbox://orders/k", &keyed("40000")).await;
+    assert!(
+        matches!(
+            overflowing,
+            Ok(Admission::SetAside {
+                reason: Reason::Unstorable,
+                ..
+            })
+        ),
+        "{overflowing:?}"
+    );
+    assert!(matches!(
+        inbox.intake("inbox://orders/k", &keyed("5")).await,
+        Ok(Admission::Stored(_))
     ));
 }

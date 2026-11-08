@@ -56,7 +56,7 @@ pub enum Reason {
     /// carries could never be stored.
     Malformed,
     /// PostgreSQL refused a value the checks did not foresee: 22P02, 22001,
-    /// 22021, 22P05, or 54000 on the inbox's own index.
+    /// 22021, 22P05, 22003, or 54000 on the inbox's own index.
     Unstorable,
     /// Its stream's owner is not a producer of the channel it arrived on
     /// (ADR-0036 R5): the host's admission refused it.
@@ -513,6 +513,11 @@ pub(crate) fn unstorable(
         "22001" => Some("22001, a value too long for its column"),
         "22021" => Some("22021, a character not in the encoding"),
         "22P05" => Some("22P05, an untranslatable character"),
+        // The intake's statements convert no number but the message's own:
+        // its stream id and metadata as jsonb, and a host's partition key
+        // over them; the sequence raises 2200H, the slot is masked and
+        // clamped (ADR-0037 decision 5).
+        "22003" => Some("22003, a number out of its type's range"),
         "54000"
             if constraint.is_some_and(|name| {
                 name == format!("{table}_pk") || name.starts_with(&format!("{table}__"))
@@ -869,6 +874,7 @@ mod tests {
     #[test]
     fn only_the_listed_codes_are_the_message_s_own() {
         assert!(unstorable("22P02", None, "inbox").is_some());
+        assert!(unstorable("22003", None, "inbox").is_some());
         assert!(unstorable("54000", Some("inbox_pk"), "inbox").is_some());
         assert!(unstorable("54000", Some("inbox__message_id_uniq"), "inbox").is_some());
         assert!(
@@ -876,7 +882,7 @@ mod tests {
             "the XID stop limit"
         );
         for environment in [
-            "57014", "55P03", "25006", "42P01", "42501", "40001", "08006", "22003",
+            "57014", "55P03", "25006", "42P01", "42501", "40001", "08006", "2200H",
         ] {
             assert!(
                 unstorable(environment, None, "inbox").is_none(),

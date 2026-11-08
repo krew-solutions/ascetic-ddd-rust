@@ -876,12 +876,153 @@ async fn refuse_a_page_the_bounds_do_not_fit<S: PgAccess>(session: &S) -> Result
     }
 }
 
+/// The inbox table's columns as this release makes them.
+const INBOX_COLUMNS: [&str; 17] = [
+    "tenant_id",
+    "stream_type",
+    "stream_id",
+    "stream_position",
+    "uri",
+    "payload",
+    "metadata",
+    "received_position",
+    "processed_position",
+    "attempts",
+    "last_error",
+    "next_attempt_at",
+    "parked_at",
+    "waiting_for",
+    "waiting_since",
+    "slot",
+    "processed_at",
+];
+
+/// The rows set aside's columns as this release makes them.
+const REJECTS_COLUMNS: [&str; 17] = [
+    "digest",
+    "channel",
+    "tenant_id",
+    "stream_type",
+    "identity",
+    "reason",
+    "detail",
+    "holder_channel",
+    "holder_position",
+    "message",
+    "seen",
+    "first_seen_at",
+    "last_seen_at",
+    "disposed_at",
+    "disposition",
+    "disposed_by",
+    "disposed_because",
+];
+
+/// Refuses on `relation` what the library did not make and that would
+/// change what the intake's statements can raise (ADR-0037 decision 5): an
+/// index — a conflict on a unique one leaves a message stored nowhere, an
+/// expression raises for its value —, a constraint, a trigger, a rule, a
+/// policy or row security, and a column a row cannot be inserted without.
+/// The library names its own objects `<relation>__…` beside its primary
+/// key, so that an older release starts beside a newer one's (R12); a
+/// release that adds a column adds it nullable, without a default.
+async fn refuse_what_the_library_did_not_make<S: PgAccess>(
+    session: &S,
+    relation: &str,
+    primary_key: &str,
+    columns: &[&str],
+) -> Result<(), Error> {
+    let connection = session.connection();
+    let own = |name: &String| name == primary_key || name.starts_with(&format!("{relation}__"));
+    let names = async |sql: &str| -> Result<Vec<String>, Error> {
+        Ok(connection
+            .query(sql, &[&relation])
+            .await?
+            .iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect())
+    };
+    let kinds = [
+        (
+            "indexes",
+            "SELECT i.relname::text FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid \
+             WHERE x.indrelid = $1::text::regclass",
+        ),
+        (
+            "constraints",
+            "SELECT conname::text FROM pg_constraint WHERE conrelid = $1::text::regclass",
+        ),
+        (
+            "triggers",
+            "SELECT tgname::text FROM pg_trigger \
+             WHERE tgrelid = $1::text::regclass AND NOT tgisinternal",
+        ),
+        (
+            "rules",
+            "SELECT rulename::text FROM pg_rewrite WHERE ev_class = $1::text::regclass",
+        ),
+        (
+            "policies",
+            "SELECT polname::text FROM pg_policy WHERE polrelid = $1::text::regclass",
+        ),
+    ];
+    for (kind, sql) in kinds {
+        let foreign: Vec<String> = names(sql)
+            .await?
+            .into_iter()
+            .filter(|name| !own(name))
+            .collect();
+        if !foreign.is_empty() {
+            return Err(Error::Malformed(format!(
+                "table `{relation}` carries {kind} the inbox does not own ({}): they would change \
+                 what its statements can raise",
+                foreign.join(", ")
+            )));
+        }
+    }
+    let secured: bool = connection
+        .query_one(
+            "SELECT relrowsecurity FROM pg_class WHERE oid = $1::text::regclass",
+            &[&relation],
+        )
+        .await?
+        .get(0);
+    if secured {
+        return Err(Error::Malformed(format!(
+            "table `{relation}` has row security, which the inbox does not own: it would refuse \
+             a row for a session's sake"
+        )));
+    }
+    let binding: Vec<String> = connection
+        .query(
+            "SELECT a.attname::text FROM pg_attribute a \
+             LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+             WHERE a.attrelid = $1::text::regclass AND a.attnum > 0 AND NOT a.attisdropped \
+               AND (a.attnotnull OR d.adbin IS NOT NULL OR a.attgenerated <> '')",
+            &[&relation],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get::<_, String>(0))
+        .filter(|name| !columns.contains(&name.as_str()))
+        .collect();
+    if !binding.is_empty() {
+        return Err(Error::Malformed(format!(
+            "table `{relation}` carries columns the inbox does not own that bind an insert ({}): \
+             not null, defaulted or generated",
+            binding.join(", ")
+        )));
+    }
+    Ok(())
+}
+
 /// Refuses a table the intake cannot read the conflicts of (ADR-0036 R2):
-/// a unique or exclusion index the inbox does not own, whose conflict would
-/// leave a message stored nowhere and acknowledged; a deferrable constraint,
-/// which an untargeted conflict cannot arbitrate (55000 on every insert);
-/// and a server encoding other than UTF8, under which 22P05 is the
-/// environment's, not the message's.
+/// what the library did not make on its tables (ADR-0037 decision 5), a
+/// unique index of a host's among them, whose conflict would leave a
+/// message stored nowhere and acknowledged; a deferrable constraint, which
+/// an untargeted conflict cannot arbitrate (55000 on every insert); and a
+/// server encoding other than UTF8, under which 22P05 is the environment's,
+/// not the message's.
 async fn refuse_what_the_intake_cannot_read<S: PgAccess>(
     session: &S,
     table: &str,
@@ -896,28 +1037,15 @@ async fn refuse_what_the_intake_cannot_read<S: PgAccess>(
             "the server encoding is {encoding}: the inbox reads PostgreSQL's refusals as UTF8's"
         )));
     }
-    let foreign: Vec<String> = connection
-        .query(
-            "SELECT i.relname::text FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid \
-             WHERE x.indrelid = $1::text::regclass AND (x.indisunique OR x.indisexclusion) \
-               AND i.relname NOT IN ($2, $3)",
-            &[
-                &table,
-                &format!("{table}_pk"),
-                &format!("{table}__message_id_uniq"),
-            ],
-        )
-        .await?
-        .iter()
-        .map(|row| row.get(0))
-        .collect();
-    if !foreign.is_empty() {
-        return Err(Error::Malformed(format!(
-            "table `{table}` carries unique or exclusion indexes the inbox does not own ({}): \
-             their conflicts would leave a message stored nowhere",
-            foreign.join(", ")
-        )));
-    }
+    refuse_what_the_library_did_not_make(session, table, &format!("{table}_pk"), &INBOX_COLUMNS)
+        .await?;
+    refuse_what_the_library_did_not_make(
+        session,
+        &format!("{table}_rejects"),
+        &format!("{table}_rejects_pkey"),
+        &REJECTS_COLUMNS,
+    )
+    .await?;
     let deferrable: Vec<String> = connection
         .query(
             "SELECT conname::text FROM pg_constraint \

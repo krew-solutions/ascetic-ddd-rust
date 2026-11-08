@@ -644,3 +644,25 @@ The host adopts them in one pin, after quoting its stream ids.
     and `numeric`'s headers repeat, even in twenty-digit integers each
     another. So the wait cannot hold a term of the bound, and the measure
     of the uncompressed datum does.
+- 2026-11-08 — Slice 4 built.
+  - **22003 is on `unstorable`'s list.** Once the stream id is in its
+    domain, its only source in the intake's statements is a host's
+    partition key over the message's values. A test with such a key (an
+    `int2` cast of a field) sets the message aside as unstorable.
+  - **`migrate` compares both tables' catalogues**, the inbox's and the
+    rows set aside's. It refuses:
+    - an index, a constraint, a trigger, a rule or a policy not named
+      `<relation>__…` or as the primary key;
+    - row security;
+    - a column the library does not make that is not null, defaulted or
+      generated.
+
+    A newer release's objects under the prefix, and its nullable columns,
+    are accepted. That is the library's rule for its own migrations from
+    now on.
+  - **Mutations caught:**
+    - 22003 removed;
+    - every name taken as the library's;
+    - none taken but the primary key, which refuses a newer release;
+    - row security, columns, and the rows set aside's table each
+      unchecked.
