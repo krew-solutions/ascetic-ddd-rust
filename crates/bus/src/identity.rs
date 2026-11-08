@@ -63,6 +63,16 @@ pub const STREAM_ID_DEPTH: usize = 32;
 /// `arbitrary_precision`, and one of `…RawValue` as a raw value.
 const PRIVATE_KEYS: &str = "$serde_json::private::";
 
+/// Whether `key` is one of serde_json's private keys: a key no object the
+/// bus keeps may name, since a reader built with `arbitrary_precision` or
+/// `raw_value` takes the object for a number or a raw value — the reader of
+/// `jsonb` among them (ADR-0037 decisions 1 and 2). The inbox refuses a
+/// header so named, since its name becomes a key of the row's metadata.
+#[must_use]
+pub fn is_private_key(key: &str) -> bool {
+    key.starts_with(PRIVATE_KEYS)
+}
+
 /// Why a header's text is no identity, in the library's words: never the
 /// text's, which may be personal data or the very value refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -345,7 +355,7 @@ impl Reader<'_> {
         }
         loop {
             let key = self.string()?;
-            if key.starts_with(PRIVATE_KEYS) {
+            if is_private_key(&key) {
                 return Err(Refused("an object names a key of serde_json's own"));
             }
             self.whitespace();

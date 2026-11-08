@@ -94,7 +94,8 @@ impl InboxMessage {
     /// The messages this one must wait for, read as the intake reads them
     /// (ADR-0037 decision 4): none when the metadata names none, and the
     /// reason when the list is not a list of dependencies. The list is the
-    /// header's JSON text, or, in a row stored before, the list itself.
+    /// header's JSON text, or the list itself, as a message built in memory
+    /// holds it (`depending_on`), read as the text it is sent as.
     ///
     /// # Errors
     /// The reason, in the library's words, when the list does not parse,

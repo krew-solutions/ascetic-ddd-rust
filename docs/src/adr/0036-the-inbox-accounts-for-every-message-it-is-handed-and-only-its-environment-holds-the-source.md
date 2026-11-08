@@ -6,7 +6,8 @@ Accepted (2026-11-07, by the owner), after its revision by the roles'
 review and with the owner (§ Revision after the roles' review, § Change
 Log). Part A, the intake and the surface of what it sets aside, is built
 in the library (2026-11-07, A1 to A5 of § Change Log); the host adopts it
-next. Part B, the parked rows, waits on what § Revision names.
+next. Of Part B, the parked rows' counts by channel and ground are built
+(2026-11-08, § Change Log); the rest waits on what § Revision names.
 
 It is the output of two rounds of a blind solver and a discriminator, run
 for the host project that uses this library (its ADR-0086, S3b-4):
@@ -536,7 +537,8 @@ would hide what the stop used to show.
 ### Part B, waiting
 
 The parked rows' state by identity, their dispositions by channel, the
-supersede and forgetting a Tenant (decision 6) wait for three things:
+supersede and forgetting a Tenant (decision 6) wait for three things (their
+counts by channel left this wait on 2026-11-08, § Change Log):
 - R1's order stamped by the producer, and the answer from the host's
   BC-DEVICE;
 - the host's BC-TENANCY's off-boarding events on the wire;
@@ -936,3 +938,42 @@ This ADR's own:
   finite `f64`, past `numeric`'s scale, 22003 taken as the environment's).
   R3, R4's claim on structured headers and decision 3's premise are revised
   by ADR-0037 (Proposed).
+- 2026-11-08 — Decision 6's counts built: the parked rows by channel and
+  ground, out of Part B's wait. Their one premise among Part B's three was
+  R11's index, built with Part A; they need neither the producer's order
+  nor the off-boarding events. Built in ADR-0037's round C10 (its Change
+  Log), for the host's adoption, under the library's gate.
+  - **Why now.** A host counting parks from the observer's events cannot
+    page durably: its counters start from zero at every restart, and a row
+    leaves the parked state with no event it could count — a supersede, a
+    dependency's wake. A gauge read from the table holds while a row stays
+    parked, and falls when it leaves.
+  - **`Ground`**, read from the columns, never from `last_error`, which a
+    subscriber writes:
+    - `failure`: attempts ran out or the failure was permanent;
+    - `expired`: the wait ran out, the dependency still named;
+    - `at_once`: parked at once for its own values (ADR-0037 decision 6).
+
+    Each asks for its own remedy, so `Parked` carries its ground too.
+  - **`PgInbox::parked_counts(within)`**: one statement grouped by the
+    parked index's channel expression and the ground, with the oldest park
+    by the database's clock. It runs in a transaction of its own under
+    `SET LOCAL statement_timeout`: parked rows are never swept, and a count
+    past the bound fails rather than hold a session, and the table's lock
+    a migration waits behind.
+  - **Measured on PostgreSQL 14**, 2 million rows: 10,000 parked counted by
+    a bitmap scan of the parked index in 5 ms; 200,000 in 180 ms and a
+    million in 315 ms, by a parallel scan of the table. The planner takes
+    the scan where it is cheaper. It is never an index-only scan, since
+    PostgreSQL ignores an index's expression columns for one and the
+    ground's columns are not in the index.
+  - **Executors:**
+    - counts by channel and ground over two keys of one channel, and the
+      listing's grounds, each exit then leaving its count: an unpark, a
+      resolve, a supersede;
+    - the plan of the library's own statement, inside the crate: the
+      parked index, no sequential scan, the rows fetched the parked ones,
+      on a table analysed first with few parked;
+    - the channel's expression held to the indexes' text.
+  - **Mutations caught:** the predicate dropped (the plan), the raw `uri`
+    grouped (two keys), one ground for every row (the counts).

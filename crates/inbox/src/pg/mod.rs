@@ -80,13 +80,13 @@
 //! vocabulary of the protocol model. The SQL lives in `store`, the loop in
 //! `dispatch`.
 
-mod census;
 mod dispatch;
 mod intake;
+#[cfg(test)]
+mod plan_tests;
 mod store;
 mod surface;
 
-pub use census::Census;
 pub use intake::Admission;
 pub use surface::{
     Readmission, Readmitted, SetAsideCount, SetAsideCursor, SetAsidePage, SetAsideRow,
@@ -168,9 +168,63 @@ pub enum Outcome {
     Parked,
 }
 
+/// Why a row is parked, read from its columns, never from its last error,
+/// which a subscriber writes (ADR-0036 decision 6, ADR-0037 decision 6).
+/// Each asks for its own remedy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Ground {
+    /// Its subscriber failed: its attempts ran out, or the failure was
+    /// permanent. Mended, it is unparked.
+    Failure,
+    /// Its wait for a causal dependency ran out, and it still names the
+    /// dependency: the dependency's mark wakes it, and an unpark only sets it
+    /// waiting again.
+    Expired,
+    /// Its own values could not be read or written, and it was parked at
+    /// once: an arrival at its identity supersedes it, and an unpark reads
+    /// the same values again.
+    AtOnce,
+}
+
+impl Ground {
+    /// The ground's name: `failure`, `expired` or `at_once`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Ground::Failure => "failure",
+            Ground::Expired => "expired",
+            Ground::AtOnce => "at_once",
+        }
+    }
+
+    /// The ground a name names.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        [Ground::Failure, Ground::Expired, Ground::AtOnce]
+            .into_iter()
+            .find(|ground| ground.as_str() == name)
+    }
+}
+
+/// The parked rows of one channel and ground (ADR-0036 decision 6): what a
+/// host's gauge pages on, read from the table, so that a page holds as long
+/// as a row stays parked, whatever the process that parked it did since.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParkedCount {
+    /// The channel the rows arrived on, without the key.
+    pub channel: String,
+    /// Why they are parked.
+    pub ground: Ground,
+    /// How many rows are parked.
+    pub open: u64,
+    /// When the oldest of them was parked, as PostgreSQL prints a
+    /// `timestamptz`: the database's clock, never a replica's.
+    pub oldest: String,
+}
+
 /// A parked row as the operator's listing gives it (ADR-0037 decision 6):
-/// by its place, and by its identity when that reads — a row stored before
-/// the intake's checks may not, and it is listed all the same, so that one
+/// by its place, and by its identity when that reads — a row the intake did
+/// not write may not, and it is listed all the same, so that one
 /// row does not close the listing for every Tenant. Never its payload or
 /// metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -185,6 +239,8 @@ pub struct Parked {
     pub last_error: Option<String>,
     /// The channel it arrived on, its key included.
     pub uri: String,
+    /// Why it is parked.
+    pub ground: Ground,
     /// Its identity; `None` when its stream id does not read back in the
     /// bus's domain.
     pub identity: Option<CausalDependency>,

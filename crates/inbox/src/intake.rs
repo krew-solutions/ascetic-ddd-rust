@@ -158,6 +158,11 @@ pub(crate) fn row_of(destination: &str, message: &Message) -> Result<InboxMessag
             if name.contains('\0') {
                 return Err("a header's name holds a NUL");
             }
+            // A name is a key of the metadata, which the reader of `jsonb`
+            // would take for a number or a raw value (ADR-0037 decision 2).
+            if identity::is_private_key(name) {
+                return Err("a header's name is one of serde_json's own");
+            }
             Ok((name.clone(), Value::String(text(value)?.to_owned())))
         })
         .collect::<Result<Map<_, _>, _>>()?;
@@ -711,6 +716,28 @@ mod tests {
         assert!(row_of("inbox://orders", &column_twice).is_err());
     }
 
+    /// A header named as one of serde_json's private keys is refused: its
+    /// name is a key of the metadata, and the only one of a message with no
+    /// other, which the reader of `jsonb` built with `arbitrary_precision`
+    /// takes for a number (ADR-0037 decision 2).
+    #[test]
+    fn a_header_named_as_serde_json_s_own_is_refused() {
+        for name in [
+            "$serde_json::private::Number",
+            "$serde_json::private::RawValue",
+            "$serde_json::private::",
+        ] {
+            let named = identified("o").with_header(name, "5");
+            assert_eq!(
+                row_of("inbox://orders", &named).err(),
+                Some("a header's name is one of serde_json's own"),
+                "{name}"
+            );
+        }
+        let near = identified("o").with_header("$serde_json::privat", "5");
+        assert!(row_of("inbox://orders", &near).is_ok());
+    }
+
     /// Each bound refuses the message past it, and no other.
     #[test]
     fn a_message_past_a_bound_is_named_by_it() {
@@ -982,7 +1009,11 @@ mod tests {
                 ),
                 proptest::collection::vec(
                     (
-                        prop_oneof![8 => "[a-z_]{1,12}", 1 => "[a-z_\\x00]{1,12}"],
+                        prop_oneof![
+                            8 => "[a-z_]{1,12}",
+                            1 => "[a-z_\\x00]{1,12}",
+                            1 => "\\$serde_json::private::(Number|RawValue)?",
+                        ],
                         header("[ -~]{0,40}"),
                     ),
                     0..3,
@@ -1051,6 +1082,13 @@ mod tests {
                             .and_then(Value::as_object)
                             .is_none_or(|fields| fields.values().all(Value::is_string)),
                         "a header is kept as its text"
+                    );
+                    prop_assert!(
+                        row.metadata
+                            .as_ref()
+                            .and_then(Value::as_object)
+                            .is_none_or(|fields| fields.keys().all(|name| !identity::is_private_key(name))),
+                        "no metadata key is serde_json's own"
                     );
                     prop_assert!(row.message_id().is_none_or(is_uuid));
                 }

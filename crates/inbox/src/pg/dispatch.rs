@@ -1,12 +1,14 @@
 //! The dispatcher: one message inside one transaction, and the loops of a
 //! process around it. The SQL is in `store`.
 
+use std::time::Duration;
+
 use ascetic_ddd_bus::uri;
 use ascetic_ddd_session::{PgAccess, Session, SessionError, SessionPool};
 use futures::future::join_all;
 use tokio::sync::watch;
 
-use super::{Loops, Outcome, Parked, PgInbox};
+use super::{Ground, Loops, Outcome, Parked, ParkedCount, PgInbox};
 use crate::error::{Error, Failure};
 use crate::intake;
 use crate::message::InboxMessage;
@@ -136,13 +138,14 @@ where
                         // lock, by a statement that binds none of its values
                         // (ADR-0037 decision 6).
                         let park = async |reason: &'static str| {
-                            self.park_at(&tx, &place, reason).await.map_err(in_slot)?;
+                            let channel = self.park_at(&tx, &place, reason).await.map_err(in_slot)?;
                             log::error!(
-                                "inbox: the row at {received_position} in slot {slot} parked at once: {reason}"
+                                "inbox: the row of {channel} at {received_position} in slot {slot} parked at once: {reason}"
                             );
                             self.observer.on_parked_at_once(&ParkedAtOnce {
                                 slot,
                                 received_position,
+                                channel: &channel,
                                 reason,
                                 snapshot: &snapshot,
                             });
@@ -159,9 +162,9 @@ where
                             Ok(Ok(message)) => message,
                             Ok(Err(reason)) | Err(reason) => return park(reason).await,
                         };
-                        // A row stored before whose list the intake would refuse
-                        // is refused for good, never waited on (ADR-0037
-                        // decision 4).
+                        // A list the intake would refuse — in a row it did not
+                        // write, or past a bound a later release tightened — is
+                        // refused for good, never waited on (ADR-0037 decision 4).
                         let dependencies = match message.checked_causal_dependencies() {
                             Ok(dependencies) => dependencies,
                             Err(why) => return park(why).await,
@@ -419,6 +422,51 @@ where
         limit: u32,
     ) -> Result<Vec<Parked>, Error> {
         self.parked_rows(session, after, limit).await
+    }
+
+    /// The parked rows, by channel and ground, with the oldest park: what a
+    /// host's gauge pages on (ADR-0036 decision 6). The rows are read from
+    /// the table, so the count holds while a row stays parked, whatever the
+    /// process that parked it did since, and falls when a row leaves the
+    /// state with no event a host could count: a supersede, a dependency's
+    /// wake. In a transaction of its own on the inbox's pool, bounded by
+    /// `within`: parked rows are never swept, so their number is the
+    /// table's to grow, and a count past the bound fails rather than hold a
+    /// session and the table's lock for a migration to wait behind.
+    ///
+    /// # Errors
+    /// [`Error`] when the database cannot be read within `within`.
+    pub async fn parked_counts(&self, within: Duration) -> Result<Vec<ParkedCount>, Error> {
+        let sql = super::store::parked_counts_sql(self.table.as_str());
+        let millis = i32::try_from(within.as_millis()).unwrap_or(i32::MAX).max(1);
+        let rows = self
+            .pool
+            .session(async |session: P::Session| {
+                session
+                    .atomic(async |tx| {
+                        tx.connection()
+                            .batch_execute(&format!("SET LOCAL statement_timeout = {millis}"))
+                            .await?;
+                        Ok::<_, Error>(tx.connection().query(&sql, &[]).await?)
+                    })
+                    .await
+            })
+            .await?;
+        rows.iter()
+            .map(|row| {
+                let ground: String = row.try_get(1)?;
+                Ok(ParkedCount {
+                    channel: row.try_get(0)?,
+                    ground: Ground::parse(&ground).ok_or_else(|| {
+                        Error::Malformed(format!(
+                            "the parked ground `{ground}` is not the library's"
+                        ))
+                    })?,
+                    open: u64::try_from(row.try_get::<_, i64>(2)?).unwrap_or_default(),
+                    oldest: row.try_get(3)?,
+                })
+            })
+            .collect()
     }
 
     /// Gives the parked row at `received_position` another go: attempts
