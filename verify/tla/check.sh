@@ -146,6 +146,12 @@ echo "   violation found, as expected"
 echo "== inbox: a poison message is parked after its attempts and the slot flows"
 tlc -config InboxPoison.cfg MCInbox.tla
 
+echo "== inbox: a row the dispatcher cannot read is parked at once and the slot flows"
+tlc -config InboxUnreadable.cfg MCInbox.tla
+
+echo "== inbox: without the park at once, TLC must find the slot held by the unreadable row"
+must_fail InboxUnreadableHolds MCInbox.tla "Temporal properties were violated"
+
 echo "== inbox: without parking, TLC must find the slot held for ever"
 if tlc -config InboxPoisonNoParking.cfg MCInbox.tla > "${TMPDIR:-/tmp}/tlc-inbox-poison.log" 2>&1; then
   echo "unexpected: no violation without parking"; exit 1

@@ -498,6 +498,44 @@ pub(crate) fn sanitized(bytes: Option<&[u8]>, width: usize) -> Option<String> {
 pub(crate) const CHANNEL_WIDTH: usize = URI_WIDTH;
 pub(crate) const DERIVED_WIDTH: usize = TENANT_ID_WIDTH;
 
+/// `text` as a text column takes it (ADR-0037 decision 7): without NUL,
+/// which no text column takes (22021), and at most `width` characters, cut
+/// at a character's boundary, never inside one.
+pub(crate) fn storable_text(text: &str, width: usize) -> String {
+    text.chars().filter(|c| *c != '\0').take(width).collect()
+}
+
+/// Whether a PostgreSQL error at dispatch is the row's own (ADR-0037
+/// decision 6): a value of the row PostgreSQL cannot convert, render or
+/// index, on a statement that reads or writes the row's values. `reading`
+/// for the statement that reads them: a plain SELECT assigns no
+/// transaction id, so its 54000 is the row's render past a buffer's bound,
+/// never the server's transaction-id limit; on a write, 54000 is the row's
+/// only when it names one of the inbox's own indexes. Any other code is the
+/// environment's: a timeout, a cancel or a lock never parks a row.
+pub(crate) fn unreadable(
+    code: &str,
+    constraint: Option<&str>,
+    table: &str,
+    reading: bool,
+) -> Option<&'static str> {
+    match code {
+        "22021" | "22P05" => Some("a value of the row is not in the server's encoding"),
+        "22003" => Some("a number of the row is out of its type's range"),
+        "22001" => Some("a value of the row is longer than its column"),
+        "22P02" => Some("a value of the row is not of its type"),
+        "54000" if reading => Some("the row's values are past what the server renders"),
+        "54000"
+            if constraint.is_some_and(|name| {
+                name == format!("{table}_pk") || name.starts_with(&format!("{table}__"))
+            }) =>
+        {
+            Some("the row's wait or mark is past what the inbox's index takes")
+        }
+        _ => None,
+    }
+}
+
 /// Whether a PostgreSQL error is the message's own value, refused by the
 /// server — a backstop for what [`row_of`] did not foresee — rather than the
 /// environment's: a SQLSTATE of the closed list, and 54000 only when it

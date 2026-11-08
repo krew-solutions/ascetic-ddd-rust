@@ -236,6 +236,16 @@ impl InboxObserver for JsonTrace {
             "error": event.error.to_string(),
         }));
     }
+    fn on_parked_at_once(&self, event: &inbox::ParkedAtOnce<'_>) {
+        self.record(json!({
+            "observer": "inbox",
+            "event": "parked_at_once",
+            "slot": event.slot,
+            "received_position": event.received_position,
+            "reason": event.reason,
+            "snapshot": snapshot_json(event.snapshot),
+        }));
+    }
     fn on_dispatched(&self, event: &inbox::Dispatched<'_>) {
         self.record(json!({
             "observer": "inbox",
@@ -245,6 +255,7 @@ impl InboxObserver for JsonTrace {
                 Ok(Outcome::Processed) => "processed",
                 Ok(Outcome::Failed { .. }) => "failed",
                 Ok(Outcome::SetAside) => "set_aside",
+                Ok(Outcome::Parked) => "parked",
                 Ok(Outcome::Nothing) => "nothing",
                 Err(_) => "rolled_back",
             },

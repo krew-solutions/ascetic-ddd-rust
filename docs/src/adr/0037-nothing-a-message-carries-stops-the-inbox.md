@@ -666,3 +666,54 @@ The host adopts them in one pin, after quoting its stream ids.
     - none taken but the primary key, which refuses a newer release;
     - row security, columns, and the rows set aside's table each
       unchecked.
+- 2026-11-08 — Slice 5a built: the dispatcher's own transaction.
+  - **Locate, then read.** `locate_head` returns the head's order of
+    arrival and its `ctid` under `FOR UPDATE`. `read_at` reads its values
+    in a savepoint and decodes them without panicking. A row whose stream
+    id reads back outside the bus's domain is unreadable too: one stored
+    before, past 64 bits, would reach the handler as another id.
+  - **Statements by place.** The wait, the mark, the failure's record and
+    the park name the row by its `ctid` and bind none of its values. The
+    mark's identity and its lock's key are written by the server from the
+    row's own columns (`IDENTITY_OF_ROW`). Before, a row read back lossy
+    changed no row at its mark, and every loop stopped ("the row to mark
+    is gone").
+  - **Parked at once.** `PgInbox::park_at` changes exactly one row in the
+    queue, under the locks the dispatch holds. It tells
+    `on_parked_at_once` and returns `Outcome::Parked`. The reasons are the
+    closed list of `intake::unreadable`: 54000 on the read, or on a write
+    naming the inbox's own index; 22021, 22P05, 22003, 22001 and 22P02.
+  - **Decision 6 made precise by a measurement.** Its wording put every
+    statement over the row's values in a savepoint. Built so, the test of
+    a lost connection stopped every loop with `Session(Abandoned)`:
+    - the subscriber's scope failed to roll back on the dead connection,
+      which poisoned the session;
+    - the next scope, the failure's record, was then refused as abandoned,
+      a defect rather than the moment's error.
+
+    So only the statements that can fail for the row's own values take a
+    savepoint, and both run before the subscriber: the read and the wait.
+    The mark binds no value of the row, and the failure's record binds
+    the place and a text made storable (decision 7, built here). Neither
+    takes a scope, so no scope opens after the subscriber's.
+  - **Decision 7's failure text, built here:** NUL removed and at most
+    4096 characters, cut at a boundary.
+  - **Inbox.tla:**
+    - `Unreadable` and `ParkAtOnce`: the row is parked in one step of the
+      transaction that holds it, and `Commit` and `Fail` exclude it;
+    - `InboxUnreadable.cfg` holds every property;
+    - `InboxUnreadableHolds.cfg`, with the step taken away, must fail and
+      does: the slot is held.
+
+    A trace cannot name a row stored by SQL. So the tests of unreadable
+    rows record none, and `trace2tla.py` refuses a park at once with that
+    reason.
+  - **Executors:**
+    - a 128-deep metadata and a stream id past 64 bits, each parked at
+      once while the next row of the slot is processed;
+    - a failure holding a NUL and 10,000 characters, recorded without them,
+      the row not parked.
+  - **Mutations caught:** the park changing no row, the domain check
+    dropped, the raw failure text, a panicking read.
+  - **No executor here:** the read's savepoint. Its server-side failure is
+    a render past 1 GB, owed with the measurements of § Owed.

@@ -1433,6 +1433,7 @@ impl InboxObserver for Recorder {
             Ok(Outcome::Processed) => "dispatched a message",
             Ok(Outcome::Failed { .. }) => "dispatched a failure",
             Ok(Outcome::SetAside) => "dispatched a set-aside",
+            Ok(Outcome::Parked) => "dispatched a park",
             Ok(Outcome::Nothing) => "dispatched nothing",
             Err(_) => "rolled back",
         });
@@ -2233,4 +2234,114 @@ async fn the_bound_on_an_identity_dominates_its_stored_size() {
             "a string's bound is tight: {bound} against {size}"
         );
     }
+}
+
+/// Inserts a row as a release before the bus's domain and ADR-0037 could
+/// have stored it, its values whatever SQL writes.
+async fn stored_before(f: &Fixture, stream_id: &str, metadata: &str) {
+    let client = pool().get().await.unwrap();
+    client
+        .execute(
+            &format!(
+                "INSERT INTO {} (tenant_id, stream_type, stream_id, stream_position, uri, payload, metadata) \
+                 VALUES ('tenant-1', 'orders.Order', $1::text::jsonb, 1, 'kafka://orders/old', 'old', $2::text::jsonb)",
+                f.table
+            ),
+            &[&stream_id, &metadata],
+        )
+        .await
+        .unwrap();
+}
+
+/// The parked rows' order of arrival and last error, read without their
+/// values, which may not decode.
+async fn parked_places(f: &Fixture) -> Vec<(i64, Option<String>)> {
+    let client = pool().get().await.unwrap();
+    client
+        .query(
+            &format!(
+                "SELECT received_position, last_error FROM {} WHERE parked_at IS NOT NULL \
+                 ORDER BY received_position",
+                f.table
+            ),
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect()
+}
+
+/// A head the dispatcher cannot read for its own values is parked at once
+/// in its transaction, its subscriber not run, and the next row of its slot
+/// is processed (ADR-0037 decision 6): a metadata 128 deep, which the
+/// client's reader refuses, and a stream id past 64 bits, which would reach
+/// the handler as another id. Before, the first panicked the dispatcher's
+/// task and the second stopped every loop at its mark.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_head_that_cannot_be_read_is_parked_at_once_and_the_slot_goes_on() {
+    for (ground, stream_id, metadata) in [
+        (
+            "a metadata 128 deep",
+            r#"{"id": "deep"}"#.to_owned(),
+            format!(r#"{{"h": {}{}}}"#, "[".repeat(127), "]".repeat(127)),
+        ),
+        (
+            "a stream id past 64 bits",
+            "12345678901234567890123".to_owned(),
+            "{}".to_owned(),
+        ),
+    ] {
+        // No trace: the row is stored by SQL, and a trace names only rows it
+        // saw received.
+        let f = fixture_cut("unreadable", (), 1, TraceFile::off()).await;
+        stored_before(&f, &stream_id, &metadata).await;
+        f.publish(&[message("next", 1)]).await;
+        let (seen, subscriber) = collector();
+        assert_eq!(f.dispatch(&subscriber).await, Outcome::Parked, "{ground}");
+        while f.dispatch(&subscriber).await != Outcome::Nothing {}
+        assert_eq!(
+            *seen.lock().unwrap(),
+            ["next@1"],
+            "{ground}: the slot goes on"
+        );
+        let parked = parked_places(&f).await;
+        assert_eq!(parked.len(), 1, "{ground}: {parked:?}");
+        assert!(
+            parked[0].1.as_deref().is_some_and(|why| !why.is_empty()),
+            "{ground}: the reason is kept"
+        );
+    }
+}
+
+/// A failure's text is kept without NUL and within its width, never failing
+/// the record: a NUL raised 22021 and stopped every loop at every poll
+/// (ADR-0037 decision 7).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_failure_with_a_nul_is_recorded_and_the_row_tried_again() {
+    let f = fixture("nul_failure").await;
+    f.publish(&[message("a", 1)]).await;
+    let failing = |_: &PgSession, _: &InboxMessage| {
+        std::future::ready(Err::<(), Failure>(Failure::Transient(
+            format!("unknown variant `\0{}`", "x".repeat(10_000)).into(),
+        )))
+    };
+    assert!(matches!(
+        f.dispatch(failing).await,
+        Outcome::Failed {
+            attempts: 1,
+            parked: false
+        }
+    ));
+    let client = pool().get().await.unwrap();
+    let kept: String = client
+        .query_one(&format!("SELECT last_error FROM {}", f.table), &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert!(!kept.contains('\0'));
+    assert!(kept.chars().count() <= 4096, "{}", kept.chars().count());
 }

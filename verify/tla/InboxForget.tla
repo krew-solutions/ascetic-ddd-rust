@@ -50,7 +50,7 @@ inboxVars == <<part, received, recvPos, nextRecv, processed, effects, holding, p
                attempts, due, parked, resolved, admin, waiting, expired>>
 vars == <<inboxVars, forgotten, horizonOpen, everProcessed>>
 
-I == INSTANCE Inbox
+I == INSTANCE Inbox WITH Unreadable <- {}
 
 \* The streams other messages depend on: a channel of them keeps its rows.
 Targets == UNION {Deps[n] : n \in Msgs}

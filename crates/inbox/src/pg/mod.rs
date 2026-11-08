@@ -158,6 +158,11 @@ pub enum Outcome {
         /// out, or the subscriber's verdict was permanent.
         parked: bool,
     },
+    /// The head could not be read, or its wait, its failure or its mark
+    /// written, for its own values, and was parked at once in the
+    /// dispatcher's transaction (ADR-0037 decision 6); the next call takes
+    /// the slot's next head.
+    Parked,
 }
 
 /// What happens to a message whose subscriber fails (ADR-0005).
