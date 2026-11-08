@@ -203,6 +203,12 @@ Read them before changing the bus, the outbox or the inbox. ADR-0036
   store, the adapters deliver again what was not taken, and the operator's
   surface disposes of the rows set aside *(Part A built; Part B, the parked
   rows, waits)*.
+- [ADR-0037](docs/src/adr/0037-nothing-a-message-carries-stops-the-inbox.md) —
+  nothing a message carries stops the inbox: a stream's id is JSON text read
+  by one function, metadata is the headers' text, a message's size and its
+  dependencies are bounded before they are read, and the dispatcher parks a
+  row it cannot read or write for its own values *(Proposed; revises
+  ADR-0036 R3)*.
 
 ## Specifications
 
