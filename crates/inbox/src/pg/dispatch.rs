@@ -108,8 +108,15 @@ where
                                 return Ok((Some(slot), Outcome::Nothing));
                             }
                         };
+                        // A row stored before whose list the intake would refuse
+                        // is refused for good, never waited on (ADR-0037
+                        // decision 4).
+                        let (dependencies, refused) = match message.checked_causal_dependencies() {
+                            Ok(dependencies) => (dependencies, None),
+                            Err(why) => (Vec::new(), Some(Failure::Permanent(why.into()))),
+                        };
                         if let Some(dependency) = self
-                            .first_unprocessed_dependency(&tx, &message)
+                            .first_unprocessed_dependency(&tx, &dependencies)
                             .await
                             .map_err(in_slot)?
                         {
@@ -141,13 +148,17 @@ where
                             message: Some(&message),
                             snapshot: &snapshot,
                         });
-                        let attempt = tx
-                            .atomic(async |inner| {
-                                subscriber(&inner, &message)
-                                    .await
-                                    .map_err(Error::Subscriber)
-                            })
-                            .await;
+                        let attempt = match refused {
+                            Some(failure) => Err(Error::Subscriber(failure)),
+                            None => {
+                                tx.atomic(async |inner| {
+                                    subscriber(&inner, &message)
+                                        .await
+                                        .map_err(Error::Subscriber)
+                                })
+                                .await
+                            }
+                        };
                         let failure = match attempt {
                             Ok(()) => None,
                             Err(Error::Subscriber(failure)) => Some(failure),

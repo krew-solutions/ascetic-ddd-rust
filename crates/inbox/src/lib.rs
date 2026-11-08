@@ -75,7 +75,7 @@ mod snapshot;
 pub use crate::channel::{INBOX_SCHEME, InboxChannel};
 pub use crate::error::{BoxError, Error, Failure};
 pub use crate::intake::{Bounds, Reason};
-pub use crate::message::{CausalDependency, InboxMessage};
+pub use crate::message::{CausalDependency, InboxMessage, MAX_DEPENDENCIES, MAX_IDENTITY_BYTES};
 pub use crate::observer::{InboxObserver, Receipt};
 pub use crate::partition::{ByStream, ByUri, PartitionKey};
 pub use crate::pg::{

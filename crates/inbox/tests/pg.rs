@@ -23,7 +23,7 @@ use ascetic_ddd_inbox::observer::{
 };
 use ascetic_ddd_inbox::{
     ByStream, CausalDependency, Error, Failure, Inbox, InboxMessage, InboxRetention, Loops,
-    Outcome, PartitionKey, PgInbox, Receipt, Retries,
+    MAX_IDENTITY_BYTES, Outcome, PartitionKey, PgInbox, Receipt, Retries,
 };
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -1973,4 +1973,264 @@ async fn a_row_stored_with_structured_dependencies_still_waits_for_them() {
     while f.dispatch(&subscriber).await != Outcome::Nothing {}
 
     assert_eq!(*seen.lock().unwrap(), ["user@5", "order@1"]);
+}
+
+/// Text no compression shrinks, `length` characters drawn from `alphabet`
+/// by a fixed sequence: the btree compresses an item over about 510 bytes,
+/// so a repeated filler would pass far past the bound (ADR-0037 decision 4).
+fn incompressible(alphabet: &[char], length: usize, seed: u64) -> String {
+    let mut state = seed | 1;
+    (0..length)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            alphabet[usize::try_from(state % alphabet.len() as u64).unwrap()]
+        })
+        .collect()
+}
+
+/// A message of `tenant`'s stream `stream_id` of `stream_type`, at the
+/// largest position, whose size bound is what the waiting index takes.
+fn cause_of(tenant: &str, stream_type: &str, stream_id: serde_json::Value) -> InboxMessage {
+    static EVENT: AtomicU64 = AtomicU64::new(1);
+    let event = EVENT.fetch_add(1, Ordering::Relaxed);
+    InboxMessage::new(
+        tenant,
+        stream_type,
+        stream_id,
+        i32::MAX,
+        "kafka://orders/cause",
+        "cause",
+    )
+    .with_metadata(json!({ "message_id": format!("00000000-0000-4000-9000-{event:012x}") }))
+}
+
+/// The largest identity the intake admits, of each shape, is stored, waited
+/// for and woken: its stored form fits the waiting index, whatever its
+/// content (ADR-0037 decision 4). Mutation run on 2026-11-08: the bound
+/// loosened by 8 bytes makes the string shape's wait fail with 54000. A
+/// number counted short is not seen here, since the index compresses the
+/// integers' item; the measured test below holds that term.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_largest_identity_admitted_is_stored_waited_for_and_woken() {
+    let f = fixture("identity_bound").await;
+    let alnum: Vec<char> = ('a'..='z').chain('A'..='Z').chain('0'..='9').collect();
+    let cyrillic: Vec<char> = ('\u{0410}'..='\u{044F}').collect();
+    let at_the_bound = |tenant: &str, stream_type: &str, filler: &dyn Fn(usize) -> String| {
+        let empty = CausalDependency::on(&cause_of(tenant, stream_type, json!({ "id": "" })));
+        let room = MAX_IDENTITY_BYTES - empty.stored_bytes();
+        let id = filler(room);
+        assert_eq!(id.len(), room, "the filler is exactly the room");
+        cause_of(tenant, stream_type, json!({ "id": id }))
+    };
+    let shapes = [
+        (
+            "a string",
+            at_the_bound("tenant-1", "orders.Order", &|room| {
+                incompressible(&alnum, room, 7)
+            }),
+        ),
+        (
+            "two-byte characters",
+            at_the_bound("tenant-1", "orders.Order", &|room| {
+                let text = incompressible(&cyrillic, room / 2, 11);
+                if room % 2 == 1 {
+                    format!("{text}x")
+                } else {
+                    text
+                }
+            }),
+        ),
+        (
+            "a tenant and a stream type at their columns",
+            at_the_bound(
+                &"t".repeat(128),
+                &format!("orders.{}", "O".repeat(121)),
+                &|room| incompressible(&alnum, room, 13),
+            ),
+        ),
+        ("integers", {
+            // Twenty digits each, every one another: alike, they compress.
+            let dense = |count: usize| {
+                let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+                let numbers: Vec<u64> = (0..count)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        10_000_000_000_000_000_000 + state % (u64::MAX - 10_000_000_000_000_000_000)
+                    })
+                    .collect();
+                cause_of(
+                    "tenant-1",
+                    "orders.Order",
+                    json!({ "id": "dense", "n": numbers }),
+                )
+            };
+            let count = (1..)
+                .take_while(|count| {
+                    CausalDependency::on(&dense(*count)).stored_bytes() <= MAX_IDENTITY_BYTES
+                })
+                .last()
+                .unwrap();
+            dense(count)
+        }),
+    ];
+    for (at, (shape, cause)) in shapes.into_iter().enumerate() {
+        assert!(
+            CausalDependency::on(&cause).stored_bytes() <= MAX_IDENTITY_BYTES,
+            "{shape}"
+        );
+        let effect =
+            message(&format!("effect{at}"), 1).depending_on(&[CausalDependency::on(&cause)]);
+        let rows = f.rows().await;
+        f.publish(std::slice::from_ref(&effect)).await;
+        assert_eq!(f.rows().await, rows + 1, "{shape}: the effect is stored");
+        let (seen, subscriber) = collector();
+        assert_eq!(
+            f.dispatch(&subscriber).await,
+            Outcome::SetAside,
+            "{shape}: it waits"
+        );
+        f.publish(std::slice::from_ref(&cause)).await;
+        assert_eq!(f.rows().await, rows + 2, "{shape}: the cause is stored");
+        while f.dispatch(&subscriber).await != Outcome::Nothing {}
+        assert_eq!(seen.lock().unwrap().len(), 2, "{shape}: both processed");
+        assert_eq!(
+            seen.lock().unwrap()[1],
+            label(&effect),
+            "{shape}: the effect after"
+        );
+    }
+}
+
+/// One byte past the bound, a message and a message depending on it are
+/// set aside at the intake, never left to fail at dispatch.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn an_identity_past_the_bound_is_set_aside_at_the_intake() {
+    let f = fixture("identity_past").await;
+    let alnum: Vec<char> = ('a'..='z').collect();
+    let empty = CausalDependency::on(&cause_of("tenant-1", "orders.Order", json!({ "id": "" })));
+    let room = MAX_IDENTITY_BYTES - empty.stored_bytes();
+    let past = cause_of(
+        "tenant-1",
+        "orders.Order",
+        json!({ "id": incompressible(&alnum, room + 1, 5) }),
+    );
+    let effect = message("effect", 1).depending_on(&[CausalDependency::on(&past)]);
+    f.publish(&[past, effect]).await;
+    assert_eq!(f.rows().await, 0);
+}
+
+/// A row stored before whose dependency list the intake would refuse is
+/// parked for good, never waited on, and the rows behind it go on.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_row_stored_with_a_list_the_intake_refuses_is_parked_and_the_slot_goes_on() {
+    let f = fixture("causal_refused").await;
+    let legacy = message("legacy", 1).with_metadata(json!({
+        "message_id": "00000000-0000-4000-a000-000000000001",
+        "causal_dependencies": [{ "tenant_id": "tenant-1", "stream_type": "orders.Order",
+                                  "stream_id": 1.5, "stream_position": 1 }],
+    }));
+    let client = pool().get().await.unwrap();
+    client
+        .execute(
+            &format!(
+                "INSERT INTO {} (tenant_id, stream_type, stream_id, stream_position, uri, payload, metadata) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                f.table
+            ),
+            &[
+                &legacy.tenant_id,
+                &legacy.stream_type,
+                &legacy.stream_id,
+                &legacy.stream_position,
+                &legacy.uri,
+                &legacy.payload,
+                &legacy.metadata,
+            ],
+        )
+        .await
+        .unwrap();
+    f.publish(&[message("next", 1)]).await;
+    let (seen, subscriber) = collector();
+    while f.dispatch(&subscriber).await != Outcome::Nothing {}
+    assert_eq!(
+        *seen.lock().unwrap(),
+        ["next@1"],
+        "the subscriber never saw it"
+    );
+    assert_eq!(f.parked().await, ["legacy@1"]);
+}
+
+/// The bound on an identity's stored form dominates what PostgreSQL makes of
+/// it, uncompressed, for every shape: strings of every width of character,
+/// integers of every count of digits, booleans, nulls, containers within
+/// containers, positions at both ends (ADR-0037 decision 4). The waiting
+/// index compresses an item past about 510 bytes, so a wait at the bound
+/// cannot tell a number counted short; this can. For a string the bound is
+/// within a few bytes of the measure, so a looser one would admit an
+/// identity the index refuses.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_bound_on_an_identity_dominates_its_stored_size() {
+    let client = pool().get().await.unwrap();
+    let measured = async |dependency: &CausalDependency| -> usize {
+        let text = serde_json::to_string(dependency).unwrap();
+        let row = client
+            .query_one("SELECT pg_column_size($1::text::jsonb)", &[&text])
+            .await
+            .unwrap();
+        usize::try_from(row.get::<_, i32>(0)).unwrap()
+    };
+    let identity = |stream_id: serde_json::Value, position: i32| CausalDependency {
+        tenant_id: "tenant-1".to_owned(),
+        stream_type: "orders.Order".to_owned(),
+        stream_id,
+        stream_position: position,
+    };
+    let mut shapes = vec![
+        identity(json!("o-1"), 1),
+        identity(json!(""), 0),
+        identity(json!("ж".repeat(300)), i32::MAX),
+        identity(json!("\u{1F600}".repeat(100)), i32::MIN),
+        identity(json!(true), 1),
+        identity(json!(null), 1),
+        identity(json!([]), 1),
+        identity(json!({}), 1),
+        identity(json!([[[[["deep"]]]]]), 1),
+        identity(json!({ "a": { "b": [1, "x", null, { "c": false }] } }), 1),
+    ];
+    for number in [
+        json!(0),
+        json!(1),
+        json!(9999),
+        json!(10000),
+        json!(123_456_789),
+        json!(i64::MIN),
+        json!(i64::MAX),
+        json!(u64::MAX),
+    ] {
+        shapes.push(identity(number.clone(), i32::MAX));
+        shapes.push(identity(json!(vec![number; 50]), i32::MAX));
+    }
+    for dependency in &shapes {
+        let (bound, size) = (dependency.stored_bytes(), measured(dependency).await);
+        assert!(
+            size <= bound,
+            "{dependency:?}: measured {size}, bounded {bound}"
+        );
+    }
+    for length in [0, 1, 100, 2_000] {
+        let dependency = identity(json!("k".repeat(length)), i32::MAX);
+        let (bound, size) = (dependency.stored_bytes(), measured(&dependency).await);
+        assert!(
+            bound - size <= 4,
+            "a string's bound is tight: {bound} against {size}"
+        );
+    }
 }

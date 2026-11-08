@@ -603,3 +603,44 @@ The host adopts them in one pin, after quoting its stream ids.
       the cut frame's identity.
     - The intake's property now also holds that every metadata value is a
       string and every number an integer within 64 bits.
+- 2026-11-08 — Slice 3 built.
+  - **One reader of a dependency list**, `dependencies_of`, at the intake
+    and at dispatch (`InboxMessage::checked_causal_dependencies`). The list
+    is read by the bus's scanner; it has at most `MAX_DEPENDENCIES` (64)
+    entries, each the identity of a row the inbox could store.
+  - **At dispatch,** a row stored before whose list the intake would
+    refuse fails for good without its subscriber, and parks; the slot goes
+    on.
+  - **`MAX_IDENTITY_BYTES` (2696) and `CausalDependency::stored_bytes`**
+    replace `KEY_BYTES`. The bound is an upper bound on the identity's
+    `jsonb` datum, calibrated on PostgreSQL 14:
+    - a number is a `numeric` of at most 16 bytes after up to 3 of
+      alignment;
+    - a position is at most 12 bytes;
+    - a string is its bytes;
+    - a container is 4 bytes, and 4 per element or 8 per member.
+  - **`migrate` refuses a server whose pages are not 8 KiB.** No executor
+    on the stand, whose pages are 8 KiB: its mutation survives, which is
+    recorded here.
+  - **Executors:**
+    - the largest identity of each shape is stored, waited for and woken,
+      with incompressible fillers: a string, two-byte characters, a tenant
+      and a stream type at their columns, and twenty-digit integers;
+    - one byte past is set aside at the intake;
+    - a row stored with a list the intake refuses is parked and the slot
+      goes on;
+    - the bound dominates `pg_column_size` of every shape, and is within
+      4 bytes of it for a string;
+    - unit tests of each ground of a list's refusal.
+  - **Mutations caught:**
+    - the bound loosened by 8 bytes (54000 at the wait);
+    - the intake not reading the list;
+    - no count;
+    - dispatch ignoring a refused list;
+    - a number, a position or an array's entries counted short;
+    - a string counted by characters.
+  - **A finding of building it.** A number counted short survived the
+    wait at the bound. The btree compresses an item past about 510 bytes,
+    and `numeric`'s headers repeat, even in twenty-digit integers each
+    another. So the wait cannot hold a term of the bound, and the measure
+    of the uncompressed datum does.

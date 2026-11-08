@@ -91,26 +91,31 @@ impl InboxMessage {
         }
     }
 
-    /// The messages this one must wait for. Entries that are not
-    /// dependencies are ignored. The list may arrive as its JSON text, which
-    /// is how flat broker headers carry it.
-    pub fn causal_dependencies(&self) -> Vec<CausalDependency> {
-        self.metadata
+    /// The messages this one must wait for, read as the intake reads them
+    /// (ADR-0037 decision 4): none when the metadata names none, and the
+    /// reason when the list is not a list of dependencies. The list is the
+    /// header's JSON text, or, in a row stored before, the list itself.
+    ///
+    /// # Errors
+    /// The reason, in the library's words, when the list does not parse,
+    /// an entry is not a dependency, or there are more than
+    /// [`MAX_DEPENDENCIES`].
+    pub fn checked_causal_dependencies(&self) -> Result<Vec<CausalDependency>, &'static str> {
+        match self
+            .metadata
             .as_ref()
             .and_then(|metadata| metadata.get("causal_dependencies"))
-            .map(|entries| match entries {
-                Value::String(text) => serde_json::from_str(text).unwrap_or(Value::Null),
-                other => other.clone(),
-            })
-            .as_ref()
-            .and_then(Value::as_array)
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter_map(|entry| serde_json::from_value(entry.clone()).ok())
-                    .collect()
-            })
-            .unwrap_or_default()
+        {
+            None => Ok(Vec::new()),
+            Some(Value::String(text)) => crate::intake::dependencies_of(text),
+            Some(structured) => crate::intake::dependencies_of(&structured.to_string()),
+        }
+    }
+
+    /// The messages this one must wait for; none when the list is not one
+    /// ([`InboxMessage::checked_causal_dependencies`] says why).
+    pub fn causal_dependencies(&self) -> Vec<CausalDependency> {
+        self.checked_causal_dependencies().unwrap_or_default()
     }
 
     /// The message id, if the metadata carries one.
@@ -136,7 +141,73 @@ pub struct CausalDependency {
     pub stream_position: i32,
 }
 
+/// The most causal dependencies one message names (ADR-0037 decision 4):
+/// dispatch looks each up in turn and starts again after every wake, so
+/// dependencies arriving one by one cost a square of their number.
+pub const MAX_DEPENDENCIES: usize = 64;
+
+/// The most bytes an identity's stored form may take (ADR-0037 decision 4):
+/// a btree's item on an 8 KiB page is 2704 bytes, the index tuple's header
+/// is 8, and `__waiting_idx` indexes a dependency's identity as `jsonb`.
+/// The row's own key is smaller than its waiting form, so an identity
+/// within it can be stored and depended on.
+pub const MAX_IDENTITY_BYTES: usize = 2696;
+
+/// The bytes of the identity's four keys.
+const IDENTITY_KEY_BYTES: usize =
+    "tenant_id".len() + "stream_type".len() + "stream_id".len() + "stream_position".len();
+
+/// A number's most bytes inside `jsonb`: a `numeric` of up to 20 digits is
+/// 16 bytes, after up to 3 of alignment.
+const NUMBER_BYTES: usize = 3 + 16;
+
+/// A position's most bytes: an `i32` is a `numeric` of at most 12 bytes.
+const POSITION_BYTES: usize = 3 + 12;
+
+/// An upper bound on the bytes of `value` inside a `jsonb` container: a
+/// string its bytes; a number its largest `numeric`; a container its header,
+/// an entry of 4 bytes per element and of 8 per member, alignment, and what
+/// it holds.
+fn stored_bytes(value: &Value) -> usize {
+    match value {
+        Value::String(text) => text.len(),
+        Value::Number(_) => NUMBER_BYTES,
+        Value::Bool(_) | Value::Null => 0,
+        Value::Array(items) => {
+            3 + 4 + 4 * items.len() + items.iter().map(stored_bytes).sum::<usize>()
+        }
+        Value::Object(fields) => {
+            3 + 4
+                + 8 * fields.len()
+                + fields
+                    .iter()
+                    .map(|(name, field)| name.len() + stored_bytes(field))
+                    .sum::<usize>()
+        }
+    }
+}
+
+/// An upper bound on the bytes of an identity as the `jsonb` datum
+/// `__waiting_idx` indexes: its varlena and object headers, four members,
+/// their keys and values, the position at its largest.
+pub(crate) fn identity_bytes(tenant_id: &str, stream_type: &str, stream_id: &Value) -> usize {
+    4 + 4
+        + 8 * 4
+        + IDENTITY_KEY_BYTES
+        + tenant_id.len()
+        + stream_type.len()
+        + stored_bytes(stream_id)
+        + POSITION_BYTES
+}
+
 impl CausalDependency {
+    /// An upper bound on the bytes this identity takes where the inbox
+    /// indexes it, to hold against [`MAX_IDENTITY_BYTES`].
+    #[must_use]
+    pub fn stored_bytes(&self) -> usize {
+        identity_bytes(&self.tenant_id, &self.stream_type, &self.stream_id)
+    }
+
     /// The identity of `message`, as a dependency on it.
     pub fn on(message: &InboxMessage) -> Self {
         CausalDependency {

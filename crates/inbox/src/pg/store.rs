@@ -235,6 +235,7 @@ where
                          asks for {slots} by `{key}`; both are fixed for the life of the table"
                     )));
                 }
+                refuse_a_page_the_bounds_do_not_fit(&session).await?;
                 refuse_what_the_intake_cannot_read(&session, table.as_str()).await
             })
             .await?;
@@ -340,15 +341,15 @@ where
         })
     }
 
-    /// The first causal dependency of `message` without a committed mark.
+    /// The first of `dependencies` without a committed mark.
     pub(super) async fn first_unprocessed_dependency(
         &self,
         session: &P::Session,
-        message: &InboxMessage,
+        dependencies: &[CausalDependency],
     ) -> Result<Option<CausalDependency>, Error> {
-        for dependency in message.causal_dependencies() {
-            if !self.is_processed(session, &dependency).await? {
-                return Ok(Some(dependency));
+        for dependency in dependencies {
+            if !self.is_processed(session, dependency).await? {
+                return Ok(Some(dependency.clone()));
             }
         }
         Ok(None)
@@ -854,6 +855,24 @@ where
         self.intake(&message.uri, &crate::channel::wire_of(message))
             .await
             .map(|_| ())
+    }
+}
+
+/// Refuses a server whose pages are not 8 KiB: the bound on an identity's
+/// stored form (`MAX_IDENTITY_BYTES`) is a btree item's on such a page
+/// (ADR-0037 decision 4).
+async fn refuse_a_page_the_bounds_do_not_fit<S: PgAccess>(session: &S) -> Result<(), Error> {
+    let block_size: String = session
+        .connection()
+        .query_one("SHOW block_size", &[])
+        .await?
+        .get(0);
+    if block_size == "8192" {
+        Ok(())
+    } else {
+        Err(Error::Malformed(format!(
+            "the server's pages are {block_size} bytes; the inbox's bound on an identity rests on 8192"
+        )))
     }
 }
 

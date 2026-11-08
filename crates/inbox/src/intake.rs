@@ -29,7 +29,7 @@ use ascetic_ddd_bus::{Message, uri};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::message::InboxMessage;
+use crate::message::{self, CausalDependency, InboxMessage, MAX_DEPENDENCIES, MAX_IDENTITY_BYTES};
 
 /// The header the outbox stamps with the channel a message was sent to.
 pub(crate) const DESTINATION: &str = "destination";
@@ -48,11 +48,6 @@ pub(crate) const COLUMNS: [&str; 5] = [
 const TENANT_ID_WIDTH: usize = 128;
 const STREAM_TYPE_WIDTH: usize = 128;
 const URI_WIDTH: usize = 255;
-
-/// The bytes the primary key's columns may take together: a btree's row is
-/// refused past about 2,704 bytes (54000), and the key's entry carries a
-/// header of its own.
-const KEY_BYTES: usize = 2_600;
 
 /// Why a message was set aside beside the inbox.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -135,9 +130,8 @@ pub(crate) fn row_of(destination: &str, message: &Message) -> Result<InboxMessag
     let stream_position = column(STREAM_POSITION)?
         .parse::<i32>()
         .map_err(|_| "the position is not an integer")?;
-    let key_bytes = tenant_id.len() + stream_type.len() + stream_id.to_string().len() + 4;
-    if key_bytes > KEY_BYTES {
-        return Err("the identity is past the index's row size");
+    if message::identity_bytes(tenant_id, stream_type, &stream_id) > MAX_IDENTITY_BYTES {
+        return Err("the identity is past what a dependency on it can index");
     }
     // The intake's name for the row: the channel this producer was built
     // for, with the message's key, or the channel's own (ADR-0018). A
@@ -172,6 +166,9 @@ pub(crate) fn row_of(destination: &str, message: &Message) -> Result<InboxMessag
         Some(Value::String(id)) if is_uuid(id) => {}
         Some(_) => return Err("the message_id is not a UUID"),
     }
+    if let Some(Value::String(list)) = metadata.get(CAUSAL_DEPENDENCIES) {
+        dependencies_of(list)?;
+    }
     Ok(InboxMessage::new(
         tenant_id,
         stream_type,
@@ -181,6 +178,59 @@ pub(crate) fn row_of(destination: &str, message: &Message) -> Result<InboxMessag
         message.payload(),
     )
     .with_metadata(Value::Object(metadata)))
+}
+
+/// The header that names the messages one must wait for.
+const CAUSAL_DEPENDENCIES: &str = "causal_dependencies";
+
+/// The causal dependencies a header's text names, read as dispatch reads
+/// them (ADR-0037 decision 4): a JSON list of at most [`MAX_DEPENDENCIES`]
+/// entries, each the identity of a row the inbox could store — a tenant and
+/// a stream type within their columns, a stream id in the bus's domain, a
+/// position an `i32` — whose stored form the waiting index takes.
+pub(crate) fn dependencies_of(text: &str) -> Result<Vec<CausalDependency>, &'static str> {
+    let list = identity::read_json(text, identity::STREAM_ID_DEPTH + 2)
+        .map_err(identity::Refused::as_str)?
+        .ok_or("the causal dependencies are not JSON")?;
+    let Value::Array(entries) = list else {
+        return Err("the causal dependencies are not a list");
+    };
+    if entries.len() > MAX_DEPENDENCIES {
+        return Err("the message names more causal dependencies than the inbox takes");
+    }
+    entries.into_iter().map(dependency_of).collect()
+}
+
+/// One entry of a dependency list, checked as the row it names would be.
+fn dependency_of(entry: Value) -> Result<CausalDependency, &'static str> {
+    let Value::Object(mut fields) = entry else {
+        return Err("a causal dependency is not an object");
+    };
+    let mut text = |name: &str, width: usize| match fields.remove(name) {
+        Some(Value::String(text)) if text.chars().count() <= width => Ok(text),
+        _ => Err("a causal dependency's tenant or stream type is not text within its column"),
+    };
+    let tenant_id = text(TENANT_ID, TENANT_ID_WIDTH)?;
+    let stream_type = text(STREAM_TYPE, STREAM_TYPE_WIDTH)?;
+    let stream_id = fields
+        .remove(STREAM_ID)
+        .ok_or("a causal dependency names no stream id")?;
+    let stream_position = fields
+        .remove(STREAM_POSITION)
+        .as_ref()
+        .and_then(Value::as_i64)
+        .and_then(|position| i32::try_from(position).ok())
+        .ok_or("a causal dependency's position is not an i32")?;
+    let dependency = CausalDependency {
+        tenant_id,
+        stream_type,
+        stream_id,
+        stream_position,
+    };
+    if dependency.stored_bytes() > MAX_IDENTITY_BYTES {
+        return Err("a causal dependency's identity is past what the waiting index takes");
+    }
+    Ok(dependency)
 }
 
 /// A header's bytes as text: UTF-8, without a NUL, which no text column
@@ -679,6 +729,86 @@ mod tests {
         assert_eq!(cut, cut_frame("inbox://orders/k", &big(b'x')));
         assert_ne!(cut, cut_frame("inbox://orders/k", &big(b'y')));
         assert!(!is_cut(&frame("inbox://orders/k", &big(b'x'))));
+    }
+
+    /// A dependency list is read as dispatch reads it (ADR-0037 decision
+    /// 4); each ground of refusal is its own.
+    #[test]
+    fn a_dependency_list_is_held_to_the_rows_it_names() {
+        let entry = |stream_id: &str, position: &str| {
+            format!(
+                r#"{{"tenant_id":"t1","stream_type":"orders.Order","stream_id":{stream_id},"stream_position":{position}}}"#
+            )
+        };
+        let one = format!("[{}]", entry(r#""o-1""#, "3"));
+        let read = dependencies_of(&one).unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].stream_id, Value::String("o-1".to_owned()));
+        assert_eq!(read[0].stream_position, 3);
+        assert_eq!(dependencies_of("[]").unwrap(), Vec::new());
+        let many = format!(
+            "[{}]",
+            vec![entry("1", "1"); MAX_DEPENDENCIES + 1].join(",")
+        );
+        let at_most = format!("[{}]", vec![entry("1", "1"); MAX_DEPENDENCIES].join(","));
+        assert!(dependencies_of(&at_most).is_ok());
+        let long_tenant = format!(
+            r#"[{{"tenant_id":"{}","stream_type":"s","stream_id":1,"stream_position":1}}]"#,
+            "t".repeat(129)
+        );
+        let past_bound = format!("[{}]", entry(&format!("\"{}\"", "k".repeat(2_700)), "1"));
+        for (case, list) in [
+            ("not JSON", "[{".to_owned()),
+            ("not a list", entry("1", "1")),
+            ("an entry not an object", "[1]".to_owned()),
+            (
+                "no stream id",
+                r#"[{"tenant_id":"t","stream_type":"s","stream_position":1}]"#.to_owned(),
+            ),
+            (
+                "a position past i32",
+                format!("[{}]", entry("1", "4294967296")),
+            ),
+            (
+                "a position not a number",
+                format!("[{}]", entry("1", r#""1""#)),
+            ),
+            (
+                "a stream id outside the domain",
+                format!("[{}]", entry("1.5", "1")),
+            ),
+            (
+                "\\u0000 in a tenant",
+                r#"[{"tenant_id":"t\u0000","stream_type":"s","stream_id":1,"stream_position":1}]"#
+                    .to_owned(),
+            ),
+            ("a tenant past its column", long_tenant),
+            ("more entries than the bound", many),
+            ("an identity past the index", past_bound),
+        ] {
+            assert!(dependencies_of(&list).is_err(), "{case}");
+        }
+        let refused = identified("o").with_header("causal_dependencies", "[1]");
+        assert!(
+            row_of("inbox://orders", &refused).is_err(),
+            "the intake reads it"
+        );
+    }
+
+    /// The bound on an identity is the bound on its stored form where a
+    /// dependency on it is indexed, the same for the row's own key: a string
+    /// id at the bound is taken, one byte past it refused.
+    #[test]
+    fn an_identity_is_bounded_by_what_a_dependency_on_it_indexes() {
+        let at = |length: usize| Value::String("k".repeat(length));
+        let base = message::identity_bytes("t1", "orders.Order", &at(0));
+        let largest = MAX_IDENTITY_BYTES - base;
+        assert_eq!(
+            message::identity_bytes("t1", "orders.Order", &at(largest)),
+            MAX_IDENTITY_BYTES
+        );
+        assert!(row_of("inbox://orders", &identified(&"k".repeat(largest))).is_ok());
+        assert!(row_of("inbox://orders", &identified(&"k".repeat(largest + 1))).is_err());
     }
 
     #[test]
