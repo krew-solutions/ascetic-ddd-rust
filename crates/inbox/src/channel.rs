@@ -20,8 +20,9 @@
 //! builds the producer for it; from a broker it would name the producer's
 //! topic, and two producers of one topic would name one row two ways. Every
 //! other header is a field of `metadata`, as its text (ADR-0037 decision
-//! 2), so it comes back as it left, byte for byte; a row stored before
-//! keeps an array or object structured, written back as JSON. The channel
+//! 2), so it comes back as it left, byte for byte; a value a message
+//! built in memory holds structured (`depending_on`, `with_metadata`) is
+//! written as its JSON text, the text the intake keeps. The channel
 //! name after `inbox://` is not a filter: the
 //! whole inbox is one channel with one subscriber, which routes by the
 //! row's `destination` and `stream_type` — a consumer that saw one address
@@ -214,8 +215,9 @@ pub(crate) fn wire_of(row: &InboxMessage) -> Message {
     }
 }
 
-/// A metadata value as header text: a string as it is; a value a row
-/// stored before ADR-0037 keeps structured, as JSON.
+/// A metadata value as header text: a string as it is; a value held
+/// structured — by a message built in memory, or a row an older release
+/// wrote — as its JSON text, which the intake keeps as that string.
 fn header_text(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),

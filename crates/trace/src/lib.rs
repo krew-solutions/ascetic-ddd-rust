@@ -242,6 +242,7 @@ impl InboxObserver for JsonTrace {
             "event": "parked_at_once",
             "slot": event.slot,
             "received_position": event.received_position,
+            "channel": event.channel,
             "reason": event.reason,
             "snapshot": snapshot_json(event.snapshot),
         }));

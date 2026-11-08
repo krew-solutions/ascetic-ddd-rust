@@ -9,7 +9,7 @@ use ascetic_ddd_migration::{
 use ascetic_ddd_session::{PgAccess, Session, SessionPool};
 use tokio_postgres::Row;
 
-use super::{Parked, PgInbox};
+use super::{Ground, Parked, PgInbox};
 use crate::error::{Error, Failure};
 use crate::message::{CausalDependency, InboxMessage};
 use crate::observer::{InboxObserver, Receipt};
@@ -25,6 +25,27 @@ const COLUMNS: &str = "tenant_id, stream_type, stream_id, stream_position, uri, 
 /// 6).
 const NARROW: &str =
     "tenant_id, stream_type, stream_id, stream_position, uri, received_position, waiting_for";
+/// A row's channel, its `uri` without the key: the expression the parked
+/// index and the sweep's index are built over, spelled as they spell it. The
+/// key is the producer's text and may hold a line break; the channel is the
+/// inbox's own name.
+pub(super) const CHANNEL_OF_ROW: &str =
+    "(split_part(uri, '/', 1) || '//' || split_part(uri, '/', 3))";
+/// A parked row's ground ([`super::Ground`]), from its columns: a row parked
+/// at once never waits (the park takes it from the queue), and every exit
+/// from the parked state clears `unreadable_at` with `parked_at`.
+const GROUND_OF_ROW: &str = "CASE WHEN unreadable_at IS NOT NULL THEN 'at_once' \
+     WHEN waiting_for IS NOT NULL THEN 'expired' ELSE 'failure' END";
+
+/// The parked rows by channel and ground, with the oldest park: one statement
+/// over the parked index's predicate, so that its work is the parked rows',
+/// not the table's.
+pub(super) fn parked_counts_sql(table: &str) -> String {
+    format!(
+        "SELECT {CHANNEL_OF_ROW}, {GROUND_OF_ROW}, count(*), min(parked_at)::text FROM {table} \
+         WHERE parked_at IS NOT NULL GROUP BY 1, 2 ORDER BY 1, 2"
+    )
+}
 /// How many rows one statement of the expiry parks.
 const EXPIRY_BATCH: i64 = 100;
 /// The most characters of a failure's text a row keeps (ADR-0037 decision
@@ -379,8 +400,9 @@ where
 
     /// The row at `place`, read: the message, or why it cannot be one — a
     /// value the client cannot decode, or a stream id outside the bus's
-    /// domain, which a row stored before the domain may hold and which
-    /// would reach the handler as another id (ADR-0037 decisions 1 and 6).
+    /// domain, which a row the intake did not write may hold — an older
+    /// release's, or one written by hand — and which would reach the
+    /// handler as another id (ADR-0037 decisions 1 and 6).
     /// A refusal of the server's is the caller's to classify.
     pub(super) async fn read_at(
         &self,
@@ -396,30 +418,29 @@ where
     }
 
     /// Parks the row at `place`, still in the queue and held by this
-    /// transaction, at once, with `reason` as its last error: a statement
-    /// that neither reads nor binds the row's values (ADR-0037 decision 6).
+    /// transaction, at once, with `reason` as its last error, and returns
+    /// its channel: a statement that binds none of the row's values, and
+    /// returns only the channel, text the inbox named (ADR-0037 decision 6).
     pub(super) async fn park_at(
         &self,
         session: &P::Session,
         place: &str,
         reason: &'static str,
-    ) -> Result<(), Error> {
+    ) -> Result<String, Error> {
         let sql = format!(
             "UPDATE {table} SET parked_at = CURRENT_TIMESTAMP, unreadable_at = CURRENT_TIMESTAMP, \
                  last_error = $2 \
-             WHERE ctid = $1::text::tid AND {QUEUE}",
+             WHERE ctid = $1::text::tid AND {QUEUE} \
+             RETURNING {CHANNEL_OF_ROW}",
             table = self.table
         );
-        let changed = session
-            .connection()
-            .execute(&sql, &[&place, &reason])
-            .await?;
-        if changed == 1 {
-            Ok(())
-        } else {
-            Err(Error::Malformed(format!(
-                "the row to park was not in the queue: {changed} rows changed"
-            )))
+        let rows = session.connection().query(&sql, &[&place, &reason]).await?;
+        match rows.as_slice() {
+            [row] => Ok(row.try_get(0)?),
+            _ => Err(Error::Malformed(format!(
+                "the row to park was not in the queue: {} rows changed",
+                rows.len()
+            ))),
         }
     }
 
@@ -651,7 +672,7 @@ where
     ) -> Result<Vec<Parked>, Error> {
         let sql = format!(
             "SELECT received_position, slot, attempts, last_error, uri, \
-                    tenant_id, stream_type, stream_id, stream_position \
+                    tenant_id, stream_type, stream_id, stream_position, {GROUND_OF_ROW} \
              FROM {} WHERE parked_at IS NOT NULL AND received_position > $1 \
              ORDER BY received_position LIMIT $2",
             self.table
@@ -668,6 +689,7 @@ where
                 attempts: u32::try_from(row.get::<_, i32>(2)).unwrap_or_default(),
                 last_error: row.get(3),
                 uri: row.get(4),
+                ground: Ground::parse(row.get(9)).unwrap_or(Ground::Failure),
                 identity: row
                     .try_get::<_, serde_json::Value>(7)
                     .ok()
@@ -1293,7 +1315,7 @@ fn identity_json(dependency: &CausalDependency) -> serde_json::Value {
 
 /// The message in `COLUMNS`, read from column `at` on, or why it cannot be
 /// one: a value the client cannot decode, or a stream id outside the bus's
-/// domain, which a row stored before the domain may hold (ADR-0037
+/// domain, which a row the intake did not write may hold (ADR-0037
 /// decisions 1 and 6).
 fn message_checked(row: &Row, at: usize) -> Result<InboxMessage, &'static str> {
     fn get<'a, T: tokio_postgres::types::FromSql<'a>>(
@@ -1326,7 +1348,7 @@ fn message_checked(row: &Row, at: usize) -> Result<InboxMessage, &'static str> {
 
 /// Whether `stream_id`, read back, is in the bus's domain: it writes and
 /// reads back as itself.
-pub(super) fn in_domain(stream_id: &serde_json::Value) -> bool {
+fn in_domain(stream_id: &serde_json::Value) -> bool {
     let text = ascetic_ddd_bus::identity::write_stream_id(stream_id);
     ascetic_ddd_bus::identity::read_stream_id(&text).as_ref() == Ok(stream_id)
 }
@@ -1376,6 +1398,15 @@ fn woken_of(rows: &[Row], at: usize) -> Vec<InboxMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The channel a statement reads is the one the parked index and the
+    /// sweep's index are built over, spelled as they spell it: another
+    /// spelling would group or label otherwise, and use neither index.
+    #[test]
+    fn a_row_s_channel_is_the_indexes_expression() {
+        assert!(INDEXES_BEFORE_LAUNCH.contains(&format!("({CHANNEL_OF_ROW}, received_position)")));
+        assert!(PROCESSED_AT.contains(&format!("({CHANNEL_OF_ROW}, processed_at)")));
+    }
 
     #[test]
     fn nothing_stored_is_acknowledged_only_on_positive_evidence() {

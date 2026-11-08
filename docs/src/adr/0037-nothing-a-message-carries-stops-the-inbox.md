@@ -2,10 +2,11 @@
 
 ## Status
 
-Accepted (2026-11-08, by the owner). Built in the library: slices 1 to 7,
-and slice 8's census (§ Change Log). The host's adoption, slice 8's rest,
-is next: it quotes its stream ids, runs the census, and takes the library
-at one pin.
+Accepted (2026-11-08, by the owner). Built in the library: slices 1 to 7.
+Slice 8's census was built and then withdrawn the same day, the owner having
+stated that the library has no deployed data (§ Change Log, round C10). The
+host's adoption is next: it stamps its stream ids through the writer and
+takes the library at one pin.
 
 It is the output of one round of a blind solver and a discriminator, whose
 synthesis was then attacked by five roles: distributed systems, database,
@@ -180,8 +181,8 @@ is bounded.
 - **The host stamps JSON text before it takes the library that refuses.**
   For a UUID or an object of strings that changes no identity: a raw UUID
   and a quoted one read as the same string. For a raw id that reads as JSON
-  (digits, `true`, `null`), quoting is a change of identity, which decision
-  8's census finds before the change.
+  (digits, `true`, `null`), quoting is a change of identity, which only
+  deployed data would feel; the library has none (decision 8).
 
 ### 2. Metadata is the headers' text
 
@@ -192,12 +193,17 @@ is bounded.
   - `message_id` is a string;
   - SQL reads only `->>'message_id'`;
   - the operator's surface reads the frame.
-- So a handler gets the producer's bytes. Numbers, depth, tokens and the
-  amplification leave metadata at once, and `channel.rs`'s claim becomes
-  true.
-- Rows stored structured stay readable. `causal_dependencies()` and
-  `wire_of` read both forms; the dispatcher reads them through decision 6's
-  tolerant read.
+- So a handler gets the producer's bytes. Numbers, depth, tokens in values
+  and the amplification leave metadata at once, and `channel.rs`'s claim
+  becomes true.
+- A header's **name** becomes a metadata key, so a name beginning
+  `$serde_json::private::` is malformed, the rule decision 1 applies to keys
+  (revised on 2026-11-08, § Change Log, round C10).
+- A value held structured stays readable. `causal_dependencies()` and
+  `wire_of` read both forms: a message built in memory holds its list
+  structured (`depending_on`) and is published through `wire_of`, and a row
+  an older release wrote does too. The dispatcher reads them through
+  decision 6's tolerant read.
 - A message that carries one header name twice is malformed. `header`
   returns the first occurrence and the metadata map kept the last, so a
   dependency list checked at the intake could differ from the one dispatch
@@ -315,26 +321,19 @@ is bounded.
 
 ### 8. The rollout
 
-- **A census, in Rust, by the library's own functions**, over every inbox's
-  rows. It counts by ground:
-  - stream ids decision 1 would refuse, including every number in a stream
-    id;
-  - dependencies decision 4 would refuse;
-  - metadata with numbers, tokens or depth;
-  - waiting data past the bound.
-
-  It reads without rendering the amplifying values: SQL path predicates
-  select rows, and Rust reads only those.
+- **No census.** The library has one consumer and no deployed data: its
+  only data are test databases, dropped and recreated (the owner,
+  2026-11-08). A census of rows stored before this ADR, built as slice 8,
+  was withdrawn the same day (§ Change Log, round C10). What a census would
+  have found does not stall the inbox anyway: decision 6 parks a row the
+  intake did not write, and never misreads one.
 - **The producer's side**, the only executor of "no stream outside D is
   minted": the host has a test that feeds every site that stamps a stream
   id through decision 1.
-- **What the census cannot see.** `jsonb` has lost the producer's spelling
-  (`1e5` is stored as `100000`). So the page on a row set aside (ADR-0036
-  decision 4) is the detector of a producer missed.
-- **Order.** The host quotes its stream ids, runs the census on its
-  inboxes, and takes the library at a pin that carries decisions 1 to 7
-  together. Before the census reads zero, rows the dispatcher would park
-  are resolved by hand.
+- **The page on a row set aside** (ADR-0036 decision 4) is the detector of
+  a producer missed.
+- **Order.** The host stamps its stream ids through the writer and takes
+  the library at a pin that carries decisions 1 to 7 together.
 
 ## Rule of Three
 
@@ -358,7 +357,7 @@ How this decision fails, each checked:
    - An older intake still structures metadata and still stalls on a
      poison; R12 accepts that for the rollout.
    - The catalogue check accepts a newer release's objects by their prefix.
-   - Rows stored structured stay readable by both.
+   - A value held structured stays readable by both.
 
 ## Alternatives Considered
 
@@ -386,8 +385,7 @@ How this decision fails, each checked:
   list per statement.
 - **A shadow phase:** the new refusals counted, not applied, until a
   retention window shows none. Weighed. The library has one consumer, which
-  is not deployed to a Tenant; the census, the producer's test and the page
-  cover it. Rejected for this release; a library with deployed consumers
+  is not deployed to a Tenant; the producer's test and the page cover it. Rejected for this release; a library with deployed consumers
   would need it.
 - **Migrating `seen` and `attempts` to `bigint`.** It rewrites the rejects
   table under ACCESS EXCLUSIVE; saturating needs no DDL. Rejected.
@@ -502,10 +500,7 @@ How this decision fails, each checked:
 - A repeat after the verdict changed shows the current reason.
 
 **Decision 8:**
-- The census is a library function with a test over seeded rows of every
-  ground.
-- The host's test of its stamping sites, and its run of the census on the
-  stand before the pin.
+- The host's test of its stamping sites.
 
 **Tests and documents this decision contradicts, rewritten with it:**
 - `intake.rs`'s `1e999999` read as a string, and its `[1e999]` hostile
@@ -545,7 +540,8 @@ How this decision fails, each checked:
 5. Decision 6: the dispatcher, with Inbox.tla.
 6. Decision 7: the counters, the failure's text and the refreshed verdict.
 7. Decision 3's adapter part: header names as bytes, the fetch caps.
-8. Decision 8: the census, and the documents above.
+8. Decision 8: the documents above (the census, built here, withdrawn in
+   round C10).
 
 The host adopts them in one pin, after quoting its stream ids.
 
@@ -886,3 +882,60 @@ The host adopts them in one pin, after quoting its stream ids.
   - **Executors:** seven golden rows, in both builds. Mutations caught:
     the reading rule dropped (the table), the writer's quotes dropped (the
     round trip, its seed kept).
+- 2026-11-08 — Round C10: the census withdrawn, header names held to
+  decision 1's rule, and a park at once named by its channel. The host's
+  adoption asked for it, and the round was run as the library's gate
+  requires: two blind solvers, a discriminator, then three roles (database,
+  operability, verifiability).
+  - **The ground.** The owner stated that the library has one consumer and
+    no deployed data: its only data are test databases, dropped and
+    recreated. Measured read-only on the host's stand the same day: three
+    inbox tables, about 560,000 rows, none open, none parked, no structured
+    metadata, no number in a stream id.
+  - **Withdrawn: the census** (decision 8), with `Census` and
+    `PgInbox::census`. Its doc's premise, a count under forced row security,
+    contradicted `migrate`, which refuses an inbox with row security.
+  - **Kept, though first taken for compatibility, each for a property that
+    holds without old data:**
+    - the structured branches of `checked_causal_dependencies` and
+      `header_text`: a message built in memory holds its list structured
+      (`depending_on`) and is published through `wire_of`;
+    - `in_domain` at read: a handler sees only identities in D, whoever
+      wrote the row. The stand's volume outlives a switch of branches, and
+      the host's `master` pins an older release;
+    - decision 6's park at once, supersede and `unreadable_at`, which a
+      present-day message reaches (below), and R12's prefix rule for
+      rolling deploys of releases to come.
+
+    Their docs now name those properties, not "rows stored before".
+  - **Found: a header's name was unchecked.** The intake checked a name for
+    NUL alone, and a name is a metadata key. A message whose only metadata
+    header was named `$serde_json::private::Number` was stored; in the
+    host's build (`arbitrary_precision`) the reader of `jsonb` took its
+    metadata for a number, or failed and parked it at once, a message the
+    intake should have set aside. Under `raw_value`, a header
+    `$serde_json::private::RawValue` would have replaced the metadata at
+    dispatch with values the intake never checked, a `message_id` among
+    them; no package of the host enables that feature. The effect needs the
+    token to be the shortest key, so a message carrying `message_id` was
+    immune. The intake now refuses such a name as malformed, through
+    `identity::is_private_key`, the check decision 1 applies to keys.
+  - **Changed: `ParkedAtOnce` names its channel.** The park returns the
+    row's channel — its `uri` without the key, by the parked index's own
+    expression — and the log line names it. Never the `uri`: its key is the
+    producer's text and may hold a line break. Every other parking event
+    names its channel through its message, so a host could not attribute a
+    park at once.
+  - **The parked rows' counts** this round also built are ADR-0036's
+    decision 6, recorded in its Change Log.
+  - **Executors:**
+    - a unit test refusing the three private names and admitting a near
+      one;
+    - the intake's property, its names drawn from the private keys too and
+      its oracle refusing a metadata key so named;
+    - a park at once of a row keyed with a line break names
+      `kafka://orders`;
+    - a unit test holding the channel's expression to the indexes'.
+  - **Mutations caught:** the name check dropped (the unit test and the
+    property, whose seed is kept), a constant channel returned (the park's
+    test).

@@ -22,7 +22,7 @@ use ascetic_ddd_inbox::observer::{
     Swept, Unparked, Waiting,
 };
 use ascetic_ddd_inbox::{
-    ByStream, CausalDependency, Census, Error, Failure, Inbox, InboxMessage, InboxRetention, Loops,
+    ByStream, CausalDependency, Error, Failure, Ground, Inbox, InboxMessage, InboxRetention, Loops,
     MAX_IDENTITY_BYTES, Outcome, Parked, PartitionKey, PgInbox, Receipt, Retries,
 };
 use ascetic_ddd_session::pg::Identifier;
@@ -2265,7 +2265,7 @@ async fn the_bound_on_an_identity_dominates_its_stored_size() {
 
 /// Inserts a row as a release before the bus's domain and ADR-0037 could
 /// have stored it, its values whatever SQL writes.
-async fn stored_before(f: &Fixture, stream_id: &str, metadata: &str) {
+async fn stored_before<O>(f: &Fixture<O>, stream_id: &str, metadata: &str) {
     let client = pool().get().await.unwrap();
     client
         .execute(
@@ -2280,9 +2280,23 @@ async fn stored_before(f: &Fixture, stream_id: &str, metadata: &str) {
         .unwrap();
 }
 
+/// The channels and orders of arrival the observer was told rows were
+/// parked at once under.
+#[derive(Clone, Default)]
+struct AtOnce(Arc<Mutex<Vec<(String, i64)>>>);
+
+impl InboxObserver for AtOnce {
+    fn on_parked_at_once(&self, event: &ascetic_ddd_inbox::observer::ParkedAtOnce<'_>) {
+        self.0
+            .lock()
+            .unwrap()
+            .push((event.channel.to_owned(), event.received_position));
+    }
+}
+
 /// The parked rows' order of arrival and last error, read without their
 /// values, which may not decode.
-async fn parked_places(f: &Fixture) -> Vec<(i64, Option<String>)> {
+async fn parked_places<O>(f: &Fixture<O>) -> Vec<(i64, Option<String>)> {
     let client = pool().get().await.unwrap();
     client
         .query(
@@ -2323,11 +2337,29 @@ async fn a_head_that_cannot_be_read_is_parked_at_once_and_the_slot_goes_on() {
     ] {
         // No trace: the row is stored by SQL, and a trace names only rows it
         // saw received.
-        let f = fixture_cut("unreadable", (), 1, TraceFile::off()).await;
+        let at_once = AtOnce::default();
+        let f = fixture_cut("unreadable", at_once.clone(), 1, TraceFile::off()).await;
         stored_before(&f, &stream_id, &metadata).await;
+        // Its key holds a line break: the event names the channel, never the
+        // key, which is the producer's text.
+        pool()
+            .get()
+            .await
+            .unwrap()
+            .batch_execute(&format!(
+                "UPDATE {} SET uri = 'kafka://orders/t1' || chr(10) || 'inbox: forged'",
+                f.table
+            ))
+            .await
+            .unwrap();
         f.publish(&[message("next", 1)]).await;
         let (seen, subscriber) = collector();
         assert_eq!(f.dispatch(&subscriber).await, Outcome::Parked, "{ground}");
+        assert_eq!(
+            *at_once.0.lock().unwrap(),
+            [("kafka://orders".to_owned(), 1)],
+            "{ground}: the park names its channel"
+        );
         while f.dispatch(&subscriber).await != Outcome::Nothing {}
         assert_eq!(
             *seen.lock().unwrap(),
@@ -2547,6 +2579,116 @@ async fn a_row_parked_at_once_is_superseded_by_the_next_arrival_at_its_identity(
     assert!(f.parked_messages().await.is_empty());
 }
 
+/// The parked rows are counted by channel — the `uri` without its key — and
+/// by ground, read from the columns, and each exit takes a row out of its
+/// count, though only an unpark and a resolve tell an observer (ADR-0036
+/// decision 6): two keys of one channel are one count.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_parked_rows_are_counted_by_channel_and_ground_and_each_exit_leaves_its_count() {
+    let f = fixture_cut("parked_counts", (), 1, TraceFile::off()).await;
+    stored_before(
+        &f,
+        r#"{"id": "deep"}"#,
+        &format!(
+            r#"{{"message_id": "00000000-0000-4000-b000-000000000001", "h": {}{}}}"#,
+            "[".repeat(127),
+            "]".repeat(127)
+        ),
+    )
+    .await;
+    let (_, subscriber) = collector();
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Parked);
+    let on = |id: &str, key: &str| {
+        InboxMessage::new(
+            "tenant-1",
+            "pay.Payment",
+            json!({ "id": id }),
+            1,
+            format!("kafka://pay/{key}"),
+            id,
+        )
+    };
+    f.publish(&[on("p1", "k1"), on("p2", "k2"), on("p3", "k1")])
+        .await;
+    // As the library parks them: a failure keeps no wait; an expiry keeps
+    // the dependency it waited for.
+    pool()
+        .get()
+        .await
+        .unwrap()
+        .batch_execute(&format!(
+            "UPDATE {t} SET parked_at = now(), attempts = 3 \
+                 WHERE stream_id IN ('{{\"id\": \"p1\"}}', '{{\"id\": \"p2\"}}'); \
+             UPDATE {t} SET parked_at = now(), waiting_since = now(), \
+                 waiting_for = jsonb_build_object('tenant_id', 'tenant-1', 'stream_type', \
+                     'pay.Payment', 'stream_id', '\"gone\"'::jsonb, 'stream_position', 1) \
+                 WHERE stream_id = '{{\"id\": \"p3\"}}'",
+            t = f.table
+        ))
+        .await
+        .unwrap();
+    let counts = async || {
+        f.inbox
+            .parked_counts(Duration::from_secs(5))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|count| (count.channel, count.ground, count.open))
+            .collect::<Vec<_>>()
+    };
+    let at = |channel: &str, ground, open| (channel.to_owned(), ground, open);
+    assert_eq!(
+        counts().await,
+        [
+            at("kafka://orders", Ground::AtOnce, 1),
+            at("kafka://pay", Ground::Expired, 1),
+            at("kafka://pay", Ground::Failure, 2),
+        ]
+    );
+    let parked = f
+        .sessions
+        .session(async |session| f.inbox.parked(&session, None, 10).await)
+        .await
+        .unwrap();
+    assert_eq!(
+        parked
+            .iter()
+            .map(|row| (row.received_position, row.ground))
+            .collect::<Vec<_>>(),
+        [
+            (1, Ground::AtOnce),
+            (2, Ground::Failure),
+            (3, Ground::Failure),
+            (4, Ground::Expired),
+        ],
+        "the listing names each row's ground"
+    );
+    assert!(
+        f.sessions
+            .session(async |session| f.inbox.unpark(&session, 2).await)
+            .await
+            .unwrap()
+    );
+    assert!(
+        f.sessions
+            .session(async |session| f.inbox.resolve(&session, 4).await)
+            .await
+            .unwrap()
+    );
+    let repaired = InboxMessage::new(
+        "tenant-1",
+        "orders.Order",
+        json!({ "id": "deep" }),
+        1,
+        "kafka://orders/old",
+        "repaired",
+    )
+    .with_metadata(json!({ "message_id": "00000000-0000-4000-b000-000000000001" }));
+    f.publish(std::slice::from_ref(&repaired)).await;
+    assert_eq!(counts().await, [at("kafka://pay", Ground::Failure, 1)]);
+}
+
 /// A supersede whose `message_id` another identity holds is that
 /// identity's taken, set aside, the row left parked: the supersede claims no
 /// one else's `message_id` (ADR-0036 R5).
@@ -2638,81 +2780,4 @@ async fn a_failure_past_the_attempts_range_saturates() {
             parked: false
         }
     ));
-}
-
-/// The census counts each ground of ADR-0037 once per row that has it, and
-/// a row that has none nowhere (decision 8).
-#[tokio::test]
-#[ignore = "requires PostgreSQL; run with --ignored"]
-async fn the_census_counts_every_ground_and_nothing_else() {
-    let f = fixture_cut("census", (), 1, TraceFile::off()).await;
-    for (stream_id, metadata) in [
-        // clean
-        (r#"{"id": "clean"}"#.to_owned(), "{}".to_owned()),
-        (
-            r#"{"id": "listed"}"#.to_owned(),
-            r#"{"causal_dependencies": "[]"}"#.to_owned(),
-        ),
-        // a number in the stream id, in the domain and outside it
-        (r#"{"n": 5}"#.to_owned(), "{}".to_owned()),
-        ("12345678901234567890123".to_owned(), "{}".to_owned()),
-        // a list the intake refuses
-        (
-            r#"{"id": "refused"}"#.to_owned(),
-            r#"{"causal_dependencies": "[1]"}"#.to_owned(),
-        ),
-        // metadata stored structured: a number, a depth, a private key
-        (
-            r#"{"id": "number"}"#.to_owned(),
-            r#"{"h": [1.5]}"#.to_owned(),
-        ),
-        (
-            r#"{"id": "deep"}"#.to_owned(),
-            format!(r#"{{"h": {}{}}}"#, "[".repeat(127), "]".repeat(127)),
-        ),
-        (
-            r#"{"id": "token"}"#.to_owned(),
-            r#"{"h": {"$serde_json::private::Number": "5"}}"#.to_owned(),
-        ),
-    ] {
-        stored_before(&f, &stream_id, &metadata).await;
-    }
-    let client = pool().get().await.unwrap();
-    // two waiting rows, at positions of their own: one for a short identity,
-    // one for an identity past the bound
-    let waiting = |position: i32, stream_id: &str| {
-        format!(
-            "INSERT INTO {} (tenant_id, stream_type, stream_id, stream_position, uri, payload, \
-                 metadata, waiting_for, waiting_since) \
-             VALUES ('tenant-1', 'orders.Order', '{{\"id\": \"waits\"}}', {position}, \
-                 'kafka://orders/w', 'w', '{{}}', jsonb_build_object('tenant_id', 'tenant-1', \
-                 'stream_type', 'orders.Order', 'stream_id', {stream_id}, 'stream_position', 1), \
-                 now())",
-            f.table
-        )
-    };
-    client
-        .batch_execute(&waiting(1, "'\"short\"'::jsonb"))
-        .await
-        .unwrap();
-    client
-        .batch_execute(&waiting(2, "to_jsonb(repeat('k', 3000))"))
-        .await
-        .unwrap();
-    let census = f
-        .sessions
-        .session(async |session| f.inbox.census(&session).await)
-        .await
-        .unwrap();
-    assert_eq!(
-        census,
-        Census {
-            numbered_stream_ids: 2,
-            stream_ids_outside: 1,
-            dependencies_refused: 1,
-            structured_metadata: 3,
-            waits_past_bound: 1,
-        }
-    );
-    assert!(!census.is_clear());
 }

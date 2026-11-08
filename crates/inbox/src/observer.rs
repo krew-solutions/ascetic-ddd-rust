@@ -176,6 +176,9 @@ pub struct ParkedAtOnce<'a> {
     pub slot: u32,
     /// The row's order of arrival.
     pub received_position: i64,
+    /// The channel it arrived on, without its key: the inbox's own name,
+    /// read by the statement that parked it, never from the row's values.
+    pub channel: &'a str,
     /// Why, in the library's words.
     pub reason: &'static str,
     /// The snapshot the head was located under.
@@ -428,6 +431,7 @@ mod tests {
         observer.on_parked_at_once(&ParkedAtOnce {
             slot: 0,
             received_position: 1,
+            channel: "inbox://o",
             reason: "unreadable",
             snapshot: &snapshot,
         });

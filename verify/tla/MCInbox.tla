@@ -18,8 +18,8 @@ MCNoDeps == (m1 :> {}) @@ (m2 :> {}) @@ (m3 :> {})
 MCOneSlot == {w1}
 MCPoisonM1 == {m1}
 
-\* Rows the dispatcher cannot read: none, or m1, stored before the intake's
-\* checks (ADR-0037 decision 6).
+\* Rows the dispatcher cannot read: none, or m1, which the intake did not
+\* foresee or did not write (ADR-0037 decision 6).
 MCNoUnreadable == {}
 MCUnreadableM1 == {m1}
 

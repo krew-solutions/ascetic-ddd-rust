@@ -56,8 +56,9 @@ CONSTANTS
   AtomicWait,     \* TRUE: the check of a dependency and the wait are one step, as under the lock of
                   \* ADR-0009; FALSE: the wait is settled in a later step, and a mark in between cannot see it
   MaxAdmin,       \* unpark and resolve actions, in all
-  Unreadable,     \* SUBSET Msgs: rows stored before the intake's checks that the dispatcher cannot
-                  \* read or write for their own values (ADR-0037 decision 6); parked at once
+  Unreadable,     \* SUBSET Msgs: rows the dispatcher cannot read or write for their own values,
+                  \* which the intake did not foresee or did not write (ADR-0037 decision 6);
+                  \* parked at once
   None            \* a model value: no row held
 
 ASSUME Deps \in [Msgs -> SUBSET Msgs]
