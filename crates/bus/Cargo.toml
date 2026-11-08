@@ -21,8 +21,12 @@ kafka = ["dep:rdkafka"]
 [dependencies]
 futures.workspace = true
 log = "0.4"
+# The stream id's value (ADR-0037 decision 1), built by the library's own
+# scanner, never by serde_json's parser.
+serde_json.workspace = true
 rdkafka = { version = "0.39", optional = true }
 tokio = { version = "1.53.1", features = ["macros", "rt", "sync", "time"] }
 
 [dev-dependencies]
+proptest = "1.11.0"
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "test-util", "time"] }

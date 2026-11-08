@@ -1,0 +1,22 @@
+# The library built as its host builds it (ADR-0037 § Executors): serde_json
+# with `arbitrary_precision` and `preserve_order`, and `raw_value` in a second
+# job. A workspace of its own, since the library's workspace tests with
+# `--all-features`, which would turn every crate's tests into this build and
+# lose the default one.
+[package]
+name = "inbox-features"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[features]
+raw_value = ["serde_json/raw_value"]
+
+[dependencies]
+ascetic-ddd-bus = { path = "../../crates/bus" }
+serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
+
+[dev-dependencies]
+proptest = "1.11.0"

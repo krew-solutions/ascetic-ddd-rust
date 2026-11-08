@@ -16,7 +16,7 @@
 //! the key, the headers and the payload, each length-delimited — under a
 //! digest of that frame, so that a repeat of the same bytes is the same row.
 
-use ascetic_ddd_bus::identity::{STREAM_ID, STREAM_POSITION, STREAM_TYPE, TENANT_ID};
+use ascetic_ddd_bus::identity::{self, STREAM_ID, STREAM_POSITION, STREAM_TYPE, TENANT_ID};
 use ascetic_ddd_bus::{Message, uri};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -112,9 +112,7 @@ pub(crate) fn row_of(destination: &str, message: &Message) -> Result<InboxMessag
     if stream_type.chars().count() > STREAM_TYPE_WIDTH {
         return Err("the stream type is longer than its column");
     }
-    let stream_id = serde_json::from_str(stream_id_text)
-        .unwrap_or_else(|_| Value::String(stream_id_text.to_owned()));
-    storable(&stream_id)?;
+    let stream_id = identity::read_stream_id(stream_id_text).map_err(identity::Refused::as_str)?;
     let stream_position = column(STREAM_POSITION)?
         .parse::<i32>()
         .map_err(|_| "the position is not an integer")?;
@@ -477,15 +475,23 @@ mod tests {
         }
     }
 
-    /// A number past `f64` is a JSON number only under `serde_json`'s
-    /// `arbitrary_precision`, which a host may enable: there it is refused
-    /// (the host's differential test holds that, ADR-0036 R3). Without the
-    /// feature it does not parse as a number, and is kept as the string it
-    /// is, which PostgreSQL stores.
+    /// A stream id is read by the bus's identity function (ADR-0037
+    /// decision 1), the same in every build of serde_json's features: JSON
+    /// outside its domain is refused, a raw id is the string of its text.
+    /// Before, `1e999999` was a string in the default build and a stall in
+    /// a host's build with `arbitrary_precision`.
     #[test]
-    fn a_number_past_f64_without_the_feature_is_a_string() {
-        let row = row_of("inbox://orders", &identified("1e999999")).unwrap();
-        assert_eq!(row.stream_id, Value::String("1e999999".to_owned()));
+    fn a_stream_id_outside_the_domain_is_refused_in_every_build() {
+        for outside in ["1e999999", "1e-16384", "1.5", "-0", "18446744073709551616"] {
+            assert!(
+                row_of("inbox://orders", &identified(outside)).is_err(),
+                "{outside}"
+            );
+        }
+        let row = row_of("inbox://orders", &identified("o-1")).unwrap();
+        assert_eq!(row.stream_id, Value::String("o-1".to_owned()));
+        let row = row_of("inbox://orders", &identified("12345")).unwrap();
+        assert_eq!(row.stream_id, Value::from(12_345_u64));
     }
 
     #[test]

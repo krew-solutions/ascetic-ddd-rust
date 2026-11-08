@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed (2026-11-08).
+Accepted (2026-11-08, by the owner); being built in the order of
+§ Slices.
 
 It is the output of one round of a blind solver and a discriminator, whose
 synthesis was then attacked by five roles: distributed systems, database,
@@ -563,3 +564,20 @@ The host adopts them in one pin, after quoting its stream ids.
 - 2026-11-08 — Proposed. One round of a blind solver and a discriminator,
   then five roles. Every finding of § Context is held by an executor of
   § Executors.
+- 2026-11-08 — Accepted by the owner; slice 1 begun.
+- 2026-11-08 — Slice 1 built.
+  - `bus::identity`: the scanner (`read_json`), `read_stream_id` and
+    `write_stream_id`. A raw id holding U+0000 is refused as well, so that
+    D's rule on strings holds for raw ids too.
+  - The inbox's intake reads the stream id through it, and `wire_of`
+    writes it through its inverse. So `Inbox::publish` of the string
+    `"12345"` no longer stores the number 12345.
+  - The golden table and the round trip run in the workspace's build and
+    in `verify/inbox-features` (`make host-features`, in `make all`), whose
+    jobs build serde_json as the host does, then with `raw_value`.
+  - Mutations caught, each by the table or the round trip:
+    - `-0`, serde_json's keys, the depth bound and duplicate keys;
+    - the fallback to a string, U+0000, the writer without quotes, a lone
+      low surrogate and the range past u64.
+  - Not a mutation: the "written plainly" flag repeats what the integer
+    parse already refuses; it is kept for its reason.

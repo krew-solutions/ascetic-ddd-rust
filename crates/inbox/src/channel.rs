@@ -33,7 +33,7 @@
 
 use std::sync::Arc;
 
-use ascetic_ddd_bus::identity::{STREAM_ID, STREAM_POSITION, STREAM_TYPE, TENANT_ID};
+use ascetic_ddd_bus::identity::{self, STREAM_ID, STREAM_POSITION, STREAM_TYPE, TENANT_ID};
 use ascetic_ddd_bus::{
     Adapter, BoxError, Error as BusError, Message, Permanent, Subscription, TransactionalConsumer,
     TransactionalHandler, TransactionalWireConsumer, WireConsumer, WireProducer, handling, uri,
@@ -198,7 +198,7 @@ pub(crate) fn wire_of(row: &InboxMessage) -> Message {
     let message = Message::new(row.payload.clone())
         .with_header(TENANT_ID, row.tenant_id.as_bytes())
         .with_header(STREAM_TYPE, row.stream_type.as_bytes())
-        .with_header(STREAM_ID, header_text(&row.stream_id))
+        .with_header(STREAM_ID, identity::write_stream_id(&row.stream_id))
         .with_header(STREAM_POSITION, row.stream_position.to_string())
         .with_header(DESTINATION, row.uri.as_bytes());
     let message = match uri::key(&row.uri) {
