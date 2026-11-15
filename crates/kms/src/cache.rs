@@ -82,11 +82,30 @@ impl<K> Cached<K> {
         self.entries.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The key unwrapped for `tenant_id` from `wrapped`, if still kept.
+    /// The key unwrapped for `tenant_id` from `wrapped`, if still kept; an
+    /// expired one goes, wiped, as it is found.
     fn get(&self, tenant_id: &str, wrapped: &[u8]) -> Option<Key> {
-        let entries = self.lock();
-        let entry = entries.get(&(tenant_id.to_owned(), wrapped.to_vec()))?;
-        (entry.since.elapsed() < self.ttl).then(|| entry.key.clone())
+        self.get_at(tenant_id, wrapped, Instant::now())
+    }
+
+    /// [`Cached::get`] at `now`.
+    fn get_at(&self, tenant_id: &str, wrapped: &[u8], now: Instant) -> Option<Key> {
+        let mut entries = self.lock();
+        let id = (tenant_id.to_owned(), wrapped.to_vec());
+        let entry = entries.get(&id)?;
+        if now.saturating_duration_since(entry.since) < self.ttl {
+            return Some(entry.key.clone());
+        }
+        entries.remove(&id);
+        None
+    }
+
+    /// Drops, wiped, every key whose time is up at `now`: a cache nobody
+    /// asks still lets go of its keys (seedwork ADR-0039 decision 2). The
+    /// caller says when; nothing here keeps time.
+    pub fn purge(&self, now: Instant) {
+        self.lock()
+            .retain(|_, entry| now.saturating_duration_since(entry.since) < self.ttl);
     }
 
     /// Keeps `key` as unwrapped for `tenant_id` from `wrapped`, making room
@@ -392,5 +411,29 @@ where
         purpose: &KeyLabel,
     ) -> Result<(), Error> {
         self.kms.delete_mac_key(session, tenant_id, purpose).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_expired_key_goes_wiped_when_it_is_found_or_purged() {
+        let cached = Cached::new(()).with_ttl(Duration::from_secs(60));
+        cached.put("t1", b"w1", Key::new(vec![1; 32]));
+        cached.put("t1", b"w2", Key::new(vec![2; 32]));
+        let at = Instant::now();
+        assert!(
+            cached.get_at("t1", b"w1", at).is_some(),
+            "kept within its time"
+        );
+        let later = at + Duration::from_secs(61);
+        assert!(cached.get_at("t1", b"w1", later).is_none());
+        assert_eq!(cached.len(), 1, "the expired key found is dropped");
+        cached.purge(at);
+        assert_eq!(cached.len(), 1, "nothing is purged before its time");
+        cached.purge(later);
+        assert!(cached.is_empty(), "a cache nobody asks lets go of its keys");
     }
 }

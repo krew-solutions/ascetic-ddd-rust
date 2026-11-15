@@ -198,57 +198,6 @@ impl VaultTransitService {
         Ok(MacKey::name_of(Self::tenant_part(tenant_id)?, purpose))
     }
 
-    /// One call under the mount; `404` is [`Error::KekNotFound`], any other
-    /// refusal [`Error::Vault`], `204` an empty object.
-    ///
-    /// Boxed, with every borrow under one lifetime: the future of a call
-    /// through two `impl Future`-returning trait methods — the transport's
-    /// `send` inside the session's `request` — cannot be shown `Send` for
-    /// every lifetime at once on stable Rust (ADR-0004), and a boxed future
-    /// says it once, for this one.
-    fn request<'a, S>(
-        &'a self,
-        session: &'a S,
-        tenant_id: &'a str,
-        method: &'static str,
-        path: &'a str,
-        body: Option<Value>,
-    ) -> BoxFuture<'a, Result<Value, Error>>
-    where
-        S: Session + HttpAccess + Sync,
-        S::Client: VaultTransport,
-    {
-        Box::pin(async move {
-            let url = format!("{}/v1/{}{}", self.addr, self.mount, path);
-            let call = session.http().send(VaultRequest {
-                method,
-                url: url.clone(),
-                token: &self.token,
-                body,
-            });
-            let response = session
-                .request(method, &url, call)
-                .await
-                .map_err(Error::Transport)?;
-            match response.status {
-                404 => Err(Error::KekNotFound {
-                    tenant_id: tenant_id.to_owned(),
-                    key_version: None,
-                }),
-                204 => Ok(json!({})),
-                status if (200..300).contains(&status) => {
-                    Ok(response.body.unwrap_or_else(|| json!({})))
-                }
-                status => Err(Error::Vault {
-                    status,
-                    method,
-                    path: path.to_owned(),
-                    message: errors_of(response.body.as_ref()),
-                }),
-            }
-        })
-    }
-
     /// One call under the mount, classified by status alone: `204` is an
     /// empty answer, any other `2xx` its body, anything else
     /// [`Error::Vault`] — a `404` included, for the callers that name the
@@ -303,7 +252,11 @@ impl VaultTransitService {
         Ok(())
     }
 
-    /// The key as Vault describes it, `None` when there is none.
+    /// The key as Vault describes it, `None` when there is none. Transit
+    /// answers a missing key's read `404` with no words, and a path no
+    /// mount serves `404` with "no handler for route" (measured, Vault
+    /// 1.21.4, seedwork ADR-0039): only the first is a key not there; the
+    /// second is a missing or misnamed mount, and stays the refusal it is.
     async fn read_named<S>(&self, session: &S, name: &str) -> Result<Option<Value>, Error>
     where
         S: Session + HttpAccess + Sync,
@@ -312,7 +265,11 @@ impl VaultTransitService {
         let path = format!("/keys/{name}");
         match self.transit(session, "GET", &path, None).await {
             Ok(answer) => Ok(Some(answer)),
-            Err(Error::Vault { status: 404, .. }) => Ok(None),
+            Err(Error::Vault {
+                status: 404,
+                ref message,
+                ..
+            }) if message.is_empty() => Ok(None),
             Err(error) => Err(error),
         }
     }
@@ -560,35 +517,6 @@ impl VaultTransitService {
         Ok(())
     }
 
-    /// What a `400` from an operation on the named key means: the key is
-    /// not there (`missing`), the version the operation named is outside
-    /// what the key serves ([`Error::NoKeyOfVersion`]), or something else,
-    /// left as it was. One read of the key, on this path only.
-    async fn explain<S>(
-        &self,
-        session: &S,
-        name: &str,
-        key_version: Option<u32>,
-        missing: impl FnOnce() -> Error + Send,
-        error: Error,
-    ) -> Error
-    where
-        S: Session + HttpAccess + Sync,
-        S::Client: VaultTransport,
-    {
-        if !matches!(error, Error::Vault { status: 400, .. }) {
-            return error;
-        }
-        match self.read_named(session, name).await {
-            Ok(None) => missing(),
-            Ok(Some(answer)) => match key_version {
-                Some(version) if !serves(&answer, version) => Error::NoKeyOfVersion(version),
-                _ => error,
-            },
-            Err(_) => error,
-        }
-    }
-
     /// Makes the tenant's KEK unless the keys are managed elsewhere.
     async fn ensure_key<S>(&self, session: &S, tenant_id: &str) -> Result<(), Error>
     where
@@ -599,20 +527,27 @@ impl VaultTransitService {
             return Ok(());
         }
         let path = format!("/keys/{}", Self::key_name(tenant_id));
-        self.request(session, tenant_id, "POST", &path, Some(self.kek_body()))
+        self.transit(session, "POST", &path, Some(self.kek_body()))
             .await?;
         Ok(())
     }
 
-    /// What a refusal of a KEK operation means, by one read of the key: a
-    /// `400` as [`VaultTransitService::explain`] reads it, with the tenant's
-    /// KEK as the key that may be missing — and, the key there and the
-    /// version served, the request's own fault, which no retry mends: on
-    /// `decrypt` and `rewrap` [`Error::Decrypt`] (a wrong context, bytes
-    /// changed since they were sealed), elsewhere [`Error::Malformed`] with
-    /// Vault's words; a `403` with the key there is [`Error::Forbidden`],
-    /// with the key not there [`Error::KekNotFound`], with the read refused
-    /// too the `403` as it came.
+    /// What a refusal of a KEK operation means, by one read of the key
+    /// (seedwork ADR-0039 decision 8, amending ADR-0017 point 5):
+    /// - a `400`, Transit's answer to a key it has not got: the key not
+    ///   there, [`Error::KekNotFound`] with no version; the version the
+    ///   operation named outside what the key serves,
+    ///   [`Error::NoKeyOfVersion`]; the key there and the version served,
+    ///   the request's own fault, which no retry mends — on `decrypt` and
+    ///   `rewrap` [`Error::Decrypt`] (a wrong context, bytes changed since
+    ///   they were sealed), elsewhere [`Error::Malformed`] with Vault's
+    ///   words; the read failed, what the `400` means is not known: the
+    ///   `400` as it came, of the moment;
+    /// - a `403` with the key there, [`Error::Forbidden`]; otherwise the
+    ///   `403` as it came — Vault checks the policy before it looks the key
+    ///   up (measured, Vault 1.21.4), so a `403` proves nothing of the key,
+    ///   and reading it as a key not there would read a policy's drift as
+    ///   every Tenant's key shredded.
     async fn explain_kek<S>(
         &self,
         session: &S,
@@ -626,39 +561,29 @@ impl VaultTransitService {
         S::Client: VaultTransport,
     {
         let name = Self::key_name(tenant_id);
-        let missing = || Error::KekNotFound {
-            tenant_id: tenant_id.to_owned(),
-            key_version: None,
-        };
         match error {
-            Error::Vault { status: 400, .. } => {
-                match self
-                    .explain(session, &name, key_version, missing, error)
-                    .await
-                {
-                    Error::Vault {
-                        status: 400,
-                        message,
-                        ..
-                    } if matches!(operation, "decrypt" | "rewrap") => {
-                        let _ = message;
-                        Error::Decrypt
-                    }
-                    Error::Vault {
-                        status: 400,
-                        message,
-                        ..
-                    } => Error::Malformed(format!("vault refused {operation}: {message}")),
-                    explained => explained,
-                }
-            }
+            Error::Vault {
+                status: 400,
+                ref message,
+                ..
+            } => match self.read_named(session, &name).await {
+                Ok(None) => Error::KekNotFound {
+                    tenant_id: tenant_id.to_owned(),
+                    key_version: None,
+                },
+                Ok(Some(answer)) => match key_version {
+                    Some(version) if !serves(&answer, version) => Error::NoKeyOfVersion(version),
+                    _ if matches!(operation, "decrypt" | "rewrap") => Error::Decrypt,
+                    _ => Error::Malformed(format!("vault refused {operation}: {message}")),
+                },
+                Err(_) => error,
+            },
             Error::Vault { status: 403, .. } => match self.read_named(session, &name).await {
                 Ok(Some(_)) => Error::Forbidden {
                     tenant_id: tenant_id.to_owned(),
                     operation,
                 },
-                Ok(None) => missing(),
-                Err(_) => error,
+                Ok(None) | Err(_) => error,
             },
             error => error,
         }
@@ -936,10 +861,7 @@ where
         self.ensure_key(session, tenant_id).await?;
         let path = format!("/encrypt/{}", Self::key_name(tenant_id));
         let body = self.in_context(json!({ "plaintext": BASE64.encode(dek.as_bytes()) }));
-        let answer = match self
-            .request(session, tenant_id, "POST", &path, Some(body))
-            .await
-        {
+        let answer = match self.transit(session, "POST", &path, Some(body)).await {
             Ok(answer) => answer,
             Err(error) => {
                 return Err(self
@@ -960,10 +882,7 @@ where
         let (key_version, _) = versioned(text, "ciphertext")?;
         let path = format!("/decrypt/{}", Self::key_name(tenant_id));
         let body = self.in_context(json!({ "ciphertext": text }));
-        let answer = match self
-            .request(session, tenant_id, "POST", &path, Some(body))
-            .await
-        {
+        let answer = match self.transit(session, "POST", &path, Some(body)).await {
             Ok(answer) => answer,
             Err(error) => {
                 return Err(self
@@ -978,10 +897,7 @@ where
         self.ensure_key(session, tenant_id).await?;
         let path = format!("/datakey/plaintext/{}", Self::key_name(tenant_id));
         let body = self.in_context(json!({ "bits": 256 }));
-        let answer = match self
-            .request(session, tenant_id, "POST", &path, Some(body))
-            .await
-        {
+        let answer = match self.transit(session, "POST", &path, Some(body)).await {
             Ok(answer) => answer,
             Err(error) => {
                 return Err(self
@@ -1004,10 +920,7 @@ where
         let (key_version, _) = versioned(text, "ciphertext")?;
         let path = format!("/rewrap/{}", Self::key_name(tenant_id));
         let body = self.in_context(json!({ "ciphertext": text }));
-        let answer = match self
-            .request(session, tenant_id, "POST", &path, Some(body))
-            .await
-        {
+        let answer = match self.transit(session, "POST", &path, Some(body)).await {
             Ok(answer) => answer,
             Err(error) => {
                 return Err(self

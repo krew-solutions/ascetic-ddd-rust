@@ -14,7 +14,10 @@ impl VaultTransport for reqwest::Client {
         }
         let response = builder.send().await?;
         let status = response.status().as_u16();
-        let text = response.text().await?;
+        // The answer may carry a key's plaintext: its text is wiped when it
+        // goes. The JSON read from it is out of this crate's reach until the
+        // caller drops it (seedwork ADR-0039 decision 2).
+        let text = zeroize::Zeroizing::new(response.text().await?);
         let body = match text.trim() {
             "" => None,
             json => Some(serde_json::from_str(json)?),

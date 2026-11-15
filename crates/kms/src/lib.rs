@@ -18,7 +18,7 @@ pub use crate::domain::{
     Aes256Gcm, Algorithm, Cipher, Kek, Key, KeyLabel, MASTER_KEY_VERSION, Mac, MacKey, MasterKey,
     PublicKey, PublicKeyring, Signature, SignatureAlgorithm, SigningKey, WrappedKey,
 };
-pub use crate::error::{BoxError, Error};
+pub use crate::error::{BoxError, Class, Error};
 #[cfg(feature = "pg")]
 pub use crate::pg::PgKeyManagementService;
 pub use crate::port::{
