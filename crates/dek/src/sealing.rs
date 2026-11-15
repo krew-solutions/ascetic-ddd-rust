@@ -34,7 +34,9 @@ use ascetic_ddd_kms::{Cached, KeyManagementService};
 use ascetic_ddd_session::SessionPool;
 use futures::future::BoxFuture;
 
-use crate::stage::{EnvelopeStage, Reuse};
+use crate::draws::{Held, SealingObserver};
+use crate::stage::{EnvelopeStage, Pacing, Reuse};
+use crate::supply::InvalidParameters;
 
 /// The header an inbox row goes out with: the channel it was received on.
 const DESTINATION: &str = "destination";
@@ -65,6 +67,23 @@ impl Default for SealingParameters {
 #[derive(Clone)]
 pub struct Sealing {
     stages: Arc<HashMap<String, Arc<dyn Stage>>>,
+    holding: Arc<HashMap<String, Arc<dyn Holding>>>,
+}
+
+/// A stage seen for what it holds.
+trait Holding: Send + Sync {
+    fn held(&self) -> Held;
+}
+
+impl<P, K> Holding for EnvelopeStage<P, K>
+where
+    P: SessionPool + Send + Sync + 'static,
+    P::Session: Sync,
+    K: KeyManagementService<P::Session> + 'static,
+{
+    fn held(&self) -> Held {
+        EnvelopeStage::held(self)
+    }
 }
 
 impl std::fmt::Debug for Sealing {
@@ -80,6 +99,9 @@ impl Sealing {
     /// `parameters`, each channel's stage over the KMS `kms` makes for it —
     /// an instance serving the channel as its derivation context — behind a
     /// cache of its own. A channel named twice gets one stage.
+    ///
+    /// Its data keys are drawn as [`Pacing::fitted`] fits the reuse
+    /// (ADR-0039); [`Sealing::over_paced`] says otherwise.
     pub fn over<P, K>(
         sessions: P,
         channels: impl IntoIterator<Item = impl Into<String>>,
@@ -91,19 +113,72 @@ impl Sealing {
         P::Session: Sync,
         K: KeyManagementService<P::Session> + 'static,
     {
+        Self::over_paced(
+            sessions,
+            channels,
+            (parameters, Pacing::fitted(parameters.reuse)),
+            None,
+            |_| Arc::new(()),
+            kms,
+        )
+        .expect("a fitted pacing fits its reuse")
+    }
+
+    /// As [`Sealing::over`], each stage's data keys drawn as `pacing` says,
+    /// what becomes of them told to the observer `observer` makes for its
+    /// channel. With a `ceiling`, the
+    /// window after an off-boarding in which a key already drawn or
+    /// unwrapped still serves — the reuse's lifetime, the cache's, and a
+    /// draw's — is held under it (ADR-0039 decision 12; the consumer's
+    /// ADR-0071 decision 11 names the ceiling).
+    ///
+    /// # Errors
+    /// [`InvalidParameters`] naming the rule broken: a composition root
+    /// refuses to start.
+    pub fn over_paced<P, K>(
+        sessions: P,
+        channels: impl IntoIterator<Item = impl Into<String>>,
+        (parameters, pacing): (SealingParameters, Pacing),
+        ceiling: Option<Duration>,
+        observer: impl Fn(&str) -> Arc<dyn SealingObserver>,
+        kms: impl Fn(&str) -> K,
+    ) -> Result<Self, InvalidParameters>
+    where
+        P: SessionPool + Clone + Send + Sync + 'static,
+        P::Session: Sync,
+        K: KeyManagementService<P::Session> + 'static,
+    {
+        pacing.supply(parameters.reuse)?;
+        if let Some(ceiling) = ceiling
+            && parameters
+                .reuse
+                .lifetime
+                .saturating_add(parameters.cache)
+                .saturating_add(pacing.draw)
+                > ceiling
+        {
+            return Err(InvalidParameters("lifetime + cache + draw ≤ the ceiling"));
+        }
         let mut stages: HashMap<String, Arc<dyn Stage>> = HashMap::new();
+        let mut holding: HashMap<String, Arc<dyn Holding>> = HashMap::new();
         for channel in channels {
             let channel = channel.into();
             if stages.contains_key(&channel) {
                 continue;
             }
             let cached = Cached::new(kms(&channel)).with_ttl(parameters.cache);
-            let stage = EnvelopeStage::new(sessions.clone(), cached).reusing(parameters.reuse);
-            stages.insert(channel, Arc::new(stage));
+            let stage = Arc::new(
+                EnvelopeStage::new(sessions.clone(), cached)
+                    .paced(parameters.reuse, pacing)?
+                    .observed_by(observer(&channel)),
+            );
+            holding.insert(channel.clone(), Arc::clone(&stage) as Arc<dyn Holding>);
+            stages.insert(channel, stage);
         }
-        Sealing {
+        Ok(Sealing {
             stages: Arc::new(stages),
-        }
+            holding: Arc::new(holding),
+        })
     }
 
     /// The stage of `channel`, or `None` for a channel the sealing was not
@@ -116,6 +191,13 @@ impl Sealing {
     /// The channels the sealing was built for.
     pub fn channels(&self) -> impl Iterator<Item = &str> {
         self.stages.keys().map(String::as_str)
+    }
+
+    /// What each channel's stage holds now: gauges for an operator.
+    pub fn held(&self) -> impl Iterator<Item = (&str, Held)> {
+        self.holding
+            .iter()
+            .map(|(channel, stage)| (channel.as_str(), stage.held()))
     }
 
     /// The stage of an inbox that receives several channels: for each

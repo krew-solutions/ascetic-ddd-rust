@@ -11,9 +11,22 @@
 //! time; a failed draw backs off, its slot refusing at once meanwhile. The
 //! flights a stage runs at once are capped, the cap partitioned so that no
 //! tenant's probes, nor the renewals, take every place.
+//!
+//! The core does not panic: its arithmetic saturates or is checked, and
+//! the lints below refuse what would panic (ADR-0039 decision 11).
 
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+#![deny(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented
+)]
+
+use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
@@ -31,6 +44,11 @@ impl std::fmt::Display for InvalidParameters {
 }
 
 impl std::error::Error for InvalidParameters {}
+
+/// The longest a key's lifetime or a back-off's cap may be: a century,
+/// so that an instant plus any duration of a supply is an instant on every
+/// platform.
+pub const LONGEST: Duration = Duration::from_secs(100 * 365 * 86_400);
 
 /// How a stage's keys are drawn, served and renewed, validated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,17 +103,22 @@ impl Supply {
                 Err(InvalidParameters(rule))
             }
         };
+        rule(p.lifetime <= LONGEST, "lifetime ≤ a century")?;
         rule(p.burst >= 1, "burst ≥ 1")?;
         rule(
-            u64::from(p.messages) >= 2 * u64::from(p.burst),
+            u64::from(p.messages) >= 2 * u64::from(p.burst) || (p.messages == 1 && p.burst == 1),
             "messages ≥ 2 · burst",
         )?;
         rule(!p.wait.is_zero(), "wait > 0")?;
         rule(p.wait < p.draw, "wait < draw")?;
-        rule(p.draw < p.lifetime / 2, "draw < lifetime / 2")?;
+        let part_of = |span: Duration, n: u32| span.checked_div(n).unwrap_or(Duration::ZERO);
+        rule(p.draw < part_of(p.lifetime, 2), "draw < lifetime / 2")?;
         rule(p.lead.0 >= p.draw, "the lead from ≥ draw")?;
         rule(p.lead.1 >= p.lead.0, "the lead to ≥ the lead from")?;
-        rule(p.jitter <= p.lifetime / 10, "jitter ≤ lifetime / 10")?;
+        rule(
+            p.jitter <= part_of(p.lifetime, 10),
+            "jitter ≤ lifetime / 10",
+        )?;
         rule(
             p.jitter
                 .saturating_add(p.lead.1)
@@ -103,11 +126,15 @@ impl Supply {
                 <= p.lifetime,
             "jitter + the lead to + 2 · draw ≤ lifetime",
         )?;
-        rule(!p.backoff.0.is_zero(), "the back-off's first step > 0")?;
+        rule(
+            p.backoff.0 >= p.wait.saturating_mul(2),
+            "the back-off's first step ≥ 2 · wait",
+        )?;
         rule(
             p.backoff.1 >= p.backoff.0,
             "the back-off's cap ≥ its first step",
         )?;
+        rule(p.backoff.1 <= LONGEST, "the back-off's cap ≤ a century")?;
         rule(!p.gone.is_zero(), "gone > 0")?;
         rule(p.gone <= p.backoff.1, "gone ≤ the back-off's cap")?;
         rule(p.flights >= 1, "flights ≥ 1")?;
@@ -141,6 +168,13 @@ impl Supply {
     #[must_use]
     pub const fn lifetime(&self) -> Duration {
         self.lifetime
+    }
+
+    /// Whether a key seals one message: then no draw is shared, and the
+    /// shell draws for each seal on its own.
+    #[must_use]
+    pub const fn per_message(&self) -> bool {
+        self.messages == 1
     }
 
     /// The uses left at which a key's successor is drawn: the larger of a
@@ -270,27 +304,76 @@ enum Evidence {
     },
 }
 
-#[derive(Debug)]
-struct Slot<K> {
-    key: Option<Serving<K>>,
-    flight: Option<(Generation, Kind)>,
-    evidence: Evidence,
-    waiters: u32,
-    /// The caller whose seal started the current flight joined it: told
-    /// Gone when the flight lands so.
-    starter: Option<Generation>,
+/// A flight in flight: its number, what it is for, when it started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Flying {
+    generation: Generation,
+    kind: Kind,
+    started: Instant,
 }
 
-impl<K> Slot<K> {
+#[derive(Debug)]
+struct Slot<K, N> {
+    key: Option<Serving<K>>,
+    flight: Option<Flying>,
+    evidence: Evidence,
+    waiters: u32,
+    /// A Gone landed and no seal has been told yet: the first to ask is.
+    gone_untold: bool,
+    /// What the shell remembers of the tenant while the slot is kept: it
+    /// has no effect of its own, and goes with the slot.
+    note: Option<N>,
+    /// The slot's one deadline in the core's map: when a sweep is to come
+    /// to it next.
+    due: Option<(Instant, Generation)>,
+}
+
+impl<K, N> Slot<K, N> {
     const fn new() -> Self {
         Slot {
             key: None,
             flight: None,
             evidence: Evidence::Trusted,
             waiters: 0,
-            starter: None,
+            gone_untold: false,
+            note: None,
+            due: None,
         }
     }
+
+    /// When the slot changes next by time alone: its key's end, or the
+    /// end of its failure's memory — the back-off, and one cap past it in
+    /// which the failure still decides the next draw (a probe, a doubled
+    /// step).
+    fn next(&self, memory: Duration) -> Option<Instant> {
+        let ends = self.key.as_ref().map(|serving| serving.ends);
+        let forgets = match self.evidence {
+            Evidence::Failed { until, .. } => Some(later(until, memory)),
+            Evidence::Trusted | Evidence::Late => None,
+        };
+        match (ends, forgets) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// Whether the slot holds nothing with a future effect as of `now`: no
+    /// key, no flight, no waiter, no failure still remembered.
+    fn idle(&self, now: Instant, memory: Duration) -> bool {
+        self.key.is_none()
+            && self.flight.is_none()
+            && self.waiters == 0
+            && match self.evidence {
+                Evidence::Failed { until, .. } => later(until, memory) <= now,
+                Evidence::Trusted | Evidence::Late => true,
+            }
+    }
+}
+
+/// `at` plus `span`. Every span of a supply is at most [`LONGEST`], which
+/// no monotonic clock's instant overflows; were one to, `at` itself.
+fn later(at: Instant, span: Duration) -> Instant {
+    at.checked_add(span).unwrap_or(at)
 }
 
 /// The places of a stage's flights, by kind.
@@ -303,24 +386,37 @@ struct Held {
 
 impl Held {
     const fn total(self) -> u32 {
-        self.misses + self.renewals + self.probes
+        self.misses
+            .saturating_add(self.renewals)
+            .saturating_add(self.probes)
+    }
+
+    const fn of(&mut self, kind: Kind) -> &mut u32 {
+        match kind {
+            Kind::Miss => &mut self.misses,
+            Kind::Renew => &mut self.renewals,
+            Kind::Probe => &mut self.probes,
+        }
     }
 }
 
-/// The core of one stage's keys.
+/// The core of one stage's keys, a note of the shell's kept per tenant
+/// while its slot is.
 #[derive(Debug)]
-pub struct Core<T, K> {
+pub struct Core<T, K, N = ()> {
     supply: Supply,
-    slots: HashMap<T, Slot<K>>,
+    slots: HashMap<T, Slot<K, N>>,
     in_flight: HashMap<Generation, (T, Kind)>,
     next: Generation,
     held: Held,
-    deadlines: BinaryHeap<Reverse<(Instant, Generation)>>,
-    deadline_of: HashMap<Generation, T>,
+    /// Each slot's one deadline, by when it falls.
+    deadlines: BTreeMap<(Instant, Generation), T>,
+    /// The keys gone out of service since the shell last took them.
+    retired: Vec<K>,
     landed_in_time: Option<Instant>,
 }
 
-impl<T: Clone + Eq + Hash, K: Clone> Core<T, K> {
+impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
     /// A core with no slot.
     #[must_use]
     pub fn new(supply: Supply) -> Self {
@@ -330,8 +426,8 @@ impl<T: Clone + Eq + Hash, K: Clone> Core<T, K> {
             in_flight: HashMap::new(),
             next: 1,
             held: Held::default(),
-            deadlines: BinaryHeap::new(),
-            deadline_of: HashMap::new(),
+            deadlines: BTreeMap::new(),
+            retired: Vec::new(),
             landed_in_time: None,
         }
     }
@@ -348,10 +444,9 @@ impl<T: Clone + Eq + Hash, K: Clone> Core<T, K> {
         generation
     }
 
-    fn deadline(&mut self, at: Instant, tenant: &T) {
-        let key = self.generation();
-        self.deadlines.push(Reverse((at, key)));
-        self.deadline_of.insert(key, tenant.clone());
+    /// How long a failure is remembered past its back-off: a cap.
+    const fn memory(&self) -> Duration {
+        self.supply.backoff.1
     }
 
     /// Whether a place of `kind` is free.
@@ -364,23 +459,77 @@ impl<T: Clone + Eq + Hash, K: Clone> Core<T, K> {
         }
     }
 
-    fn start(&mut self, tenant: &T, kind: Kind) -> Start {
+    fn start(&mut self, tenant: &T, kind: Kind, now: Instant) -> Start {
         let generation = self.generation();
-        match kind {
-            Kind::Miss => self.held.misses += 1,
-            Kind::Renew => self.held.renewals += 1,
-            Kind::Probe => self.held.probes += 1,
-        }
+        let held = self.held.of(kind);
+        *held = held.saturating_add(1);
         self.in_flight.insert(generation, (tenant.clone(), kind));
         if let Some(slot) = self.slots.get_mut(tenant) {
-            slot.flight = Some((generation, kind));
+            slot.flight = Some(Flying {
+                generation,
+                kind,
+                started: now,
+            });
         }
         Start { generation, kind }
     }
 
+    /// After a transition of `tenant`'s slot at `now`: its key retires if
+    /// it has ended; the slot goes when it holds nothing with a future
+    /// effect, and is otherwise due for a sweep when it next changes by
+    /// time, after `now` — so no slot is kept that no sweep will reach, a
+    /// slot has one deadline at most, and a sweep never meets the same
+    /// slot twice. A slot kept by its flight or its waiters alone needs no
+    /// deadline: their landing and their leaving settle it.
+    fn settle(&mut self, tenant: &T, now: Instant) {
+        let memory = self.memory();
+        let Some(slot) = self.slots.get_mut(tenant) else {
+            return;
+        };
+        if slot.key.as_ref().is_some_and(|serving| serving.ends <= now)
+            && let Some(serving) = slot.key.take()
+        {
+            self.retired.push(serving.key);
+        }
+        let next = slot.next(memory).filter(|at| *at > now);
+        let (idle, due) = (slot.idle(now, memory), slot.due);
+        if idle {
+            if let Some(due) = due {
+                self.deadlines.remove(&due);
+            }
+            self.slots.remove(tenant);
+            return;
+        }
+        if next == due.map(|(at, _)| at) {
+            return;
+        }
+        if let Some(due) = due {
+            self.deadlines.remove(&due);
+        }
+        let due = next.map(|at| (at, self.generation()));
+        if let Some(due) = due {
+            self.deadlines.insert(due, tenant.clone());
+        }
+        if let Some(slot) = self.slots.get_mut(tenant) {
+            slot.due = due;
+        }
+    }
+
     /// What a seal for `tenant` at `now` is answered, its wait ending at
-    /// `deadline`, and the flight to start, if any.
+    /// `deadline`, and the flight to start, if any. A slot the seal leaves
+    /// holding nothing — refused for a full stage, say — goes at once.
     pub fn seal(
+        &mut self,
+        tenant: &T,
+        now: Instant,
+        deadline: Instant,
+    ) -> (Answer<K>, Option<Start>) {
+        let answered = self.answer(tenant, now, deadline);
+        self.settle(tenant, now);
+        answered
+    }
+
+    fn answer(
         &mut self,
         tenant: &T,
         now: Instant,
@@ -391,45 +540,58 @@ impl<T: Clone + Eq + Hash, K: Clone> Core<T, K> {
         // The key in service, while it serves.
         if let Some(serving) = slot.key.as_mut() {
             if now < serving.ends && serving.used < supply.messages {
-                serving.used += 1;
+                serving.used = serving.used.saturating_add(1);
                 let key = serving.key.clone();
                 let due = now >= serving.renew_at
-                    || supply.messages - serving.used <= supply.renew_uses();
+                    || supply.messages.saturating_sub(serving.used) <= supply.renew_uses();
                 let quiet = slot.flight.is_none()
                     && !matches!(slot.evidence, Evidence::Failed { until, .. } if now < until);
                 let start = (due && quiet && self.place(Kind::Renew))
-                    .then(|| self.start(tenant, Kind::Renew));
+                    .then(|| self.start(tenant, Kind::Renew, now));
                 return (Answer::Hit(key), start);
             }
             // Ended, or its uses spent: it serves no more.
-            slot.key = None;
+            if let Some(serving) = slot.key.take() {
+                self.retired.push(serving.key);
+            }
         }
-        let slot = self.slots.get_mut(tenant).expect("the slot");
+        let landed_in_time = self.landed_in_time;
+        let Some(slot) = self.slots.get_mut(tenant) else {
+            return refused(Reason::Late, None);
+        };
+        // A key gone: told to the first seal that asks after its landing,
+        // and refused to every other until its memory ends (ADR-0039 F11).
+        if let Evidence::Failed {
+            failure: Failure::Gone,
+            until,
+            ..
+        } = slot.evidence
+            && now < until
+        {
+            if std::mem::take(&mut slot.gone_untold) {
+                return (Answer::Gone, None);
+            }
+            return refused(
+                Reason::BackingOff,
+                Some(until.saturating_duration_since(now)),
+            );
+        }
         // A failed draw's back-off.
         if let Evidence::Failed { until, .. } = slot.evidence
             && now < until
         {
-            return (
-                Answer::Refused {
-                    reason: Reason::BackingOff,
-                    retry_after: Some(until - now),
-                },
-                None,
+            return refused(
+                Reason::BackingOff,
+                Some(until.saturating_duration_since(now)),
             );
         }
         // A flight in flight: joined only when trusted.
-        if let Some((generation, _)) = slot.flight {
+        if let Some(flying) = slot.flight {
             return if slot.evidence == Evidence::Trusted {
-                slot.waiters += 1;
-                (Answer::Join(generation, deadline), None)
+                slot.waiters = slot.waiters.saturating_add(1);
+                (Answer::Join(flying.generation, deadline), None)
             } else {
-                (
-                    Answer::Refused {
-                        reason: Reason::Late,
-                        retry_after: None,
-                    },
-                    None,
-                )
+                refused(Reason::Late, None)
             };
         }
         // No flight: start one, and wait for it only on evidence.
@@ -438,24 +600,18 @@ impl<T: Clone + Eq + Hash, K: Clone> Core<T, K> {
             Evidence::Late => (Kind::Miss, false),
             Evidence::Failed { at, .. } => (
                 Kind::Probe,
-                self.landed_in_time.is_some_and(|landed| landed > at),
+                landed_in_time.is_some_and(|landed| landed > at),
             ),
         };
         if !self.place(kind) {
-            return (
-                Answer::Refused {
-                    reason: Reason::FlightsFull,
-                    retry_after: None,
-                },
-                None,
-            );
+            return refused(Reason::FlightsFull, None);
         }
-        let start = self.start(tenant, kind);
-        let slot = self.slots.get_mut(tenant).expect("the slot");
+        let start = self.start(tenant, kind, now);
         if trusted {
-            slot.evidence = Evidence::Trusted;
-            slot.waiters += 1;
-            slot.starter = Some(start.generation);
+            if let Some(slot) = self.slots.get_mut(tenant) {
+                slot.evidence = Evidence::Trusted;
+                slot.waiters = slot.waiters.saturating_add(1);
+            }
             (Answer::Join(start.generation, deadline), Some(start))
         } else {
             (
@@ -468,41 +624,52 @@ impl<T: Clone + Eq + Hash, K: Clone> Core<T, K> {
         }
     }
 
-    /// A waiter of `tenant` stops waiting: woken, or at its deadline.
-    pub fn left(&mut self, tenant: &T) {
+    /// A waiter of `tenant` stops waiting at `now`: woken, at its deadline,
+    /// or dropped with its caller. A slot it leaves holding nothing goes.
+    pub fn left(&mut self, tenant: &T, now: Instant) {
         if let Some(slot) = self.slots.get_mut(tenant) {
             slot.waiters = slot.waiters.saturating_sub(1);
         }
+        self.settle(tenant, now);
     }
 
-    /// A waiter of flight `generation` gave up at its deadline: the slot
-    /// is late, unless that flight is no longer in flight.
-    pub fn gave_up(&mut self, tenant: &T, generation: Generation) {
+    /// Notes `note` for `tenant`, kept while its slot is; nothing when the
+    /// stage keeps no slot for it.
+    pub fn note(&mut self, tenant: &T, note: Option<N>) {
+        if let Some(slot) = self.slots.get_mut(tenant) {
+            slot.note = note;
+        }
+    }
+
+    /// The note kept for `tenant`.
+    #[must_use]
+    pub fn noted(&self, tenant: &T) -> Option<&N> {
+        self.slots.get(tenant).and_then(|slot| slot.note.as_ref())
+    }
+
+    /// How many draws of `tenant` have failed in a row.
+    #[must_use]
+    pub fn failures(&self, tenant: &T) -> u32 {
+        match self.slots.get(tenant).map(|slot| slot.evidence) {
+            Some(Evidence::Failed { failures, .. }) => failures,
+            _ => 0,
+        }
+    }
+
+    /// A waiter of flight `generation` gave up at `now`, its deadline: the
+    /// slot is late when that flight is still in flight and has flown a
+    /// wait at least — a waiter that joined it with little of its own wait
+    /// left is no evidence that it is late.
+    pub fn gave_up(&mut self, tenant: &T, generation: Generation, now: Instant) {
+        let wait = self.supply.wait;
         if let Some(slot) = self.slots.get_mut(tenant)
-            && slot.flight.is_some_and(|(flying, _)| flying == generation)
+            && let Some(flying) = slot.flight
+            && flying.generation == generation
+            && now.saturating_duration_since(flying.started) >= wait
             && slot.evidence == Evidence::Trusted
         {
             slot.evidence = Evidence::Late;
         }
-    }
-
-    /// Whether flight `generation`'s starter is to be told the key is gone:
-    /// asked once, by the starter, after the flight landed so.
-    pub fn starter_told_gone(&mut self, tenant: &T, generation: Generation) -> bool {
-        self.slots.get_mut(tenant).is_some_and(|slot| {
-            let told = slot.starter == Some(generation)
-                && matches!(
-                    slot.evidence,
-                    Evidence::Failed {
-                        failure: Failure::Gone,
-                        ..
-                    }
-                );
-            if told {
-                slot.starter = None;
-            }
-            told
-        })
     }
 
     /// Flight `generation` of `tenant` landed at `now` with `outcome`;
@@ -519,11 +686,8 @@ impl<T: Clone + Eq + Hash, K: Clone> Core<T, K> {
         let Some((flying_for, kind)) = self.in_flight.remove(&generation) else {
             return;
         };
-        match kind {
-            Kind::Miss => self.held.misses -= 1,
-            Kind::Renew => self.held.renewals -= 1,
-            Kind::Probe => self.held.probes -= 1,
-        }
+        let held = self.held.of(kind);
+        *held = held.saturating_sub(1);
         if &flying_for != tenant {
             return;
         }
@@ -531,44 +695,53 @@ impl<T: Clone + Eq + Hash, K: Clone> Core<T, K> {
         let Some(slot) = self.slots.get_mut(tenant) else {
             return;
         };
-        if slot.flight.is_some_and(|(flying, _)| flying == generation) {
+        if slot
+            .flight
+            .is_some_and(|flying| flying.generation == generation)
+        {
             slot.flight = None;
         }
         let failures = match slot.evidence {
             Evidence::Failed { failures, .. } => failures,
             _ => 0,
         };
-        let mut deadline = None;
+        let mut retired = None;
         match outcome {
             Outcome::Drawn { key, started } => {
-                let ends = (started + supply.lifetime).checked_sub(part(supply.jitter, random));
-                let lead =
-                    supply.lead.0 + part(supply.lead.1 - supply.lead.0, random.rotate_left(32));
-                if let Some(ends) = ends
-                    && now < ends
-                {
-                    slot.key = Some(Serving {
-                        key,
-                        ends,
-                        renew_at: ends.checked_sub(lead).unwrap_or(started),
-                        used: 0,
-                    });
-                    deadline = Some(ends);
+                let ends = started
+                    .checked_add(supply.lifetime)
+                    .and_then(|end| end.checked_sub(part(supply.jitter, random)));
+                let lead = supply.lead.0.saturating_add(part(
+                    supply.lead.1.saturating_sub(supply.lead.0),
+                    random.rotate_left(32),
+                ));
+                match ends {
+                    Some(ends) if now < ends => {
+                        let serving = Serving {
+                            key,
+                            ends,
+                            renew_at: ends.checked_sub(lead).unwrap_or(started),
+                            used: 0,
+                        };
+                        retired = slot.key.replace(serving).map(|old| old.key);
+                    }
+                    _ => retired = Some(key),
                 }
                 slot.evidence = Evidence::Trusted;
+                slot.gone_untold = false;
                 if now.saturating_duration_since(started) <= supply.wait {
                     self.landed_in_time = Some(now);
                 }
             }
             Outcome::Gone => {
-                slot.key = None;
+                retired = slot.key.take().map(|old| old.key);
                 slot.evidence = Evidence::Failed {
                     failure: Failure::Gone,
-                    until: now + supply.gone,
+                    until: later(now, supply.gone),
                     failures: failures.saturating_add(1),
                     at: now,
                 };
-                deadline = Some(now + supply.gone);
+                slot.gone_untold = true;
             }
             Outcome::Refused
             | Outcome::Unavailable
@@ -578,21 +751,19 @@ impl<T: Clone + Eq + Hash, K: Clone> Core<T, K> {
                 let step = supply
                     .backoff
                     .0
-                    .saturating_mul(1u32 << failures.min(16))
+                    .saturating_mul(1u32.checked_shl(failures.min(16)).unwrap_or(u32::MAX))
                     .min(supply.backoff.1);
-                let backoff = step / 2 + part(step / 2, random);
+                let half = step.checked_div(2).unwrap_or(Duration::ZERO);
                 slot.evidence = Evidence::Failed {
                     failure: Failure::Other,
-                    until: now + backoff,
+                    until: later(now, half.saturating_add(part(half, random))),
                     failures: failures.saturating_add(1),
                     at: now,
                 };
-                deadline = Some(now + backoff);
             }
         }
-        if let Some(at) = deadline {
-            self.deadline(at, tenant);
-        }
+        self.retired.extend(retired);
+        self.settle(tenant, now);
     }
 
     /// Flight `generation` could not be started: no runtime would run it.
@@ -601,45 +772,34 @@ impl<T: Clone + Eq + Hash, K: Clone> Core<T, K> {
     }
 
     /// Retires, as of `now`, every key past its end and evicts every slot
-    /// that holds nothing with a future effect: the keys retired are
-    /// returned, to be wiped as they drop.
-    pub fn sweep(&mut self, now: Instant) -> Vec<K> {
-        let mut retired = Vec::new();
-        while let Some(Reverse((at, key))) = self.deadlines.peek().copied() {
-            if at > now {
+    /// that holds nothing with a future effect, its note with it, each one
+    /// its deadline brings the sweep to.
+    pub fn sweep(&mut self, now: Instant) {
+        while let Some(entry) = self.deadlines.first_entry() {
+            if entry.key().0 > now {
                 break;
             }
-            self.deadlines.pop();
-            let Some(tenant) = self.deadline_of.remove(&key) else {
-                continue;
-            };
+            let tenant = entry.remove();
             let Some(slot) = self.slots.get_mut(&tenant) else {
                 continue;
             };
-            if slot.key.as_ref().is_some_and(|serving| serving.ends <= now)
-                && let Some(serving) = slot.key.take()
-            {
-                retired.push(serving.key);
-            }
-            let idle = slot.key.is_none()
-                && slot.flight.is_none()
-                && slot.waiters == 0
-                && match slot.evidence {
-                    Evidence::Failed { until, .. } => until <= now,
-                    Evidence::Trusted | Evidence::Late => true,
-                };
-            if idle {
-                self.slots.remove(&tenant);
-            }
+            slot.due = None;
+            self.settle(&tenant, now);
         }
-        retired
     }
 
-    /// When the next key ends or the next back-off is over: when the shell
-    /// is to sweep next.
+    /// The keys gone out of service since last taken — at their end, their
+    /// uses spent, replaced by a successor, or their tenant's gone — to be
+    /// wiped as they drop, outside the shell's lock.
+    pub fn take_retired(&mut self) -> Vec<K> {
+        std::mem::take(&mut self.retired)
+    }
+
+    /// When the next slot is due for a sweep: when the shell is to sweep
+    /// next.
     #[must_use]
     pub fn next_deadline(&self) -> Option<Instant> {
-        self.deadlines.peek().map(|Reverse((at, _))| *at)
+        self.deadlines.first_key_value().map(|((at, _), _)| *at)
     }
 
     /// How many keys the stage holds now.
@@ -664,12 +824,26 @@ impl<T: Clone + Eq + Hash, K: Clone> Core<T, K> {
     }
 }
 
+/// A seal refused for `reason`.
+const fn refused<K>(reason: Reason, retry_after: Option<Duration>) -> (Answer<K>, Option<Start>) {
+    (
+        Answer::Refused {
+            reason,
+            retry_after,
+        },
+        None,
+    )
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    reason = "tests"
+    clippy::disallowed_methods,
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "tests: a pure core's origin of time is any instant"
 )]
 mod tests {
     use super::*;
@@ -714,7 +888,7 @@ mod tests {
         let (answer, start) = core.seal(&tenant, at, deadline(at));
         let start = start.expect("a flight");
         assert_eq!(answer, Answer::Join(start.generation, deadline(at)));
-        core.left(&tenant);
+        core.left(&tenant, at);
         core.landed(
             &tenant,
             start.generation,
@@ -762,9 +936,10 @@ mod tests {
         let (mut core, t0) = (core(), Instant::now());
         let (_, start) = core.seal(&"a", t0, deadline(t0));
         let generation = start.unwrap().generation;
-        core.gave_up(&"a", generation);
-        core.left(&"a");
-        let (answer, start) = core.seal(&"a", t0, deadline(t0));
+        let gave_up = deadline(t0);
+        core.gave_up(&"a", generation, gave_up);
+        core.left(&"a", gave_up);
+        let (answer, start) = core.seal(&"a", gave_up, deadline(gave_up));
         assert_eq!(
             answer,
             Answer::Refused {
@@ -791,17 +966,31 @@ mod tests {
     }
 
     #[test]
+    fn a_give_up_with_little_of_a_wait_flown_is_no_evidence() {
+        let (mut core, t0) = (core(), Instant::now());
+        let (_, start) = core.seal(&"a", t0, deadline(t0));
+        let generation = start.unwrap().generation;
+        // A waiter whose own wait was nearly spent when it joined.
+        let soon = t0 + Duration::from_millis(10);
+        core.gave_up(&"a", generation, soon);
+        assert!(
+            matches!(core.seal(&"a", soon, deadline(soon)).0, Answer::Join(..)),
+            "the flight is still trusted"
+        );
+    }
+
+    #[test]
     fn a_give_up_after_its_flight_landed_is_inert() {
         let (mut core, t0) = (core(), Instant::now());
         let generation = drawn(&mut core, "a", t0, 1);
-        core.gave_up(&"a", generation);
+        core.gave_up(&"a", generation, t0 + S);
         assert_eq!(core.seal(&"a", t0, deadline(t0)).0, Answer::Hit(1));
         // The key spent, a new miss waits: the slot is trusted.
         let mut p = parameters();
         (p.messages, p.burst) = (2, 1);
         let mut core = core_with(p);
         let generation = drawn(&mut core, "a", t0, 1);
-        core.gave_up(&"a", generation);
+        core.gave_up(&"a", generation, t0 + S);
         core.seal(&"a", t0, deadline(t0));
         core.seal(&"a", t0, deadline(t0));
         assert!(matches!(
@@ -819,6 +1008,7 @@ mod tests {
             let (_, start) = core.seal(&"a", now, deadline(now));
             let generation = start.expect("a probe or a miss").generation;
             core.landed(&"a", generation, Outcome::Unavailable, now, 0);
+            core.left(&"a", now);
             let (answer, start) = core.seal(&"a", now, deadline(now));
             assert_eq!(start, None, "no call while it backs off");
             let Answer::Refused {
@@ -830,6 +1020,10 @@ mod tests {
             };
             waited.push(after);
             now += after;
+            // The tick comes at the back-off's end: the failure is still
+            // remembered, its next draw a probe, its step doubled.
+            core.sweep(now);
+            assert_eq!(core.slots(), 1, "the failure is remembered");
         }
         // The jitter drawn at its least: half of each step.
         let halves: Vec<_> = [1u32, 2, 4, 8, 16, 30, 30]
@@ -877,16 +1071,70 @@ mod tests {
     }
 
     #[test]
+    fn a_landing_slower_than_the_wait_is_no_evidence_that_the_kms_answers() {
+        let (mut core, t0) = (core(), Instant::now());
+        let (_, a) = core.seal(&"a", t0, deadline(t0));
+        let (_, b) = core.seal(&"b", t0, deadline(t0));
+        core.landed(&"a", a.unwrap().generation, Outcome::Unavailable, t0, 0);
+        // Another tenant's draw lands, but slower than a seal waits.
+        core.landed(
+            &"b",
+            b.unwrap().generation,
+            Outcome::Drawn {
+                key: 9,
+                started: t0,
+            },
+            t0 + S,
+            0,
+        );
+        let after = t0 + 2 * S;
+        let (answer, start) = core.seal(&"a", after, deadline(after));
+        assert_eq!(start.unwrap().kind, Kind::Probe);
+        assert_eq!(
+            answer,
+            Answer::Refused {
+                reason: Reason::Late,
+                retry_after: None
+            },
+            "the probe runs on its own; the seal does not wait on it"
+        );
+    }
+
+    #[test]
+    fn a_renewal_takes_a_place_only_while_half_are_free() {
+        let mut p = parameters();
+        p.flights = 4;
+        let mut core = core_with(p);
+        let t0 = Instant::now();
+        drawn(&mut core, "a", t0, 1);
+        for tenant in ["b", "c", "d"] {
+            core.seal(&tenant, t0, deadline(t0));
+        }
+        // Three of four places held: a renewal due waits for its place.
+        let at = t0 + 55 * S;
+        assert_eq!(core.seal(&"a", at, deadline(at)), (Answer::Hit(1), None));
+        // With two held, half are free: it is drawn.
+        let mut core = core_with(p);
+        drawn(&mut core, "a", t0, 1);
+        for tenant in ["b", "c"] {
+            core.seal(&tenant, t0, deadline(t0));
+        }
+        let (hit, start) = core.seal(&"a", at, deadline(at));
+        assert_eq!(hit, Answer::Hit(1));
+        assert_eq!(start.unwrap().kind, Kind::Renew);
+    }
+
+    #[test]
     fn a_shredded_tenant_s_key_retires_at_once_and_it_is_not_asked_again_for_a_while() {
         let (mut core, t0) = (core(), Instant::now());
         let (_, start) = core.seal(&"a", t0, deadline(t0));
         let generation = start.unwrap().generation;
         core.landed(&"a", generation, Outcome::Gone, t0, 0);
-        assert!(
-            core.starter_told_gone(&"a", generation),
-            "its own caller is told"
+        assert_eq!(
+            core.seal(&"a", t0, deadline(t0)),
+            (Answer::Gone, None),
+            "the first seal to ask after the landing is told"
         );
-        assert!(!core.starter_told_gone(&"a", generation), "once");
         let (answer, start) = core.seal(&"a", t0 + S, deadline(t0 + S));
         assert_eq!(start, None, "no call within gone");
         assert!(matches!(
@@ -937,22 +1185,65 @@ mod tests {
         let (mut core, t0) = (core(), Instant::now());
         drawn(&mut core, "a", t0, 1);
         assert_eq!(core.next_deadline(), Some(t0 + 60 * S));
-        assert!(core.sweep(t0 + 59 * S).is_empty());
-        assert_eq!(core.sweep(t0 + 60 * S), vec![1]);
+        core.sweep(t0 + 59 * S);
+        assert!(core.take_retired().is_empty());
+        core.sweep(t0 + 60 * S);
+        assert_eq!(core.take_retired(), vec![1]);
         assert_eq!(core.keys_held(), 0);
         assert_eq!(core.slots(), 0, "the idle slot goes too");
     }
 
     #[test]
-    fn a_slot_backing_off_is_not_evicted_before_its_back_off_ends() {
+    fn a_key_landing_past_its_end_leaves_no_slot_behind() {
+        let (mut core, t0) = (core(), Instant::now());
+        let (_, start) = core.seal(&"a", t0, deadline(t0));
+        core.left(&"a", t0);
+        core.landed(
+            &"a",
+            start.unwrap().generation,
+            Outcome::Drawn {
+                key: 1,
+                started: t0,
+            },
+            t0 + 61 * S,
+            0,
+        );
+        assert_eq!(core.keys_held(), 0, "an ended key is never served");
+        assert_eq!(core.slots(), 0, "and no slot is kept that no sweep reaches");
+    }
+
+    #[test]
+    fn a_note_goes_with_its_slot() {
+        let mut core: Core<&'static str, u32, &'static str> =
+            Core::new(Supply::new(parameters()).unwrap());
+        let t0 = Instant::now();
+        let (_, start) = core.seal(&"a", t0, deadline(t0));
+        core.left(&"a", t0);
+        core.landed(&"a", start.unwrap().generation, Outcome::Moment, t0, 0);
+        core.note(&"a", Some("down"));
+        assert_eq!(core.noted(&"a"), Some(&"down"));
+        core.sweep(t0 + 60 * S);
+        assert_eq!((core.slots(), core.noted(&"a")), (0, None));
+        core.note(&"a", Some("unheld"));
+        assert_eq!(
+            core.noted(&"a"),
+            None,
+            "a tenant without a slot is noted nothing"
+        );
+    }
+
+    #[test]
+    fn a_failed_slot_is_kept_a_cap_past_its_back_off_and_then_goes() {
         let (mut core, t0) = (core(), Instant::now());
         let (_, start) = core.seal(&"a", t0, deadline(t0));
         core.landed(&"a", start.unwrap().generation, Outcome::Gone, t0, 0);
-        core.left(&"a");
-        core.sweep(t0 + S);
-        assert_eq!(core.slots(), 1, "its memory of gone stays");
+        core.left(&"a", t0);
+        assert_eq!(core.next_deadline(), Some(t0 + 40 * S), "gone, then a cap");
         core.sweep(t0 + 10 * S);
-        assert_eq!(core.slots(), 0);
+        assert_eq!(core.slots(), 1, "its back-off over, its failure decides");
+        core.sweep(t0 + 40 * S);
+        assert_eq!(core.slots(), 0, "and then it goes");
+        assert_eq!(core.next_deadline(), None);
     }
 
     #[test]
@@ -1039,6 +1330,10 @@ mod tests {
     fn invalid_parameters_are_refused() {
         type Change = Box<dyn Fn(&mut SupplyParameters)>;
         let cases: Vec<(&str, Change)> = vec![
+            (
+                "lifetime ≤ a century",
+                Box::new(|p| p.lifetime = LONGEST + S),
+            ),
             ("messages ≥ 2 · burst", Box::new(|p| p.burst = 51)),
             ("burst ≥ 1", Box::new(|p| p.burst = 0)),
             ("wait > 0", Box::new(|p| p.wait = Duration::ZERO)),
@@ -1058,12 +1353,16 @@ mod tests {
                 Box::new(|p| p.lead.1 = 50 * S),
             ),
             (
-                "the back-off's first step > 0",
-                Box::new(|p| p.backoff.0 = Duration::ZERO),
+                "the back-off's first step ≥ 2 · wait",
+                Box::new(|p| p.backoff.0 = p.wait * 2 - Duration::from_nanos(1)),
             ),
             (
                 "the back-off's cap ≥ its first step",
                 Box::new(|p| p.backoff.1 = p.backoff.0 / 2),
+            ),
+            (
+                "the back-off's cap ≤ a century",
+                Box::new(|p| p.backoff.1 = LONGEST + S),
             ),
             ("gone > 0", Box::new(|p| p.gone = Duration::ZERO)),
             (
@@ -1086,7 +1385,10 @@ mod tests {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    reason = "tests"
+    clippy::disallowed_methods,
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "tests: a pure core's origin of time is any instant"
 )]
 mod property {
     use std::collections::{HashMap, HashSet};
@@ -1134,7 +1436,7 @@ mod property {
             lifetime: 20 * S,
             messages: 6,
             burst: 2,
-            wait: S,
+            wait: S / 2,
             draw: 3 * S,
             lead: (3 * S, 5 * S),
             jitter: 2 * S,
@@ -1167,6 +1469,7 @@ mod property {
         let mut flying: HashMap<&'static str, (Generation, Instant)> = HashMap::new();
         let mut landed_generations: Vec<(&'static str, Generation)> = Vec::new();
         let mut uses: HashMap<u32, u32> = HashMap::new();
+        let mut retired: HashSet<u32> = HashSet::new();
         let mut gone_at: HashMap<&'static str, Instant> = HashMap::new();
         let mut next_id = 0;
         let mut activity = Activity::default();
@@ -1191,6 +1494,7 @@ mod property {
                     match answer {
                         Answer::Hit(key) => {
                             activity.hits += 1;
+                            prop_assert!(!retired.contains(&key.id), "a retired key served");
                             prop_assert!(
                                 now < key.started + supply.lifetime(),
                                 "a key served past its draw plus its lifetime"
@@ -1296,23 +1600,54 @@ mod property {
                 Step::GaveUp(t) => {
                     let tenant = TENANTS[t];
                     if let Some(&(generation, _)) = flying.get(tenant) {
-                        core.gave_up(&tenant, generation);
+                        core.gave_up(&tenant, generation, now);
                     }
                 }
-                Step::Left(t) => core.left(&TENANTS[t]),
-                Step::Sweep => {
-                    let retired = core.sweep(now);
-                    activity.retired += u32::try_from(retired.len()).unwrap();
-                    for key in retired {
-                        prop_assert!(
-                            key.started + supply.lifetime() - 2 * S <= now,
-                            "retired before its end"
-                        );
-                    }
-                }
+                Step::Left(t) => core.left(&TENANTS[t], now),
+                Step::Sweep => core.sweep(now),
+            }
+            // Every key gone out of service is told, once, and never served
+            // again.
+            for key in core.take_retired() {
+                prop_assert!(retired.insert(key.id), "a key retired twice");
+                activity.retired += 1;
             }
             prop_assert!(core.flights() <= 2, "more flights than the cap");
             prop_assert_eq!(core.flights(), flying.len());
+            // No slot is kept that no sweep will reach, and a slot has one
+            // deadline at most: when it next changes by time.
+            let memory = supply.backoff.1;
+            for (tenant, slot) in &core.slots {
+                prop_assert!(
+                    !slot.idle(now, memory) || slot.due.is_some_and(|(at, _)| at <= now),
+                    "the slot of {} holds nothing and no sweep is due to it",
+                    tenant
+                );
+                if slot.flight.is_none() && slot.waiters == 0 {
+                    prop_assert_eq!(
+                        slot.due.map(|(at, _)| at),
+                        slot.next(memory),
+                        "the slot of {} is due when it does not change",
+                        tenant
+                    );
+                }
+                if let Some(due) = slot.due {
+                    prop_assert_eq!(core.deadlines.get(&due), Some(tenant));
+                }
+                prop_assert!(
+                    slot.due.is_some() || slot.flight.is_some() || slot.waiters > 0,
+                    "the slot of {} is kept, and no sweep will reach it",
+                    tenant
+                );
+            }
+            prop_assert_eq!(
+                core.deadlines.len(),
+                core.slots
+                    .values()
+                    .filter(|slot| slot.due.is_some())
+                    .count(),
+                "a deadline of no slot"
+            );
         }
         Ok(activity)
     }

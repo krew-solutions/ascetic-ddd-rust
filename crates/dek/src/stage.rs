@@ -43,13 +43,12 @@
 //! nowhere else, and the DEK in service ([`Reuse`]) is the channel's
 //! (ADR-0017).
 
-use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use ascetic_ddd_bus::{BoxError, Message, Permanent, Stage};
-use ascetic_ddd_kms::{Algorithm, Error as KmsError, Key, KeyManagementService};
+use ascetic_ddd_kms::{Algorithm, Class, Error as KmsError, KeyManagementService};
 use ascetic_ddd_session::SessionPool;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -57,6 +56,8 @@ use futures::future::BoxFuture;
 use serde_json::Value;
 
 use crate::domain::canonical;
+use crate::draws::{Draws, Held, SealingObserver};
+use crate::supply::{InvalidParameters, LONGEST, Supply, SupplyParameters};
 
 /// The header naming the tenant, and the associated data of the payload.
 pub const TENANT_ID: &str = "tenant_id";
@@ -96,48 +97,248 @@ impl Default for Reuse {
     }
 }
 
-/// A tenant's DEK in service at the sealing side.
-struct Serving {
-    dek: Key,
-    wrapped: Vec<u8>,
-    since: Instant,
-    used: u32,
+/// How a stage's data keys are drawn (ADR-0039): how long a seal waits for
+/// a draw, how long a draw may take, how early a key's successor is drawn,
+/// how a failed draw backs off, how many draws run at once, and the most
+/// messages one caller's transaction seals for one tenant. Built by
+/// [`Pacing::fitted`] from a [`Reuse`], each part then set by the
+/// deployment; checked against the reuse when the stage is built.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Pacing {
+    /// How long a seal waits for a draw that will land in time.
+    pub wait: Duration,
+    /// How long a draw may take before it is abandoned.
+    pub draw: Duration,
+    /// How long before a key's end its successor is drawn: from, to.
+    pub lead: (Duration, Duration),
+    /// How much earlier than its lifetime a key may end, drawn per key.
+    pub jitter: Duration,
+    /// A failed draw's back-off: its first step, its cap.
+    pub backoff: (Duration, Duration),
+    /// How long a tenant whose key is gone is not asked again.
+    pub gone: Duration,
+    /// How many draws a stage runs at once.
+    pub flights: u32,
+    /// The most messages one caller's transaction seals for one tenant.
+    pub burst: u32,
+}
+
+impl Pacing {
+    /// A pacing that fits `reuse`, whatever it is: a draw of at most five
+    /// seconds and a twelfth of the lifetime, a wait of at most a quarter of
+    /// a second and half the draw, the successor drawn one to two draws
+    /// ahead, a twentieth of the lifetime's jitter, a back-off from a second
+    /// to thirty, ten seconds' memory of a key gone, sixteen draws at once,
+    /// a burst of a tenth of the messages. A reuse's lifetime is taken as a
+    /// second at least and a century at most ([`LONGEST`]).
+    #[must_use]
+    pub fn fitted(reuse: Reuse) -> Self {
+        let lifetime = bounded(reuse.lifetime);
+        let draw = Duration::from_secs(5).min(lifetime / 12);
+        Pacing {
+            wait: Duration::from_millis(250).min(draw / 2),
+            draw,
+            lead: (draw, draw * 2),
+            jitter: lifetime / 20,
+            backoff: (Duration::from_secs(1), Duration::from_secs(30)),
+            gone: Duration::from_secs(10),
+            flights: 16,
+            burst: (reuse.messages / 10).max(1),
+        }
+    }
+
+    /// The same pacing waiting `wait`.
+    #[must_use]
+    pub const fn with_wait(self, wait: Duration) -> Self {
+        Pacing { wait, ..self }
+    }
+
+    /// The same pacing abandoning a draw after `draw`.
+    #[must_use]
+    pub const fn with_draw(self, draw: Duration) -> Self {
+        Pacing { draw, ..self }
+    }
+
+    /// The same pacing drawing a successor between `from` and `to` ahead.
+    #[must_use]
+    pub const fn with_lead(self, from: Duration, to: Duration) -> Self {
+        Pacing {
+            lead: (from, to),
+            ..self
+        }
+    }
+
+    /// The same pacing ending keys up to `jitter` early.
+    #[must_use]
+    pub const fn with_jitter(self, jitter: Duration) -> Self {
+        Pacing { jitter, ..self }
+    }
+
+    /// The same pacing backing off from `first` to `cap`.
+    #[must_use]
+    pub const fn with_backoff(self, first: Duration, cap: Duration) -> Self {
+        Pacing {
+            backoff: (first, cap),
+            ..self
+        }
+    }
+
+    /// The same pacing remembering a key gone for `gone`.
+    #[must_use]
+    pub const fn with_gone(self, gone: Duration) -> Self {
+        Pacing { gone, ..self }
+    }
+
+    /// The same pacing running `flights` draws at once.
+    #[must_use]
+    pub const fn with_flights(self, flights: u32) -> Self {
+        Pacing { flights, ..self }
+    }
+
+    /// The same pacing for callers sealing `burst` messages of one tenant
+    /// in one transaction.
+    #[must_use]
+    pub const fn with_burst(self, burst: u32) -> Self {
+        Pacing { burst, ..self }
+    }
+
+    /// The supply of a stage reusing keys as `reuse` says, paced so.
+    ///
+    /// # Errors
+    /// [`InvalidParameters`] naming the rule the two break together.
+    pub fn supply(&self, reuse: Reuse) -> Result<Supply, InvalidParameters> {
+        Supply::new(SupplyParameters {
+            lifetime: bounded(reuse.lifetime),
+            messages: reuse.messages.max(1),
+            burst: self.burst,
+            wait: self.wait,
+            draw: self.draw,
+            lead: self.lead,
+            jitter: self.jitter,
+            backoff: self.backoff,
+            gone: self.gone,
+            flights: self.flights,
+        })
+    }
+}
+
+/// A reuse's lifetime as a supply takes it: a second at least, a century at
+/// most.
+fn bounded(lifetime: Duration) -> Duration {
+    lifetime.clamp(Duration::from_secs(1), LONGEST)
 }
 
 /// The envelope stage over the KMS `K`, reached through sessions of `P`.
 pub struct EnvelopeStage<P, K> {
-    sessions: P,
-    kms: K,
+    draws: Arc<Draws<P, K>>,
     algorithm: Algorithm,
     bound_to: Vec<String>,
-    reuse: Option<Reuse>,
-    serving: Mutex<HashMap<String, Serving>>,
+    reuse: Reuse,
 }
+
+/// A key per message: what a stage that reuses none draws.
+const PER_MESSAGE: Reuse = Reuse {
+    messages: 1,
+    lifetime: Duration::from_secs(60),
+};
 
 impl<P, K> EnvelopeStage<P, K> {
     /// A stage sealing with AES-256-GCM, drawing and unwrapping DEKs through
     /// `kms` in sessions of `sessions`, binding every payload to the
     /// message's `tenant_id` and `message_id`.
-    pub fn new(sessions: P, kms: K) -> Self {
+    pub fn new(sessions: P, kms: K) -> Self
+    where
+        P: SessionPool + Send + Sync + 'static,
+        P::Session: Sync,
+        K: KeyManagementService<P::Session> + 'static,
+    {
+        let supply = Pacing::fitted(PER_MESSAGE)
+            .supply(PER_MESSAGE)
+            .expect("a fitted pacing fits its reuse");
         EnvelopeStage {
-            sessions,
-            kms,
+            draws: Arc::new(Draws::new(sessions, kms, supply)),
             algorithm: Algorithm::Aes256Gcm,
             bound_to: vec![TENANT_ID.to_owned(), MESSAGE_ID.to_owned()],
-            reuse: None,
-            serving: Mutex::new(HashMap::new()),
+            reuse: PER_MESSAGE,
         }
+    }
+
+    /// The same stage over new draws, paced by `supply` and changed by
+    /// `change`. Whatever the old draws hold or fly stays theirs: a flight
+    /// out when the stage is configured again lands in them and goes with
+    /// them.
+    fn redrawn(self, supply: Supply, change: impl FnOnce(Draws<P, K>) -> Draws<P, K>) -> Self
+    where
+        P: SessionPool + Send + Sync + 'static,
+        P::Session: Sync,
+        K: KeyManagementService<P::Session> + 'static,
+    {
+        let draws = Arc::new(change(self.draws.anew(supply)));
+        EnvelopeStage { draws, ..self }
     }
 
     /// The same stage sealing a tenant's messages under one DEK for as long
     /// as `reuse` allows, instead of a fresh one per message. The wrapped
     /// key travels in every message as before; the opening side needs no
     /// change, and with a cache in front of its KMS unwraps it once.
-    pub fn reusing(self, reuse: Reuse) -> Self {
-        EnvelopeStage {
-            reuse: Some(reuse),
-            ..self
-        }
+    pub fn reusing(self, reuse: Reuse) -> Self
+    where
+        P: SessionPool + Send + Sync + 'static,
+        P::Session: Sync,
+        K: KeyManagementService<P::Session> + 'static,
+    {
+        self.paced(reuse, Pacing::fitted(reuse))
+            .expect("a fitted pacing fits its reuse")
+    }
+
+    /// The same stage reusing keys as `reuse` says and drawing them as
+    /// `pacing` says (ADR-0039).
+    ///
+    /// # Errors
+    /// [`InvalidParameters`] when the two do not fit together.
+    pub fn paced(self, reuse: Reuse, pacing: Pacing) -> Result<Self, InvalidParameters>
+    where
+        P: SessionPool + Send + Sync + 'static,
+        P::Session: Sync,
+        K: KeyManagementService<P::Session> + 'static,
+    {
+        let supply = pacing.supply(reuse)?;
+        let stage = self.redrawn(supply, |draws| draws);
+        Ok(EnvelopeStage { reuse, ..stage })
+    }
+
+    /// The same stage drawing its jitters from `seed`: a test's, so that
+    /// what it draws is known.
+    pub fn seeded(self, seed: u64) -> Self
+    where
+        P: SessionPool + Send + Sync + 'static,
+        P::Session: Sync,
+        K: KeyManagementService<P::Session> + 'static,
+    {
+        let supply = self.draws.supply();
+        self.redrawn(supply, |draws| draws.with_seed(seed))
+    }
+
+    /// The same stage telling `observer` what becomes of its draws.
+    pub fn observed_by(self, observer: Arc<dyn SealingObserver>) -> Self
+    where
+        P: SessionPool + Send + Sync + 'static,
+        P::Session: Sync,
+        K: KeyManagementService<P::Session> + 'static,
+    {
+        let supply = self.draws.supply();
+        self.redrawn(supply, |draws| draws.with_observer(observer))
+    }
+
+    /// What the stage holds now: its keys, its tenants, its draws.
+    pub fn held(&self) -> Held
+    where
+        P: SessionPool + Send + Sync + 'static,
+        P::Session: Sync,
+        K: KeyManagementService<P::Session> + 'static,
+    {
+        self.draws.held()
     }
 
     /// The same stage sealing with `algorithm`. What was sealed before opens
@@ -157,38 +358,6 @@ impl<P, K> EnvelopeStage<P, K> {
             ..self
         }
     }
-
-    /// The tenant's DEK in service, if one is and it may serve once more;
-    /// counted as used.
-    fn serving(&self, tenant_id: &str) -> Option<(Key, Vec<u8>)> {
-        let reuse = self.reuse?;
-        let mut serving = self.serving.lock().unwrap_or_else(PoisonError::into_inner);
-        let current = serving.get_mut(tenant_id)?;
-        if current.used >= reuse.messages || current.since.elapsed() >= reuse.lifetime {
-            return None;
-        }
-        current.used += 1;
-        Some((current.dek.clone(), current.wrapped.clone()))
-    }
-
-    /// Puts a fresh DEK in service for the tenant, used once.
-    fn serve(&self, tenant_id: &str, dek: &Key, wrapped: &[u8]) {
-        if self.reuse.is_none() {
-            return;
-        }
-        self.serving
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(
-                tenant_id.to_owned(),
-                Serving {
-                    dek: dek.clone(),
-                    wrapped: wrapped.to_vec(),
-                    since: Instant::now(),
-                    used: 1,
-                },
-            );
-    }
 }
 
 impl<P, K> Stage for EnvelopeStage<P, K>
@@ -201,23 +370,13 @@ where
         Box::pin(async move {
             let tenant_id = tenant_of(&message)?;
             let aad = associated_data(&message, &self.bound_to)?;
-            let (dek, wrapped) = match self.serving(&tenant_id) {
-                Some(in_service) => in_service,
-                None => {
-                    let fresh = self
-                        .sessions
-                        .session(async |session| self.kms.generate_dek(&session, &tenant_id).await)
-                        .await
-                        .map_err(verdict)?;
-                    self.serve(&tenant_id, &fresh.0, &fresh.1);
-                    fresh
-                }
-            };
+            let served = self.draws.key(&tenant_id).await?;
+            let (dek, wrapped) = (served.dek, served.wrapped);
             let cipher = self.algorithm.cipher(&dek, aad).map_err(verdict)?;
             let sealed = cipher.encrypt(message.payload()).map_err(verdict)?;
             Ok(message
                 .with_payload(sealed)
-                .with_header(DEK, BASE64.encode(wrapped))
+                .with_header(DEK, BASE64.encode(&wrapped))
                 .with_header(DEK_ALGORITHM, self.algorithm.as_str())
                 .with_header(DEK_BOUND_TO, self.bound_to.join(",")))
         })
@@ -235,9 +394,12 @@ where
                 .map(str::to_owned)
                 .collect();
             let aad = associated_data(&message, &bound_to)?;
-            let dek = self
+            let parts = &self.draws.parts;
+            let dek = parts
                 .sessions
-                .session(async |session| self.kms.decrypt_dek(&session, &tenant_id, &wrapped).await)
+                .session(async |session| {
+                    parts.kms.decrypt_dek(&session, &tenant_id, &wrapped).await
+                })
                 .await
                 .map_err(verdict)?;
             let cipher = algorithm.cipher(&dek, aad).map_err(verdict)?;
@@ -257,6 +419,7 @@ impl<P, K> fmt::Debug for EnvelopeStage<P, K> {
             .field("algorithm", &self.algorithm)
             .field("bound_to", &self.bound_to)
             .field("reuse", &self.reuse)
+            .field("draws", &self.draws)
             .finish_non_exhaustive()
     }
 }
@@ -295,22 +458,15 @@ fn refused(what: String) -> BoxError {
     Permanent::new(what).into()
 }
 
-/// Which failures of the KMS no retry will mend: a key that is gone or
-/// retired, a ciphertext that does not open, an operation the KMS refuses
-/// under this identity or context, bytes that are not what they should
-/// be. The rest — the session, the database, Vault out of reach — are of
-/// the moment.
+/// Which failures at the opening end, and of a cipher, no retry will mend,
+/// by the KMS's own class (ADR-0039 decision 8): a key that is gone, a
+/// ciphertext that does not open, an operation refused, bytes that are not
+/// what they should be. The rest — the session, the database, the KMS out
+/// of reach, what the KMS did not explain — are of the moment. At the
+/// sealing end the draws decide (`draws.rs`): only a key gone is for good.
 fn verdict(error: KmsError) -> BoxError {
-    match error {
-        KmsError::KekNotFound { .. }
-        | KmsError::Decrypt
-        | KmsError::WrongKeyVersion { .. }
-        | KmsError::NoKeyOfVersion(_)
-        | KmsError::Forbidden { .. }
-        | KmsError::Conflict { .. }
-        | KmsError::Unsupported(_)
-        | KmsError::UnsupportedAlgorithm(_)
-        | KmsError::Malformed(_) => Permanent::new(error).into(),
-        _ => error.into(),
+    match error.class() {
+        Class::Gone | Class::Refused => Permanent::new(error).into(),
+        Class::Unavailable | Class::Moment => error.into(),
     }
 }

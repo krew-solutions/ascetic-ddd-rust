@@ -2,8 +2,9 @@
 
 ## Status
 
-Proposed (2026-11-15). Slices S1a (the `kms` crate) and S1b (`dek`'s pure
-core) are built; S1c and S1d are owed, each with its executor (§ Owed).
+Proposed (2026-11-15). Slices S1a (the `kms` crate), S1b (`dek`'s pure
+core) and S1c (`dek`'s shell) are built; S1d, the consumer's adoption, and
+the later slices are owed, each with its executor (§ Owed).
 
 Decided under the library's gate:
 - a blind solver and a discriminator;
@@ -83,21 +84,41 @@ what a stage does is counted and told.**
    DELETE only to a request begun before it, so S precedes the deletion
    and the window is exactly the lifetime; no classification below can
    widen it (to be confirmed by a DELETE race on the stand, § Owed).
-2. **A key leaves memory at its hard end**, wiped: a deadline heap checked
-   on every transition, and a tick per `Sealing` spawned lazily at the
-   first flight, holding `Weak` references and sleeping until the earliest
-   deadline, so an idle stage lets go of its keys. A slot is evicted only
-   when it holds no key, no flight, no waiters and no evidence with a
-   future effect. `Cached` drops an expired entry as it finds it and on
-   `purge(now)`. The transport's text of an answer is wiped; the JSON read
-   from it is out of this library's reach until the caller drops it.
+2. **A key leaves memory at its hard end**, wiped: each slot has one
+   deadline at most — when it next changes by time, its key's end or the
+   end of its failure's memory — kept in an ordered map, so the deadlines
+   are never more than the slots; and a tick per stage, spawned lazily at
+   the first flight, holding the stage weakly and sleeping until the
+   earliest deadline, so an idle stage lets go of its keys. A slot is
+   evicted only when it holds no key, no flight, no waiters and no failure
+   still remembered — and then at once, by the transition that left it so
+   (a seal, a waiter leaving, a landing) or by the sweep its deadline
+   brings: no slot is kept that no sweep will reach. **A failure is
+   remembered a back-off cap past its back-off's end**: until then it
+   decides the next draw — a probe (decision 7), a doubled step (decision
+   8's back-off) — and with it the slot. A waiter leaves once, whether
+   woken, at its deadline or dropped with its caller. What the shell
+   remembers of a tenant (why its last draw failed) is a note in its slot
+   and goes with it; a flight's landing signal lives with the flight. The
+   tick ends with its stage, or its runtime, and the next draw starts
+   another. `Cached` drops an expired entry as it finds it and on
+   `purge(now)`; the caller of `purge` is the opening side's (§ Owed 5).
+   The transport's text of an answer is wiped; the JSON read from it is
+   out of this library's reach until the caller drops it.
 3. **A slot per (channel, Tenant)** holds the key in service, at most one
    flight, and evidence: trusted, late, or failed until an instant.
    - A landing signals its generation only. Woken waiters re-enter `seal`
      under the stage's mutex and take a use there, so every use is
      counted; waiters beyond a key's uses start the next flight: N misses
      cost ceil(N / messages) draws.
-   - A seal's deadline is absolute: its start plus `wait`.
+   - A seal's deadline is absolute: its start plus `wait`, however often
+     it joins, or waits for a place.
+   - A stage that runs as many flights as it may lets a seal wait for a
+     place, freed by a landing, until its deadline; then it is refused
+     `FlightsFull`.
+   - A key per message (`messages` = 1) shares nothing: each seal draws on
+     its own task, bounded by `draw`, as before this decision; a key gone
+     is `Permanent`, any other failure of the moment.
 4. **Generations** are one monotonic counter per stage, never reused; a
    landing is addressed by (Tenant, generation), and a flight captures its
    own stage: its KMS instance and derivation context.
@@ -111,10 +132,12 @@ what a stage does is counted and told.**
    lands `Canceled`, an outcome of its own. tokio is used directly: it is
    already in `dek[bus]`'s graph through `ascetic-ddd-bus`, and the inbox
    spawns the same way (`inbox/src/channel.rs:161`).
-6. **A waiter that gives up** carries its generation, and its give-up is
-   inert unless that flight is still in flight; on its deadline it re-runs
-   `seal` once under the mutex before refusing; it registers for the
-   landing under the mutex.
+6. **A waiter that gives up** carries its generation and the time, and
+   its give-up is evidence that the flight is late only when that flight
+   is still in flight and has flown a `wait` at least — a waiter that
+   joined it with little of its own wait left proves nothing; on its
+   deadline it re-runs `seal` once under the mutex before refusing; it
+   registers for the landing under the mutex.
 7. **Evidence.** A miss joins a flight and waits only when its slot is
    trusted; a late or failed slot refuses at once. A slot whose backoff
    ended is trusted for its first draw when a slot of the same stage
@@ -142,28 +165,40 @@ what a stage does is counted and told.**
    **At sealing only Gone is Permanent**: every other class backs off as
    of the moment and is counted with its cause — a policy's drift is
    mended by a deploy, not by parking every Tenant's messages. Until the
-   answers of a standby node are measured, a slot's memory of Gone refuses
-   later seals as Unavailable, and only the flight's own caller is told
-   Permanent. At opening, the per-message refusals stay Permanent
+   answers of a standby node are measured, one Gone tells one seal
+   Permanent — the first to ask after its landing, whether or not it is
+   the seal that drew, so that a draw slower than `wait` still tells one —
+   and a slot's memory of Gone refuses every other as Unavailable. At opening, the per-message refusals stay Permanent
    (ADR-0017; the consumer's ADR-0071 Rule of Three 1–2).
 9. **Errors.** `dek::Unavailable{reason, retry_after, last}` is transient;
    its reason is `#[non_exhaustive]` (`Waited`, `BackingOff`, `Late`,
    `FlightsFull`, `Unspawned`); its `Display` names the last flight's
    outcome and Vault's status. Gone keeps `Permanent(kms::Error)`.
-10. **Told.** A `SealingObserver`, called outside the mutex: flights with
+10. **Told.** A `SealingObserver`, called outside the mutex, one per
+    channel (`Sealing::over_paced` takes a maker of them): flights with
     their outcome (`Landed`, `Gone`, `Refused`, `Unavailable`, `Moment`,
     `Abandoned`, `Canceled`), error, elapsed time and consecutive failures;
-    served; unserved with its reason; retired. `dek` logs a slot's
-    transitions through `log`, rate-limited per stage.
+    served; unserved with its reason; retired — every key out of service,
+    at its end, its uses spent, replaced or its tenant's gone.
+    `Sealing::held()` gives each channel's keys, slots and flights. `dek`
+    logs a slot's transitions through `log` — failing (warn), drawn again
+    (info) — one line per stage per ten seconds at most, the next line
+    counting the transitions kept quiet.
 11. **Jitter and time.** Jitter is an input of the pure core, drawn from a
     per-`Sealing` seed (getrandom), injectable. Time is
     `tokio::time::Instant`; `crates/dek/clippy.toml` disallows the standard
     library's clock; the core's arithmetic saturates and denies panics.
-12. **Parameters** are validated by `Sealing::over`, which returns
-    `Result<_, InvalidParameters>`, and `SealingParameters` is
-    `#[non_exhaustive]` with a builder: messages ≥ 2·burst; 0 < wait <
+12. **Parameters** are a `Pacing`, `#[non_exhaustive]` with a builder per
+    part and `Pacing::fitted(reuse)` fitting any `Reuse`; they are validated
+    by `Sealing::over_paced` and `EnvelopeStage::paced`, which return
+    `Result<_, InvalidParameters>`, while `Sealing::over` and
+    `EnvelopeStage::reusing` keep their signatures and take the fitted
+    pacing. The rules: lifetime and the backoff cap ≤ a century (`LONGEST`,
+    so that an instant plus any of them is an instant; `fitted` clamps a
+    longer reuse to it); messages ≥ 2·burst, or both one; 0 < wait <
     draw < lifetime/2; renewal lead in [draw, lead_max] with jitter +
-    lead_max + 2·draw ≤ lifetime; backoff base > 0, cap ≥ base; 0 < gone ≤
+    lead_max + 2·draw ≤ lifetime; backoff base ≥ 2·wait (so that half a
+    step, the least back-off, is never zero), cap ≥ base; 0 < gone ≤
     the backoff cap; flights ≥ 1; lifetime + cache + draw ≤ the ceiling
     the consumer passes. `burst` is the most seals one caller's
     transaction makes on one (channel, Tenant). Defaults are hypotheses
@@ -186,8 +221,10 @@ what a stage does is counted and told.**
 - A key serves exactly its lifetime from its draw, and leaves memory then.
 - A mount's name, a policy's drift or a read that failed never reads as a
   Tenant shredded, and never parks every Tenant's messages.
-- `Sealing::over` can refuse to build; a consumer's composition root
-  refuses to start on an invalid configuration.
+- `Sealing::over_paced` can refuse to build; a consumer's composition
+  root refuses to start on an invalid configuration. `Sealing::over`
+  keeps its signature: a consumer that names no pacing gets the fitted
+  one.
 - A stall longer than the inbox's attempts still parks inbound messages:
   the inbox's own change (§ Owed).
 
@@ -253,27 +290,95 @@ S1b (built), `dek::supply`, the pure core — `Core::seal`, `landed`,
   its slot with it; a slot backing off is not evicted; a landing reaches
   its own flight and a stale one changes nothing; hanging probes and
   renewals never take every place; each invalid parameter is refused by
-  its rule;
+  its rule; a key landing past its end leaves no slot behind; a note goes
+  with its slot;
 - a property over interleavings of three tenants (seals, time, landings
   current and stale, give-ups, sweeps): at most one flight per tenant and
   the cap per stage, no hit past a key's draw plus its lifetime or its
   uses, no key drawn before its tenant's was gone, a stale landing
-  changing nothing, `retry_after` within the back-off's cap; and a test on
-  a fixed seed that the histories reach every reason, kind and outcome;
+  changing nothing, `retry_after` within the back-off's cap, no slot kept
+  that no sweep will reach (added with S1c: it found a seal refused for a
+  full stage keeping an empty slot for good); and a test on a fixed seed
+  that the histories reach every reason, kind and outcome;
 - mutations, each killed: a key served past its end; past its uses; a
   stale landing applied; a renewal started beside a flight; a late flight
   joined; the key kept after its tenant's was gone; no doubling; no cap
-  for misses; a key's life from its landing.
+  for misses; a key's life from its landing; with S1c, a seal, a waiter
+  leaving or a landing keeping an empty slot; a note keeping its slot.
 
-S1c (owed): deterministic tests on tokio's paused clock with a gated fake
-KMS returning distinct keys tagged (context, Tenant, n) and counting calls
-and drops; one multi-thread count test. The list is in § Owed.
+S1c (built), `dek`'s shell (`draws.rs`): `EnvelopeStage` draws through it
+whatever its constructor; `Pacing` (fitted to any `Reuse`, each part set
+by a builder) and `Sealing::over_paced` with a ceiling and a maker of
+observers per channel; `Sealing::over` keeps its signature and gets the
+fitted pacing; `Sealing::held()`; the opening end's verdict by the KMS's
+class; `dek::Unavailable`, `SealingObserver`, `Held`;
+`crates/dek/clippy.toml` refuses the standard clock, and `supply.rs`
+denies what panics (`expect`, `unwrap`, `panic`, indexing, unchecked
+arithmetic). Tests on tokio's paused clock against a KMS whose every draw
+a test releases (`tests/draws.rs`):
+- concurrent misses cost one draw and every one is served;
+- a waiter refuses at its bound — exactly the wait — and a late draw
+  refuses at once; the draw lands for the next;
+- a seal waits its bound once however often it joins, and a flight joined
+  with little of a wait left is not late;
+- a dropped caller does not cancel the draw, and leaves nothing behind;
+- a key gone is told to the first seal to ask, though its draw outlived
+  the wait, and to no other within `gone`;
+- a sealing-side refusal backs off and is never for good, its cause told;
+- a KMS out of reach is asked less and less however often a tenant seals:
+  at most eight draws in a minute of a seal every 100 ms (75 before the
+  failure was remembered past its back-off);
+- one tenant's failing draws do not stop another's;
+- a seal on a full stage waits for a place within its bound;
+- a flight past its bound is abandoned, its future dropped, its place
+  given back; a flight that dies (a panic) frees its slot;
+- a draw outside a runtime is refused `Unspawned`, neither deadlocks nor
+  wedges its slot, and a runtime draws again; a hit is served though its
+  successor's draw cannot start;
+- a key leaves memory at its end though no one asks; a tick ended with
+  its runtime starts again in the next; a stage dropped ends its tick;
+- no seal waits while its successor is drawn; a burst under a KMS slower
+  than the wait never waits, its key renewed by its uses alone;
+- a key per message is drawn for each seal at once;
+- a stage configured again while a draw flies starts draws of its own;
+- a fitted pacing fits any reuse, `Duration::MAX` too, and serves;
+- a tenant's last failure is forgotten with its slot;
+- an observer is told every flight with its failures in a row, every
+  seal served and unserved, every key retired, replaced ones too; a
+  sealing tells each channel's observer of its own stage;
+- a sealing whose keys would outlive its ceiling is refused;
+- an outage of fifty tenants at once is logged one line, the next line
+  counting the 49 kept quiet;
+- on four threads, 64 tasks over 8 tenants against a KMS failing one draw
+  in five: every seal keeps its bound, the cap holds, and the stage
+  drains to nothing.
+Core tests added: a give-up with little of a wait flown is no evidence; a
+landing slower than the wait is no evidence that the KMS answers; a
+renewal takes a place only while half are free; a failed slot is kept a
+cap past its back-off and then goes; a key landing past its end leaves no
+slot behind; a note goes with its slot; the doubling test sweeps at every
+back-off's end. The property holds that a slot has one deadline, when it
+next changes by time, and that every key out of service is told once and
+never served again.
+Mutations, each killed (22 in the last round): a failure forgotten at its
+back-off's end; Gone never told; any give-up taken as evidence; a slow
+landing counted in time; a renewal taking any free place; a replaced key
+not retired; no renewal by uses; an idle slot kept; the back-off's 2·wait
+rule dropped; the deadline set again per join; no tick end on a stage's
+drop; per-message seals single-flight; a full stage refusing at once;
+served, failures or a landing's retired keys not told; every transition
+logged; a dropped waiter never leaving; the tick's flag never cleared; a
+hit refused when its successor cannot start; no ceiling; the observer
+dropped. Earlier: a waiter giving up leaves its slot trusted; a dead
+flight never lands; no bound on a draw; no tick; no century's clamp.
 
 ## Owed
 
 1. **S1b, `dek`'s pure core** — built 2026-11-15 (§ Executors).
-2. **S1c, `dek`'s shell**: spawn and guard, `timeout(draw)`, the tick,
-   the observer, the logs, `Unavailable`; tests: N misses cost one draw; a
+2. **S1c, `dek`'s shell** — built 2026-11-15 (§ Executors). Still owed of
+   its list: the jitter's spread over its interval (a mutation drawing no
+   jitter survives); a landing reaching only its own slot across two
+   stages. Its original list: N misses cost one draw; a
    landed key serves its waiters no more than its uses; a waiter refuses
    at its bound and the draw lands for the next; a dropped caller does not
    cancel the draw; a late draw refuses at once; the first draw after a
@@ -297,8 +402,15 @@ and drops; one multi-thread count test. The list is in § Owed.
    revised.
 6. **Measurements**: a datakey racing a key's deletion (the audit log), to
    state decision 1's S before the deletion as a guarantee; a standby
-   node's answers, to drop decision 8's interim rule; Vault's datakey
-   latency under load in staging, to set `wait` and `draw`.
+   node's answers, to drop decision 8's interim rule — until then a
+   shredded tenant's backlog drains one message per `gone`; Vault's
+   datakey latency under load in staging, to set `wait` and `draw`; a
+   cold start of 500 and 2 000 tenants on one channel, counting the seals
+   refused `FlightsFull` after their wait for a place, to set `flights`.
+7. **`Cached::purge`'s caller**: the opening side's tick (slice 4), told
+   the cache's next expiry and woken by the first entry of an empty cache;
+   until then an unwrapped key outlives its TTL on a quiet channel until
+   the next unwrap.
 
 ## References
 
@@ -310,3 +422,24 @@ ADR-0017 (amended: decision 8 above replaces its point 5's reading of a
 
 - 2026-11-15 — Proposed; S1a built.
 - 2026-11-15 — S1b built: `dek`'s pure core.
+- 2026-11-15 — S1c built: `dek`'s shell. Its review found five defects
+  in S1b's core and S1c's first draft, each fixed with its test: an empty
+  slot kept for good (a seal refused for a full stage, a waiter dropped
+  with its caller); the shell's per-tenant maps never shrinking, scanned
+  whole under the lock on every tick; the tick never restarted after its
+  runtime; a stage configured again while a draw flew panicking; a hit
+  refused when its successor could not start. Decision 2 says how a slot
+  goes; decision 12 how parameters are validated, with `LONGEST`.
+- 2026-11-15 — S1c reviewed again by two roles (concurrency; resources
+  and verifiability), each told the task and not our reading. Fixed, each
+  with a test that failed first: a failure forgotten at its back-off's end
+  (no doubling, no probe: 75 draws a minute instead of eight); Gone lost
+  when its draw outlived the wait (now told to the first seal to ask); a
+  give-up with no wait left marking its flight late; a key per message
+  made single-flight (now drawn per seal); a full stage refusing at once
+  (now a wait for a place); a stage dropped leaving its tick; a deadline
+  entry per draw (now one per slot); keys replaced or spent untold;
+  decision 10's failures, served and rate-limited log unbuilt; a first
+  back-off step of a nanosecond; the burst test passing without renewal
+  by uses. Decisions 2, 3, 6, 8, 10 and 12 say what changed;
+  `Cached::purge`'s caller moved to § Owed 7.
