@@ -69,6 +69,7 @@ dependencies = [
  "ascetic-ddd-session",
  "base64 0.22.1",
  "futures",
+ "proptest",
  "serde_json",
  "tokio",
  "tokio-postgres",

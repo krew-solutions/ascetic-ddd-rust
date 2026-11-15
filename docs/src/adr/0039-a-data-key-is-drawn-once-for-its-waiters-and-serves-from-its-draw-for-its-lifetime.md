@@ -2,8 +2,8 @@
 
 ## Status
 
-Proposed (2026-11-15). Slice S1a (the `kms` crate) is built; S1b–S1d are
-owed, each with its executor (§ Owed).
+Proposed (2026-11-15). Slices S1a (the `kms` crate) and S1b (`dek`'s pure
+core) are built; S1c and S1d are owed, each with its executor (§ Owed).
 
 Decided under the library's gate:
 - a blind solver and a discriminator;
@@ -240,19 +240,38 @@ S1a (built):
   and a read's 404 read as a key not there; a 400 whose read failed read
   as the request's fault; a 429 out of Unavailable.
 
-S1b–S1c (owed): deterministic tests on tokio's paused clock with a gated
-fake KMS returning distinct keys tagged (context, Tenant, n) and counting
-calls and drops; a pure-core property over interleavings with activity
-shares; one multi-thread count test. The list is in § Owed.
+S1b (built), `dek::supply`, the pure core — `Core::seal`, `landed`,
+`gave_up`, `left`, `sweep`, `next_deadline`, time and randomness passed in:
+- unit tests: concurrent misses cost one draw and wait on it; a landed key
+  serves its waiters no more than its uses; a give-up marks its flight
+  late and a late flight refuses at once; a give-up after its flight
+  landed is inert; a failed draw backs off 0.5, 1, 2, 4, 8, 15, 15 s with
+  the jitter at its least; the first draw after a back-off waits when the
+  stage has landed in time since; a shredded tenant's key retires at once
+  and it is not asked again for `gone`; a key serves from its draw's start
+  for its lifetime; a key leaves memory at its end on an idle stage, and
+  its slot with it; a slot backing off is not evicted; a landing reaches
+  its own flight and a stale one changes nothing; hanging probes and
+  renewals never take every place; each invalid parameter is refused by
+  its rule;
+- a property over interleavings of three tenants (seals, time, landings
+  current and stale, give-ups, sweeps): at most one flight per tenant and
+  the cap per stage, no hit past a key's draw plus its lifetime or its
+  uses, no key drawn before its tenant's was gone, a stale landing
+  changing nothing, `retry_after` within the back-off's cap; and a test on
+  a fixed seed that the histories reach every reason, kind and outcome;
+- mutations, each killed: a key served past its end; past its uses; a
+  stale landing applied; a renewal started beside a flight; a late flight
+  joined; the key kept after its tenant's was gone; no doubling; no cap
+  for misses; a key's life from its landing.
+
+S1c (owed): deterministic tests on tokio's paused clock with a gated fake
+KMS returning distinct keys tagged (context, Tenant, n) and counting calls
+and drops; one multi-thread count test. The list is in § Owed.
 
 ## Owed
 
-1. **S1b, `dek`'s pure core**: slots, evidence, generations, the deadline
-   heap, the partitioned cap, renewal by time and by `burst`, validation;
-   the property (≤ 1 flight per slot and ≤ cap per stage; no hit past the
-   hard end or the uses; no key held past its draw plus its lifetime;
-   stale and duplicate landings inert; nothing after Gone until a landing;
-   joins only when trusted).
+1. **S1b, `dek`'s pure core** — built 2026-11-15 (§ Executors).
 2. **S1c, `dek`'s shell**: spawn and guard, `timeout(draw)`, the tick,
    the observer, the logs, `Unavailable`; tests: N misses cost one draw; a
    landed key serves its waiters no more than its uses; a waiter refuses
@@ -290,3 +309,4 @@ ADR-0017 (amended: decision 8 above replaces its point 5's reading of a
 ## Change Log
 
 - 2026-11-15 — Proposed; S1a built.
+- 2026-11-15 — S1b built: `dek`'s pure core.

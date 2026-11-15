@@ -12,6 +12,7 @@ mod port;
 pub mod sealing;
 #[cfg(feature = "bus")]
 pub mod stage;
+pub mod supply;
 
 pub use crate::domain::{Keyring, Resource, VersionedCipher};
 pub use crate::error::Error;

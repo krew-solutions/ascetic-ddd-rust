@@ -35,3 +35,4 @@ ascetic-ddd-inbox = { path = "../inbox" }
 ascetic-ddd-kms = { path = "../kms", features = ["pg"] }
 ascetic-ddd-outbox = { path = "../outbox" }
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+proptest = "1"
