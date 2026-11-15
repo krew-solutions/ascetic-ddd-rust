@@ -114,6 +114,95 @@ pub enum Error {
     },
 }
 
+/// What an [`Error`] means for whoever acts on it (seedwork ADR-0039
+/// decision 8): the table is this crate's, total over every variant and
+/// the fields that tell them apart, so that no caller matches a
+/// `#[non_exhaustive]` enum with a `_` arm that would read a variant added
+/// later as anything at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Class {
+    /// The key the operation needs is not there — never made, or destroyed
+    /// (crypto-shredding): only a key-encryption key not found at any
+    /// version, or a signing or MAC key not found. Asking again finds
+    /// nothing until the key is made.
+    Gone,
+    /// The KMS answered and refused this operation for a reason of the
+    /// request, the key's version or the identity's policy: asking again
+    /// unchanged is refused again. Whether that refusal is the message's
+    /// fault or a deployment's is the caller's to say: at sealing a
+    /// policy's drift is mended by a deploy, at opening a ciphertext that
+    /// does not open never will.
+    Refused,
+    /// The KMS, or what reaches it, could not answer now: unreachable, rate
+    /// limited, sealed, failing over, a connection the pool could not hand
+    /// out. Asking again later may succeed.
+    Unavailable,
+    /// Something the caller cannot attribute: a refusal Vault did not
+    /// explain, a route no mount serves, a database's refusal that is not
+    /// of the connection, the operating system's randomness. Of the moment
+    /// for a retry's purposes; a defect or a misconfiguration for the
+    /// operator's.
+    Moment,
+}
+
+impl Error {
+    /// What this error means for whoever acts on it.
+    #[must_use]
+    pub fn class(&self) -> Class {
+        match self {
+            Error::KekNotFound {
+                key_version: None, ..
+            }
+            | Error::SigningKeyNotFound { .. }
+            | Error::MacKeyNotFound { .. } => Class::Gone,
+            // A version retired or never made: the message's, not the
+            // Tenant's — its other keys still serve.
+            Error::KekNotFound {
+                key_version: Some(_),
+                ..
+            }
+            | Error::Decrypt
+            | Error::WrongKeyVersion { .. }
+            | Error::NoKeyOfVersion(_)
+            | Error::InvalidSignature
+            | Error::UnsupportedAlgorithm(_)
+            | Error::Malformed(_)
+            | Error::Conflict { .. }
+            | Error::Forbidden { .. }
+            | Error::Unsupported(_) => Class::Refused,
+            Error::Entropy(_) => Class::Moment,
+            Error::Session(error) => {
+                if error.is_transient() {
+                    Class::Unavailable
+                } else {
+                    Class::Moment
+                }
+            }
+            #[cfg(feature = "pg")]
+            Error::Database(error) => {
+                if ascetic_ddd_session::pg::transient(error) {
+                    Class::Unavailable
+                } else {
+                    Class::Moment
+                }
+            }
+            #[cfg(feature = "pg")]
+            Error::Migration(_) => Class::Moment,
+            #[cfg(feature = "vault")]
+            Error::Transport(_) => Class::Unavailable,
+            // 412: a node not yet consistent (Enterprise); 429: a quota;
+            // 5xx: sealed, failing over, overloaded.
+            #[cfg(feature = "vault")]
+            Error::Vault {
+                status: 412 | 429 | 500..=599,
+                ..
+            } => Class::Unavailable,
+            #[cfg(feature = "vault")]
+            Error::Vault { .. } => Class::Moment,
+        }
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -205,5 +294,104 @@ impl From<SessionError> for Error {
 impl From<tokio_postgres::Error> for Error {
     fn from(error: tokio_postgres::Error) -> Self {
         Error::Database(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_class_of_every_error() {
+        let tenant = || "t".to_owned();
+        let cases: Vec<(Error, Class)> = vec![
+            (
+                Error::KekNotFound {
+                    tenant_id: tenant(),
+                    key_version: None,
+                },
+                Class::Gone,
+            ),
+            (
+                Error::KekNotFound {
+                    tenant_id: tenant(),
+                    key_version: Some(2),
+                },
+                Class::Refused,
+            ),
+            (
+                Error::SigningKeyNotFound {
+                    tenant_id: tenant(),
+                    algorithm: SignatureAlgorithm::Ed25519,
+                },
+                Class::Gone,
+            ),
+            (
+                Error::MacKeyNotFound {
+                    tenant_id: tenant(),
+                    purpose: "p".to_owned(),
+                },
+                Class::Gone,
+            ),
+            (Error::Decrypt, Class::Refused),
+            (
+                Error::WrongKeyVersion {
+                    expected: 1,
+                    found: 2,
+                },
+                Class::Refused,
+            ),
+            (Error::NoKeyOfVersion(1), Class::Refused),
+            (Error::InvalidSignature, Class::Refused),
+            (Error::UnsupportedAlgorithm("x".to_owned()), Class::Refused),
+            (Error::Malformed("x".to_owned()), Class::Refused),
+            (
+                Error::Conflict {
+                    tenant_id: tenant(),
+                    detail: "x".to_owned(),
+                },
+                Class::Refused,
+            ),
+            (
+                Error::Forbidden {
+                    tenant_id: tenant(),
+                    operation: "datakey",
+                },
+                Class::Refused,
+            ),
+            (Error::Unsupported("x"), Class::Refused),
+            (
+                Error::Session(SessionError::Acquire("pool".into())),
+                Class::Unavailable,
+            ),
+            (Error::Session(SessionError::Abandoned), Class::Moment),
+        ];
+        for (error, class) in cases {
+            assert_eq!(error.class(), class, "{error:?}");
+        }
+    }
+
+    #[cfg(feature = "vault")]
+    #[test]
+    fn the_class_of_vault_s_answers() {
+        let vault = |status| Error::Vault {
+            status,
+            method: "POST",
+            path: "/datakey/plaintext/k".to_owned(),
+            message: String::new(),
+        };
+        for (status, class) in [
+            (400, Class::Moment),
+            (403, Class::Moment),
+            (404, Class::Moment),
+            (412, Class::Unavailable),
+            (429, Class::Unavailable),
+            (500, Class::Unavailable),
+            (503, Class::Unavailable),
+            (599, Class::Unavailable),
+        ] {
+            assert_eq!(vault(status).class(), class, "{status}");
+        }
+        assert_eq!(Error::Transport("reset".into()).class(), Class::Unavailable);
     }
 }

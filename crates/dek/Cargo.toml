@@ -17,7 +17,8 @@ readme = "README.md"
 # PostgreSQL adapter: DEKs in a table, each wrapped by the tenant's KEK through the KMS port.
 pg = ["ascetic-ddd-session/pg", "dep:ascetic-ddd-migration", "dep:tokio-postgres"]
 # The envelope stage of the bus: a DEK per message, wrapped through the KMS, carried in a header.
-bus = ["dep:ascetic-ddd-bus", "dep:base64", "dep:futures"]
+# Its data keys drawn on spawned flights with tokio, the runtime the bus already runs on (ADR-0039).
+bus = ["dep:ascetic-ddd-bus", "dep:base64", "dep:futures", "dep:tokio", "dep:log"]
 
 [dependencies]
 ascetic-ddd-bus = { path = "../bus", optional = true }
@@ -26,12 +27,16 @@ ascetic-ddd-migration = { path = "../migration", optional = true }
 ascetic-ddd-session = { path = "../session" }
 base64 = { version = "0.22", optional = true }
 futures = { workspace = true, optional = true }
+log = { version = "0.4", optional = true }
 serde_json.workspace = true
 tokio-postgres = { version = "0.7.18", optional = true, features = ["with-serde_json-1"] }
+tokio = { version = "1.53.1", optional = true, features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
 ascetic-ddd-bus = { path = "../bus" }
 ascetic-ddd-inbox = { path = "../inbox" }
 ascetic-ddd-kms = { path = "../kms", features = ["pg"] }
 ascetic-ddd-outbox = { path = "../outbox" }
-tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
+proptest = "1"
+log = "0.4"

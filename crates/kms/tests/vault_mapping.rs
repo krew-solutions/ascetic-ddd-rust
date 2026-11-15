@@ -9,7 +9,7 @@ use ascetic_ddd_kms::vault::{VaultRequest, VaultResponse, VaultTransport};
 use std::num::NonZeroU32;
 
 use ascetic_ddd_kms::{
-    BoxError, Error, KekOptions, KeyCustody, KeyLabel, KeyManagementService, KeyOptions,
+    BoxError, Class, Error, KekOptions, KeyCustody, KeyLabel, KeyManagementService, KeyOptions,
     MacKeyCustody, MacService, PublicKeyService, Signature, SignatureAlgorithm, SigningKeyCustody,
     SigningService, VaultTransitService,
 };
@@ -653,6 +653,7 @@ async fn managed_keys_are_made_by_nobody_here_and_a_missing_one_is_said_so() {
         matches!(outcome, Err(Error::KekNotFound { ref tenant_id, key_version: None }) if tenant_id == "t"),
         "{outcome:?}"
     );
+    assert_eq!(outcome.as_ref().unwrap_err().class(), Class::Gone);
     let asked = transport.asked();
     assert!(
         asked
@@ -660,6 +661,108 @@ async fn managed_keys_are_made_by_nobody_here_and_a_missing_one_is_said_so() {
             .all(|(method, path, _)| !(method == "POST" && path == "/keys/t")),
         "no key was made: {asked:?}"
     );
+}
+
+/// A route no mount serves — a mount missing or misnamed — as Transit
+/// answers it when the policy lets the request reach its router.
+fn no_route() -> Value {
+    json!({ "errors": ["no handler for route \"transit/x\". route entry not found."] })
+}
+
+#[tokio::test]
+async fn a_direct_404_on_a_kek_operation_is_a_route_not_a_key_and_reads_nothing() {
+    // Transit answers a missing key on these paths 400 (measured, Vault
+    // 1.21.4): a 404 is a route, never a key, and no Tenant is read as
+    // shredded for a mount's name (seedwork ADR-0039 decision 8).
+    let managed = || VaultTransitService::new("http://vault", "t").managed_keys();
+    let made = || VaultTransitService::new("http://vault", "t");
+    let one = |path: &'static str| Scripted::answering(vec![("POST", path, 404, no_route())]);
+    let outcomes = vec![
+        ("datakey", {
+            let transport = one("/datakey/plaintext/t");
+            let outcome = with_service(&transport, managed(), |tx, kms| async move {
+                kms.generate_dek(&tx, "t").await.map(|_| ())
+            })
+            .await;
+            (outcome, transport.asked().len())
+        }),
+        ("encrypt", {
+            let transport = one("/encrypt/t");
+            let outcome = with_service(&transport, managed(), |tx, kms| async move {
+                kms.encrypt_dek(&tx, "t", &ascetic_ddd_kms::Key::new(vec![1; 32]))
+                    .await
+                    .map(|_| ())
+            })
+            .await;
+            (outcome, transport.asked().len())
+        }),
+        ("decrypt", {
+            let transport = one("/decrypt/t");
+            let outcome = with_service(&transport, managed(), |tx, kms| async move {
+                kms.decrypt_dek(&tx, "t", b"vault:v1:abc").await.map(|_| ())
+            })
+            .await;
+            (outcome, transport.asked().len())
+        }),
+        ("rewrap", {
+            let transport = one("/rewrap/t");
+            let outcome = with_service(&transport, managed(), |tx, kms| async move {
+                kms.rewrap_dek(&tx, "t", b"vault:v1:abc").await.map(|_| ())
+            })
+            .await;
+            (outcome, transport.asked().len())
+        }),
+        ("the key made first", {
+            let transport = one("/keys/t");
+            let outcome = with_service(&transport, made(), |tx, kms| async move {
+                kms.generate_dek(&tx, "t").await.map(|_| ())
+            })
+            .await;
+            (outcome, transport.asked().len())
+        }),
+    ];
+    for (operation, (outcome, asked)) in outcomes {
+        assert!(
+            matches!(outcome, Err(Error::Vault { status: 404, .. })),
+            "{operation}: {outcome:?}"
+        );
+        assert_eq!(outcome.unwrap_err().class(), Class::Moment, "{operation}");
+        assert_eq!(asked, 1, "{operation}: nothing read to explain a route");
+    }
+}
+
+#[tokio::test]
+async fn a_400_whose_read_fails_or_finds_no_route_is_of_the_moment() {
+    // What the 400 means is not known when the read does not answer: as it
+    // came, of the moment — never the request's fault, which would park.
+    for (read_status, read_body) in [
+        (503, json!({ "errors": ["Vault is sealed"] })),
+        (404, no_route()),
+    ] {
+        for (operation, path) in [
+            ("datakey", "/datakey/plaintext/t"),
+            ("decrypt", "/decrypt/t"),
+        ] {
+            let transport = Scripted::answering(vec![
+                ("POST", path, 400, json!({ "errors": ["something"] })),
+                ("GET", "/keys/t", read_status, read_body.clone()),
+            ]);
+            let kms = VaultTransitService::new("http://vault", "t").managed_keys();
+            let outcome = with_service(&transport, kms, |tx, kms| async move {
+                if operation == "datakey" {
+                    kms.generate_dek(&tx, "t").await.map(|_| ())
+                } else {
+                    kms.decrypt_dek(&tx, "t", b"vault:v1:abc").await.map(|_| ())
+                }
+            })
+            .await;
+            assert!(
+                matches!(outcome, Err(Error::Vault { status: 400, .. })),
+                "{operation} with the read {read_status}: {outcome:?}"
+            );
+            assert_eq!(outcome.unwrap_err().class(), Class::Moment);
+        }
+    }
 }
 
 #[tokio::test]
@@ -772,7 +875,10 @@ async fn a_403_on_decrypt_is_forbidden_when_the_key_is_there() {
         matches!(outcome, Err(Error::Forbidden { ref tenant_id, operation: "decrypt" }) if tenant_id == "t"),
         "{outcome:?}"
     );
-    // The key is not there: not found, whatever the policy says.
+    // The key is not there, but Vault checks the policy before it looks
+    // the key up (measured, Vault 1.21.4): a 403 proves nothing of the key,
+    // and stays as it came — never a key not there, which would read a
+    // policy's drift as the Tenant shredded (seedwork ADR-0039).
     let transport = Scripted::answering(vec![
         (
             "POST",
@@ -787,9 +893,10 @@ async fn a_403_on_decrypt_is_forbidden_when_the_key_is_there() {
     })
     .await;
     assert!(
-        matches!(outcome, Err(Error::KekNotFound { .. })),
+        matches!(outcome, Err(Error::Vault { status: 403, .. })),
         "{outcome:?}"
     );
+    assert_eq!(outcome.unwrap_err().class(), Class::Moment);
     // The read is refused too: the 403 as it came, for the operator.
     let transport = Scripted::answering(vec![
         (

@@ -1,0 +1,7 @@
+# A stage's data keys keep time by tokio's clock alone, which a test pauses
+# and moves (ADR-0039 decision 11): the standard library's is refused here.
+disallowed-methods = [
+    { path = "std::time::Instant::now", reason = "time is tokio's: `tokio::time::Instant::now()` (ADR-0039)" },
+    { path = "std::time::Instant::elapsed", reason = "time is tokio's: `tokio::time::Instant::now()` (ADR-0039)" },
+    { path = "std::time::SystemTime::now", reason = "a stage's keys keep no wall clock (ADR-0039)" },
+]

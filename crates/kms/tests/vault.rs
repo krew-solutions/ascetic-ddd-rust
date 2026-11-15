@@ -12,7 +12,7 @@
 #![cfg(feature = "reqwest")]
 
 use ascetic_ddd_kms::{
-    Algorithm, Error, KekOptions, Key, KeyCustody, KeyManagementService, VaultTransitService,
+    Algorithm, Class, Error, KekOptions, Key, KeyCustody, KeyManagementService, VaultTransitService,
 };
 use std::sync::Arc;
 
@@ -86,6 +86,55 @@ impl Fixture {
                 .unwrap();
         }
     }
+}
+
+/// What Transit answers a key it has not got and a mount that is not there
+/// (seedwork ADR-0039 decision 8, measured on Vault 1.21.4): the first is
+/// the key not there, the Tenant's key gone; the second is a route, never a
+/// key, of the moment — a mount's name must not read as every Tenant
+/// shredded.
+#[tokio::test]
+#[ignore = "needs a Vault dev server"]
+async fn a_missing_key_is_gone_and_a_missing_mount_is_a_route_not_a_key() {
+    let fixture = fixture("missing");
+    let managed = Arc::new(
+        VaultTransitService::new(fixture.addr.clone(), fixture.token.clone()).managed_keys(),
+    );
+    let missing = fixture
+        .atomic_with(managed, |tx, kms| async move {
+            kms.generate_dek(&tx, "test-missing-never-made")
+                .await
+                .map(|_| ())
+        })
+        .await;
+    assert!(
+        matches!(
+            missing,
+            Err(Error::KekNotFound {
+                key_version: None,
+                ..
+            })
+        ),
+        "{missing:?}"
+    );
+    assert_eq!(missing.unwrap_err().class(), Class::Gone);
+    let nowhere = Arc::new(
+        VaultTransitService::new(fixture.addr.clone(), fixture.token.clone())
+            .with_mount("transit-nowhere")
+            .managed_keys(),
+    );
+    let route = fixture
+        .atomic_with(nowhere, |tx, kms| async move {
+            kms.generate_dek(&tx, "test-missing-never-made")
+                .await
+                .map(|_| ())
+        })
+        .await;
+    assert!(
+        matches!(route, Err(Error::Vault { status: 404, .. })),
+        "{route:?}"
+    );
+    assert_eq!(route.unwrap_err().class(), Class::Moment);
 }
 
 #[tokio::test]

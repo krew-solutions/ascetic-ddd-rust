@@ -236,3 +236,13 @@ should not be able to.
 PostgreSQL adapter is the simple one already, and the tests run on it with
 nothing but the network replaced; a third implementation of the binding
 would be a third place for it to drift.
+
+## Amended
+
+**2026-11-15, by ADR-0039 decision 8.** Point 5's reading of a refusal
+changes in three cells, measured on Vault 1.21.4: a `403` whose read answers
+`404` stays the `403` (Vault checks the policy before it looks the key up,
+so a `403` proves nothing of the key); a `400` whose read fails stays the
+`400`, of the moment, never the request's fault; a direct `404` on a KEK
+operation is `Vault{404}`, a route, never `KekNotFound`. A read's `404` is a
+key not there only when Vault said no words.
