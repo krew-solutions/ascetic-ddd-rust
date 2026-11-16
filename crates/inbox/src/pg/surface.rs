@@ -320,6 +320,23 @@ pub struct Readmitted {
 /// How many rows a bulk readmit reads at a time.
 const READMIT_BATCH: i64 = 100;
 
+/// A batch of a bulk readmit: the open rows of a channel and a reason first
+/// seen within the window ending at `$3`, after the cursor. It reads no
+/// clock: the window is the call's, read once.
+fn readmit_batch(table: &str) -> String {
+    format!(
+        "SELECT digest::text, first_seen_at::text FROM {table}_rejects \
+         WHERE disposed_at IS NULL AND channel = $1 AND reason = $2 \
+           AND first_seen_at <= $3::text::timestamptz \
+           AND first_seen_at >= $3::text::timestamptz \
+                                - make_interval(secs => $4::double precision) \
+           AND ($5::text IS NULL \
+                OR (first_seen_at, digest) > ($5::text::timestamptz, $6::text::uuid)) \
+         ORDER BY first_seen_at, digest \
+         LIMIT $7"
+    )
+}
+
 impl<P, O> PgInbox<P, O>
 where
     P: SessionPool + Send + Sync,
@@ -402,8 +419,13 @@ where
     }
 
     /// Readmits the open rows of `channel` set aside for `reason` and first
-    /// seen within `window`, oldest first, each message in a transaction of
-    /// its own: for a flood whose cause on the consuming side was fixed.
+    /// seen within `window` before the call, oldest first, each message in a
+    /// transaction of its own: for a flood whose cause on the consuming side
+    /// was fixed.
+    ///
+    /// The window's both ends are read once, from the database's clock, at
+    /// the call: a row set aside while the call runs is not the flood it
+    /// was called for, and a flood still arriving cannot keep it running.
     ///
     /// # Errors
     /// As [`PgInbox::readmit`], at the first row that fails; the rows
@@ -420,10 +442,19 @@ where
                 "the channel does not readmit its rows set aside",
             ));
         }
-        let sql = format!(
-            "SELECT digest::text, first_seen_at::text FROM {}_rejects              WHERE disposed_at IS NULL AND channel = $1 AND reason = $2                AND first_seen_at >= statement_timestamp() - make_interval(secs => $3::double precision)                AND ($4::text IS NULL                     OR (first_seen_at, digest) > ($4::text::timestamptz, $5::text::uuid))              ORDER BY first_seen_at, digest              LIMIT $6",
-            self.table
-        );
+        let as_of = self
+            .pool
+            .session(async |session: P::Session| {
+                Ok::<_, Error>(
+                    session
+                        .connection()
+                        .query_one("SELECT statement_timestamp()::text", &[])
+                        .await?
+                        .get::<_, String>(0),
+                )
+            })
+            .await?;
+        let sql = readmit_batch(self.table.as_str());
         let mut done = Readmitted::default();
         let mut after: Option<(String, String)> = None;
         loop {
@@ -439,6 +470,7 @@ where
                                 &[
                                     &channel,
                                     &reason.as_str(),
+                                    &as_of,
                                     &window.as_secs_f64(),
                                     &after_at,
                                     &after_digest,
@@ -532,4 +564,27 @@ where
 /// The reason a row names, which the inbox wrote.
 fn reason_of(text: &str) -> Result<Reason, Error> {
     Reason::parse(text).ok_or_else(|| Error::Malformed(format!("a row set aside for `{text}`")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A batch reads no clock, so that the window cannot move while a bulk
+    /// readmit runs: its ends are the call's.
+    #[test]
+    fn a_bulk_readmit_s_batch_reads_no_clock() {
+        let batch = readmit_batch("inbox").to_lowercase();
+        for clock in [
+            "statement_timestamp",
+            "clock_timestamp",
+            "transaction_timestamp",
+            "now(",
+            "current_timestamp",
+            "localtimestamp",
+            "timeofday",
+        ] {
+            assert!(!batch.contains(clock), "{clock} in {batch}");
+        }
+    }
 }

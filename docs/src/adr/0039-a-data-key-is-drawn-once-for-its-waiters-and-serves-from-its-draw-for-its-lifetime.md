@@ -395,7 +395,8 @@ flight never lands; no bound on a draw; no tick; no century's clamp.
 3. **S1d, the consumer** (architecture-docs ADR-0091 § Owed S4).
 4. **The inbox's `Unavailable` marker**: a retry that spends no attempt,
    for stalls longer than the inbox's attempts; its own ADR, revising
-   ADR-0005 and ADR-0010.
+   ADR-0005 and ADR-0010: ADR-0040 (Proposed 2026-11-16), whose S2 gives
+   the stage's verdict its scope.
 5. **The opening side**: one unwrap per (channel, Tenant, wrapped key), a
    memory of Gone per (channel, Tenant), age from the unwrap's start, a
    cap; the unwrap cache moved out of `Cached`; ADR-0017 decision 2
@@ -443,3 +444,4 @@ ADR-0017 (amended: decision 8 above replaces its point 5's reading of a
   back-off step of a nanosecond; the burst test passing without renewal
   by uses. Decisions 2, 3, 6, 8, 10 and 12 say what changed;
   `Cached::purge`'s caller moved to § Owed 7.
+- 2026-11-16: Owed 4 names its ADR, ADR-0040 (Proposed).
