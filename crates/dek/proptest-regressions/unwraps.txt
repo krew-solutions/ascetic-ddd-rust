@@ -1,0 +1,12 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3b232a4a61652249cc5ae044f47e8a49dd1ec99e4637eac29baba1733a8158bc # shrinks to steps = [Open(1, 0), Open(1, 1), Advance(1), Land(1, 1, 3, false), Advance(1713), Advance(1287), Land(1, 0, 0, false), Open(1, 0)], random = 0
+cc beacb35f652a2ef1efe66fb94f9219ff811cc8d5359bb1e1e3a93d2c8b1fd21a # shrinks to steps = [Open(0, 0), Open(2, 1), Land(0, 0, 0, false), Open(2, 2), Land(2, 1, 3, false), Land(2, 2, 0, false)], random = 0
+cc 58290f72e6b7fcdcb2f9be49282001c1b6631fbd5a74b18390bdedd117dcd96d # shrinks to steps = [Open(2, 0), Land(2, 0, 0, false), Open(0, 0), Open(0, 0), Land(0, 0, 0, false), Open(0, 0), Open(1, 0), Open(0, 0), Advance(1), Open(0, 2), Land(0, 2, 3, false), Advance(215), Advance(2785), Open(0, 0)], random = 0
+cc 9a151740193bbf73c96ebd9307f9de5d5d2de2541acb233d8757c7d4c5924176 # shrinks to steps = [Open(0, 1), Land(0, 1, 0, false), Open(0, 0), Land(0, 0, 6, false), Open(0, 2), Sweep, Left(0, 2), Advance(1622), Advance(2031), Advance(1886), Open(1, 1), Left(2, 1), Advance(2195), Land(0, 2, 0, false), Land(1, 0, 4, false), GaveUp(1, 0), Left(2, 0), Advance(2685), Open(2, 1), Land(1, 1, 6, false), Sweep, Land(1, 2, 2, false), Left(0, 2), Land(2, 1, 0, true), Land(0, 1, 3, false), Open(0, 1), Advance(2119), Left(2, 0), Land(2, 2, 0, true), Open(2, 0), GaveUp(2, 0), Land(2, 1, 1, false), Land(0, 0, 4, false), Open(1, 2), Land(2, 1, 5, false), Advance(509), Left(0, 0), GaveUp(0, 1), Land(2, 1, 1, true), GaveUp(1, 1), Land(1, 2, 5, false), Sweep], random = 12007842434134193432
+cc 8f3b09ed533311826bfcc9a3fb62dd6e20782ee887d87a7376f6f6e618fa03f0 # shrinks to steps = [Open(0, 1), Open(0, 2), Land(0, 2, 3, false), Advance(496), Land(0, 1, 3, false), Advance(1002), Advance(1502), Open(0, 0)], random = 0
+cc 6ba9627e6ebda2b016f4b9eeae44db4c47a70fc46fb2d43420782029b03968c3 # shrinks to steps = [Open(2, 1), Land(2, 1, 0, false), Open(0, 1), Advance(500), Open(0, 0), Land(0, 0, 3, false), GaveUp(0, 1), Open(0, 0)], random = 0

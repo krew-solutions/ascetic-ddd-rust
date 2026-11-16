@@ -16,6 +16,7 @@ pub mod sealing;
 #[cfg(feature = "bus")]
 pub mod stage;
 pub mod supply;
+pub mod unwraps;
 
 pub use crate::supply::{InvalidParameters, Scope};
 
