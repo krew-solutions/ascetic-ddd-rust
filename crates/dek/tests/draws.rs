@@ -292,7 +292,7 @@ async fn a_dropped_caller_does_not_cancel_the_draw() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_shredded_tenant_is_told_once_and_not_asked_again_for_a_while() {
+async fn a_shredded_tenant_is_told_by_every_seal_and_not_asked_again_for_a_while() {
     let kms = Gated::new([Answer::Gone]);
     let stage = stage(&kms, reuse(), |p| p);
     let drew = seal(&stage, "a", 1).await;
@@ -300,15 +300,19 @@ async fn a_shredded_tenant_is_told_once_and_not_asked_again_for_a_while() {
         permanent(&drew),
         "the one who drew is told the key is gone: {drew:?}"
     );
-    let after = seal(&stage, "a", 2).await;
-    assert_eq!(unavailable(&after).reason, Reason::BackingOff);
+    for n in 2..5 {
+        let after = seal(&stage, "a", n).await;
+        assert_eq!(
+            after
+                .as_ref()
+                .err()
+                .and_then(|error| error.downcast_ref::<Permanent>())
+                .map(Permanent::cause),
+            Some(ascetic_ddd_dek::causes::GONE),
+            "every seal within gone is told, under kms.gone: {after:?}"
+        );
+    }
     assert_eq!(kms.draws(), 1, "no call within gone");
-    let verdict = unavailable(&after).verdict();
-    assert_eq!(
-        verdict.downcast_ref::<Permanent>().map(Permanent::cause),
-        Some(ascetic_ddd_dek::causes::GONE),
-        "a seal refused while gone is remembered is for good, under kms.gone"
-    );
     advance(Duration::from_secs(10)).await;
     let again = seal(&stage, "a", 3).await;
     assert!(
@@ -735,7 +739,7 @@ async fn a_kms_out_of_reach_is_asked_less_and_less_however_often_a_tenant_seals(
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_key_gone_is_told_to_the_first_seal_to_ask_though_its_draw_outlived_the_wait() {
+async fn a_key_gone_is_told_to_every_seal_though_its_draw_outlived_the_wait() {
     let kms = Gated::new([Answer::Gone]);
     kms.slow(Duration::from_secs(1));
     let stage = stage(&kms, reuse(), |p| p);
@@ -751,8 +755,7 @@ async fn a_key_gone_is_told_to_the_first_seal_to_ask_though_its_draw_outlived_th
         permanent(&seal(&stage, "a", 2).await),
         "the first to ask is told"
     );
-    let after = seal(&stage, "a", 3).await;
-    assert_eq!(unavailable(&after).reason, Reason::BackingOff, "once");
+    assert!(permanent(&seal(&stage, "a", 3).await), "and so is the next");
     assert_eq!(kms.draws(), 1);
 }
 

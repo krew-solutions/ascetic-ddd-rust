@@ -1198,3 +1198,63 @@ async fn custody_makes_a_key_of_its_type_and_refuses_another() {
         &json!({ "type": "hmac", "key_size": 32 })
     );
 }
+
+/// A `200` whose body is not what Vault writes — no `data.plaintext`, or
+/// one that is not base64, a signature that is not JWS — is an answer that
+/// could not be read: `Vault { status: 200 }`, of the moment, never the
+/// request's fault, so that the message it would open is not parked for
+/// good (ADR-0039 decision 8, ADR-0040).
+#[tokio::test]
+async fn an_answer_that_cannot_be_read_is_of_the_moment_never_the_request_s_fault() {
+    let plaintext = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
+    for (path, body) in [
+        ("/decrypt/t", json!({ "data": {} })),
+        (
+            "/decrypt/t",
+            json!({ "data": { "plaintext": "not base64!" } }),
+        ),
+        (
+            "/datakey/plaintext/t",
+            json!({ "data": { "plaintext": plaintext } }),
+        ),
+        (
+            "/datakey/plaintext/t",
+            json!({ "data": { "ciphertext": "vault:v1:abc" } }),
+        ),
+    ] {
+        let mut script = vec![("POST", path, 200, body.clone())];
+        if path.starts_with("/datakey") {
+            script.insert(0, ("POST", "/keys/t", 204, json!({})));
+        }
+        let transport = Scripted::answering(script);
+        let outcome = with(&transport, |tx, kms| async move {
+            if path.starts_with("/decrypt") {
+                kms.decrypt_dek(&tx, "t", b"vault:v1:abc").await.map(|_| ())
+            } else {
+                kms.generate_dek(&tx, "t").await.map(|_| ())
+            }
+        })
+        .await;
+        let error = outcome.unwrap_err();
+        assert!(
+            matches!(&error, Error::Vault { status: 200, path: asked, .. } if asked == path),
+            "{path} {body}: {error}"
+        );
+        assert_eq!(error.class(), Class::Moment, "{path} {body}");
+    }
+    let transport = Scripted::answering(vec![
+        ("POST", "/keys/t.sign.ed25519", 200, json!({})),
+        (
+            "POST",
+            "/sign/t.sign.ed25519",
+            200,
+            json!({ "data": { "signature": "vault:v1:!!" } }),
+        ),
+    ]);
+    let signed = with(&transport, |tx, kms| async move {
+        kms.sign(&tx, "t", ED25519, b"message").await
+    })
+    .await;
+    let error = signed.unwrap_err();
+    assert_eq!(error.class(), Class::Moment, "{error}");
+}

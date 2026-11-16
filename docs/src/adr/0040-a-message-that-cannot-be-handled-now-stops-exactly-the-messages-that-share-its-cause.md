@@ -435,10 +435,13 @@ S2, built (`dek`, `kms`):
     draw is made for evidence.
 - `last` is typed (`Last { landed, text }`). `Unavailable::verdict` is the
   bus's verdict on a seal not served:
-  - `Permanent::because(kms.gone)` after a key gone;
   - `Permanent::because(kms.refused)` after a policy's refusal;
   - otherwise `bus::Unavailable(kms.unavailable)` over the refusal's scope
     and `retry_after`.
+  - A key gone is not among these. Since ADR-0039 decision 8 lost its
+    interim rule (slice 4's S4e), the core tells every seal within a
+    Gone's memory `Permanent(kms.gone)`. Past the memory a stale note of
+    Gone is no verdict: a probe finds out.
 - The opening end's verdict is by class:
   - a key gone is `kms.gone`;
   - a refusal is `kms.refused`;
@@ -463,7 +466,7 @@ S2, built (`dek`, `kms`):
   - the scope always the stage's, and the tenant's on any landing;
   - the probe unpaced, ignoring the sentinel's back-off, and never
     launched;
-  - a refused or a remembered gone read as unavailable;
+  - a refused read as unavailable;
   - the opening's unavailable read as of the moment, and its gone as
     refused;
   - a keyless tenant read as a version.

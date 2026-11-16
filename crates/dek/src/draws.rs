@@ -82,15 +82,16 @@ pub struct Unavailable {
 
 impl Unavailable {
     /// The bus's verdict on the seal not served (ADR-0040 decisions 2 and
-    /// 3): for good when the tenant's last draw found its key gone, or the
-    /// context refused — a deploy, not a retry, mends that; otherwise
-    /// unavailable over the refusal's scope, asked again past its
-    /// `retry_after`. A host returns it from a handler whose message the
-    /// inbox is to hold, spend or park as it says.
+    /// 3): for good when the tenant's last draw found the context refused —
+    /// a deploy, not a retry, mends that; otherwise unavailable over the
+    /// refusal's scope, asked again past its `retry_after`. A key gone is no
+    /// refusal of this kind: within its memory every seal is told
+    /// [`Permanent`] under `kms.gone` (ADR-0039 decision 8), and past it a
+    /// probe finds out. A host returns the verdict from a handler whose
+    /// message the inbox is to hold, spend or park as it says.
     #[must_use]
     pub fn verdict(self) -> BoxError {
         match self.last.as_ref().map(|last| last.landed) {
-            Some(Landed::Gone) => Permanent::because(causes::GONE, self).into(),
             Some(Landed::Refused) => Permanent::because(causes::REFUSED, self).into(),
             _ => {
                 let scope = match self.scope {

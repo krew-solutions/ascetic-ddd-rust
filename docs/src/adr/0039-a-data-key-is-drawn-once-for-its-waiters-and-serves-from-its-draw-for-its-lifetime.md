@@ -164,12 +164,25 @@ what a stage does is counted and told.**
 
    **At sealing only Gone is Permanent**: every other class backs off as
    of the moment and is counted with its cause — a policy's drift is
-   mended by a deploy, not by parking every Tenant's messages. Until the
-   answers of a standby node are measured, one Gone tells one seal
-   Permanent — the first to ask after its landing, whether or not it is
-   the seal that drew, so that a draw slower than `wait` still tells one —
-   and a slot's memory of Gone refuses every other as Unavailable. At opening, the per-message refusals stay Permanent
-   (ADR-0017; the consumer's ADR-0071 Rule of Three 1–2).
+   mended by a deploy, not by parking every Tenant's messages. A slot's
+   memory of Gone tells every seal within it Permanent, none of them
+   drawing.
+   - **The premise.** On Vault Community a standby node forwards to the
+     leader and never answers a key it holds as missing. Measured
+     2026-11-16 on a three-node Raft cluster: 200 uses of a key made a
+     moment before, through a standby; and about 20 000 requests through
+     a standby while the leader was killed. The latter met elections
+     (`500`) and redirects (`307`), and no false `404`.
+   - Enterprise's performance standbys answer from their own state and
+     reopen this: a false Gone would park a Tenant's messages.
+   - The interim rule, Gone told to one seal and the rest refused as
+     Unavailable, is withdrawn.
+   - A Vault answer that cannot be read (a `200` without the field asked
+     for, or not base64, a signature that is not JWS) is
+     `Vault { status: 200 }`, of the moment, never the request's fault.
+
+   At opening, the per-message refusals stay Permanent (ADR-0017; the
+   consumer's ADR-0071 Rule of Three 1–2).
 9. **Errors.** `dek::Unavailable{reason, retry_after, last}` is transient;
    its reason is `#[non_exhaustive]` (`Waited`, `BackingOff`, `Late`,
    `FlightsFull`, `Unspawned`); its `Display` names the last flight's
@@ -237,8 +250,9 @@ what a stage does is counted and told.**
    policy publication: thousands of sends on one channel in one
    transaction). Without `burst`, a slow Vault refuses it at every key it
    crosses, forever; decisions 12 and 13 bound it.
-3. **A false Gone** from a lagging standby node: decision 8's interim
-   rule, until measured.
+3. **A false Gone** from a lagging standby node: measured absent on
+   Vault Community (decision 8), whose premise an Enterprise deployment
+   reopens.
 4. **A dead flight wedging a slot**: the guard lands `Canceled` on a
    panic or a shutdown; no runtime is refused at once.
 5. **Keys lingering in memory**: decision 2's tick and eviction rule.
@@ -401,13 +415,16 @@ flight never lands; no bound on a draw; no tick; no century's clamp.
    memory of Gone per (channel, Tenant), age from the unwrap's start, a
    cap; the unwrap cache moved out of `Cached`; ADR-0017 decision 2
    revised.
-6. **Measurements**: a datakey racing a key's deletion (the audit log), to
-   state decision 1's S before the deletion as a guarantee; a standby
-   node's answers, to drop decision 8's interim rule — until then a
-   shredded tenant's backlog drains one message per `gone`; Vault's
-   datakey latency under load in staging, to set `wait` and `draw`; a
-   cold start of 500 and 2 000 tenants on one channel, counting the seals
-   refused `FlightsFull` after their wait for a place, to set `flights`.
+6. **Measurements**:
+   - Measured 2026-11-16 and closed:
+     - a datakey racing a key's deletion: every `200` draw began before the
+       deletion's answer, so decision 1's S holds;
+     - a standby node's answers: decision 8's interim rule is dropped.
+   - Owed to staging:
+     - Vault's datakey latency under load, to set `wait` and `draw`;
+     - a cold start of 500 and 2 000 tenants on one channel, counting the
+       seals refused `FlightsFull` after their wait for a place, to set
+       `flights`.
 7. **`Cached::purge`'s caller**: the opening side's tick (slice 4), told
    the cache's next expiry and woken by the first entry of an empty cache;
    until then an unwrapped key outlives its TTL on a quiet channel until
@@ -457,3 +474,9 @@ ADR-0017 (amended: decision 8 above replaces its point 5's reading of a
     through the function it checks.
   - `a_key_whose_renewal_failed_still_leaves_memory_at_its_end` and the
     property both kill the defect.
+- 2026-11-16: Decision 8's interim rule dropped (slice 4's S4e): on Vault
+  Community a standby never answers a key it holds as missing (measured on
+  a three-node Raft cluster), so every seal within a Gone's memory is told
+  Permanent. A Vault answer that cannot be read is `Vault { status: 200 }`,
+  of the moment (S4a), and the plaintext's text in an answer is wiped once
+  read. Owed 6's race and standby measurements closed.

@@ -351,8 +351,6 @@ struct Slot<K, N> {
     flight: Option<Flying>,
     evidence: Evidence,
     waiters: u32,
-    /// A Gone landed and no seal has been told yet: the first to ask is.
-    gone_untold: bool,
     /// What the shell remembers of the tenant while the slot is kept: it
     /// has no effect of its own, and goes with the slot.
     note: Option<N>,
@@ -368,7 +366,6 @@ impl<K, N> Slot<K, N> {
             flight: None,
             evidence: Evidence::Trusted,
             waiters: 0,
-            gone_untold: false,
             note: None,
             due: None,
         }
@@ -655,8 +652,10 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
             return refused(Reason::Late, None, Scope::Stage);
         };
         let scope = scope_by(trouble_since(slot), landed_in_time);
-        // A key gone: told to the first seal that asks after its landing,
-        // and refused to every other until its memory ends (ADR-0039 F11).
+        // A key gone: told to every seal that asks until its memory ends,
+        // none of them drawing (ADR-0039 decision 8). A standby of Vault
+        // Community forwards to the leader and never answers a key it holds
+        // as missing (measured 2026-11-16), so a Gone is the key's.
         if let Evidence::Failed {
             failure: Failure::Gone,
             until,
@@ -664,14 +663,7 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
         } = slot.evidence
             && now < until
         {
-            if std::mem::take(&mut slot.gone_untold) {
-                return (Answer::Gone, None);
-            }
-            return refused(
-                Reason::BackingOff,
-                Some(until.saturating_duration_since(now)),
-                scope,
-            );
+            return (Answer::Gone, None);
         }
         // A failed draw's back-off.
         if let Evidence::Failed { until, .. } = slot.evidence
@@ -827,7 +819,6 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
                     _ => retired = Some(key),
                 }
                 slot.evidence = Evidence::Trusted;
-                slot.gone_untold = false;
                 if now.saturating_duration_since(started) <= supply.wait {
                     self.landed_in_time = Some(now);
                 }
@@ -840,7 +831,6 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
                     failures: failures.saturating_add(1),
                     at: now,
                 };
-                slot.gone_untold = true;
             }
             Outcome::Refused
             | Outcome::Unavailable
@@ -1362,17 +1352,16 @@ mod tests {
         assert_eq!(
             core.seal(&"a", t0, deadline(t0)),
             (Answer::Gone, None),
-            "the first seal to ask after the landing is told"
+            "a seal after the landing is told"
         );
-        let (answer, start) = core.seal(&"a", t0 + S, deadline(t0 + S));
-        assert_eq!(start, None, "no call within gone");
-        assert!(matches!(
-            answer,
-            Answer::Refused {
-                reason: Reason::BackingOff,
-                ..
-            }
-        ));
+        assert_eq!(
+            core.seal(&"a", t0 + S, deadline(t0 + S)),
+            (Answer::Gone, None),
+            "and so is every other within gone, none of them drawing"
+        );
+        let past = t0 + 10 * S;
+        let (_, start) = core.seal(&"a", past, deadline(past));
+        assert!(start.is_some(), "asked again past gone");
         // A key in service retires at once on Gone.
         let mut core = self::core();
         drawn(&mut core, "a", t0, 1);
