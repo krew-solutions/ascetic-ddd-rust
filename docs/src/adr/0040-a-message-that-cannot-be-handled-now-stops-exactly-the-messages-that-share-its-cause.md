@@ -10,8 +10,8 @@ Proposed (2026-11-16). Built in the library:
 - S1d, the outage model and the traces checked afresh;
 - S2, the stage's scope and its sentinel.
 
-S3, S4 and the host's adoption are owed, each with its executor
-(§ Executors, § Owed).
+S3 is built with ADR-0039's slice 4. S4 and the host's adoption are owed,
+each with its executor (§ Executors, § Owed).
 
 Decided under the library's gate:
 - a blind solver and a discriminator;
@@ -473,12 +473,19 @@ S2, built (`dek`, `kms`):
 
 The host's adoption, owed (with the merge of this branch):
 - its handlers' verdict maps `dek::Unavailable::verdict`;
-- its sealing passes its sentinel account;
+- its sealing passes its sentinel account, and an `Opening` to
+  `Sealing::over_paced` (ADR-0039 slice 4), its `keep` within ADR-0071's
+  window;
 - the end to end: Gone for Tenant A and Refused for Tenant B, through the
   stage and the host's verdict; `unpark_all(kms.refused)` re-arms B's rows
   only.
 
-S3: with ADR-0039's slice 4 (the opening side).
+S3, built with ADR-0039's slice 4: the opening end's verdicts come from its
+shell, by evidence as the sealing end's do:
+- a key gone is `kms.gone`, once the sentinel's key is there;
+- a remembered refused wrapped key is `kms.refused`;
+- a refusal is unavailable over its scope, with its `retry_after`.
+Tested by `tests/opens.rs` and the pg tests of `tests/stage.rs`.
 
 S4: slice B (decision 9), with the fat-Tenant change's owner.
 
@@ -545,3 +552,6 @@ S4: slice B (decision 9), with the fat-Tenant change's owner.
   `Unavailable::verdict` maps it, and the opening end's verdict is by
   class. The PG KMS answered a shredded tenant as a missing version, the
   class a policy's fix would have re-armed; fixed.
+- 2026-11-16: S3 built with ADR-0039's slice 4: the opening end's verdicts
+  come from its shell by evidence. The host's adoption adds
+  `Sealing::over_paced`'s `Opening` to its list.

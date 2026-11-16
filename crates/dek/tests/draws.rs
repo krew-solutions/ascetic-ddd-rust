@@ -937,7 +937,11 @@ fn a_sealing_whose_keys_would_outlive_its_ceiling_is_refused() {
         ascetic_ddd_dek::Sealing::over_paced(
             Arc::new(MemorySessionPool::new()),
             ["c"],
-            (parameters, pacing),
+            (
+                parameters,
+                pacing,
+                ascetic_ddd_dek::Opening::fitted(parameters.cache, 16),
+            ),
             Some(ceiling),
             None,
             |_| Arc::new(()),
@@ -946,7 +950,7 @@ fn a_sealing_whose_keys_would_outlive_its_ceiling_is_refused() {
     };
     assert_eq!(
         build(window - Duration::from_nanos(1)).unwrap_err(),
-        ascetic_ddd_dek::InvalidParameters("lifetime + cache + draw ≤ the ceiling")
+        ascetic_ddd_dek::InvalidParameters("lifetime + keep + draw ≤ the ceiling")
     );
     let sealing = build(window).unwrap();
     assert_eq!(
@@ -1070,7 +1074,11 @@ async fn a_sealing_tells_each_channel_s_observer_of_its_own_stage() {
     let sealing = ascetic_ddd_dek::Sealing::over_paced(
         Arc::new(MemorySessionPool::new()),
         ["c", "d"],
-        (parameters, Pacing::fitted(parameters.reuse)),
+        (
+            parameters,
+            Pacing::fitted(parameters.reuse),
+            ascetic_ddd_dek::Opening::fitted(parameters.cache, 16),
+        ),
         None,
         None,
         |channel| {

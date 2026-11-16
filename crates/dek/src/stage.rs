@@ -18,8 +18,10 @@
 //! back rests nowhere. A fresh DEK per message is one KMS call per message;
 //! where that is a network round trip, [`EnvelopeStage::reusing`] keeps a
 //! tenant's DEK for so many messages or so long, as the AWS Encryption
-//! SDK's caching materials manager does, and the opening side keeps what it
-//! unwraps with [`Cached`][ascetic_ddd_kms::Cached] in front of its KMS.
+//! SDK's caching materials manager does. The opening side unwraps each
+//! wrapped key once for its waiters and keeps what it unwraps from the
+//! unwrap's start for its `keep`, its entries capped, a key gone told before
+//! any key held ([`EnvelopeStage::opened`], ADR-0039 slice 4).
 //!
 //! The payload is bound to the message's identity: its associated data is
 //! the canonical text of the headers the stage is bound to — the tenant and
@@ -57,7 +59,9 @@ use serde_json::Value;
 
 use crate::domain::canonical;
 use crate::draws::{Draws, Held, SealingObserver, causes};
+use crate::opens::{Opener, OpeningHeld};
 use crate::supply::{InvalidParameters, LONGEST, Supply, SupplyParameters};
+use crate::unwraps::Opening;
 
 /// The header naming the tenant, and the associated data of the payload.
 pub const TENANT_ID: &str = "tenant_id";
@@ -232,10 +236,16 @@ fn bounded(lifetime: Duration) -> Duration {
 /// The envelope stage over the KMS `K`, reached through sessions of `P`.
 pub struct EnvelopeStage<P, K> {
     draws: Arc<Draws<P, K>>,
+    opener: Arc<Opener<P, K>>,
+    sentinel: Option<String>,
     algorithm: Algorithm,
     bound_to: Vec<String>,
     reuse: Reuse,
 }
+
+/// The entries an opening end holds by default: keys unwrapped and
+/// memories of refusals.
+const KEYS: usize = 16_384;
 
 /// A key per message: what a stage that reuses none draws.
 const PER_MESSAGE: Reuse = Reuse {
@@ -256,8 +266,16 @@ impl<P, K> EnvelopeStage<P, K> {
         let supply = Pacing::fitted(PER_MESSAGE)
             .supply(PER_MESSAGE)
             .expect("a fitted pacing fits its reuse");
+        let draws = Arc::new(Draws::new(sessions, kms, supply));
+        let opener = Arc::new(Opener::over(
+            Arc::clone(&draws.parts),
+            Opening::fitted(PER_MESSAGE.lifetime, KEYS),
+            None,
+        ));
         EnvelopeStage {
-            draws: Arc::new(Draws::new(sessions, kms, supply)),
+            draws,
+            opener,
+            sentinel: None,
             algorithm: Algorithm::Aes256Gcm,
             bound_to: vec![TENANT_ID.to_owned(), MESSAGE_ID.to_owned()],
             reuse: PER_MESSAGE,
@@ -343,7 +361,49 @@ impl<P, K> EnvelopeStage<P, K> {
     {
         let supply = self.draws.supply();
         let sentinel = sentinel.into();
-        self.redrawn(supply, |draws| draws.with_sentinel(sentinel))
+        let opening = *self.opener.opening();
+        let stage = self.redrawn(supply, |draws| draws.with_sentinel(sentinel.clone()));
+        let opener = Arc::new(Opener::over(
+            Arc::clone(&stage.draws.parts),
+            opening,
+            Some(sentinel.clone()),
+        ));
+        EnvelopeStage {
+            opener,
+            sentinel: Some(sentinel),
+            ..stage
+        }
+    }
+
+    /// The same stage opening as `opening` says (ADR-0039 slice 4): each key
+    /// unwrapped once for its waiters, kept from its unwrap's start for
+    /// `keep`, its entries capped. What the old opening held stays its own.
+    ///
+    /// # Errors
+    /// [`InvalidParameters`] naming the rule broken.
+    pub fn opened(self, opening: Opening) -> Result<Self, InvalidParameters>
+    where
+        P: SessionPool + Send + Sync + 'static,
+        P::Session: Sync,
+        K: KeyManagementService<P::Session> + 'static,
+    {
+        let opening = opening.validated()?;
+        let opener = Arc::new(Opener::over(
+            Arc::clone(&self.draws.parts),
+            opening,
+            self.sentinel.clone(),
+        ));
+        Ok(EnvelopeStage { opener, ..self })
+    }
+
+    /// What the opening end holds now: its keys, its entries, its unwraps.
+    pub fn opening_held(&self) -> OpeningHeld
+    where
+        P: SessionPool + Send + Sync + 'static,
+        P::Session: Sync,
+        K: KeyManagementService<P::Session> + 'static,
+    {
+        self.opener.held()
     }
 
     /// What the stage holds now: its keys, its tenants, its draws.
@@ -409,14 +469,7 @@ where
                 .map(str::to_owned)
                 .collect();
             let aad = associated_data(&message, &bound_to)?;
-            let parts = &self.draws.parts;
-            let dek = parts
-                .sessions
-                .session(async |session| {
-                    parts.kms.decrypt_dek(&session, &tenant_id, &wrapped).await
-                })
-                .await
-                .map_err(verdict)?;
+            let dek = self.opener.key(&tenant_id, &wrapped).await?;
             let cipher = algorithm.cipher(&dek, aad).map_err(verdict)?;
             let opened = cipher.decrypt(message.payload()).map_err(verdict)?;
             Ok(message

@@ -411,10 +411,28 @@ flight never lands; no bound on a draw; no tick; no century's clamp.
    for stalls longer than the inbox's attempts; its own ADR, revising
    ADR-0005 and ADR-0010: ADR-0040 (Proposed 2026-11-16), whose S2 gives
    the stage's verdict its scope.
-5. **The opening side**: one unwrap per (channel, Tenant, wrapped key), a
-   memory of Gone per (channel, Tenant), age from the unwrap's start, a
-   cap; the unwrap cache moved out of `Cached`; ADR-0017 decision 2
-   revised.
+5. **The opening side**: built in slice 4 (S4b–S4d, S4f; § Change Log).
+   - S4b moved the shared pacing into `pace`, with the sealing core's
+     fingerprint unchanged.
+   - S4c is the opening core `unwraps`:
+     - one unwrap per (tenant, wrapped key);
+     - a memory of Gone per tenant, told before any key held and wiping
+       what lands after or began before;
+     - a refused wrapped key remembered for `gone`;
+     - a key's age from its unwrap's start;
+     - its entries capped, the idle entry ending first evicted.
+   - S4d is the shell `opens` and the stage:
+     - the opening's own wait, 2 s;
+     - an unwrap bounded by `draw`;
+     - a runtime sentinel on Gone: a sentinel gone too is the KMS's
+       outage, not a tenant's shredding.
+   - S4f deleted `Cached`, and the ceiling reads `Opening::keep`.
+   - ADR-0017 decision 2 is revised.
+   - Owed:
+     - the opening's observer, its metrics and alerts in the host;
+     - a tenant id validated at the header;
+     - the decrypt-versus-DELETE race and the residual window, measured
+       on the stand.
 6. **Measurements**:
    - Measured 2026-11-16 and closed:
      - a datakey racing a key's deletion: every `200` draw began before the
@@ -425,10 +443,9 @@ flight never lands; no bound on a draw; no tick; no century's clamp.
      - a cold start of 500 and 2 000 tenants on one channel, counting the
        seals refused `FlightsFull` after their wait for a place, to set
        `flights`.
-7. **`Cached::purge`'s caller**: the opening side's tick (slice 4), told
-   the cache's next expiry and woken by the first entry of an empty cache;
-   until then an unwrapped key outlives its TTL on a quiet channel until
-   the next unwrap.
+7. **`Cached::purge`'s caller**: closed with `Cached` deleted (S4f). The
+   opening shell's tick wipes each key at its end, woken by its unwraps
+   (`a_key_leaves_memory_at_its_end_on_a_quiet_stage`).
 
 ## References
 
@@ -480,3 +497,19 @@ ADR-0017 (amended: decision 8 above replaces its point 5's reading of a
   Permanent. A Vault answer that cannot be read is `Vault { status: 200 }`,
   of the moment (S4a), and the plaintext's text in an answer is wiped once
   read. Owed 6's race and standby measurements closed.
+- 2026-11-16: Slice 4 built (S4b–S4d, S4f): Owed 5 and 7 closed, and Owed 5
+  names what stays owed.
+  - The opening end has a pure core and a shell, as the sealing end
+    does, on shared pacing. It answers a key gone before any key held,
+    wipes what lands after it or began before it, and remembers a
+    refused wrapped key. It keeps a key from its unwrap's start, caps its
+    entries, waits its own 2 s, and bounds an unwrap by `draw`.
+  - A Gone at the opening end is told only once the sentinel's key is
+    there: a mount wiped, or a recovery copy without its keys, reads as
+    the KMS's outage and is held, never parked as a tenant shredded.
+  - `Opening` validates `draw ≤ gone`, so that an unwrap begun before a
+    Gone lands within its memory.
+  - `Cached` is deleted, and `Sealing::over_paced` takes the `Opening`.
+    Its ceiling reads `keep`: lifetime + keep + draw.
+  - Two defects of the new core were found by its property while it was
+    written, and fixed before it was committed.
