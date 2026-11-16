@@ -805,6 +805,18 @@ where
         Ok((dek, wrapped.to_bytes()))
     }
 
+    async fn key_exists(&self, session: &S, tenant_id: &str) -> Result<bool, Error> {
+        let sql = format!(
+            "SELECT EXISTS (SELECT 1 FROM {} WHERE tenant_id = $1)",
+            self.table
+        );
+        Ok(session
+            .connection()
+            .query_one(&sql, &[&tenant_id])
+            .await?
+            .get::<_, bool>(0))
+    }
+
     async fn rewrap_dek(
         &self,
         session: &S,

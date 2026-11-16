@@ -2,8 +2,9 @@
 
 ## Status
 
-Proposed (2026-11-16). Slice 1 built (2026-11-17): the breaker's and the memo's pure core
-(`crates/inbox/src/breaker.rs`), C1–C13 its tests. § Slices orders the rest.
+Proposed (2026-11-16). Built (2026-11-17): slice 1, the breaker's and the memo's pure core
+(`crates/inbox/src/breaker.rs`), C1–C13 its tests; slice 2, the DEK stage's causes and its sentinel read (§ 9,
+D1). § Slices orders the rest.
 
 It supersedes ADR-0040's decisions 4, 5, 7, 9 and its `park_held` (decision 8), and ADR-0041's decision 3 (the
 environment's verdict, its slice 2). It keeps ADR-0040's verdicts and causes (decisions 1–3, 6) and
@@ -210,9 +211,13 @@ reporting what it did, what it passed by and whether more remain; each wakes the
   an operation every consumer holds, rather than drawing a key it may not. A shredded Tenant stays `Permanent
   kms.gone`; a wiped mount reads `Unavailable`.
 - `Forbidden` with the key present stays `Permanent`: no retry mends it, and the host pages on it.
-- A cause per remedy: `kms.forbidden`, `kms.key_version`, `kms.ciphertext`, `kms.malformed`, `kms.unsupported`,
-  `kms.gone`, `kms.unavailable`, `kms.unauthorized` (a 403 the key's read does not explain), and `kms.unexplained`
-  (the rest), with a detail the library composes (status and method), never a path.
+- A cause per remedy (`dek::causes::of`): `kms.forbidden`, `kms.key_version`, `kms.ciphertext`, `kms.malformed`,
+  `kms.unsupported`, `kms.conflict` (a key made otherwise than asked: custody's), `kms.gone`, `kms.unavailable`,
+  `kms.unauthorized` (a 403 the key's read does not explain), and `kms.unexplained` (the rest). A Vault error's
+  text names its status and method, never a path: a key's name is its tenant's.
+- The KMS port gains `key_exists`, a read: Vault reads the key, PostgreSQL asks whether a row of the tenant is
+  there. A wrapped key the KMS refused keeps its cause by the wrapped key, so the opening end's memory of it
+  tells the same cause.
 - `last_error` keeps a text only for `Cause::UNEXPLAINED`. No Tenant identifier in a log line of the dek.
 
 ### 10. Isolation, per transaction
@@ -352,9 +357,11 @@ cache during an outage; a two-session run of a verb's `ctid` join against a conc
 ## Slices
 
 1. The breaker's and the memo's pure core, with C1–C13.
-2. The rows, the exits and their CHECKs (R1, X1); the dek's causes and its sentinel by a key read (D1).
-3. The walk's paused channels, the guest, the trial and `Outcome::Paused`, in the dispatch (G1, P1, C5, C8, C10,
-   I1).
+2. The dek's causes and its sentinel by a key read (D1).
+3. The breaker in the dispatch: the rows, the exits and their CHECKs (R1, X1); the walk's paused channels, the
+   guest, the trial and `Outcome::Paused` (G1, P1, C5, C8, C10, I1); the text the inbox keeps for a named cause
+   whose detail the library composes (`kms.unexplained`). The rows and the dispatch are one slice: a row's hold is
+   the interval the core gives.
 4. The expiry off the dispatch path (E1).
 5. The verbs and the reads, the stalls table (V1, § 6).
 6. The model (§ Executors).
@@ -381,3 +388,11 @@ payloads), its generated Vault policies.
   - **Two mutants survived the first tests**: without the broad arm C1 still paused, because its window began
     empty and two failures made a share of one; and C11's channel opened before its causes could differ. Both
     tests now begin on processed Tenants, as an outage begins, and both mutants die.
+- 2026-11-17: Slice 2 built: the DEK stage's causes per remedy, its sentinel read, and its log lines without a
+  Tenant. Seven mutations, each red. What building it found:
+  - **A remembered refusal lost its cause.** The opening core keeps a note for a Tenant with evidence of failures,
+    not for one wrapped key the KMS refused, which is the message's: its memory answered with no cause. The shell
+    now keeps the cause by the wrapped key, bounded.
+  - **`kms.conflict`** joins the causes: a key made otherwise than asked is custody's remedy, no other's.
+  - **A test counted log lines by the Tenant's name.** With no Tenant in a line it read the other tests' lines;
+    it now reads its own by its thread, and asserts that no line names a Tenant.

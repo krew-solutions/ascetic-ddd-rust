@@ -530,8 +530,8 @@ fn refused(what: String) -> BoxError {
 /// class (ADR-0039 decision 8, ADR-0040 decisions 2 and 3):
 /// - a key that is gone, for good, under `kms.gone`;
 /// - an operation refused, a ciphertext that does not open, bytes that are
-///   not what they should be, for good, under `kms.refused`: a deploy, not a
-///   retry, mends a policy;
+///   not what they should be, for good, each under the cause of its remedy
+///   ([`causes::of`]): a deploy, not a retry, mends a policy;
 /// - the KMS out of reach, unavailable over the stage: a Vault that answers
 ///   no one answers no tenant, and the inbox holds the message without
 ///   spending its attempts;
@@ -540,12 +540,10 @@ fn refused(what: String) -> BoxError {
 ///
 /// At the sealing end the draws decide (`draws.rs`).
 fn verdict(error: KmsError) -> BoxError {
+    let cause = causes::of(&error);
     match error.class() {
-        Class::Gone => Permanent::because(causes::GONE, error).into(),
-        Class::Refused => Permanent::because(causes::REFUSED, error).into(),
-        Class::Unavailable => {
-            Unavailable::new(causes::UNAVAILABLE, Scope::Stage, None, error).into()
-        }
+        Class::Gone | Class::Refused => Permanent::because(cause, error).into(),
+        Class::Unavailable => Unavailable::new(cause, Scope::Stage, None, error).into(),
         Class::Moment => error.into(),
     }
 }
@@ -553,9 +551,74 @@ fn verdict(error: KmsError) -> BoxError {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 mod tests {
+    use ascetic_ddd_bus::Cause;
     use ascetic_ddd_session::SessionError;
 
     use super::*;
+
+    /// Every failure of the KMS has the cause of its remedy, and two remedies
+    /// never share a cause (seedwork ADR-0042 decision 9): an operator tells
+    /// them apart without the error's text, which may name a tenant.
+    #[test]
+    fn every_kms_failure_has_the_cause_of_its_remedy() {
+        let tenant = || "t".to_owned();
+        let cases: Vec<(KmsError, Cause)> = vec![
+            (
+                KmsError::KekNotFound {
+                    tenant_id: tenant(),
+                    key_version: None,
+                },
+                causes::GONE,
+            ),
+            (
+                KmsError::KekNotFound {
+                    tenant_id: tenant(),
+                    key_version: Some(3),
+                },
+                causes::KEY_VERSION,
+            ),
+            (
+                KmsError::WrongKeyVersion {
+                    expected: 1,
+                    found: 2,
+                },
+                causes::KEY_VERSION,
+            ),
+            (KmsError::NoKeyOfVersion(4), causes::KEY_VERSION),
+            (KmsError::Decrypt, causes::CIPHERTEXT),
+            (KmsError::InvalidSignature, causes::CIPHERTEXT),
+            (KmsError::Malformed("x".into()), causes::KMS_MALFORMED),
+            (KmsError::Unsupported("x"), causes::UNSUPPORTED),
+            (
+                KmsError::Conflict {
+                    tenant_id: tenant(),
+                    detail: "x".into(),
+                },
+                causes::CONFLICT,
+            ),
+            (
+                KmsError::Forbidden {
+                    tenant_id: tenant(),
+                    operation: "decrypt",
+                },
+                causes::FORBIDDEN,
+            ),
+            (
+                KmsError::Session(SessionError::Acquire("down".into())),
+                causes::UNAVAILABLE,
+            ),
+            (
+                KmsError::Session(SessionError::Abandoned),
+                causes::UNEXPLAINED,
+            ),
+        ];
+        for (error, cause) in &cases {
+            assert_eq!(causes::of(error), *cause, "{error:?}");
+        }
+        let distinct: std::collections::HashSet<Cause> =
+            cases.iter().map(|(_, cause)| *cause).collect();
+        assert_eq!(distinct.len(), 9, "a remedy per cause: {distinct:?}");
+    }
 
     /// Each class of the KMS's failures at the opening end comes to its
     /// verdict on the bus, under its cause (ADR-0040 decisions 2 and 3).
@@ -575,7 +638,7 @@ mod tests {
         });
         assert_eq!(
             refused.downcast_ref::<Permanent>().map(Permanent::cause),
-            Some(causes::REFUSED)
+            Some(causes::FORBIDDEN)
         );
         let away = verdict(KmsError::Session(SessionError::Acquire("down".into())));
         let away = away

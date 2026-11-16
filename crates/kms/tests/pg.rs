@@ -122,6 +122,23 @@ async fn a_dek_wrapped_after_a_rotation_unwraps() {
     .unwrap();
 }
 
+/// Whether a tenant has a key is a read that makes none (seedwork ADR-0042
+/// decision 9).
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn whether_a_tenant_has_a_key_is_a_read_that_makes_none() {
+    let f = fixture("key_exists").await;
+    f.atomic(|tx, kms| async move {
+        assert!(!kms.key_exists(&tx, "1").await?, "none before");
+        assert!(!kms.key_exists(&tx, "1").await?, "the read made none");
+        kms.create_kek(&tx, "1", &KekOptions::default()).await?;
+        assert!(kms.key_exists(&tx, "1").await?, "one after");
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 #[ignore = "needs a live PostgreSQL"]
 async fn a_generated_dek_is_thirty_two_bytes_and_unwraps() {

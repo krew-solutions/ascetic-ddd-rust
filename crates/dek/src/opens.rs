@@ -12,19 +12,19 @@
 //! stage's outage, never a Tenant's shredding (the discriminator's runtime
 //! sentinel).
 
-use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
+use std::collections::{HashMap, VecDeque};
 use std::hash::BuildHasher as _;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
-use ascetic_ddd_bus::{self as bus, BoxError, Permanent};
+use ascetic_ddd_bus::{self as bus, BoxError, Cause, Permanent};
 use ascetic_ddd_kms::{Class, Error as KmsError, Key, KeyManagementService};
 use ascetic_ddd_session::SessionPool;
 use tokio::sync::{Notify, watch};
 
-use crate::draws::{Landed, Last, Parts, Unavailable, causes};
+use crate::draws::{Landed, Last, Parts, Unavailable, causes, unavailable_cause};
 use crate::pace::{Generation, Outcome, Reason, Scope, Start};
 use crate::unwraps::{Opened, Opening, Unwraps};
 
@@ -34,9 +34,17 @@ type Wrapped = Arc<[u8]>;
 struct State {
     core: Unwraps<String, Wrapped, Key, Last>,
     flights: HashMap<Generation, watch::Sender<()>>,
-    /// The sentinel's key, as last drawn: when, and whether it was there.
+    /// The sentinel's key, as last read: when, and whether it was there.
     sentinel: Option<(Instant, Option<bool>)>,
+    /// The cause each wrapped key the KMS refused was refused under, so that
+    /// its memory tells the same cause (seedwork ADR-0042 decision 9): the
+    /// core keeps the refusal, by wrapped key, not why. At most
+    /// [`REFUSALS`], the oldest out.
+    refusals: VecDeque<(Wrapped, Cause)>,
 }
+
+/// The most refused wrapped keys whose cause an opening end keeps.
+const REFUSALS: usize = 1_024;
 
 /// What an opening end holds now.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -143,6 +151,7 @@ where
                 core: Unwraps::new(opening),
                 flights: HashMap::new(),
                 sentinel: None,
+                refusals: VecDeque::new(),
             }),
             sentinel,
             seed: RandomState::new(),
@@ -211,7 +220,15 @@ where
             let generation = match answer {
                 Opened::Hit(key) => return Ok(key),
                 Opened::Gone => return Err(gone(tenant)),
-                Opened::Rejected => return Err(rejected(tenant)),
+                Opened::Rejected => {
+                    let cause = self
+                        .lock()
+                        .refusals
+                        .iter()
+                        .find(|(refused, _)| *refused == wrapped)
+                        .map(|(_, cause)| *cause);
+                    return Err(rejected(cause));
+                }
                 Opened::Refused {
                     reason,
                     retry_after,
@@ -288,7 +305,7 @@ where
             Scope::Tenant => bus::Scope::Tenant,
         };
         bus::Unavailable::new(
-            causes::UNAVAILABLE,
+            unavailable_cause(last.as_ref().map(|last| (last.landed, last.cause))),
             bus_scope,
             retry_after,
             Unavailable {
@@ -364,9 +381,11 @@ where
         true
     }
 
-    /// Whether the sentinel's key is there, drawn at most once per `gone`:
+    /// Whether the sentinel's key is there, read at most once per `gone`:
     /// `None` when it could not be told, and with no sentinel `Some(true)`,
-    /// every Gone the tenant's.
+    /// every Gone the tenant's. A read, not a draw: a service may unwrap on
+    /// the channels it only receives and not draw there (seedwork ADR-0042
+    /// decision 9).
     async fn sentinel_present(&self) -> Option<bool> {
         let Some(sentinel) = &self.sentinel else {
             return Some(true);
@@ -377,16 +396,15 @@ where
         {
             return present;
         }
-        let drawn = tokio::time::timeout(
+        let read = tokio::time::timeout(
             self.opening.draw,
             self.parts
                 .sessions
-                .session(async |session| self.parts.kms.generate_dek(&session, sentinel).await),
+                .session(async |session| self.parts.kms.key_exists(&session, sentinel).await),
         )
         .await;
-        let present = match drawn {
-            Ok(Ok(_)) => Some(true),
-            Ok(Err(error)) if error.class() == Class::Gone => Some(false),
+        let present = match read {
+            Ok(Ok(present)) => Some(present),
             Ok(Err(_)) | Err(_) => None,
         };
         if present == Some(false) {
@@ -416,12 +434,22 @@ where
             let mut state = self.lock();
             let landing = state.flights.remove(&generation);
             let key = tenant.to_owned();
+            if let (Landed::Refused, Some(error)) = (landed, error) {
+                state.refusals.retain(|(refused, _)| refused != wrapped);
+                state
+                    .refusals
+                    .push_back((Arc::clone(wrapped), causes::of(error)));
+                while state.refusals.len() > REFUSALS {
+                    state.refusals.pop_front();
+                }
+            }
             state
                 .core
                 .landed(&key, wrapped, generation, outcome, at, random);
             if landing.is_some() && landed != Landed::Drawn {
                 let last = Last {
                     landed,
+                    cause: error.map_or(causes::UNAVAILABLE, causes::of),
                     text: error.map_or_else(|| format!("{landed:?}"), ToString::to_string),
                 };
                 state.core.note(&key, Some(last));
@@ -435,7 +463,7 @@ where
         self.tick.notify_one();
         drop(retired);
         if landed != Landed::Drawn {
-            log::debug!("a data key of {tenant} not unwrapped: {landed:?}");
+            log::debug!("a tenant's data key not unwrapped: {landed:?}");
         }
     }
 
@@ -499,11 +527,12 @@ fn gone(tenant: &str) -> BoxError {
     .into()
 }
 
-/// A wrapped key the KMS refused, within its memory.
-fn rejected(tenant: &str) -> BoxError {
+/// A wrapped key the KMS refused, within its memory, under the refusal's
+/// cause as it was kept; its text names no tenant.
+fn rejected(cause: Option<Cause>) -> BoxError {
     Permanent::because(
-        causes::REFUSED,
-        format!("the KMS refused to unwrap this key of {tenant}, a while ago"),
+        cause.unwrap_or(causes::CIPHERTEXT),
+        "the KMS refused to unwrap this key, a while ago",
     )
     .into()
 }

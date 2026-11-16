@@ -32,6 +32,8 @@ enum Unwrap {
     Gone,
     Forbidden,
     Unreachable,
+    /// A failure the KMS did not explain nor the stage attribute.
+    Unexplained,
 }
 
 /// A KMS whose draws make a key whose wrapped form is itself, and whose
@@ -42,7 +44,7 @@ struct Scripted {
     latency: Mutex<Duration>,
     counted: Mutex<HashMap<Vec<u8>, u32>>,
     sentinel_there: AtomicBool,
-    sentinel_draws: AtomicU32,
+    sentinel_reads: AtomicU32,
     drawn: AtomicU32,
 }
 
@@ -53,7 +55,7 @@ impl Scripted {
             latency: Mutex::new(Duration::from_millis(10)),
             counted: Mutex::new(HashMap::new()),
             sentinel_there: AtomicBool::new(true),
-            sentinel_draws: AtomicU32::new(0),
+            sentinel_reads: AtomicU32::new(0),
             drawn: AtomicU32::new(0),
         })
     }
@@ -69,6 +71,15 @@ struct Kms(Arc<Scripted>);
 impl KeyManagementService<MemorySession> for Kms {
     async fn encrypt_dek(&self, _: &MemorySession, _: &str, dek: &Key) -> Result<Vec<u8>, Error> {
         Ok(dek.as_bytes().to_vec())
+    }
+
+    /// The sentinel's key read: there or not.
+    async fn key_exists(&self, _: &MemorySession, tenant_id: &str) -> Result<bool, Error> {
+        if tenant_id == SENTINEL {
+            self.0.sentinel_reads.fetch_add(1, Ordering::SeqCst);
+            return Ok(self.0.sentinel_there.load(Ordering::SeqCst));
+        }
+        Ok(true)
     }
 
     async fn decrypt_dek(
@@ -106,6 +117,9 @@ impl KeyManagementService<MemorySession> for Kms {
             Unwrap::Unreachable => Err(Error::Session(ascetic_ddd_session::SessionError::Acquire(
                 "down".into(),
             ))),
+            Unwrap::Unexplained => {
+                Err(Error::Session(ascetic_ddd_session::SessionError::Abandoned))
+            }
         }
     }
 
@@ -115,13 +129,12 @@ impl KeyManagementService<MemorySession> for Kms {
         tenant_id: &str,
     ) -> Result<(Key, Vec<u8>), Error> {
         if tenant_id == SENTINEL {
-            self.0.sentinel_draws.fetch_add(1, Ordering::SeqCst);
-            if !self.0.sentinel_there.load(Ordering::SeqCst) {
-                return Err(Error::KekNotFound {
-                    tenant_id: tenant_id.to_owned(),
-                    key_version: None,
-                });
-            }
+            // The opening end's service only unwraps on the channel: its
+            // policy refuses a draw (the host's ADR-0071 decision 4).
+            return Err(Error::Forbidden {
+                tenant_id: tenant_id.to_owned(),
+                operation: "datakey",
+            });
         }
         let n = self.0.drawn.fetch_add(1, Ordering::SeqCst) + 1;
         let mut key = vec![0u8; 32];
@@ -250,7 +263,7 @@ async fn a_key_gone_is_told_for_good_unless_the_sentinel_is_gone_too() {
         "another tenant shredded"
     );
     assert_eq!(
-        kms.sentinel_draws.load(Ordering::SeqCst),
+        kms.sentinel_reads.load(Ordering::SeqCst),
         1,
         "the sentinel drawn once per gone, for both"
     );
@@ -265,9 +278,10 @@ async fn a_key_gone_is_told_for_good_unless_the_sentinel_is_gone_too() {
     assert_eq!(unavailable(&refused).scope(), BusScope::Stage);
 }
 
-/// A wrapped key the KMS refused is told for good under `kms.refused` and
-/// remembered: asked again within its memory, no unwrap; the tenant's other
-/// keys still unwrap.
+/// A wrapped key the KMS refused is told for good under the cause of its
+/// remedy, `kms.forbidden` here, and remembered: asked again within its
+/// memory, no unwrap, and still under that cause; the tenant's other keys
+/// still unwrap.
 #[tokio::test(start_paused = true)]
 async fn a_refused_wrapped_key_is_remembered_and_the_tenant_s_others_open() {
     let kms = Scripted::new([Unwrap::Forbidden]);
@@ -277,7 +291,7 @@ async fn a_refused_wrapped_key_is_remembered_and_the_tenant_s_others_open() {
     for _ in 0..3 {
         assert_eq!(
             cause_of_permanent(&stage.inbound(refused.clone()).await),
-            Some("kms.refused")
+            Some("kms.forbidden")
         );
     }
     assert_eq!(stage.inbound(other).await.unwrap().payload(), b"payload 2");
@@ -300,6 +314,19 @@ async fn a_kms_out_of_reach_backs_the_tenant_off_and_says_when_to_ask_again() {
             .is_some_and(|after| after > Duration::ZERO)
     );
     assert_eq!(kms.unwraps(), 1, "no unwrap while it backs off");
+}
+
+/// The open refused after a failure the KMS did not explain names that, by
+/// the landing's own cause, not the KMS's unavailability: the operator's
+/// remedy differs (seedwork ADR-0042 decision 9).
+#[tokio::test(start_paused = true)]
+async fn an_unexplained_failure_is_told_under_its_own_cause() {
+    let kms = Scripted::new([Unwrap::Unexplained]);
+    let stage = stage(&kms, Duration::from_secs(2));
+    let message = sealed(&stage, "a", 1).await;
+    let _ = stage.inbound(message.clone()).await;
+    let again = stage.inbound(message).await;
+    assert_eq!(unavailable(&again).cause().as_str(), "kms.unexplained");
 }
 
 /// A key leaves memory at its end on a quiet stage: the tick wipes it.

@@ -44,17 +44,60 @@ impl fmt::Debug for Served {
 
 /// The causes the stage names its verdicts under (ADR-0040 decision 2).
 pub mod causes {
+    use ascetic_ddd_kms::{Class, Error as KmsError};
+
     use super::{Cause, cause};
 
     /// The tenant's key is not there: shredded, or never made.
     pub const GONE: Cause = cause!("kms.gone");
-    /// The KMS refuses the operation for the context: a policy's verdict,
-    /// which a deploy mends.
-    pub const REFUSED: Cause = cause!("kms.refused");
+    /// The KMS refuses the operation for the context, the key there: a
+    /// policy's verdict, which a deploy mends.
+    pub const FORBIDDEN: Cause = cause!("kms.forbidden");
+    /// The version the wrapped key names is retired, or was never made.
+    pub const KEY_VERSION: Cause = cause!("kms.key_version");
+    /// A ciphertext or a signature that does not open under the key.
+    pub const CIPHERTEXT: Cause = cause!("kms.ciphertext");
+    /// Bytes the KMS was handed, or answered, that are not what they should
+    /// be.
+    pub const KMS_MALFORMED: Cause = cause!("kms.malformed");
+    /// An algorithm or an operation the KMS does not serve.
+    pub const UNSUPPORTED: Cause = cause!("kms.unsupported");
+    /// A key that exists made otherwise than asked: custody's.
+    pub const CONFLICT: Cause = cause!("kms.conflict");
     /// The KMS serves no key now.
     pub const UNAVAILABLE: Cause = cause!("kms.unavailable");
+    /// The KMS refused the caller's own credentials: a token expired or
+    /// revoked.
+    pub const UNAUTHORIZED: Cause = cause!("kms.unauthorized");
+    /// What the KMS did not explain, nor the stage attribute.
+    pub const UNEXPLAINED: Cause = cause!("kms.unexplained");
     /// The message cannot be sealed or opened for its own values.
     pub const MALFORMED: Cause = cause!("dek.malformed");
+
+    /// The cause of a KMS's failure, by its remedy (seedwork ADR-0042
+    /// decision 9): what an operator mends, never the error's text.
+    #[must_use]
+    pub fn of(error: &KmsError) -> Cause {
+        match error {
+            KmsError::KekNotFound {
+                key_version: Some(_),
+                ..
+            }
+            | KmsError::WrongKeyVersion { .. }
+            | KmsError::NoKeyOfVersion(_) => KEY_VERSION,
+            KmsError::Decrypt | KmsError::InvalidSignature => CIPHERTEXT,
+            KmsError::Malformed(_) => KMS_MALFORMED,
+            KmsError::UnsupportedAlgorithm(_) | KmsError::Unsupported(_) => UNSUPPORTED,
+            KmsError::Conflict { .. } => CONFLICT,
+            KmsError::Forbidden { .. } => FORBIDDEN,
+            other if other.unauthorized() => UNAUTHORIZED,
+            other => match other.class() {
+                Class::Gone => GONE,
+                Class::Unavailable => UNAVAILABLE,
+                Class::Refused | Class::Moment => UNEXPLAINED,
+            },
+        }
+    }
 }
 
 /// What the stage's last draw for a tenant came to, when it failed.
@@ -62,6 +105,9 @@ pub mod causes {
 pub struct Last {
     /// Its landing.
     pub landed: Landed,
+    /// Its cause, by remedy ([`causes::of`]): a landing with no error, the
+    /// KMS not answering, is [`causes::UNAVAILABLE`].
+    pub cause: Cause,
     /// Its error's words, for the log; never a verdict's ground.
     pub text: String,
 }
@@ -91,17 +137,27 @@ impl Unavailable {
     /// message the inbox is to hold, spend or park as it says.
     #[must_use]
     pub fn verdict(self) -> BoxError {
-        match self.last.as_ref().map(|last| last.landed) {
-            Some(Landed::Refused) => Permanent::because(causes::REFUSED, self).into(),
+        let last = self.last.as_ref().map(|last| (last.landed, last.cause));
+        match last {
+            Some((Landed::Refused, cause)) => Permanent::because(cause, self).into(),
             _ => {
                 let scope = match self.scope {
                     Scope::Stage => bus::Scope::Stage,
                     Scope::Tenant => bus::Scope::Tenant,
                 };
                 let retry_after = self.retry_after;
-                bus::Unavailable::new(causes::UNAVAILABLE, scope, retry_after, self).into()
+                bus::Unavailable::new(unavailable_cause(last), scope, retry_after, self).into()
             }
         }
+    }
+}
+
+/// The cause an `Unavailable` names: the last landing's when it failed for
+/// want of an answer or a credential, else the KMS's unavailability.
+pub(crate) fn unavailable_cause(last: Option<(Landed, Cause)>) -> Cause {
+    match last {
+        Some((Landed::Unavailable | Landed::Moment, cause)) => cause,
+        _ => causes::UNAVAILABLE,
     }
 }
 
@@ -739,10 +795,12 @@ where
                     (Landed::Drawn, _) => None,
                     (landed, Some(error)) => Some(Last {
                         landed,
+                        cause: causes::of(error),
                         text: error.to_string(),
                     }),
                     (landed, None) => Some(Last {
                         landed,
+                        cause: causes::UNAVAILABLE,
                         text: format!("{landed:?}"),
                     }),
                 };
@@ -775,16 +833,20 @@ where
             _ => String::new(),
         };
         match (landed, failing_before, told) {
+            // No Tenant and no error's text in a line: a key's name and a
+            // path carry the Tenant (seedwork ADR-0042 decision 9).
             (Landed::Drawn, true, Some(_)) => {
-                log::info!("data keys of {tenant} drawn again{quiet}");
+                log::info!("a tenant's data keys drawn again{quiet}");
             }
             (Landed::Drawn, _, _) => {}
             (_, false, Some(_)) => log::warn!(
-                "a data key of {tenant} was not drawn: {landed:?}{}{quiet}",
-                error.map(|e| format!(" ({e})")).unwrap_or_default()
+                "a tenant's data key was not drawn: {landed:?}{}{quiet}",
+                error
+                    .map(|e| format!(" ({})", causes::of(e)))
+                    .unwrap_or_default()
             ),
             (_, _, _) => {
-                log::debug!("a data key of {tenant} not drawn: {landed:?}, {failures} in a row")
+                log::debug!("a tenant's data key not drawn: {landed:?}, {failures} in a row")
             }
         }
     }

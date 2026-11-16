@@ -146,6 +146,17 @@ pub enum Class {
 }
 
 impl Error {
+    /// Whether this is a refusal of the caller's own credentials: a `403`
+    /// the key's read did not explain, a token expired or revoked.
+    #[must_use]
+    pub fn unauthorized(&self) -> bool {
+        #[cfg(feature = "vault")]
+        if let Error::Vault { status: 403, .. } = self {
+            return true;
+        }
+        false
+    }
+
     /// What this error means for whoever acts on it.
     #[must_use]
     pub fn class(&self) -> Class {
@@ -258,12 +269,14 @@ impl fmt::Display for Error {
             #[cfg(feature = "vault")]
             Error::Transport(error) => write!(f, "vault unreachable: {error}"),
             #[cfg(feature = "vault")]
+            // No path: a key's name is its tenant's (seedwork ADR-0042
+            // decision 9), and this text reaches logs and stored errors.
             Error::Vault {
                 status,
                 method,
-                path,
                 message,
-            } => write!(f, "vault: {status} for {method} {path}: {message}"),
+                ..
+            } => write!(f, "vault: {status} for {method}: {message}"),
         }
     }
 }

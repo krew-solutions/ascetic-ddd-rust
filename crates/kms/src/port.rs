@@ -50,6 +50,15 @@ pub trait KeyManagementService<S: Session>: Send + Sync {
         tenant_id: &str,
         encrypted_dek: &[u8],
     ) -> impl Future<Output = Result<Vec<u8>, Error>> + Send;
+
+    /// Whether the tenant has a key at all, by a read: an operation a
+    /// service holds on the channels it only receives, where it may unwrap
+    /// and not draw (seedwork ADR-0042 decision 9). It makes no key.
+    fn key_exists(
+        &self,
+        session: &S,
+        tenant_id: &str,
+    ) -> impl Future<Output = Result<bool, Error>> + Send;
 }
 
 /// What a tenant's KEK is made with, by whoever has custody of it.

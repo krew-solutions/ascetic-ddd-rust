@@ -111,6 +111,10 @@ impl KeyManagementService<MemorySession> for Kms {
         Ok(dek.as_bytes().to_vec())
     }
 
+    async fn key_exists(&self, _: &MemorySession, _: &str) -> Result<bool, Error> {
+        Ok(true)
+    }
+
     async fn decrypt_dek(&self, _: &MemorySession, _: &str, wrapped: &[u8]) -> Result<Key, Error> {
         Ok(Key::new(wrapped.to_vec()))
     }
@@ -354,8 +358,8 @@ async fn a_sealing_side_refusal_backs_off_and_is_never_for_good() {
             .verdict()
             .downcast_ref::<Permanent>()
             .map(Permanent::cause),
-        Some(ascetic_ddd_dek::causes::REFUSED),
-        "the bus's verdict: for good, under kms.refused, for a deploy to mend"
+        Some(ascetic_ddd_dek::causes::FORBIDDEN),
+        "the bus's verdict: for good, under kms.forbidden, for a deploy to mend"
     );
 }
 
@@ -959,8 +963,10 @@ fn a_sealing_whose_keys_would_outlive_its_ceiling_is_refused() {
     );
 }
 
-/// The log lines a test binary wrote: one logger for the process.
-static LOGGED: Mutex<Vec<(log::Level, String)>> = Mutex::new(Vec::new());
+/// The log lines a test binary wrote, with the thread that wrote each: one
+/// logger for the process, and a test on a current-thread runtime reads its
+/// own by its thread.
+static LOGGED: Mutex<Vec<(std::thread::ThreadId, log::Level, String)>> = Mutex::new(Vec::new());
 
 struct Logged;
 
@@ -969,10 +975,11 @@ impl log::Log for Logged {
         true
     }
     fn log(&self, record: &log::Record<'_>) {
-        LOGGED
-            .lock()
-            .unwrap()
-            .push((record.level(), record.args().to_string()));
+        LOGGED.lock().unwrap().push((
+            std::thread::current().id(),
+            record.level(),
+            record.args().to_string(),
+        ));
     }
     fn flush(&self) {}
 }
@@ -987,28 +994,43 @@ async fn an_outage_of_every_tenant_is_logged_a_line_at_a_time() {
     for n in 0..50 {
         let _ = seal(&stage, &format!("told-{n}"), n).await;
     }
-    let warned = LOGGED
-        .lock()
-        .unwrap()
+    const LINE: &str = "a tenant's data key was not drawn";
+    let this = std::thread::current().id();
+    let ours = || -> Vec<(log::Level, String)> {
+        LOGGED
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(thread, _, _)| *thread == this)
+            .map(|(_, level, line)| (*level, line.clone()))
+            .collect()
+    };
+    let warned = ours()
         .iter()
-        .filter(|(level, line)| *level == log::Level::Warn && line.contains("told-"))
+        .filter(|(level, line)| *level == log::Level::Warn && line.contains(LINE))
         .count();
     assert_eq!(warned, 1, "fifty tenants failing at once: one line");
     advance(Duration::from_secs(11)).await;
     let _ = seal(&stage, "told-late", 99).await;
     sleep(Duration::from_millis(1)).await;
-    let last = LOGGED
-        .lock()
-        .unwrap()
+    let logged = ours();
+    let last = logged
         .iter()
         .rev()
-        .find(|(level, line)| *level == log::Level::Warn && line.contains("told-"))
+        .find(|(level, line)| *level == log::Level::Warn && line.contains(LINE))
         .map(|(_, line)| line.clone())
         .unwrap();
     assert!(
         last.contains("49 more"),
         "the next line counts the quiet: {last}"
     );
+    // No line names a tenant: a key's name and a path carry it (seedwork
+    // ADR-0042 decision 9).
+    let named: Vec<_> = logged
+        .iter()
+        .filter(|(_, line)| line.contains("told-"))
+        .collect();
+    assert!(named.is_empty(), "a tenant named in the log: {named:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

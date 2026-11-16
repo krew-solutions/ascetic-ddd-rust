@@ -889,6 +889,13 @@ where
     S: Session + HttpAccess + Sync,
     S::Client: VaultTransport,
 {
+    async fn key_exists(&self, session: &S, tenant_id: &str) -> Result<bool, Error> {
+        Ok(self
+            .read_named(session, &Self::key_name(tenant_id))
+            .await?
+            .is_some())
+    }
+
     async fn encrypt_dek(&self, session: &S, tenant_id: &str, dek: &Key) -> Result<Vec<u8>, Error> {
         self.ensure_key(session, tenant_id).await?;
         let path = format!("/encrypt/{}", Self::key_name(tenant_id));

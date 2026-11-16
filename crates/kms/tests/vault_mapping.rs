@@ -1258,3 +1258,56 @@ async fn an_answer_that_cannot_be_read_is_of_the_moment_never_the_request_s_faul
     let error = signed.unwrap_err();
     assert_eq!(error.class(), Class::Moment, "{error}");
 }
+
+/// Whether a tenant has a key is one read of it, which makes none (seedwork
+/// ADR-0042 decision 9): a service that may only unwrap on a channel holds
+/// the read, and an opening end tells a key gone from a mount wiped by it.
+#[tokio::test]
+async fn whether_a_tenant_has_a_key_is_one_read_that_makes_none() {
+    let transport = Scripted::answering(vec![
+        (
+            "GET",
+            "/keys/sentinel",
+            200,
+            json!({ "data": { "latest_version": 1 } }),
+        ),
+        ("GET", "/keys/shredded", 404, json!({ "errors": [] })),
+    ]);
+    let (there, gone) = with(&transport, |tx, kms| async move {
+        Ok((
+            kms.key_exists(&tx, "sentinel").await?,
+            kms.key_exists(&tx, "shredded").await?,
+        ))
+    })
+    .await
+    .unwrap();
+    assert!(there, "a key there reads as there");
+    assert!(!gone, "a key not there reads as not there");
+    let asked = transport.asked();
+    assert_eq!(asked.len(), 2, "two reads, nothing made: {asked:?}");
+    assert!(asked.iter().all(|(method, _, _)| method == "GET"));
+}
+
+/// A refusal Vault did not explain names no path in its text — a key's name
+/// is its tenant's — and a `403` of it is the caller's credentials.
+#[tokio::test]
+async fn an_unexplained_refusal_names_no_path_and_a_403_is_unauthorized() {
+    let transport = Scripted::answering(vec![(
+        "GET",
+        "/keys/tenant-secret",
+        403,
+        json!({ "errors": ["permission denied"] }),
+    )]);
+    let error = with(&transport, |tx, kms| async move {
+        kms.key_exists(&tx, "tenant-secret").await
+    })
+    .await
+    .unwrap_err();
+    let text = error.to_string();
+    assert!(
+        !text.contains("tenant-secret"),
+        "a tenant in the text: {text}"
+    );
+    assert!(text.contains("403") && text.contains("GET"), "{text}");
+    assert!(error.unauthorized(), "{error:?}");
+}
