@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc b618d10f72c22898a6059f13c2af2d3893f213b3d96112bc7552bd0fc5444ab5 # shrinks to steps = [Seal(2), Advance(3001), Land(2, 0, false), Seal(0), Seal(0), Seal(0), Advance(625), Sweep, Left(2)], random = 4611686018427387904
 cc d453b0cc772586dfbb15a36d751c37e2ef14daaad8fe1e6bc7bfc81c7c2293dd # shrinks to steps = [Seal(1), Seal(1), Seal(1), Seal(1), Seal(2), Left(2), Advance(3001), Land(2, 0, false), Advance(828)], random = 2449958197289549824
+cc ef90e39b0d15e53e3d88f1beeb33483c3a0dd4effc6e943415ca147afe39e5f7 # shrinks to steps = [Advance(0), Seal(1), Seal(1), Advance(0), Advance(0), Seal(1), Seal(2), Land(2, 0, false), Seal(2), Seal(2), Seal(2), Seal(2), Advance(3001), Land(2, 0, false), Advance(2045), Advance(6753), Left(2)], random = 11979575008805519360

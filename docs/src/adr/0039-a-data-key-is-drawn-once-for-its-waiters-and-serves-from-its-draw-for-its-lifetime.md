@@ -445,3 +445,15 @@ ADR-0017 (amended: decision 8 above replaces its point 5's reading of a
   by uses. Decisions 2, 3, 6, 8, 10 and 12 say what changed;
   `Cached::purge`'s caller moved to § Owed 7.
 - 2026-11-16: Owed 4 names its ADR, ADR-0040 (Proposed).
+- 2026-11-16: A key whose renewal failed outlived its end on a quiet
+  stage. The core's property found it (regression `ef90e39b…`).
+  - A failed renewal leaves the key in service with the failure's
+    memory, and that memory may end before the key does.
+  - The slot's next change was the earlier of the two, dropped when it
+    was past, so the key's end went with it. No sweep reached the key,
+    and it stayed in memory until the Tenant's next seal.
+  - The fix: each change is weighed only while it is ahead.
+  - The property now also reads each change off the slot itself, not
+    through the function it checks.
+  - `a_key_whose_renewal_failed_still_leaves_memory_at_its_end` and the
+    property both kill the defect.
