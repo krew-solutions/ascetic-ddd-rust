@@ -232,6 +232,9 @@ impl InboxObserver for JsonTrace {
             "attempts": event.attempts,
             "parked": event.parked,
             "permanent": event.permanent,
+            "cause": event.cause.as_str(),
+            "held": event.held,
+            "past_budget": event.past_budget,
             "retry_after_ms": event.retry_after.as_millis() as u64,
             "error": event.error.to_string(),
         }));

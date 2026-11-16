@@ -249,6 +249,10 @@ def inbox_steps(events, names=None, by_message_id=False):
             yield record(side="inbox", event="wait", slot=slot, of=slots, msg=row(e["id"], "a wait"),
                          dep=dependency(e["dependency"]), snap=snapshot(e))
         elif kind == "failed":
+            if e.get("held"):
+                # a hold spends no attempt (ADR-0040 decision 4): Inbox.tla has
+                # no Defer yet, and a hold read as a failure would fit wrongly
+                raise SystemExit(f"slot {slot} held a row for its stage's outage: not modelled yet")
             failed[slot] = (e["attempts"], e["parked"])
         elif kind == "handled":
             if e["ok"]:

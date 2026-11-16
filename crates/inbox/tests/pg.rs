@@ -541,7 +541,8 @@ async fn a_failing_subscriber_leaves_the_message_unprocessed() {
         f.dispatch(&failing).await,
         Outcome::Failed {
             attempts: 1,
-            parked: false
+            parked: false,
+            held: false
         }
     );
     assert_eq!(f.processed().await, 0);
@@ -601,14 +602,16 @@ async fn a_poison_message_is_parked_after_its_attempts_and_the_partition_flows()
         f.dispatch(&subscriber).await,
         Outcome::Failed {
             attempts: 1,
-            parked: false
+            parked: false,
+            held: false
         }
     );
     assert_eq!(
         f.dispatch(&subscriber).await,
         Outcome::Failed {
             attempts: 2,
-            parked: true
+            parked: true,
+            held: false
         }
     );
     assert_eq!(f.dispatch(&subscriber).await, Outcome::Processed);
@@ -641,7 +644,8 @@ async fn a_message_in_backoff_holds_its_partition() {
         f.dispatch(&subscriber).await,
         Outcome::Failed {
             attempts: 1,
-            parked: false
+            parked: false,
+            held: false
         }
     );
     assert_eq!(
@@ -668,7 +672,8 @@ async fn an_unparked_message_is_tried_again() {
         f.dispatch(&subscriber).await,
         Outcome::Failed {
             attempts: 1,
-            parked: true
+            parked: true,
+            held: false
         }
     );
     assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
@@ -700,7 +705,8 @@ async fn a_resolved_message_releases_its_dependents() {
         f.dispatch(&subscriber).await,
         Outcome::Failed {
             attempts: 1,
-            parked: true
+            parked: true,
+            held: false
         }
     );
     assert_eq!(
@@ -1178,7 +1184,8 @@ async fn a_permanent_failure_parks_the_message_at_once() {
         f.dispatch(&judging).await,
         Outcome::Failed {
             attempts: 1,
-            parked: true
+            parked: true,
+            held: false
         }
     );
     assert_eq!(f.dispatch(&judging).await, Outcome::Processed, "b@1 flows");
@@ -1511,7 +1518,8 @@ async fn the_observer_sees_the_protocol() {
         f.dispatch(&flaky).await,
         Outcome::Failed {
             attempts: 1,
-            parked: false
+            parked: false,
+            held: false
         }
     );
     assert_eq!(f.dispatch(&flaky).await, Outcome::Processed);
@@ -1741,6 +1749,10 @@ fn the_released_migrations_keep_their_checksums() {
             (
                 "20261108T000000Z_unreadable_at".to_owned(),
                 "fnv1a64:d9799e13a5481289:68".to_owned()
+            ),
+            (
+                "20261116T000000Z_causes".to_owned(),
+                "fnv1a64:c5ba526461649816:170".to_owned()
             )
         ]
     );
@@ -2387,15 +2399,17 @@ async fn a_failure_with_a_nul_is_recorded_and_the_row_tried_again() {
     let f = fixture("nul_failure").await;
     f.publish(&[message("a", 1)]).await;
     let failing = |_: &PgSession, _: &InboxMessage| {
-        std::future::ready(Err::<(), Failure>(Failure::Transient(
-            format!("unknown variant `\0{}`", "x".repeat(10_000)).into(),
-        )))
+        std::future::ready(Err::<(), Failure>(Failure::from(format!(
+            "unknown variant `\0{}`",
+            "x".repeat(10_000)
+        ))))
     };
     assert!(matches!(
         f.dispatch(failing).await,
         Outcome::Failed {
             attempts: 1,
-            parked: false
+            parked: false,
+            held: false
         }
     ));
     let client = pool().get().await.unwrap();
@@ -2575,8 +2589,28 @@ async fn a_row_parked_at_once_is_superseded_by_the_next_arrival_at_its_identity(
         "repaired",
     )
     .with_metadata(json!({ "message_id": "00000000-0000-4000-b000-000000000001" }));
+    // as a row that failed and held before a host's lower bounds made it
+    // unreadable: the supersede ends what its failures wrote (ADR-0040
+    // decision 6)
+    f.execute(
+        "UPDATE {table} SET last_cause = 'kms.unavailable', unavailable_since = now() \
+         WHERE unreadable_at IS NOT NULL",
+    )
+    .await;
     f.publish(std::slice::from_ref(&repaired)).await;
     assert_eq!(f.rows().await, 2, "superseded in place");
+    let causes = format!(
+        "SELECT count(*) FROM {} WHERE last_cause IS NOT NULL OR unavailable_since IS NOT NULL",
+        f.table
+    );
+    let left: i64 = f
+        .sessions
+        .session(async |session| {
+            Ok::<_, Error>(session.connection().query_one(&causes, &[]).await?.get(0))
+        })
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "the supersede clears the causes and the hold");
     while f.dispatch(&subscriber).await != Outcome::Nothing {}
     assert_eq!(*seen.lock().unwrap(), ["deep@1", "waiter@1"]);
     assert!(f.parked_messages().await.is_empty());
@@ -2774,13 +2808,14 @@ async fn a_failure_past_the_attempts_range_saturates() {
         .await
         .unwrap();
     let failing = |_: &PgSession, _: &InboxMessage| {
-        std::future::ready(Err::<(), Failure>(Failure::Transient("again".into())))
+        std::future::ready(Err::<(), Failure>(Failure::from("again")))
     };
     assert!(matches!(
         f.dispatch(failing).await,
         Outcome::Failed {
             attempts: 2_147_483_647,
-            parked: false
+            parked: false,
+            held: false
         }
     ));
 }

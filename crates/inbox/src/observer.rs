@@ -25,6 +25,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use ascetic_ddd_bus::Cause;
+
 use crate::error::{BoxError, Error};
 use crate::intake::Reason;
 use crate::message::{CausalDependency, InboxMessage};
@@ -202,13 +204,22 @@ pub struct Failed<'a> {
     pub message: &'a InboxMessage,
     /// What the subscriber returned.
     pub error: &'a BoxError,
+    /// Why, by name: a column's and a label's value, never the error's text
+    /// (ADR-0040 decision 2).
+    pub cause: Cause,
     /// The subscriber's verdict that no retry will succeed (ADR-0010).
     pub permanent: bool,
-    /// Failed attempts so far, this one included.
+    /// Failed attempts so far, this one included when it spent one.
     pub attempts: u32,
     /// Whether this attempt was the last: the message is parked, its
     /// attempts run out or the failure permanent.
     pub parked: bool,
+    /// Whether the message holds its slot for its stage's outage, its
+    /// attempts untouched (ADR-0040 decision 4).
+    pub held: bool,
+    /// Whether it has held past its budget, the channel's evidence not
+    /// refuting the outage: a page.
+    pub past_budget: bool,
     /// How long the message waits before it may be taken again.
     pub retry_after: Duration,
 }
@@ -393,9 +404,12 @@ mod tests {
             slot: 0,
             message: &message,
             error: &error,
+            cause: Cause::UNEXPLAINED,
             permanent: false,
             attempts: 1,
             parked: false,
+            held: false,
+            past_budget: false,
             retry_after: Duration::ZERO,
         });
         observer.on_expired(&Expired { messages: none });

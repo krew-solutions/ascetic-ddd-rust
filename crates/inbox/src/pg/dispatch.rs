@@ -256,14 +256,20 @@ where
                                 Ok((Some(slot), Outcome::Processed))
                             }
                             Some(failure) => {
-                                let retry_after = (self.retries.backoff)(message.attempts + 1);
                                 // No scope of its own either: the record binds the
                                 // place and the failure's text made storable
                                 // (ADR-0037 decision 7).
-                                let (attempts, parked) = self
-                                    .record_failure(&tx, &place, &failure, retry_after)
+                                let recorded = self
+                                    .record_failure(&tx, &place, &failure, message.attempts)
                                     .await
                                     .map_err(in_slot)?;
+                                let (attempts, parked, held, retry_after) = (
+                                    recorded.attempts,
+                                    recorded.parked,
+                                    recorded.held,
+                                    recorded.retry_after,
+                                );
+                                let cause = failure.cause();
                                 // The `log` facade is the observer everyone has: a
                                 // parked message must not be silent when no
                                 // observer of ours is attached. An attempt is
@@ -287,27 +293,38 @@ where
                                 );
                                 if failure.is_permanent() {
                                     log::error!(
-                                        "inbox: the message of {place} parked, the subscriber's verdict is permanent"
+                                        "inbox: the message of {place} parked, the subscriber's verdict is permanent ({cause})"
                                     );
                                 } else if parked {
                                     log::error!(
-                                        "inbox: the message of {place} parked after {attempts} failed attempts"
+                                        "inbox: the message of {place} parked after {attempts} failed attempts ({cause})"
+                                    );
+                                } else if held && recorded.past_budget {
+                                    log::error!(
+                                        "inbox: the message of {place} holds its slot past its budget, its stage unavailable ({cause}), next in {retry_after:?}"
+                                    );
+                                } else if held {
+                                    log::warn!(
+                                        "inbox: the message of {place} holds its slot, its stage unavailable ({cause}), next in {retry_after:?}"
                                     );
                                 } else {
                                     log::warn!(
-                                        "inbox: attempt {attempts} on the message of {place} failed, next in {retry_after:?}"
+                                        "inbox: attempt {attempts} on the message of {place} failed ({cause}), next in {retry_after:?}"
                                     );
                                 }
                                 self.observer.on_failed(&Failed {
                                     slot,
                                     message: &message,
                                     error: failure.error(),
+                                    cause,
                                     permanent: failure.is_permanent(),
                                     attempts,
                                     parked,
+                                    held,
+                                    past_budget: recorded.past_budget,
                                     retry_after,
                                 });
-                                Ok((Some(slot), Outcome::Failed { attempts, parked }))
+                                Ok((Some(slot), Outcome::Failed { attempts, parked, held }))
                             }
                         }
                     })

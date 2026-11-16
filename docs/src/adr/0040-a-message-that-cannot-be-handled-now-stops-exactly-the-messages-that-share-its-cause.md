@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed (2026-11-16). S0 (a bulk readmit's window) is built. S1–S4 are
+Proposed (2026-11-16). S0 (a bulk readmit's window) and S1a (the
+verdicts, the hold and its budget, the causes) are built. S1b–S4 are
 owed, each with its executor (§ Executors, § Owed).
 
 Decided under the library's gate:
@@ -103,14 +104,23 @@ reports facts, and the inbox owns the policy (ADR-0005 d5).
 4. **`Stage`: the head holds its slot and spends no attempt.**
    - `next_attempt_at` is deferred to `retry_after`, clamped to the
      host's back-off bounds. `unavailable_since` is set once.
-   - Past the host's `outage_budget` (default 1 h), the budget is an
+   - Past the host's `Outage::budget` (default 1 h), the budget is an
      evidence check, not a park. The inbox asks whether the channel has
-     processed any row since `unavailable_since`, with one probe on
-     `__forgettable_idx`.
+     processed any row within the last `Outage::cap` (default 300 s, the
+     longest a held row waits to be asked again), with one probe on
+     `__forgettable_idx`. "Since the hold began" would count rows a key
+     cache served in an outage's first minutes, and refute every outage
+     longer than the cache.
      - If it has, the `Stage` claim is refuted. The row takes the
        `Tenant` path (decision 5) with its cause.
      - If it has not, the row keeps holding, and the observer says "held
        past budget" (a page).
+   - A refuted hold keeps its clock, so that each later `Stage` verdict is
+     weighed at once and spends.
+   - A held row is asked again at the teller's `retry_after`, else after as
+     long as it has held, never sooner than the first back-off nor a second
+     (`Outage::FLOOR`: each asking is a call to the stage's dependency) and
+     never later than `cap`.
    - A true stage outage therefore parks nothing, however long it lasts,
      and its rows keep their order.
    - A misread costs at most one budget per row before the evidence
@@ -129,9 +139,10 @@ reports facts, and the inbox owns the policy (ADR-0005 d5).
    - A park writes `parked_cause`.
    - `unavailable_since` is set by the first `Stage` verdict. It and the
      causes are cleared by:
-     - every non-`Stage` verdict;
-     - `mark_processed` (a row that failed and then succeeded);
-     - `unpark`, `unpark_at`, `unpark_all`, `resolve` and supersede.
+     - every non-`Stage` verdict, except a refuted hold (decision 4);
+     - the mark (a row that failed and then succeeded);
+     - an unpark, a resolve and a supersede (a row that failed before a
+       host's lower bounds made it unreadable), and `unpark_all`.
    - A second outage never inherits the first one's clock.
    - The wake exits (`store.rs:611`, `:763`) touch only rows that waited
      for a dependency. Those rows never failed, so the exits have nothing
@@ -231,15 +242,36 @@ S0, built:
 - `a_bulk_readmit_s_batch_reads_no_clock` (unit): a clock in the batch's
   statement is killed.
 
-S1, owed (bus and inbox):
+S1a, built (bus and inbox; `crates/inbox/tests/outage.rs`, each test
+killing the mutations named):
+- `a_stage_outage_holds_its_slot_and_spends_no_attempt`: a hold that
+  spends an attempt; a hold whose clock restarts; a mark that keeps the
+  cause.
+- `a_tenant_s_unavailability_spends_an_attempt_never_sooner_than_its_back_off`
+  (`retry_after` 3 s against a 10 s back-off, then 45 s against 20 s): the
+  teller's while taken over the back-off; an exhausted park without its
+  cause.
+- `a_hold_is_asked_again_between_its_floor_and_its_cap`: no floor.
+- `a_hold_past_its_budget_holds_on_unrefuted_and_spends_once_the_channel_refutes_it`:
+  never refuted; a refuted hold that loses its clock.
+- `two_outages_each_under_the_budget_never_park`: another verdict that
+  keeps the hold.
+- `a_cause_is_kept_while_its_state_lasts_and_cleared_at_every_exit`: an
+  unpark or a resolve that keeps the causes.
+- `a_row_parked_at_once_is_superseded_by_the_next_arrival_at_its_identity`
+  (`tests/pg.rs`) now also holds a supersede to clearing them.
+- `a_verdict_is_read_off_the_error_s_top`: a bus verdict wrapped in
+  another error is of the moment.
+- `the_release_before_the_causes_admits_the_table_they_were_added_to`
+  (`src/pg/release_tests.rs`): the real migration, against the previous
+  release's own list of columns; a binding column is killed.
+- `cause!`'s `compile_fail,E0080` doctest: a check that admits any name is
+  killed. Pinning the error code mattered: without it the doctest passed
+  for a format string's error.
+- A trace refuses a hold (`trace2tla.py`) until S1d models it.
+
+S1b–S1d, owed (bus and inbox):
 - pg tests:
-  - `Stage` holds and spends no attempt;
-  - `Tenant` is never scheduled sooner than `backoff(n)`, with a
-    `retry_after` ≠ `backoff(1)` and values on the clamp's bounds;
-  - the budget refuted parks with its cause, and unrefuted holds and
-    tells "past budget";
-  - two outages, each under the budget, never park;
-  - every clearing exit clears, `mark_processed` of a failed row included;
   - expiry spares a held row's dependents;
   - `unpark_all`:
     - filters by cause, Tenant and `unrecorded`;
@@ -344,3 +376,7 @@ S4: slice B (decision 9), with the fat-Tenant change's owner.
 ## Change Log
 
 - 2026-11-16: Proposed. S0 built: `readmit_all`'s window read once.
+- 2026-11-16: S1a built. Decision 4's evidence is a row processed within
+  the last `cap`, not since the hold began: a key cache serving an
+  outage's first minutes would otherwise refute every outage longer than
+  the cache. A refuted hold keeps its clock; the hold's floor is named.

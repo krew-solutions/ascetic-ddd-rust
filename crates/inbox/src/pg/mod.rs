@@ -84,6 +84,8 @@ mod dispatch;
 mod intake;
 #[cfg(test)]
 mod plan_tests;
+#[cfg(test)]
+mod release_tests;
 mod store;
 mod surface;
 
@@ -160,6 +162,9 @@ pub enum Outcome {
         /// Whether the message was parked by this attempt: its attempts ran
         /// out, or the subscriber's verdict was permanent.
         parked: bool,
+        /// Whether the message holds its slot for its stage's outage, its
+        /// attempts untouched (ADR-0040 decision 4).
+        held: bool,
     },
     /// The head could not be read, or its wait, its failure or its mark
     /// written, for its own values, and was parked at once in the
@@ -255,6 +260,40 @@ pub struct Retries {
     /// How long the message waits after its `n`th failed attempt, `n` from 1.
     /// While it waits it holds its slot.
     pub backoff: Arc<dyn Fn(u32) -> Duration + Send + Sync>,
+    /// How a message unavailable for its stage's outage is held.
+    pub outage: Outage,
+}
+
+/// How a message unavailable for its stage's outage holds its slot, its
+/// attempts untouched (ADR-0040 decision 4): asked again at the teller's
+/// `retry_after`, else after as long as it has been held, never sooner than
+/// the first back-off nor a second — each asking is a call to the stage's
+/// dependency — and never later than `cap`. Past `budget` the inbox weighs
+/// its own evidence: a row of the channel processed within the last `cap`
+/// refutes the outage, and the message spends an attempt as one of its
+/// Tenant's; otherwise it holds on, told past its budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Outage {
+    /// How long a message holds before the inbox weighs its evidence.
+    pub budget: Duration,
+    /// The longest a held message waits to be asked again.
+    pub cap: Duration,
+}
+
+impl Outage {
+    /// The shortest a held message waits to be asked again, whatever its
+    /// back-off: each asking is a call to the stage's dependency.
+    pub const FLOOR: Duration = Duration::from_secs(1);
+}
+
+impl Default for Outage {
+    /// An hour's budget, asked again within five minutes.
+    fn default() -> Self {
+        Outage {
+            budget: Duration::from_secs(3600),
+            cap: Duration::from_secs(300),
+        }
+    }
 }
 
 impl Retries {
@@ -264,6 +303,7 @@ impl Retries {
         Retries {
             max_attempts: 0,
             backoff: Arc::new(|_| Duration::ZERO),
+            outage: Outage::default(),
         }
     }
 
@@ -281,6 +321,12 @@ impl Retries {
             backoff: Arc::new(backoff),
             ..self
         }
+    }
+
+    /// The same, holding for a stage's outage as `outage` says.
+    #[must_use]
+    pub fn with_outage(self, outage: Outage) -> Self {
+        Retries { outage, ..self }
     }
 
     /// `base`, doubled with every failure, at most `cap`.
