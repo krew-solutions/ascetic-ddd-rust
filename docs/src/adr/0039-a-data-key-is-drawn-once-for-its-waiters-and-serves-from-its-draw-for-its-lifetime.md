@@ -513,3 +513,17 @@ ADR-0017 (amended: decision 8 above replaces its point 5's reading of a
     Its ceiling reads `keep`: lifetime + keep + draw.
   - Two defects of the new core were found by its property while it was
     written, and fixed before it was committed.
+- 2026-11-16: The stage's live tests (`crates/dek/tests/stage.rs`) seal
+  on a patient pacing: the fitted one, waiting 2 s for a draw instead of
+  250 ms, its back-off's first step 4 s. A test only, the library's code
+  unchanged.
+  - They check what a stage seals and opens, and built with the fitted
+    wait they failed on a machine of four cores and a spinning disk: four
+    or five of the sixteen unavailable (`Waited`) in each of four runs at
+    once on PostgreSQL 14 and in one on 18; one test at a time, all passed
+    on 14 and one failed on 18, its first draw making the tenant's KEK.
+  - Patient, they passed in three runs at once on each.
+  - The wait is still checked where it is decided, by the draws' tests
+    on a paused clock. That a draw making a KEK can outlast the fitted
+    250 ms is a deployment's to weigh when it sets the wait
+    (`Sealing::over_paced`).
