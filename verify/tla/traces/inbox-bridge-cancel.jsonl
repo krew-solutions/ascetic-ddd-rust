@@ -1,0 +1,5 @@
+{"deps":[],"event":"received","id":"t1/orders.Order/7/5","message_id":"00000000-0000-4000-8000-000000000005","observer":"inbox","received_position":1,"slot":0,"xid":96105}
+{"event":"fetched","id":"t1/orders.Order/7/5","observer":"inbox","slot":0,"slots":1,"snapshot":{"xip":[96117],"xmax":96123,"xmin":96117}}
+{"event":"handled","id":"t1/orders.Order/7/5","observer":"inbox","ok":true,"slot":0}
+{"event":"marked","id":"t1/orders.Order/7/5","observer":"inbox","processed_position":2,"slot":0,"woken":[]}
+{"event":"dispatched","observer":"inbox","outcome":"processed","slot":0}

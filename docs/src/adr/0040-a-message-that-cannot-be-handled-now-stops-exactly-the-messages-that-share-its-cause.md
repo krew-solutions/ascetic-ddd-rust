@@ -3,8 +3,9 @@
 ## Status
 
 Proposed (2026-11-16). S0 (a bulk readmit's window), S1a (the verdicts,
-the hold and its budget, the causes) and S1b (expiry, `park_held`) are
-built. S1c–S4 are owed, each with its executor (§ Executors, § Owed).
+the hold and its budget, the causes), S1b (expiry, `park_held`) and S1c
+(`unpark_all`) and S1d (the outage model, traces checked afresh) are
+built. S2–S4 are owed, each with its executor (§ Executors, § Owed).
 
 Decided under the library's gate:
 - a blind solver and a discriminator;
@@ -158,13 +159,16 @@ reports facts, and the inbox owns the policy (ADR-0005 d5).
 
 8. **The operator acts by cause.** Every verb is audited with its
    principal, like ADR-0036's surface.
-   - `unpark_all(principal, because, Unparking { channel, cause, tenant,
-     within, tries, limit, overtaken })` re-arms parked rows of the
-     failure ground:
+   - `unpark_all(principal, Unparking { channel, cause, tenant, within,
+     tries, limit, overtaken })` re-arms parked rows of the failure
+     ground:
      - its window is read once (decision 1);
-     - `cause` may be `unrecorded`, for rows parked before this ADR;
+     - `cause` may be `ParkedUnder::Unrecorded`, for rows parked before
+       this ADR;
      - `attempts` is set to `GREATEST(attempts, max_attempts − tries)`,
-       so an early unpark re-parks at its first failure (a canary);
+       so an early unpark re-parks at its `tries`th failure (a canary);
+     - a window longer than the channel keeps its processed rows is
+       refused: an overtaking row forgotten could not be told;
      - overtaken rows stay parked unless `overtaken` is set;
      - each batch is its own transaction, and the observer is told after
        commit.
@@ -175,9 +179,13 @@ reports facts, and the inbox owns the policy (ADR-0005 d5).
      (`FOR UPDATE OF s SKIP LOCKED`): a second call parks that head if it
      still holds. A fairness change that lets a slot serve past its head
      changes this, and is to say so (decision 9).
-   - `forget_tenant(principal, tenant)` closes a Tenant's open rows. A
-     host's off-boarding calls it before shredding, so a shredded
-     backlog never drains one Gone at a time.
+   - Forgetting a Tenant is ADR-0036 Part B's (decision 6): its rows are
+     deleted in batches, and the Tenant is recorded, so that the intake
+     acknowledges its later messages without storing them. A host's
+     off-boarding runs it before shredding, so that a shredded backlog
+     never drains one Gone at a time. Until Part B is built, that backlog
+     parks under `kms.gone`, and `unpark_all` never re-arms it (its cause
+     is not `kms.refused`).
 
 9. **Yielding per key is the next owner's** (slice B). While a `Tenant`
    verdict spends attempts at the head, the rows behind it in the slot
@@ -288,67 +296,114 @@ S1b, built (`tests/outage.rs`):
     goes on;
   - the call is told with its principal.
 
-S1c–S1d, owed (bus and inbox):
-- pg tests:
-  - `unpark_all`:
-    - filters by cause, Tenant and `unrecorded`;
-    - its canary includes a row parked without a hold and fails a row
-      twice;
-    - its window is read once;
-    - overtaken rows stay;
-    - the observer is told after commit;
-  - `forget_tenant`.
-- Plan: `EXPLAIN (ANALYZE, BUFFERS)` of an `unpark_all` batch at ≥10M rows,
-  1M parked across 5k Tenants, a Tenant filter matching 100 rows and a
-  cause matching 1%. The batch uses `__parked_idx`, with buffers in
-  proportion to the channel's parked rows. The index is widened only if
-  this says so.
-- Migration: a test reads the migration's real DDL. Every new column is
-  nullable with no default that binds an insert, and every object is
-  `{table}__`-prefixed.
-- Cause: a `compile_fail` doctest for an invalid `const` cause.
-- `Inbox.tla`:
-  - Constants:
-    - `KeyOf` and `TenantOf`, with `part = slotOf ∘ KeyOf`;
-    - `PermanentSet`;
-    - `Budget`;
-    - `OutageEnds` and `OutageLen`;
-    - `Tries`.
-  - Variables: `stageDown`, `tenantDown`, `cause`, `held`, a ghost
-    `spent`, and `canary`.
-  - Actions:
-    - `Defer`, where the scope is a free choice when only a Tenant is
-      down, since misclassification is modelled;
-    - `FailTenant` and `FailPermanent`;
-    - `Outlast`, with the evidence check;
-    - `UnparkAll` and `ParkHeld`;
-    - `Commit`, guarded by the stage and the Tenant being up.
-  - Invariants:
-    - `HoldSpendsNothing`;
-    - `ParkedIsAside` by cause;
-    - `CauseIsCurrent`;
-    - `CanaryReparks`;
-    - `KeyOrder` beside `ArrivalOrder`;
-    - probes per wait ≤ slots.
-  - Cfgs:
-    - `InboxOutage` holds;
-    - `Counts` violates `HoldSpendsNothing`;
-    - `NoBudget` violates `EventuallyAside` with `OutageEnds = FALSE`;
-    - `ShortOutageProcesses` holds, and `Counts` violates it;
-    - one must-fail cfg per clearing exit, each violating
-      `CauseIsCurrent`;
-    - `SlotStallWithinBudget` must violate, which documents the
-      k × budget stall.
+S1c, built (`tests/outage.rs`, `src/pg/plan_tests.rs`):
+- `an_operator_re_arms_the_rows_parked_for_a_cause_and_a_canary_parks_again`:
+  - a Tenant's filter;
+  - never a shredded Tenant's rows (`kms.gone`), nor the expired or
+    unreadable ground;
+  - `Unrecorded` only by name;
+  - a canary of one parks again at its first failure, one of two at its
+    second;
+  - each call is told with its principal.
+- `a_bulk_unpark_keeps_to_its_window_and_leaves_an_overtaken_row_unless_asked`:
+  - rows parked before the window, or stamped after the call, are left;
+  - an overtaken row stays parked and is counted, unless asked for;
+  - a window longer than the retention is refused.
+- `a_bulk_unpark_goes_batch_after_batch_to_its_limit`: 120 of 250 to its
+  limit, then the rest past one batch.
+- `a_bulk_unpark_walks_the_parked_index_and_reads_no_other_row`
+  (`EXPLAIN ANALYZE`, 20,000 rows, 200 parked on the channel beside 2,000
+  on another): no sequential scan, the parked index, and at most the
+  channel's 200 rows walked.
+- The no-clock check covers the unpark batch too.
+- 14 mutations are killed, among them each bound of the window, each
+  filter, each ground, the canary reset to zero, the overtaken check, one
+  batch only, the limit, the retention refusal, and the channel spelled
+  so that the index is passed by. Two guards were redundant: the loop's
+  limit check beside the batch's own, and the plan test's single channel
+  walked whole. The first was dropped; the test parks on a second
+  channel.
+
+S1d, built (`verify/tla`, `make proofs`, `make traces`):
+- `InboxOutage.tla`, a module of its own. `Inbox.tla` is instanced by
+  four modules, `InboxPg.tla`'s refinement mapping among them, and a hold
+  changes none of what they check (dependencies, waits, crashes,
+  supersedes). The outage's variables there would have rippled through
+  every mapping for nothing.
+  - Constants: `TenantOf`, `KeyOf` (a key's rows share a slot),
+    `Outages`, `OutageEnds`, `TenantFaults`, `TenantEnds`, `Permanent`,
+    `Budget`, `Tries`.
+  - Actions: `Defer` (the verdict's scope is a free choice when only a
+    Tenant is down), `Outlast` with the evidence, `FailTenant`,
+    `FailPermanent`, `Commit` guarded by the stage and the Tenant,
+    `ParkHeld`, `UnparkAll`, `Unpark`.
+  - Properties:
+    - `HoldSpendsNothing`, `CauseIsCurrent`, `HeldIsQueued`,
+      `ParkedIsAside`, `CanaryReparks`, `NoStageParks` and `KeyOrder`;
+    - `EventuallyProcessed` and `EventuallyOutOfTheWay`.
+  - Nine configurations (`verify/tla/README.md`):
+    - a hold that counts parks a row for the stage (`NoStageParks`, an
+      invariant independent of `Defer`);
+    - a mark, and an unpark, that keep the cause break `CauseIsCurrent`;
+    - a bulk unpark that resets the attempts breaks `CanaryReparks`;
+    - a stage down for good, and a misread Tenant fault on a channel
+      serving nothing else, each hold for good, by design.
+  - Every action is reached (`-coverage`): `Outlast` in the Tenant's and
+    the operator's instances.
+  - At most one probe per slot per wait is structural, since only a head
+    is asked (`Asked`), and is written there rather than as an invariant.
+    The k × budget stall is not a configuration: the quiet misread is its
+    unbounded case.
 - Traces:
-  - `trace2tla.py` refuses an unknown outcome;
-  - `MaxAttempts` is read from exhausted parks only;
-  - attempts are always compared;
-  - `defer`, `outlast`, `permanent` and `tenant` steps;
-  - per-row `unparked` events;
-  - `hold` traces recorded from pg tests.
-- A new gate, `make traces`, re-records the pg traces into a temporary
-  directory and checks those. Today `make proofs` checks only the
-  committed traces, which still fit after the code regresses.
+  - `Inbox.tla` gains `Permanent` and `FailPermanent`.
+    `TraceInbox.tla` reads `MaxAttempts` off the parks of exhausted
+    attempts alone, and maps a permanent failure to `FailPermanent`.
+    `inbox-permanent.jsonl` had fitted as `MaxAttempts = 1`, for the wrong
+    reason. Mapped to `Fail` now, it does not fit.
+  - `trace2tla.py` refuses a dispatch closed with an outcome it does not
+    map, and a hold.
+  - `make traces` records the pg tests' runs afresh into a directory of
+    its own, and `check.sh --traces DIR` checks the fresh run of every
+    inbox scenario committed under `traces/`. Committing a run declares
+    its scenario covered.
+    - The outbox's runs, and the bridges' over it, are ADR-0035's: its
+      own Owed names the refinement to `Outbox.tla` and its traces.
+      `TraceOutbox.tla` follows the outbox before its epochs, which hand
+      on a later transaction's row while an earlier one is open, as
+      `an_open_transaction_delays_only_its_own_rows` requires. A fresh
+      `outbox-visibility` run did so and did not fit. The committed run
+      predates the epochs.
+    - A committed scenario that no test records any more fails the gate,
+      unless `traces/RECORDED_ONCE` names it with its reason.
+      `bridge-outbox-set-aside` is named there: since ADR-0038 its test
+      writes the first row around the producer, which no recorder sees.
+  - Its first run found the tests recording 39 runs that were never
+    committed, so never checked:
+    - 24 fit, and are committed now: the checked scenarios grow from 29
+      to 53;
+    - the other 15 are owed below.
+
+S1d, owed:
+- the 15 scenarios the tests record and the trace models do not yet
+  follow, each classified (the converter or the model extended, or a
+  defect of the library found and fixed) and then committed:
+  - not converted by `trace2tla.py`:
+    - `inbox-causal_refused`, `inbox-causal_structured` and
+      `inbox-expiry_batches` name rows written by SQL around the intake;
+    - `outbox-backlog`, `outbox-between` and `outbox-rewind_epoch`
+      carry null fields the converter cannot write;
+  - converted, but not fitting: `inbox-held_by_concurrent`,
+    `inbox-window_passed`; and, ADR-0035's with its refinement,
+    `outbox-commit_order`, `outbox-lane_start`, `outbox-position`,
+    `outbox-replay_horizon`, `outbox-reset`, `outbox-rewind_open`,
+    `outbox-uri`;
+- a trace refinement of a hold:
+  - `defer`, `outlast` and `tenant` steps, and per-row events of a bulk
+    unpark;
+  - attempts compared under unlimited retries;
+  - a `hold` run recorded from a pg test.
+  Until then a hold is checked by `InboxOutage.tla` and the pg tests, and a
+  recorded hold is refused rather than fitted wrongly.
 
 S2, owed (dek):
 - the scope's evidence, with core tests:
@@ -380,6 +435,11 @@ S4: slice B (decision 9), with the fat-Tenant change's owner.
 3. **The migration's lock under load**: the age of dispatch transactions
    under the consumer's S6 drill, against the 500 ms lock timeout
    (`migration/lib.rs:177-178`).
+5. **`unpark_all` at the host's scale**: `EXPLAIN (ANALYZE, BUFFERS)` of a
+   batch at ≥10M rows, 1M parked across 5k Tenants, a Tenant filter
+   matching 100 rows and a cause matching 1%, on the host's drill. The
+   shape is held at 20,000 rows today. The parked index is widened only
+   if this says so.
 4. **The previous release run against the migrated schema**, pinned as a
    renamed dev-dependency (to production, as 2).
 
@@ -403,3 +463,18 @@ S4: slice B (decision 9), with the fat-Tenant change's owner.
   hold's exhausted park kept its clock. It now ends the hold, so that
   "held" alone means unparked, and each guard is now the only one of its
   kind.
+- 2026-11-16: Decision 8's `forget_tenant` withdrawn: forgetting a Tenant is
+  ADR-0036 Part B's decision 6, a richer design (the intake drops a
+  forgotten Tenant's later messages) waiting on the host's off-boarding
+  events. One mechanism, one owner.
+- 2026-11-16: S1c built: `unpark_all` by channel, cause (or `Unrecorded`),
+  Tenant and a window read once, re-arming with a canary of `tries`
+  failures, leaving overtaken rows parked unless asked, refusing a window
+  longer than the retention. It takes no `because`, as `park_held` does
+  not: the library's audit is the principal, and a reason is the host's
+  record. The measurement at the host's scale moved to § Owed 5.
+- 2026-11-16: S1d built: `InboxOutage.tla` with nine configurations, a
+  permanent verdict in `Inbox.tla` so that a recorded permanent park fits
+  for its own reason, an unknown outcome refused, and `make traces`. The
+  model is a module of its own rather than `Inbox.tla` grown, and the
+  trace refinement of a hold is owed (§ Executors).

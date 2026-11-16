@@ -1,0 +1,3 @@
+{"deps":[],"event":"received","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","message_id":"00000000-0000-4000-8000-00000000002e","observer":"inbox","received_position":1,"slot":0,"xid":96557}
+{"deps":[],"event":"received","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","message_id":"00000000-0000-4000-8000-00000000002e","observer":"inbox","received_position":null,"slot":null,"xid":null}
+{"deps":[],"event":"received","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","message_id":"00000000-0000-4000-8000-00000000002f","observer":"inbox","received_position":null,"slot":null,"xid":null}

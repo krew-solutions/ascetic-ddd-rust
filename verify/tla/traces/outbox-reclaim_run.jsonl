@@ -1,0 +1,8 @@
+{"delivered":null,"epoch":null,"epoch_end":0,"epoch_offset":0,"event":"fetched","group":"a","horizon":0,"limit":100,"messages":[],"observer":"outbox","slot":null,"slots":1,"statement":null}
+{"event":"dispatched","group":"a","observer":"outbox","outcome":"nothing","slot":null}
+{"delivered":null,"epoch":null,"epoch_end":0,"epoch_offset":0,"event":"fetched","group":"a","horizon":0,"limit":100,"messages":[],"observer":"outbox","slot":null,"slots":1,"statement":null}
+{"event":"dispatched","group":"a","observer":"outbox","outcome":"nothing","slot":null}
+{"delivered":null,"epoch":null,"epoch_end":0,"epoch_offset":0,"event":"fetched","group":"a","horizon":0,"limit":100,"messages":[],"observer":"outbox","slot":null,"slots":1,"statement":null}
+{"event":"dispatched","group":"a","observer":"outbox","outcome":"nothing","slot":null}
+{"delivered":null,"epoch":null,"epoch_end":0,"epoch_offset":0,"event":"fetched","group":"a","horizon":0,"limit":100,"messages":[],"observer":"outbox","slot":null,"slots":1,"statement":null}
+{"event":"dispatched","group":"a","observer":"outbox","outcome":"nothing","slot":null}

@@ -59,6 +59,8 @@ CONSTANTS
   Unreadable,     \* SUBSET Msgs: rows the dispatcher cannot read or write for their own values,
                   \* which the intake did not foresee or did not write (ADR-0037 decision 6);
                   \* parked at once
+  Permanent,      \* SUBSET Msgs: messages whose subscriber says no retry will succeed
+                  \* (ADR-0010): parked at once, the attempt recorded
   None            \* a model value: no row held
 
 ASSUME Deps \in [Msgs -> SUBSET Msgs]
@@ -71,6 +73,7 @@ ASSUME MaxAdmin \in Nat
 ASSUME WaitsOnDependencies \in BOOLEAN
 ASSUME WaitExpires \in BOOLEAN
 ASSUME Unreadable \subseteq Msgs
+ASSUME Permanent \subseteq Msgs
 
 VARIABLES
   part,       \* [Msgs -> Slots], fixed at the start: any cut is allowed
@@ -212,6 +215,7 @@ Commit(d) ==
   /\ holding[d] # None
   /\ waiting[holding[d]] = None
   /\ holding[d] \notin Poison
+  /\ holding[d] \notin Permanent
   /\ holding[d] \notin unread
   /\ processed' = processed \cup {holding[d]}
   /\ effects' = [effects EXCEPT ![holding[d]] = @ + 1]
@@ -233,6 +237,7 @@ Fail(d) ==
   /\ holding[d] # None
   /\ waiting[holding[d]] = None
   /\ holding[d] \notin unread
+  /\ holding[d] \notin Permanent
   /\ LET m == holding[d] IN
      /\ m \in Poison \/ crashes < MaxCrashes
      /\ crashes' = IF m \in Poison THEN crashes ELSE crashes + 1
@@ -241,6 +246,23 @@ Fail(d) ==
      /\ parked' = IF MaxAttempts > 0 /\ attempts[m] + 1 >= MaxAttempts THEN parked \cup {m} ELSE parked
   /\ holding' = [holding EXCEPT ![d] = None]
   /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, procOrder, resolved, admin,
+                waiting, expired, unread>>
+
+\* The subscriber's verdict is that no retry will succeed: its writes roll
+\* back, the attempt is recorded, and the row is parked at once, whatever
+\* attempts it had left (ADR-0010).  Attempts are counted as Fail counts
+\* them.
+FailPermanent(d) ==
+  /\ holding[d] # None
+  /\ waiting[holding[d]] = None
+  /\ holding[d] \notin unread
+  /\ holding[d] \in Permanent
+  /\ LET m == holding[d] IN
+     /\ attempts' = [attempts EXCEPT ![m] = IF MaxAttempts > 0 THEN @ + 1 ELSE @]
+     /\ due' = [due EXCEPT ![m] = FALSE]
+     /\ parked' = parked \cup {m}
+  /\ holding' = [holding EXCEPT ![d] = None]
+  /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, procOrder, crashes, resolved, admin,
                 waiting, expired, unread>>
 
 \* A row the dispatcher cannot read, or whose wait, failure or mark it
@@ -355,13 +377,14 @@ Supersede(m) ==
 Next ==
   \/ \E m \in Msgs : Receive(m) \/ Elapse(m) \/ Expire(m) \/ Unpark(m) \/ Resolve(m) \/ Supersede(m)
   \/ \E d \in Slots : Fetch(d) \/ Wait(d) \/ Settle(d) \/ Commit(d) \/ Fail(d) \/ Crash(d) \/ ParkAtOnce(d)
+                    \/ FailPermanent(d)
 
 \* Every message that arrives at all arrives eventually; every backoff
 \* passes, and every wait runs out where waits do; every dispatcher keeps
 \* walking its queue and finishes what it took, one way or the other.
 Fairness ==
   /\ \A m \in Msgs : WF_vars(Receive(m)) /\ WF_vars(Elapse(m)) /\ WF_vars(Expire(m))
-  /\ \A d \in Slots : WF_vars(Fetch(d) \/ Wait(d) \/ Settle(d)) /\ WF_vars(Commit(d) \/ Fail(d) \/ ParkAtOnce(d))
+  /\ \A d \in Slots : WF_vars(Fetch(d) \/ Wait(d) \/ Settle(d)) /\ WF_vars(Commit(d) \/ Fail(d) \/ ParkAtOnce(d) \/ FailPermanent(d))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -397,10 +420,12 @@ EffectsOnce == \A m \in Msgs : effects[m] <= 1
 EffectsIffProcessed == \A m \in Msgs : (m \in processed /\ m \notin resolved) <=> (effects[m] = 1)
 
 \* A parked message is out of the queue and not processed, and got there by
-\* exhausting its attempts or its wait.
+\* exhausting its attempts or its wait, by its own values, or by a verdict
+\* that no retry will succeed.
 ParkedIsAside ==
   /\ parked \cap processed = {}
   /\ \A m \in parked : (MaxAttempts > 0 /\ attempts[m] = MaxAttempts) \/ m \in expired \/ m \in Unreadable
+                        \/ m \in Permanent
 
 \* A message set aside waits for a dependency of its own that is not yet
 \* processed — never for one already processed, which nothing would wake it

@@ -58,7 +58,12 @@ InboxEvents == {r \in Events : r.side = "inbox"}
 Receives == {r \in Events : \/ r.side = "inbox" /\ r.event = "receive"
                             \/ r.side = "bridge" /\ r.event = "forward" /\ ~r.dup}
 Dispatching == {r \in InboxEvents : r.event \in {"wait", "fetch", "nofetch", "handle", "commit", "fail", "crash"}}
-Parks == {r \in InboxEvents : r.event = "fail" /\ r.parked}
+\* The parks of exhausted attempts: they say what MaxAttempts is.  A park
+\* for a verdict that no retry will succeed says nothing of it, and read
+\* as one, a single permanent failure would fit as MaxAttempts = 1.
+Parks == {r \in InboxEvents : r.event = "fail" /\ r.parked /\ ~r.permanent}
+\* The messages whose subscriber said no retry will succeed.
+Permanents == {r.msg : r \in {r \in InboxEvents : r.event = "fail" /\ r.permanent}}
 Expires == {r \in InboxEvents : r.event = "expire"}
 
 Arrives == {r.msg : r \in Receives}
@@ -93,7 +98,7 @@ VARIABLES part, received, recvPos, nextRecv, processed, effects, holding, procOr
 vars == <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
           attempts, due, parked, resolved, admin, waiting, expired, i>>
 
-O == INSTANCE Inbox WITH Unreadable <- {}, unread <- {},  Msgs <- Msgs, Deps <- Deps, Arrives <- Arrives, Slots <- Slots,
+O == INSTANCE Inbox WITH Unreadable <- {}, unread <- {}, Permanent <- Permanents, Msgs <- Msgs, Deps <- Deps, Arrives <- Arrives, Slots <- Slots,
                          MaxCrashes <- MaxCrashes,
                          WaitsOnDependencies <- WaitsOnDependencies, WaitExpires <- WaitExpires, None <- None,
                          Poison <- Poison, MaxAttempts <- MaxAttempts,
@@ -189,7 +194,7 @@ Logged ==
         /\ O!Commit(Step.slot)
      \/ /\ Step.event = "fail"
         /\ holding[Step.slot] = Step.msg
-        /\ O!Fail(Step.slot)
+        /\ IF Step.permanent THEN O!FailPermanent(Step.slot) ELSE O!Fail(Step.slot)
         /\ (MaxAttempts > 0 => attempts'[Step.msg] = Step.attempts)
         /\ (Step.msg \in parked') = Step.parked
      \/ /\ Step.event = "crash"

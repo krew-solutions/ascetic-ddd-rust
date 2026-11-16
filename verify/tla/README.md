@@ -302,6 +302,56 @@ able to arrive again; two slots.
 | `InboxForgetEarly.cfg` | before the horizon closes | `EffectsOnce` violated |
 | `InboxForgetTarget.cfg` | dependency targets forgotten | `WaitingIsAsideEver` violated |
 
+## Inbox outage — `InboxOutage.tla`
+
+ADR-0040: a message that cannot be handled now stops exactly the messages
+that share its cause. The inbox of `Inbox.tla` reduced to what the outage
+protocol turns on: slots and their heads, attempts, parks. Dependencies,
+waits, crashes and supersedes are left out, because a hold changes none of
+them; a held row is in the queue at its slot's head, as a row waiting for
+its backoff is.
+
+The model has a stage that goes down, Tenants whose keys fail alone, and the
+verdict's scope. A Tenant's fault may be read as the stage's (a free choice
+of the model), since the stage cannot always tell. A dispatch of a slot's
+head ends in one transaction:
+- processed, when the stage and the head's Tenant serve;
+- held (`Defer`) on the stage's verdict, its attempts untouched, up to
+  `Budget` holds;
+- past the budget, weighed against the channel's evidence (a row processed
+  while it held): an unrefuted hold holds on, a refuted one spends
+  (`Outlast`);
+- spent on the Tenant's verdict (`FailTenant`), parked at `MaxAttempts`;
+- parked at once on a permanent one (`FailPermanent`).
+
+Every failure writes its cause and every exit clears it. The operator parks
+a held row (`ParkHeld`), re-arms parked ones with a canary of `Tries`
+failures (`UnparkAll`), or unparks one afresh (`Unpark`).
+`MCInboxOutage.tla` fixes the instance: three rows, two slots; `m1` and
+`m2` of Tenant `t1` under one key, so in one slot, and `m3` of `t2` under
+its own.
+
+| Configuration | Rule | Expected |
+| --- | --- | --- |
+| `InboxOutage.cfg` | the stage down once and back, no Tenant failing alone | every invariant holds; `HoldSpendsNothing`, `EventuallyProcessed` |
+| `InboxOutageCounts.cfg` | a hold that spends as any failure, as before | `NoStageParks` violated |
+| `InboxOutageForever.cfg` | the stage down for good | `EventuallyOutOfTheWay` violated: a true outage holds for good, by design |
+| `InboxOutageOperators.cfg` | `t1` failing alone, `m3` permanent, the operator acting | `CauseIsCurrent`, `ParkedIsAside`, `CanaryReparks` hold |
+| `InboxOutageCommitKeepingCause.cfg` | a mark that keeps the cause | `CauseIsCurrent` violated |
+| `InboxOutageUnparkKeepingCause.cfg` | an unpark that keeps the cause | `CauseIsCurrent` violated |
+| `InboxOutageUnparkAllResetting.cfg` | a bulk unpark that resets the attempts | `CanaryReparks` violated |
+| `InboxOutageTenant.cfg` | `t1` failing alone for a while, read either way | `EventuallyOutOfTheWay` holds |
+| `InboxOutageQuietMisread.cfg` | `t1` failing for good, read as the stage's, nothing else served | `EventuallyOutOfTheWay` violated: the stage's sentinel probe and `park_held` answer it |
+
+`KeyOrder` is `ArrivalOrder` by partition key rather than by slot: which
+keys share a slot is the hash's accident, while the order of a key's rows is
+what a host relies on. A change that lets a slot serve past a held head
+(slice B of ADR-0040) is to keep `KeyOrder` and give up `ArrivalOrder`.
+
+A recorded run with a hold is refused by `trace2tla.py`, which does not
+map it: a hold is checked here and by the PostgreSQL tests, and a trace
+refinement for it is owed (ADR-0040 § Owed).
+
 ## Inbox, statement by statement — `InboxPg.tla`
 
 `Inbox.tla` has one step per protocol action and assumes what the
@@ -445,6 +495,22 @@ ASCETIC_DDD_TRACE_DIR=verify/tla/traces \
     cargo test -p ascetic-ddd-outbox -p ascetic-ddd-inbox --test pg --test bridge -- --include-ignored
 ./verify/tla/check.sh
 ```
+
+The traces under `traces/` were recorded once, and fit the models whatever
+the code does now. `make traces` records the runs afresh, into a directory
+of its own, and `check.sh --traces DIR` checks the fresh run of every
+inbox scenario committed under `traces/`: committing a run declares its
+scenario covered. The outbox's runs, and the bridges', are ADR-0035's owed
+refinement: `TraceOutbox.tla` follows the outbox before its epochs. A committed scenario that no test records any more fails, unless
+`traces/RECORDED_ONCE` names it with its reason; a run recorded under no
+committed name is counted and left. ADR-0040 § Executors lists the
+scenarios the tests record and the trace models do not yet follow. A
+failure's park says whether its verdict was permanent: `MaxAttempts` is read
+off the parks of exhausted attempts alone, and a permanent one is the
+model's `FailPermanent`. Read as an exhausted one, a single permanent
+failure would fit as `MaxAttempts = 1`, for the wrong reason. A dispatch
+closed with an outcome the mapping does not know is refused, rather than
+ended without a step.
 
 `trace2tla.py` maps the lines onto the model's steps — an acknowledgement and
 the commit that follows it become one `Ack`, a rolled-back batch a `Crash`, a

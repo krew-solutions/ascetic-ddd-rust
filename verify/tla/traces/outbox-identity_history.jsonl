@@ -1,0 +1,2 @@
+{"event":"published","message_id":"00000000-0000-4000-8000-0000000000c1","observer":"outbox","position":1,"uri":"kafka://orders/order-1","xid":98068}
+{"event":"published","message_id":"00000000-0000-4000-8000-0000000000c2","observer":"outbox","position":2,"uri":"kafka://orders/order-2","xid":98068}

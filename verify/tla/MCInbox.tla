@@ -21,6 +21,10 @@ MCPoisonM1 == {m1}
 \* Rows the dispatcher cannot read: none, or m1, which the intake did not
 \* foresee or did not write (ADR-0037 decision 6).
 MCNoUnreadable == {}
+
+\* Messages whose subscriber says no retry will succeed: none, in the
+\* instances above; a recorded run names its own (TraceInbox.tla).
+MCNoPermanent == {}
 MCUnreadableM1 == {m1}
 
 \* The park at once taken away, for InboxUnreadableHolds.cfg.

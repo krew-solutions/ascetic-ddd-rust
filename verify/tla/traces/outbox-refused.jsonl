@@ -1,0 +1,15 @@
+{"event":"published","message_id":"00000000-0000-4000-8000-00000000003a","observer":"outbox","position":1,"uri":"kafka://orders","xid":97541}
+{"event":"published","message_id":"00000000-0000-4000-8000-00000000003b","observer":"outbox","position":2,"uri":"kafka://orders","xid":97542}
+{"event":"published","message_id":"00000000-0000-4000-8000-00000000003c","observer":"outbox","position":3,"uri":"kafka://orders","xid":97544}
+{"event":"published","message_id":"00000000-0000-4000-8000-00000000003d","observer":"outbox","position":4,"uri":"kafka://orders","xid":97545}
+{"event":"published","message_id":"00000000-0000-4000-8000-00000000003e","observer":"outbox","position":5,"uri":"kafka://orders","xid":97548}
+{"event":"published","message_id":"00000000-0000-4000-8000-00000000003f","observer":"outbox","position":6,"uri":"kafka://orders","xid":97551}
+{"event":"published","message_id":"00000000-0000-4000-8000-000000000040","observer":"outbox","position":7,"uri":"kafka://orders","xid":97552}
+{"event":"published","message_id":"00000000-0000-4000-8000-000000000041","observer":"outbox","position":8,"uri":"kafka://orders","xid":97554}
+{"event":"published","message_id":"00000000-0000-4000-8000-000000000043","observer":"outbox","position":9,"uri":"kafka://orders","xid":97555}
+{"event":"published","message_id":"00000000-0000-4000-8000-000000000044","observer":"outbox","position":10,"uri":"kafka://orders","xid":97557}
+{"event":"published","message_id":"00000000-0000-4000-8000-000000000045","observer":"outbox","position":11,"uri":"kafka://orders","xid":97559}
+{"event":"published","message_id":"00000000-0000-4000-8000-000000000046","observer":"outbox","position":12,"uri":"kafka://orders","xid":97560}
+{"event":"published","message_id":"00000000-0000-4000-8000-000000000047","observer":"outbox","position":13,"uri":"kafka://orders","xid":97560}
+{"event":"published","message_id":"00000000-0000-4000-8000-000000000048","observer":"outbox","position":14,"uri":"kafka://orders","xid":97560}
+{"event":"published","message_id":"00000000-0000-4000-8000-000000000049","observer":"outbox","position":15,"uri":"kafka://orders","xid":97560}

@@ -61,7 +61,7 @@ grep -lE '#\[ignore = "($(1))' crates/*/tests/*.rs | while IFS=/ read -r _ crate
 done
 endef
 
-.PHONY: all stand check clippy doc test test-pg host-features test-vault test-kafka proofs fmt help
+.PHONY: all stand check clippy doc test test-pg host-features test-vault test-kafka proofs traces fmt help
 
 all: check clippy doc test test-pg host-features ## everything CI runs on a push: a PostgreSQL beside it
 
@@ -103,6 +103,16 @@ test-kafka: ## the tests ignored for want of Kafka, at ASCETIC_DDD_TEST_KAFKA_BR
 
 proofs: ## the TLA+ models under verify/tla, model-checked with TLC (java, tla2tools.jar)
 	verify/tla/check.sh
+
+# The committed traces under verify/tla/traces fit the models whatever the
+# code does now: they were recorded once. This tier records the PostgreSQL
+# tests' runs afresh, into a directory of its own under the system's
+# temporary one, kept for reading when a run does not fit, and checks those.
+traces: ## the PostgreSQL tests run afresh with their recorder on, each run checked against its model (java, tla2tools.jar)
+	dir=$$(mktemp -d) && echo "recording into $$dir" && \
+	ASCETIC_DDD_TRACE_DIR=$$dir $(CARGO) test -p ascetic-ddd-outbox -p ascetic-ddd-inbox --all-features \
+	    --test pg --test bridge -- --include-ignored && \
+	verify/tla/check.sh --traces $$dir
 
 help: ## this list
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'

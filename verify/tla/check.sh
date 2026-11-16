@@ -31,6 +31,39 @@ check_trace() {
   echo "   $1: does not fit the model:"; grep -E "^Error|^/\\\\ i = " "$log" | head -4; return 1
 }
 
+# `check.sh --traces DIR` checks the runs recorded afresh in DIR: `make
+# traces` records them, so that what the code writes today is checked, not
+# only what was committed once. The scenarios checked are the ones committed
+# under traces/: a run's name is its test's, and committing a run is
+# declaring that the models cover its scenario. A committed run whose test
+# no longer records it is a failure, unless traces/RECORDED_ONCE names it
+# with its reason. A run recorded under no committed name is counted and
+# left: its scenario is not declared covered (ADR-0040 § Owed).
+#
+# The inbox's runs only. The outbox's runs, and the bridges' over it, are
+# owed to ADR-0035's refinement to Outbox.tla: TraceOutbox follows the
+# outbox before its epochs, which hand on a later transaction's row while an
+# earlier one is open, as `an_open_transaction_delays_only_its_own_rows`
+# requires. A fresh outbox run may do so; the committed ones predate it.
+if [ "${1:-}" = "--traces" ]; then
+  checked=0
+  for committed in traces/inbox-*.jsonl; do
+    name=$(basename "$committed")
+    if grep -v '^#' traces/RECORDED_ONCE | grep -qx "$name"; then continue; fi
+    [ -e "$2/$name" ] || { echo "   $name: committed, but no test records it now"; exit 1; }
+    check_trace "$2/$name"
+    checked=$((checked + 1))
+  done
+  [ "$checked" -gt 0 ] || { echo "no committed run was recorded afresh in $2"; exit 1; }
+  echo "== $checked runs recorded afresh fit their models"
+  left=0
+  for trace in "$2"/inbox-*.jsonl; do
+    [ -e "traces/$(basename "$trace")" ] || left=$((left + 1))
+  done
+  echo "   $left runs recorded under no committed name, their scenarios not declared covered"
+  exit 0
+fi
+
 echo "== outbox: with the visibility rule, every property holds"
 tlc -config Outbox.cfg Outbox.tla
 
@@ -219,6 +252,29 @@ if tlc -config InboxPgWalkOn.cfg MCInboxPg.tla > "${TMPDIR:-/tmp}/tlc-inboxpg-wa
 fi
 grep -q "Invariant NoDeadlock is violated" "${TMPDIR:-/tmp}/tlc-inboxpg-walkon.log"
 echo "   violation found, as expected"
+
+echo "== inbox outage (ADR-0040): the stage down once, a hold spends nothing, no row parks for it, keys keep their order, every row processed once it is back"
+tlc -config InboxOutage.cfg MCInboxOutage.tla
+
+echo "== inbox outage: with a hold that spends as any failure, TLC must find a row parked for the stage"
+must_fail InboxOutageCounts MCInboxOutage.tla "Invariant NoStageParks is violated"
+
+echo "== inbox outage: the stage down for good holds its rows for good, by design"
+must_fail InboxOutageForever MCInboxOutage.tla "Temporal properties were violated"
+
+echo "== inbox outage, with a Tenant failing alone and the operator: causes stay current, parks have their reason, a re-armed row has its canary"
+tlc -config InboxOutageOperators.cfg MCInboxOutage.tla
+
+echo "== inbox outage: a mark, or an unpark, that keeps the cause must break CauseIsCurrent; a bulk unpark that resets the attempts, CanaryReparks"
+must_fail InboxOutageCommitKeepingCause MCInboxOutage.tla "Invariant CauseIsCurrent is violated"
+must_fail InboxOutageUnparkKeepingCause MCInboxOutage.tla "Invariant CauseIsCurrent is violated"
+must_fail InboxOutageUnparkAllResetting MCInboxOutage.tla "Invariant CanaryReparks is violated"
+
+echo "== inbox outage, a Tenant failing alone for a while, read either way: every row ends processed or parked"
+tlc -config InboxOutageTenant.cfg MCInboxOutage.tla
+
+echo "== inbox outage: a Tenant failing for good, read as the stage's on a channel serving nothing else, holds for good -- the sentinel's and park_held's case"
+must_fail InboxOutageQuietMisread MCInboxOutage.tla "Temporal properties were violated"
 
 echo "== inbox: recorded runs of the tests fit the model"
 for trace in traces/inbox-*.jsonl; do

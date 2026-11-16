@@ -253,7 +253,7 @@ def inbox_steps(events, names=None, by_message_id=False):
                 # a hold spends no attempt (ADR-0040 decision 4): Inbox.tla has
                 # no Defer yet, and a hold read as a failure would fit wrongly
                 raise SystemExit(f"slot {slot} held a row for its stage's outage: not modelled yet")
-            failed[slot] = (e["attempts"], e["parked"])
+            failed[slot] = (e["attempts"], e["parked"], e["permanent"])
         elif kind == "handled":
             if e["ok"]:
                 yield record(side="inbox", event="handle", slot=slot, of=slots, msg=row(e["id"], "a handling"))
@@ -272,11 +272,15 @@ def inbox_steps(events, names=None, by_message_id=False):
             if outcome == "processed":
                 yield record(side="inbox", event="commit", slot=slot, of=slots, woken=woken.get(slot, []))
             elif outcome == "failed":
-                attempts, parked = failed[slot]
+                attempts, parked, permanent = failed[slot]
                 yield record(side="inbox", event="fail", slot=slot, of=slots, msg=holding[slot],
-                             attempts=attempts, parked=parked)
+                             attempts=attempts, parked=parked, permanent=permanent)
             elif outcome == "rolled_back" and holding[slot] is not None:
                 yield record(side="inbox", event="crash", slot=slot, of=slots)
+            elif outcome not in ("rolled_back", "nothing", "set_aside", "parked"):
+                # an outcome the mapping does not know would otherwise end the
+                # dispatch without a step, and a run would fit for the wrong reason
+                raise SystemExit(f"slot {slot} closed a dispatch with an outcome not mapped: {outcome}")
             del holding[slot]
             failed.pop(slot, None)
             woken.pop(slot, None)
