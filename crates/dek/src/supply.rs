@@ -341,20 +341,23 @@ impl<K, N> Slot<K, N> {
         }
     }
 
-    /// When the slot changes next by time alone: its key's end, or the
-    /// end of its failure's memory — the back-off, and one cap past it in
-    /// which the failure still decides the next draw (a probe, a doubled
-    /// step).
-    fn next(&self, memory: Duration) -> Option<Instant> {
+    /// When the slot changes next by time alone, after `now`: its key's
+    /// end, or the end of its failure's memory — the back-off, and one cap
+    /// past it in which the failure still decides the next draw (a probe, a
+    /// doubled step). Each is weighed only while it is ahead: a memory that
+    /// ended before a key that serves on — a renewal failed, and its back-off
+    /// over — is no change, and must not hide the key's end.
+    fn next(&self, memory: Duration, now: Instant) -> Option<Instant> {
         let ends = self.key.as_ref().map(|serving| serving.ends);
         let forgets = match self.evidence {
             Evidence::Failed { until, .. } => Some(later(until, memory)),
             Evidence::Trusted | Evidence::Late => None,
         };
-        match (ends, forgets) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        [ends, forgets]
+            .into_iter()
+            .flatten()
+            .filter(|at| *at > now)
+            .min()
     }
 
     /// Whether the slot holds nothing with a future effect as of `now`: no
@@ -491,7 +494,7 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
         {
             self.retired.push(serving.key);
         }
-        let next = slot.next(memory).filter(|at| *at > now);
+        let next = slot.next(memory, now);
         let (idle, due) = (slot.idle(now, memory), slot.due);
         if idle {
             if let Some(due) = due {
@@ -1193,6 +1196,33 @@ mod tests {
         assert_eq!(core.slots(), 0, "the idle slot goes too");
     }
 
+    /// A renewal that failed, its back-off and its memory over before the
+    /// key in service ends: the key still leaves memory at its end on a
+    /// quiet stage. Its end was hidden behind the memory's, already past.
+    #[test]
+    fn a_key_whose_renewal_failed_still_leaves_memory_at_its_end() {
+        let mut p = parameters();
+        (p.backoff, p.gone) = ((S, 2 * S), 2 * S);
+        let (mut core, t0) = (core_with(p), Instant::now());
+        drawn(&mut core, "a", t0, 1);
+        let at = t0 + 55 * S;
+        let (hit, renewal) = core.seal(&"a", at, deadline(at));
+        assert_eq!(hit, Answer::Hit(1));
+        let renewal = renewal.expect("its successor drawn ahead");
+        core.landed(&"a", renewal.generation, Outcome::Unavailable, at, 0);
+        // the failure is forgotten at 57.5 s, the key ends at 60 s
+        core.sweep(t0 + 59 * S);
+        assert!(core.take_retired().is_empty());
+        assert_eq!(
+            core.next_deadline(),
+            Some(t0 + 60 * S),
+            "the key's end is still due"
+        );
+        core.sweep(t0 + 60 * S);
+        assert_eq!(core.take_retired(), vec![1]);
+        assert_eq!(core.keys_held(), 0);
+    }
+
     #[test]
     fn a_key_landing_past_its_end_leaves_no_slot_behind() {
         let (mut core, t0) = (core(), Instant::now());
@@ -1623,10 +1653,38 @@ mod property {
                     "the slot of {} holds nothing and no sweep is due to it",
                     tenant
                 );
+                // Read off the slot itself, not through `next`: every change
+                // ahead — its key's end, its failure's forgetting — is
+                // reached by a sweep no later than it, unless a landing or a
+                // leaving will settle the slot first.
                 if slot.flight.is_none() && slot.waiters == 0 {
+                    let reached = |change: Instant| {
+                        change <= now || slot.due.is_some_and(|(at, _)| at <= change)
+                    };
+                    if let Some(serving) = &slot.key {
+                        prop_assert!(
+                            reached(serving.ends),
+                            "the end of {}'s key is reached by no sweep",
+                            tenant
+                        );
+                    }
+                    if let Evidence::Failed { until, .. } = slot.evidence {
+                        prop_assert!(
+                            reached(later(until, memory)),
+                            "the forgetting of {}'s failure is reached by no sweep",
+                            tenant
+                        );
+                    }
+                }
+                // A slot whose deadline is past is owed to a sweep, which
+                // settles it; any other is due when it next changes.
+                if slot.flight.is_none()
+                    && slot.waiters == 0
+                    && slot.due.is_none_or(|(at, _)| at > now)
+                {
                     prop_assert_eq!(
                         slot.due.map(|(at, _)| at),
-                        slot.next(memory),
+                        slot.next(memory, now),
                         "the slot of {} is due when it does not change",
                         tenant
                     );
