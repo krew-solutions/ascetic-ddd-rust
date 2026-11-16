@@ -94,6 +94,8 @@ pub enum Operation {
     /// Parked the rows held for their stage's outage, by cause (ADR-0040
     /// decision 8): their slots go on.
     ParkedHeld,
+    /// Re-armed parked rows by cause, a batch of them (ADR-0040 decision 8).
+    UnparkedAll,
 }
 
 /// The intake set a message aside beside the inbox, never storing it as a

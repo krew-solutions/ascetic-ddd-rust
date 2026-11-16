@@ -17,8 +17,8 @@ use std::time::Duration;
 use ascetic_ddd_bus::{Cause, Permanent, Scope, Transient, Unavailable, cause};
 use ascetic_ddd_inbox::observer::{Failed, InboxObserver, Operated, Operation};
 use ascetic_ddd_inbox::{
-    ByStream, CausalDependency, Error, Failure, Inbox, InboxMessage, Outage, Outcome, PgInbox,
-    Retries,
+    ByStream, CausalDependency, Error, Failure, Inbox, InboxMessage, InboxRetention, Outage,
+    Outcome, ParkedUnder, PgInbox, Retries, UnparkedAll, Unparking,
 };
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -195,6 +195,21 @@ impl Fixture {
         self.told().last().cloned().expect("a failure told")
     }
 
+    /// One number `sql` reads, `{table}` standing for the inbox's table.
+    async fn count(&self, sql: &str) -> i64 {
+        let sql = sql.replace("{table}", &self.table);
+        self.sessions
+            .session(async |session| {
+                Ok::<_, Error>(session.connection().query_one(&sql, &[]).await?.get(0))
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn unpark_all(&self, unparking: &Unparking<'_>) -> UnparkedAll {
+        self.inbox.unpark_all("ops", unparking).await.unwrap()
+    }
+
     async fn received_position(&self, stream: &str) -> i64 {
         let sql = format!(
             "SELECT received_position FROM {} WHERE stream_id->>'id' = $1",
@@ -227,10 +242,14 @@ struct Row {
 }
 
 fn message(stream: &str, position: i32) -> InboxMessage {
+    message_of("tenant-1", stream, position)
+}
+
+fn message_of(tenant: &str, stream: &str, position: i32) -> InboxMessage {
     static EVENT: AtomicU64 = AtomicU64::new(1);
     let event = EVENT.fetch_add(1, Ordering::Relaxed);
     InboxMessage::new(
-        "tenant-1",
+        tenant,
         "orders.Order",
         json!({ "id": stream }),
         position,
@@ -666,6 +685,211 @@ async fn an_operator_parks_the_rows_held_for_a_cause_and_their_slots_go_on() {
     assert_eq!(
         f.operated().last(),
         Some(&("ops".to_owned(), Operation::ParkedHeld, 1))
+    );
+}
+
+const REFUSED: Cause = cause!("kms.refused");
+
+/// The re-arm of a refused context's rows, of a channel, parked within the
+/// last hour: a canary of one failure, every Tenant.
+fn refused_within_an_hour<'a>() -> Unparking<'a> {
+    Unparking {
+        channel: "kafka://orders",
+        cause: ParkedUnder::Cause("kms.refused"),
+        tenant: None,
+        within: Duration::from_secs(3600),
+        tries: 1,
+        limit: 1000,
+        overtaken: false,
+    }
+}
+
+/// The operator re-arms the parked rows of a cause — of a Tenant, when
+/// named; never another cause's, nor a shredded Tenant's — and those parked
+/// before causes were recorded only when asked for them. A row re-armed with
+/// a canary of `tries` failures parks again at its `tries`th.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn an_operator_re_arms_the_rows_parked_for_a_cause_and_a_canary_parks_again() {
+    let f = fixture("unparkall", Retries::up_to(5)).await;
+    f.publish(&[
+        message("a", 1),
+        message("b", 1),
+        message("c", 1),
+        message_of("tenant-2", "d", 1),
+        message("x", 1),
+        message("u", 1),
+    ])
+    .await;
+    for (stream, cause) in [
+        ("a", REFUSED),
+        ("b", KMS_GONE),
+        ("c", REFUSED),
+        ("d", REFUSED),
+        ("x", REFUSED),
+        ("u", REFUSED),
+    ] {
+        assert_eq!(
+            f.dispatch(|| Err(Permanent::because(cause, "refused").into()))
+                .await,
+            spent(1, true),
+            "{stream}@1 parks"
+        );
+    }
+    // c@1 as parked before causes were recorded; x@1 as parked for a
+    // dependency that never arrived, u@1 for its own values: other grounds,
+    // which a bulk unpark never re-arms
+    f.execute(
+        "UPDATE {table} SET parked_cause = NULL WHERE stream_id->>'id' IN ('c', 'x', 'u'); \
+         UPDATE {table} SET waiting_for = '{\"tenant_id\": \"tenant-1\"}' WHERE stream_id->>'id' = 'x'; \
+         UPDATE {table} SET unreadable_at = now() WHERE stream_id->>'id' = 'u'",
+    )
+    .await;
+
+    let tenant_2 = f
+        .unpark_all(&Unparking {
+            tenant: Some("tenant-2"),
+            ..refused_within_an_hour()
+        })
+        .await;
+    assert_eq!(tenant_2.unparked, 1, "d@1 only");
+    assert!(!f.row("d").await.parked);
+    let all = f.unpark_all(&refused_within_an_hour()).await;
+    assert_eq!(
+        all.unparked, 1,
+        "a@1; never b@1, whose Tenant's key is gone"
+    );
+    assert!(!all.as_of.is_empty());
+    assert!(f.row("b").await.parked && f.row("c").await.parked);
+    let unrecorded = f
+        .unpark_all(&Unparking {
+            cause: ParkedUnder::Unrecorded,
+            tries: 2,
+            ..refused_within_an_hour()
+        })
+        .await;
+    assert_eq!(
+        unrecorded.unparked, 1,
+        "c@1, asked for by name; never x@1 nor u@1, of other grounds"
+    );
+    let a = f.row("a").await;
+    assert_eq!(
+        (a.attempts, a.parked_cause, a.last_cause.as_deref()),
+        (4, None, Some("kms.refused")),
+        "a canary of one: one failure left of five"
+    );
+
+    let fails = || Err(Transient::because(DB_TIMEOUT, "still").into());
+    assert_eq!(
+        f.dispatch(fails).await,
+        spent(5, true),
+        "a@1 parks at its first failure"
+    );
+    assert_eq!(f.dispatch(fails).await, spent(4, false), "c@1 has two");
+    f.due().await;
+    assert_eq!(
+        f.dispatch(fails).await,
+        spent(5, true),
+        "and parks at its second"
+    );
+    assert_eq!(
+        f.dispatch(ok).await,
+        Outcome::Processed,
+        "d@1, re-armed, goes on"
+    );
+    assert_eq!(
+        f.operated()
+            .iter()
+            .filter(|(principal, operation, _)| principal == "ops"
+                && *operation == Operation::UnparkedAll)
+            .count(),
+        3,
+        "each call told with its principal"
+    );
+}
+
+/// The window of a bulk unpark ends at the call and reaches back `within`:
+/// a row parked earlier, or stamped after the call, is left; a row overtaken
+/// by its stream stays parked, counted, unless asked for; and a window
+/// longer than the channel keeps its processed rows is refused.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_bulk_unpark_keeps_to_its_window_and_leaves_an_overtaken_row_unless_asked() {
+    let f = fixture("unparkwindow", Retries::up_to(5)).await;
+    f.publish(&[
+        message("old", 1),
+        message("new", 1),
+        message("e", 1),
+        message("e", 2),
+        message("late", 1),
+    ])
+    .await;
+    let refuse = || Err(Permanent::because(REFUSED, "refused").into());
+    assert_eq!(f.dispatch(refuse).await, spent(1, true));
+    assert_eq!(f.dispatch(refuse).await, spent(1, true));
+    assert_eq!(f.dispatch(refuse).await, spent(1, true), "e@1 parks");
+    assert_eq!(f.dispatch(ok).await, Outcome::Processed, "e@2 overtakes it");
+    assert_eq!(f.dispatch(refuse).await, spent(1, true));
+    f.execute(
+        "UPDATE {table} SET parked_at = now() - interval '2 hours' WHERE stream_id->>'id' = 'old'",
+    )
+    .await;
+    f.execute(
+        "UPDATE {table} SET parked_at = now() + interval '1 hour' WHERE stream_id->>'id' = 'late'",
+    )
+    .await;
+
+    let first = f.unpark_all(&refused_within_an_hour()).await;
+    assert_eq!(
+        (first.unparked, first.overtaken),
+        (1, 1),
+        "new@1 re-armed; e@1 overtaken, left; old@1 and late@1 outside the window"
+    );
+    assert!(f.row("old").await.parked && f.row("late").await.parked);
+    let overtaken = f
+        .unpark_all(&Unparking {
+            overtaken: true,
+            ..refused_within_an_hour()
+        })
+        .await;
+    assert_eq!(overtaken.unparked, 1, "e@1, asked for");
+
+    let kept = PgInbox::new(PgSessionPool::new(pool()))
+        .with_table(
+            Identifier::new(&f.table).unwrap(),
+            Identifier::new(format!("{}_seq", f.table)).unwrap(),
+        )
+        .with_retention(
+            InboxRetention::keep_everything().window("kafka://orders", Duration::from_secs(1800)),
+        );
+    assert!(matches!(
+        kept.unpark_all("ops", &refused_within_an_hour()).await,
+        Err(Error::Refused(_))
+    ));
+}
+
+/// A bulk unpark goes batch after batch to its limit, and no further.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_bulk_unpark_goes_batch_after_batch_to_its_limit() {
+    let f = fixture("unparkbatches", Retries::up_to(5)).await;
+    let messages: Vec<InboxMessage> = (0..250).map(|i| message(&format!("s{i}"), 1)).collect();
+    f.publish(&messages).await;
+    f.execute("UPDATE {table} SET parked_at = now(), parked_cause = 'kms.refused', attempts = 1")
+        .await;
+    let limited = f
+        .unpark_all(&Unparking {
+            limit: 120,
+            ..refused_within_an_hour()
+        })
+        .await;
+    assert_eq!(limited.unparked, 120, "to its limit");
+    let rest = f.unpark_all(&refused_within_an_hour()).await;
+    assert_eq!(rest.unparked, 130, "past one batch");
+    assert_eq!(
+        f.count("SELECT count(*) FROM {table} WHERE parked_at IS NOT NULL")
+            .await,
+        0
     );
 }
 

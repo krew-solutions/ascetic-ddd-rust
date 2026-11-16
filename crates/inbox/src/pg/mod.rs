@@ -91,7 +91,8 @@ mod surface;
 
 pub use intake::Admission;
 pub use surface::{
-    Readmission, Readmitted, SetAsideCount, SetAsideCursor, SetAsidePage, SetAsideRow,
+    ParkedUnder, Readmission, Readmitted, SetAsideCount, SetAsideCursor, SetAsidePage, SetAsideRow,
+    UnparkedAll, Unparking,
 };
 mod sweep;
 

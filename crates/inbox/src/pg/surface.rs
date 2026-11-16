@@ -321,6 +321,85 @@ pub struct Readmitted {
 /// How many rows a bulk readmit reads at a time.
 const READMIT_BATCH: i64 = 100;
 
+/// The cause a parked row was parked under, for [`PgInbox::unpark_all`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParkedUnder<'a> {
+    /// This cause.
+    Cause(&'a str),
+    /// None recorded: parked before causes were (ADR-0040 decision 8).
+    Unrecorded,
+}
+
+/// Which parked rows [`PgInbox::unpark_all`] re-arms, and how.
+#[derive(Clone, Copy, Debug)]
+pub struct Unparking<'a> {
+    /// Their channel, without its key.
+    pub channel: &'a str,
+    /// The cause they were parked under.
+    pub cause: ParkedUnder<'a>,
+    /// Their Tenant, when only one's.
+    pub tenant: Option<&'a str>,
+    /// Parked within this long before the call.
+    pub within: Duration,
+    /// The failures each may have before it parks again: a canary of one
+    /// re-parks a row at its first failure, so that an early re-arm costs
+    /// one attempt a row. Under unlimited attempts, none parks again.
+    pub tries: u32,
+    /// The most rows re-armed.
+    pub limit: u32,
+    /// Whether a row overtaken by a processed row of its stream at a higher
+    /// position is re-armed too; otherwise it stays parked, counted.
+    pub overtaken: bool,
+}
+
+/// What [`PgInbox::unpark_all`] did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UnparkedAll {
+    /// Rows re-armed.
+    pub unparked: u64,
+    /// Rows left parked because they were overtaken.
+    pub overtaken: u64,
+    /// The end of the window, the database's clock at the call.
+    pub as_of: String,
+}
+
+/// A batch of a bulk unpark: the parked rows of a channel on the failure
+/// ground, parked within the window ending at `$3`, after the cursor, by
+/// the parked index; each told whether a processed row of its stream at a
+/// higher position overtook it. It reads no clock: the window is the
+/// call's.
+pub(super) fn unpark_batch(table: &str) -> String {
+    format!(
+        "WITH chosen AS ( \
+            SELECT r.ctid AS place, r.received_position, \
+                   EXISTS (SELECT 1 FROM {table} later \
+                           WHERE later.tenant_id = r.tenant_id AND later.stream_type = r.stream_type \
+                             AND later.stream_id = r.stream_id \
+                             AND later.stream_position > r.stream_position \
+                             AND later.processed_position IS NOT NULL) AS overtaken \
+            FROM {table} r \
+            WHERE {channel} = $1 AND r.parked_at IS NOT NULL AND r.received_position > $2 \
+              AND r.unreadable_at IS NULL AND r.waiting_for IS NULL \
+              AND r.parked_at <= $3::text::timestamptz \
+              AND r.parked_at >= $3::text::timestamptz - make_interval(secs => $4::double precision) \
+              AND CASE WHEN $5::text IS NULL THEN r.parked_cause IS NULL \
+                       ELSE r.parked_cause = $5::text END \
+              AND ($6::text IS NULL OR r.tenant_id = $6::text) \
+            ORDER BY r.received_position LIMIT $7 \
+            FOR UPDATE OF r SKIP LOCKED \
+         ), unparked AS ( \
+            UPDATE {table} SET parked_at = NULL, parked_cause = NULL, unavailable_since = NULL, \
+                next_attempt_at = NULL, attempts = GREATEST(attempts, $8::integer) \
+            WHERE ctid IN (SELECT place FROM chosen WHERE $9::boolean OR NOT overtaken) \
+            RETURNING 1 \
+         ) \
+         SELECT (SELECT count(*) FROM chosen), (SELECT count(*) FROM unparked), \
+                (SELECT count(*) FROM chosen WHERE overtaken AND NOT $9::boolean), \
+                (SELECT max(received_position) FROM chosen)",
+        channel = CHANNEL_OF_ROW.replace("uri", "r.uri")
+    )
+}
+
 /// A batch of a bulk readmit: the open rows of a channel and a reason first
 /// seen within the window ending at `$3`, after the cursor. It reads no
 /// clock: the window is the call's, read once.
@@ -563,6 +642,120 @@ where
         Ok(parked)
     }
 
+    /// Re-arms the parked rows `unparking` names (ADR-0040 decision 8):
+    /// those of a channel, on the failure ground, parked under a cause — of
+    /// one Tenant, when named — within a window before the call, oldest
+    /// first, a batch at a time, each its own transaction, the observer
+    /// told after each commits. A row re-armed loses its park and its cause,
+    /// keeps its attempts, and has at most `tries` failures left. A row a
+    /// later row of its stream overtook stays parked unless asked for: its
+    /// stream has gone on without it. The window's ends are read once, as
+    /// [`PgInbox::readmit_all`]'s are.
+    ///
+    /// # Errors
+    /// [`Error::Refused`] when the window is longer than the channel keeps
+    /// its processed rows: an overtaking row forgotten could not be told.
+    /// [`Error`] when the environment fails, the batches before it re-armed.
+    pub async fn unpark_all(
+        &self,
+        principal: &str,
+        unparking: &Unparking<'_>,
+    ) -> Result<UnparkedAll, Error> {
+        if self
+            .retention
+            .windows
+            .get(unparking.channel)
+            .is_some_and(|kept| unparking.within > *kept)
+        {
+            return Err(Error::Refused(
+                "the window is longer than the channel keeps its processed rows",
+            ));
+        }
+        let as_of = self
+            .pool
+            .session(async |session: P::Session| {
+                Ok::<_, Error>(
+                    session
+                        .connection()
+                        .query_one("SELECT statement_timestamp()::text", &[])
+                        .await?
+                        .get::<_, String>(0),
+                )
+            })
+            .await?;
+        let sql = unpark_batch(self.table.as_str());
+        let cause = match unparking.cause {
+            ParkedUnder::Cause(cause) => Some(cause),
+            ParkedUnder::Unrecorded => None,
+        };
+        let left = i32::try_from(self.retries.max_attempts.saturating_sub(unparking.tries))
+            .unwrap_or(i32::MAX);
+        let mut done = UnparkedAll {
+            as_of: as_of.clone(),
+            ..UnparkedAll::default()
+        };
+        let mut after = i64::MIN;
+        // Each batch reads at most what the limit leaves, so that the last
+        // reads none and ends the walk.
+        loop {
+            let room = u64::from(unparking.limit).saturating_sub(done.unparked);
+            let batch =
+                i64::try_from(room.min(READMIT_BATCH.unsigned_abs())).unwrap_or(READMIT_BATCH);
+            let (chosen, unparked, overtaken, last) = self
+                .pool
+                .session(async |session: P::Session| {
+                    let row = session
+                        .connection()
+                        .query_one(
+                            &sql,
+                            &[
+                                &unparking.channel,
+                                &after,
+                                &as_of,
+                                &unparking.within.as_secs_f64(),
+                                &cause,
+                                &unparking.tenant,
+                                &batch,
+                                &left,
+                                &unparking.overtaken,
+                            ],
+                        )
+                        .await?;
+                    Ok::<_, Error>((
+                        row.get::<_, i64>(0),
+                        row.get::<_, i64>(1),
+                        row.get::<_, i64>(2),
+                        row.get::<_, Option<i64>>(3),
+                    ))
+                })
+                .await?;
+            let unparked = u64::try_from(unparked).unwrap_or_default();
+            done.unparked += unparked;
+            done.overtaken += u64::try_from(overtaken).unwrap_or_default();
+            self.operated(
+                principal,
+                Operation::UnparkedAll,
+                Some(unparking.channel),
+                None,
+                usize::try_from(unparked).unwrap_or(usize::MAX),
+            );
+            match last {
+                Some(last) if chosen >= batch => after = last,
+                _ => break,
+            }
+        }
+        log::warn!(
+            "inbox: {} re-armed {} parked rows of {}, {} overtaken left parked",
+            intake::sanitized(Some(principal.as_bytes()), intake::DERIVED_WIDTH)
+                .unwrap_or_default(),
+            done.unparked,
+            intake::sanitized(Some(unparking.channel.as_bytes()), intake::CHANNEL_WIDTH)
+                .unwrap_or_default(),
+            done.overtaken,
+        );
+        Ok(done)
+    }
+
     /// Closes the open row under `digest` as discarded, for `because`: a
     /// tombstone, its bytes gone. A later repeat of the same bytes stays
     /// discarded, and is counted. Returns whether an open row was closed.
@@ -636,10 +829,15 @@ mod tests {
     use super::*;
 
     /// A batch reads no clock, so that the window cannot move while a bulk
-    /// readmit runs: its ends are the call's.
+    /// readmit or unpark runs: its ends are the call's.
     #[test]
     fn a_bulk_readmit_s_batch_reads_no_clock() {
-        let batch = readmit_batch("inbox").to_lowercase();
+        for batch in [readmit_batch("inbox"), unpark_batch("inbox")] {
+            reads_no_clock(&batch.to_lowercase());
+        }
+    }
+
+    fn reads_no_clock(batch: &str) {
         for clock in [
             "statement_timestamp",
             "clock_timestamp",
