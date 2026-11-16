@@ -18,9 +18,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ascetic_ddd_bus::{BoxError, Message, Permanent, Stage};
+use ascetic_ddd_dek::Scope;
 use ascetic_ddd_dek::stage::{DEK, MESSAGE_ID, TENANT_ID};
 use ascetic_ddd_dek::supply::Reason;
-use ascetic_ddd_dek::{EnvelopeStage, Pacing, Reuse, Unavailable};
+use ascetic_ddd_dek::{EnvelopeStage, Landed, Pacing, Reuse, Unavailable};
 use ascetic_ddd_kms::{Error, Key, KeyManagementService};
 use ascetic_ddd_session::testing::{MemorySession, MemorySessionPool};
 use tokio::sync::Notify;
@@ -302,6 +303,12 @@ async fn a_shredded_tenant_is_told_once_and_not_asked_again_for_a_while() {
     let after = seal(&stage, "a", 2).await;
     assert_eq!(unavailable(&after).reason, Reason::BackingOff);
     assert_eq!(kms.draws(), 1, "no call within gone");
+    let verdict = unavailable(&after).verdict();
+    assert_eq!(
+        verdict.downcast_ref::<Permanent>().map(Permanent::cause),
+        Some(ascetic_ddd_dek::causes::GONE),
+        "a seal refused while gone is remembered is for good, under kms.gone"
+    );
     advance(Duration::from_secs(10)).await;
     let again = seal(&stage, "a", 3).await;
     assert!(
@@ -324,7 +331,9 @@ async fn a_sealing_side_refusal_backs_off_and_is_never_for_good() {
     );
     let refused = unavailable(&refused);
     assert!(
-        refused.last.is_some_and(|last| last.contains("refused")),
+        refused
+            .last
+            .is_some_and(|last| last.landed == Landed::Refused && last.text.contains("refused")),
         "the cause told"
     );
     let backing = seal(&stage, "a", 2).await;
@@ -336,6 +345,58 @@ async fn a_sealing_side_refusal_backs_off_and_is_never_for_good() {
             .is_some_and(|after| after > Duration::ZERO)
     );
     assert_eq!(kms.draws(), 1);
+    assert_eq!(
+        backing
+            .verdict()
+            .downcast_ref::<Permanent>()
+            .map(Permanent::cause),
+        Some(ascetic_ddd_dek::causes::REFUSED),
+        "the bus's verdict: for good, under kms.refused, for a deploy to mend"
+    );
+}
+
+/// A stage that refuses a tenant on no evidence of whether its KMS serves
+/// draws for its sentinel, and once that lands in time, the tenant's
+/// refusal is its own: the inbox spends an attempt rather than holding the
+/// slot for an outage that is not there (ADR-0040 decision 3). Without a
+/// sentinel the refusal stays the stage's.
+#[tokio::test(start_paused = true)]
+async fn a_sentinel_tells_a_tenant_s_trouble_from_the_kms_s() {
+    for sentinel in [true, false] {
+        let kms = Gated::new([Answer::Unreachable, Answer::Key]);
+        let built = EnvelopeStage::new(MemorySessionPool::new(), Kms(Arc::clone(&kms)))
+            .paced(reuse(), Pacing::fitted(reuse()))
+            .unwrap()
+            .seeded(7);
+        let stage: Tested = Arc::new(if sentinel {
+            built.with_sentinel("s")
+        } else {
+            built
+        });
+        let first = unavailable(&seal(&stage, "a", 1).await);
+        assert_eq!(first.scope, Scope::Stage, "no evidence yet");
+        sleep(Duration::from_millis(50)).await;
+        let second = unavailable(&seal(&stage, "a", 2).await);
+        assert_eq!(second.reason, Reason::BackingOff);
+        if sentinel {
+            assert_eq!(kms.draws(), 2, "a's draw, and the sentinel's");
+            assert_eq!(second.scope, Scope::Tenant, "the sentinel landed in time");
+            let verdict = second.verdict();
+            let told = verdict
+                .downcast_ref::<ascetic_ddd_bus::Unavailable>()
+                .expect("unavailable");
+            assert_eq!(
+                (told.scope(), told.cause()),
+                (
+                    ascetic_ddd_bus::Scope::Tenant,
+                    ascetic_ddd_dek::causes::UNAVAILABLE
+                )
+            );
+        } else {
+            assert_eq!(kms.draws(), 1, "no sentinel, no draw for evidence");
+            assert_eq!(second.scope, Scope::Stage);
+        }
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -875,6 +936,7 @@ fn a_sealing_whose_keys_would_outlive_its_ceiling_is_refused() {
             ["c"],
             (parameters, pacing),
             Some(ceiling),
+            None,
             |_| Arc::new(()),
             |_| Kms(Arc::clone(&kms)),
         )
@@ -1006,6 +1068,7 @@ async fn a_sealing_tells_each_channel_s_observer_of_its_own_stage() {
         Arc::new(MemorySessionPool::new()),
         ["c", "d"],
         (parameters, Pacing::fitted(parameters.reuse)),
+        None,
         None,
         |channel| {
             let recorded = Arc::new(Recorded::default());

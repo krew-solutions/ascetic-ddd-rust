@@ -16,11 +16,11 @@ pub mod sealing;
 pub mod stage;
 pub mod supply;
 
-pub use crate::supply::InvalidParameters;
+pub use crate::supply::{InvalidParameters, Scope};
 
 pub use crate::domain::{Keyring, Resource, VersionedCipher};
 #[cfg(feature = "bus")]
-pub use crate::draws::{Flight, Held, Landed, SealingObserver, Unavailable};
+pub use crate::draws::{Flight, Held, Landed, Last, SealingObserver, Unavailable, causes};
 pub use crate::error::Error;
 #[cfg(feature = "pg")]
 pub use crate::pg::PgDekStore;

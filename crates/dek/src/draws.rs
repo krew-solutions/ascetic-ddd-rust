@@ -22,12 +22,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
-use ascetic_ddd_bus::{BoxError, Permanent};
+use ascetic_ddd_bus::{self as bus, BoxError, Cause, Permanent, cause};
 use ascetic_ddd_kms::{Class, Error as KmsError, Key, KeyManagementService};
 use ascetic_ddd_session::SessionPool;
 use tokio::sync::{Notify, watch};
 
-use crate::supply::{Answer, Core, Generation, Kind, Outcome, Reason, Start, Supply};
+use crate::supply::{Answer, Core, Generation, Kind, Outcome, Reason, Scope, Start, Supply};
 
 /// A data key in service: the key, and the key wrapped by the tenant's KEK.
 #[derive(Clone)]
@@ -42,6 +42,30 @@ impl fmt::Debug for Served {
     }
 }
 
+/// The causes the stage names its verdicts under (ADR-0040 decision 2).
+pub mod causes {
+    use super::{Cause, cause};
+
+    /// The tenant's key is not there: shredded, or never made.
+    pub const GONE: Cause = cause!("kms.gone");
+    /// The KMS refuses the operation for the context: a policy's verdict,
+    /// which a deploy mends.
+    pub const REFUSED: Cause = cause!("kms.refused");
+    /// The KMS serves no key now.
+    pub const UNAVAILABLE: Cause = cause!("kms.unavailable");
+    /// The message cannot be sealed or opened for its own values.
+    pub const MALFORMED: Cause = cause!("dek.malformed");
+}
+
+/// What the stage's last draw for a tenant came to, when it failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Last {
+    /// Its landing.
+    pub landed: Landed,
+    /// Its error's words, for the log; never a verdict's ground.
+    pub text: String,
+}
+
 /// Why a seal was not served now: of the moment, to be asked again.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unavailable {
@@ -49,8 +73,35 @@ pub struct Unavailable {
     pub reason: Reason,
     /// When asking again may be served, when the stage knows.
     pub retry_after: Option<Duration>,
+    /// Whose seals the refusal stops, as far as the stage can tell
+    /// (ADR-0040 decision 3).
+    pub scope: Scope,
     /// What the stage's last draw for the tenant came to, if it failed.
-    pub last: Option<String>,
+    pub last: Option<Last>,
+}
+
+impl Unavailable {
+    /// The bus's verdict on the seal not served (ADR-0040 decisions 2 and
+    /// 3): for good when the tenant's last draw found its key gone, or the
+    /// context refused — a deploy, not a retry, mends that; otherwise
+    /// unavailable over the refusal's scope, asked again past its
+    /// `retry_after`. A host returns it from a handler whose message the
+    /// inbox is to hold, spend or park as it says.
+    #[must_use]
+    pub fn verdict(self) -> BoxError {
+        match self.last.as_ref().map(|last| last.landed) {
+            Some(Landed::Gone) => Permanent::because(causes::GONE, self).into(),
+            Some(Landed::Refused) => Permanent::because(causes::REFUSED, self).into(),
+            _ => {
+                let scope = match self.scope {
+                    Scope::Stage => bus::Scope::Stage,
+                    Scope::Tenant => bus::Scope::Tenant,
+                };
+                let retry_after = self.retry_after;
+                bus::Unavailable::new(causes::UNAVAILABLE, scope, retry_after, self).into()
+            }
+        }
+    }
 }
 
 impl fmt::Display for Unavailable {
@@ -67,7 +118,7 @@ impl fmt::Display for Unavailable {
             write!(f, "; again after {}ms", after.as_millis())?;
         }
         if let Some(last) = &self.last {
-            write!(f, "; the last draw: {last}")?;
+            write!(f, "; the last draw: {}", last.text)?;
         }
         Ok(())
     }
@@ -179,7 +230,7 @@ enum Seed {
 #[derive(Debug)]
 struct State {
     /// The core, noting why a tenant's last draw failed.
-    core: Core<String, Served, String>,
+    core: Core<String, Served, Last>,
     /// Each flight's landing, told to its waiters: made when it starts,
     /// dropped when it lands.
     flights: HashMap<Generation, watch::Sender<()>>,
@@ -206,6 +257,8 @@ pub(crate) struct Draws<P, K> {
     observer: Arc<dyn SealingObserver>,
     tick: Arc<Notify>,
     ticking: Arc<AtomicBool>,
+    /// The tenant drawn for evidence, carried to draws made anew.
+    sentinel: Option<String>,
 }
 
 /// The tick running: cleared when its task ends.
@@ -253,6 +306,7 @@ enum Step<'a, P, K> {
     Refused {
         reason: Reason,
         retry_after: Option<Duration>,
+        scope: Scope,
     },
     /// The stage runs as many flights as it may: wait for a place.
     Full(watch::Receiver<()>),
@@ -322,6 +376,7 @@ where
             observer: Arc::new(()),
             tick: Arc::new(Notify::new()),
             ticking: Arc::new(AtomicBool::new(false)),
+            sentinel: None,
         }
     }
 
@@ -330,6 +385,9 @@ where
     /// these hold or fly.
     pub(crate) fn anew(&self, supply: Supply) -> Self {
         let mut draws = Self::over(Arc::clone(&self.parts), supply);
+        if let Some(sentinel) = &self.sentinel {
+            draws = draws.with_sentinel(sentinel.clone());
+        }
         draws.seed = match &self.seed {
             Seed::Process(state) => Seed::Process(state.clone()),
             Seed::Fixed(seed) => Seed::Fixed(*seed),
@@ -341,6 +399,15 @@ where
     /// The supply these draws are paced by.
     pub(crate) fn supply(&self) -> Supply {
         self.supply
+    }
+
+    /// The same draws, drawing for `sentinel`'s evidence when the stage has
+    /// none (ADR-0040 decision 3).
+    pub(crate) fn with_sentinel(mut self, sentinel: String) -> Self {
+        let state = self.state.get_mut().unwrap_or_else(PoisonError::into_inner);
+        state.core = Core::new(self.supply).with_sentinel(sentinel.clone());
+        self.sentinel = Some(sentinel);
+        self
     }
 
     pub(crate) fn with_seed(mut self, seed: u64) -> Self {
@@ -397,9 +464,11 @@ where
                     Answer::Refused {
                         reason,
                         retry_after,
+                        scope,
                     } => Step::Refused {
                         reason,
                         retry_after,
+                        scope,
                     },
                     Answer::Join(generation, _) => Step::Join(Joined {
                         draws: self,
@@ -423,7 +492,12 @@ where
                 // start; a miss that cannot draw is not served.
                 if !self.launch(tenant, start) && !matches!(step, Step::Hit(_)) {
                     drop(step);
-                    return Err(self.unavailable(tenant, Reason::Unspawned, None));
+                    return Err(self.unavailable(
+                        tenant,
+                        Reason::Unspawned,
+                        None,
+                        Some(Scope::Stage),
+                    ));
                 }
             }
             let mut joined = match step {
@@ -435,13 +509,14 @@ where
                 Step::Refused {
                     reason,
                     retry_after,
+                    scope,
                 } => {
                     let reason = if gave_up && reason == Reason::Late {
                         Reason::Waited
                     } else {
                         reason
                     };
-                    return Err(self.unavailable(tenant, reason, retry_after));
+                    return Err(self.unavailable(tenant, reason, retry_after, Some(scope)));
                 }
                 Step::Full(mut places) => {
                     // A place freed by a landing before the deadline: asked
@@ -460,7 +535,7 @@ where
             };
             if gave_up {
                 drop(joined);
-                return Err(self.unavailable(tenant, Reason::Waited, None));
+                return Err(self.unavailable(tenant, Reason::Waited, None, None));
             }
             // Woken only by its flight's landing; at the deadline, or by a
             // channel closed unlanded, the waiter gives up — so a seal asks
@@ -492,7 +567,7 @@ where
 
     /// A key drawn for one message, on the caller's own task: nothing is
     /// shared, so nothing is single-flight; bounded by `draw`.
-    async fn drawn_now(&self, tenant: &str) -> Result<Served, BoxError> {
+    async fn drawn_now(self: &Arc<Self>, tenant: &str) -> Result<Served, BoxError> {
         let started = now();
         let drawn = tokio::time::timeout(
             self.supply.draw(),
@@ -526,14 +601,14 @@ where
                 tell(landed, Some(&error));
                 // At the sealing end only a key gone is for good.
                 Err(if landed == Landed::Gone {
-                    Permanent::new(error).into()
+                    Permanent::because(causes::GONE, error).into()
                 } else {
                     error.into()
                 })
             }
             Err(_) => {
                 tell(Landed::Abandoned, None);
-                Err(self.unavailable(tenant, Reason::Waited, None))
+                Err(self.unavailable(tenant, Reason::Waited, None, None))
             }
         }
     }
@@ -548,13 +623,39 @@ where
         }
     }
 
-    /// A seal not served, told.
-    fn unavailable(&self, tenant: &str, reason: Reason, retry_after: Option<Duration>) -> BoxError {
+    /// A seal not served, told, over `scope` or the scope the core gives
+    /// its reason. A refusal of the stage's scope on evidence asks the core
+    /// for a draw of the sentinel's, so that a quiet stage learns whether
+    /// its KMS serves (ADR-0040 decision 3).
+    fn unavailable(
+        self: &Arc<Self>,
+        tenant: &str,
+        reason: Reason,
+        retry_after: Option<Duration>,
+        scope: Option<Scope>,
+    ) -> BoxError {
         self.observer.on_unserved(tenant, reason);
-        let last = self.lock().core.noted(&tenant.to_owned()).cloned();
+        let (scope, last, probe) = {
+            let mut state = self.lock();
+            let key = tenant.to_owned();
+            let scope = scope.unwrap_or_else(|| state.core.scope(&key, reason));
+            let last = state.core.noted(&key).cloned();
+            let on_evidence = matches!(reason, Reason::Waited | Reason::BackingOff | Reason::Late);
+            let probe = (scope == Scope::Stage && on_evidence)
+                .then(|| state.core.probe(now()))
+                .flatten();
+            if let Some((_, start)) = &probe {
+                state.flights.insert(start.generation, watch::channel(()).0);
+            }
+            (scope, last, probe)
+        };
+        if let Some((sentinel, start)) = probe {
+            self.launch(&sentinel, start);
+        }
         Box::new(Unavailable {
             reason,
             retry_after,
+            scope,
             last,
         })
     }
@@ -633,10 +734,16 @@ where
             if let Some(landing) = landing {
                 // The flight's one landing: why it failed noted in its slot,
                 // to go with it; its waiters woken, the sender dropped.
-                let cause = match (&landed, error) {
+                let cause = match (landed, error) {
                     (Landed::Drawn, _) => None,
-                    (_, Some(error)) => Some(error.to_string()),
-                    (other, None) => Some(format!("{other:?}")),
+                    (landed, Some(error)) => Some(Last {
+                        landed,
+                        text: error.to_string(),
+                    }),
+                    (landed, None) => Some(Last {
+                        landed,
+                        text: format!("{landed:?}"),
+                    }),
                 };
                 state.core.note(&key, cause);
                 landing.send_replace(());
@@ -731,10 +838,13 @@ where
 
 /// The tenant's key is not there, for good.
 fn gone(tenant: &str) -> BoxError {
-    Permanent::new(KmsError::KekNotFound {
-        tenant_id: tenant.to_owned(),
-        key_version: None,
-    })
+    Permanent::because(
+        causes::GONE,
+        KmsError::KekNotFound {
+            tenant_id: tenant.to_owned(),
+            key_version: None,
+        },
+    )
     .into()
 }
 

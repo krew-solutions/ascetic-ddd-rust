@@ -251,6 +251,37 @@ pub enum Reason {
     Unspawned,
 }
 
+/// Whose seals a refusal stops, as far as the stage can tell (ADR-0040
+/// decision 3): every tenant's, when the KMS serves no one, or this
+/// tenant's alone, when a draw of another tenant landed in time since this
+/// one's trouble began.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Scope {
+    /// The stage cannot serve now: no draw has landed in time since this
+    /// tenant's trouble began, or the stage itself is full or has no
+    /// runtime.
+    Stage,
+    /// Another tenant's draw landed in time since: this tenant's own.
+    Tenant,
+}
+
+/// The scope a refusal on evidence has: the tenant's own when a draw landed
+/// in time after `since`, its trouble's start; the stage's otherwise.
+fn scope_by(since: Option<Instant>, landed_in_time: Option<Instant>) -> Scope {
+    match (since, landed_in_time) {
+        (Some(since), Some(landed)) if landed > since => Scope::Tenant,
+        _ => Scope::Stage,
+    }
+}
+
+/// When a slot's trouble began: its failure, or its flight's start.
+fn trouble_since<K, N>(slot: &Slot<K, N>) -> Option<Instant> {
+    match slot.evidence {
+        Evidence::Failed { at, .. } => Some(at),
+        Evidence::Trusted | Evidence::Late => slot.flight.map(|flying| flying.started),
+    }
+}
+
 /// What a seal is answered.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Answer<K> {
@@ -264,6 +295,8 @@ pub enum Answer<K> {
         reason: Reason,
         /// When asking again may be served.
         retry_after: Option<Duration>,
+        /// Whose seals the refusal stops, by the stage's evidence.
+        scope: Scope,
     },
     /// The tenant's key is not there: answered to the flight's own caller.
     Gone,
@@ -417,6 +450,11 @@ pub struct Core<T, K, N = ()> {
     /// The keys gone out of service since the shell last took them.
     retired: Vec<K>,
     landed_in_time: Option<Instant>,
+    /// The tenant drawn for evidence when the stage has none: the host's own
+    /// account, under the same KMS and policy (ADR-0040 decision 3).
+    sentinel: Option<T>,
+    /// When its last draw for evidence started.
+    probed: Option<Instant>,
 }
 
 impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
@@ -432,7 +470,61 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
             deadlines: BTreeMap::new(),
             retired: Vec::new(),
             landed_in_time: None,
+            sentinel: None,
+            probed: None,
         }
+    }
+
+    /// The same, drawing for `sentinel` when the stage has no evidence of
+    /// whether its KMS serves (ADR-0040 decision 3).
+    #[must_use]
+    pub fn with_sentinel(mut self, sentinel: T) -> Self {
+        self.sentinel = Some(sentinel);
+        self
+    }
+
+    /// The scope of a refusal of `tenant` for `reason` as of now: the
+    /// stage's for a stage that is full or has no runtime; otherwise as the
+    /// evidence says.
+    #[must_use]
+    pub fn scope(&self, tenant: &T, reason: Reason) -> Scope {
+        match reason {
+            Reason::FlightsFull | Reason::Unspawned => Scope::Stage,
+            Reason::Waited | Reason::BackingOff | Reason::Late => scope_by(
+                self.slots.get(tenant).and_then(trouble_since),
+                self.landed_in_time,
+            ),
+        }
+    }
+
+    /// A draw for the sentinel's evidence at `now`, if one is due: at most
+    /// one in flight, none within `wait` of the last, none while the
+    /// sentinel's own failure backs off, and only on a place a probe may
+    /// take. The shell starts it after a refusal of the stage's scope, so
+    /// that a quiet stage — its other tenants served from their keys —
+    /// learns whether its KMS serves before the inbox weighs a hold.
+    pub fn probe(&mut self, now: Instant) -> Option<(T, Start)> {
+        let sentinel = self.sentinel.clone()?;
+        if self
+            .probed
+            .is_some_and(|at| now < later(at, self.supply.wait))
+        {
+            return None;
+        }
+        if self.slots.get(&sentinel).is_some_and(|slot| {
+            slot.flight.is_some()
+                || matches!(slot.evidence, Evidence::Failed { until, .. } if now < until)
+        }) {
+            return None;
+        }
+        if !self.place(Kind::Probe) {
+            return None;
+        }
+        self.slots.entry(sentinel.clone()).or_insert_with(Slot::new);
+        let start = self.start(&sentinel, Kind::Probe, now);
+        self.probed = Some(now);
+        self.settle(&sentinel, now);
+        Some((sentinel, start))
     }
 
     /// The supply.
@@ -560,8 +652,9 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
         }
         let landed_in_time = self.landed_in_time;
         let Some(slot) = self.slots.get_mut(tenant) else {
-            return refused(Reason::Late, None);
+            return refused(Reason::Late, None, Scope::Stage);
         };
+        let scope = scope_by(trouble_since(slot), landed_in_time);
         // A key gone: told to the first seal that asks after its landing,
         // and refused to every other until its memory ends (ADR-0039 F11).
         if let Evidence::Failed {
@@ -577,6 +670,7 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
             return refused(
                 Reason::BackingOff,
                 Some(until.saturating_duration_since(now)),
+                scope,
             );
         }
         // A failed draw's back-off.
@@ -586,6 +680,7 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
             return refused(
                 Reason::BackingOff,
                 Some(until.saturating_duration_since(now)),
+                scope,
             );
         }
         // A flight in flight: joined only when trusted.
@@ -594,7 +689,7 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
                 slot.waiters = slot.waiters.saturating_add(1);
                 (Answer::Join(flying.generation, deadline), None)
             } else {
-                refused(Reason::Late, None)
+                refused(Reason::Late, None, scope)
             };
         }
         // No flight: start one, and wait for it only on evidence.
@@ -607,7 +702,7 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
             ),
         };
         if !self.place(kind) {
-            return refused(Reason::FlightsFull, None);
+            return refused(Reason::FlightsFull, None, Scope::Stage);
         }
         let start = self.start(tenant, kind, now);
         if trusted {
@@ -621,6 +716,7 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
                 Answer::Refused {
                     reason: Reason::Late,
                     retry_after: None,
+                    scope,
                 },
                 Some(start),
             )
@@ -827,12 +923,17 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
     }
 }
 
-/// A seal refused for `reason`.
-const fn refused<K>(reason: Reason, retry_after: Option<Duration>) -> (Answer<K>, Option<Start>) {
+/// A seal refused for `reason`, over `scope`.
+const fn refused<K>(
+    reason: Reason,
+    retry_after: Option<Duration>,
+    scope: Scope,
+) -> (Answer<K>, Option<Start>) {
     (
         Answer::Refused {
             reason,
             retry_after,
+            scope,
         },
         None,
     )
@@ -947,7 +1048,8 @@ mod tests {
             answer,
             Answer::Refused {
                 reason: Reason::Late,
-                retry_after: None
+                retry_after: None,
+                scope: Scope::Stage
             }
         );
         assert_eq!(start, None);
@@ -1017,6 +1119,7 @@ mod tests {
             let Answer::Refused {
                 reason: Reason::BackingOff,
                 retry_after: Some(after),
+                ..
             } = answer
             else {
                 panic!("{answer:?}");
@@ -1097,10 +1200,133 @@ mod tests {
             answer,
             Answer::Refused {
                 reason: Reason::Late,
-                retry_after: None
+                retry_after: None,
+                scope: Scope::Stage
             },
-            "the probe runs on its own; the seal does not wait on it"
+            "the probe runs on its own; the seal does not wait on it: a landing slower than the \
+             wait is no evidence that the KMS serves another tenant"
         );
+    }
+
+    fn scope_of(answer: &Answer<u32>) -> Scope {
+        match answer {
+            Answer::Refused { scope, .. } => *scope,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A refusal is the tenant's when another tenant's draw landed in time
+    /// since this tenant's trouble began, and the stage's otherwise; a full
+    /// stage refuses over the stage (ADR-0040 decision 3).
+    #[test]
+    fn a_refusal_is_the_tenant_s_when_another_landed_in_time_since_its_trouble_began() {
+        let (mut core, t0) = (core(), Instant::now());
+        let (_, a) = core.seal(&"a", t0, deadline(t0));
+        let (_, b) = core.seal(&"b", t0, deadline(t0));
+        core.left(&"a", t0);
+        core.left(&"b", t0);
+        core.landed(&"a", a.unwrap().generation, Outcome::Unavailable, t0, 0);
+        let before = t0 + Duration::from_millis(50);
+        let (refused, _) = core.seal(&"a", before, deadline(before));
+        assert_eq!(scope_of(&refused), Scope::Stage, "no landing since");
+        core.landed(
+            &"b",
+            b.unwrap().generation,
+            Outcome::Drawn {
+                key: 2,
+                started: t0,
+            },
+            t0 + Duration::from_millis(100),
+            0,
+        );
+        let after = t0 + Duration::from_millis(200);
+        let (refused, _) = core.seal(&"a", after, deadline(after));
+        assert!(matches!(
+            refused,
+            Answer::Refused {
+                reason: Reason::BackingOff,
+                ..
+            }
+        ));
+        assert_eq!(scope_of(&refused), Scope::Tenant, "b landed in time since");
+        assert_eq!(core.scope(&"a", Reason::BackingOff), Scope::Tenant);
+        assert_eq!(core.scope(&"a", Reason::FlightsFull), Scope::Stage);
+        assert_eq!(core.scope(&"a", Reason::Unspawned), Scope::Stage);
+
+        // A landing before the tenant's trouble began is no evidence of it.
+        let mut core = self::core();
+        let (_, b) = core.seal(&"b", t0, deadline(t0));
+        core.left(&"b", t0);
+        core.landed(
+            &"b",
+            b.unwrap().generation,
+            Outcome::Drawn {
+                key: 2,
+                started: t0,
+            },
+            t0 + Duration::from_millis(100),
+            0,
+        );
+        let later = t0 + S;
+        let (_, a) = core.seal(&"a", later, deadline(later));
+        core.left(&"a", later);
+        core.landed(&"a", a.unwrap().generation, Outcome::Unavailable, later, 0);
+        let asked = later + Duration::from_millis(50);
+        let (refused, _) = core.seal(&"a", asked, deadline(asked));
+        assert_eq!(
+            scope_of(&refused),
+            Scope::Stage,
+            "b landed before a's trouble began"
+        );
+
+        let mut p = parameters();
+        p.flights = 1;
+        let mut core = core_with(p);
+        core.seal(&"a", t0, deadline(t0));
+        let (full, _) = core.seal(&"b", t0, deadline(t0));
+        assert!(matches!(
+            full,
+            Answer::Refused {
+                reason: Reason::FlightsFull,
+                scope: Scope::Stage,
+                ..
+            }
+        ));
+    }
+
+    /// The sentinel is drawn for evidence at most one at a time, never
+    /// within `wait` of the last draw, never while its own failure backs
+    /// off; a core without one draws none.
+    #[test]
+    fn a_sentinel_is_drawn_for_evidence_at_most_once_per_wait() {
+        let t0 = Instant::now();
+        assert_eq!(core().probe(t0), None, "no sentinel, no probe");
+        let mut core = core().with_sentinel("s");
+        let (sentinel, start) = core.probe(t0).expect("a probe");
+        assert_eq!((sentinel, start.kind), ("s", Kind::Probe));
+        assert_eq!(core.probe(t0), None, "one in flight");
+        let landed = t0 + Duration::from_millis(100);
+        core.landed(
+            &"s",
+            start.generation,
+            Outcome::Drawn {
+                key: 1,
+                started: t0,
+            },
+            landed,
+            0,
+        );
+        assert_eq!(
+            core.probe(t0 + Duration::from_millis(200)),
+            None,
+            "within the wait of the last"
+        );
+        let again = t0 + Duration::from_millis(300);
+        let (_, start) = core.probe(again).expect("past the wait");
+        core.landed(&"s", start.generation, Outcome::Unavailable, again, 0);
+        let later = again + Duration::from_millis(300);
+        assert_eq!(core.probe(later), None, "the sentinel's failure backs off");
+        assert!(core.probe(again + 30 * S).is_some(), "and is drawn past it");
     }
 
     #[test]
@@ -1448,6 +1674,8 @@ mod property {
         GaveUp(usize),
         Left(usize),
         Sweep,
+        /// A draw for the sentinel's evidence, if one is due.
+        Probe,
     }
 
     fn step() -> impl Strategy<Value = Step> {
@@ -1458,6 +1686,7 @@ mod property {
             1 => (0..3usize).prop_map(Step::GaveUp),
             2 => (0..3usize).prop_map(Step::Left),
             1 => Just(Step::Sweep),
+            1 => Just(Step::Probe),
         ]
     }
 
@@ -1488,13 +1717,17 @@ mod property {
         stale: u32,
         retired: u32,
         expired_by_uses: u32,
+        tenant_scoped: u32,
+        probes: u32,
     }
 
     /// Runs `steps`, holding the invariants after each; what they exercised.
     fn run(steps: &[Step], random: u64) -> Result<Activity, TestCaseError> {
         let supply = supply();
-        let mut core: Core<&'static str, Drawn> = Core::new(supply);
+        // `c` is the sentinel, and seals as any tenant does too.
+        let mut core: Core<&'static str, Drawn> = Core::new(supply).with_sentinel("c");
         let t0 = Instant::now();
+        let mut probed: Option<Instant> = None;
         let mut now = t0;
         let mut flying: HashMap<&'static str, (Generation, Instant)> = HashMap::new();
         let mut landed_generations: Vec<(&'static str, Generation)> = Vec::new();
@@ -1546,7 +1779,11 @@ mod property {
                         Answer::Refused {
                             reason,
                             retry_after,
+                            scope,
                         } => {
+                            if scope == Scope::Tenant {
+                                activity.tenant_scoped += 1;
+                            }
                             if let Some(after) = retry_after {
                                 prop_assert!(!after.is_zero() && after <= 8 * S, "{after:?}");
                             }
@@ -1635,6 +1872,20 @@ mod property {
                 }
                 Step::Left(t) => core.left(&TENANTS[t], now),
                 Step::Sweep => core.sweep(now),
+                Step::Probe => {
+                    if let Some((tenant, start)) = core.probe(now) {
+                        prop_assert_eq!(tenant, "c", "only the sentinel is probed");
+                        prop_assert_eq!(start.kind, Kind::Probe);
+                        prop_assert!(!flying.contains_key(tenant), "two flights for {tenant}");
+                        prop_assert!(
+                            probed.is_none_or(|at| now >= at + supply.wait()),
+                            "a probe within the wait of the last"
+                        );
+                        probed = Some(now);
+                        flying.insert(tenant, (start.generation, now));
+                        activity.probes += 1;
+                    }
+                }
             }
             // Every key gone out of service is told, once, and never served
             // again.
@@ -1737,6 +1988,8 @@ mod property {
             total.stale += activity.stale;
             total.retired += activity.retired;
             total.expired_by_uses += activity.expired_by_uses;
+            total.tenant_scoped += activity.tenant_scoped;
+            total.probes += activity.probes;
             for (k, v) in activity.refused {
                 *total.refused.entry(k).or_default() += v;
             }
@@ -1747,6 +2000,11 @@ mod property {
                 *total.landed.entry(k).or_default() += v;
             }
         }
+        assert!(
+            total.tenant_scoped > 0,
+            "never a refusal of the tenant's scope: {total:?}"
+        );
+        assert!(total.probes > 0, "never a sentinel's probe: {total:?}");
         let refused: HashSet<_> = total.refused.keys().copied().collect();
         for reason in ["backing off", "late", "full"] {
             assert!(

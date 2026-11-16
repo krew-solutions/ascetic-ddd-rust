@@ -34,7 +34,7 @@ use ascetic_ddd_kms::{Cached, KeyManagementService};
 use ascetic_ddd_session::SessionPool;
 use futures::future::BoxFuture;
 
-use crate::draws::{Held, SealingObserver};
+use crate::draws::{Held, SealingObserver, causes};
 use crate::stage::{EnvelopeStage, Pacing, Reuse};
 use crate::supply::InvalidParameters;
 
@@ -118,6 +118,7 @@ impl Sealing {
             channels,
             (parameters, Pacing::fitted(parameters.reuse)),
             None,
+            None,
             |_| Arc::new(()),
             kms,
         )
@@ -130,7 +131,9 @@ impl Sealing {
     /// window after an off-boarding in which a key already drawn or
     /// unwrapped still serves — the reuse's lifetime, the cache's, and a
     /// draw's — is held under it (ADR-0039 decision 12; the consumer's
-    /// ADR-0071 decision 11 names the ceiling).
+    /// ADR-0071 decision 11 names the ceiling). With a `sentinel`, each
+    /// stage draws for the host's own account when it refuses on no
+    /// evidence of whether its KMS serves ([`EnvelopeStage::with_sentinel`]).
     ///
     /// # Errors
     /// [`InvalidParameters`] naming the rule broken: a composition root
@@ -140,6 +143,7 @@ impl Sealing {
         channels: impl IntoIterator<Item = impl Into<String>>,
         (parameters, pacing): (SealingParameters, Pacing),
         ceiling: Option<Duration>,
+        sentinel: Option<&str>,
         observer: impl Fn(&str) -> Arc<dyn SealingObserver>,
         kms: impl Fn(&str) -> K,
     ) -> Result<Self, InvalidParameters>
@@ -167,11 +171,13 @@ impl Sealing {
                 continue;
             }
             let cached = Cached::new(kms(&channel)).with_ttl(parameters.cache);
-            let stage = Arc::new(
-                EnvelopeStage::new(sessions.clone(), cached)
-                    .paced(parameters.reuse, pacing)?
-                    .observed_by(observer(&channel)),
-            );
+            let stage = EnvelopeStage::new(sessions.clone(), cached)
+                .paced(parameters.reuse, pacing)?
+                .observed_by(observer(&channel));
+            let stage = Arc::new(match sentinel {
+                Some(sentinel) => stage.with_sentinel(sentinel),
+                None => stage,
+            });
             holding.insert(channel.clone(), Arc::clone(&stage) as Arc<dyn Holding>);
             stages.insert(channel, stage);
         }
@@ -289,7 +295,7 @@ impl ByDestination {
 }
 
 fn refused(what: String) -> BoxError {
-    Permanent::new(what).into()
+    Permanent::because(causes::MALFORMED, what).into()
 }
 
 impl Stage for ByDestination {

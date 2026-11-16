@@ -259,7 +259,11 @@ async fn a_message_without_a_tenant_is_refused_for_good() {
         .inbound(Message::new(b"secret".to_vec()))
         .await
         .unwrap_err();
-    assert!(error.is::<Permanent>(), "{error}");
+    assert_eq!(
+        error.downcast_ref::<Permanent>().map(Permanent::cause),
+        Some(ascetic_ddd_dek::causes::MALFORMED),
+        "{error}"
+    );
 }
 
 #[tokio::test]
@@ -277,7 +281,11 @@ async fn a_shredded_tenant_s_messages_are_refused_for_good() {
         .await
         .unwrap();
     let error = sealing.inbound(sealed).await.unwrap_err();
-    assert!(error.is::<Permanent>(), "{error}");
+    assert_eq!(
+        error.downcast_ref::<Permanent>().map(Permanent::cause),
+        Some(ascetic_ddd_dek::causes::GONE),
+        "{error}"
+    );
 }
 
 #[tokio::test]
@@ -292,6 +300,24 @@ async fn a_kms_out_of_reach_is_a_failure_of_the_moment() {
         .await
         .unwrap_err();
     assert!(!error.is::<Permanent>(), "{error}");
+    // At the opening end a KMS out of reach answers no tenant: the inbox
+    // holds the message over the stage (ADR-0040 decision 3).
+    let sealed = stage("unreachable")
+        .await
+        .outbound(message("tenant-1", "secret"))
+        .await
+        .unwrap();
+    let error = sealing.inbound(sealed).await.unwrap_err();
+    let told = error
+        .downcast_ref::<ascetic_ddd_bus::Unavailable>()
+        .unwrap_or_else(|| panic!("unavailable: {error}"));
+    assert_eq!(
+        (told.cause(), told.scope()),
+        (
+            ascetic_ddd_dek::causes::UNAVAILABLE,
+            ascetic_ddd_bus::Scope::Stage
+        )
+    );
 }
 
 /// The whole path of ADR-0002: the command's transaction seals into the

@@ -673,10 +673,25 @@ impl PgKeyManagementService {
             .await?;
         match row {
             Some(row) => self.load_kek(tenant_id, &row),
-            None => Err(Error::KekNotFound {
-                tenant_id: tenant_id.to_owned(),
-                key_version: Some(version),
-            }),
+            None => {
+                // A version missing beside the tenant's other keys is the
+                // message's; a tenant with no key left is gone, shredded or
+                // never made (`Error::class`): its messages park under
+                // `kms.gone`, never re-armed with a policy's (ADR-0040).
+                let others = format!(
+                    "SELECT EXISTS (SELECT 1 FROM {} WHERE tenant_id = $1)",
+                    self.table
+                );
+                let any = session
+                    .connection()
+                    .query_one(&others, &[&tenant_id])
+                    .await?
+                    .get::<_, bool>(0);
+                Err(Error::KekNotFound {
+                    tenant_id: tenant_id.to_owned(),
+                    key_version: any.then_some(version),
+                })
+            }
         }
     }
 

@@ -47,7 +47,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ascetic_ddd_bus::{BoxError, Message, Permanent, Stage};
+use ascetic_ddd_bus::{BoxError, Message, Permanent, Scope, Stage, Unavailable};
 use ascetic_ddd_kms::{Algorithm, Class, Error as KmsError, KeyManagementService};
 use ascetic_ddd_session::SessionPool;
 use base64::Engine as _;
@@ -56,7 +56,7 @@ use futures::future::BoxFuture;
 use serde_json::Value;
 
 use crate::domain::canonical;
-use crate::draws::{Draws, Held, SealingObserver};
+use crate::draws::{Draws, Held, SealingObserver, causes};
 use crate::supply::{InvalidParameters, LONGEST, Supply, SupplyParameters};
 
 /// The header naming the tenant, and the associated data of the payload.
@@ -331,6 +331,21 @@ impl<P, K> EnvelopeStage<P, K> {
         self.redrawn(supply, |draws| draws.with_observer(observer))
     }
 
+    /// The same stage drawing for `sentinel` — the host's own account,
+    /// under the same KMS and policy — when it refuses a seal on no evidence
+    /// of whether its KMS serves: at most once per `wait`, so that a quiet
+    /// stage tells a tenant's trouble from its KMS's (ADR-0040 decision 3).
+    pub fn with_sentinel(self, sentinel: impl Into<String>) -> Self
+    where
+        P: SessionPool + Send + Sync + 'static,
+        P::Session: Sync,
+        K: KeyManagementService<P::Session> + 'static,
+    {
+        let supply = self.draws.supply();
+        let sentinel = sentinel.into();
+        self.redrawn(supply, |draws| draws.with_sentinel(sentinel))
+    }
+
     /// What the stage holds now: its keys, its tenants, its draws.
     pub fn held(&self) -> Held
     where
@@ -455,18 +470,72 @@ fn header<'a>(message: &'a Message, name: &str) -> Result<&'a str, BoxError> {
 }
 
 fn refused(what: String) -> BoxError {
-    Permanent::new(what).into()
+    Permanent::because(causes::MALFORMED, what).into()
 }
 
-/// Which failures at the opening end, and of a cipher, no retry will mend,
-/// by the KMS's own class (ADR-0039 decision 8): a key that is gone, a
-/// ciphertext that does not open, an operation refused, bytes that are not
-/// what they should be. The rest — the session, the database, the KMS out
-/// of reach, what the KMS did not explain — are of the moment. At the
-/// sealing end the draws decide (`draws.rs`): only a key gone is for good.
+/// The bus's verdict on a failure at the opening end, by the KMS's own
+/// class (ADR-0039 decision 8, ADR-0040 decisions 2 and 3):
+/// - a key that is gone, for good, under `kms.gone`;
+/// - an operation refused, a ciphertext that does not open, bytes that are
+///   not what they should be, for good, under `kms.refused`: a deploy, not a
+///   retry, mends a policy;
+/// - the KMS out of reach, unavailable over the stage: a Vault that answers
+///   no one answers no tenant, and the inbox holds the message without
+///   spending its attempts;
+/// - the rest — the session, the database, what the KMS did not explain —
+///   of the moment.
+///
+/// At the sealing end the draws decide (`draws.rs`).
 fn verdict(error: KmsError) -> BoxError {
     match error.class() {
-        Class::Gone | Class::Refused => Permanent::new(error).into(),
-        Class::Unavailable | Class::Moment => error.into(),
+        Class::Gone => Permanent::because(causes::GONE, error).into(),
+        Class::Refused => Permanent::because(causes::REFUSED, error).into(),
+        Class::Unavailable => {
+            Unavailable::new(causes::UNAVAILABLE, Scope::Stage, None, error).into()
+        }
+        Class::Moment => error.into(),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
+mod tests {
+    use ascetic_ddd_session::SessionError;
+
+    use super::*;
+
+    /// Each class of the KMS's failures at the opening end comes to its
+    /// verdict on the bus, under its cause (ADR-0040 decisions 2 and 3).
+    #[test]
+    fn an_opening_failure_comes_to_its_class_s_verdict() {
+        let gone = verdict(KmsError::KekNotFound {
+            tenant_id: "t".into(),
+            key_version: None,
+        });
+        assert_eq!(
+            gone.downcast_ref::<Permanent>().map(Permanent::cause),
+            Some(causes::GONE)
+        );
+        let refused = verdict(KmsError::Forbidden {
+            tenant_id: "t".into(),
+            operation: "decrypt",
+        });
+        assert_eq!(
+            refused.downcast_ref::<Permanent>().map(Permanent::cause),
+            Some(causes::REFUSED)
+        );
+        let away = verdict(KmsError::Session(SessionError::Acquire("down".into())));
+        let away = away
+            .downcast_ref::<Unavailable>()
+            .expect("unavailable, the stage's");
+        assert_eq!(
+            (away.cause(), away.scope()),
+            (causes::UNAVAILABLE, Scope::Stage)
+        );
+        let moment = verdict(KmsError::Session(SessionError::Abandoned));
+        assert!(
+            !moment.is::<Permanent>() && !moment.is::<Unavailable>(),
+            "of the moment: {moment}"
+        );
     }
 }

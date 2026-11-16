@@ -2,10 +2,16 @@
 
 ## Status
 
-Proposed (2026-11-16). S0 (a bulk readmit's window), S1a (the verdicts,
-the hold and its budget, the causes), S1b (expiry, `park_held`) and S1c
-(`unpark_all`) and S1d (the outage model, traces checked afresh) are
-built. S2–S4 are owed, each with its executor (§ Executors, § Owed).
+Proposed (2026-11-16). Built in the library:
+- S0, a bulk readmit's window;
+- S1a, the verdicts, the hold and its budget, the causes;
+- S1b, expiry and `park_held`;
+- S1c, `unpark_all`;
+- S1d, the outage model and the traces checked afresh;
+- S2, the stage's scope and its sentinel.
+
+S3, S4 and the host's adoption are owed, each with its executor
+(§ Executors, § Owed).
 
 Decided under the library's gate:
 - a blind solver and a discriminator;
@@ -405,16 +411,69 @@ S1d, owed:
   Until then a hold is checked by `InboxOutage.tla` and the pg tests, and a
   recorded hold is refused rather than fitted wrongly.
 
-S2, owed (dek):
-- the scope's evidence, with core tests:
-  - another Tenant's landing reads `Tenant`;
-  - the sentinel lands → `Tenant`;
-  - the sentinel fails → `Stage`;
-  - at most one probe per `wait`;
-- a typed `last`;
-- the opening verdict by class;
-- end to end through the stage and a host's verdict: Gone for Tenant A and
-  Refused for Tenant B; `unpark_all(kms.refused)` re-arms B's rows only.
+S2, built (`dek`, `kms`):
+- The core's refusal carries its scope (`supply::Scope`):
+  - the stage's for a full stage or one with no runtime;
+  - otherwise the tenant's when a draw landed in time after its trouble
+    began (its failure, or its flight's start), and the stage's when none
+    did.
+  - `a_refusal_is_the_tenant_s_when_another_landed_in_time_since_its_trouble_began`
+    covers a landing after, one before, and a full stage.
+- The sentinel (`EnvelopeStage::with_sentinel`, and `Sealing::over_paced`'s
+  `sentinel`): after a refusal of the stage's scope on evidence (waited,
+  backing off, late), the shell asks the core for a draw of the sentinel's.
+  - The core allows one when none is in flight, the last started a `wait`
+    ago or more, the sentinel's own failure is not backing off, and a
+    probe's place is free.
+  - `a_sentinel_is_drawn_for_evidence_at_most_once_per_wait` tests this,
+    and the property `no_history_breaks_the_core_s_invariants` gains a
+    probe step and its pacing; the histories reach both scopes and the
+    probe.
+  - `a_sentinel_tells_a_tenant_s_trouble_from_the_kms_s`, through the
+    shell: a tenant's refusal is the stage's before the sentinel lands,
+    the tenant's after; without a sentinel it stays the stage's and no
+    draw is made for evidence.
+- `last` is typed (`Last { landed, text }`). `Unavailable::verdict` is the
+  bus's verdict on a seal not served:
+  - `Permanent::because(kms.gone)` after a key gone;
+  - `Permanent::because(kms.refused)` after a policy's refusal;
+  - otherwise `bus::Unavailable(kms.unavailable)` over the refusal's scope
+    and `retry_after`.
+- The opening end's verdict is by class:
+  - a key gone is `kms.gone`;
+  - a refusal is `kms.refused`;
+  - the KMS out of reach is `Unavailable` over the stage, held by the
+    inbox;
+  - the rest are of the moment.
+  - Tested by `an_opening_failure_comes_to_its_class_s_verdict` and the
+    pg tests of `tests/stage.rs`.
+- The stage's own refusals of a message's values are `dek.malformed`.
+- A defect the pg tests found, fixed (`kms/src/pg.rs`):
+  - The PG KMS answered a shredded tenant's ciphertext
+    `KekNotFound { key_version: Some(v) }`. That is `Class::Refused`, the
+    message's, so its rows would have parked under `kms.refused`, and
+    `unpark_all(kms.refused)` after a policy's fix would have re-armed
+    them.
+  - A version missing from a tenant with no key left is now
+    `key_version: None`, `Class::Gone`.
+  - `deleting_the_keks_shreds_what_they_wrapped` holds both: a version
+    the tenant never had beside one it has is `Refused`; after the
+    deletion, `Gone`.
+- Mutations killed:
+  - the scope always the stage's, and the tenant's on any landing;
+  - the probe unpaced, ignoring the sentinel's back-off, and never
+    launched;
+  - a refused or a remembered gone read as unavailable;
+  - the opening's unavailable read as of the moment, and its gone as
+    refused;
+  - a keyless tenant read as a version.
+
+The host's adoption, owed (with the merge of this branch):
+- its handlers' verdict maps `dek::Unavailable::verdict`;
+- its sealing passes its sentinel account;
+- the end to end: Gone for Tenant A and Refused for Tenant B, through the
+  stage and the host's verdict; `unpark_all(kms.refused)` re-arms B's rows
+  only.
 
 S3: with ADR-0039's slice 4 (the opening side).
 
@@ -478,3 +537,8 @@ S4: slice B (decision 9), with the fat-Tenant change's owner.
   for its own reason, an unknown outcome refused, and `make traces`. The
   model is a module of its own rather than `Inbox.tla` grown, and the
   trace refinement of a hold is owed (§ Executors).
+- 2026-11-16: S2 built: the core's refusals carry their scope, a sentinel
+  is drawn for evidence at most once per wait, `last` is typed and
+  `Unavailable::verdict` maps it, and the opening end's verdict is by
+  class. The PG KMS answered a shredded tenant as a missing version, the
+  class a policy's fix would have re-armed; fixed.
