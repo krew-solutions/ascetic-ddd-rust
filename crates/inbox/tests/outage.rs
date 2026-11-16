@@ -15,9 +15,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ascetic_ddd_bus::{Cause, Permanent, Scope, Transient, Unavailable, cause};
-use ascetic_ddd_inbox::observer::{Failed, InboxObserver};
+use ascetic_ddd_inbox::observer::{Failed, InboxObserver, Operated, Operation};
 use ascetic_ddd_inbox::{
-    ByStream, Error, Failure, Inbox, InboxMessage, Outage, Outcome, PgInbox, Retries,
+    ByStream, CausalDependency, Error, Failure, Inbox, InboxMessage, Outage, Outcome, PgInbox,
+    Retries,
 };
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -59,9 +60,16 @@ struct Told {
 }
 
 #[derive(Default)]
-struct Failures(Mutex<Vec<Told>>);
+struct Failures(Mutex<Vec<Told>>, Mutex<Vec<(String, Operation, u64)>>);
 
 impl InboxObserver for Failures {
+    fn on_operated(&self, event: &Operated<'_>) {
+        self.1
+            .lock()
+            .unwrap()
+            .push((event.principal.to_owned(), event.operation, event.rows));
+    }
+
     fn on_failed(&self, event: &Failed<'_>) {
         self.0.lock().unwrap().push(Told {
             cause: event.cause.as_str().to_owned(),
@@ -83,6 +91,11 @@ struct Fixture {
 
 /// A table of its own, one slot, `retries` as given.
 async fn fixture(name: &str, retries: Retries) -> Fixture {
+    fixture_waiting(name, retries, Duration::from_secs(600)).await
+}
+
+/// The same, a row waiting for its dependency at most `max_wait`.
+async fn fixture_waiting(name: &str, retries: Retries, max_wait: Duration) -> Fixture {
     let table = format!("outage_{name}");
     let told = Arc::new(Failures::default());
     let inbox = PgInbox::new(PgSessionPool::new(pool()))
@@ -93,6 +106,7 @@ async fn fixture(name: &str, retries: Retries) -> Fixture {
         .with_slots(1)
         .partitioned_by(ByStream)
         .with_retries(retries)
+        .with_max_wait(max_wait)
         .observed_by(Arc::clone(&told));
     inbox.teardown().await.unwrap();
     inbox.migrate().await.unwrap();
@@ -164,6 +178,17 @@ impl Fixture {
 
     fn told(&self) -> Vec<Told> {
         self.told.0.lock().unwrap().clone()
+    }
+
+    fn operated(&self) -> Vec<(String, Operation, u64)> {
+        self.told.1.lock().unwrap().clone()
+    }
+
+    async fn park_held(&self, channel: &str, cause: &str, tenant: Option<&str>) -> u64 {
+        self.inbox
+            .park_held("ops", channel, cause, tenant)
+            .await
+            .unwrap()
     }
 
     fn last_told(&self) -> Told {
@@ -441,7 +466,11 @@ async fn a_hold_past_its_budget_holds_on_unrefuted_and_spends_once_the_channel_r
         "weighed again at once"
     );
     let parked = f.row("a").await;
-    assert_eq!(parked.parked_cause.as_deref(), Some("kms.unavailable"));
+    assert_eq!(
+        (parked.parked_cause.as_deref(), parked.holding),
+        (Some("kms.unavailable"), false),
+        "a parked row holds nothing"
+    );
 }
 
 /// Two outages, each shorter than the budget, with a failure of another
@@ -552,6 +581,92 @@ async fn a_cause_is_kept_while_its_state_lasts_and_cleared_at_every_exit() {
     );
     let told: Vec<String> = f.told().into_iter().map(|told| told.cause).collect();
     assert_eq!(told, ["db.timeout", "kms.gone", "kms.unavailable"]);
+}
+
+/// A row waiting for a dependency that arrived and holds its slot for its
+/// stage's outage does not expire: the outage that holds the dependency
+/// holds what waits for it. Once the dependency is parked, it expires as
+/// any other.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_row_waiting_for_a_held_dependency_does_not_expire() {
+    let f = fixture_waiting("spared", Retries::up_to(3), Duration::from_secs(600)).await;
+    let cause = message("a", 1);
+    let effect = message("b", 1).depending_on(&[CausalDependency::on(&cause)]);
+    f.publish(std::slice::from_ref(&effect)).await;
+    assert_eq!(f.dispatch(ok).await, Outcome::SetAside, "b@1 waits for a@1");
+    f.publish(std::slice::from_ref(&cause)).await;
+    assert_eq!(f.dispatch(|| stage_down(None)).await, held(0));
+
+    f.execute(
+        "UPDATE {table} SET waiting_since = now() - interval '20 minutes', next_attempt_at = now()",
+    )
+    .await;
+    assert_eq!(f.dispatch(|| stage_down(None)).await, held(0));
+    assert!(!f.row("b").await.parked, "spared while a@1 holds");
+
+    assert_eq!(
+        f.park_held("kafka://orders", "kms.unavailable", None).await,
+        1
+    );
+    f.dispatch(ok).await;
+    assert!(f.row("b").await.parked, "expired once a@1 holds no more");
+}
+
+/// The operator parks the rows held for a cause, of a channel and, when
+/// named, of a Tenant: their slots go on, each row parked under its cause,
+/// and the call is told with its principal. A row failing on its Tenant's
+/// account is not held, and is left alone.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn an_operator_parks_the_rows_held_for_a_cause_and_their_slots_go_on() {
+    let f = fixture("parkheld", Retries::up_to(3)).await;
+    f.publish(&[message("a", 1), message("b", 1)]).await;
+    assert_eq!(f.dispatch(|| tenant_down(None)).await, spent(1, false));
+    assert_eq!(
+        f.park_held("kafka://orders", "kms.throttled", None).await,
+        0,
+        "a Tenant's failure does not hold"
+    );
+    f.due().await;
+    assert_eq!(f.dispatch(|| stage_down(None)).await, held(1));
+
+    assert_eq!(
+        f.park_held("kafka://orders", "kms.gone", None).await,
+        0,
+        "another cause"
+    );
+    assert_eq!(
+        f.park_held("kafka://orders", "kms.unavailable", Some("tenant-2"))
+            .await,
+        0,
+        "another Tenant"
+    );
+    assert_eq!(
+        f.park_held("kafka://other", "kms.unavailable", None).await,
+        0,
+        "another channel"
+    );
+    assert_eq!(f.dispatch(ok).await, Outcome::Nothing, "a@1 still holds");
+    assert_eq!(
+        f.park_held("kafka://orders", "kms.unavailable", Some("tenant-1"))
+            .await,
+        1
+    );
+    let parked = f.row("a").await;
+    assert_eq!(
+        (
+            parked.parked,
+            parked.parked_cause.as_deref(),
+            parked.holding
+        ),
+        (true, Some("kms.unavailable"), false)
+    );
+    assert_eq!(f.dispatch(ok).await, Outcome::Processed, "b@1 goes on");
+    assert_eq!(
+        f.operated().last(),
+        Some(&("ops".to_owned(), Operation::ParkedHeld, 1))
+    );
 }
 
 /// A plain error is of the moment for no named cause, and a bus verdict

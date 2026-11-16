@@ -56,7 +56,8 @@ const FAILURE_WIDTH: usize = 4096;
 const IDENTITY_OF_ROW: &str = "jsonb_build_object('tenant_id', tenant_id, 'stream_type', stream_type, \
                                'stream_id', stream_id, 'stream_position', stream_position)";
 /// The rows a dispatcher may take: neither processed, parked nor waiting.
-const QUEUE: &str = "processed_position IS NULL AND parked_at IS NULL AND waiting_for IS NULL";
+pub(super) const QUEUE: &str =
+    "processed_position IS NULL AND parked_at IS NULL AND waiting_for IS NULL";
 
 /// The inbox's sequence, tables and indexes as created, `{table}`,
 /// `{sequence}`, `{slots}` and `{key}` standing for their names, the cut and
@@ -548,7 +549,11 @@ where
     /// row parked so keeps the identity it waited for, so that the mark of
     /// that identity — the hole readmitted, or arrived late — puts it back
     /// in the queue (ADR-0036 R8); without the time of its wait, it does not
-    /// expire again.
+    /// expire again. A row whose dependency is present and holds its slot
+    /// for its stage's outage does not expire: the dependency did arrive, and
+    /// the outage that holds it holds what waits for it (ADR-0040 decision
+    /// 7). Its dependency is found by the primary key's stream, its identity
+    /// compared whole, so that no value is cast.
     pub(super) async fn expire_waiting(
         &self,
         session: &P::Session,
@@ -559,11 +564,18 @@ where
                 last_error = 'dependency ' || waiting_for::text || ' never arrived', \
                 waiting_since = NULL \
              WHERE ctid IN ( \
-                SELECT ctid FROM {table} \
-                WHERE waiting_for IS NOT NULL \
-                  AND waiting_since < CURRENT_TIMESTAMP - make_interval(secs => $1::double precision) \
+                SELECT w.ctid FROM {table} w \
+                WHERE w.waiting_for IS NOT NULL \
+                  AND w.waiting_since < CURRENT_TIMESTAMP - make_interval(secs => $1::double precision) \
+                  AND NOT EXISTS ( \
+                    SELECT 1 FROM {table} \
+                    WHERE tenant_id = w.waiting_for->>'tenant_id' \
+                      AND stream_type = w.waiting_for->>'stream_type' \
+                      AND stream_id = w.waiting_for->'stream_id' \
+                      AND {IDENTITY_OF_ROW} = w.waiting_for \
+                      AND unavailable_since IS NOT NULL) \
                 LIMIT $2 \
-                FOR UPDATE SKIP LOCKED) \
+                FOR UPDATE OF w SKIP LOCKED) \
              RETURNING {NARROW}",
             table = self.table
         );
@@ -702,8 +714,8 @@ where
         );
         // Any other failure spends an attempt; the last one, or a permanent
         // verdict, parks the row under its cause. A hold refuted keeps its
-        // clock, so that it is weighed again at once; every other verdict
-        // ends the hold.
+        // clock, so that it is weighed again at once, until it parks; every
+        // other verdict ends the hold. A parked row holds nothing.
         let spend_failure = format!(
             "UPDATE {table} SET attempts = LEAST(attempts, 2147483646) + 1, last_error = $2, \
                 last_cause = $6::text, \
@@ -714,7 +726,9 @@ where
                 parked_cause = CASE WHEN $5::boolean \
                                    OR ($4::integer > 0 AND LEAST(attempts, 2147483646) + 1 >= $4::integer) \
                                  THEN $6::text END, \
-                unavailable_since = CASE WHEN $7::boolean THEN unavailable_since END \
+                unavailable_since = CASE WHEN $7::boolean AND NOT \
+                                   ($4::integer > 0 AND LEAST(attempts, 2147483646) + 1 >= $4::integer) \
+                                 THEN unavailable_since END \
              WHERE ctid = $1::text::tid \
              RETURNING attempts, parked_at IS NOT NULL"
         );

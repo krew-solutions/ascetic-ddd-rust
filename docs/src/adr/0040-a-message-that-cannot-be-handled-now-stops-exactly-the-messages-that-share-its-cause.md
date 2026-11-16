@@ -2,9 +2,9 @@
 
 ## Status
 
-Proposed (2026-11-16). S0 (a bulk readmit's window) and S1a (the
-verdicts, the hold and its budget, the causes) are built. S1b–S4 are
-owed, each with its executor (§ Executors, § Owed).
+Proposed (2026-11-16). S0 (a bulk readmit's window), S1a (the verdicts,
+the hold and its budget, the causes) and S1b (expiry, `park_held`) are
+built. S1c–S4 are owed, each with its executor (§ Executors, § Owed).
 
 Decided under the library's gate:
 - a blind solver and a discriminator;
@@ -149,9 +149,12 @@ reports facts, and the inbox owns the policy (ADR-0005 d5).
      to clear.
 
 7. **Expiry spares a dependent of a held row.** `expire_waiting` skips a
-   row whose dependency is present and held (`unavailable_since` set),
-   with a primary-key probe. Without this, the host's 600 s `max_wait`
-   parks every dependent behind a held head as expired, and pages.
+   row whose dependency is present and held: `unavailable_since` set,
+   which a park, a mark and every other exit clear. It finds the dependency by the primary
+   key's stream and compares its identity whole, so that no value is
+   cast. Without this, the host's 600 s `max_wait` parks every dependent
+   behind a held head as expired, and pages. Once the dependency is
+   parked, its dependents expire as any other.
 
 8. **The operator acts by cause.** Every verb is audited with its
    principal, like ADR-0036's surface.
@@ -165,9 +168,13 @@ reports facts, and the inbox owns the policy (ADR-0005 d5).
      - overtaken rows stay parked unless `overtaken` is set;
      - each batch is its own transaction, and the observer is told after
        commit.
-   - `park_held(principal, because, channel, cause, tenant)` parks held
-     rows with their cause, so their slots proceed. The operator chooses
-     out-of-order handling over the stall.
+   - `park_held(principal, channel, cause, tenant)` parks held rows with
+     their cause, so their slots proceed. The operator chooses
+     out-of-order handling over the stall. Only a slot's head can hold, so
+     it reads one row a slot, and passes by a slot a dispatcher holds
+     (`FOR UPDATE OF s SKIP LOCKED`): a second call parks that head if it
+     still holds. A fairness change that lets a slot serve past its head
+     changes this, and is to say so (decision 9).
    - `forget_tenant(principal, tenant)` closes a Tenant's open rows. A
      host's off-boarding calls it before shredding, so a shredded
      backlog never drains one Gone at a time.
@@ -270,9 +277,19 @@ killing the mutations named):
   for a format string's error.
 - A trace refuses a hold (`trace2tla.py`) until S1d models it.
 
-S1b–S1d, owed (bus and inbox):
+S1b, built (`tests/outage.rs`):
+- `a_row_waiting_for_a_held_dependency_does_not_expire`: a dependent 20
+  minutes past `max_wait` stays waiting while its dependency holds, and
+  expires once that is parked.
+- `an_operator_parks_the_rows_held_for_a_cause_and_their_slots_go_on`:
+  - a Tenant's failure, another cause, another Tenant and another channel
+    each park nothing;
+  - the right one parks the head under its cause, and the row behind it
+    goes on;
+  - the call is told with its principal.
+
+S1c–S1d, owed (bus and inbox):
 - pg tests:
-  - expiry spares a held row's dependents;
   - `unpark_all`:
     - filters by cause, Tenant and `unrecorded`;
     - its canary includes a row parked without a hold and fails a row
@@ -280,7 +297,6 @@ S1b–S1d, owed (bus and inbox):
     - its window is read once;
     - overtaken rows stay;
     - the observer is told after commit;
-  - `park_held`;
   - `forget_tenant`.
 - Plan: `EXPLAIN (ANALYZE, BUFFERS)` of an `unpark_all` batch at ≥10M rows,
   1M parked across 5k Tenants, a Tenant filter matching 100 rows and a
@@ -380,3 +396,10 @@ S4: slice B (decision 9), with the fat-Tenant change's owner.
   the last `cap`, not since the hold began: a key cache serving an
   outage's first minutes would otherwise refute every outage longer than
   the cache. A refuted hold keeps its clock; the hold's floor is named.
+- 2026-11-16: S1b built: expiry spares a held dependency's dependents, and
+  `park_held` parks held heads by channel, cause and Tenant. Decision 8's
+  `park_held` takes no `because`: the cause it parks under is the row's
+  own. Its mutations found two guards that masked each other. A refuted
+  hold's exhausted park kept its clock. It now ends the hold, so that
+  "held" alone means unparked, and each guard is now the only one of its
+  kind.

@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use ascetic_ddd_session::{PgAccess, SessionPool};
 
+use super::store::{CHANNEL_OF_ROW, QUEUE};
 use super::{Admission, PgInbox};
 use crate::error::Error;
 use crate::intake::{self, Reason};
@@ -496,6 +497,70 @@ where
             }
             after = batch.last().cloned();
         }
+    }
+
+    /// Parks the rows of `channel` that hold their slot for their stage's
+    /// outage under `cause` — of `tenant` only, when given — so that their
+    /// slots go on (ADR-0040 decision 8): the operator's choice of
+    /// out-of-order over the stall, each row parked under its cause and
+    /// re-armed later by an unpark. Only a slot's head can hold, so the
+    /// call reads one row a slot; a slot a dispatcher holds right now is
+    /// passed by, and a second call parks its head if it still holds. The
+    /// slots it reads it holds itself, so no dispatcher changes their heads
+    /// meanwhile.
+    /// Returns how many rows were parked.
+    ///
+    /// # Errors
+    /// [`Error`] when the environment fails, nothing parked.
+    pub async fn park_held(
+        &self,
+        principal: &str,
+        channel: &str,
+        cause: &str,
+        tenant: Option<&str>,
+    ) -> Result<u64, Error> {
+        let sql = format!(
+            "WITH held AS ( \
+                SELECT h.place FROM {table}_slots s \
+                CROSS JOIN LATERAL ( \
+                    SELECT r.ctid AS place, r.unavailable_since, r.last_cause, r.tenant_id, \
+                           {CHANNEL_OF_ROW} AS channel \
+                    FROM {table} r WHERE r.slot = s.slot AND {QUEUE} \
+                    ORDER BY r.received_position LIMIT 1) h \
+                WHERE h.unavailable_since IS NOT NULL AND h.last_cause = $2 AND h.channel = $1 \
+                  AND ($3::text IS NULL OR h.tenant_id = $3::text) \
+                FOR UPDATE OF s SKIP LOCKED \
+             ) \
+             UPDATE {table} SET parked_at = CURRENT_TIMESTAMP, parked_cause = last_cause, \
+                 unavailable_since = NULL \
+             WHERE ctid IN (SELECT place FROM held)",
+            table = self.table
+        );
+        let parked = self
+            .pool
+            .session(async |session: P::Session| {
+                Ok::<_, Error>(
+                    session
+                        .connection()
+                        .execute(&sql, &[&channel, &cause, &tenant])
+                        .await?,
+                )
+            })
+            .await?;
+        self.operated(
+            principal,
+            Operation::ParkedHeld,
+            Some(channel),
+            None,
+            usize::try_from(parked).unwrap_or(usize::MAX),
+        );
+        log::warn!(
+            "inbox: {} parked {parked} rows of {} held for their stage's outage",
+            intake::sanitized(Some(principal.as_bytes()), intake::DERIVED_WIDTH)
+                .unwrap_or_default(),
+            intake::sanitized(Some(channel.as_bytes()), intake::CHANNEL_WIDTH).unwrap_or_default(),
+        );
+        Ok(parked)
     }
 
     /// Closes the open row under `digest` as discarded, for `because`: a

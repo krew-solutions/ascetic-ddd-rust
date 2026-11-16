@@ -91,6 +91,9 @@ pub enum Operation {
     Readmitted,
     /// Closed a row as discarded, a tombstone.
     Discarded,
+    /// Parked the rows held for their stage's outage, by cause (ADR-0040
+    /// decision 8): their slots go on.
+    ParkedHeld,
 }
 
 /// The intake set a message aside beside the inbox, never storing it as a
