@@ -15,10 +15,11 @@ each with its executor (§ Executors, § Owed).
 
 Since 2026-11-16 the inbox's slots serve their Tenants in turn (ADR-0041),
 and a hold for a stage's outage holds its (slot, Tenant), not its slot.
-Decision 9's invariants are broken on this branch until the revision
-restores them, and S4 waits for it (§ Owed 6). ADR-0041's slice 2, the
-failure's scope, and its deferral move here: this ADR's revision decides
-them (§ Change Log).
+Decision 9's invariants are broken on this branch. **ADR-0042 supersedes
+decisions 4, 5, 7 and 9 and `park_held` (decision 8)**: a stage's outage
+pauses its channel in the process that sees it, and nothing is parked for
+it. Decisions 1–3 and 6, and `unpark_all`, stand. S4 waits for ADR-0042's
+slices, and § Owed 6–10 are answered there (§ Change Log).
 
 Decided under the library's gate:
 - a blind solver and a discriminator;
@@ -740,3 +741,16 @@ S4: slice B (decision 9), with the fat-Tenant change's owner.
     (`BoundedOvertaking`), dropped from fairness (liveness), and `Commit`
     without its `Permanent` guard (`ArrivalOrder`).
 
+- 2026-11-16: Decisions 4, 5, 7 and 9 and `park_held` superseded by ADR-0042,
+  after its blind solver, discriminator and three rounds of roles. What the
+  revision found against them:
+  - a hold kept on each row asks, walks, logs and parks by the head under
+    the rotation (§ Owed 6);
+  - the budget's evidence, a row of the channel processed within the cap,
+    is no evidence of the KMS: a cached key processes during an outage;
+  - the stage's `Stage` scope is its default reading whenever caches are
+    warm, and its sentinel is drawn by an operation a consumer may not
+    perform on the channels it only receives.
+  § Owed 6–10 are answered in ADR-0042: the extent (a pause per process
+  and channel), the holds counted by kind, the model rewritten, `park_held`
+  withdrawn, and this ADR's own exits and canary mended.

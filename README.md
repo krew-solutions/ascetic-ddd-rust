@@ -220,6 +220,12 @@ Read them before changing the bus, the outbox or the inbox. ADR-0036
   environment's verdict and a bounded deferral, the stages before the inbox
   kept short rather than fair *(Proposed; amends ADR-0005 decision 2,
   ADR-0008 decisions 2 and 4, ADR-0010 decision 4)*.
+- [ADR-0042](docs/src/adr/0042-a-stage-s-outage-pauses-its-channel-in-the-process-that-sees-it.md) —
+  a stage's outage pauses its channel in the process that sees it, and
+  nothing is parked for it: a circuit breaker per process and channel, a
+  Tenant's memo, holds counted by kind, the expiry off the dispatch path
+  *(Proposed; supersedes ADR-0040 decisions 4, 5, 7, 9 and `park_held`,
+  and ADR-0041 decision 3)*.
 
 ## Specifications
 

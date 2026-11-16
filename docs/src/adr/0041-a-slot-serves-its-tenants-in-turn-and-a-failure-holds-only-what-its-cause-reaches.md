@@ -8,7 +8,9 @@ until 2026-11-16, when the data keys' ADR took that number on the main line
 
 Slice 2, the failure's scope (decision 3), moved to ADR-0040's revision,
 which owns the verdicts a subscriber returns; decision 4's deferral goes
-with it (§ Change Log, 2026-11-16).
+with it (§ Change Log, 2026-11-16). That revision is ADR-0042, which
+supersedes decision 3's environment's verdict; the deferral is its own
+decision, still owed.
 
 Decided under the library's gate:
 - **A blind solver.** It worked from the problem alone.
@@ -1543,4 +1545,6 @@ scheduler. So:
     - Decision 5's `held_since` is the clock of a hold by the head's own
       failure: a hold for the stage's outage ends it, so `held_counts`
       never counts an outage as a back-off.
-
+- 2026-11-16 — Decision 3's environment's verdict superseded by ADR-0042: a
+  stage's outage pauses its channel in the process that sees it, rather
+  than rolling back and pausing every loop of the process.

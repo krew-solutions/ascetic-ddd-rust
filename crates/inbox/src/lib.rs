@@ -62,6 +62,7 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod breaker;
 pub mod channel;
 mod error;
 pub mod intake;
