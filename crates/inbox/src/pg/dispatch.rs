@@ -1,6 +1,7 @@
 //! The dispatcher: one message inside one transaction, and the loops of a
 //! process around it. The SQL is in `store`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use ascetic_ddd_bus::uri;
@@ -8,13 +9,15 @@ use ascetic_ddd_session::{PgAccess, Session, SessionError, SessionPool};
 use futures::future::join_all;
 use tokio::sync::watch;
 
+use super::store::read_committed;
 use super::{Ground, HeldCount, Hold, Loops, Outcome, Parked, ParkedCount, PgInbox};
+use crate::breaker::{Before, Breaker, Effect, Flight, Told, Trial, Verdict};
 use crate::error::{Error, Failure};
 use crate::intake;
 use crate::message::InboxMessage;
 use crate::observer::{
-    Dispatched, Expired, Failed, Fetched, Handled, InboxObserver, Marked, ParkedAtOnce, Resolved,
-    Unparked, Waiting,
+    BreakerChanged, Dispatched, Expired, Failed, Fetched, Handled, InboxObserver, Marked,
+    ParkedAtOnce, Resolved, Unparked, Waiting, Withheld,
 };
 
 /// The outcome of a statement over a row's values, classified (ADR-0037
@@ -37,6 +40,63 @@ fn own<T>(
             }
         }
         Err(other) => Err(other),
+    }
+}
+
+/// An ask the breaker let through, released on every exit of the dispatch
+/// that carries it: a verdict tells it, any other exit — a rollback, a
+/// connection lost, a dropped future — abandons it (ADR-0042 decision 2).
+struct Asked<'a> {
+    breaker: &'a std::sync::Mutex<Breaker>,
+    flight: Option<Flight>,
+}
+
+impl Asked<'_> {
+    /// The verdict told, once: the guard is consumed, and its drop then
+    /// finds nothing to abandon.
+    fn told(mut self, verdict: Verdict) -> Told {
+        let flight = self
+            .flight
+            .take()
+            .expect("a guard is built with its flight");
+        lock(self.breaker).told(now(), flight, verdict)
+    }
+}
+
+impl Drop for Asked<'_> {
+    fn drop(&mut self) {
+        if let Some(flight) = self.flight.take() {
+            lock(self.breaker).abandoned(&flight);
+        }
+    }
+}
+
+fn lock(breaker: &std::sync::Mutex<Breaker>) -> std::sync::MutexGuard<'_, Breaker> {
+    breaker
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The breaker's clock: tokio's, so that a paused runtime moves it.
+fn now() -> std::time::Instant {
+    tokio::time::Instant::now().into_std()
+}
+
+/// A subscriber's verdict as the breaker weighs it.
+fn verdict_of(failure: Option<&Failure>) -> Verdict {
+    match failure {
+        None => Verdict::Processed,
+        Some(Failure::Unavailable {
+            cause,
+            scope,
+            retry_after,
+            ..
+        }) => Verdict::Unavailable {
+            cause: *cause,
+            scope: *scope,
+            retry_after: *retry_after,
+        },
+        Some(_) => Verdict::Own,
     }
 }
 
@@ -97,6 +157,27 @@ where
                 self.observer.on_expired(&Expired { messages: &expired });
             }
         }
+        // The breaker's tick: a trial due is this call's work, and the
+        // channels paused are the walk's (ADR-0042 decision 1). Every
+        // dispatch ticks it, a host's own as well as `run`'s.
+        let (effects, paused) = {
+            let mut breaker = self.breaker();
+            let effects = breaker.tick(now());
+            (effects, breaker.paused())
+        };
+        self.tell(&effects);
+        if let Some(Effect::Trial {
+            id,
+            channel,
+            slot,
+            tenant,
+            ..
+        }) = effects.iter().find(|e| matches!(e, Effect::Trial { .. }))
+        {
+            return self
+                .trial(&subscriber, *id, channel, *slot as u32, tenant)
+                .await;
+        }
         let before_slot = |error: Error| Rolled { slot: None, error };
         let outcome: Result<(Option<u32>, Outcome), Rolled> = self
             .pool
@@ -104,6 +185,7 @@ where
                 session
                     .atomic(async |tx| {
                         let taken = self.take(&tx).await.map_err(before_slot)?;
+                        read_committed(&taken.isolation).map_err(before_slot)?;
                         let Some(slot) = taken.slot else {
                             self.observer.on_fetched(&Fetched {
                                 slot: None,
@@ -117,27 +199,64 @@ where
                             slot: Some(slot),
                             error,
                         };
-                        let located = self.locate_head(&tx, slot).await.map_err(in_slot)?;
+                        let located = self
+                            .locate_head(&tx, slot, &paused)
+                            .await
+                            .map_err(in_slot)?;
                         let snapshot = located.snapshot;
-                        let (received_position, place) = match located.row {
-                            Some(row) => row,
-                            // the walk found no due head among the Tenants it
-                            // examined: it passed them, or ended its round and
-                            // the slot sleeps, or the queue was empty by now
-                            None => {
-                                self.observer.on_fetched(&Fetched {
-                                    slot: Some(slot),
-                                    slots: taken.slots,
-                                    message: None,
-                                    snapshot: &snapshot,
-                                });
-                                let outcome = if located.passed {
-                                    Outcome::Passed
-                                } else {
-                                    Outcome::Nothing
-                                };
-                                return Ok((Some(slot), outcome));
+                        if !located.met.is_empty() {
+                            let mut breaker = self.breaker();
+                            for (channel, tenant) in &located.met {
+                                breaker.met(now(), channel, &[(slot as i16, tenant.clone())]);
                             }
+                        }
+                        let ((received_position, place), (tenant, channel, holds)) =
+                            match (located.row, located.head) {
+                                (Some(row), Some(head)) => (row, head),
+                                // the walk found no due head among the Tenants it
+                                // examined: it passed them, or ended its round and
+                                // the slot sleeps, or found only heads of channels
+                                // this process paused, or the queue was empty by now
+                                _ => {
+                                    self.observer.on_fetched(&Fetched {
+                                        slot: Some(slot),
+                                        slots: taken.slots,
+                                        message: None,
+                                        snapshot: &snapshot,
+                                    });
+                                    let outcome = if located.paused {
+                                        Outcome::Paused
+                                    } else if located.passed {
+                                        Outcome::Passed
+                                    } else {
+                                        Outcome::Nothing
+                                    };
+                                    return Ok((Some(slot), outcome));
+                                }
+                            };
+                        // Before the row is read: a head the breaker holds is
+                        // held without its payload read or its subscriber called.
+                        let before = self
+                            .breaker()
+                            .before(now(), &channel, &tenant, slot as i16, holds);
+                        let flight = match before {
+                            Before::Hold { wait, cause } => {
+                                self.hold_unasked(&tx, &place, cause, wait)
+                                    .await
+                                    .map_err(in_slot)?;
+                                self.observer.on_withheld(&Withheld {
+                                    slot,
+                                    channel: &channel,
+                                    cause,
+                                    wait,
+                                });
+                                return Ok((Some(slot), Outcome::Held));
+                            }
+                            Before::Ask(flight) => flight,
+                        };
+                        let asked = Asked {
+                            breaker: &self.breaker,
+                            flight: Some(flight),
                         };
                         // The row's own failure, parked at once in this
                         // transaction, under the slot's lease and the row's
@@ -235,104 +354,11 @@ where
                             message: &message,
                             outcome: failure.as_ref().map_or(Ok(()), |failure| Err(failure.error())),
                         });
-                        match failure {
-                            None => {
-                                if self.slots > 1 {
-                                    // with one slot every dispatcher serializes on
-                                    // it, and no wait can race the mark
-                                    self.lock_own_identity(&tx, &place)
-                                        .await
-                                        .map_err(in_slot)?;
-                                }
-                                // No scope of its own: the mark binds none of the
-                                // row's values, and after the subscriber's scope a
-                                // lost connection poisons the session, which a new
-                                // scope would report as a defect rather than the
-                                // moment's (ADR-0037 decision 6).
-                                let (processed_position, woken) = self
-                                    .mark_processed(&tx, &place)
-                                    .await
-                                    .map_err(in_slot)?;
-                                self.observer.on_marked(&Marked {
-                                    slot,
-                                    message: &message,
-                                    processed_position,
-                                    woken: &woken,
-                                });
-                                Ok((Some(slot), Outcome::Processed))
-                            }
-                            Some(failure) => {
-                                // No scope of its own either: the record binds the
-                                // place and the failure's text made storable
-                                // (ADR-0037 decision 7).
-                                let recorded = self
-                                    .record_failure(&tx, &place, &failure, message.attempts)
-                                    .await
-                                    .map_err(in_slot)?;
-                                let (attempts, parked, held, retry_after) = (
-                                    recorded.attempts,
-                                    recorded.parked,
-                                    recorded.held,
-                                    recorded.retry_after,
-                                );
-                                let cause = failure.cause();
-                                // The `log` facade is the observer everyone has: a
-                                // parked message must not be silent when no
-                                // observer of ours is attached. An attempt is
-                                // expected and repeats; parking needs a person.
-                                // A line names the row by its channel and its
-                                // place in the inbox: never by its stream, whose
-                                // id and Tenant are the producer's values, and
-                                // never with the subscriber's text, which the
-                                // row keeps and the observer is handed
-                                // (ADR-0036 R9).
-                                let place = format!(
-                                    "{} at {} in slot {slot}",
-                                    intake::sanitized(
-                                        Some(uri::without_key(&message.uri).as_bytes()),
-                                        intake::CHANNEL_WIDTH,
-                                    )
-                                    .unwrap_or_default(),
-                                    message
-                                        .received_position
-                                        .map_or_else(|| "?".to_owned(), |position| position.to_string()),
-                                );
-                                if failure.is_permanent() {
-                                    log::error!(
-                                        "inbox: the message of {place} parked, the subscriber's verdict is permanent ({cause})"
-                                    );
-                                } else if parked {
-                                    log::error!(
-                                        "inbox: the message of {place} parked after {attempts} failed attempts ({cause})"
-                                    );
-                                } else if held && recorded.past_budget {
-                                    log::error!(
-                                        "inbox: the message of {place} holds its Tenant's rows of its slot past its budget, its stage unavailable ({cause}), next in {retry_after:?}"
-                                    );
-                                } else if held {
-                                    log::warn!(
-                                        "inbox: the message of {place} holds its Tenant's rows of its slot, its stage unavailable ({cause}), next in {retry_after:?}"
-                                    );
-                                } else {
-                                    log::warn!(
-                                        "inbox: attempt {attempts} on the message of {place} failed ({cause}), next in {retry_after:?}"
-                                    );
-                                }
-                                self.observer.on_failed(&Failed {
-                                    slot,
-                                    message: &message,
-                                    error: failure.error(),
-                                    cause,
-                                    permanent: failure.is_permanent(),
-                                    attempts,
-                                    parked,
-                                    held,
-                                    past_budget: recorded.past_budget,
-                                    retry_after,
-                                });
-                                Ok((Some(slot), Outcome::Failed { attempts, parked, held }))
-                            }
-                        }
+                        let outcome = self
+                            .conclude(&tx, slot, &place, &message, failure, asked)
+                            .await
+                            .map_err(in_slot)?;
+                        Ok((Some(slot), outcome))
                     })
                     .await
             })
@@ -350,6 +376,306 @@ where
         outcome
             .map(|(_, outcome)| outcome)
             .map_err(|rolled| rolled.error)
+    }
+
+    /// The subscriber's verdict carried out, in its dispatch transaction:
+    /// processed, the row marked; failed, the failure recorded, an
+    /// `Unavailable` held for the breaker's interval. The breaker is told
+    /// before the record, for that interval.
+    async fn conclude(
+        &self,
+        tx: &P::Session,
+        slot: u32,
+        place: &str,
+        message: &InboxMessage,
+        failure: Option<Failure>,
+        asked: Asked<'_>,
+    ) -> Result<Outcome, Error> {
+        let told = asked.told(verdict_of(failure.as_ref()));
+        self.tell(&told.effects);
+        let Some(failure) = failure else {
+            if self.slots > 1 {
+                // with one slot every dispatcher serializes on it, and no
+                // wait can race the mark
+                self.lock_own_identity(tx, place).await?;
+            }
+            // No scope of its own: the mark binds none of the row's values,
+            // and after the subscriber's scope a lost connection poisons the
+            // session, which a new scope would report as a defect rather than
+            // the moment's (ADR-0037 decision 6).
+            let (processed_position, woken) = self.mark_processed(tx, place).await?;
+            self.observer.on_marked(&Marked {
+                slot,
+                message,
+                processed_position,
+                woken: &woken,
+            });
+            return Ok(Outcome::Processed);
+        };
+        // No scope of its own either: the record binds the place and the
+        // failure's text made storable (ADR-0037 decision 7).
+        let recorded = self
+            .record_failure(tx, place, &failure, message.attempts, told.hold)
+            .await?;
+        let (attempts, parked, held, retry_after) = (
+            recorded.attempts,
+            recorded.parked,
+            recorded.held,
+            recorded.retry_after,
+        );
+        let cause = failure.cause();
+        // The `log` facade is the observer everyone has: a parked message
+        // must not be silent when no observer of ours is attached. An attempt
+        // is expected and repeats; parking needs a person; a hold for an
+        // `Unavailable` is the breaker's to report, and logs at `debug`. A
+        // line names the row by its channel and its place in the inbox: never
+        // by its stream, whose id and Tenant are the producer's values, and
+        // never with the subscriber's text, which the row keeps and the
+        // observer is handed (ADR-0036 R9).
+        let place = format!(
+            "{} at {} in slot {slot}",
+            intake::sanitized(
+                Some(uri::without_key(&message.uri).as_bytes()),
+                intake::CHANNEL_WIDTH,
+            )
+            .unwrap_or_default(),
+            message
+                .received_position
+                .map_or_else(|| "?".to_owned(), |position| position.to_string()),
+        );
+        if failure.is_permanent() {
+            log::error!(
+                "inbox: the message of {place} parked, the subscriber's verdict is permanent ({cause})"
+            );
+        } else if parked {
+            log::error!(
+                "inbox: the message of {place} parked after {attempts} failed attempts ({cause})"
+            );
+        } else if held {
+            log::debug!(
+                "inbox: the message of {place} held, unavailable ({cause}), next in {retry_after:?}"
+            );
+        } else {
+            log::warn!(
+                "inbox: attempt {attempts} on the message of {place} failed ({cause}), next in {retry_after:?}"
+            );
+        }
+        self.observer.on_failed(&Failed {
+            slot,
+            message,
+            error: failure.error(),
+            cause,
+            permanent: failure.is_permanent(),
+            attempts,
+            parked,
+            held,
+            retry_after,
+        });
+        Ok(Outcome::Failed {
+            attempts,
+            parked,
+            held,
+        })
+    }
+
+    /// A trial the breaker asked for (ADR-0042 decision 1): the witness's
+    /// slot locked as `take` locks one, passed by when another holds it; the
+    /// Tenant's head in it located in a statement after the lock, so that
+    /// what the previous holder committed is in view, and asked if it is
+    /// still a head of the paused channel; its subscriber run under the
+    /// trial's wait, past which it is dropped and the transaction rolled
+    /// back. The cursor is never moved; a processed trial clears the slot's
+    /// round, as a take does. Statements sent as text: a trial is at most
+    /// one a tick a channel.
+    async fn trial<F, Fut>(
+        &self,
+        subscriber: &F,
+        id: u64,
+        channel: &str,
+        slot: u32,
+        tenant: &str,
+    ) -> Result<Outcome, Error>
+    where
+        F: Fn(&P::Session, &InboxMessage) -> Fut + Send + Sync,
+        Fut: Future<Output = Result<(), Failure>> + Send,
+    {
+        let wait = self.breaker().settings().trial_wait;
+        let table = self.table.as_str();
+        let ran_out = AtomicBool::new(false);
+        let tried = self
+            .pool
+            .session(async |session| {
+                session
+                    .atomic(async |tx| -> Result<(Trial, Outcome), Error> {
+                        let connection = tx.connection();
+                        read_committed(&self.isolation(&tx).await?)?;
+                        let locked = connection
+                            .query_opt(
+                                &format!(
+                                    "SELECT slot FROM {table}_slots WHERE slot = $1 \
+                                     FOR UPDATE SKIP LOCKED"
+                                ),
+                                &[&(slot as i16)],
+                            )
+                            .await?;
+                        if locked.is_none() {
+                            return Ok((Trial::Gone, Outcome::Nothing));
+                        }
+                        let head = connection
+                            .query_opt(
+                                &format!(
+                                    "SELECT ctid::text, {channel_of} = $3 FROM {table} \
+                                     WHERE slot = $1 AND tenant_id = $2 AND {queue} \
+                                     ORDER BY received_position LIMIT 1 FOR UPDATE",
+                                    channel_of = super::store::CHANNEL_OF_ROW,
+                                    queue = super::store::QUEUE,
+                                ),
+                                &[&(slot as i16), &tenant, &channel],
+                            )
+                            .await?;
+                        let Some(place) = head
+                            .filter(|row| row.get::<_, bool>(1))
+                            .map(|row| row.get::<_, String>(0))
+                        else {
+                            return Ok((Trial::Gone, Outcome::Nothing));
+                        };
+                        let message = match own(
+                            tx.atomic(async |inner| self.read_at(&inner, &place).await)
+                                .await,
+                            table,
+                            true,
+                        )? {
+                            Ok(Ok(message)) => message,
+                            Ok(Err(_)) | Err(_) => return Ok((Trial::Gone, Outcome::Nothing)),
+                        };
+                        let dependencies = message.checked_causal_dependencies().ok();
+                        let waits = match &dependencies {
+                            Some(dependencies) => self
+                                .first_unprocessed_dependency(&tx, dependencies)
+                                .await?
+                                .is_some(),
+                            None => true,
+                        };
+                        if waits {
+                            return Ok((Trial::Gone, Outcome::Nothing));
+                        }
+                        let attempt = tokio::time::timeout(
+                            wait,
+                            tx.atomic(async |inner| {
+                                subscriber(&inner, &message)
+                                    .await
+                                    .map_err(Error::Subscriber)
+                            }),
+                        )
+                        .await;
+                        let failure = match attempt {
+                            // The transaction rolls back: what the subscriber
+                            // began is cut off mid-call, never committed.
+                            Err(_elapsed) => {
+                                ran_out.store(true, Ordering::Relaxed);
+                                return Err(Error::Refused("the trial's wait ran out"));
+                            }
+                            Ok(Ok(())) => None,
+                            Ok(Err(Error::Subscriber(failure))) => Some(failure),
+                            Ok(Err(other)) => return Err(other),
+                        };
+                        let verdict = verdict_of(failure.as_ref());
+                        let told = self.breaker().tried(now(), id, Trial::Told(verdict));
+                        self.tell(&told.effects);
+                        let outcome = match failure {
+                            None => {
+                                if self.slots > 1 {
+                                    self.lock_own_identity(&tx, &place).await?;
+                                }
+                                let (processed_position, woken) =
+                                    self.mark_processed(&tx, &place).await?;
+                                connection
+                                    .execute(
+                                        &format!(
+                                            "UPDATE {table}_slots SET round_from = NULL, \
+                                             dormant_until = NULL, dormant_after = NULL \
+                                             WHERE slot = $1"
+                                        ),
+                                        &[&(slot as i16)],
+                                    )
+                                    .await?;
+                                self.observer.on_marked(&Marked {
+                                    slot,
+                                    message: &message,
+                                    processed_position,
+                                    woken: &woken,
+                                });
+                                Outcome::Processed
+                            }
+                            Some(failure) => {
+                                let recorded = self
+                                    .record_failure(
+                                        &tx,
+                                        &place,
+                                        &failure,
+                                        message.attempts,
+                                        told.hold,
+                                    )
+                                    .await?;
+                                Outcome::Failed {
+                                    attempts: recorded.attempts,
+                                    parked: recorded.parked,
+                                    held: recorded.held,
+                                }
+                            }
+                        };
+                        Ok((Trial::Told(verdict), outcome))
+                    })
+                    .await
+            })
+            .await;
+        match tried {
+            Ok((Trial::Gone, outcome)) => {
+                let told = self.breaker().tried(now(), id, Trial::Gone);
+                self.tell(&told.effects);
+                Ok(outcome)
+            }
+            Ok((_, outcome)) => Ok(outcome),
+            Err(_) if ran_out.load(Ordering::Relaxed) => {
+                let told = self.breaker().tried(now(), id, Trial::TimedOut);
+                self.tell(&told.effects);
+                Ok(Outcome::Nothing)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The breaker's effects told: to the observer, and to the log — a pause
+    /// and a resume once each, a stall at its first tick and every
+    /// [`crate::breaker::REMINDER`], by channel and cause and never a Tenant
+    /// (ADR-0042 decision 6).
+    fn tell(&self, effects: &[Effect]) {
+        for effect in effects {
+            match effect {
+                Effect::Paused { channel, cause } => {
+                    log::warn!("inbox: the channel {channel} paused in this process ({cause})");
+                }
+                Effect::Stalled {
+                    channel,
+                    cause,
+                    since,
+                    remind: true,
+                    ..
+                } => {
+                    log::error!(
+                        "inbox: the channel {channel} stalled in this process ({cause}), paused for {:?}",
+                        now().saturating_duration_since(*since)
+                    );
+                }
+                Effect::Resumed { channel, cause, .. } => {
+                    log::warn!(
+                        "inbox: the channel {channel} asked again in this process ({cause})"
+                    );
+                }
+                Effect::Stalled { .. } | Effect::Trial { .. } => {}
+            }
+            self.observer.on_breaker(&BreakerChanged { effect });
+        }
     }
 
     /// Processes messages until `shutdown` completes, with `loops.concurrency`
@@ -395,12 +721,13 @@ where
                             | Outcome::Failed { .. }
                             | Outcome::SetAside
                             | Outcome::Parked
-                            | Outcome::Passed,
+                            | Outcome::Passed
+                            | Outcome::Held,
                         ) => {
                             passing = 0;
                             continue;
                         }
-                        Ok(Outcome::Nothing) => {
+                        Ok(Outcome::Nothing | Outcome::Paused) => {
                             passing = 0;
                             loops.poll_interval
                         }
@@ -486,15 +813,16 @@ where
                             "the parked ground `{ground}` is not the library's"
                         ))
                     })?,
-                    open: u64::try_from(row.try_get::<_, i64>(2)?).unwrap_or_default(),
-                    oldest: row.try_get(3)?,
+                    cause: row.try_get(2)?,
+                    open: u64::try_from(row.try_get::<_, i64>(3)?).unwrap_or_default(),
+                    oldest: row.try_get(4)?,
                 })
             })
             .collect()
     }
 
-    /// The heads held by their own failure, by channel and cause, with how
-    /// many Tenants they are of and the oldest hold (ADR-0041 decision 5).
+    /// The heads held, by channel, kind and cause, with how many Tenants and
+    /// heads and the oldest hold (ADR-0041 decision 5, ADR-0042 decision 6).
     /// Read from the table, as [`Self::parked_counts`] reads the parked rows,
     /// in a transaction of its own bounded by `within`.
     ///
@@ -518,14 +846,16 @@ where
             .await?;
         rows.iter()
             .map(|row| {
-                let cause: String = row.try_get(1)?;
+                let hold: String = row.try_get(1)?;
                 Ok(HeldCount {
                     channel: row.try_get(0)?,
-                    cause: Hold::parse(&cause).ok_or_else(|| {
-                        Error::Malformed(format!("the hold `{cause}` is not the library's"))
+                    hold: Hold::parse(&hold).ok_or_else(|| {
+                        Error::Malformed(format!("the hold `{hold}` is not the library's"))
                     })?,
-                    tenants: u64::try_from(row.try_get::<_, i64>(2)?).unwrap_or_default(),
-                    oldest: row.try_get(3)?,
+                    cause: row.try_get(2)?,
+                    tenants: u64::try_from(row.try_get::<_, i64>(3)?).unwrap_or_default(),
+                    heads: u64::try_from(row.try_get::<_, i64>(4)?).unwrap_or_default(),
+                    oldest: row.try_get(5)?,
                 })
             })
             .collect()
@@ -560,6 +890,7 @@ where
     ) -> Result<bool, Error> {
         let resolved = session
             .atomic(async |tx| {
+                read_committed(&self.isolation(&tx).await?)?;
                 self.lock_parked_identity(&tx, received_position).await?;
                 self.resolve_at(&tx, received_position).await
             })

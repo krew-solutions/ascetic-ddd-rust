@@ -1,10 +1,12 @@
 //! The table this release migrated, judged against its twin without the
-//! columns ADR-0040 added — the causes and the hold's clock — is admitted:
-//! they are nullable, without a default, so they bind no insert of a
-//! release that does not know them (ADR-0037 decision 5 and R12; ADR-0040
-//! § Executors). The twin stands for the release before ADR-0040; it is not
-//! that release's own check, which ADR-0041 decision 6 replaced while no
-//! release is deployed. Inside the crate, so that it runs the library's own
+//! columns ADR-0042 added — a row's cause, and the count and kind of its
+//! holds — is admitted: nullable, or defaulted, so they bind no insert of a
+//! release that does not know them (ADR-0037 decision 5 and R12). The twin
+//! stands for the release before ADR-0042; it is not that release's own
+//! check, which ADR-0041 decision 6 replaced while no release is deployed.
+//! A release before ADR-0042 that takes a row out of the queue with a hold
+//! on it is refused by the baseline's CHECK, which is the live deployment's
+//! (ADR-0042 § Owed 3), not this test's. Inside the crate, so that it runs the library's own
 //! check over the migration's real statement, not a copy of either.
 
 use std::str::FromStr;
@@ -21,8 +23,8 @@ use crate::partition::ByStream;
 
 const DEFAULT_URL: &str = "postgresql://devel:devel@localhost:5432/devel_karmabot_test";
 
-/// What ADR-0040 added to the inbox table.
-const ADDED: [&str; 3] = ["last_cause", "parked_cause", "unavailable_since"];
+/// What ADR-0042 added to the inbox table.
+const ADDED: [&str; 3] = ["cause", "holds", "hold_kind"];
 
 fn pool() -> Pool {
     let url = std::env::var("ASCETIC_DDD_TEST_PG_URL").unwrap_or_else(|_| DEFAULT_URL.to_owned());
@@ -39,9 +41,9 @@ fn pool() -> Pool {
         .expect("the pool can be built")
 }
 
-/// `twin` without the columns ADR-0040 added: the twin the release before
+/// `twin` without the columns ADR-0042 added: the twin the release before
 /// it rendered, its last column's comma dropped.
-fn before_the_causes(twin: &str) -> String {
+fn before_the_holds(twin: &str) -> String {
     let kept: Vec<&str> = twin
         .lines()
         .filter(|line| {
@@ -61,7 +63,7 @@ fn before_the_causes(twin: &str) -> String {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
-async fn the_release_before_the_causes_admits_the_table_they_were_added_to() {
+async fn the_release_before_the_holds_admits_the_table_they_were_added_to() {
     let table = "inbox_release_before";
     let inbox = PgInbox::new(PgSessionPool::new(pool()))
         .with_table(
@@ -71,7 +73,7 @@ async fn the_release_before_the_causes_admits_the_table_they_were_added_to() {
         .partitioned_by(ByStream);
     inbox.teardown().await.unwrap();
     inbox.migrate().await.unwrap();
-    let before = before_the_causes(&inbox.inbox_twin());
+    let before = before_the_holds(&inbox.inbox_twin());
     let sessions = PgSessionPool::new(pool());
     let pk = format!("{table}_pk");
     // The twin lives for one transaction, as `migrate` makes it.

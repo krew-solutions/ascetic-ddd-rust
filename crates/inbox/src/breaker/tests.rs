@@ -100,7 +100,7 @@ impl Sim {
                 }
                 Some(told)
             }
-            Before::Hold(wait) => {
+            Before::Hold { wait, .. } => {
                 assert!(wait > Duration::ZERO, "a hold is always ahead of now");
                 self.due.insert(key, self.now + wait);
                 None
@@ -338,7 +338,7 @@ fn c5_a_hanging_tenant_is_asked_once_at_a_time() {
         assert!(
             matches!(
                 sim.breaker.before(sim.now, CHANNEL, "x", slot, 0),
-                Before::Hold(_)
+                Before::Hold { .. }
             ),
             "head {slot} asked while another is in flight"
         );
@@ -377,7 +377,8 @@ fn c6_three_inconclusive_trials_close_the_channel() {
     let told = sim.breaker.tried(sim.now, second, Trial::Gone);
     assert!(!resumed(&told.effects));
     sim.advance(Duration::from_secs(5));
-    let effects = sim.breaker.met(sim.now, CHANNEL, &[(9, "c".to_owned())]);
+    sim.breaker.met(sim.now, CHANNEL, &[(9, "c".to_owned())]);
+    let effects = sim.tick();
     let third = effects
         .iter()
         .find_map(|e| match e {
@@ -463,16 +464,26 @@ fn c9_a_late_trial_answer_changes_nothing_but_a_close() {
 }
 
 /// C10: a sparse channel: a guest meets the one head of a Tenant the memo does
-/// not hold, and it is tried at once, the channel closed on its success. Red
-/// when the trial waits for a memoised witness.
+/// not hold, and it is tried at once — at the next call's tick, ahead of the
+/// tick the failed trials scheduled — the channel closed on its success. Red
+/// when the trial waits for the scheduled tick or a memoised witness.
 #[test]
 fn c10_a_witness_met_by_a_guest_is_tried_at_once() {
     let mut sim = Sim::new(Breaking::default());
     sim.open();
-    sim.advance(Duration::from_secs(2));
-    let effects = sim
-        .breaker
+    // a first trial, of a memoised witness, fails: the next tick is two
+    // seconds on
+    let (first, _) = sim.next_trial();
+    sim.breaker.tried(sim.now, first, Trial::Told(stage()));
+    sim.advance(Duration::from_millis(1100));
+    assert!(
+        !sim.tick().iter().any(|e| matches!(e, Effect::Trial { .. })),
+        "nothing tried before the tick scheduled"
+    );
+    // the meeting issues no trial itself: the next tick does, now
+    sim.breaker
         .met(sim.now, CHANNEL, &[(17, "lonely".to_owned())]);
+    let effects = sim.tick();
     let Some((id, tenant)) = effects.iter().find_map(|e| match e {
         Effect::Trial { id, tenant, .. } => Some((*id, tenant.clone())),
         _ => None,
@@ -560,12 +571,12 @@ proptest! {
             let answer = breaker.before(now, CHANNEL, &tenant, 0, 0);
             if let Some(until) = held_until.get(&tenant) {
                 if now < *until {
-                    prop_assert!(matches!(answer, Before::Hold(_)), "{tenant} evicted before {until:?}");
+                    prop_assert!(matches!(answer, Before::Hold { .. }), "{tenant} evicted before {until:?}");
                     continue;
                 }
             }
             match answer {
-                Before::Hold(wait) => {
+                Before::Hold { wait, .. } => {
                     held_until.insert(tenant, now + wait);
                 }
                 Before::Ask(flight) => {

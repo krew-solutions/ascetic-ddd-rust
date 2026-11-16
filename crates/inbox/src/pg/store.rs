@@ -9,7 +9,7 @@ use ascetic_ddd_migration::{
 use ascetic_ddd_session::{PgAccess, Session, SessionPool};
 use tokio_postgres::Row;
 
-use super::{Ground, Outage, Parked, PgInbox};
+use super::{Ground, Parked, PgInbox};
 use crate::error::{Error, Failure};
 use crate::message::{CausalDependency, InboxMessage};
 use crate::observer::{InboxObserver, Receipt};
@@ -37,23 +37,29 @@ pub(super) const CHANNEL_OF_ROW: &str =
 const GROUND_OF_ROW: &str = "CASE WHEN unreadable_at IS NOT NULL THEN 'at_once' \
      WHEN waiting_for IS NOT NULL THEN 'expired' ELSE 'failure' END";
 
-/// The parked rows by channel and ground, with the oldest park: one statement
-/// over the parked index's predicate, so that its work is the parked rows',
-/// not the table's.
+/// The parked rows by channel, ground and cause, with the oldest park: one
+/// statement over the parked index's predicate, so that its work is the
+/// parked rows', not the table's.
 pub(super) fn parked_counts_sql(table: &str) -> String {
     format!(
-        "SELECT {CHANNEL_OF_ROW}, {GROUND_OF_ROW}, count(*), min(parked_at)::text FROM {table} \
-         WHERE parked_at IS NOT NULL GROUP BY 1, 2 ORDER BY 1, 2"
+        "SELECT {CHANNEL_OF_ROW}, {GROUND_OF_ROW}, cause, count(*), min(parked_at)::text \
+         FROM {table} WHERE parked_at IS NOT NULL GROUP BY 1, 2, 3 ORDER BY 1, 2, 3"
     )
 }
-/// The heads held by their own failure, by channel and cause, with how
-/// many Tenants they are of and the oldest hold: one statement over the held
-/// index's predicate, so that its work is the held rows', not the table's
-/// (ADR-0041 decision 5). No Tenant's identifier leaves the database.
+/// The heads held, by channel, kind and cause, with how many Tenants and
+/// heads and the oldest hold: one statement over the held index's predicate,
+/// so that its work is the held rows', not the table's (ADR-0041 decision 5,
+/// ADR-0042 decision 6). The index carries every column it reads, the row's
+/// `uri` its channel is computed from among them, so that it can be
+/// answered from the index alone; the planner takes that when the heap's
+/// pages are visible enough — on a vacuumed table 18 read 70 pages for
+/// 4,000 held rows of 100,000, against 3,386 by their heap, where 14 priced
+/// the heap lower. No Tenant's identifier leaves the database.
 pub(super) fn held_counts_sql(table: &str) -> String {
     format!(
-        "SELECT {CHANNEL_OF_ROW}, 'backoff', count(DISTINCT tenant_id), min(held_since)::text \
-         FROM {table} WHERE held_since IS NOT NULL GROUP BY 1, 2 ORDER BY 1, 2"
+        "SELECT {CHANNEL_OF_ROW}, coalesce(hold_kind, 'backoff'), cause, \
+                count(DISTINCT tenant_id), count(*), min(held_since)::text \
+         FROM {table} WHERE held_since IS NOT NULL GROUP BY 1, 2, 3 ORDER BY 1, 2, 3"
     )
 }
 /// The take's statement over `table` ([`PgInbox::take`]): a function, so
@@ -89,7 +95,8 @@ pub(super) fn take_sql(table: &str) -> String {
                 LIMIT 1
                 FOR UPDATE OF s SKIP LOCKED
             )
-            SELECT t.slot, pg_current_snapshot()::text, (SELECT slots FROM {table}_meta)
+            SELECT t.slot, pg_current_snapshot()::text, (SELECT slots FROM {table}_meta),
+                   current_setting('transaction_isolation')
             FROM (SELECT 1) AS one
             LEFT JOIN taken t ON true
             "#
@@ -121,12 +128,15 @@ pub(super) fn walk_sql(table: &str) -> String {
     format!(
         r#"
             WITH RECURSIVE here AS (
-                SELECT coalesce(last_tenant, '') AS c, round_from, dormant_until, dormant_after
+                SELECT coalesce(CASE WHEN cardinality($4::text[]) > 0 THEN guest_tenant END,
+                                last_tenant, '') AS c,
+                       round_from, dormant_until, dormant_after,
+                       cardinality($4::text[]) > 0 AS guest
                 FROM {table}_slots WHERE slot = $1
-            ), walk (n, phase, tenant_id, place, due, retry_at) AS (
-                SELECT 0, 0, c, NULL::tid, false, NULL::timestamptz FROM here
+            ), walk (n, phase, tenant_id, place, due, retry_at, paused, channel) AS (
+                SELECT 0, 0, c, NULL::tid, false, NULL::timestamptz, false, NULL::text FROM here
                 UNION ALL
-                SELECT w.n + 1, h.phase, h.tenant_id, h.place, h.due, h.retry_at
+                SELECT w.n + 1, h.phase, h.tenant_id, h.place, h.due, h.retry_at, h.paused, h.channel
                 FROM walk w CROSS JOIN here CROSS JOIN LATERAL (
                     SELECT * FROM (
                         (SELECT w.phase AS phase, after.* FROM (
@@ -144,7 +154,9 @@ pub(super) fn walk_sql(table: &str) -> String {
             ), last AS (
                 SELECT * FROM walk WHERE n > 0 AND n = (SELECT max(n) FROM walk)
             ), head AS (
-                SELECT r.received_position, r.ctid::text AS place, r.tenant_id
+                SELECT r.received_position, r.ctid::text AS place, r.tenant_id,
+                       (split_part(r.uri, '/', 1) || '//' || split_part(r.uri, '/', 3)) AS channel,
+                       coalesce(r.holds, 0) AS holds
                 FROM {table} r JOIN last ON r.ctid = last.place
                 WHERE last.due AND {QUEUE}
                 FOR UPDATE OF r
@@ -154,7 +166,9 @@ pub(super) fn walk_sql(table: &str) -> String {
                        coalesce(l.due, false) AND h.tenant_id IS NULL AS vanished,
                        seen.n < $2 AND NOT coalesce(l.due, false) AS exhausted,
                        seen.earliest, here.c, here.round_from, here.dormant_until, here.dormant_after,
-                       here.round_from IS NULL AS starts
+                       here.round_from IS NULL AS starts, here.guest,
+                       (SELECT array_agg(tenant_id ORDER BY n) FILTER (WHERE paused) FROM walk) AS met_tenants,
+                       (SELECT array_agg(channel ORDER BY n) FILTER (WHERE paused) FROM walk) AS met_channels
                 FROM here
                 CROSS JOIN (SELECT max(n) AS n, min(retry_at) FILTER (WHERE NOT due) AS earliest
                             FROM walk) seen
@@ -175,30 +189,64 @@ pub(super) fn walk_sql(table: &str) -> String {
                             ELSE v.dormant_after END AS round_after
                 FROM verdict v
             ), updated AS (
+                -- A guest (ADR-0042 decision 5) moves its own cursor only, and
+                -- writes no round and no sleep on its paused view: a head it
+                -- takes clears the slot's round, as any take does.
                 UPDATE {table}_slots s SET
                     served_at = CURRENT_TIMESTAMP,
-                    last_tenant = CASE WHEN d.taken THEN d.taken_tenant
+                    last_tenant = CASE WHEN d.guest THEN s.last_tenant
+                                       WHEN d.taken THEN d.taken_tenant
                                        WHEN d.u IS NOT NULL AND NOT d.vanished THEN d.u
                                        ELSE s.last_tenant END,
-                    round_from = CASE WHEN d.taken OR d.u IS NULL OR d.vanished OR d.ends THEN NULL
+                    guest_tenant = CASE WHEN NOT d.guest THEN s.guest_tenant
+                                        WHEN d.taken THEN d.taken_tenant
+                                        WHEN d.u IS NOT NULL AND NOT d.vanished THEN d.u
+                                        ELSE s.guest_tenant END,
+                    round_from = CASE WHEN d.taken THEN NULL
+                                      WHEN d.guest THEN s.round_from
+                                      WHEN d.u IS NULL OR d.vanished OR d.ends THEN NULL
                                       ELSE d.r_from END,
-                    dormant_until = CASE WHEN d.taken OR d.u IS NULL OR d.vanished THEN NULL
+                    dormant_until = CASE WHEN d.taken THEN NULL
+                                         WHEN d.guest THEN s.dormant_until
+                                         WHEN d.u IS NULL OR d.vanished THEN NULL
                                          WHEN d.ends THEN least(d.round_earliest,
                                              CURRENT_TIMESTAMP + make_interval(secs => $3))
                                          ELSE d.round_earliest END,
-                    dormant_after = CASE WHEN d.taken OR d.u IS NULL OR d.vanished THEN NULL
+                    dormant_after = CASE WHEN d.taken THEN NULL
+                                         WHEN d.guest THEN s.dormant_after
+                                         WHEN d.u IS NULL OR d.vanished THEN NULL
                                          ELSE d.round_after END
                 FROM decided d
                 WHERE s.slot = $1
                 RETURNING CASE WHEN d.taken THEN 'taken'
-                               WHEN d.u IS NULL OR d.vanished OR d.ends THEN 'nothing'
-                               ELSE 'passed' END AS outcome
+                               WHEN d.u IS NULL OR d.vanished THEN 'nothing'
+                               WHEN d.guest THEN 'paused'
+                               WHEN d.ends THEN 'nothing'
+                               ELSE 'passed' END AS outcome,
+                          d.met_tenants, d.met_channels
             )
-            SELECT h.received_position, h.place, u.outcome, pg_current_snapshot()::text
+            SELECT h.received_position, h.place, h.tenant_id::text, h.channel, h.holds, u.outcome,
+                   pg_current_snapshot()::text, u.met_tenants, u.met_channels
             FROM updated u LEFT JOIN head h ON true
             "#
     )
 }
+/// Refuses a transaction under an isolation other than READ COMMITTED: the
+/// take's, the trial's and the resolve's locks and waits hold under it only
+/// — a lock waited for and then a statement that reads past it see what
+/// committed meanwhile (ADR-0042 decision 10). Checked for each
+/// transaction, since a session's level may change between them.
+pub(super) fn read_committed(isolation: &str) -> Result<(), Error> {
+    if isolation == "read committed" {
+        Ok(())
+    } else {
+        Err(Error::Refused(
+            "the transaction's isolation is not READ COMMITTED, under which alone the inbox's \
+             locks and waits hold (ADR-0042 decision 10)",
+        ))
+    }
+}
+
 /// How many rows one statement of the expiry parks.
 const EXPIRY_BATCH: i64 = 100;
 /// The most characters of a failure's text a row keeps (ADR-0037 decision
@@ -211,6 +259,12 @@ const IDENTITY_OF_ROW: &str = "jsonb_build_object('tenant_id', tenant_id, 'strea
 /// The rows a dispatcher may take: neither processed, parked nor waiting.
 pub(super) const QUEUE: &str =
     "processed_position IS NULL AND parked_at IS NULL AND waiting_for IS NULL";
+/// What every statement that takes a row out of the queue writes: no hold
+/// left on it (ADR-0042 decision 4). The baseline's `__hold_in_queue` makes
+/// a statement that forgets it fail. `holds` is nullable without a default,
+/// as every column the library adds (ADR-0037 decision 5): `NULL` is none.
+pub(super) const LEAVE_QUEUE: &str =
+    "held_since = NULL, holds = NULL, hold_kind = NULL, next_attempt_at = NULL";
 
 /// The inbox's sequence, tables, indexes and functions as created,
 /// `{table}`, `{sequence}`, `{slots}` and `{key}` standing for their names,
@@ -252,15 +306,22 @@ const BASELINE: &str = r#"
         slot smallint GENERATED ALWAYS AS ((hashtext({key}) & 2147483647) % {slots}) STORED,
         received_at timestamptz NOT NULL DEFAULT statement_timestamp(),
         held_since timestamptz NULL,
-        CONSTRAINT {table}_pk PRIMARY KEY (tenant_id, stream_type, stream_id, stream_position)
+        cause varchar(64) NULL,
+        holds integer NULL,
+        hold_kind varchar(16) NULL,
+        CONSTRAINT {table}_pk PRIMARY KEY (tenant_id, stream_type, stream_id, stream_position),
+        CONSTRAINT {table}__hold_in_queue CHECK (
+            (held_since IS NULL AND next_attempt_at IS NULL AND holds IS NULL AND hold_kind IS NULL)
+            OR (processed_position IS NULL AND parked_at IS NULL AND waiting_for IS NULL)),
+        CONSTRAINT {table}__cause_unprocessed CHECK (cause IS NULL OR processed_position IS NULL)
     );
     CREATE INDEX IF NOT EXISTS {table}__head_idx
         ON {table} (slot, received_position) WHERE {queue};
     CREATE INDEX IF NOT EXISTS {table}__tenant_head_idx
         ON {table} (slot, tenant_id, received_position) WHERE {queue};
     CREATE INDEX IF NOT EXISTS {table}__held_idx
-        ON {table} ((split_part(uri, '/', 1) || '//' || split_part(uri, '/', 3)), held_since)
-        INCLUDE (tenant_id) WHERE held_since IS NOT NULL;
+        ON {table} ((split_part(uri, '/', 1) || '//' || split_part(uri, '/', 3)), cause, held_since)
+        INCLUDE (tenant_id, hold_kind, uri) WHERE held_since IS NOT NULL;
     CREATE INDEX IF NOT EXISTS {table}__waiting_idx
         ON {table} (waiting_for) WHERE waiting_for IS NOT NULL;
     CREATE INDEX IF NOT EXISTS {table}__waiting_since_idx
@@ -276,17 +337,20 @@ const BASELINE: &str = r#"
         last_tenant varchar(128) NULL,
         round_from varchar(128) NULL,
         dormant_until timestamptz NULL,
-        dormant_after bigint NULL
+        dormant_after bigint NULL,
+        guest_tenant varchar(128) NULL
     );
     INSERT INTO {table}_slots (slot) SELECT s FROM generate_series(0, {slots} - 1) AS s
         ON CONFLICT DO NOTHING;
     CREATE FUNCTION {table}__take(
-        OUT taken_slot smallint, OUT take_snapshot text, OUT slot_count integer)
+        OUT taken_slot smallint, OUT take_snapshot text, OUT slot_count integer,
+        OUT take_isolation text)
         LANGUAGE plpgsql VOLATILE
         AS $fn${take}$fn$;
-    CREATE FUNCTION {table}__walk(smallint, integer, double precision,
-        OUT head_position bigint, OUT head_place text, OUT walk_outcome text,
-        OUT walk_snapshot text)
+    CREATE FUNCTION {table}__walk(smallint, integer, double precision, text[],
+        OUT head_position bigint, OUT head_place text, OUT head_tenant text,
+        OUT head_channel text, OUT head_holds integer, OUT walk_outcome text,
+        OUT walk_snapshot text, OUT met_tenants text[], OUT met_channels text[])
         LANGUAGE plpgsql VOLATILE SET plan_cache_mode = force_generic_plan
         AS $fn${walk}$fn$;
 "#;
@@ -308,7 +372,7 @@ fn baseline_template() -> String {
 pub(super) fn take_body(table: &str) -> String {
     format!(
         "\n    #variable_conflict use_column\n    BEGIN\n{}\n    INTO STRICT taken_slot, take_snapshot, \
-         slot_count;\n    END\n    ",
+         slot_count, take_isolation;\n    END\n    ",
         take_sql(table).trim_end()
     )
 }
@@ -318,7 +382,8 @@ pub(super) fn take_body(table: &str) -> String {
 pub(super) fn walk_body(table: &str) -> String {
     format!(
         "\n    #variable_conflict use_column\n    BEGIN\n{}\n    INTO STRICT head_position, head_place, \
-         walk_outcome, walk_snapshot;\n    END\n    ",
+         head_tenant, head_channel, head_holds, walk_outcome, walk_snapshot, met_tenants, \
+         met_channels;\n    END\n    ",
         walk_sql(table).trim_end()
     )
 }
@@ -342,19 +407,19 @@ struct Called {
 const TAKE_FUNCTION: Called = Called {
     suffix: "__take",
     identity: "()",
-    types: "{smallint,text,integer}",
-    modes: "{o,o,o}",
-    names: "{taken_slot,take_snapshot,slot_count}",
+    types: "{smallint,text,integer,text}",
+    modes: "{o,o,o,o}",
+    names: "{taken_slot,take_snapshot,slot_count,take_isolation}",
     setting: None,
 };
 
-/// `{table}__walk(slot, walk, max_dormancy)`.
+/// `{table}__walk(slot, walk, max_dormancy, paused)`.
 const WALK_FUNCTION: Called = Called {
     suffix: "__walk",
-    identity: "(smallint, integer, double precision)",
-    types: "{smallint,integer,\"double precision\",bigint,text,text,text}",
-    modes: "{i,i,i,o,o,o,o}",
-    names: "{\"\",\"\",\"\",head_position,head_place,walk_outcome,walk_snapshot}",
+    identity: "(smallint, integer, double precision, text[])",
+    types: "{smallint,integer,\"double precision\",\"text[]\",bigint,text,text,text,integer,text,text,\"text[]\",\"text[]\"}",
+    modes: "{i,i,i,i,o,o,o,o,o,o,o,o,o}",
+    names: "{\"\",\"\",\"\",\"\",head_position,head_place,head_tenant,head_channel,head_holds,walk_outcome,walk_snapshot,met_tenants,met_channels}",
     setting: Some("plan_cache_mode=force_generic_plan"),
 };
 
@@ -364,10 +429,8 @@ pub(super) struct Recorded {
     pub(super) attempts: u32,
     /// Whether the row is now parked.
     pub(super) parked: bool,
-    /// Whether it holds for its stage's outage.
+    /// Whether it holds for an `Unavailable`, its attempts untouched.
     pub(super) held: bool,
-    /// Whether it has held past its budget.
-    pub(super) past_budget: bool,
     /// How long it waits before it may be taken again.
     pub(super) retry_after: Duration,
 }
@@ -381,6 +444,9 @@ pub(super) struct Taken {
     pub(super) slot: Option<u32>,
     pub(super) snapshot: Snapshot,
     pub(super) slots: u32,
+    /// The transaction's isolation, as the server reads it: the dispatch
+    /// refuses anything but READ COMMITTED (ADR-0042 decision 10).
+    pub(super) isolation: String,
 }
 
 /// What one walk of a held slot returned: the due head it took, by its
@@ -390,15 +456,27 @@ pub(super) struct Taken {
 /// snapshot.
 pub(super) struct Located {
     pub(super) row: Option<(i64, String)>,
+    /// The head's Tenant, channel and count of `Unavailable` holds, when
+    /// one was taken: what the breaker weighs before it is read.
+    pub(super) head: Option<(String, String, u32)>,
     pub(super) passed: bool,
+    /// A guest walk found no head due but heads of paused channels.
+    pub(super) paused: bool,
+    /// The heads of paused channels the walk met: (channel, Tenant).
+    pub(super) met: Vec<(String, String)>,
     pub(super) snapshot: Snapshot,
 }
 
-/// One head of the walk: its Tenant, its place, whether it is due and when
-/// its backoff ends. `r` is the queue row read.
+/// One head of the walk: its Tenant, its place, whether it is due — its own
+/// back-off passed and its channel not one the process paused, `$4`
+/// (ADR-0042 decision 5) — when its backoff ends, whether its channel is
+/// paused, and its channel. `r` is the queue row read.
 const WALKED: &str = "r.tenant_id, r.ctid AS place, \
-     (r.next_attempt_at IS NULL OR r.next_attempt_at <= CURRENT_TIMESTAMP) AS due, \
-     r.next_attempt_at AS retry_at";
+     (r.next_attempt_at IS NULL OR r.next_attempt_at <= CURRENT_TIMESTAMP) \
+         AND NOT ((split_part(r.uri, '/', 1) || '//' || split_part(r.uri, '/', 3)) = ANY($4::text[])) AS due, \
+     r.next_attempt_at AS retry_at, \
+     (split_part(r.uri, '/', 1) || '//' || split_part(r.uri, '/', 3)) = ANY($4::text[]) AS paused, \
+     (split_part(r.uri, '/', 1) || '//' || split_part(r.uri, '/', 3)) AS channel";
 
 /// The mark's time, and an index over it by channel — the destination
 /// without its key — for the processed rows alone, which the sweep walks
@@ -416,16 +494,6 @@ const PROCESSED_AT: &str = r#"
 /// without a default, as every column the library adds (decision 5).
 const UNREADABLE_AT: &str = r#"
     ALTER TABLE {table} ADD COLUMN unreadable_at timestamptz NULL;
-"#;
-
-/// Why a row failed, why it is parked, and since when it holds for its
-/// stage's outage (ADR-0040 decisions 2, 4 and 6): a cause is a
-/// name of at most 64 characters, never a message's text. Nullable, without
-/// a default, as every column the library adds.
-const CAUSES: &str = r#"
-    ALTER TABLE {table} ADD COLUMN last_cause varchar(64) NULL,
-        ADD COLUMN parked_cause varchar(64) NULL,
-        ADD COLUMN unavailable_since timestamptz NULL;
 "#;
 
 /// What the intake sets aside beside the inbox, never stored as a row
@@ -542,15 +610,9 @@ where
                 )
                 .on(self.table.clone())
                 .checked_over(UNREADABLE_AT),
-                Migration::new(
-                    "20261116T000000Z_causes",
-                    CAUSES.replace("{table}", self.table.as_str()),
-                )
-                .on(self.table.clone())
-                .checked_over(CAUSES),
             ],
         )
-        .unwrap_or_else(|_| unreachable!("six migrations with ids, under a name"))
+        .unwrap_or_else(|_| unreachable!("five migrations with ids, under a name"))
     }
 
     /// [`INBOX_TWIN`] for this inbox's sequence, slots and key.
@@ -615,9 +677,24 @@ where
                     .batch_execute(&format!(
                         "DROP TABLE IF EXISTS {table}; DROP SEQUENCE IF EXISTS {sequence}; \
                          DROP TABLE IF EXISTS {table}_meta; DROP TABLE IF EXISTS {table}_slots; \
-                         DROP TABLE IF EXISTS {table}_rejects; \
-                         DROP FUNCTION IF EXISTS {table}{}{}; DROP FUNCTION IF EXISTS {table}{}{};",
-                        take.suffix, take.identity, walk.suffix, walk.identity
+                         DROP TABLE IF EXISTS {table}_rejects;"
+                    ))
+                    .await?;
+                // Every function of the dispatch's names the search path sees,
+                // whatever its arguments: a release that changed a signature
+                // leaves the earlier one, which the start check refuses
+                // (ADR-0041 decision 6).
+                session
+                    .connection()
+                    .batch_execute(&format!(
+                        "DO $teardown$ DECLARE f regprocedure; BEGIN \
+                           FOR f IN SELECT p.oid::regprocedure FROM pg_proc p \
+                                    WHERE p.proname IN ('{table}{}', '{table}{}') \
+                                      AND pg_function_is_visible(p.oid) LOOP \
+                             EXECUTE 'DROP FUNCTION ' || f; \
+                           END LOOP; \
+                         END $teardown$;",
+                        take.suffix, walk.suffix
                     ))
                     .await?;
                 Ok::<_, Error>(())
@@ -656,6 +733,7 @@ where
             slot: row.get::<_, Option<i16>>(0).map(|slot| slot as u32),
             snapshot: snapshot_of(&row, 1)?,
             slots: row.get::<_, i32>(2) as u32,
+            isolation: row.get(3),
         })
     }
 
@@ -693,9 +771,10 @@ where
         &self,
         session: &P::Session,
         slot: u32,
+        paused: &[String],
     ) -> Result<Located, Error> {
         let sql = format!(
-            "SELECT * FROM {}{}($1::smallint, $2::integer, $3::double precision)",
+            "SELECT * FROM {}{}($1::smallint, $2::integer, $3::double precision, $4::text[])",
             self.table, WALK_FUNCTION.suffix
         );
         let rotation = self.rotation();
@@ -707,15 +786,32 @@ where
                     &(slot as i16),
                     &(rotation.walk.max(1) as i32),
                     &rotation.max_dormancy.as_secs_f64(),
+                    &paused,
                 ],
             )
             .await?;
+        let position = row.get::<_, Option<i64>>(0);
+        let outcome = row.get::<_, String>(5);
+        let met = row
+            .get::<_, Option<Vec<String>>>(7)
+            .unwrap_or_default()
+            .into_iter()
+            .zip(row.get::<_, Option<Vec<String>>>(8).unwrap_or_default())
+            .map(|(tenant, channel)| (channel, tenant))
+            .collect();
         Ok(Located {
-            row: row
-                .get::<_, Option<i64>>(0)
-                .map(|position| (position, row.get(1))),
-            passed: row.get::<_, String>(2) == "passed",
-            snapshot: snapshot_of(&row, 3)?,
+            row: position.map(|position| (position, row.get(1))),
+            head: position.map(|_| {
+                (
+                    row.get::<_, String>(2),
+                    row.get::<_, String>(3),
+                    row.get::<_, Option<i32>>(4).unwrap_or(0).max(0) as u32,
+                )
+            }),
+            passed: outcome == "passed",
+            paused: outcome == "paused",
+            met,
+            snapshot: snapshot_of(&row, 6)?,
         })
     }
 
@@ -750,7 +846,7 @@ where
     ) -> Result<String, Error> {
         let sql = format!(
             "UPDATE {table} SET parked_at = CURRENT_TIMESTAMP, unreadable_at = CURRENT_TIMESTAMP, \
-                 last_error = $2, held_since = NULL \
+                 last_error = $2, cause = NULL, {LEAVE_QUEUE} \
              WHERE ctid = $1::text::tid AND {QUEUE} \
              RETURNING {CHANNEL_OF_ROW}",
             table = self.table
@@ -810,7 +906,8 @@ where
         dependency: &CausalDependency,
     ) -> Result<bool, Error> {
         let sql = format!(
-            "UPDATE {table} SET waiting_for = $2::jsonb, waiting_since = CURRENT_TIMESTAMP, held_since = NULL \
+            "UPDATE {table} SET waiting_for = $2::jsonb, waiting_since = CURRENT_TIMESTAMP, \
+                 cause = NULL, {LEAVE_QUEUE} \
              WHERE ctid = $1::text::tid AND {QUEUE} \
                AND NOT EXISTS (SELECT 1 FROM {table} d \
                                WHERE d.tenant_id = $3 AND d.stream_type = $4 AND d.stream_id = $5 \
@@ -852,7 +949,7 @@ where
         let sql = format!(
             "UPDATE {table} SET parked_at = CURRENT_TIMESTAMP, \
                 last_error = 'dependency ' || waiting_for::text || ' never arrived', \
-                waiting_since = NULL \
+                waiting_since = NULL, cause = NULL, {LEAVE_QUEUE} \
              WHERE ctid IN ( \
                 SELECT w.ctid FROM {table} w \
                 WHERE w.waiting_for IS NOT NULL \
@@ -863,7 +960,7 @@ where
                       AND stream_type = w.waiting_for->>'stream_type' \
                       AND stream_id = w.waiting_for->'stream_id' \
                       AND {IDENTITY_OF_ROW} = w.waiting_for \
-                      AND unavailable_since IS NOT NULL) \
+                      AND hold_kind = 'unavailable') \
                 LIMIT $2 \
                 FOR UPDATE OF w SKIP LOCKED) \
              RETURNING {NARROW}",
@@ -936,8 +1033,7 @@ where
         let sql = format!(
             "WITH marked AS ( \
                 UPDATE {table} SET processed_position = nextval('{sequence}'), \
-                    processed_at = statement_timestamp(), held_since = NULL, \
-                    last_cause = NULL, parked_cause = NULL, unavailable_since = NULL \
+                    processed_at = statement_timestamp(), cause = NULL, {LEAVE_QUEUE} \
                 WHERE ctid = $1::text::tid \
                 RETURNING processed_position, {IDENTITY_OF_ROW} AS identity \
              ), woken AS ( \
@@ -956,143 +1052,79 @@ where
         Ok((first.get(0), woken_of(&rows, 1)))
     }
 
-    /// Records a failure under its cause (ADR-0040). A failure unavailable
-    /// for its stage's outage holds the row's slot, its attempts untouched,
-    /// until its budget runs out and the channel's own evidence refutes the
-    /// outage; any other spends an attempt and parks the row when it was the
-    /// last, or when the verdict is permanent. `attempts` is the row's count
-    /// before this failure.
+    /// Records a failure under its cause. An `Unavailable` holds the row for
+    /// `hold`, the breaker's interval (ADR-0042 decisions 2 and 3), counted on
+    /// the row and spending no attempt. Any other failure spends an attempt
+    /// and parks the row when it was the last, or when the verdict is
+    /// permanent; a parked row holds nothing. `attempts` is the row's count
+    /// before this failure. A failure's text is kept only when its cause is
+    /// unexplained, the handler's own words: a named cause is its name, and a
+    /// stage's text may name a Tenant. Every interval runs from the
+    /// database's clock as the statement runs, not from the transaction's
+    /// start, which a slow subscriber left behind.
     pub(super) async fn record_failure(
         &self,
         session: &P::Session,
         place: &str,
         failure: &Failure,
         attempts: u32,
+        hold: Option<Duration>,
     ) -> Result<Recorded, Error> {
-        let error = crate::intake::storable_text(&failure.to_string(), FAILURE_WIDTH);
-        let cause = failure.cause().as_str();
-        let outage = self.retries.outage;
+        let cause = failure.cause();
+        let error = (cause == ascetic_ddd_bus::Cause::UNEXPLAINED)
+            .then(|| crate::intake::storable_text(&failure.to_string(), FAILURE_WIDTH));
+        let cause = cause.as_str();
         let table = &self.table;
-        // Past its budget a hold is weighed against the channel's evidence:
-        // a row processed within the last `cap` says the stage serves
-        // (ADR-0040 decision 4), read off the sweep's index.
-        let weigh_outage = format!(
-            "WITH held AS ( \
-                SELECT COALESCE(CURRENT_TIMESTAMP - unavailable_since \
-                                    >= make_interval(secs => $2::double precision), false) AS past, \
-                       {CHANNEL_OF_ROW} AS channel \
-                FROM {table} WHERE ctid = $1::text::tid \
-             ) \
-             SELECT held.past, held.past AND EXISTS ( \
-                SELECT 1 FROM {table} \
-                WHERE {CHANNEL_OF_ROW} = held.channel AND processed_at IS NOT NULL \
-                  AND processed_at > CURRENT_TIMESTAMP - make_interval(secs => $3::double precision)) \
-             FROM held"
-        );
-        // A hold spends no attempt: it is asked again at the teller's
-        // `retry_after`, else after as long as it has held, between the floor
-        // and the cap; its clock starts at its first hold. The outage holds
-        // the head now, not its own failure: `held_since`, the clock of a
-        // hold by the head's own failure (ADR-0041 decision 5), ends, so that
-        // `held_counts` never counts an outage's hold as a back-off.
-        let hold_failure = format!(
-            "UPDATE {table} SET last_error = $2, last_cause = $3::text, held_since = NULL, \
-                 unavailable_since = COALESCE(unavailable_since, CURRENT_TIMESTAMP), \
-                 next_attempt_at = CURRENT_TIMESTAMP + make_interval(secs => LEAST($6::double precision, \
-                     GREATEST($5::double precision, COALESCE($4::double precision, \
-                         EXTRACT(EPOCH FROM CURRENT_TIMESTAMP \
-                                 - COALESCE(unavailable_since, CURRENT_TIMESTAMP))::double precision)))) \
-             WHERE ctid = $1::text::tid \
-             RETURNING attempts, EXTRACT(EPOCH FROM next_attempt_at - CURRENT_TIMESTAMP)::double precision"
-        );
-        // Any other failure spends an attempt; the last one, or a permanent
-        // verdict, parks the row under its cause. A hold refuted keeps its
-        // clock, so that it is weighed again at once, until it parks; every
-        // other verdict ends the hold. A parked row holds nothing.
-        let spend_failure = format!(
-            "UPDATE {table} SET attempts = LEAST(attempts, 2147483646) + 1, last_error = $2, \
-                last_cause = $6::text, \
-                next_attempt_at = CURRENT_TIMESTAMP + make_interval(secs => $3::double precision), \
-                parked_at = CASE WHEN $5::boolean \
-                                   OR ($4::integer > 0 AND LEAST(attempts, 2147483646) + 1 >= $4::integer) \
-                                 THEN CURRENT_TIMESTAMP END, \
-                parked_cause = CASE WHEN $5::boolean \
-                                   OR ($4::integer > 0 AND LEAST(attempts, 2147483646) + 1 >= $4::integer) \
-                                 THEN $6::text END, \
-                unavailable_since = CASE WHEN $7::boolean AND NOT \
-                                   ($4::integer > 0 AND LEAST(attempts, 2147483646) + 1 >= $4::integer) \
-                                 THEN unavailable_since END, \
-                held_since = CASE WHEN $5::boolean \
-                                    OR ($4::integer > 0 AND LEAST(attempts, 2147483646) + 1 >= $4::integer) \
-                                  THEN NULL ELSE coalesce(held_since, statement_timestamp()) END \
-             WHERE ctid = $1::text::tid \
-             RETURNING attempts, parked_at IS NOT NULL"
-        );
-        let (past_budget, refuted) = if failure.holds() {
-            let weighed = session
-                .connection()
-                .query_one(
-                    &weigh_outage,
-                    &[
-                        &place,
-                        &outage.budget.as_secs_f64(),
-                        &outage.cap.as_secs_f64(),
-                    ],
-                )
-                .await?;
-            (weighed.get::<_, bool>(0), weighed.get::<_, bool>(1))
-        } else {
-            (false, false)
-        };
-        if failure.holds() && !refuted {
-            let told = match failure {
-                Failure::Unavailable { retry_after, .. } => retry_after.map(|at| at.as_secs_f64()),
-                _ => None,
-            };
-            let floor = (self.retries.backoff)(1).max(Outage::FLOOR);
+        if matches!(failure, Failure::Unavailable { .. }) {
+            let hold = hold.unwrap_or((self.retries.backoff)(1));
+            let held = format!(
+                "UPDATE {table} SET last_error = $2, cause = $3::text, \
+                     held_since = COALESCE(held_since, statement_timestamp()), \
+                     holds = LEAST(coalesce(holds, 0), 2147483646) + 1, hold_kind = 'unavailable', \
+                     next_attempt_at = clock_timestamp() + make_interval(secs => $4::double precision) \
+                 WHERE ctid = $1::text::tid \
+                 RETURNING attempts"
+            );
             let row = session
                 .connection()
-                .query_one(
-                    &hold_failure,
-                    &[
-                        &place,
-                        &error,
-                        &cause,
-                        &told,
-                        &floor.as_secs_f64(),
-                        &outage.cap.max(floor).as_secs_f64(),
-                    ],
-                )
+                .query_one(&held, &[&place, &error, &cause, &hold.as_secs_f64()])
                 .await?;
             return Ok(Recorded {
                 attempts: row.get::<_, i32>(0) as u32,
                 parked: false,
                 held: true,
-                past_budget,
-                retry_after: Duration::try_from_secs_f64(row.get::<_, f64>(1))
-                    .unwrap_or(Duration::ZERO),
+                retry_after: hold,
             });
         }
-        let backoff = (self.retries.backoff)(attempts.saturating_add(1));
-        let retry_after = match failure {
-            Failure::Unavailable {
-                retry_after: Some(told),
-                ..
-            } => backoff.max(*told),
-            _ => backoff,
-        };
+        // The last attempt, or a permanent verdict, parks the row under its
+        // cause and leaves the queue; any other waits its back-off, its
+        // `Unavailable` holds forgotten: its latest trouble is its own.
+        let spend = format!(
+            "UPDATE {table} SET attempts = LEAST(attempts, 2147483646) + 1, last_error = $2, \
+                cause = $5::text, \
+                parked_at = CASE WHEN {parks} THEN CURRENT_TIMESTAMP END, \
+                next_attempt_at = CASE WHEN {parks} THEN NULL \
+                    ELSE clock_timestamp() + make_interval(secs => $3::double precision) END, \
+                held_since = CASE WHEN {parks} THEN NULL \
+                    ELSE coalesce(held_since, statement_timestamp()) END, \
+                holds = NULL, \
+                hold_kind = CASE WHEN {parks} THEN NULL ELSE 'backoff' END \
+             WHERE ctid = $1::text::tid \
+             RETURNING attempts, parked_at IS NOT NULL",
+            parks = "($6::boolean OR ($4::integer > 0 AND LEAST(attempts, 2147483646) + 1 >= $4::integer))"
+        );
+        let retry_after = (self.retries.backoff)(attempts.saturating_add(1));
         let row = session
             .connection()
             .query_one(
-                &spend_failure,
+                &spend,
                 &[
                     &place,
                     &error,
                     &retry_after.as_secs_f64(),
                     &(self.retries.max_attempts as i32),
-                    &failure.is_permanent(),
                     &cause,
-                    &refuted,
+                    &failure.is_permanent(),
                 ],
             )
             .await?;
@@ -1100,9 +1132,34 @@ where
             attempts: row.get::<_, i32>(0) as u32,
             parked: row.get(1),
             held: false,
-            past_budget,
             retry_after,
         })
+    }
+
+    /// Holds a head that was not asked, for `wait` under `cause` (ADR-0042
+    /// decision 2): its Tenant's `Unavailable` remembered, an ask of it in
+    /// flight, or its channel paused. The row's count of holds is the
+    /// subscriber's verdicts', and stays.
+    pub(super) async fn hold_unasked(
+        &self,
+        session: &P::Session,
+        place: &str,
+        cause: ascetic_ddd_bus::Cause,
+        wait: Duration,
+    ) -> Result<(), Error> {
+        let sql = format!(
+            "UPDATE {table} SET cause = $2::text, \
+                 held_since = COALESCE(held_since, statement_timestamp()), \
+                 hold_kind = 'unavailable', \
+                 next_attempt_at = clock_timestamp() + make_interval(secs => $3::double precision) \
+             WHERE ctid = $1::text::tid AND {QUEUE}",
+            table = self.table
+        );
+        session
+            .connection()
+            .execute(&sql, &[&place, &cause.as_str(), &wait.as_secs_f64()])
+            .await?;
+        Ok(())
     }
 
     /// A page of the parked rows, after `after`'s order of arrival, at most
@@ -1158,8 +1215,7 @@ where
     ) -> Result<Option<InboxMessage>, Error> {
         let sql = format!(
             "UPDATE {} SET parked_at = NULL, unreadable_at = NULL, attempts = 0, \
-                 next_attempt_at = NULL, waiting_for = NULL, waiting_since = NULL, held_since = NULL, \
-                 last_cause = NULL, parked_cause = NULL, unavailable_since = NULL \
+                 waiting_for = NULL, waiting_since = NULL, cause = NULL, {LEAVE_QUEUE} \
              WHERE received_position = $1 AND parked_at IS NOT NULL \
              RETURNING {NARROW}",
             self.table
@@ -1169,6 +1225,16 @@ where
             .query_opt(&sql, &[&received_position])
             .await?;
         Ok(row.map(|row| narrow_of(&row, 0)))
+    }
+
+    /// The isolation of the transaction `session` runs, as the server names
+    /// it.
+    pub(super) async fn isolation(&self, session: &P::Session) -> Result<String, Error> {
+        Ok(session
+            .connection()
+            .query_one("SELECT current_setting('transaction_isolation')", &[])
+            .await?
+            .get(0))
     }
 
     /// Takes the lock a mark of the parked row at `received_position` takes,
@@ -1203,7 +1269,7 @@ where
                 UPDATE {table} SET parked_at = NULL, unreadable_at = NULL, \
                     processed_position = nextval('{sequence}'), \
                     processed_at = statement_timestamp(), waiting_for = NULL, waiting_since = NULL, \
-                    held_since = NULL, last_cause = NULL, parked_cause = NULL, unavailable_since = NULL \
+                    cause = NULL, {LEAVE_QUEUE} \
                 WHERE received_position = $1 AND parked_at IS NOT NULL \
                 RETURNING processed_position, {IDENTITY_OF_ROW} AS identity, {NARROW} \
              ), woken AS ( \
@@ -1326,9 +1392,9 @@ where
         // decision 5).
         let supersede = format!(
             "UPDATE {table} SET payload = $5, metadata = $6, parked_at = NULL, unreadable_at = NULL, \
-                 last_error = NULL, attempts = 0, next_attempt_at = NULL, \
+                 last_error = NULL, attempts = 0, \
                  waiting_for = NULL, waiting_since = NULL, received_at = statement_timestamp(), \
-                 held_since = NULL, last_cause = NULL, parked_cause = NULL, unavailable_since = NULL \
+                 cause = NULL, {LEAVE_QUEUE} \
              WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4 \
                AND unreadable_at IS NOT NULL AND processed_position IS NULL \
              RETURNING pg_current_xact_id()::text, received_position, slot"
@@ -1691,11 +1757,11 @@ const INBOX_TWIN: &str = r#"
         slot smallint GENERATED ALWAYS AS ((hashtext({key}) & 2147483647) % {slots}) STORED,
         received_at timestamptz NOT NULL DEFAULT statement_timestamp(),
         held_since timestamptz NULL,
+        cause varchar(64) NULL,
+        holds integer NULL,
+        hold_kind varchar(16) NULL,
         processed_at timestamptz NULL,
-        unreadable_at timestamptz NULL,
-        last_cause varchar(64) NULL,
-        parked_cause varchar(64) NULL,
-        unavailable_since timestamptz NULL
+        unreadable_at timestamptz NULL
     ) ON COMMIT DROP;
 "#;
 

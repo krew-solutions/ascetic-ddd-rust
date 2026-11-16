@@ -234,7 +234,6 @@ impl InboxObserver for JsonTrace {
             "permanent": event.permanent,
             "cause": event.cause.as_str(),
             "held": event.held,
-            "past_budget": event.past_budget,
             "retry_after_ms": event.retry_after.as_millis() as u64,
             "error": event.error.to_string(),
         }));
@@ -262,6 +261,11 @@ impl InboxObserver for JsonTrace {
                 Ok(Outcome::Parked) => "parked",
                 Ok(Outcome::Nothing) => "nothing",
                 Ok(Outcome::Passed) => "passed",
+                // A head held unasked, a guest's walk among paused heads
+                // (ADR-0042): the model does not take these steps yet, and the
+                // trace check refuses a run that has them.
+                Ok(Outcome::Held) => "held",
+                Ok(Outcome::Paused) => "paused",
                 Err(_) => "rolled_back",
             },
         }));

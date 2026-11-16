@@ -18,7 +18,7 @@ use ascetic_ddd_session::pg::tokio_postgres::{Config, NoTls};
 use serde_json::Value;
 
 use super::PgInbox;
-use super::store::{parked_counts_sql, take_sql, walk_sql};
+use super::store::{held_counts_sql, parked_counts_sql, take_sql, walk_sql};
 use super::surface::unpark_batch;
 use crate::partition::ByStream;
 
@@ -121,6 +121,97 @@ async fn the_parked_rows_are_counted_by_their_index_and_read_no_other_row() {
         .filter_map(|node| node["Actual Rows"].as_f64())
         .collect();
     assert_eq!(fetched, [20.0], "the rows read are the parked ones: {plan}");
+    inbox.teardown().await.unwrap();
+}
+
+/// The heads held are counted by their index, and read no row but theirs:
+/// 4,000 held of 100,000 on two channels, by both kinds. And the index
+/// carries every column the count reads, so that the count can be answered
+/// from it alone: with the scans that read the heap set off, the plan is an
+/// index-only scan of it. Whether the planner takes that plan is its cost's,
+/// by the share of the heap all visible, which open transactions elsewhere
+/// hold down; what the index offers is the library's (ADR-0042 § 6 and
+/// § Executors, R1). Red when the index lacks a column the count reads.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_held_heads_are_counted_by_their_index() {
+    let table = "inbox_held_plan";
+    let inbox = PgInbox::new(PgSessionPool::new(pool()))
+        .with_table(
+            Identifier::new(table).unwrap(),
+            Identifier::new("inbox_held_plan_seq").unwrap(),
+        )
+        .partitioned_by(ByStream);
+    inbox.teardown().await.unwrap();
+    inbox.migrate().await.unwrap();
+    let client = pool().get().await.unwrap();
+    client
+        .batch_execute(&format!(
+            "INSERT INTO {table} (tenant_id, stream_type, stream_id, stream_position, uri, payload, \
+                 metadata, processed_position) \
+             SELECT 'tenant-' || (g % 500), 'orders.Order', to_jsonb('o-' || g), 1, \
+                 'kafka://' || (ARRAY['orders', 'pay'])[1 + g % 2] || '/k' || g, convert_to(repeat('x', 200), 'UTF8'), \
+                 '{{}}', CASE WHEN g % 25 <> 0 THEN g END \
+             FROM generate_series(1, 100000) g; \
+             UPDATE {table} SET held_since = now(), next_attempt_at = now() + interval '1 minute', \
+                 cause = CASE WHEN received_position % 50 = 0 THEN 'kms.unavailable' ELSE 'db.timeout' END, \
+                 hold_kind = CASE WHEN received_position % 50 = 0 THEN 'unavailable' ELSE 'backoff' END, \
+                 holds = CASE WHEN received_position % 50 = 0 THEN 1 END \
+             WHERE processed_position IS NULL;"
+        ))
+        .await
+        .unwrap();
+    client
+        .batch_execute(&format!("VACUUM ANALYZE {table}"))
+        .await
+        .unwrap();
+    let explain = async |sql: &str| {
+        client
+            .query_one(&format!("EXPLAIN (ANALYZE, FORMAT JSON) {sql}"), &[])
+            .await
+            .unwrap()
+            .get::<_, Value>(0)
+    };
+    let explained = explain(&held_counts_sql(table)).await;
+    let plan = &explained[0]["Plan"];
+    let nodes = nodes(plan);
+    let kinds: Vec<&str> = nodes
+        .iter()
+        .filter_map(|node| node["Node Type"].as_str())
+        .collect();
+    assert!(!kinds.contains(&"Seq Scan"), "{kinds:?}");
+    assert!(
+        nodes
+            .iter()
+            .any(|node| node["Index Name"].as_str() == Some(&format!("{table}__held_idx"))),
+        "the held index: {plan}"
+    );
+    let fetched: Vec<f64> = nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node["Node Type"].as_str(),
+                Some("Bitmap Heap Scan" | "Index Scan" | "Index Only Scan")
+            )
+        })
+        .filter_map(|node| node["Actual Rows"].as_f64())
+        .collect();
+    assert_eq!(fetched, [4000.0], "the rows read are the held ones: {plan}");
+    // the heap's scans set off for this transaction alone
+    client
+        .batch_execute("BEGIN; SET LOCAL enable_seqscan = off; SET LOCAL enable_bitmapscan = off")
+        .await
+        .unwrap();
+    let explained = explain(&held_counts_sql(table)).await;
+    client.batch_execute("ROLLBACK").await.unwrap();
+    let plan = &explained[0]["Plan"];
+    assert!(
+        self::nodes(plan).iter().any(|node| {
+            node["Node Type"].as_str() == Some("Index Only Scan")
+                && node["Index Name"].as_str() == Some(&format!("{table}__held_idx"))
+        }),
+        "the count answered from the held index alone: {plan}"
+    );
     inbox.teardown().await.unwrap();
 }
 
@@ -238,7 +329,8 @@ async fn the_take_and_the_walk_go_by_the_queue_s_indexes() {
             ))
             .await
             .unwrap();
-        let walk = explain(&walk_sql(&table), &[&slot, &32i32, &1.0f64]).await;
+        let none: Vec<String> = Vec::new();
+        let walk = explain(&walk_sql(&table), &[&slot, &32i32, &1.0f64, &none]).await;
         by_the_indexes(
             &walk[0]["Plan"],
             &table,
@@ -264,7 +356,7 @@ async fn the_take_and_the_walk_go_by_the_queue_s_indexes() {
                      dormant_until = NULL, dormant_after = NULL WHERE slot = {slot}; \
                  SET plan_cache_mode = force_generic_plan; \
                  PREPARE generic_take AS {}; \
-                 PREPARE generic_walk (smallint, integer, double precision) AS {};",
+                 PREPARE generic_walk (smallint, integer, double precision, text[]) AS {};",
                 take_sql(&table),
                 walk_sql(&table)
             ))
@@ -287,7 +379,7 @@ async fn the_take_and_the_walk_go_by_the_queue_s_indexes() {
             &[format!("{table}__head_idx")],
             f64::from(slots),
         );
-        let walk = explain_generic(&format!("generic_walk ({slot}, 32, 1.0)")).await;
+        let walk = explain_generic(&format!("generic_walk ({slot}, 32, 1.0, '{{}}')")).await;
         by_the_indexes(
             &walk[0]["Plan"],
             &table,
@@ -381,13 +473,14 @@ async fn the_take_and_the_walk_are_planned_once_a_connection() {
         let row = client
             .query_one(
                 &format!(
-                    "SELECT * FROM {table}__walk($1::smallint, $2::integer, $3::double precision)"
+                    "SELECT * FROM {table}__walk($1::smallint, $2::integer, $3::double precision, \
+                     $4::text[])"
                 ),
-                &[&0i16, &32i32, &1.0f64],
+                &[&0i16, &32i32, &1.0f64, &Vec::<String>::new()],
             )
             .await
             .unwrap();
-        assert_eq!(row.get::<_, String>(2), "taken");
+        assert_eq!(row.get::<_, String>(5), "taken");
     }
     client
         .batch_execute("RESET debug_print_plan; RESET client_min_messages")
@@ -436,7 +529,7 @@ async fn a_bulk_unpark_walks_the_parked_index_and_reads_no_other_row() {
                  'kafka://' || (ARRAY['orders', 'pay'])[1 + g % 2] || '/k' || (g % 3), 'x', '{{}}', g \
              FROM generate_series(1, 20000) g; \
              UPDATE {table} SET processed_position = NULL, parked_at = now(), \
-                 parked_cause = CASE WHEN received_position % 100 = 0 THEN 'kms.refused' \
+                 cause = CASE WHEN received_position % 100 = 0 THEN 'kms.refused' \
                                      ELSE 'kms.gone' END \
              WHERE (received_position % 2 = 0 AND received_position <= 400) \
                 OR (received_position % 2 = 1 AND received_position <= 4000);"

@@ -84,6 +84,8 @@
 //! `dispatch`.
 
 mod dispatch;
+#[cfg(test)]
+mod exit_tests;
 mod intake;
 #[cfg(test)]
 mod measure_tests;
@@ -108,6 +110,7 @@ use std::time::Duration;
 
 use ascetic_ddd_session::pg::Identifier;
 
+use crate::breaker::{Breaker, Breaking};
 use crate::intake::Bounds;
 use crate::message::CausalDependency;
 use crate::observer::InboxObserver;
@@ -202,11 +205,20 @@ pub enum Outcome {
         /// Whether the message was parked by this attempt: its attempts ran
         /// out, or the subscriber's verdict was permanent.
         parked: bool,
-        /// Whether the message holds for its stage's outage, its attempts
-        /// untouched (ADR-0040 decision 4): its Tenant's rows of its slot
-        /// wait behind it.
+        /// Whether the subscriber's verdict was `Unavailable`, which holds
+        /// the message and spends no attempt (ADR-0042): its Tenant's rows
+        /// of its slot wait behind it.
         held: bool,
     },
+    /// The head was not asked: its Tenant's `Unavailable` is remembered, or
+    /// an ask of it is in flight, or its channel is paused in this process,
+    /// and it is held under that cause without its subscriber called
+    /// (ADR-0042 decision 2).
+    Held,
+    /// The slot's walk found no head due but heads of channels this process
+    /// has paused (ADR-0042 decision 5): the loop waits its poll, and the
+    /// slot's sleep and cursor are left to the processes that ask them.
+    Paused,
     /// The head could not be read, or its wait, its failure or its mark
     /// written, for its own values, and was parked at once in the
     /// dispatcher's transaction (ADR-0037 decision 6); the next call takes
@@ -252,15 +264,19 @@ impl Ground {
     }
 }
 
-/// The parked rows of one channel and ground (ADR-0036 decision 6): what a
-/// host's gauge pages on, read from the table, so that a page holds as long
-/// as a row stays parked, whatever the process that parked it did since.
+/// The parked rows of one channel, ground and cause (ADR-0036 decision 6,
+/// ADR-0042 decision 6): what a host's gauge pages on, read from the table,
+/// so that a page holds as long as a row stays parked, whatever the process
+/// that parked it did since.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParkedCount {
     /// The channel the rows arrived on, without the key.
     pub channel: String,
     /// Why they are parked.
     pub ground: Ground,
+    /// The cause they were parked under: a subscriber's failure's name;
+    /// `None` for a ground that is its own reason.
+    pub cause: Option<String>,
     /// How many rows are parked.
     pub open: u64,
     /// When the oldest of them was parked, as PostgreSQL prints a
@@ -268,46 +284,54 @@ pub struct ParkedCount {
     pub oldest: String,
 }
 
-/// What holds a head (ADR-0041 decision 5): its own failure, waiting for
-/// its backoff. A deferral, decision 4's, is the next cause.
+/// What holds a head (ADR-0041 decision 5, ADR-0042 decision 3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Hold {
-    /// The head failed and waits for its backoff, holding its (slot,
-    /// Tenant): retried, it is processed or parked.
+    /// The head failed on its own and waits for its backoff, holding its
+    /// (slot, Tenant): retried, it is processed or parked.
     Backoff,
+    /// The head was told `Unavailable`, or held for a Tenant's or a
+    /// channel's `Unavailable` without being asked: it spends no attempt and
+    /// never parks for it.
+    Unavailable,
 }
 
 impl Hold {
-    /// The cause's name: `backoff`.
+    /// The kind's name, as the row keeps it: `backoff` or `unavailable`.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Hold::Backoff => "backoff",
+            Hold::Unavailable => "unavailable",
         }
     }
 
-    /// The cause a name names.
+    /// The kind a name names.
     #[must_use]
     pub fn parse(name: &str) -> Option<Self> {
-        [Hold::Backoff]
+        [Hold::Backoff, Hold::Unavailable]
             .into_iter()
             .find(|hold| hold.as_str() == name)
     }
 }
 
-/// The heads of one channel held by one cause (ADR-0041 decision 5): what a
-/// host pages on — the oldest against the channel's budget — and opens a
-/// ticket on — the count; a count rising across Tenants is a common cause.
-/// Read from the table, as [`ParkedCount`] is. No Tenant is named: only how
-/// many there are.
+/// The heads of one channel held by one kind and cause (ADR-0041 decision 5,
+/// ADR-0042 decision 6): what a host pages on — the oldest `Unavailable`
+/// hold over a threshold — and opens a ticket on — the count; a count rising
+/// across Tenants is a common cause. Read from the table, as [`ParkedCount`]
+/// is. No Tenant is named: only how many there are.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeldCount {
     /// The channel the rows arrived on, without the key.
     pub channel: String,
-    /// What holds them.
-    pub cause: Hold,
+    /// What kind of hold.
+    pub hold: Hold,
+    /// The cause the heads are held under.
+    pub cause: Option<String>,
     /// How many Tenants' heads are held.
     pub tenants: u64,
+    /// How many heads are held.
+    pub heads: u64,
     /// When the oldest hold began, as PostgreSQL prints a `timestamptz`.
     pub oldest: String,
 }
@@ -344,43 +368,9 @@ pub struct Retries {
     pub max_attempts: u32,
     /// How long the message waits after its `n`th failed attempt, `n` from 1.
     /// While it waits it holds its Tenant's rows of its slot (ADR-0041
-    /// decision 2).
+    /// decision 2). An `Unavailable` spends no attempt: its hold is the
+    /// breaker's ([`crate::breaker::Breaking`]).
     pub backoff: Arc<dyn Fn(u32) -> Duration + Send + Sync>,
-    /// How a message unavailable for its stage's outage is held.
-    pub outage: Outage,
-}
-
-/// How a message unavailable for its stage's outage holds its Tenant's rows
-/// of its slot, its attempts untouched (ADR-0040 decision 4, under ADR-0041
-/// decision 2; § Owed 6 of ADR-0040 for the extent): asked again at the teller's
-/// `retry_after`, else after as long as it has been held, never sooner than
-/// the first back-off nor a second — each asking is a call to the stage's
-/// dependency — and never later than `cap`. Past `budget` the inbox weighs
-/// its own evidence: a row of the channel processed within the last `cap`
-/// refutes the outage, and the message spends an attempt as one of its
-/// Tenant's; otherwise it holds on, told past its budget.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Outage {
-    /// How long a message holds before the inbox weighs its evidence.
-    pub budget: Duration,
-    /// The longest a held message waits to be asked again.
-    pub cap: Duration,
-}
-
-impl Outage {
-    /// The shortest a held message waits to be asked again, whatever its
-    /// back-off: each asking is a call to the stage's dependency.
-    pub const FLOOR: Duration = Duration::from_secs(1);
-}
-
-impl Default for Outage {
-    /// An hour's budget, asked again within five minutes.
-    fn default() -> Self {
-        Outage {
-            budget: Duration::from_secs(3600),
-            cap: Duration::from_secs(300),
-        }
-    }
 }
 
 impl Retries {
@@ -390,7 +380,6 @@ impl Retries {
         Retries {
             max_attempts: 0,
             backoff: Arc::new(|_| Duration::ZERO),
-            outage: Outage::default(),
         }
     }
 
@@ -408,12 +397,6 @@ impl Retries {
             backoff: Arc::new(backoff),
             ..self
         }
-    }
-
-    /// The same, holding for a stage's outage as `outage` says.
-    #[must_use]
-    pub fn with_outage(self, outage: Outage) -> Self {
-        Retries { outage, ..self }
     }
 
     /// `base`, doubled with every failure, at most `cap`.
@@ -528,6 +511,9 @@ pub struct PgInbox<P, O = ()> {
     max_wait: Option<Duration>,
     slots: u32,
     retention: InboxRetention,
+    /// The process's breaker and Tenants' memo (ADR-0042): what this
+    /// process does not ask, and when it asks again.
+    breaker: Arc<std::sync::Mutex<Breaker>>,
     /// Per channel, the latest `processed_at` the sweep forgot: where its
     /// next statement starts, so that dead index entries a held vacuum
     /// horizon keeps are not walked again.
@@ -569,6 +555,7 @@ impl<P> PgInbox<P> {
             max_wait: Some(Duration::from_secs(3600)),
             slots: 1,
             retention: InboxRetention::default(),
+            breaker: Arc::new(std::sync::Mutex::new(Breaker::new(Breaking::default()))),
             swept_to: Mutex::new(HashMap::new()),
             admission: Arc::new(|_, _| true),
             readmission: Arc::new(|_| false),
@@ -592,6 +579,7 @@ impl<P, O> PgInbox<P, O> {
             max_wait: self.max_wait,
             slots: self.slots,
             retention: self.retention,
+            breaker: self.breaker,
             swept_to: self.swept_to,
             admission: self.admission,
             readmission: self.readmission,
@@ -697,6 +685,24 @@ impl<P, O> PgInbox<P, O> {
     /// The same inbox, treating a failed message as `retries` says.
     pub fn with_retries(self, retries: Retries) -> Self {
         PgInbox { retries, ..self }
+    }
+
+    /// The same inbox, its breaker and Tenants' memo set by `breaking`
+    /// (ADR-0042 decisions 1 and 2): a fresh breaker, every channel closed.
+    #[must_use]
+    pub fn with_breaking(self, breaking: Breaking) -> Self {
+        PgInbox {
+            breaker: Arc::new(std::sync::Mutex::new(Breaker::new(breaking))),
+            ..self
+        }
+    }
+
+    /// The process's breaker, under its lock; a poisoned lock is taken as it
+    /// is: the core's state is whole after every call.
+    pub(crate) fn breaker(&self) -> std::sync::MutexGuard<'_, Breaker> {
+        self.breaker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The same inbox, forgetting processed messages as `retention` says.

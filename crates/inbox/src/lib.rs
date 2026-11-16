@@ -73,6 +73,7 @@ pub mod pg;
 mod port;
 mod snapshot;
 
+pub use crate::breaker::Breaking;
 pub use crate::channel::{INBOX_SCHEME, InboxChannel};
 pub use crate::error::{BoxError, Error, Failure};
 pub use crate::intake::{Bounds, Reason};
@@ -80,8 +81,8 @@ pub use crate::message::{CausalDependency, InboxMessage, MAX_DEPENDENCIES, MAX_I
 pub use crate::observer::{InboxObserver, Receipt};
 pub use crate::partition::{ByStream, ByUri, PartitionKey};
 pub use crate::pg::{
-    Admission, Ground, HeldCount, Hold, InboxRetention, Loops, Outage, Outcome, Parked,
-    ParkedCount, ParkedUnder, PgInbox, Readmission, Readmitted, Retries, Rotation, SetAsideCount,
+    Admission, Ground, HeldCount, Hold, InboxRetention, Loops, Outcome, Parked, ParkedCount,
+    ParkedUnder, PgInbox, Readmission, Readmitted, Retries, Rotation, SetAsideCount,
     SetAsideCursor, SetAsidePage, SetAsideRow, UnparkedAll, Unparking,
 };
 pub use crate::port::Inbox;

@@ -219,15 +219,35 @@ pub struct Failed<'a> {
     /// Whether this attempt was the last: the message is parked, its
     /// attempts run out or the failure permanent.
     pub parked: bool,
-    /// Whether the message holds for its stage's outage, its attempts
-    /// untouched (ADR-0040 decision 4): its Tenant's rows of its slot wait
-    /// behind it (ADR-0041 decision 2).
+    /// Whether the subscriber's verdict was `Unavailable`, which holds the
+    /// message and spends no attempt (ADR-0042): its Tenant's rows of its
+    /// slot wait behind it (ADR-0041 decision 2).
     pub held: bool,
-    /// Whether it has held past its budget, the channel's evidence not
-    /// refuting the outage: a page.
-    pub past_budget: bool,
     /// How long the message waits before it may be taken again.
     pub retry_after: Duration,
+}
+
+/// A head held without its subscriber called (ADR-0042 decision 2): its
+/// Tenant's `Unavailable` remembered, an ask of it in flight, or its channel
+/// paused in this process. No Tenant is named.
+#[derive(Debug)]
+pub struct Withheld<'a> {
+    /// The slot taken.
+    pub slot: u32,
+    /// The head's channel, without the key.
+    pub channel: &'a str,
+    /// The cause it is held under.
+    pub cause: Cause,
+    /// How long it is held.
+    pub wait: Duration,
+}
+
+/// What the process's breaker did to a channel (ADR-0042 decision 1): the
+/// pause, the stall to report, the resume.
+#[derive(Debug)]
+pub struct BreakerChanged<'a> {
+    /// The breaker's effect.
+    pub effect: &'a crate::breaker::Effect,
 }
 
 /// The dispatcher's transaction closed: committed, with what it did, or
@@ -321,6 +341,11 @@ observer! {
     fn on_marked(&self, _event: &Marked<'_>);
     /// The attempt was recorded after the subscriber failed.
     fn on_failed(&self, _event: &Failed<'_>);
+    /// A head was held without its subscriber called (ADR-0042 decision 2).
+    fn on_withheld(&self, _event: &Withheld<'_>);
+    /// The process's breaker paused, stalled or resumed a channel (ADR-0042
+    /// decision 1).
+    fn on_breaker(&self, _event: &BreakerChanged<'_>);
     /// The head was parked at once for its own values.
     fn on_parked_at_once(&self, _event: &ParkedAtOnce<'_>);
     /// Waits ran out; the rows were parked.
@@ -415,7 +440,6 @@ mod tests {
             attempts: 1,
             parked: false,
             held: false,
-            past_budget: false,
             retry_after: Duration::ZERO,
         });
         observer.on_expired(&Expired { messages: none });

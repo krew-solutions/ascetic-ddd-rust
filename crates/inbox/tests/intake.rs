@@ -726,7 +726,7 @@ async fn a_host_object_on_the_inbox_s_tables_is_refused_at_migrate() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_dispatch_function_not_as_the_library_made_it_is_refused_at_migrate() {
-    const WALK: &str = "{t}__walk(smallint, integer, double precision)";
+    const WALK: &str = "{t}__walk(smallint, integer, double precision, text[])";
     let schema = "intake_function_schema";
     let sessions = PgSessionPool::new(pool());
     let setup = async |sql: String| {
@@ -743,7 +743,7 @@ async fn a_dispatch_function_not_as_the_library_made_it_is_refused_at_migrate() 
     setup(format!(
         "DROP FUNCTION IF EXISTS intake_dispatch_function__take(integer); \
          DROP FUNCTION IF EXISTS intake_dispatch_function__walk_v2(); \
-         DROP FUNCTION IF EXISTS intake_dispatch_function__walk(text, text, text); \
+         DROP FUNCTION IF EXISTS intake_dispatch_function__walk(text, text, text, text); \
          DROP FUNCTION IF EXISTS public.intake_dispatch_function_schema__take(); \
          DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_proc \
              WHERE proname = 'intake_dispatch_function__take' AND prokind = 'p') \
@@ -799,7 +799,8 @@ async fn a_dispatch_function_not_as_the_library_made_it_is_refused_at_migrate() 
         (
             "its language",
             "CREATE OR REPLACE FUNCTION {t}__take(OUT taken_slot smallint, OUT take_snapshot text, \
-             OUT slot_count integer) LANGUAGE sql AS 'SELECT NULL::smallint, NULL::text, 1'"
+             OUT slot_count integer, OUT take_isolation text) LANGUAGE sql \
+             AS 'SELECT NULL::smallint, NULL::text, 1, ''read committed''::text'"
                 .to_owned(),
             "",
         ),
@@ -886,7 +887,7 @@ async fn a_dispatch_function_not_as_the_library_made_it_is_refused_at_migrate() 
                 .connection()
                 .query_one(
                     &format!(
-                        "SELECT * FROM {}__walk(999::smallint, 32, 1.0::float8)",
+                        "SELECT * FROM {}__walk(999::smallint, 32, 1.0::float8, '{{}}'::text[])",
                         f.table
                     ),
                     &[],
@@ -903,13 +904,13 @@ async fn a_dispatch_function_not_as_the_library_made_it_is_refused_at_migrate() 
     f.intake(&order("1", ID_1, "{}")).await;
     altered(
         &f,
-        "CREATE FUNCTION {t}__walk(text, text, text, OUT head_position bigint, \
+        "CREATE FUNCTION {t}__walk(text, text, text, text, OUT head_position bigint, \
          OUT head_place text, OUT walk_outcome text, OUT walk_snapshot text) LANGUAGE sql \
          AS 'SELECT NULL::bigint, NULL::text, ''nothing'', NULL::text'",
     )
     .await;
     let dispatched = f.inbox.dispatch(ok).await;
-    altered(&f, "DROP FUNCTION {t}__walk(text, text, text)").await;
+    altered(&f, "DROP FUNCTION {t}__walk(text, text, text, text)").await;
     assert_eq!(dispatched.unwrap(), Outcome::Processed);
     // A function of another name after the table is a newer release's, or
     // the host's: let be.

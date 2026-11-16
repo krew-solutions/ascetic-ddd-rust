@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use ascetic_ddd_session::{PgAccess, SessionPool};
 
-use super::store::{CHANNEL_OF_ROW, QUEUE};
+use super::store::CHANNEL_OF_ROW;
 use super::{Admission, PgInbox};
 use crate::error::Error;
 use crate::intake::{self, Reason};
@@ -382,14 +382,14 @@ pub(super) fn unpark_batch(table: &str) -> String {
               AND r.unreadable_at IS NULL AND r.waiting_for IS NULL \
               AND r.parked_at <= $3::text::timestamptz \
               AND r.parked_at >= $3::text::timestamptz - make_interval(secs => $4::double precision) \
-              AND CASE WHEN $5::text IS NULL THEN r.parked_cause IS NULL \
-                       ELSE r.parked_cause = $5::text END \
+              AND CASE WHEN $5::text IS NULL THEN r.cause IS NULL \
+                       ELSE r.cause = $5::text END \
               AND ($6::text IS NULL OR r.tenant_id = $6::text) \
             ORDER BY r.received_position LIMIT $7 \
             FOR UPDATE OF r SKIP LOCKED \
          ), unparked AS ( \
-            UPDATE {table} SET parked_at = NULL, parked_cause = NULL, unavailable_since = NULL, \
-                next_attempt_at = NULL, attempts = GREATEST(attempts, $8::integer) \
+            UPDATE {table} SET parked_at = NULL, cause = NULL, \
+                next_attempt_at = NULL, attempts = GREATEST(0, $8::integer) \
             WHERE ctid IN (SELECT place FROM chosen WHERE $9::boolean OR NOT overtaken) \
             RETURNING 1 \
          ) \
@@ -578,93 +578,12 @@ where
         }
     }
 
-    /// Parks the heads of `channel` held for their stage's outage under
-    /// `cause` — of `tenant` only, when given — so that the rows behind them
-    /// go on (ADR-0040 decision 8): the operator's choice of out-of-order
-    /// over the stall, each row parked under its cause and re-armed later by
-    /// an unpark. Only a head can hold, and a slot has a head for each of its
-    /// Tenants (ADR-0041 decision 2), so the call reads the heads alone, one
-    /// probe of the Tenants' head index each, from one Tenant to the next as
-    /// a walk goes. Under rotation a hold stops its own Tenant's rows of its
-    /// slot, not the slot: the rows a park lets go on are that Tenant's, and
-    /// while the outage lasts they meet it and hold in turn (ADR-0040 § Owed
-    /// 6). A slot a dispatcher holds right now is passed by, so a call may
-    /// park part of what holds; a second call parks what it passed, and the
-    /// rows held since. The slots it parks in it holds itself, and a row is
-    /// parked only if it is still in the queue and still held when the
-    /// statement reaches it: a row a dispatcher marked or let go after the
-    /// statement's snapshot is left.
-    /// Returns how many rows were parked.
-    ///
-    /// # Errors
-    /// [`Error`] when the environment fails, nothing parked.
-    pub async fn park_held(
-        &self,
-        principal: &str,
-        channel: &str,
-        cause: &str,
-        tenant: Option<&str>,
-    ) -> Result<u64, Error> {
-        let sql = format!(
-            "WITH RECURSIVE heads AS ( \
-                SELECT h.* FROM {table}_slots s \
-                CROSS JOIN LATERAL ( \
-                    SELECT r.slot, r.tenant_id, r.ctid AS place, r.unavailable_since, \
-                           r.last_cause, {CHANNEL_OF_ROW} AS channel \
-                    FROM {table} r WHERE r.slot = s.slot AND {QUEUE} \
-                    ORDER BY r.tenant_id, r.received_position LIMIT 1) h \
-                UNION ALL \
-                SELECT n.* FROM heads p \
-                CROSS JOIN LATERAL ( \
-                    SELECT r.slot, r.tenant_id, r.ctid AS place, r.unavailable_since, \
-                           r.last_cause, {CHANNEL_OF_ROW} AS channel \
-                    FROM {table} r \
-                    WHERE r.slot = p.slot AND {QUEUE} AND r.tenant_id > p.tenant_id \
-                    ORDER BY r.tenant_id, r.received_position LIMIT 1) n \
-             ), held AS ( \
-                SELECT h.place FROM heads h JOIN {table}_slots s ON s.slot = h.slot \
-                WHERE h.unavailable_since IS NOT NULL AND h.last_cause = $2 AND h.channel = $1 \
-                  AND ($3::text IS NULL OR h.tenant_id = $3::text) \
-                FOR UPDATE OF s SKIP LOCKED \
-             ) \
-             UPDATE {table} SET parked_at = CURRENT_TIMESTAMP, parked_cause = last_cause, \
-                 unavailable_since = NULL, held_since = NULL \
-             WHERE ctid IN (SELECT place FROM held) AND {QUEUE} AND unavailable_since IS NOT NULL",
-            table = self.table
-        );
-        let parked = self
-            .pool
-            .session(async |session: P::Session| {
-                Ok::<_, Error>(
-                    session
-                        .connection()
-                        .execute(&sql, &[&channel, &cause, &tenant])
-                        .await?,
-                )
-            })
-            .await?;
-        self.operated(
-            principal,
-            Operation::ParkedHeld,
-            Some(channel),
-            None,
-            usize::try_from(parked).unwrap_or(usize::MAX),
-        );
-        log::warn!(
-            "inbox: {} parked {parked} rows of {} held for their stage's outage",
-            intake::sanitized(Some(principal.as_bytes()), intake::DERIVED_WIDTH)
-                .unwrap_or_default(),
-            intake::sanitized(Some(channel.as_bytes()), intake::CHANNEL_WIDTH).unwrap_or_default(),
-        );
-        Ok(parked)
-    }
-
     /// Re-arms the parked rows `unparking` names (ADR-0040 decision 8):
     /// those of a channel, on the failure ground, parked under a cause — of
     /// one Tenant, when named — within a window before the call, oldest
     /// first, a batch at a time, each its own transaction, the observer
     /// told after each commits. A row re-armed loses its park and its cause,
-    /// keeps its attempts, and has at most `tries` failures left. A row a
+    /// has its attempts set so that `tries` more failures park it again, however it was parked. A row a
     /// later row of its stream overtook stays parked unless asked for: its
     /// stream has gone on without it. The window's ends are read once, as
     /// [`PgInbox::readmit_all`]'s are.

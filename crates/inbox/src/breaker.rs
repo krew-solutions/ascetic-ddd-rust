@@ -84,6 +84,45 @@ impl Default for Breaking {
 }
 
 impl Breaking {
+    /// The same, weighing the verdicts of `window`.
+    #[must_use]
+    pub const fn with_window(self, window: Duration) -> Self {
+        Breaking { window, ..self }
+    }
+
+    /// The same, an open channel ticking from `first` to `cap`.
+    #[must_use]
+    pub const fn with_tick(self, first: Duration, cap: Duration) -> Self {
+        Breaking {
+            tick: (first, cap),
+            ..self
+        }
+    }
+
+    /// The same, a Tenant's back-off from `first` to `cap`.
+    #[must_use]
+    pub const fn with_hold(self, first: Duration, cap: Duration) -> Self {
+        Breaking {
+            hold: (first, cap),
+            ..self
+        }
+    }
+
+    /// The same, a trial's subscriber running at most `wait`.
+    #[must_use]
+    pub const fn with_trial_wait(self, wait: Duration) -> Self {
+        Breaking {
+            trial_wait: wait,
+            ..self
+        }
+    }
+
+    /// The same, a channel's memo keeping at most `memo` Tenants.
+    #[must_use]
+    pub const fn with_memo(self, memo: usize) -> Self {
+        Breaking { memo, ..self }
+    }
+
     /// How long a stall row stays valid after its refresh: twice the tick's
     /// cap and a trial.
     #[must_use]
@@ -140,9 +179,14 @@ pub struct Flight {
 pub enum Before {
     /// Ask it.
     Ask(Flight),
-    /// Do not ask it: hold it this long from the database's now, without
-    /// counting the hold on the row.
-    Hold(Duration),
+    /// Do not ask it: hold it this long from the database's now, under the
+    /// cause that holds it, without counting the hold on the row.
+    Hold {
+        /// How long.
+        wait: Duration,
+        /// The cause that holds it: the memo's, or the pause's.
+        cause: Cause,
+    },
 }
 
 /// What a verdict asks of the row, and what the shell is to do.
@@ -188,6 +232,9 @@ pub enum Effect {
         since: Instant,
         /// How long the row stays valid from the database's now.
         ttl: Duration,
+        /// Whether to say so in the log: at the stall's first tick, then
+        /// every [`REMINDER`].
+        remind: bool,
     },
     /// The channel is asked again.
     Resumed {
@@ -199,6 +246,9 @@ pub enum Effect {
         stalled: bool,
     },
 }
+
+/// How often a stall is said again in the log while it lasts.
+pub const REMINDER: Duration = Duration::from_secs(300);
 
 /// The breaker and the memo of one process.
 #[derive(Debug)]
@@ -229,6 +279,7 @@ struct Channel {
 #[derive(Debug)]
 struct Entry {
     slot: i16,
+    cause: Cause,
     unavailable: u32,
     until: Instant,
     /// The step that set `until`: the entry is protected a step past it.
@@ -236,11 +287,13 @@ struct Entry {
     flight: Option<(u64, Instant)>,
 }
 
+/// A channel's state. An open channel's record is boxed: a process holds a
+/// state for every channel it saw, and few are open at a time.
 #[derive(Debug, Default)]
 enum State {
     #[default]
     Closed,
-    Open(Open),
+    Open(Box<Open>),
 }
 
 #[derive(Debug)]
@@ -255,6 +308,8 @@ struct Open {
     expired: VecDeque<u64>,
     last_trial: Option<Instant>,
     inconclusive: Vec<String>,
+    /// When the stall was last said in the log.
+    reminded: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -326,19 +381,29 @@ impl Breaker {
             if let State::Open(open) = &c.state {
                 // A head of a paused channel is asked only by a trial.
                 let wait = open.next_tick.saturating_duration_since(now);
-                return Some(Err(wait.max(settings.tick.0).min(settings.tick.1)));
+                return Some(Err((
+                    wait.max(settings.tick.0).min(settings.tick.1),
+                    open.cause,
+                )));
             }
             c.memo.get_mut(tenant).map(Ok)
         });
         let marked = match entry {
-            Some(Err(wait)) => return Before::Hold(wait),
+            Some(Err((wait, cause))) => return Before::Hold { wait, cause },
             Some(Ok(entry)) => {
+                let cause = entry.cause;
                 if let Some((_, deadline)) = entry.flight.filter(|(_, deadline)| *deadline > now) {
                     let until = entry.until.max(deadline).max(now + settings.hold.0);
-                    return Before::Hold(until - now);
+                    return Before::Hold {
+                        wait: until - now,
+                        cause,
+                    };
                 }
                 if entry.until > now {
-                    return Before::Hold(entry.until - now);
+                    return Before::Hold {
+                        wait: entry.until - now,
+                        cause,
+                    };
                 }
                 entry.flight = Some((id, now + settings.flight));
                 true
@@ -463,21 +528,23 @@ impl Breaker {
             channel.schedule(&settings, now);
         }
         if ticked {
-            effects.extend(channel.stall(&settings, name));
+            effects.extend(channel.stall(&settings, name, now));
         }
         effects
     }
 
     /// A guest walk met these heads of `channel` while it was paused, not
     /// asked: they are witnesses, and one whose Tenant the memo does not hold
-    /// is tried at once, at most once a tick's first step.
-    pub fn met(&mut self, now: Instant, channel: &str, heads: &[(i16, String)]) -> Vec<Effect> {
+    /// is tried at the next tick, now, at most once a tick's first step: the
+    /// next [`Breaker::tick`] asks it, so that no trial is issued that the
+    /// shell is not about to run.
+    pub fn met(&mut self, now: Instant, channel: &str, heads: &[(i16, String)]) {
         let settings = self.settings;
         let Some(c) = self.channels.get_mut(channel) else {
-            return Vec::new();
+            return;
         };
         if !matches!(c.state, State::Open(_)) {
-            return Vec::new();
+            return;
         }
         for (slot, tenant) in heads {
             if !c.witnesses.iter().any(|(_, t)| t == tenant) {
@@ -489,16 +556,14 @@ impl Breaker {
         }
         let fresh = heads.iter().any(|(_, t)| !c.memo.contains_key(t));
         let State::Open(open) = &mut c.state else {
-            return Vec::new();
+            return;
         };
         let rested = open
             .last_trial
             .is_none_or(|at| now.saturating_duration_since(at) >= settings.tick.0);
         if fresh && open.trial.is_none() && rested {
             open.next_tick = now;
-            return self.tick_channel(now, channel);
         }
-        Vec::new()
     }
 
     /// A guest walked every slot once and met no head of `channel`: nothing
@@ -590,7 +655,7 @@ impl Breaker {
                 if let State::Open(open) = &channel.state {
                     told.hold = Some(open.next_tick.saturating_duration_since(now));
                 }
-                told.effects.extend(channel.stall(&settings, &name));
+                told.effects.extend(channel.stall(&settings, &name, now));
             }
             Trial::Told(
                 verdict @ Verdict::Unavailable {
@@ -675,6 +740,7 @@ impl Channel {
                     tenant,
                     Entry {
                         slot,
+                        cause,
                         unavailable,
                         until,
                         step,
@@ -786,7 +852,7 @@ impl Channel {
         {
             self.failed = 0;
         }
-        self.state = State::Open(Open {
+        self.state = State::Open(Box::new(Open {
             cause,
             since: now,
             next_tick: now,
@@ -795,7 +861,8 @@ impl Channel {
             expired: VecDeque::new(),
             last_trial: None,
             inconclusive: Vec::new(),
-        });
+            reminded: None,
+        }));
         self.schedule(settings, now);
     }
 
@@ -852,15 +919,26 @@ impl Channel {
             .map(|(t, e)| (e.slot, t.clone()))
     }
 
-    fn stall(&self, settings: &Breaking, name: &str) -> Option<Effect> {
-        let State::Open(open) = &self.state else {
+    fn stall(&mut self, settings: &Breaking, name: &str, now: Instant) -> Option<Effect> {
+        let failed = self.failed;
+        let State::Open(open) = &mut self.state else {
             return None;
         };
-        (self.failed >= 2).then(|| Effect::Stalled {
+        if failed < 2 {
+            return None;
+        }
+        let remind = open
+            .reminded
+            .is_none_or(|at| now.saturating_duration_since(at) >= REMINDER);
+        if remind {
+            open.reminded = Some(now);
+        }
+        Some(Effect::Stalled {
             channel: name.to_owned(),
             cause: open.cause,
             since: open.since,
             ttl: settings.stall_ttl(),
+            remind,
         })
     }
 }

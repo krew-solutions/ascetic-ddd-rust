@@ -4,7 +4,8 @@
 
 Proposed (2026-11-16). Built (2026-11-17): slice 1, the breaker's and the memo's pure core
 (`crates/inbox/src/breaker.rs`), C1–C13 its tests; slice 2, the DEK stage's causes and its sentinel read (§ 9,
-D1). § Slices orders the rest.
+D1); slice 3, the breaker in the dispatch — the rows, the exits and their CHECKs, the walk's paused channels and
+the guest, the trial, the isolation per transaction (R1, X1, G1, P1, C5, C8, C10, I1). § Slices orders the rest.
 
 It supersedes ADR-0040's decisions 4, 5, 7, 9 and its `park_held` (decision 8), and ADR-0041's decision 3 (the
 environment's verdict, its slice 2). It keeps ADR-0040's verdicts and causes (decisions 1–3, 6) and
@@ -126,9 +127,11 @@ those: a healthy Tenant never enters it.
 
 ### 3. The rows
 
-- Columns: `cause` (replacing `last_cause` and `parked_cause`), `held_since`, `holds integer NOT NULL DEFAULT 0`,
-  `hold_kind` (`backoff` or `unavailable`), `next_attempt_at`. `unavailable_since` is dropped.
-- `Permanent` and `Transient` as today; a `Transient` sets `holds = 0`, `hold_kind = backoff`.
+- Columns: `cause` (replacing `last_cause` and `parked_cause`), `held_since`, `holds integer NULL` (`NULL` is
+  none: nullable without a default, as every column the library adds, so that it binds no insert of a release
+  that does not know it — ADR-0037 decision 5), `hold_kind` (`backoff` or `unavailable`), `next_attempt_at`.
+  `unavailable_since` is dropped.
+- `Permanent` and `Transient` as today; a `Transient` sets `holds = NULL`, `hold_kind = backoff`.
 - An `Unavailable` told by the subscriber: `cause`, `last_error = NULL`, `held_since = COALESCE(held_since,
   now)`, `holds + 1`, `hold_kind = unavailable`, `next_attempt_at = clock_timestamp() + interval`. The interval is
   the memo's `until` for a `Tenant` scope, and **at most the tick cap** for a `Stage` scope, the longer clock kept
@@ -138,12 +141,12 @@ those: a healthy Tenant never enters it.
 
 ### 4. The exits
 
-One fragment, `held_since = NULL, holds = 0, hold_kind = NULL, next_attempt_at = NULL`, in every statement that
+One fragment, `held_since = NULL, holds = NULL, hold_kind = NULL, next_attempt_at = NULL`, in every statement that
 takes a row out of the queue, conditional where the statement may keep it queued. `cause` is cleared by every
 exit but a park, which writes its own. The baseline carries the invariant:
 
 ```
-CHECK ((held_since IS NULL AND next_attempt_at IS NULL AND holds = 0 AND hold_kind IS NULL)
+CHECK ((held_since IS NULL AND next_attempt_at IS NULL AND holds IS NULL AND hold_kind IS NULL)
        OR (processed_position IS NULL AND parked_at IS NULL AND waiting_for IS NULL))
 CHECK (cause IS NULL OR processed_position IS NULL)
 ```
@@ -161,7 +164,11 @@ A violation (23514) is a defect that stops the loops: the fault of the library's
   sleeps its poll.
 - A head of another channel waits for a guest at most N / (R · L · K / poll) per message: 33 s at the host's
   200 ms poll. Under a KMS outage every channel of a host's inbox is paused, so nothing waits on a guest.
-- `<table>__trial(slot, tenant, channel)` is a function of the baseline beside the take and the walk.
+- A trial is the dispatch's own statements, not a function of the baseline: the slot locked `SKIP LOCKED`, then
+  the witness's head by its Tenant and channel `FOR UPDATE`, never the slot's head. The take and the walk are
+  functions, planned once a connection (ADR-0027), because every dispatch runs them; a trial runs once a tick a
+  paused channel in a process, and a function for it would add a baseline object, its signature check and its
+  teardown for no cost measured.
 
 ### 6. The report and the page
 
@@ -177,6 +184,11 @@ A violation (23514) is a defect that stops the loops: the fault of the library's
   trouble.
 - `stalls()`; `held_counts(within)` by (channel, kind, cause); `waiting_counts(within)` by channel;
   `parked_counts` by (channel, ground, cause).
+- `__held_idx` carries every column `held_counts` reads, the row's `uri` its channel is computed from among
+  them, so that the count can be answered from the index alone, on 14 as on 18. The planner takes that plan
+  when the heap's pages are visible enough: on a vacuumed table of 100,000 rows, 4,000 held, 18 read 70 pages
+  against 3,386 by their heap, where 14 priced the heap lower; under open transactions elsewhere, 18 read the
+  heap too. Either way no row but the held is read.
 
 ### 7. The expiry leaves the dispatch path
 
@@ -222,8 +234,9 @@ reporting what it did, what it passed by and whether more remain; each wakes the
 
 ### 10. Isolation, per transaction
 
-`<table>__take`, `<table>__trial` and the identity lock of `resolve` and `unpark` return the transaction's
-isolation, and anything but READ COMMITTED is refused for that transaction.
+`<table>__take` returns the transaction's isolation; a trial and a `resolve` read it as their first statement;
+anything but READ COMMITTED is refused for that transaction (`Error::Refused`), since a session's level may
+change between two. `unpark` is one statement that waits for no lock it then reads past, and needs no check.
 
 ### 11. Names
 
@@ -315,20 +328,20 @@ histories with a manual clock; the shell's with a `Clock` and a paused runtime; 
 | C7 | paused, every head parked by a person | closed after one guest circle; the stall lapses within its ttl | keep refreshing |
 | C8 | one replica cut off, caches warm | a healthy replica's head delayed ≤ the tick cap; at one slot its throughput ≥ (tick − `trial_wait`)/tick | hold to `until` on the row; no trial timeout |
 | C9 | a trial answered after its deadline | f unchanged | count a stale answer |
-| C10 | one head of the channel among T ≫ K | processed within 2 ticks of recovery | trial through the general walk |
+| C10 | one head of the channel among T ≫ K | processed within 2 ticks of recovery, the slot's oldest rows another channel's | the trial takes the slot's head rather than its witness's |
 | C11 | mixed causes during a pause | one row a (channel, reporter); a stable cause | a cause per verdict |
 | C12 | effects unanswered | `tick(now + d)` re-issues within d | in flight without a deadline |
 | C13 | more memo keys than capacity | an entry in flight or not run out is never evicted | plain LRU |
-| G1 | at S = 1, K = 4, a memo of 16, at 8 and 64 Tenants, driven until every slot is paused, then n more dispatches | calls = trials; changed rows = trial rows; walk steps = K; equal log lines; onset calls ≤ a figure | drop the walk's filter; a hold on each head met; no K; a log line per hold |
+| G1 | at S = 1, K = 4, a memo of 16, at 8 and 64 Tenants, driven until every slot is paused, then n more dispatches | calls ≤ trials; changed rows ≤ calls; no head held unasked; a guest's step ≤ K; only the pause and the stall logged, as many lines at 64 as at 8; onset calls = `fewest` | drop the walk's filter (a hold on each paused head met, the same observable); no K; a held row logged at `warn` |
 | E1 | the expiry: a present chain, an untried head, a row behind a held head, a missing and a parked dependency, 8 and 9 hops, a cycle under `statement_timeout`, 20,000 spared with one missing last, ties at one `waiting_since`, a malformed `waiting_for`, parked-expired rows; the spared rows' `(ctid, xmin, xmax)` and no xid in one transaction | spared or expired as stated, within the bound, ≤ `batch` rows examined | drop `present`; drop `parked_at IS NULL`; bounds 7 and 16; the cursor on expired rows; `LIMIT` after the filter; a `ctid` tiebreak; a plain cast; renew by write; lock before the spare test |
-| R1 | the rows: 20 asks, no spend; `holds` at its cap; a `Transient` resets; the clock an hour fast and slow; a hold after a 3 s subscriber; four rows' kinds by an index-only scan | as stated | spend; no cap; an absolute time; `CURRENT_TIMESTAMP`; the kind from `holds` |
+| R1 | the rows: 20 asks, no spend; `holds` at its cap; a `Transient` resets, its back-off kept; every wait bound to `clock_timestamp()`, read from the source (a process's clock an hour fast agrees with the server's on one host, so no run tells the two apart); a hold after a 1.5 s subscriber; the kinds of a held head asked and of one held unasked; the counts by `__held_idx`, and answerable from it alone, the heap's scans set off | as stated | spend; no cap; the holds kept by a spend; the back-off dropped; `CURRENT_TIMESTAMP`; the kind from `holds`; `uri` out of the index |
 | X1 | the exits: random operation histories on a live database; every `UPDATE` that sets `processed_position`, `parked_at` or `waiting_for` carries the fragment; the spend that keeps a row queued keeps its back-off; `unpark_all` clears `cause` | no 23514 | drop the fragment; an unconditional fragment; keep `cause` |
 | V1 | the verbs: a locked head passed by; a walk waiting on a verb's lock reads vanished; a slot asleep after a verb wakes within `max_dormancy` and the poll; the canary with `tries` above `max_attempts`; `park_queue` then `unpark_all` in order; the audit | as stated | as stated |
-| P1 | the guest: more than K paused Tenants and a due head beyond K; three backlogged Tenants of an unpaused channel in turn; a guest that serves clears the round, one that does not leaves it; HOT with 128-character ids | as stated | drop the cursor; keep it on a take; keep the round; index `guest_tenant` |
-| I1 | a dispatch, a trial and a `resolve` inside REPEATABLE READ | refused | check at start only |
+| P1 | the guest: more than K paused Tenants and a due head beyond K; three backlogged Tenants of an unpaused channel in turn; a guest that serves clears the round, one that does not leaves it; at 128-character ids, no index of the slots' table reads what a guest writes, the condition of its write's being HOT | as stated | drop the cursor; keep it on a take; keep the round; index `guest_tenant` |
+| I1 | a dispatch, a trial and a `resolve` inside REPEATABLE READ, the trial's session set to it after the process began | refused | a trial or a `resolve` without the check; the check at start only |
 | D1 | the dek: a distinct cause per class, `Forbidden` `Permanent`; the sentinel by a key read on a channel the consumer only receives; `kms.unexplained`'s detail without a path; no Tenant in a log line | as stated | draw the sentinel's key; collapse two causes; store the text |
 | T1 | `outage.rs` recorded by `make traces`; a recording not covered fails unless listed with its reason, the reason the converter's | as stated | a recording test not listed; a stale entry |
-| B1 | buffers a message and walk steps under `test-pg`; statements a happy dispatch at an absolute count; the take, walk, trial and expiry planned once a connection | absolute figures | a heap fetch; the isolation read as its own statement |
+| B1 | buffers a message and walk steps under `test-pg`; statements a happy dispatch at an absolute count; the take, walk and expiry planned once a connection | absolute figures | a heap fetch; the take's isolation read as its own statement |
 
 **The model.** `InboxOutage.tla` is rewritten over (slot, Tenant) heads with processes of two loops, an ask split
 into its start and its verdict with a rollback between, the breaker per process, the memo, a process cut off and
@@ -396,3 +409,36 @@ payloads), its generated Vault policies.
   - **`kms.conflict`** joins the causes: a key made otherwise than asked is custody's remedy, no other's.
   - **A test counted log lines by the Tenant's name.** With no Tenant in a line it read the other tests' lines;
     it now reads its own by its thread, and asserts that no line names a Tenant.
+- 2026-11-17: Slice 3 built: the breaker in the dispatch — the rows, the exits and their CHECKs, the walk's
+  paused channels, the guest, the trial, `Outcome::Held` and `Outcome::Paused`, the isolation per transaction.
+  Its executors: the database's tests (`tests/outage.rs`, R1, X1, G1, P1, C5, C8, C10, I1, the kinds and the
+  causes of the holds, the canary), a gate over the library's own statements (`pg/exit_tests.rs`: every exit's
+  fragment, every wait's clock) and the held counts' plan; 34 mutations, each red, and the core's 13 again. What
+  building it found:
+  - **`holds` is nullable, without a default** (§ 3). `NOT NULL DEFAULT 0` binds every insert of a release that
+    does not know the column, and the release test refused the table (ADR-0037 decision 5). `NULL` is none; the
+    fragment and the CHECK say so.
+  - **The trial is statements, not a function** (§ 5): it runs once a tick a paused channel a process, where the
+    take and the walk, planned once a connection, run every dispatch.
+  - **The held counts read a heap page for every held row**: the index lacked the `uri` the channel is computed
+    from. With it both versions can answer from the index alone (§ 6). The plan test first asserted that 18
+    does; under `make all` it did not, the other tests' open transactions holding the visibility map down, so
+    the test now asserts what the index offers — the index-only plan with the heap's scans set off — and that
+    no row but the held is read, which is the library's, and leaves the choice to the planner's cost.
+  - **`unpark` needs no isolation check** (§ 10): one statement, no lock it waits for and reads past. The
+    refusal is the call's (`Error::Refused`), not the table's (`Malformed`).
+  - **The canary's exactness had no executor.** `unpark_all` now sets a row's attempts to `max − tries`, where
+    the higher of that and the row's own count parked a row spent to its last attempt again at its first failure,
+    whatever `tries`; the test's rows had all parked at their first attempt, below both. One now parks at its
+    last first, and the old form fails it.
+  - **Three tests passed or failed by their timing, not by the rule.** The core's C10 advanced past the tick the
+    pause had scheduled, so a meeting that brought no tick forward passed; it now meets the witness before that
+    tick. G1 bounded a guest's step from above, so a walk without its bound, a whole circle back to its cursor,
+    stepped zero and passed; a walk that is not a trial now steps K exactly. C5 asked for every healthy Tenant
+    processed within four seconds, which `make all`'s load missed, and which the healthy Tenants met before x
+    hung at all; they now arrive while x hangs, and one asked meanwhile is the assertion.
+  - **A trial's timeout was told apart by its message**: the call now flags it, and the transaction rolls back.
+  - **A test that woke every slot from four dispatchers at once deadlocked** on the slots' rows: the test's own
+    statement, by the server's log, not the library's. One waker now.
+  - **The migrations' checksums** were the baseline's before this slice and listed ADR-0040's causes migration,
+    which the baseline took (ADR-0041 decision 6's exception, nothing deployed; § Owed 3 for a live one).

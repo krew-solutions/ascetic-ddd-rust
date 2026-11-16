@@ -1486,6 +1486,8 @@ impl InboxObserver for Recorder {
             Ok(Outcome::Parked) => "dispatched a park",
             Ok(Outcome::Nothing) => "dispatched nothing",
             Ok(Outcome::Passed) => "dispatched a pass",
+            Ok(Outcome::Held) => "dispatched a hold",
+            Ok(Outcome::Paused) => "dispatched a paused walk",
             Err(_) => "rolled back",
         });
     }
@@ -1744,10 +1746,13 @@ async fn a_dependency_that_never_arrives_parks_the_message_after_max_wait() {
 /// written here with its checksum when it is released. One exception, while
 /// nothing is deployed: the baseline took ADR-0041's schema on 2026-11-15,
 /// by the owner's decision (ADR-0041 decision 6), and the take's and the
-/// walk's functions the same day; the databases made before are recreated.
+/// walk's functions the same day; on 2026-11-17 it took ADR-0042's rows —
+/// a row's cause, the count and kind of its holds, their CHECKs, the held
+/// index, the guest's cursor and the walk's paused channels — and ADR-0040's
+/// causes migration with them; the databases made before are recreated.
 /// Once the library is live, the exception is gone: the checksum covers the
 /// functions' bodies, so an edit of either statement is then a new
-/// function by a new migration.
+/// function by a new migration, and ADR-0042 § Owed lists the steps.
 #[test]
 fn the_released_migrations_keep_their_checksums() {
     let inbox = PgInbox::new(PgSessionPool::new(pool()));
@@ -1762,7 +1767,7 @@ fn the_released_migrations_keep_their_checksums() {
         [
             (
                 "20261027T000000Z_baseline".to_owned(),
-                "fnv1a64:99415d7916d70f2e:9537".to_owned()
+                "fnv1a64:68fe5f2fa07f40c0:12727".to_owned()
             ),
             (
                 "20261104T000000Z_processed_at".to_owned(),
@@ -1779,10 +1784,6 @@ fn the_released_migrations_keep_their_checksums() {
             (
                 "20261108T000000Z_unreadable_at".to_owned(),
                 "fnv1a64:d9799e13a5481289:68".to_owned()
-            ),
-            (
-                "20261116T000000Z_causes".to_owned(),
-                "fnv1a64:c5ba526461649816:170".to_owned()
             )
         ]
     );
@@ -2644,18 +2645,16 @@ async fn a_row_parked_at_once_is_superseded_by_the_next_arrival_at_its_identity(
         "repaired",
     )
     .with_metadata(json!({ "message_id": "00000000-0000-4000-b000-000000000001" }));
-    // as a row that failed and held before a host's lower bounds made it
-    // unreadable: the supersede ends what its failures wrote (ADR-0040
-    // decision 6)
-    f.execute(
-        "UPDATE {table} SET last_cause = 'kms.unavailable', unavailable_since = now() \
-         WHERE unreadable_at IS NOT NULL",
-    )
-    .await;
+    // as a row that failed under a cause before a host's lower bounds made
+    // it unreadable: the supersede ends what its failures wrote (ADR-0042
+    // decision 4); a parked row holds nothing, which the baseline's CHECK
+    // keeps
+    f.execute("UPDATE {table} SET cause = 'kms.unavailable' WHERE unreadable_at IS NOT NULL")
+        .await;
     f.publish(std::slice::from_ref(&repaired)).await;
     assert_eq!(f.rows().await, 2, "superseded in place");
     let causes = format!(
-        "SELECT count(*) FROM {} WHERE last_cause IS NOT NULL OR unavailable_since IS NOT NULL",
+        "SELECT count(*) FROM {} WHERE cause IS NOT NULL OR holds > 0 OR hold_kind IS NOT NULL",
         f.table
     );
     let left: i64 = f
@@ -3417,7 +3416,7 @@ async fn the_held_heads_are_counted_by_channel_and_cause_from_the_table() {
     let counts = f.inbox.held_counts(Duration::from_secs(5)).await.unwrap();
     let seen: Vec<_> = counts
         .iter()
-        .map(|c| (c.channel.as_str(), c.cause, c.tenants))
+        .map(|c| (c.channel.as_str(), c.hold, c.tenants))
         .collect();
     assert_eq!(
         seen,

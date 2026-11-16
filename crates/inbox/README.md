@@ -137,8 +137,11 @@ let inbox = PgInbox::new(pool)
 
 match inbox.dispatch(&subscriber).await? {
     Outcome::Processed => {}
-    Outcome::Failed { attempts, parked } => {}
+    Outcome::Failed { attempts, parked, held } => {}
     Outcome::SetAside => {}
+    Outcome::Held => {}     // a head held without asking (below)
+    Outcome::Passed => {}   // the walk found no head due; go on at once
+    Outcome::Paused => {}   // every head met is of a paused channel; poll
     Outcome::Nothing => {}
 }
 
@@ -176,6 +179,25 @@ let subscriber = |tx: &PgSession, message: &InboxMessage| async move {
     Ok(())
 };
 ```
+
+`Failure::Unavailable` says that what the subscriber needs cannot answer now —
+a key service sealed, a quota spent — at the scope of a `Tenant` or of the
+whole `Stage` (ADR-0040, ADR-0042). It holds the row and spends no attempt,
+however often it is told, so that an outage never parks a message. The
+process remembers the Tenant's trouble: its other heads are held without the
+subscriber called (`Outcome::Held`) while its back-off runs, one ask of it in
+flight at a time. A `Stage` verdict broad across Tenants pauses the channel
+in this process — a circuit breaker per process and channel, which no other
+process shares, since a key served from one's cache is no evidence of
+another's. A paused channel's heads are not asked: the walk goes on as a
+guest, serving the other channels' heads and moving a cursor of its own, and
+once a tick a trial asks one of the channel's Tenants, its witness, whose
+answer resumes the channel. `PgInbox::with_breaking(Breaking)` sets the
+window, the thresholds, the ticks, the back-off and the trial's wait; the
+observer is told of each head held unasked and of each pause, stall and
+resume. A row's hold runs from the database's clock as its verdict is
+written. A dispatch, a trial and a `resolve` run under READ COMMITTED only,
+checked for each transaction; another level is refused.
 
 The savepoint costs two statements per message on the happy path. Draining
 200 messages with a subscriber that does nothing, on one PostgreSQL over
@@ -254,8 +276,8 @@ is rolled back:
 ```sql
 BEGIN;
 SET LOCAL plan_cache_mode = force_generic_plan;
-PREPARE w (smallint, integer, double precision) AS <the walk's statement>;
-EXPLAIN (ANALYZE, BUFFERS) EXECUTE w (0, 32, 1.0);
+PREPARE w (smallint, integer, double precision, text[]) AS <the walk's statement>;
+EXPLAIN (ANALYZE, BUFFERS) EXECUTE w (0, 32, 1.0, '{}');
 ROLLBACK;
 ```
 
@@ -288,13 +310,11 @@ whose every head waits writes ⌈T/K⌉ `Passed` and one `Nothing`, then nothing
 until it wakes. `PgInbox::with_rotation` sets both.
 
 What holds a slot's Tenants is counted from the table, for a host's gauges:
-`held_counts(within)` gives, by channel and cause, how many Tenants have a
-head held by its own failure and the oldest hold, never which. A head held
-for its stage's outage (ADR-0040 decision 4) holds its own Tenant's rows,
-not its slot's, and is not counted there yet (ADR-0040 § Owed);
-`park_held(principal, channel, cause, tenant)` parks every head held for a
-cause, and `unpark_all(principal, unparking)` re-arms the rows one cause
-parked.
+`held_counts(within)` gives, by channel, kind and cause, how many Tenants
+have a head held and how many heads, and the oldest hold, never which: a
+head waiting its own back-off, or held for an `Unavailable` (ADR-0042
+decision 6). `unpark_all(principal, unparking)` re-arms the rows one cause
+parked, each with a canary of `tries` failures before it parks again.
 
 ## Forgetting
 
