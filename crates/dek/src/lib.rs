@@ -7,6 +7,7 @@ pub mod domain;
 #[cfg(feature = "bus")]
 mod draws;
 mod error;
+mod pace;
 #[cfg(feature = "pg")]
 pub mod pg;
 mod port;
