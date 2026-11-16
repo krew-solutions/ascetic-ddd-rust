@@ -1708,6 +1708,26 @@ mod property {
         expired_by_uses: u32,
         tenant_scoped: u32,
         probes: u32,
+        /// What the core answered and held after each step, its times as
+        /// offsets from the history's start: the behaviour's fingerprint.
+        trace: Vec<String>,
+    }
+
+    /// An answer as the fingerprint writes it: its instants as offsets from
+    /// `t0`, so that two runs of one history write the same.
+    fn described(answer: &Answer<Drawn>, t0: Instant) -> String {
+        match answer {
+            Answer::Hit(key) => format!("hit {} {:?}", key.id, key.started - t0),
+            Answer::Join(generation, deadline) => {
+                format!("join {generation} {:?}", *deadline - t0)
+            }
+            Answer::Refused {
+                reason,
+                retry_after,
+                scope,
+            } => format!("refused {reason:?} {retry_after:?} {scope:?}"),
+            Answer::Gone => "gone".to_owned(),
+        }
     }
 
     /// Runs `steps`, holding the invariants after each; what they exercised.
@@ -1731,6 +1751,10 @@ mod property {
                 Step::Seal(t) => {
                     let tenant = TENANTS[t];
                     let (answer, start) = core.seal(&tenant, now, now + supply.wait());
+                    activity.trace.push(format!(
+                        "seal {tenant}: {} {start:?}",
+                        described(&answer, t0)
+                    ));
                     if let Some(start) = start {
                         prop_assert!(!flying.contains_key(tenant), "two flights for {tenant}");
                         flying.insert(tenant, (start.generation, now));
@@ -1862,7 +1886,9 @@ mod property {
                 Step::Left(t) => core.left(&TENANTS[t], now),
                 Step::Sweep => core.sweep(now),
                 Step::Probe => {
-                    if let Some((tenant, start)) = core.probe(now) {
+                    let probe = core.probe(now);
+                    activity.trace.push(format!("probe {probe:?}"));
+                    if let Some((tenant, start)) = probe {
                         prop_assert_eq!(tenant, "c", "only the sentinel is probed");
                         prop_assert_eq!(start.kind, Kind::Probe);
                         prop_assert!(!flying.contains_key(tenant), "two flights for {tenant}");
@@ -1876,9 +1902,17 @@ mod property {
                     }
                 }
             }
+            let next = core.next_deadline().map(|at| at - t0);
+            activity.trace.push(format!(
+                "{n} {step:?} next={next:?} flights={} keys={} slots={}",
+                core.flights(),
+                core.keys_held(),
+                core.slots()
+            ));
             // Every key gone out of service is told, once, and never served
             // again.
             for key in core.take_retired() {
+                activity.trace.push(format!("retired {}", key.id));
                 prop_assert!(retired.insert(key.id), "a key retired twice");
                 activity.retired += 1;
             }
@@ -1964,6 +1998,35 @@ mod property {
 
     /// The histories exercise every path the invariants speak of, on a
     /// runner whose seed is fixed.
+    /// The fingerprint of 300 histories, FNV-1a over their traces.
+    fn fingerprint() -> u64 {
+        let mut runner = TestRunner::deterministic();
+        let strategy = (proptest::collection::vec(step(), 40..120), any::<u64>());
+        let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
+        for _ in 0..300 {
+            let (steps, random) = strategy.new_tree(&mut runner).unwrap().current();
+            for line in run(&steps, random).unwrap().trace {
+                for byte in line.bytes().chain(std::iter::once(b'\n')) {
+                    digest ^= u64::from(byte);
+                    digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            }
+        }
+        digest
+    }
+
+    /// The core's behaviour over 300 histories, pinned: what it answers,
+    /// starts, retires and holds after each step. A change that is to keep
+    /// the behaviour — moving the pacing and the flights into modules the
+    /// opening end shares (ADR-0039 slice 4, S4b) — keeps the digest; one
+    /// that changes the behaviour pins the new digest with its reason.
+    #[test]
+    fn the_core_s_behaviour_is_pinned() {
+        assert_eq!(fingerprint(), PINNED);
+    }
+
+    const PINNED: u64 = 5_305_874_238_329_810_116;
+
     #[test]
     fn the_histories_exercise_every_path() {
         let mut runner = TestRunner::deterministic();
