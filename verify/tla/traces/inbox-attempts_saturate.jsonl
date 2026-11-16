@@ -1,5 +1,5 @@
-{"deps":[],"event":"received","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","message_id":"00000000-0000-4000-8000-000000000014","observer":"inbox","received_position":1,"slot":0,"xid":96283}
-{"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","slot":0,"slots":1,"snapshot":{"xip":[96290],"xmax":96293,"xmin":96290}}
+{"deps":[],"event":"received","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","message_id":"00000000-0000-4000-8000-00000000000c","observer":"inbox","received_position":1,"slot":0,"xid":2361280}
+{"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","slot":0,"slots":1,"snapshot":{"xip":[],"xmax":2361282,"xmin":2361282}}
 {"event":"handled","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","ok":false,"slot":0}
 {"attempts":2147483647,"cause":"bus.unexplained","error":"again","event":"failed","held":false,"id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","parked":false,"past_budget":false,"permanent":false,"retry_after_ms":0,"slot":0}
 {"event":"dispatched","observer":"inbox","outcome":"failed","slot":0}

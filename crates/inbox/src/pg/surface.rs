@@ -578,15 +578,22 @@ where
         }
     }
 
-    /// Parks the rows of `channel` that hold their slot for their stage's
-    /// outage under `cause` — of `tenant` only, when given — so that their
-    /// slots go on (ADR-0040 decision 8): the operator's choice of
-    /// out-of-order over the stall, each row parked under its cause and
-    /// re-armed later by an unpark. Only a slot's head can hold, so the
-    /// call reads one row a slot; a slot a dispatcher holds right now is
-    /// passed by, and a second call parks its head if it still holds. The
-    /// slots it reads it holds itself, so no dispatcher changes their heads
-    /// meanwhile.
+    /// Parks the heads of `channel` held for their stage's outage under
+    /// `cause` — of `tenant` only, when given — so that the rows behind them
+    /// go on (ADR-0040 decision 8): the operator's choice of out-of-order
+    /// over the stall, each row parked under its cause and re-armed later by
+    /// an unpark. Only a head can hold, and a slot has a head for each of its
+    /// Tenants (ADR-0041 decision 2), so the call reads the heads alone, one
+    /// probe of the Tenants' head index each, from one Tenant to the next as
+    /// a walk goes. Under rotation a hold stops its own Tenant's rows of its
+    /// slot, not the slot: the rows a park lets go on are that Tenant's, and
+    /// while the outage lasts they meet it and hold in turn (ADR-0040 § Owed
+    /// 6). A slot a dispatcher holds right now is passed by, so a call may
+    /// park part of what holds; a second call parks what it passed, and the
+    /// rows held since. The slots it parks in it holds itself, and a row is
+    /// parked only if it is still in the queue and still held when the
+    /// statement reaches it: a row a dispatcher marked or let go after the
+    /// statement's snapshot is left.
     /// Returns how many rows were parked.
     ///
     /// # Errors
@@ -599,20 +606,30 @@ where
         tenant: Option<&str>,
     ) -> Result<u64, Error> {
         let sql = format!(
-            "WITH held AS ( \
-                SELECT h.place FROM {table}_slots s \
+            "WITH RECURSIVE heads AS ( \
+                SELECT h.* FROM {table}_slots s \
                 CROSS JOIN LATERAL ( \
-                    SELECT r.ctid AS place, r.unavailable_since, r.last_cause, r.tenant_id, \
-                           {CHANNEL_OF_ROW} AS channel \
+                    SELECT r.slot, r.tenant_id, r.ctid AS place, r.unavailable_since, \
+                           r.last_cause, {CHANNEL_OF_ROW} AS channel \
                     FROM {table} r WHERE r.slot = s.slot AND {QUEUE} \
-                    ORDER BY r.received_position LIMIT 1) h \
+                    ORDER BY r.tenant_id, r.received_position LIMIT 1) h \
+                UNION ALL \
+                SELECT n.* FROM heads p \
+                CROSS JOIN LATERAL ( \
+                    SELECT r.slot, r.tenant_id, r.ctid AS place, r.unavailable_since, \
+                           r.last_cause, {CHANNEL_OF_ROW} AS channel \
+                    FROM {table} r \
+                    WHERE r.slot = p.slot AND {QUEUE} AND r.tenant_id > p.tenant_id \
+                    ORDER BY r.tenant_id, r.received_position LIMIT 1) n \
+             ), held AS ( \
+                SELECT h.place FROM heads h JOIN {table}_slots s ON s.slot = h.slot \
                 WHERE h.unavailable_since IS NOT NULL AND h.last_cause = $2 AND h.channel = $1 \
                   AND ($3::text IS NULL OR h.tenant_id = $3::text) \
                 FOR UPDATE OF s SKIP LOCKED \
              ) \
              UPDATE {table} SET parked_at = CURRENT_TIMESTAMP, parked_cause = last_cause, \
-                 unavailable_since = NULL \
-             WHERE ctid IN (SELECT place FROM held)",
+                 unavailable_since = NULL, held_since = NULL \
+             WHERE ctid IN (SELECT place FROM held) AND {QUEUE} AND unavailable_since IS NOT NULL",
             table = self.table
         );
         let parked = self
@@ -654,18 +671,22 @@ where
     ///
     /// # Errors
     /// [`Error::Refused`] when the window is longer than the channel keeps
-    /// its processed rows: an overtaking row forgotten could not be told.
+    /// its processed rows and an overtaken row is to stay parked: an
+    /// overtaking row forgotten could not be told. Asked to re-arm the
+    /// overtaken too, it needs no overtaker, and takes any window: so a park
+    /// older than the channel's retention has a way back in bulk.
     /// [`Error`] when the environment fails, the batches before it re-armed.
     pub async fn unpark_all(
         &self,
         principal: &str,
         unparking: &Unparking<'_>,
     ) -> Result<UnparkedAll, Error> {
-        if self
-            .retention
-            .windows
-            .get(unparking.channel)
-            .is_some_and(|kept| unparking.within > *kept)
+        if !unparking.overtaken
+            && self
+                .retention
+                .windows
+                .get(unparking.channel)
+                .is_some_and(|kept| unparking.within > *kept)
         {
             return Err(Error::Refused(
                 "the window is longer than the channel keeps its processed rows",

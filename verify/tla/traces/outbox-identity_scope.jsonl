@@ -1,8 +1,8 @@
-{"event":"published","message_id":"00000000-0000-4000-8000-00000000005d","observer":"outbox","position":1,"uri":"kafka://orders","xid":97817}
-{"event":"published","message_id":"00000000-0000-4000-8000-00000000005e","observer":"outbox","position":2,"uri":"kafka://audit","xid":97817}
-{"event":"published","message_id":"00000000-0000-4000-8000-00000000005f","observer":"outbox","position":3,"uri":"kafka://orders","xid":97818}
-{"event":"published","message_id":"00000000-0000-4000-8000-000000000060","observer":"outbox","position":4,"uri":"kafka://orders","xid":97819}
-{"event":"published","message_id":"00000000-0000-4000-8000-000000000061","observer":"outbox","position":5,"uri":"kafka://orders","xid":97819}
-{"event":"published","message_id":"00000000-0000-4000-8000-000000000062","observer":"outbox","position":6,"uri":"kafka://orders","xid":97820}
-{"event":"published","message_id":"00000000-0000-4000-8000-000000000063","observer":"outbox","position":7,"uri":"kafka://orders","xid":97820}
-{"event":"published","message_id":"00000000-0000-4000-8000-000000000064","observer":"outbox","position":8,"uri":"kafka://orders","xid":97823}
+{"event":"published","message_id":"00000000-0000-4000-8000-00000000005e","observer":"outbox","position":1,"uri":"kafka://orders","xid":2365201}
+{"event":"published","message_id":"00000000-0000-4000-8000-00000000005f","observer":"outbox","position":2,"uri":"kafka://audit","xid":2365201}
+{"event":"published","message_id":"00000000-0000-4000-8000-000000000060","observer":"outbox","position":3,"uri":"kafka://orders","xid":2365202}
+{"event":"published","message_id":"00000000-0000-4000-8000-000000000061","observer":"outbox","position":4,"uri":"kafka://orders","xid":2365203}
+{"event":"published","message_id":"00000000-0000-4000-8000-000000000062","observer":"outbox","position":5,"uri":"kafka://orders","xid":2365203}
+{"event":"published","message_id":"00000000-0000-4000-8000-000000000063","observer":"outbox","position":6,"uri":"kafka://orders","xid":2365204}
+{"event":"published","message_id":"00000000-0000-4000-8000-000000000064","observer":"outbox","position":7,"uri":"kafka://orders","xid":2365204}
+{"event":"published","message_id":"00000000-0000-4000-8000-000000000065","observer":"outbox","position":8,"uri":"kafka://orders","xid":2365207}

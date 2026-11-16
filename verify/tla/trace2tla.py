@@ -277,7 +277,10 @@ def inbox_steps(events, names=None, by_message_id=False):
                              attempts=attempts, parked=parked, permanent=permanent)
             elif outcome == "rolled_back" and holding[slot] is not None:
                 yield record(side="inbox", event="crash", slot=slot, of=slots)
-            elif outcome not in ("rolled_back", "nothing", "set_aside", "parked"):
+            # "passed": a walk that found no due head among the Tenants it
+            # examined took none, its fetch an empty one; the cursor it moved is
+            # not followed, TraceInbox.tla being FIFO (ADR-0041 § Owed)
+            elif outcome not in ("rolled_back", "nothing", "set_aside", "parked", "passed"):
                 # an outcome the mapping does not know would otherwise end the
                 # dispatch without a step, and a run would fit for the wrong reason
                 raise SystemExit(f"slot {slot} closed a dispatch with an outcome not mapped: {outcome}")
@@ -364,6 +367,10 @@ def main(trace, out):
             raise SystemExit(f"{trace.name} holds {foreign[0]} events; name it bridge-*.jsonl to check both sides")
     name = "Trace_" + re.sub(r"[^A-Za-z0-9_]", "_", trace.stem)
     produced = list(steps(events))
+    # A run without a step fits whatever the model says: covered, it would
+    # check nothing (an intake that only set messages aside, say).
+    if not produced:
+        raise SystemExit(f"{trace.name} maps to no step: there is nothing to check")
     body = ",\n  ".join(str(step) for step in produced)
     # The order of arrival is a promise only with one slot.
     if crate == "inbox" and all(step["fields"].get("of", 1) == 1 for step in produced):

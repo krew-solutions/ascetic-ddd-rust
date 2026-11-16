@@ -1,2 +1,0 @@
-{"channel":"kafka://orders","digest":"1450f03f-0a86-8263-c2b4-82f29fedb207","event":"rejected","observer":"inbox","reason":"malformed","repeat":false}
-{"channel":"kafka://orders","digest":"d671cbc8-0382-3c9c-6f25-64a543a2eb24","event":"rejected","observer":"inbox","reason":"malformed","repeat":false}

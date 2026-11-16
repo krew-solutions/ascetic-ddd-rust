@@ -136,6 +136,11 @@ transaction-scoped.
 
 - A start against a current schema takes no lock on any application table: a
   replica can start beside live traffic, as often as it likes.
+- A component may check its own tables after the runner. The inbox does
+  (ADR-0037 decision 5): it compares its tables with temporary twins, in a
+  transaction of its own. That start still takes no lock on an application
+  table, but it is no read: it needs TEMPORARY on the database, and fails on
+  a read-only database or a standby.
 - A schema change takes its table's strongest lock for the length of its
   migration: reads of that table wait that long. At the sizes this library's
   users have today that is milliseconds; a large table is the trigger of
@@ -200,3 +205,10 @@ aborts the scope). PostgreSQL 14 documentation: § 13.3 Explicit Locking, § 20.
 
 - 2026-10-27 — proposed, with the runner and every table of the library as
   components.
+- 2026-11-15 — The inbox's start is no longer a read (ADR-0037 decision 5):
+  after the runner it makes temporary twins of its tables and compares them,
+  in a transaction of its own. It takes no lock on an application table —
+  `a_current_inbox_starts_beside_its_tables_held_exclusively`
+  (`crates/inbox/tests/intake.rs`) holds that, as this record's executor
+  holds it for the runner — but it needs TEMPORARY on the database and fails
+  on a read-only one. Decision 2, the runner's read, is unchanged.

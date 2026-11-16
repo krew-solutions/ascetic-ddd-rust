@@ -1,0 +1,113 @@
+# The gates of every push. A job hosts a gate - its runtime, caches,
+# services - and runs it by name: `make <target>`. What a gate does lives in
+# the Makefile, once (ADR-0041 decision 8). The models run in proofs.yml.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # The live tests' database: a role of its own, owning its database, neither
+  # superuser nor BYPASSRLS, as a host's service role is.
+  ASCETIC_DDD_TEST_PG_URL: postgresql://ascetic_test:ascetic_test@localhost:5432/ascetic_test
+
+jobs:
+  all:
+    name: rustfmt, clippy, rustdoc, tests, tests on PostgreSQL ${{ matrix.pg }}, host features
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # 14: the major the host's stand runs and the library's measurements
+        # ran on (ADR-0041 § Measured); its life ended on 2026-11-12. 18: the
+        # current major, supported to 2030, whose planner can skip-scan a
+        # multicolumn index. Narrowed to the host's production major once it
+        # is chosen.
+        pg: ["14", "18"]
+    services:
+      postgres:
+        image: postgres:${{ matrix.pg }}-trixie
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal \
+            --component rustfmt --component clippy
+          rustup default 1.97.0
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: cargo-registry-${{ hashFiles('Cargo.lock', 'verify/**/Cargo.lock') }}
+      - name: Create the test role and its database
+        env:
+          PGPASSWORD: postgres
+        # As the host creates its databases (its ADR-0087 decision 2): text
+        # ordered by bytes, case mapped by the server's locale.
+        run: |
+          ctype=$(psql -h localhost -U postgres -tAc "SELECT datctype FROM pg_database WHERE datname = 'template1'")
+          psql -h localhost -U postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE ascetic_test LOGIN PASSWORD 'ascetic_test'" \
+            -c "CREATE DATABASE ascetic_test OWNER ascetic_test TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE '$ctype'"
+      - name: make all
+        run: make all
+
+  traces:
+    name: traces recorded again by the live tests, checked against the models
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:14-trixie
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal
+          rustup default 1.97.0
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: cargo-registry-${{ hashFiles('Cargo.lock', 'verify/**/Cargo.lock') }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Fetch the pinned TLA+ tools
+        uses: ./.github/actions/tla2tools
+      - name: Create the test role and its database
+        env:
+          PGPASSWORD: postgres
+        # As the host creates its databases (its ADR-0087 decision 2): text
+        # ordered by bytes, case mapped by the server's locale.
+        run: |
+          ctype=$(psql -h localhost -U postgres -tAc "SELECT datctype FROM pg_database WHERE datname = 'template1'")
+          psql -h localhost -U postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE ascetic_test LOGIN PASSWORD 'ascetic_test'" \
+            -c "CREATE DATABASE ascetic_test OWNER ascetic_test TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE '$ctype'"
+      - name: make traces
+        run: make traces

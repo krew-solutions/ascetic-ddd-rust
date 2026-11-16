@@ -119,10 +119,11 @@ the waking was added; no difference the measurement can tell.
 A subscriber that fails does not roll the whole transaction back. It runs in a
 savepoint; its writes roll back to it, and the transaction goes on to record
 the attempt: `attempts`, `last_error`, and `next_attempt_at`. Until that time
-the message is not taken, and it holds its partition — the rows behind it wait
-— so that the order of arrival survives the failure; a retry topic would let
-them pass and lose it. After `max_attempts` failures the message is parked:
-`parked_at` is set, the selection passes it by, the partition flows, and the
+the message is not taken, and it holds its (slot, Tenant) — that Tenant's rows
+behind it wait — so that the order of arrival survives the failure; a retry
+topic would let them pass and lose it. The slot's other Tenants go on. After
+`max_attempts` failures the message is parked: `parked_at` is set, the
+selection passes it by, the Tenant flows, and the
 row stays where it is, so a later arrival of the same message is still a
 duplicate. Off by default: unlimited attempts, no backoff, the message is
 taken again at the next call (ADR-0005).
@@ -191,14 +192,20 @@ slots are fixed for the life of the table, `partitioned_by` and
 The table `<table>_slots` has one row per slot. A dispatcher has no identity:
 `dispatch(subscriber)` takes whichever slot has a due head and is held by
 nobody, least recently served first, locks that slot's row for the length of
-the transaction, `FOR UPDATE SKIP LOCKED`, and works the head of that slot.
+the transaction, `FOR UPDATE SKIP LOCKED`, and serves that slot's Tenants in
+turn (below).
 Any number of loops in any number of processes share the slots through the
 locks alone, `run(subscriber, Loops { concurrency, poll_interval },
 shutdown)`; a process that dies releases its slot with its transaction, and
-the next poll of a survivor takes it. One slot is the order of arrival over
-the whole table; more slots are parallelism, and order within a stream
-still, since a stream is in one slot. A head waiting for its backoff holds
-its slot, and the other slots flow. Changing the number of slots or the key
+the next poll of a survivor takes it. **The order kept is per (slot,
+Tenant):** within a slot, the messages of one Tenant are processed one at a
+time, in arrival order; the messages of different Tenants have no order
+between them. Under `ByStream` that is per stream, which holds its Tenant;
+under `ByUri` per (URI, Tenant). A host that relied on order across Tenants
+in one slot no longer has it (ADR-0041 decision 1). A head waiting for its
+backoff holds its (slot, Tenant), and that Tenant's other rows in the slot
+wait behind it; the slot's other Tenants and the other slots flow. Changing
+the number of slots or the key
 moves rows between slots and is a migration, not a restart: `migrate` refuses
 a table cut otherwise (ADR-0008).
 
@@ -208,18 +215,86 @@ so that a process starts beside live traffic without locking them;
 `teardown` drops them and forgets them, for an inbox that lives as long as a
 test.
 
-Taking a slot is one statement, and reading its head another, under a
-snapshot taken after the lock: a statement's snapshot predates the lock it
+Taking a slot is one statement, and walking it for its head another, under
+a snapshot taken after the lock: a statement's snapshot predates the lock it
 takes, and what the slot's previous holder committed in between — its head
 processed, set aside, put in backoff — is out of the first statement's
-sight. Measured on 200,000 rows, a quarter of them processed, with the head
-read in the same statement: 0.07 ms for one slot, 0.21 ms for sixteen,
-0.43 ms for sixty-four; idle 0.05–0.08 ms; the second statement is one
-round trip more. The head index, `(slot, received_position)` over the rows
+sight.
+
+Both statements are functions the baseline makes, `<table>__take()` and
+`<table>__walk(slot, walk, max_dormancy)`, and the dispatch calls each
+(ADR-0041 decision 6). Sent as text, a statement is parsed and planned at
+every call: that cost the walk 3.3 ms against 0.4 of execution. A
+function's statement is parsed once a connection, and its plan kept until
+its tables' definition or statistics change — an `ANALYZE` plans it again:
+- the walk's plan is forced generic, so that a session asking for custom
+  plans does not plan it at every call; the take's has no parameter and is
+  generic anyway;
+- the first call on a connection pays the parse and the plan: 12 ms and
+  6.5 ms on the record's laptop;
+- `migrate` refuses either function when it is not as the library makes
+  it: its arguments, result, body, language, volatility, setting, rights or
+  schema changed, EXECUTE gone from the pool's role, or another function of
+  its name in its schema or the search path. The refusal names what it
+  found;
+- EXECUTE on both is PUBLIC's, as on any function: they run with the
+  caller's rights, so they grant nothing the caller lacks. A database whose
+  default privileges take EXECUTE from PUBLIC grants it to the role that
+  dispatches; `migrate`, run by that role at its start, refuses otherwise;
+- a pool that runs `DISCARD ALL` or `DISCARD PLANS` at each checkout plans
+  them again at each: correct, at the old price. deadpool's recycling
+  methods do not;
+- `pg_stat_statements` shows the calls, with their time and buffers, and
+  the statements inside them with `pg_stat_statements.track = all`.
+
+To see the plan the walk runs: `auto_explain.log_nested_statements = on`,
+or the statement prepared under the generic plan, inside a transaction that
+is rolled back:
+
+```sql
+BEGIN;
+SET LOCAL plan_cache_mode = force_generic_plan;
+PREPARE w (smallint, integer, double precision) AS <the walk's statement>;
+EXPLAIN (ANALYZE, BUFFERS) EXECUTE w (0, 32, 1.0);
+ROLLBACK;
+```
+
+The statement is `prosrc` of `<table>__walk`, less its `INTO`. A call by
+hand, `SELECT * FROM <table>__walk(…)`, writes the slot's row like any
+dispatch: its cursor and its round. Outside a rolled-back transaction it
+moves them.
+
+The head index, `(slot, received_position)` over the rows
 neither processed, parked nor waiting, is the only index in
 `received_position` order on purpose: beside a second one over the whole
 column the planner walked that one from the first row, past the whole
 processed history, 89 ms at sixteen slots.
+
+## Tenants in turn
+
+A slot's holder serves its Tenants in turn, so that one Tenant's backlog
+does not hold the others back (ADR-0041 decision 2). The slot row keeps a
+cursor, the Tenant served last. A dispatch walks the slot's Tenants after the
+cursor, cyclically, wrapping once, one descent of `__tenant_head_idx` each,
+and takes the first whose head — its oldest queue row in the slot — is due.
+It examines at most `Rotation::walk` Tenants, 32 by default; finding none
+due, it moves the cursor past them and returns `Outcome::Passed`, and the
+loop goes on at once. A round over the slot's Tenants that finds no head due
+puts the slot to sleep until the earliest backoff it saw, a row arriving
+after the round began, or `Rotation::max_dormancy`, a second by default —
+the bound on a row made due behind its back: an insert in flight when the
+round began, a row a mark in another slot woke, a row unparked. So a slot
+whose every head waits writes ⌈T/K⌉ `Passed` and one `Nothing`, then nothing
+until it wakes. `PgInbox::with_rotation` sets both.
+
+What holds a slot's Tenants is counted from the table, for a host's gauges:
+`held_counts(within)` gives, by channel and cause, how many Tenants have a
+head held by its own failure and the oldest hold, never which. A head held
+for its stage's outage (ADR-0040 decision 4) holds its own Tenant's rows,
+not its slot's, and is not counted there yet (ADR-0040 § Owed);
+`park_held(principal, channel, cause, tenant)` parks every head held for a
+cause, and `unpark_all(principal, unparking)` re-arms the rows one cause
+parked.
 
 ## Forgetting
 

@@ -91,8 +91,8 @@ pub enum Operation {
     Readmitted,
     /// Closed a row as discarded, a tombstone.
     Discarded,
-    /// Parked the rows held for their stage's outage, by cause (ADR-0040
-    /// decision 8): their slots go on.
+    /// Parked the heads held for their stage's outage, by cause (ADR-0040
+    /// decision 8): the rows behind them go on.
     ParkedHeld,
     /// Re-armed parked rows by cause, a batch of them (ADR-0040 decision 8).
     UnparkedAll,
@@ -219,8 +219,9 @@ pub struct Failed<'a> {
     /// Whether this attempt was the last: the message is parked, its
     /// attempts run out or the failure permanent.
     pub parked: bool,
-    /// Whether the message holds its slot for its stage's outage, its
-    /// attempts untouched (ADR-0040 decision 4).
+    /// Whether the message holds for its stage's outage, its attempts
+    /// untouched (ADR-0040 decision 4): its Tenant's rows of its slot wait
+    /// behind it (ADR-0041 decision 2).
     pub held: bool,
     /// Whether it has held past its budget, the channel's evidence not
     /// refuting the outage: a page.

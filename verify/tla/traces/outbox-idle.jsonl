@@ -1,7 +1,7 @@
-{"event":"published","message_id":"00000000-0000-4000-8000-00000000005b","observer":"outbox","position":1,"uri":"kafka://orders","xid":97815}
-{"delivered":"97807:97807:","epoch":"97825:97825:","epoch_end":1,"epoch_offset":0,"event":"fetched","group":"broker","horizon":97825,"limit":100,"messages":["00000000-0000-4000-8000-00000000005b"],"observer":"outbox","slot":0,"slots":1,"statement":"97825:97825:"}
-{"event":"handled","group":"broker","message_id":"00000000-0000-4000-8000-00000000005b","observer":"outbox","ok":true,"slot":0}
-{"drained":true,"event":"acked","group":"broker","observer":"outbox","position":1,"short":false,"slot":0,"xid":97815}
+{"event":"published","message_id":"00000000-0000-4000-8000-000000000067","observer":"outbox","position":1,"uri":"kafka://orders","xid":2365220}
+{"delivered":"2365218:2365218:","epoch":"2365221:2365221:","epoch_end":1,"epoch_offset":0,"event":"fetched","group":"broker","horizon":2365221,"limit":100,"messages":["00000000-0000-4000-8000-000000000067"],"observer":"outbox","slot":0,"slots":1,"statement":"2365221:2365221:"}
+{"event":"handled","group":"broker","message_id":"00000000-0000-4000-8000-000000000067","observer":"outbox","ok":true,"slot":0}
+{"drained":true,"event":"acked","group":"broker","observer":"outbox","position":1,"short":false,"slot":0,"xid":2365220}
 {"event":"dispatched","group":"broker","observer":"outbox","outcome":"batch","slot":0}
 {"delivered":null,"epoch":null,"epoch_end":0,"epoch_offset":0,"event":"fetched","group":"broker","horizon":0,"limit":100,"messages":[],"observer":"outbox","slot":null,"slots":1,"statement":null}
 {"event":"dispatched","group":"broker","observer":"outbox","outcome":"nothing","slot":null}

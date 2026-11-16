@@ -1,5 +1,6 @@
 # The gates of this workspace, in one list: a developer runs a tier of it,
-# CI runs `all`, and nothing else holds the commands. The shape is the one
+# CI runs `all` on every push and `proofs` and `traces` in a pipeline of
+# their own (.github/workflows), and nothing else holds the commands. The shape is the one
 # of the architecture repository's Makefile, with the tiers this workspace
 # has.
 #
@@ -13,6 +14,8 @@
 #   make test-kafka  the tests ignored for want of Kafka
 #   make stand       every tier a full stand serves: all, test-vault, test-kafka
 #   make proofs      the TLA+ models under verify/tla, model-checked with TLC
+#   make proofs-groups  the groups `proofs` falls into, for a job each
+#   make traces      the traces recorded again by the live tests, then checked
 #   make fmt         rustfmt, writing
 #   make help        this list
 #
@@ -31,6 +34,8 @@
 #   ASCETIC_DDD_TEST_KAFKA_BROKERS
 #                             the brokers of `test-kafka`
 #   TLA2TOOLS                 the jar verify/tla/check.sh runs TLC from
+#   PROOFS                    the groups of verify/tla/check.sh `proofs` runs;
+#                             unset, every group
 #   CARGO                     the cargo to run (`cargo +nightly`, say)
 #
 # The experiments under verify/pg are evidence behind ADRs, run by hand
@@ -54,14 +59,20 @@ NEEDS_KAFKA := requires Kafka
 
 # Runs the ignored tests of every integration test file that gives the
 # reason $(1): the crate is the directory, `crates/<name>` being the package
-# `ascetic-ddd-<name>`, and the test target is the file.
+# `ascetic-ddd-<name>`, and the test target is the file. Then those of every
+# library whose sources give it, as its `--lib` target: a test that reads
+# the crate's private statements lives beside them (`plan_tests.rs`). A grep
+# that finds nothing is no failure; one that cannot read is.
 define run_ignored
-grep -lE '#\[ignore = "($(1))' crates/*/tests/*.rs | while IFS=/ read -r _ crate _ file; do
+{ grep -lE '#\[ignore = "($(1))' crates/*/tests/*.rs || test $$? -eq 1; } | while IFS=/ read -r _ crate _ file; do
 	$(CARGO) test -p "ascetic-ddd-$$crate" --all-features --test "$${file%.rs}" -- --ignored
+done
+{ grep -rlE '#\[ignore = "($(1))' crates/*/src || test $$? -eq 1; } | cut -d/ -f2 | sort -u | while read -r crate; do
+	$(CARGO) test -p "ascetic-ddd-$$crate" --all-features --lib -- --ignored
 done
 endef
 
-.PHONY: all stand check clippy doc test test-pg host-features test-vault test-kafka proofs traces fmt help
+.PHONY: all stand check clippy doc test test-pg host-features test-vault test-kafka proofs proofs-groups traces fmt help
 
 all: check clippy doc test test-pg host-features ## everything CI runs on a push: a PostgreSQL beside it
 
@@ -101,18 +112,44 @@ test-vault: ## the tests ignored for want of a Vault dev server, at ASCETIC_DDD_
 test-kafka: ## the tests ignored for want of Kafka, at ASCETIC_DDD_TEST_KAFKA_BROKERS
 	$(call run_ignored,$(NEEDS_KAFKA))
 
-proofs: ## the TLA+ models under verify/tla, model-checked with TLC (java, tla2tools.jar)
-	verify/tla/check.sh
+PROOFS ?=
 
-# The committed traces under verify/tla/traces fit the models whatever the
-# code does now: they were recorded once. This tier records the PostgreSQL
-# tests' runs afresh, into a directory of its own under the system's
-# temporary one, kept for reading when a run does not fit, and checks those.
-traces: ## the PostgreSQL tests run afresh with their recorder on, each run checked against its model (java, tla2tools.jar)
-	dir=$$(mktemp -d) && echo "recording into $$dir" && \
-	ASCETIC_DDD_TRACE_DIR=$$dir $(CARGO) test -p ascetic-ddd-outbox -p ascetic-ddd-inbox --all-features \
-	    --test pg --test bridge -- --include-ignored && \
-	verify/tla/check.sh --traces $$dir
+proofs: ## the TLA+ models under verify/tla, model-checked with TLC (java, tla2tools.jar); PROOFS='<group> ...' for some
+	verify/tla/check.sh $(PROOFS)
+
+proofs-groups: ## the groups `proofs` falls into, a name a line: a pipeline runs each as a job of its own
+	@verify/tla/check.sh --groups
+
+# The live tests that record a trace, run with the recorder on, then the
+# trace checks alone: a trace replayed but never recorded again checks the
+# code as it was (ADR-0041 decision 8).
+# - The traces the repository holds are the covered ones, and the list:
+#   each is replaced by its new recording, and one that no test recorded
+#   again fails the target, its test gone or renamed.
+# - A recording the repository does not hold is named, not checked: the
+#   models do not express what its test runs (verify/tla/README.md, Trace
+#   validation). Committing it, once it fits, covers it.
+# - The directory is absolute: cargo runs a test in its crate's directory,
+#   where a relative one would land.
+# - One test at a time: a sibling's open transaction would stand in a
+#   recorded snapshot, a step no trace records (measured: the bridge's trace
+#   then fits or not as the siblings happen to run).
+traces: ## the traces recorded again by the live tests at ASCETIC_DDD_TEST_PG_URL, then checked against the models
+	shopt -s nullglob
+	recorded=$$(mktemp -d)
+	trap 'rm -rf "$$recorded"' EXIT
+	ASCETIC_DDD_TRACE_DIR="$$recorded" $(CARGO) test -p ascetic-ddd-outbox -p ascetic-ddd-inbox \
+	  --all-features --test pg --test bridge -- --include-ignored --test-threads=1
+	gone=0
+	for kept in verify/tla/traces/*.jsonl; do
+	  if [ -f "$$recorded/$${kept##*/}" ]; then cp "$$recorded/$${kept##*/}" "$$kept"
+	  else echo "traces: $${kept##*/} is covered, and no test recorded it again" >&2; gone=1; fi
+	done
+	for made in "$$recorded"/*.jsonl; do
+	  [ -f "verify/tla/traces/$${made##*/}" ] || echo "traces: not covered: $${made##*/}"
+	done
+	[ "$$gone" -eq 0 ]
+	verify/tla/check.sh traces
 
 help: ## this list
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'

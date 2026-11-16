@@ -1,0 +1,61 @@
+# The TLA+ models under verify/tla, model-checked with TLC: `make proofs`,
+# one job per group of verify/tla/check.sh. The whole takes longer than a
+# hosted job may run (six hours), so the groups run side by side, each well
+# inside it (ADR-0041 decision 8). The groups are the script's own list,
+# read by the first job, so that a group added there runs here without an
+# edit of this file.
+#
+# On a push or a pull request that changes the models, weekly, and on
+# demand: the models read no code of the crates, so only a change under
+# verify/tla can change what they find; the week catches what no such change
+# brings, and a change to the code reaches the models through `traces`, in
+# ci.yml.
+name: Proofs
+
+on:
+  push:
+    branches: [main]
+    paths: ["verify/tla/**", ".github/workflows/proofs.yml", ".github/actions/tla2tools/**"]
+  pull_request:
+    branches: [main]
+    paths: ["verify/tla/**", ".github/workflows/proofs.yml", ".github/actions/tla2tools/**"]
+  schedule:
+    - cron: "41 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  groups:
+    name: the groups of check.sh
+    runs-on: ubuntu-24.04
+    outputs:
+      groups: ${{ steps.list.outputs.groups }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        run: |
+          groups=$(make proofs-groups | python3 -c 'import json, sys; print(json.dumps(sys.stdin.read().split()))')
+          test "$groups" != "[]"
+          echo "groups=$groups" >> "$GITHUB_OUTPUT"
+
+  proofs:
+    name: proofs, ${{ matrix.group }}
+    needs: groups
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        group: ${{ fromJSON(needs.groups.outputs.groups) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Fetch the pinned TLA+ tools
+        uses: ./.github/actions/tla2tools
+      - name: make proofs
+        run: make proofs PROOFS=${{ matrix.group }}

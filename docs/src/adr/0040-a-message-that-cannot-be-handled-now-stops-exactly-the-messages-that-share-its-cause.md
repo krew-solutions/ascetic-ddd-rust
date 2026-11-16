@@ -13,6 +13,13 @@ Proposed (2026-11-16). Built in the library:
 S3 is built with ADR-0039's slice 4. S4 and the host's adoption are owed,
 each with its executor (§ Executors, § Owed).
 
+Since 2026-11-16 the inbox's slots serve their Tenants in turn (ADR-0041),
+and a hold for a stage's outage holds its (slot, Tenant), not its slot.
+Decision 9's invariants are broken on this branch until the revision
+restores them, and S4 waits for it (§ Owed 6). ADR-0041's slice 2, the
+failure's scope, and its deferral move here: this ADR's revision decides
+them (§ Change Log).
+
 Decided under the library's gate:
 - a blind solver and a discriminator;
 - the synthesis refuted by two pairs of roles, each finding folded in
@@ -203,6 +210,11 @@ reports facts, and the inbox owns the policy (ADR-0005 d5).
      budget outcomes per hour ≤ slots.
    - Per-Tenant heads would otherwise probe the whole backlog during an
      outage, and park it all at once when the budget ran out.
+   - **Broken since 2026-11-16 on this branch** (§ Owed 6): ADR-0041's
+     rotation landed with the hold kept per row, so a hold holds a (slot,
+     Tenant) and both invariants count Tenants' heads, not slots. Restoring
+     them, or replacing them with bounds of the same strength, is the
+     revision's first decision; S4 waits for it.
 
 ## Consequences
 
@@ -358,6 +370,8 @@ S1d, built (`verify/tla`, `make proofs`, `make traces`):
     the operator's instances.
   - At most one probe per slot per wait is structural, since only a head
     is asked (`Asked`), and is written there rather than as an invariant.
+    Under ADR-0041's rotation a slot has a head per Tenant, so the code no
+    longer has this structure; the model still has it (§ Owed 6, 8).
     The k × budget stall is not a configuration: the quiet misread is its
     unbounded case.
 - Traces:
@@ -511,6 +525,115 @@ S4: slice B (decision 9), with the fat-Tenant change's owner.
    if this says so.
 4. **The previous release run against the migrated schema**, pinned as a
    renamed dev-dependency (to production, as 2).
+6. **The extent of a stage's hold under rotation** — the revision's first
+   decision, and S4 (the host's adoption) waits for it. ADR-0041 serves a
+   slot's Tenants in turn, and the hold is kept per row, so a hold holds its
+   (slot, Tenant) and each Tenant's head is asked again on its own clock.
+   Decision 9's invariants count Tenants' heads now, not slots.
+   - **What that buys:** the other Tenants of a slot go on beside an outage.
+     A Tenant's own rows of other channels in the slot do not: they wait
+     behind its head, which is its oldest row of every channel.
+   - **What it costs, found by the roles on 2026-11-16** (derived, not
+     measured):
+     - **A refuted budget parks a head per Tenant.** Past the budget, any
+       row of the channel processed within the cap (an operator's
+       `resolve`, a flap that lets a few heads through) refutes every head
+       asked in the next cap; each spends at each ask and parks at its
+       attempts. Before the rotation that was at most a slot's head each.
+       So also for a replica cut off from the stage alone: the healthy
+       replicas' processing refutes the heads it keeps holding, and they
+       park under the stage's cause, `past_budget` never told.
+     - **A recovery after an outage past its budget** brings every head due
+       within a cap; a flapping stage then parks the backlog's heads.
+     - **The walks.** With every head held, a slot walks its Tenants, K at a
+       time, in `Passed` dispatches that do not pause, at least once a
+       `max_dormancy`, and a head taken ends the round: about 4,000 walk
+       transactions a second at 128,000 heads and K = 32, each updating a
+       `_slots` row, beside 427 asks a second at a 300 s cap. Every
+       dispatch runs `expire_waiting` first, whose spare re-reads, each
+       time, every waiter past `max_wait` whose dependency holds.
+     - **The log.** Past the budget each held head logs an error at each
+       ask: about 427 lines a second at 128,000 heads.
+     - The dependency's own calls stay bounded by the stage's pacing
+       (ADR-0039 slice 4: a tenant backing off is answered without one).
+   - **Measurements** for the revision, on the host's drill:
+     - T Tenants held past the budget, the stage answering `Stage` to 20 %
+       of asks for 15 minutes after recovery: count `parked_cause =
+       'kms.unavailable'`;
+     - with every head held, the rate of `Passed`, and `n_tup_upd`,
+       `n_tup_hot_upd` and `n_dead_tup` of `<table>_slots` sampled over
+       ten minutes with one long transaction open;
+     - `EXPLAIN (ANALYZE, BUFFERS)` of `expire_waiting`'s statement with
+       10,000 waiters whose dependency holds.
+   - **The executor of today's extent:**
+     `under_rotation_a_stage_outage_holds_each_tenant_s_head_and_an_operator_parks_them_all`.
+7. **A head held for its stage's outage is not in `held_counts`.** The hold
+   ends `held_since`, the clock of a hold by the head's own failure
+   (ADR-0041 decision 5), so an outage's hold is never counted as a
+   back-off aged by a failure it superseded
+   (`a_head_held_for_its_stage_is_not_counted_as_its_own_back_off`). The
+   host sees the outage's holds by the observer's `held` and
+   `past_budget`, and by the log, not by a count from the table; and
+   `park_held` tells a count, not a row, so a gauge derived from `held`
+   cannot come down when it parks. A `Hold` of the stage's outage, counted
+   from the table, is owed with 6. So is a queue predicate in
+   `held_counts_sql`, which a release that leaves `held_since` on a row it
+   marks or parks would otherwise inflate (to production, as 2).
+8. **`InboxOutage.tla` holds a slot whole**, as the inbox did before
+   ADR-0041. The rotating extent is not modelled; the trace refinement of a
+   hold was already owed (§ Executors). Its group, `inbox-outage`, says so.
+9. **`park_held` under rotation** — owed with 6:
+   - **Its purpose.** It let a stalled slot go on. Under rotation the slot's
+     other Tenants go on without it, and a park lets only the parked head's
+     Tenant's later rows be asked; while the outage lasts they hold in turn,
+     their clocks fresh, so `past_budget` goes quiet for a budget. Its doc
+     says so; whether it keeps a use beyond a misread Tenant is the
+     revision's.
+   - **Partial, and told as a count.** A slot a dispatcher holds is passed
+     by (`SKIP LOCKED`), so with loops busy on a stage that times out a call
+     parks little, and 0 does not tell "none held" from "all passed by".
+   - **Out of order on recovery.** The later rows of each stream process
+     first once the stage is back, so every parked head is overtaken, and
+     `unpark_all` leaves it parked unless asked for the overtaken.
+   - **Its cost and its window.** One statement walks every Tenant's head
+     of every slot, the Tenant filter included, holding the slots it parks
+     in. Its rows are read under a snapshot older than its slot locks; a
+     row is parked only if it is still in the queue and still held when the
+     `UPDATE` reaches it, so a row a dispatcher marked meanwhile is left
+     (a guard, beside the `ctid` recheck, for a minor whose TID recheck the
+     roles could not vouch for). To measure: `EXPLAIN (ANALYZE, BUFFERS)`
+     at 64 slots × 2,000 Tenants all held with ≥ 1M processed rows, with and
+     without the Tenant filter; and, on the lowest supported minor, whether
+     the `UPDATE`'s recheck can park a row marked between the snapshot and
+     the lock.
+   - **The slot's sleep after an operator's verb has no executor of its
+     own.** A slot whose round found no head due sleeps up to
+     `max_dormancy`, and neither `park_held` nor `unpark_all` wakes it; the
+     tests wake it by hand. The cap in general has its executor (ADR-0041
+     E4: a row made due behind a sleeping slot's back); a sleep to the
+     earliest back-off without the cap would pass this ADR's tests, a
+     hold's back-off reaching the cap.
+10. **Found by the roles in this ADR's own code**, older than the rotation:
+    - **A hold left by a row that leaves the queue another way.**
+      `park_at` and `set_waiting_unless_processed` clear `held_since` but not
+      `unavailable_since` or `last_cause`, and `expire_waiting` neither. A
+      held row whose processed dependency was swept is set waiting, expires,
+      and is parked on the `expired` ground still "held": its own
+      dependents are then spared from expiry for ever, and `unpark_all`,
+      which takes the failure ground alone, cannot reach it.
+    - **The spare covers a held head only.** A row waiting for a row behind
+      a held head (s1@5 behind s1@4) is not spared, and expires, paging,
+      during a true outage; it heals at s1@5's mark.
+    - **`unpark_all` leaves `last_cause`** where decision 6 says the
+      re-armed row loses its cause; `unpark_at` clears it.
+    - **A row parked by its attempts re-arms with one try**, whatever
+      `tries`: `GREATEST(attempts, max − tries)` keeps it at `max`. Under
+      rotation such rows are a Tenant's heads by the thousand (6), and the
+      single unpark is the only way to give one its attempts afresh.
+    - **No bulk verb for the other grounds**: `expired` rows (a hole that
+      will never fill) and rows parked at once (after a release loosens a
+      bound) are re-armed one at a time. ADR-0041's `unpark_where` took any
+      ground; it was withdrawn for `unpark_all`.
 
 ## References
 
@@ -555,3 +678,65 @@ S4: slice B (decision 9), with the fat-Tenant change's owner.
 - 2026-11-16: S3 built with ADR-0039's slice 4: the opening end's verdicts
   come from its shell by evidence. The host's adoption adds
   `Sealing::over_paced`'s `Opening` to its list.
+- 2026-11-16: Rebased under ADR-0041's rotation, this branch carrying both.
+  - `park_held` read one head a slot, the slot's oldest. Under rotation a
+    slot has a head for each Tenant, and the others were left holding. It
+    now reads every Tenant's head, one probe of the Tenants' head index
+    each, and clears `held_since` as every park does. Its executor holds
+    four Tenants of one slot; the old statement put back fails it alone,
+    since this ADR's tests have one Tenant to a slot.
+  - Three tests assumed a slot served in arrival order across Tenants, or
+    a slot awake after a round that found no head due. Each now says the
+    verdict by the message, or wakes the slot whose clock it moved. No
+    behaviour changed for them.
+  - The release test renders ADR-0041's twin without the three columns
+    rather than a list of names; the twin gains them in the migration's
+    order.
+  - ADR-0041's `make traces` replaces this ADR's: it runs the tests one at
+    a time, and a sibling's open transaction no longer stands in a
+    recorded snapshot. `check.sh --traces` and `RECORDED_ONCE` are dropped;
+    the run that file named had no test recording it, and ADR-0041 had
+    already withdrawn it. The outage model's checks are the group
+    `inbox-outage`.
+  - ADR-0041's `unpark_where` is withdrawn for `unpark_all`.
+  - § Owed 6–10: the extent of a hold under rotation, the holds' count,
+    the model's extent, `park_held` under rotation, and what the roles found
+    in this ADR's own code. ADR-0041's slice 2 and its deferral move here.
+    The revision's round takes as its requirements the failure scenarios of
+    ADR-0041's two refuted rounds, of the comparison that chose this
+    branch, and of § Owed 6–10.
+  - **Refuted by three roles before the commit** (distributed systems with
+    the database, operability with evolution, verifiability; read-only, on
+    the merged tree). What they found against the merge itself, mended:
+    - Decision 9's invariants, broken by a hold kept per row under
+      rotation, were not said to be: decision 9, S1d's executor and § Owed 6
+      now say so, with the costs the roles derived, their measurements, and
+      S4 waiting.
+    - `unpark_all` refused any window past the channel's retention, so a
+      park older than it had no way back in bulk once `unpark_where` was
+      withdrawn. Asked for the overtaken too, it needs no overtaker and now
+      takes any window.
+    - A hold for the stage's outage kept a `held_since` an earlier failure
+      had set, so `held_counts` paged on it as a back-off with the age of a
+      failure the outage superseded. The hold now ends it.
+    - `park_held`'s `UPDATE` parks a row only if it is still in the queue
+      and still held; its doc says what it does under rotation.
+    - The hold's log lines and docs said it held its slot. They now say it
+      holds its Tenant's rows of its slot.
+    - The executor of `park_held` parked no Tenant above the lowest with a
+      processed row ahead of its head, nor a row carrying `held_since`; it
+      now does both.
+    - `trace2tla.py` still refused a dispatch that passed (the branch meant
+      to map it was unreachable), and took a run of no step as fitting:
+      `inbox-identity_past`, committed here, fit with none, and fails the
+      rotating model's `TypeOK` on an empty set of messages. A pass is now
+      mapped, a run of no step refused, and that run no longer covered.
+    - No configuration enabled `FailPermanent` beside the rotation.
+      `InboxRotationPermanent.cfg` does.
+  - **Mutations, each red:** the recursive arm of `park_held` without the
+    queue's predicate; `park_held` keeping `held_since`; the hold keeping
+    `held_since`; the retention refused whatever `overtaken`. In the model,
+    under `InboxRotationPermanent.cfg`: `FailPermanent` resetting the cursor
+    (`BoundedOvertaking`), dropped from fairness (liveness), and `Commit`
+    without its `Permanent` guard (`ArrivalOrder`).
+

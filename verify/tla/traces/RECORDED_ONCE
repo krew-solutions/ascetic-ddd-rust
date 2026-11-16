@@ -1,9 +1,0 @@
-# Runs committed under traces/ that their tests no longer record, each with
-# its reason. check.sh checks the committed run; `make traces` does not look
-# for a fresh one.
-#
-# The test writes its first outbox row around the producer, as a producer
-# before ADR-0038 would have: the outbox now refuses such a message at the
-# producer's commit, and no recorder sees a row written around it. The run
-# committed before that change still fits the bridge's model.
-bridge-outbox-set-aside.jsonl

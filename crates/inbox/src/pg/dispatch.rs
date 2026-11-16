@@ -8,7 +8,7 @@ use ascetic_ddd_session::{PgAccess, Session, SessionError, SessionPool};
 use futures::future::join_all;
 use tokio::sync::watch;
 
-use super::{Ground, Loops, Outcome, Parked, ParkedCount, PgInbox};
+use super::{Ground, HeldCount, Hold, Loops, Outcome, Parked, ParkedCount, PgInbox};
 use crate::error::{Error, Failure};
 use crate::intake;
 use crate::message::InboxMessage;
@@ -120,17 +120,23 @@ where
                         let located = self.locate_head(&tx, slot).await.map_err(in_slot)?;
                         let snapshot = located.snapshot;
                         let (received_position, place) = match located.row {
-                            Some((position, place, false)) => (position, place),
-                            // the previous holder changed the head after the
-                            // take chose the slot: nothing due in it now
-                            Some((_, _, true)) | None => {
+                            Some(row) => row,
+                            // the walk found no due head among the Tenants it
+                            // examined: it passed them, or ended its round and
+                            // the slot sleeps, or the queue was empty by now
+                            None => {
                                 self.observer.on_fetched(&Fetched {
                                     slot: Some(slot),
                                     slots: taken.slots,
                                     message: None,
                                     snapshot: &snapshot,
                                 });
-                                return Ok((Some(slot), Outcome::Nothing));
+                                let outcome = if located.passed {
+                                    Outcome::Passed
+                                } else {
+                                    Outcome::Nothing
+                                };
+                                return Ok((Some(slot), outcome));
                             }
                         };
                         // The row's own failure, parked at once in this
@@ -301,11 +307,11 @@ where
                                     );
                                 } else if held && recorded.past_budget {
                                     log::error!(
-                                        "inbox: the message of {place} holds its slot past its budget, its stage unavailable ({cause}), next in {retry_after:?}"
+                                        "inbox: the message of {place} holds its Tenant's rows of its slot past its budget, its stage unavailable ({cause}), next in {retry_after:?}"
                                     );
                                 } else if held {
                                     log::warn!(
-                                        "inbox: the message of {place} holds its slot, its stage unavailable ({cause}), next in {retry_after:?}"
+                                        "inbox: the message of {place} holds its Tenant's rows of its slot, its stage unavailable ({cause}), next in {retry_after:?}"
                                     );
                                 } else {
                                     log::warn!(
@@ -388,7 +394,8 @@ where
                             Outcome::Processed
                             | Outcome::Failed { .. }
                             | Outcome::SetAside
-                            | Outcome::Parked,
+                            | Outcome::Parked
+                            | Outcome::Passed,
                         ) => {
                             passing = 0;
                             continue;
@@ -480,6 +487,44 @@ where
                         ))
                     })?,
                     open: u64::try_from(row.try_get::<_, i64>(2)?).unwrap_or_default(),
+                    oldest: row.try_get(3)?,
+                })
+            })
+            .collect()
+    }
+
+    /// The heads held by their own failure, by channel and cause, with how
+    /// many Tenants they are of and the oldest hold (ADR-0041 decision 5).
+    /// Read from the table, as [`Self::parked_counts`] reads the parked rows,
+    /// in a transaction of its own bounded by `within`.
+    ///
+    /// # Errors
+    /// [`Error`] when the database cannot be read within `within`.
+    pub async fn held_counts(&self, within: Duration) -> Result<Vec<HeldCount>, Error> {
+        let sql = super::store::held_counts_sql(self.table.as_str());
+        let millis = i32::try_from(within.as_millis()).unwrap_or(i32::MAX).max(1);
+        let rows = self
+            .pool
+            .session(async |session: P::Session| {
+                session
+                    .atomic(async |tx| {
+                        tx.connection()
+                            .batch_execute(&format!("SET LOCAL statement_timeout = {millis}"))
+                            .await?;
+                        Ok::<_, Error>(tx.connection().query(&sql, &[]).await?)
+                    })
+                    .await
+            })
+            .await?;
+        rows.iter()
+            .map(|row| {
+                let cause: String = row.try_get(1)?;
+                Ok(HeldCount {
+                    channel: row.try_get(0)?,
+                    cause: Hold::parse(&cause).ok_or_else(|| {
+                        Error::Malformed(format!("the hold `{cause}` is not the library's"))
+                    })?,
+                    tenants: u64::try_from(row.try_get::<_, i64>(2)?).unwrap_or_default(),
                     oldest: row.try_get(3)?,
                 })
             })

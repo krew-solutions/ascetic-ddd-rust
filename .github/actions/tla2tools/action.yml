@@ -1,0 +1,21 @@
+# The TLA+ tools verify/tla/check.sh is run with, pinned by release and by
+# digest, cached, and named to it in TLA2TOOLS. v1.7.4 is TLC 2.19, the
+# version every result recorded in verify/tla/README.md came from.
+name: TLA+ tools
+description: tla2tools.jar v1.7.4, checked against its digest, its path in TLA2TOOLS
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache@v4
+      with:
+        path: ~/.cache/tla2tools/v1.7.4
+        key: tla2tools-v1.7.4
+    - shell: bash
+      run: |
+        jar="$HOME/.cache/tla2tools/v1.7.4/tla2tools.jar"
+        if [ ! -f "$jar" ]; then
+          mkdir -p "$(dirname "$jar")"
+          curl -fsSL -o "$jar" https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+        fi
+        echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  $jar" | sha256sum -c -
+        echo "TLA2TOOLS=$jar" >> "$GITHUB_ENV"

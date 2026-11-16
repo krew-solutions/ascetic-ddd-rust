@@ -46,6 +46,159 @@ pub(super) fn parked_counts_sql(table: &str) -> String {
          WHERE parked_at IS NOT NULL GROUP BY 1, 2 ORDER BY 1, 2"
     )
 }
+/// The heads held by their own failure, by channel and cause, with how
+/// many Tenants they are of and the oldest hold: one statement over the held
+/// index's predicate, so that its work is the held rows', not the table's
+/// (ADR-0041 decision 5). No Tenant's identifier leaves the database.
+pub(super) fn held_counts_sql(table: &str) -> String {
+    format!(
+        "SELECT {CHANNEL_OF_ROW}, 'backoff', count(DISTINCT tenant_id), min(held_since)::text \
+         FROM {table} WHERE held_since IS NOT NULL GROUP BY 1, 2 ORDER BY 1, 2"
+    )
+}
+/// The take's statement over `table` ([`PgInbox::take`]): a function, so
+/// that a test explains the library's own statement. Its look at the whole
+/// queue is ordered as `__head_idx` is: an `EXISTS` the planner takes for a
+/// scan of the table, the queue's rows spread evenly in its estimate, and
+/// they lie past the processed history — 35 ms on 100,000 rows against 0.1
+/// by the index (E8). Each slot's look is one probe of the same index, its
+/// newest queue row, in a lateral subquery whose `LIMIT` keeps the planner
+/// from pulling it up: an `EXISTS` it pulls up into a semi-join that reads
+/// the whole queue — every row of it, 2,250 at 64 slots in E8 — where one
+/// probe a slot reads one. That row answers both questions of the slot:
+/// whether it has a queue row, and whether one arrived after its round
+/// ended: one reference to the table fewer than a probe for each. The body of
+/// `{table}__take()` ([`take_body`]).
+pub(super) fn take_sql(table: &str) -> String {
+    format!(
+        r#"
+            WITH taken AS (
+                SELECT s.slot FROM {table}_slots s
+                CROSS JOIN LATERAL (
+                    SELECT r.received_position AS newest FROM {table} r
+                    WHERE r.slot = s.slot AND {QUEUE}
+                    ORDER BY r.received_position DESC LIMIT 1
+                ) q
+                WHERE (SELECT true FROM {table} q WHERE {QUEUE}
+                       ORDER BY q.slot, q.received_position LIMIT 1) IS TRUE
+                  AND (s.round_from IS NOT NULL
+                       OR s.dormant_until IS NULL
+                       OR s.dormant_until <= CURRENT_TIMESTAMP
+                       OR q.newest > s.dormant_after)
+                ORDER BY s.served_at
+                LIMIT 1
+                FOR UPDATE OF s SKIP LOCKED
+            )
+            SELECT t.slot, pg_current_snapshot()::text, (SELECT slots FROM {table}_meta)
+            FROM (SELECT 1) AS one
+            LEFT JOIN taken t ON true
+            "#
+    )
+}
+
+/// The walk's statement over `table` ([`PgInbox::locate_head`]), its
+/// parameters the slot, the walk's bound and the longest sleep in seconds.
+///
+/// The body of `{table}__walk` ([`walk_body`]), planned once a connection
+/// and again at each change of its tables' definition or statistics. Sent as
+/// text it was parsed and planned at every call, its references to the inbox
+/// table most of the planning (ADR-0041 decision 6); it keeps them few, which
+/// also cut its execution, 0.87 ms to 0.60 on M9's shape.
+/// - The walk starts from a step of its own at the cursor, `n = 0`, which
+///   names no head, so that the first step is any other: one recursive
+///   term, not a first term repeating its probes.
+/// - A step looks twice: at the next Tenant after the one it is at, kept
+///   in the second phase only while it is not past the cursor — a probe
+///   whose `LIMIT` stands before that test reads one index entry, where a
+///   bound inside it would read on past the cursor; and, in the first
+///   phase, at the lowest Tenant, the walk wrapping round.
+/// - The verdict reads the locked head by a join, not by a subquery for
+///   each of its uses: the planner writes the verdict into the `UPDATE`,
+///   and a subquery there is planned at every place it lands.
+/// - The slot's newest queue row is a probe of `__head_idx`, not `max()`,
+///   which the planner plans twice, as an aggregate and as that probe.
+pub(super) fn walk_sql(table: &str) -> String {
+    format!(
+        r#"
+            WITH RECURSIVE here AS (
+                SELECT coalesce(last_tenant, '') AS c, round_from, dormant_until, dormant_after
+                FROM {table}_slots WHERE slot = $1
+            ), walk (n, phase, tenant_id, place, due, retry_at) AS (
+                SELECT 0, 0, c, NULL::tid, false, NULL::timestamptz FROM here
+                UNION ALL
+                SELECT w.n + 1, h.phase, h.tenant_id, h.place, h.due, h.retry_at
+                FROM walk w CROSS JOIN here CROSS JOIN LATERAL (
+                    SELECT * FROM (
+                        (SELECT w.phase AS phase, after.* FROM (
+                             SELECT {WALKED} FROM {table} r
+                             WHERE r.slot = $1 AND {QUEUE} AND r.tenant_id > w.tenant_id
+                             ORDER BY r.tenant_id, r.received_position LIMIT 1) after
+                         WHERE w.phase = 0 OR after.tenant_id <= here.c)
+                        UNION ALL
+                        (SELECT 1, {WALKED} FROM {table} r
+                         WHERE w.phase = 0 AND r.slot = $1 AND {QUEUE} AND r.tenant_id <= here.c
+                         ORDER BY r.tenant_id, r.received_position LIMIT 1)
+                    ) next ORDER BY phase LIMIT 1
+                ) h
+                WHERE w.n < $2 AND NOT w.due
+            ), last AS (
+                SELECT * FROM walk WHERE n > 0 AND n = (SELECT max(n) FROM walk)
+            ), head AS (
+                SELECT r.received_position, r.ctid::text AS place, r.tenant_id
+                FROM {table} r JOIN last ON r.ctid = last.place
+                WHERE last.due AND {QUEUE}
+                FOR UPDATE OF r
+            ), verdict AS (
+                SELECT h.tenant_id IS NOT NULL AS taken, h.tenant_id AS taken_tenant,
+                       l.tenant_id AS u, l.phase AS u_phase,
+                       coalesce(l.due, false) AND h.tenant_id IS NULL AS vanished,
+                       seen.n < $2 AND NOT coalesce(l.due, false) AS exhausted,
+                       seen.earliest, here.c, here.round_from, here.dormant_until, here.dormant_after,
+                       here.round_from IS NULL AS starts
+                FROM here
+                CROSS JOIN (SELECT max(n) AS n, min(retry_at) FILTER (WHERE NOT due) AS earliest
+                            FROM walk) seen
+                LEFT JOIN last l ON true
+                LEFT JOIN head h ON true
+            ), decided AS (
+                SELECT v.*,
+                       CASE WHEN v.starts THEN v.c ELSE v.round_from END AS r_from,
+                       v.exhausted OR (NOT v.starts AND
+                           ROW(CASE WHEN v.round_from > v.c THEN 0 ELSE 1 END, v.round_from)
+                               <= ROW(v.u_phase, v.u)) AS ends,
+                       CASE WHEN v.starts THEN v.earliest
+                            ELSE least(v.dormant_until, v.earliest) END AS round_earliest,
+                       CASE WHEN v.starts
+                            THEN (SELECT q.received_position FROM {table} q
+                                  WHERE q.slot = $1 AND {QUEUE}
+                                  ORDER BY q.received_position DESC LIMIT 1)
+                            ELSE v.dormant_after END AS round_after
+                FROM verdict v
+            ), updated AS (
+                UPDATE {table}_slots s SET
+                    served_at = CURRENT_TIMESTAMP,
+                    last_tenant = CASE WHEN d.taken THEN d.taken_tenant
+                                       WHEN d.u IS NOT NULL AND NOT d.vanished THEN d.u
+                                       ELSE s.last_tenant END,
+                    round_from = CASE WHEN d.taken OR d.u IS NULL OR d.vanished OR d.ends THEN NULL
+                                      ELSE d.r_from END,
+                    dormant_until = CASE WHEN d.taken OR d.u IS NULL OR d.vanished THEN NULL
+                                         WHEN d.ends THEN least(d.round_earliest,
+                                             CURRENT_TIMESTAMP + make_interval(secs => $3))
+                                         ELSE d.round_earliest END,
+                    dormant_after = CASE WHEN d.taken OR d.u IS NULL OR d.vanished THEN NULL
+                                         ELSE d.round_after END
+                FROM decided d
+                WHERE s.slot = $1
+                RETURNING CASE WHEN d.taken THEN 'taken'
+                               WHEN d.u IS NULL OR d.vanished OR d.ends THEN 'nothing'
+                               ELSE 'passed' END AS outcome
+            )
+            SELECT h.received_position, h.place, u.outcome, pg_current_snapshot()::text
+            FROM updated u LEFT JOIN head h ON true
+            "#
+    )
+}
 /// How many rows one statement of the expiry parks.
 const EXPIRY_BATCH: i64 = 100;
 /// The most characters of a failure's text a row keeps (ADR-0037 decision
@@ -59,11 +212,25 @@ const IDENTITY_OF_ROW: &str = "jsonb_build_object('tenant_id', tenant_id, 'strea
 pub(super) const QUEUE: &str =
     "processed_position IS NULL AND parked_at IS NULL AND waiting_for IS NULL";
 
-/// The inbox's sequence, tables and indexes as created, `{table}`,
-/// `{sequence}`, `{slots}` and `{key}` standing for their names, the cut and
-/// the partition key's expression, `{key_text}` for that expression as a
-/// literal, and `{queue}` for [`QUEUE`]: the baseline of its component, its
-/// checksum the template's with the queue written out.
+/// The inbox's sequence, tables, indexes and functions as created,
+/// `{table}`, `{sequence}`, `{slots}` and `{key}` standing for their names,
+/// the cut and the partition key's expression, `{key_text}` for that
+/// expression as a literal, `{queue}` for [`QUEUE`], and `{take}` and
+/// `{walk}` for the functions' bodies: the baseline of its component, its
+/// checksum the template's with the queue and the bodies written out
+/// ([`baseline_template`]), so that an edit of the take's or the walk's
+/// statement is an edit of the baseline.
+///
+/// The take and the walk are functions the dispatch calls, not statements
+/// it sends (ADR-0041 decision 6): a statement sent as text is parsed and
+/// planned at every call, which cost the walk 3.3 ms against its 0.4 of
+/// execution; a function's statement is parsed once a connection and its
+/// plan kept until its tables' definition or statistics change. The walk's plan is forced generic, so that it is planned once
+/// whatever the session asks — the specification crate's queries need custom
+/// plans (ADR-0027) — and its generic plan is the one E8 holds to the
+/// indexes. The take's statement has no parameter, and a plan without one
+/// is generic already. `CREATE`, not `CREATE OR REPLACE`: a function left
+/// behind by a teardown that missed it fails the next baseline.
 const BASELINE: &str = r#"
     CREATE SEQUENCE IF NOT EXISTS {sequence};
     CREATE TABLE IF NOT EXISTS {table} (
@@ -83,10 +250,17 @@ const BASELINE: &str = r#"
         waiting_for jsonb NULL,
         waiting_since timestamptz NULL,
         slot smallint GENERATED ALWAYS AS ((hashtext({key}) & 2147483647) % {slots}) STORED,
+        received_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+        held_since timestamptz NULL,
         CONSTRAINT {table}_pk PRIMARY KEY (tenant_id, stream_type, stream_id, stream_position)
     );
     CREATE INDEX IF NOT EXISTS {table}__head_idx
         ON {table} (slot, received_position) WHERE {queue};
+    CREATE INDEX IF NOT EXISTS {table}__tenant_head_idx
+        ON {table} (slot, tenant_id, received_position) WHERE {queue};
+    CREATE INDEX IF NOT EXISTS {table}__held_idx
+        ON {table} ((split_part(uri, '/', 1) || '//' || split_part(uri, '/', 3)), held_since)
+        INCLUDE (tenant_id) WHERE held_since IS NOT NULL;
     CREATE INDEX IF NOT EXISTS {table}__waiting_idx
         ON {table} (waiting_for) WHERE waiting_for IS NOT NULL;
     CREATE INDEX IF NOT EXISTS {table}__waiting_since_idx
@@ -98,22 +272,99 @@ const BASELINE: &str = r#"
         WHERE NOT EXISTS (SELECT 1 FROM {table}_meta);
     CREATE TABLE IF NOT EXISTS {table}_slots (
         slot smallint PRIMARY KEY,
-        served_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
+        served_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_tenant varchar(128) NULL,
+        round_from varchar(128) NULL,
+        dormant_until timestamptz NULL,
+        dormant_after bigint NULL
     );
     INSERT INTO {table}_slots (slot) SELECT s FROM generate_series(0, {slots} - 1) AS s
         ON CONFLICT DO NOTHING;
+    CREATE FUNCTION {table}__take(
+        OUT taken_slot smallint, OUT take_snapshot text, OUT slot_count integer)
+        LANGUAGE plpgsql VOLATILE
+        AS $fn${take}$fn$;
+    CREATE FUNCTION {table}__walk(smallint, integer, double precision,
+        OUT head_position bigint, OUT head_place text, OUT walk_outcome text,
+        OUT walk_snapshot text)
+        LANGUAGE plpgsql VOLATILE SET plan_cache_mode = force_generic_plan
+        AS $fn${walk}$fn$;
 "#;
 
-/// What taking a slot returned: the slot whose row the statement locked, or
-/// none when no slot had a due head; the statement's snapshot, read in the
-/// same statement because under `READ COMMITTED` every statement takes a
+/// The baseline with the queue and the functions' bodies written out,
+/// `{table}` and the cut's placeholders left: what its checksum is over.
+fn baseline_template() -> String {
+    BASELINE
+        .replace("{queue}", QUEUE)
+        .replace("{take}", &take_body("{table}"))
+        .replace("{walk}", &walk_body("{table}"))
+}
+
+/// The body of `{table}__take`: the take's statement, its one row into the
+/// function's columns. `use_column`, so that a name the statement shares with
+/// a column of the function means what it means in the statement alone,
+/// which E8 explains; `STRICT`, so that a statement that returned no row
+/// fails, as the statement sent alone failed `query_one`.
+pub(super) fn take_body(table: &str) -> String {
+    format!(
+        "\n    #variable_conflict use_column\n    BEGIN\n{}\n    INTO STRICT taken_slot, take_snapshot, \
+         slot_count;\n    END\n    ",
+        take_sql(table).trim_end()
+    )
+}
+
+/// The body of `{table}__walk`, as [`take_body`] is the take's: `$1`–`$3`
+/// are the function's own arguments.
+pub(super) fn walk_body(table: &str) -> String {
+    format!(
+        "\n    #variable_conflict use_column\n    BEGIN\n{}\n    INTO STRICT head_position, head_place, \
+         walk_outcome, walk_snapshot;\n    END\n    ",
+        walk_sql(table).trim_end()
+    )
+}
+
+/// A function the dispatch calls, as the start check requires it: its name
+/// after the table's; its arguments, in and out, as the catalogue holds them
+/// — their types, modes and names, as array literals — not as the server
+/// renders them, a rendering that `quote_all_identifiers` changes (ADR-0037's
+/// lesson); and the setting it carries. Written here, not read from
+/// [`BASELINE`], so that the baseline cannot drop what the check requires.
+struct Called {
+    suffix: &'static str,
+    identity: &'static str,
+    types: &'static str,
+    modes: &'static str,
+    names: &'static str,
+    setting: Option<&'static str>,
+}
+
+/// `{table}__take()`.
+const TAKE_FUNCTION: Called = Called {
+    suffix: "__take",
+    identity: "()",
+    types: "{smallint,text,integer}",
+    modes: "{o,o,o}",
+    names: "{taken_slot,take_snapshot,slot_count}",
+    setting: None,
+};
+
+/// `{table}__walk(slot, walk, max_dormancy)`.
+const WALK_FUNCTION: Called = Called {
+    suffix: "__walk",
+    identity: "(smallint, integer, double precision)",
+    types: "{smallint,integer,\"double precision\",bigint,text,text,text}",
+    modes: "{i,i,i,o,o,o,o}",
+    names: "{\"\",\"\",\"\",head_position,head_place,walk_outcome,walk_snapshot}",
+    setting: Some("plan_cache_mode=force_generic_plan"),
+};
+
 /// What a failure did to its row.
 pub(super) struct Recorded {
     /// Failed attempts so far, this one included when it spent one.
     pub(super) attempts: u32,
     /// Whether the row is now parked.
     pub(super) parked: bool,
-    /// Whether it holds its slot for its stage's outage.
+    /// Whether it holds for its stage's outage.
     pub(super) held: bool,
     /// Whether it has held past its budget.
     pub(super) past_budget: bool,
@@ -121,22 +372,33 @@ pub(super) struct Recorded {
     pub(super) retry_after: Duration,
 }
 
-/// snapshot of its own; and how many slots the table is cut into.
+/// What taking a slot returned: the slot whose row the statement locked, or
+/// none when no slot had a queue row and was awake; the statement's
+/// snapshot, read in the same statement because under `READ COMMITTED` every
+/// statement takes a snapshot of its own; and how many slots the table is
+/// cut into.
 pub(super) struct Taken {
     pub(super) slot: Option<u32>,
     pub(super) snapshot: Snapshot,
     pub(super) slots: u32,
 }
 
-/// What one look at the head of a held slot returned: the row, with whether
-/// it still waits for its backoff, or no row; and the statement's snapshot.
+/// What one walk of a held slot returned: the due head it took, by its
+/// order of arrival and its place in the table (`ctid`); or none, and then
+/// whether the walk only passed the Tenants it examined, the round going on,
+/// rather than ending the round or finding no queue row; and the statement's
+/// snapshot.
 pub(super) struct Located {
-    /// The head's order of arrival, its place in the table (`ctid`), and
-    /// whether it still waits for its backoff; none when the slot's queue
-    /// is empty.
-    pub(super) row: Option<(i64, String, bool)>,
+    pub(super) row: Option<(i64, String)>,
+    pub(super) passed: bool,
     pub(super) snapshot: Snapshot,
 }
+
+/// One head of the walk: its Tenant, its place, whether it is due and when
+/// its backoff ends. `r` is the queue row read.
+const WALKED: &str = "r.tenant_id, r.ctid AS place, \
+     (r.next_attempt_at IS NULL OR r.next_attempt_at <= CURRENT_TIMESTAMP) AS due, \
+     r.next_attempt_at AS retry_at";
 
 /// The mark's time, and an index over it by channel — the destination
 /// without its key — for the processed rows alone, which the sweep walks
@@ -156,8 +418,8 @@ const UNREADABLE_AT: &str = r#"
     ALTER TABLE {table} ADD COLUMN unreadable_at timestamptz NULL;
 "#;
 
-/// Why a row failed, why it is parked, and since when it holds its slot
-/// for its stage's outage (ADR-0040 decisions 2, 4 and 6): a cause is a
+/// Why a row failed, why it is parked, and since when it holds for its
+/// stage's outage (ADR-0040 decisions 2, 4 and 6): a cause is a
 /// name of at most 64 characters, never a message's text. Nullable, without
 /// a default, as every column the library adds.
 const CAUSES: &str = r#"
@@ -246,8 +508,8 @@ where
     /// dispatcher locks to hold the slot.
     pub fn component(&self) -> Component {
         let key = self.partition.sql_expression();
-        let sql = BASELINE
-            .replace("{queue}", QUEUE)
+        let template = baseline_template();
+        let sql = template
             .replace("{table}", self.table.as_str())
             .replace("{sequence}", self.sequence.as_str())
             .replace("{slots}", &self.slots.to_string())
@@ -256,8 +518,7 @@ where
         Component::new(
             format!("inbox:{}", self.table),
             vec![
-                Migration::new("20261027T000000Z_baseline", sql)
-                    .checked_over(&BASELINE.replace("{queue}", QUEUE)),
+                Migration::new("20261027T000000Z_baseline", sql).checked_over(&template),
                 Migration::new(
                     "20261104T000000Z_processed_at",
                     PROCESSED_AT.replace("{table}", self.table.as_str()),
@@ -292,17 +553,28 @@ where
         .unwrap_or_else(|_| unreachable!("six migrations with ids, under a name"))
     }
 
+    /// [`INBOX_TWIN`] for this inbox's sequence, slots and key.
+    pub(super) fn inbox_twin(&self) -> String {
+        INBOX_TWIN
+            .replace("{sequence}", self.sequence.as_str())
+            .replace("{slots}", &self.slots.to_string())
+            .replace("{key}", self.partition.sql_expression())
+    }
+
     /// Brings the inbox's tables up to its migrations — a read of the
     /// ledger when they are current, so that a process starts beside live
     /// traffic without locking them — and refuses to go on when the table
     /// is cut into another number of slots or by another key: that is a
-    /// migration, not a restart.
+    /// migration, not a restart; when the tables hold what the library did
+    /// not make (ADR-0037 decision 5); or when a function the dispatch calls
+    /// is not as the library makes it (ADR-0041 decision 6).
     pub async fn migrate(&self) -> Result<Applied, Error> {
         let applied = migrate(&self.pool, &self.component(), &MigrationOptions::default())
             .await
             .map_err(Error::Migration)?;
         let (table, slots) = (&self.table, self.slots);
         let key = self.partition.sql_expression();
+        let twins = [self.inbox_twin(), REJECTS_TWIN.to_owned()];
         self.pool
             .session(async |session: P::Session| {
                 let pinned = session
@@ -317,16 +589,25 @@ where
                     )));
                 }
                 refuse_a_page_the_bounds_do_not_fit(&session).await?;
-                refuse_what_the_intake_cannot_read(&session, table.as_str()).await
+                refuse_a_function_the_library_did_not_make(&session, table.as_str()).await?;
+                // The twins live for one transaction, and are dropped at its end.
+                session
+                    .atomic(async |tx| {
+                        refuse_what_the_intake_cannot_read(&tx, table.as_str(), &twins).await
+                    })
+                    .await
             })
             .await?;
         Ok(applied)
     }
 
-    /// Drops the inbox's tables and its sequence and forgets them in the
-    /// ledger: for an inbox that lives as long as a test.
+    /// Drops the inbox's tables, its sequence and its functions and forgets
+    /// them in the ledger: for an inbox that lives as long as a test. A
+    /// function goes by its own statement: one written in PL/pgSQL depends
+    /// on no table it reads, and outlives them.
     pub async fn teardown(&self) -> Result<(), Error> {
         let (table, sequence) = (&self.table, &self.sequence);
+        let (take, walk) = (&TAKE_FUNCTION, &WALK_FUNCTION);
         self.pool
             .session(async |session: P::Session| {
                 session
@@ -334,7 +615,9 @@ where
                     .batch_execute(&format!(
                         "DROP TABLE IF EXISTS {table}; DROP SEQUENCE IF EXISTS {sequence}; \
                          DROP TABLE IF EXISTS {table}_meta; DROP TABLE IF EXISTS {table}_slots; \
-                         DROP TABLE IF EXISTS {table}_rejects;"
+                         DROP TABLE IF EXISTS {table}_rejects; \
+                         DROP FUNCTION IF EXISTS {table}{}{}; DROP FUNCTION IF EXISTS {table}{}{};",
+                        take.suffix, take.identity, walk.suffix, walk.identity
                     ))
                     .await?;
                 Ok::<_, Error>(())
@@ -345,39 +628,28 @@ where
             .map_err(Error::Migration)
     }
 
-    /// Takes a slot: the one least recently served among those whose head —
-    /// the oldest row of the queue in the slot — is due, locking its row in
-    /// `<table>_slots` for the length of the transaction, `FOR UPDATE SKIP
-    /// LOCKED`, so that a slot another dispatcher holds is passed by. A slot
-    /// whose head waits for its backoff is not taken: the head holds the
-    /// slot, and the others go on.
+    /// Takes a slot: the one least recently served among those with a queue
+    /// row and awake, locking its row in `<table>_slots` for the length of the
+    /// transaction, `FOR UPDATE SKIP LOCKED`, so that a slot another
+    /// dispatcher holds is passed by. A slot is awake while a round of walks
+    /// goes on in it, when it never slept or its sleep ran out, and when a
+    /// row arrived after its round began (ADR-0041 decision 2): the last is
+    /// one descent of `__head_idx`. One look at the queue first, so that an
+    /// idle inbox is one probe. Which head is due is the walk's matter, in
+    /// [`Self::locate_head`], not this statement's.
     ///
-    /// The head itself is located by [`Self::locate_head`], a statement of its own:
-    /// a statement's snapshot predates the lock it takes, and the previous
-    /// holder of the slot may commit between the two — a head it processed
-    /// then fails the re-check `FOR UPDATE` makes on the latest version, and
-    /// the slot comes back without a head, or with the wrong one. The head
-    /// read after the lock, under a fresh snapshot, is the head.
+    /// The head is located by a statement of its own: a statement's snapshot
+    /// predates the lock it takes, and the previous holder of the slot may
+    /// commit between the two. The walk read after the lock, under a fresh
+    /// snapshot, sees what that holder committed.
+    ///
+    /// Called as `{table}__take()`, whose body is [`take_sql`]: a call of its
+    /// own, so that the dispatch knows the slot it holds before it walks it,
+    /// and a failure of the walk is the slot's (`Dispatched::slot`).
     pub(super) async fn take(&self, session: &P::Session) -> Result<Taken, Error> {
         let sql = format!(
-            r#"
-            WITH taken AS (
-                SELECT s.slot FROM {table}_slots s
-                WHERE (SELECT r.next_attempt_at IS NULL OR r.next_attempt_at <= CURRENT_TIMESTAMP
-                       FROM {table} r
-                       WHERE r.slot = s.slot AND {QUEUE}
-                       ORDER BY r.received_position LIMIT 1) IS TRUE
-                ORDER BY s.served_at
-                LIMIT 1
-                FOR UPDATE OF s SKIP LOCKED
-            ), touched AS (
-                UPDATE {table}_slots SET served_at = CURRENT_TIMESTAMP WHERE slot IN (SELECT slot FROM taken)
-            )
-            SELECT t.slot, pg_current_snapshot()::text, (SELECT slots FROM {table}_meta)
-            FROM (SELECT 1) AS one
-            LEFT JOIN taken t ON true
-            "#,
-            table = self.table,
+            "SELECT * FROM {}{}{}",
+            self.table, TAKE_FUNCTION.suffix, TAKE_FUNCTION.identity
         );
         let row = session.connection().query_one(&sql, &[]).await?;
         Ok(Taken {
@@ -387,44 +659,62 @@ where
         })
     }
 
-    /// The head of a slot the dispatcher holds, located: the oldest row of
-    /// its queue, locked, by its order of arrival and its place, with
-    /// whether it still waits for its backoff, and the statement's
-    /// snapshot; no row when the slot's queue is empty. Read after the slot
-    /// was taken, so that what its previous holder committed is in view.
-    /// None of the row's values is read here (ADR-0037 decision 6): a value
-    /// that cannot be read fails [`Self::read_at`], a statement of its own,
-    /// for one known row.
+    /// A walk of a slot the dispatcher holds (ADR-0041 decision 2), in one
+    /// statement, read after the slot was taken so that what its previous
+    /// holder committed is in view:
+    /// - from the first Tenant after the slot's cursor, cyclically, wrapping
+    ///   once and ending at the cursor's own, it examines at most
+    ///   `Rotation::walk` Tenants — one descent of `__tenant_head_idx` each — and
+    ///   stops at the first whose head, its oldest queue row in the slot, is
+    ///   due; that row it locks;
+    /// - the slot's row is written once: `served_at`, the cursor at the
+    ///   Tenant served or the last one examined, and the round's state. A
+    ///   round begins at the walk that finds no due head with none going on:
+    ///   it keeps where it began, the queue's position then, and the earliest
+    ///   backoff it sees; it ends at the walk that has seen every Tenant or
+    ///   passed the place it began at, and the slot sleeps until that backoff
+    ///   or `Rotation::max_dormancy`, whichever comes first. A head taken clears
+    ///   the round.
+    ///
+    /// No row's value but its Tenant, its place and its backoff is read here
+    /// (ADR-0037 decision 6): a value that cannot be read fails
+    /// [`Self::read_at`], a statement of its own, for one known row. The
+    /// cursor and the round compare `tenant_id` in the column's collation,
+    /// the index's own; any order serves the rotation, and the host's
+    /// databases order by bytes.
+    ///
+    /// Called as `{table}__walk(slot, walk, max_dormancy)`, whose body is
+    /// [`walk_sql`]: in a function that is not stable, each statement takes
+    /// a snapshot of its own, so the walk's is taken at the call, after the
+    /// slot's lock, and `pg_current_snapshot()` in it is that one. The
+    /// arguments are cast to the function's own types: untyped, they would
+    /// resolve to a function of the same name taking text before this one.
     pub(super) async fn locate_head(
         &self,
         session: &P::Session,
         slot: u32,
     ) -> Result<Located, Error> {
         let sql = format!(
-            r#"
-            WITH r AS (
-                SELECT received_position, ctid::text AS place,
-                       next_attempt_at IS NOT NULL AND next_attempt_at > CURRENT_TIMESTAMP AS deferred
-                FROM {table}
-                WHERE slot = $1 AND {QUEUE}
-                ORDER BY received_position ASC
-                LIMIT 1
-                FOR UPDATE
-            )
-            SELECT r.received_position, r.place, r.deferred, pg_current_snapshot()::text AS snapshot
-            FROM (SELECT 1) AS one
-            LEFT JOIN r ON true
-            "#,
-            table = self.table,
+            "SELECT * FROM {}{}($1::smallint, $2::integer, $3::double precision)",
+            self.table, WALK_FUNCTION.suffix
         );
+        let rotation = self.rotation();
         let row = session
             .connection()
-            .query_one(&sql, &[&(slot as i16)])
+            .query_one(
+                &sql,
+                &[
+                    &(slot as i16),
+                    &(rotation.walk.max(1) as i32),
+                    &rotation.max_dormancy.as_secs_f64(),
+                ],
+            )
             .await?;
         Ok(Located {
             row: row
                 .get::<_, Option<i64>>(0)
-                .map(|position| (position, row.get(1), row.get(2))),
+                .map(|position| (position, row.get(1))),
+            passed: row.get::<_, String>(2) == "passed",
             snapshot: snapshot_of(&row, 3)?,
         })
     }
@@ -460,7 +750,7 @@ where
     ) -> Result<String, Error> {
         let sql = format!(
             "UPDATE {table} SET parked_at = CURRENT_TIMESTAMP, unreadable_at = CURRENT_TIMESTAMP, \
-                 last_error = $2 \
+                 last_error = $2, held_since = NULL \
              WHERE ctid = $1::text::tid AND {QUEUE} \
              RETURNING {CHANNEL_OF_ROW}",
             table = self.table
@@ -520,7 +810,7 @@ where
         dependency: &CausalDependency,
     ) -> Result<bool, Error> {
         let sql = format!(
-            "UPDATE {table} SET waiting_for = $2::jsonb, waiting_since = CURRENT_TIMESTAMP \
+            "UPDATE {table} SET waiting_for = $2::jsonb, waiting_since = CURRENT_TIMESTAMP, held_since = NULL \
              WHERE ctid = $1::text::tid AND {QUEUE} \
                AND NOT EXISTS (SELECT 1 FROM {table} d \
                                WHERE d.tenant_id = $3 AND d.stream_type = $4 AND d.stream_id = $5 \
@@ -549,8 +839,8 @@ where
     /// row parked so keeps the identity it waited for, so that the mark of
     /// that identity — the hole readmitted, or arrived late — puts it back
     /// in the queue (ADR-0036 R8); without the time of its wait, it does not
-    /// expire again. A row whose dependency is present and holds its slot
-    /// for its stage's outage does not expire: the dependency did arrive, and
+    /// expire again. A row whose dependency is present and holds for its
+    /// stage's outage does not expire: the dependency did arrive, and
     /// the outage that holds it holds what waits for it (ADR-0040 decision
     /// 7). Its dependency is found by the primary key's stream, its identity
     /// compared whole, so that no value is cast.
@@ -646,7 +936,7 @@ where
         let sql = format!(
             "WITH marked AS ( \
                 UPDATE {table} SET processed_position = nextval('{sequence}'), \
-                    processed_at = statement_timestamp(), \
+                    processed_at = statement_timestamp(), held_since = NULL, \
                     last_cause = NULL, parked_cause = NULL, unavailable_since = NULL \
                 WHERE ctid = $1::text::tid \
                 RETURNING processed_position, {IDENTITY_OF_ROW} AS identity \
@@ -701,9 +991,12 @@ where
         );
         // A hold spends no attempt: it is asked again at the teller's
         // `retry_after`, else after as long as it has held, between the floor
-        // and the cap; its clock starts at its first hold.
+        // and the cap; its clock starts at its first hold. The outage holds
+        // the head now, not its own failure: `held_since`, the clock of a
+        // hold by the head's own failure (ADR-0041 decision 5), ends, so that
+        // `held_counts` never counts an outage's hold as a back-off.
         let hold_failure = format!(
-            "UPDATE {table} SET last_error = $2, last_cause = $3::text, \
+            "UPDATE {table} SET last_error = $2, last_cause = $3::text, held_since = NULL, \
                  unavailable_since = COALESCE(unavailable_since, CURRENT_TIMESTAMP), \
                  next_attempt_at = CURRENT_TIMESTAMP + make_interval(secs => LEAST($6::double precision, \
                      GREATEST($5::double precision, COALESCE($4::double precision, \
@@ -728,7 +1021,10 @@ where
                                  THEN $6::text END, \
                 unavailable_since = CASE WHEN $7::boolean AND NOT \
                                    ($4::integer > 0 AND LEAST(attempts, 2147483646) + 1 >= $4::integer) \
-                                 THEN unavailable_since END \
+                                 THEN unavailable_since END, \
+                held_since = CASE WHEN $5::boolean \
+                                    OR ($4::integer > 0 AND LEAST(attempts, 2147483646) + 1 >= $4::integer) \
+                                  THEN NULL ELSE coalesce(held_since, statement_timestamp()) END \
              WHERE ctid = $1::text::tid \
              RETURNING attempts, parked_at IS NOT NULL"
         );
@@ -862,7 +1158,7 @@ where
     ) -> Result<Option<InboxMessage>, Error> {
         let sql = format!(
             "UPDATE {} SET parked_at = NULL, unreadable_at = NULL, attempts = 0, \
-                 next_attempt_at = NULL, waiting_for = NULL, waiting_since = NULL, \
+                 next_attempt_at = NULL, waiting_for = NULL, waiting_since = NULL, held_since = NULL, \
                  last_cause = NULL, parked_cause = NULL, unavailable_since = NULL \
              WHERE received_position = $1 AND parked_at IS NOT NULL \
              RETURNING {NARROW}",
@@ -907,7 +1203,7 @@ where
                 UPDATE {table} SET parked_at = NULL, unreadable_at = NULL, \
                     processed_position = nextval('{sequence}'), \
                     processed_at = statement_timestamp(), waiting_for = NULL, waiting_since = NULL, \
-                    last_cause = NULL, parked_cause = NULL, unavailable_since = NULL \
+                    held_since = NULL, last_cause = NULL, parked_cause = NULL, unavailable_since = NULL \
                 WHERE received_position = $1 AND parked_at IS NOT NULL \
                 RETURNING processed_position, {IDENTITY_OF_ROW} AS identity, {NARROW} \
              ), woken AS ( \
@@ -1025,12 +1321,14 @@ where
              WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4"
         );
         // A row parked at once for its own values, superseded by this
-        // arrival's (ADR-0037 decision 6): back in the queue, readable.
+        // arrival's (ADR-0037 decision 6): back in the queue, readable, and
+        // arrived now, so that its wait is the new arrival's (ADR-0041
+        // decision 5).
         let supersede = format!(
             "UPDATE {table} SET payload = $5, metadata = $6, parked_at = NULL, unreadable_at = NULL, \
                  last_error = NULL, attempts = 0, next_attempt_at = NULL, \
-                 waiting_for = NULL, waiting_since = NULL, \
-                 last_cause = NULL, parked_cause = NULL, unavailable_since = NULL \
+                 waiting_for = NULL, waiting_since = NULL, received_at = statement_timestamp(), \
+                 held_since = NULL, last_cause = NULL, parked_cause = NULL, unavailable_since = NULL \
              WHERE tenant_id = $1 AND stream_type = $2 AND stream_id = $3 AND stream_position = $4 \
                AND unreadable_at IS NOT NULL AND processed_position IS NULL \
              RETURNING pg_current_xact_id()::text, received_position, slot"
@@ -1239,6 +1537,110 @@ where
     }
 }
 
+/// Refuses a function the dispatch calls that is not as the library makes
+/// it (ADR-0041 decision 6): missing; not a function, or of other argument
+/// types, modes or names, or another result, by the catalogue's values; of
+/// another language, body, volatility or setting; run with its owner's
+/// rights; not executable by
+/// this role; in another schema than its table; or beside another function
+/// of its name in its schema or visible, which a call may resolve to — an
+/// overload with a default makes the call ambiguous (42725) and would stop
+/// the loops at their first dispatch; one a call cannot reach is refused as
+/// well, the check counting rather than resolving. Each of these the server
+/// would run, or refuse, without a word at the start: a body replaced by
+/// `CREATE OR REPLACE` runs another statement, a `STABLE` one refuses the
+/// walk's lock at every dispatch, a dropped setting brings the planning at
+/// every call back. A procedure of the same name has no result, and is
+/// refused by its signature. Other functions named after the table are not
+/// the dispatch's, and are let be, as a newer release's would be.
+async fn refuse_a_function_the_library_did_not_make<S: PgAccess>(
+    session: &S,
+    table: &str,
+) -> Result<(), Error> {
+    for (called, body) in [
+        (&TAKE_FUNCTION, take_body(table)),
+        (&WALK_FUNCTION, walk_body(table)),
+    ] {
+        let name = format!("{table}{}{}", called.suffix, called.identity);
+        let row = session
+            .connection()
+            .query_opt(
+                "SELECT p.prokind = 'f' AND p.prorettype = 'record'::regtype \
+                        AND p.proallargtypes IS NOT DISTINCT FROM $3::text::regtype[]::oid[] \
+                        AND p.proargmodes IS NOT DISTINCT FROM $4::text::\"char\"[] \
+                        AND p.proargnames IS NOT DISTINCT FROM $5::text::text[], \
+                        coalesce(pg_get_function_arguments(p.oid), ''), \
+                        l.lanname::text, p.prosrc, p.provolatile::text, p.prosecdef, \
+                        array_to_string(p.proconfig, ','), has_function_privilege(p.oid, 'EXECUTE'), \
+                        p.pronamespace IS NOT DISTINCT FROM \
+                            (SELECT relnamespace FROM pg_class WHERE oid = to_regclass($2)), \
+                        (SELECT string_agg(o.oid::regprocedure::text, ', ') FROM pg_proc o \
+                            WHERE o.proname = p.proname AND o.oid <> p.oid \
+                              AND (o.pronamespace = p.pronamespace OR pg_function_is_visible(o.oid))) \
+                 FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang \
+                 WHERE p.oid = to_regprocedure($1)",
+                &[&name, &table, &called.types, &called.modes, &called.names],
+            )
+            .await?;
+        let Some(row) = row else {
+            return Err(Error::Malformed(format!(
+                "function `{name}` is missing: the dispatch calls it"
+            )));
+        };
+        let setting = row.get::<_, Option<String>>(6);
+        let others = row.get::<_, Option<String>>(9);
+        let wrong: Vec<String> = [
+            (
+                !row.get::<_, bool>(0),
+                format!("its signature ({})", row.get::<_, String>(1)),
+            ),
+            (
+                row.get::<_, String>(2) != "plpgsql",
+                "its language".to_owned(),
+            ),
+            (row.get::<_, String>(3) != body, "its body".to_owned()),
+            (row.get::<_, String>(4) != "v", "its volatility".to_owned()),
+            (
+                row.get::<_, bool>(5),
+                "its owner's rights (SECURITY DEFINER)".to_owned(),
+            ),
+            (
+                setting.as_deref() != called.setting,
+                format!(
+                    "its settings ({}, the library's {})",
+                    setting.as_deref().unwrap_or("none"),
+                    called.setting.unwrap_or("none")
+                ),
+            ),
+            (
+                !row.get::<_, bool>(7),
+                "no EXECUTE for this role".to_owned(),
+            ),
+            (
+                !row.get::<_, bool>(8),
+                "its schema, not its table's".to_owned(),
+            ),
+            (
+                others.is_some(),
+                format!(
+                    "another function of its name ({})",
+                    others.as_deref().unwrap_or_default()
+                ),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(differs, what)| differs.then_some(what))
+        .collect();
+        if !wrong.is_empty() {
+            return Err(Error::Malformed(format!(
+                "function `{name}` is not as the library makes it: {}",
+                wrong.join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Refuses a server whose pages are not 8 KiB: the bound on an identity's
 /// stored form (`MAX_IDENTITY_BYTES`) is a btree item's on such a page
 /// (ADR-0037 decision 4).
@@ -1257,65 +1659,122 @@ async fn refuse_a_page_the_bounds_do_not_fit<S: PgAccess>(session: &S) -> Result
     }
 }
 
-/// The inbox table's columns as this release makes them.
-pub(super) const INBOX_COLUMNS: [&str; 21] = [
-    "tenant_id",
-    "stream_type",
-    "stream_id",
-    "stream_position",
-    "uri",
-    "payload",
-    "metadata",
-    "received_position",
-    "processed_position",
-    "attempts",
-    "last_error",
-    "next_attempt_at",
-    "parked_at",
-    "waiting_for",
-    "waiting_since",
-    "slot",
-    "processed_at",
-    "unreadable_at",
-    "last_cause",
-    "parked_cause",
-    "unavailable_since",
-];
+/// The inbox table's columns as this release's migrations make them, in the
+/// order they add them, declared once more as a temporary twin. `migrate`
+/// has the server render the twin's columns beside the table's, in one
+/// session, and compares the two (ADR-0037 decision 5). A default's or a
+/// generation's text is the server's rendering: it depends on the major, on
+/// the session's settings (`quote_all_identifiers`) and, for `slot`, on the
+/// key and the columns' types; the twin is rendered under all of them alike.
+/// Measured identical to the tables the library made, on 14.24 and 18.6, for
+/// every key the tests cut by. The order is the table's: `slot` names its
+/// key's columns by their place. `STORED` is written out: 18 makes a
+/// generated column virtual without it. `{sequence}`, `{key}` and `{slots}`
+/// are the table's own.
+const INBOX_TWIN: &str = r#"
+    CREATE TEMP TABLE ascetic_inbox_twin (
+        tenant_id varchar(128) NOT NULL,
+        stream_type varchar(128) NOT NULL,
+        stream_id jsonb NOT NULL,
+        stream_position integer NOT NULL,
+        uri varchar(255) NOT NULL,
+        payload bytea NOT NULL,
+        metadata jsonb NULL,
+        received_position bigint NOT NULL DEFAULT nextval('{sequence}'),
+        processed_position bigint NULL,
+        attempts integer NOT NULL DEFAULT 0,
+        last_error text NULL,
+        next_attempt_at timestamptz NULL,
+        parked_at timestamptz NULL,
+        waiting_for jsonb NULL,
+        waiting_since timestamptz NULL,
+        slot smallint GENERATED ALWAYS AS ((hashtext({key}) & 2147483647) % {slots}) STORED,
+        received_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+        held_since timestamptz NULL,
+        processed_at timestamptz NULL,
+        unreadable_at timestamptz NULL,
+        last_cause varchar(64) NULL,
+        parked_cause varchar(64) NULL,
+        unavailable_since timestamptz NULL
+    ) ON COMMIT DROP;
+"#;
 
-/// The rows set aside's columns as this release makes them.
-const REJECTS_COLUMNS: [&str; 17] = [
-    "digest",
-    "channel",
-    "tenant_id",
-    "stream_type",
-    "identity",
-    "reason",
-    "detail",
-    "holder_channel",
-    "holder_position",
-    "message",
-    "seen",
-    "first_seen_at",
-    "last_seen_at",
-    "disposed_at",
-    "disposition",
-    "disposed_by",
-    "disposed_because",
-];
+/// The rows set aside's columns, as [`INBOX_TWIN`] has the inbox table's;
+/// `digest` NOT NULL as its primary key makes it.
+const REJECTS_TWIN: &str = r#"
+    CREATE TEMP TABLE ascetic_rejects_twin (
+        digest uuid NOT NULL,
+        channel text NOT NULL,
+        tenant_id text NULL,
+        stream_type text NULL,
+        identity uuid NULL,
+        reason text NOT NULL,
+        detail text NOT NULL,
+        holder_channel text NULL,
+        holder_position bigint NULL,
+        message bytea NULL,
+        seen integer NOT NULL DEFAULT 1,
+        first_seen_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+        last_seen_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+        disposed_at timestamptz NULL,
+        disposition text NULL,
+        disposed_by text NULL,
+        disposed_because text NULL
+    ) ON COMMIT DROP;
+"#;
+
+/// A column of a table and of its twin, paired by name: on which side it
+/// is, and what binds an insert on each — NOT NULL, identity, generation, and
+/// the default's or the generation's text.
+struct Paired {
+    name: String,
+    live: Option<Bound>,
+    twin: Option<Bound>,
+}
+
+#[derive(PartialEq)]
+struct Bound {
+    not_null: bool,
+    identity: String,
+    generated: String,
+    expression: Option<String>,
+}
+
+impl Bound {
+    fn binds(&self) -> bool {
+        self.not_null
+            || !self.identity.is_empty()
+            || !self.generated.is_empty()
+            || self.expression.is_some()
+    }
+}
 
 /// Refuses on `relation` what the library did not make and that would
 /// change what the intake's statements can raise (ADR-0037 decision 5): an
 /// index — a conflict on a unique one leaves a message stored nowhere, an
 /// expression raises for its value —, a constraint, a trigger, a rule, a
-/// policy or row security, and a column a row cannot be inserted without.
-/// The library names its own objects `<relation>__…` beside its primary
-/// key, so that an older release starts beside a newer one's (R12); a
-/// release that adds a column adds it nullable, without a default.
+/// policy or row security; and, column by column against `twin`, what binds
+/// an insert otherwise than the library makes it. The library names its own
+/// objects `<relation>__…` beside its primary key, so that an older release
+/// starts beside a newer one's (R12); a release that adds a column adds it
+/// nullable, without a default.
+///
+/// The columns: one the twin lacks may be nullable, without a default, a
+/// generation or an identity, as a newer release's is; one the twin has
+/// must be there, NOT NULL no more than the twin's — a NOT NULL the library
+/// does not make raises 23502 for an insert that leaves the column out —, and
+/// filled as the twin's: the same identity, generation and text. A NOT NULL
+/// is judged with its column, never by a constraint's name: 18 records each
+/// in `pg_constraint` (`contype` `n`), named by the server, truncated or kept
+/// through a rename; `attnotnull` is the column's on every major, 18 setting
+/// it for a NOT VALID one too (measured on 18.6). Both sides are rendered
+/// against the twin, which names a column by its place as the table does:
+/// so no lock is taken on the live table (ADR-0029).
 pub(super) async fn refuse_what_the_library_did_not_make<S: PgAccess>(
     session: &S,
     relation: &str,
     primary_key: &str,
-    columns: &[&str],
+    twin: &str,
 ) -> Result<(), Error> {
     let connection = session.connection();
     let own = |name: &String| name == primary_key || name.starts_with(&format!("{relation}__"));
@@ -1335,7 +1794,8 @@ pub(super) async fn refuse_what_the_library_did_not_make<S: PgAccess>(
         ),
         (
             "constraints",
-            "SELECT conname::text FROM pg_constraint WHERE conrelid = $1::text::regclass",
+            "SELECT conname::text FROM pg_constraint \
+             WHERE conrelid = $1::text::regclass AND contype <> 'n'",
         ),
         (
             "triggers",
@@ -1378,39 +1838,124 @@ pub(super) async fn refuse_what_the_library_did_not_make<S: PgAccess>(
              a row for a session's sake"
         )));
     }
-    let binding: Vec<String> = connection
+    let side = "SELECT a.attname::text AS name, a.attnotnull AS not_null, \
+                       a.attidentity::text AS identity, a.attgenerated::text AS generated, \
+                       pg_get_expr(d.adbin, $2::text::regclass) AS expression \
+                FROM pg_attribute a \
+                LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+                WHERE a.attrelid = {of}::text::regclass AND a.attnum > 0 AND NOT a.attisdropped";
+    let paired: Vec<Paired> = connection
         .query(
-            "SELECT a.attname::text FROM pg_attribute a \
-             LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
-             WHERE a.attrelid = $1::text::regclass AND a.attnum > 0 AND NOT a.attisdropped \
-               AND (a.attnotnull OR d.adbin IS NOT NULL OR a.attgenerated <> '')",
-            &[&relation],
+            &format!(
+                "WITH live AS ({}), twin AS ({}) \
+                 SELECT coalesce(l.name, t.name), l.name IS NOT NULL, l.not_null, l.identity, \
+                        l.generated, l.expression, t.name IS NOT NULL, t.not_null, t.identity, \
+                        t.generated, t.expression \
+                 FROM live l FULL JOIN twin t ON t.name = l.name ORDER BY 1",
+                side.replace("{of}", "$1"),
+                side.replace("{of}", "$2"),
+            ),
+            &[&relation, &twin],
         )
         .await?
         .iter()
-        .map(|row| row.get::<_, String>(0))
-        .filter(|name| !columns.contains(&name.as_str()))
+        .map(|row| {
+            let bound = |at: usize| {
+                row.get::<_, bool>(at).then(|| Bound {
+                    not_null: row.get(at + 1),
+                    identity: row.get(at + 2),
+                    generated: row.get(at + 3),
+                    expression: row.get(at + 4),
+                })
+            };
+            Paired {
+                name: row.get(0),
+                live: bound(1),
+                twin: bound(6),
+            }
+        })
         .collect();
-    if !binding.is_empty() {
-        return Err(Error::Malformed(format!(
-            "table `{relation}` carries columns the inbox does not own that bind an insert ({}): \
-             not null, defaulted or generated",
-            binding.join(", ")
-        )));
-    }
-    Ok(())
+    let refuse = |what: &str, why: &str, columns: Vec<String>| -> Result<(), Error> {
+        if columns.is_empty() {
+            return Ok(());
+        }
+        Err(Error::Malformed(format!(
+            "table `{relation}` carries {what} ({}): {why}",
+            columns.join(", ")
+        )))
+    };
+    let named = |pick: &dyn Fn(&Bound, &Bound) -> bool| -> Vec<String> {
+        paired
+            .iter()
+            .filter_map(|column| match (&column.live, &column.twin) {
+                (Some(live), Some(twin)) if pick(live, twin) => Some(column.name.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    refuse(
+        "columns the inbox does not own that bind an insert",
+        "not null, defaulted, generated or an identity",
+        paired
+            .iter()
+            .filter(|column| {
+                column.twin.is_none() && column.live.as_ref().is_some_and(Bound::binds)
+            })
+            .map(|column| column.name.clone())
+            .collect(),
+    )?;
+    refuse(
+        "none of the columns the inbox makes",
+        "its statements name them",
+        paired
+            .iter()
+            .filter(|column| column.live.is_none())
+            .map(|column| column.name.clone())
+            .collect(),
+    )?;
+    refuse(
+        "columns the inbox makes nullable made NOT NULL",
+        "an insert that leaves them out would raise",
+        named(&|live, twin| live.not_null && !twin.not_null),
+    )?;
+    refuse(
+        "identity columns the inbox does not make",
+        "an insert that names them would raise",
+        named(&|live, twin| live.identity != twin.identity),
+    )?;
+    refuse(
+        "columns generated otherwise than the inbox makes them",
+        "a row would land in another slot, or none",
+        named(&|live, twin| {
+            (!live.generated.is_empty() || !twin.generated.is_empty())
+                && (live.generated != twin.generated || live.expression != twin.expression)
+        }),
+    )?;
+    refuse(
+        "defaults the inbox does not make, on",
+        "an insert would fill them otherwise, or raise",
+        named(&|live, twin| {
+            live.generated.is_empty()
+                && twin.generated.is_empty()
+                && live.expression != twin.expression
+        }),
+    )
 }
 
 /// Refuses a table the intake cannot read the conflicts of (ADR-0036 R2):
 /// what the library did not make on its tables (ADR-0037 decision 5), a
 /// unique index of a host's among them, whose conflict would leave a
-/// message stored nowhere and acknowledged; a deferrable constraint, which
-/// an untargeted conflict cannot arbitrate (55000 on every insert); and a
-/// server encoding other than UTF8, under which 22P05 is the environment's,
-/// not the message's.
+/// message stored nowhere and acknowledged; a deferrable constraint on
+/// either table, which a conflict cannot arbitrate (55000 on every insert);
+/// and a server encoding other than UTF8, under which 22P05 is the
+/// environment's, not the message's. `twins` are [`INBOX_TWIN`] and
+/// [`REJECTS_TWIN`] for this table, made here in the caller's transaction
+/// and dropped at its end: so a start needs TEMPORARY on the database, and
+/// runs no longer on a read-only one.
 async fn refuse_what_the_intake_cannot_read<S: PgAccess>(
     session: &S,
     table: &str,
+    twins: &[String; 2],
 ) -> Result<(), Error> {
     let connection = session.connection();
     let encoding: String = connection
@@ -1422,31 +1967,42 @@ async fn refuse_what_the_intake_cannot_read<S: PgAccess>(
             "the server encoding is {encoding}: the inbox reads PostgreSQL's refusals as UTF8's"
         )));
     }
-    refuse_what_the_library_did_not_make(session, table, &format!("{table}_pk"), &INBOX_COLUMNS)
-        .await?;
+    for twin in twins {
+        connection.batch_execute(twin).await?;
+    }
+    let rejects = format!("{table}_rejects");
     refuse_what_the_library_did_not_make(
         session,
-        &format!("{table}_rejects"),
-        &format!("{table}_rejects_pkey"),
-        &REJECTS_COLUMNS,
+        table,
+        &format!("{table}_pk"),
+        "pg_temp.ascetic_inbox_twin",
     )
     .await?;
-    let deferrable: Vec<String> = connection
-        .query(
-            "SELECT conname::text FROM pg_constraint \
-             WHERE conrelid = $1::text::regclass AND condeferrable",
-            &[&table],
-        )
-        .await?
-        .iter()
-        .map(|row| row.get(0))
-        .collect();
-    if !deferrable.is_empty() {
-        return Err(Error::Malformed(format!(
-            "table `{table}` carries deferrable constraints ({}): an untargeted conflict cannot \
-             arbitrate them",
-            deferrable.join(", ")
-        )));
+    refuse_what_the_library_did_not_make(
+        session,
+        &rejects,
+        &format!("{table}_rejects_pkey"),
+        "pg_temp.ascetic_rejects_twin",
+    )
+    .await?;
+    for relation in [table, rejects.as_str()] {
+        let deferrable: Vec<String> = connection
+            .query(
+                "SELECT conname::text FROM pg_constraint \
+                 WHERE conrelid = $1::text::regclass AND condeferrable",
+                &[&relation],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        if !deferrable.is_empty() {
+            return Err(Error::Malformed(format!(
+                "table `{relation}` carries deferrable constraints ({}): a conflict cannot \
+                 arbitrate them",
+                deferrable.join(", ")
+            )));
+        }
     }
     Ok(())
 }

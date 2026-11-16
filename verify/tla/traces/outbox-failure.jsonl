@@ -1,8 +1,8 @@
-{"event":"published","message_id":"00000000-0000-4000-8000-000000000002","observer":"outbox","position":1,"uri":"kafka://orders","xid":2051777}
-{"event":"fetched","group":"broker","horizon":2051778,"limit":100,"messages":["00000000-0000-4000-8000-000000000002"],"observer":"outbox","slot":0,"slots":1}
-{"event":"handled","group":"broker","message_id":"00000000-0000-4000-8000-000000000002","observer":"outbox","ok":false,"slot":0}
+{"event":"published","message_id":"00000000-0000-4000-8000-000000000009","observer":"outbox","position":1,"uri":"kafka://orders","xid":2364703}
+{"delivered":"2364701:2364701:","epoch":"2364704:2364704:","epoch_end":1,"epoch_offset":0,"event":"fetched","group":"broker","horizon":2364704,"limit":100,"messages":["00000000-0000-4000-8000-000000000009"],"observer":"outbox","slot":0,"slots":1,"statement":"2364704:2364704:"}
+{"event":"handled","group":"broker","message_id":"00000000-0000-4000-8000-000000000009","observer":"outbox","ok":false,"slot":0}
 {"event":"dispatched","group":"broker","observer":"outbox","outcome":"rolled_back","slot":0}
-{"event":"fetched","group":"broker","horizon":2051778,"limit":100,"messages":["00000000-0000-4000-8000-000000000002"],"observer":"outbox","slot":0,"slots":1}
-{"event":"handled","group":"broker","message_id":"00000000-0000-4000-8000-000000000002","observer":"outbox","ok":true,"slot":0}
-{"event":"acked","group":"broker","observer":"outbox","position":1,"slot":0,"xid":2051777}
+{"delivered":"2364701:2364701:","epoch":"2364705:2364705:","epoch_end":1,"epoch_offset":0,"event":"fetched","group":"broker","horizon":2364705,"limit":100,"messages":["00000000-0000-4000-8000-000000000009"],"observer":"outbox","slot":0,"slots":1,"statement":"2364705:2364705:"}
+{"event":"handled","group":"broker","message_id":"00000000-0000-4000-8000-000000000009","observer":"outbox","ok":true,"slot":0}
+{"drained":true,"event":"acked","group":"broker","observer":"outbox","position":1,"short":false,"slot":0,"xid":2364703}
 {"event":"dispatched","group":"broker","observer":"outbox","outcome":"batch","slot":0}

@@ -1,1 +1,2 @@
-{"deps":[],"event":"received","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","message_id":"00000000-0000-4000-8000-00000000001a","observer":"inbox","received_position":1,"slot":0,"xid":2051321}
+{"deps":[],"event":"received","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","message_id":"00000000-0000-4000-8000-00000000004c","observer":"inbox","received_position":1,"slot":0,"xid":2361813}
+{"channel":"kafka://orders","digest":"71eaea99-a54f-1990-18d3-20ea950820ad","event":"rejected","observer":"inbox","reason":"identity_taken","repeat":false}

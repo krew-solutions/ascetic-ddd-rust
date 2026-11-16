@@ -20,7 +20,8 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// invariant the message breaks — and the message is parked at once,
 /// whatever attempts it had left (ADR-0010). `Unavailable` is the verdict
 /// that the message cannot be handled now for a cause not its own: of the
-/// stage, it holds its slot without spending an attempt; of the Tenant, it
+/// stage, it holds its Tenant's rows of its slot without spending an attempt
+/// (ADR-0041 decision 2: the slot's other Tenants go on); of the Tenant, it
 /// spends one, never sooner than its `retry_after` (ADR-0040 decisions 4
 /// and 5).
 ///
@@ -123,8 +124,8 @@ impl Failure {
         matches!(self, Failure::Permanent { .. })
     }
 
-    /// Whether it holds its slot without spending an attempt: unavailable
-    /// for the whole stage.
+    /// Whether it holds without spending an attempt: unavailable for the
+    /// whole stage.
     pub fn holds(&self) -> bool {
         matches!(
             self,

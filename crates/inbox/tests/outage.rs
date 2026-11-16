@@ -1,5 +1,5 @@
 //! A message that cannot be handled now stops exactly the messages that
-//! share its cause (ADR-0040): a stage's outage holds its slot without
+//! share its cause (ADR-0040): a stage's outage holds its head without
 //! spending an attempt, weighed against the channel's evidence past its
 //! budget; a Tenant's spends one, never sooner than its back-off; and a
 //! cause lives as long as the state it explains. They need a live database:
@@ -126,8 +126,18 @@ impl Fixture {
     }
 
     async fn dispatch(&self, verdict: impl Fn() -> Result<(), Failure> + Send + Sync) -> Outcome {
+        self.dispatch_on(|_| verdict()).await
+    }
+
+    /// The same, the verdict by the message: the walk serves a slot's
+    /// Tenants in turn (ADR-0041 decision 2), so a test of two Tenants says
+    /// what each message gets, not what the nth dispatch gets.
+    async fn dispatch_on(
+        &self,
+        verdict: impl Fn(&InboxMessage) -> Result<(), Failure> + Send + Sync,
+    ) -> Outcome {
         self.inbox
-            .dispatch(|_: &PgSession, _: &InboxMessage| std::future::ready(verdict()))
+            .dispatch(|_: &PgSession, message: &InboxMessage| std::future::ready(verdict(message)))
             .await
             .unwrap()
     }
@@ -170,9 +180,20 @@ impl Fixture {
             .unwrap()
     }
 
-    /// Makes every row due now.
+    /// Makes every row due now, and wakes the slot: a round that found no
+    /// head due sleeps until the earliest back-off it saw (ADR-0041 decision
+    /// 2), and the rows' clock moved by hand moves the slot's too.
     async fn due(&self) {
         self.execute("UPDATE {table} SET next_attempt_at = now()")
+            .await;
+        self.wake().await;
+    }
+
+    /// Wakes the slot from the sleep a round that found no head due began:
+    /// it sleeps at most `max_dormancy`, a second, and the tests do not wait
+    /// it out (ADR-0041 decision 2).
+    async fn wake(&self) {
+        self.execute("UPDATE {table}_slots SET dormant_until = now()")
             .await;
     }
 
@@ -602,8 +623,8 @@ async fn a_cause_is_kept_while_its_state_lasts_and_cleared_at_every_exit() {
     assert_eq!(told, ["db.timeout", "kms.gone", "kms.unavailable"]);
 }
 
-/// A row waiting for a dependency that arrived and holds its slot for its
-/// stage's outage does not expire: the outage that holds the dependency
+/// A row waiting for a dependency that arrived and holds for its stage's
+/// outage does not expire: the outage that holds the dependency
 /// holds what waits for it. Once the dependency is parked, it expires as
 /// any other.
 #[tokio::test]
@@ -632,10 +653,151 @@ async fn a_row_waiting_for_a_held_dependency_does_not_expire() {
     assert!(f.row("b").await.parked, "expired once a@1 holds no more");
 }
 
+/// A slot serves its Tenants in turn (ADR-0041 decision 2), so a stage's
+/// outage holds each Tenant's head on its own: another Tenant of the slot
+/// goes on meanwhile, and the heads held wait, each with the rows behind
+/// it. The operator parks every head held for the cause — of the Tenant
+/// named, when one is — and each Tenant's next row is its head then. The
+/// extent a stage's hold takes under rotation is ADR-0040's revision's to
+/// decide (ADR-0040 § Owed); this is what it is until then.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn under_rotation_a_stage_outage_holds_each_tenant_s_head_and_an_operator_parks_them_all() {
+    let f = fixture("parkheads", Retries::up_to(3)).await;
+    // tenant-2 and tenant-4 have a row processed ahead of their heads, as
+    // every Tenant has until the sweep: a head is the first row in the queue
+    f.publish(&[
+        message_of("tenant-2", "b0", 1),
+        message_of("tenant-4", "d0", 1),
+    ])
+    .await;
+    assert_eq!(f.dispatch(ok).await, Outcome::Processed);
+    assert_eq!(f.dispatch(ok).await, Outcome::Processed);
+    f.publish(&[
+        message_of("tenant-1", "a", 1),
+        message_of("tenant-2", "b", 1),
+        message_of("tenant-3", "c", 1),
+        message_of("tenant-4", "d", 1),
+        message_of("tenant-1", "a2", 1),
+        message_of("tenant-2", "b2", 1),
+    ])
+    .await;
+    // the stage serves tenant-3's message and is down for every other's
+    let down_but_for_c = |message: &InboxMessage| {
+        if message.tenant_id == "tenant-3" {
+            Ok(())
+        } else {
+            stage_down(None)
+        }
+    };
+    let mut outcomes = Vec::new();
+    for _ in 0..4 {
+        outcomes.push(format!("{:?}", f.dispatch_on(down_but_for_c).await));
+    }
+    outcomes.sort();
+    let mut expected = [
+        format!("{:?}", held(0)),
+        format!("{:?}", held(0)),
+        format!("{:?}", held(0)),
+        format!("{:?}", Outcome::Processed),
+    ];
+    expected.sort();
+    assert_eq!(outcomes, expected, "tenant-3 goes on beside the holds");
+    for stream in ["a", "b", "d"] {
+        let head = f.row(stream).await;
+        assert_eq!((head.holding, head.attempts), (true, 0), "{stream}@1 holds");
+    }
+    for stream in ["a2", "b2"] {
+        let behind = f.row(stream).await;
+        assert_eq!(
+            (behind.holding, behind.attempts, behind.processed),
+            (false, 0, false),
+            "{stream}@1 waits behind its Tenant's head"
+        );
+    }
+    assert_eq!(
+        f.dispatch(ok).await,
+        Outcome::Nothing,
+        "every head left holds"
+    );
+
+    assert_eq!(
+        f.park_held("kafka://orders", "kms.unavailable", Some("tenant-2"))
+            .await,
+        1,
+        "tenant-2's head, not the slot's oldest"
+    );
+    assert!(f.row("b").await.parked);
+    // d@1 as a hold refuted past its budget leaves it: an attempt spent on
+    // its own account, its outage's clock kept; a park ends both
+    f.execute("UPDATE {table} SET held_since = now() WHERE stream_id->>'id' = 'd'")
+        .await;
+    assert_eq!(
+        f.park_held("kafka://orders", "kms.unavailable", None).await,
+        2,
+        "every Tenant's head held for the cause, in one call"
+    );
+    assert!(
+        f.inbox
+            .held_counts(Duration::from_secs(5))
+            .await
+            .unwrap()
+            .is_empty(),
+        "a parked row holds nothing"
+    );
+    for stream in ["a", "d"] {
+        let parked = f.row(stream).await;
+        assert_eq!(
+            (
+                parked.parked,
+                parked.parked_cause.as_deref(),
+                parked.holding
+            ),
+            (true, Some("kms.unavailable"), false),
+            "{stream}@1"
+        );
+    }
+    f.wake().await;
+    assert_eq!(f.dispatch(ok).await, Outcome::Processed);
+    assert_eq!(f.dispatch(ok).await, Outcome::Processed);
+    assert!(
+        f.row("a2").await.processed && f.row("b2").await.processed,
+        "each Tenant's next row is its head, and goes on"
+    );
+}
+
+/// A head that failed on its own and then holds for its stage's outage is
+/// held by the outage: `held_counts` counts the holds of a head's own failure
+/// (ADR-0041 decision 5), which an outage's are not among (ADR-0040 § Owed
+/// 7), so it is not counted as `backoff`, aged by a failure the outage
+/// superseded. Refuted, the hold spends on the head's own account again,
+/// and is counted again.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_head_held_for_its_stage_is_not_counted_as_its_own_back_off() {
+    let f = fixture("heldcount", Retries::up_to(5)).await;
+    f.publish(&[message("a", 1)]).await;
+    let held_counts = async || {
+        f.inbox
+            .held_counts(Duration::from_secs(5))
+            .await
+            .unwrap()
+            .len()
+    };
+    assert_eq!(f.dispatch(|| tenant_down(None)).await, spent(1, false));
+    assert_eq!(held_counts().await, 1, "its own failure holds it");
+    f.due().await;
+    assert_eq!(f.dispatch(|| stage_down(None)).await, held(1));
+    assert_eq!(held_counts().await, 0, "the outage holds it now");
+    f.due().await;
+    assert_eq!(f.dispatch(|| tenant_down(None)).await, spent(2, false));
+    assert_eq!(held_counts().await, 1, "its own failure again");
+}
+
 /// The operator parks the rows held for a cause, of a channel and, when
-/// named, of a Tenant: their slots go on, each row parked under its cause,
-/// and the call is told with its principal. A row failing on its Tenant's
-/// account is not held, and is left alone.
+/// named, of a Tenant: the rows behind them go on, each row parked under its
+/// cause, and the call is told with its principal. A row failing on its
+/// Tenant's account is not held, and is left alone.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn an_operator_parks_the_rows_held_for_a_cause_and_their_slots_go_on() {
@@ -681,6 +843,8 @@ async fn an_operator_parks_the_rows_held_for_a_cause_and_their_slots_go_on() {
         ),
         (true, Some("kms.unavailable"), false)
     );
+    // the round that found a@1 holding put the slot to sleep for a second
+    f.wake().await;
     assert_eq!(f.dispatch(ok).await, Outcome::Processed, "b@1 goes on");
     assert_eq!(
         f.operated().last(),
@@ -721,20 +885,21 @@ async fn an_operator_re_arms_the_rows_parked_for_a_cause_and_a_canary_parks_agai
         message("u", 1),
     ])
     .await;
-    for (stream, cause) in [
-        ("a", REFUSED),
-        ("b", KMS_GONE),
-        ("c", REFUSED),
-        ("d", REFUSED),
-        ("x", REFUSED),
-        ("u", REFUSED),
-    ] {
-        assert_eq!(
-            f.dispatch(|| Err(Permanent::because(cause, "refused").into()))
-                .await,
-            spent(1, true),
-            "{stream}@1 parks"
-        );
+    // b@1's key is gone, every other's refused; the walk serves tenant-1
+    // and tenant-2 in turn, so each verdict is said by its stream
+    let refused = |message: &InboxMessage| {
+        let cause = if message.stream_id == json!({ "id": "b" }) {
+            KMS_GONE
+        } else {
+            REFUSED
+        };
+        Err(Permanent::because(cause, "refused").into())
+    };
+    for _ in 0..6 {
+        assert_eq!(f.dispatch_on(refused).await, spent(1, true), "each parks");
+    }
+    for stream in ["a", "b", "c", "d", "x", "u"] {
+        assert!(f.row(stream).await.parked, "{stream}@1 parked");
     }
     // c@1 as parked before causes were recorded; x@1 as parked for a
     // dependency that never arrived, u@1 for its own values: other grounds,
@@ -779,24 +944,39 @@ async fn an_operator_re_arms_the_rows_parked_for_a_cause_and_a_canary_parks_agai
         "a canary of one: one failure left of five"
     );
 
-    let fails = || Err(Transient::because(DB_TIMEOUT, "still").into());
+    // a@1 and c@1 fail, d@1 goes on: the walk serves tenant-1 and tenant-2
+    // in turn, a@1 before c@1 within tenant-1, so each verdict is said by
+    // the stream and the outcomes are counted, not ordered
+    let fails_but_d = |message: &InboxMessage| {
+        if message.stream_id == json!({ "id": "d" }) {
+            Ok(())
+        } else {
+            Err(Transient::because(DB_TIMEOUT, "still").into())
+        }
+    };
+    let mut outcomes = Vec::new();
+    for _ in 0..4 {
+        outcomes.push(format!("{:?}", f.dispatch_on(fails_but_d).await));
+        f.due().await;
+    }
+    outcomes.sort();
+    let mut expected = [
+        format!("{:?}", spent(5, true)),
+        format!("{:?}", spent(4, false)),
+        format!("{:?}", spent(5, true)),
+        format!("{:?}", Outcome::Processed),
+    ];
+    expected.sort();
     assert_eq!(
-        f.dispatch(fails).await,
-        spent(5, true),
-        "a@1 parks at its first failure"
+        outcomes, expected,
+        "a@1 parks at its first failure, c@1 at its second, d@1 goes on"
     );
-    assert_eq!(f.dispatch(fails).await, spent(4, false), "c@1 has two");
-    f.due().await;
+    let (a, c) = (f.row("a").await, f.row("c").await);
     assert_eq!(
-        f.dispatch(fails).await,
-        spent(5, true),
-        "and parks at its second"
+        (a.parked, a.attempts, c.parked, c.attempts),
+        (true, 5, true, 5)
     );
-    assert_eq!(
-        f.dispatch(ok).await,
-        Outcome::Processed,
-        "d@1, re-armed, goes on"
-    );
+    assert!(f.row("d").await.processed, "d@1, re-armed, goes on");
     assert_eq!(
         f.operated()
             .iter()
@@ -811,7 +991,8 @@ async fn an_operator_re_arms_the_rows_parked_for_a_cause_and_a_canary_parks_agai
 /// The window of a bulk unpark ends at the call and reaches back `within`:
 /// a row parked earlier, or stamped after the call, is left; a row overtaken
 /// by its stream stays parked, counted, unless asked for; and a window
-/// longer than the channel keeps its processed rows is refused.
+/// longer than the channel keeps its processed rows is refused, unless the
+/// overtaken are asked for too.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_bulk_unpark_keeps_to_its_window_and_leaves_an_overtaken_row_unless_asked() {
@@ -866,6 +1047,21 @@ async fn a_bulk_unpark_keeps_to_its_window_and_leaves_an_overtaken_row_unless_as
         kept.unpark_all("ops", &refused_within_an_hour()).await,
         Err(Error::Refused(_))
     ));
+    // asked to re-arm the overtaken too, it needs no overtaker and takes a
+    // window past the retention: a park older than it has a way back in bulk
+    let past = kept
+        .unpark_all(
+            "ops",
+            &Unparking {
+                overtaken: true,
+                within: Duration::from_secs(3 * 3600),
+                ..refused_within_an_hour()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(past.unparked, 1, "old@1, parked two hours ago");
+    assert!(!f.row("old").await.parked && f.row("late").await.parked);
 }
 
 /// A bulk unpark goes batch after batch to its limit, and no further.

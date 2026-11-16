@@ -10,7 +10,16 @@ by trace validation, where recorded test runs are checked against the model
 
 ```bash
 ./verify/tla/check.sh          # needs Java, tla2tools.jar and Python 3, see the script
+./verify/tla/check.sh --groups # the groups the checks fall into, one a line
+./verify/tla/check.sh inbox-pg traces   # those groups alone
 ```
+
+`make proofs` runs the script, `make proofs PROOFS='<group> ...'` some groups
+of it. The whole took seven hours on a four-core machine, longer than a
+hosted CI job may run (six), so `.github/workflows/proofs.yml` runs each
+group as a job of its own; the longest took two hours there. The groups
+follow the models, except the rotation beside a dependency
+(`inbox-pg-rotation-deps`), a group of its own for its length alone.
 
 ## Outbox — `Outbox.tla`
 
@@ -221,7 +230,9 @@ cut is checked, including dependencies across slots.
 | `ParkedIsAside` | invariant | a parked message is out of the queue, unprocessed, and got there by exhausting its attempts or its wait |
 | `WaitingIsAside` | invariant | a message set aside waits for a dependency of its own that is not processed, and is neither processed nor parked meanwhile, unless its wait ran out: then it is parked and keeps the identity |
 | `WokenAfterExpiry` | liveness | a row whose wait ran out does not stay parked once what it depends on is processed: the mark of the hole unparks it (ADR-0036 R8) |
-| `ArrivalOrder` | invariant | messages without dependencies of one slot are processed in order of arrival |
+| `ArrivalOrder` | invariant | messages without dependencies of one slot and one Tenant are processed in order of arrival; with one Tenant, the whole slot's order |
+| `BoundedOvertaking` | invariant | rotating, while a message is a due head, its slot takes or sets aside at most one head of each other Tenant, NT − 1 in all, NT the number of Tenants (ADR-0041; `MCInboxRotation.tla`) |
+| `EventuallyProcessedBesidePoison` | liveness | a poison message never parked holds only what its failure holds: rotating, its own (slot, Tenant) |
 | `EventuallyProcessed` | liveness | a received message whose dependencies are processed is eventually processed, unless its subscriber never succeeds |
 | `EventuallyParked` | liveness | with parking on, a message whose subscriber never succeeds is eventually parked or resolved |
 | `EventuallyAside` | liveness | with parking and expiring waits, every received message ends up processed or parked |
@@ -283,6 +294,76 @@ configurations, on one slot and no dependencies:
 Attempts are counted in the model only where the count decides something:
 with `MaxAttempts = 0` an unbounded counter would make the state space
 infinite.
+
+**Tenants in turn (ADR-0041).** Every message has a Tenant, `TenantOf`,
+numbered from 1. By default there is one Tenant and a slot is one FIFO, as
+before; `TenantOf` and `Rotates` are definitions, not constants, so every
+configuration and every instance of the module keeps that behaviour unless it
+replaces them (`TenantOf <- MCTwoTenants`, `Rotates <- MCTrue`).
+
+Rotating:
+- the head of (slot, Tenant) is the Tenant's oldest row in the slot's queue;
+- the slot's `cursor` names the Tenant served last, and the holder takes the
+  head of the first Tenant after it, cyclically, whose head is due;
+- the cursor moves when a head is taken or set aside, and stays when the
+  dispatcher crashes, as decision 3 has it on a rollback;
+- a head in its backoff holds its own (slot, Tenant), not the slot.
+
+The walk's bound K and a slot's dormancy are the statements' matter, in
+`InboxPg.tla`. Here a walk sees every Tenant of its slot, which takes heads
+in the same order. A step of its own, `Pass`, moves the cursor past Tenants
+with no due head and takes nothing, as a walk bounded by K does when it
+finds none, so that `InboxPg.tla` can refine this module.
+
+`MCInboxRotation.tla` extends `MCInbox.tla` with a history variable,
+`overtaken`: for each message and each other Tenant, the heads of that Tenant
+a slot took or set aside while the message was a due head of its (slot,
+Tenant). It counts dispatches, not time.
+It is kept out of `MCInbox.tla` so that every specification there keeps its
+variables, and out of `Inbox.tla` so that `InboxPg.tla`'s refinement does not
+have to produce it.
+
+Configurations, with m1 and m2 of Tenant 1 and m3 of Tenant 2:
+- `InboxRotation.cfg` (`MCInboxRotation.tla`): the instance of `Inbox.cfg`,
+  rotating. Everything holds, `BoundedOvertaking` included.
+- `InboxRotationPoison.cfg` (`MCInboxRotation.tla`): the instance of
+  `InboxPoison.cfg`, rotating. Everything holds.
+- `InboxRotationPoisonNoParking.cfg` (`MCInbox.tla`): m1 poison and never
+  parked. m2 waits behind it by design, and m3, of the other Tenant,
+  is processed: `EventuallyProcessedBesidePoison` holds.
+- `InboxFifoSlot.cfg` (`MCInboxRotation.tla`): the FIFO, before ADR-0041. TLC
+  finds `BoundedOvertaking` violated: m1 and m2 are taken while m3 is a due
+  head.
+- `InboxCursorStays.cfg` (`MCInboxRotation.tla`): a rotation whose cursor is
+  never written (`Turned <- MCCursorStays`), so the walk always starts from
+  the same Tenant. TLC finds `BoundedOvertaking` violated the same way: the
+  rotation has become a priority by Tenant.
+- `InboxPoisonHoldsSlot.cfg` (`MCInbox.tla`): the FIFO behind a poison head
+  never parked. TLC finds `EventuallyProcessedBesidePoison` violated: m3
+  waits behind m1 for ever. It runs on `Spec`: there the history counter
+  would grow without end.
+- `InboxNewestOfTenant.cfg` (`MCInbox.tla`): a rotation taking a Tenant's
+  newest row (`HeadOf <- MCNewestOfTenant`). TLC finds `ArrivalOrder`
+  violated.
+
+`BoundedOvertaking` bounds each other Tenant to one head, not only all of
+them to NT − 1: one large Tenant overtakes a due head once, whatever its
+backlog, and that is what the rotation is for. Two Tenants cannot tell the
+two forms apart, nor a walk that starts after the cursor from one that goes
+by Tenant number and skips only the cursor's Tenant, as `tenant_id <>
+last_tenant ORDER BY tenant_id` would. `MCInboxThree.tla` has three, in one
+slot: m1 and m2 of Tenant 1, m2 depending on m1, m3 of Tenant 2, m4 of
+Tenant 3.
+- `InboxRotationThree.cfg`: one crash. Everything holds, `BoundedOvertaking`
+  included: 15 382 states.
+- `InboxWalkFromLowest.cfg`: that walk (`Dist <- MCWalkFromLowest`). TLC
+  finds `BoundedOvertaking` violated: Tenant 1 comes first from every cursor
+  but its own, so m1 is taken, its dispatcher dies, a walk passes Tenant 2,
+  which has no row, and m1 is taken again while m4 is due. On
+  `InboxRotation.cfg`'s two Tenants the same walk holds, with the same
+  16 766 states as the rotation.
+
+`check.sh` requires each of the five violations.
 
 ## Inbox forgetting — `InboxForget.tla`
 
@@ -365,8 +446,9 @@ Taking a slot is two steps, the snapshot and then the lock, because that is
 where the two come apart. The slot's row is locked `FOR UPDATE SKIP LOCKED`;
 the advisory lock on a dependency's identity is taken by the wait and by the
 mark, held to the end of the transaction, re-entrant for its holder. Left
-out, as matters `Inbox.tla` settles: failures, backoff, parking, expiring
-waits, operators. One abstraction is declared in the module: the dependency
+out, as matters `Inbox.tla` settles: failures and backoff (except where
+the rotation needs them, below), parking after attempts, operators.
+Expiring waits are in, behind `Expires`. One abstraction is declared in the module: the dependency
 check is taken with the head's snapshot, where the implementation runs it
 one statement later — a mark committed in that window is then seen, and a
 head this model would set aside is processed instead.
@@ -419,6 +501,102 @@ Three switches name the designs the module was written to tell apart, and
   expiry as it was before R8, clearing `waiting_for`. TLC finds
   `EventuallyProcessed` violated: the second message parked when its wait
   ran out, the first marked, and the second never woken.
+
+**Tenants in turn, statement by statement (ADR-0041).** `Rotates` is the
+slot of ADR-0041 decision 2 as statements:
+- the slot row's cursor, `last_tenant`;
+- the walk inside the head's statement, under the slot's lock and a fresh
+  snapshot, which examines at most `K` Tenants after the cursor and wraps
+  once;
+- `Passed` when none of their heads is due;
+- the round, from the cursor it began at to the walk that passes it, and the
+  dormancy that ends it;
+- a take that qualifies a slot by a queue row and its not being asleep.
+
+The cursor the walk writes is pending in its transaction and commits with
+it. A walk that finds nothing commits the slot row at once.
+
+`TenantOf`, `Rotates`, `K` and the switches are definitions, as in
+`Inbox.tla`. A rotating configuration replaces `Rotates` and `TenantOf` here
+and in the instanced `Inbox.tla` alike (`Rotates <- [Inbox] MCTrue`), so that
+the refinement maps onto a rotating protocol. Two things come in with the
+rotation that the FIFO had no need of here:
+- a subscriber's own failure and the backoff it leaves (`Fails`);
+- an insert whose position is drawn by its statement and committed later
+  (`SplitReceive`), so that rows of different Tenants commit out of the
+  order of their positions. The rows of one Tenant arrive one at a time, as
+  a stream's do.
+
+The world's clock is two events, not a variable: a backoff passing
+(`Elapse`) and `max_dormancy` passing for a dormant slot (`Cap`). The model
+has no time, so it cannot tell `max_dormancy` from a backoff of 300 s. The
+cap's bound in time is ADR-0041's E4.
+
+The refinement:
+- `cursor` is the holder's pending cursor once its walk has chosen a head,
+  the committed one otherwise.
+- A walk that found nothing is `Inbox.tla`'s `Pass`.
+- A set-aside is the protocol's `Wait` at the walk that chose the head, not
+  at the statement that sets the wait. The walk moved the cursor, so a
+  dependency marked before the wait is set wakes it in the protocol, and the
+  transaction commits the cursor alone, as the implementation commits it.
+- An insert committed after a later one is `ReceiveAs` with the position
+  the sequence drew.
+
+A rollback of a rotating dispatch is not modelled. Decision 3 moves the
+cursor after it by a statement of its own, which is ADR-0041's slice 2.
+
+`MCInboxPgRotation.tla` adds a history variable, `passes`: a slot's walks
+that returned `Passed` in a row. Two properties are new:
+- `NoDueHeadAsleep`: a slot sleeps past a due head only when that head could
+  not be seen by the round that put it to sleep — its insert was in flight
+  when the round began, or a dependency's mark woke it after.
+- `PassedPerRound`: while nothing in the slot changes, at most ⌈T_s/K⌉
+  `Passed` in a row. The last may be one walk more than the Tenants need.
+  When the Tenant served last has no row left, the place the round began at
+  is no Tenant's, and the walk that examined the last Tenant before it
+  cannot know it is past.
+
+Configurations:
+- `InboxPgRotation.cfg` (`MCInboxPgRotation.tla`): one slot, one loop,
+  three Tenants of a row each, numbered so that a round beginning at Tenant 3
+  passes Tenant 2 first. `K = 1`, two failures, inserts committed out of
+  order. `Refines`, `EventuallyProcessed` and every invariant hold, the two
+  new ones included: 431 643 states.
+- `InboxPgRotationWide.cfg`: the same with `K = 3`, a walk that examines
+  every Tenant, so that a round is one walk: 360 127 states.
+- `InboxPgRotationDeps.cfg` (`MCInboxPg.tla`): rotating beside a dependency.
+  m2 depends on m1; m1 and m2 are Tenant 1's, m3 Tenant 2's. Two cuts: m1
+  in one slot and m2 with m3 in the other, or all three in one. Two loops,
+  one failure. `Refines` holds with the set-aside at the walk, and so
+  do `EventuallyProcessed`, `CausalOrder`, `WaitingIsAside`, `NoDeadlock`
+  and the rest: 1 914 637 states, about twice `InboxPg.cfg`.
+- `InboxPgRotationNoCap.cfg` (`MCInboxPg.tla`): `InboxPgRotation.cfg`
+  without `Cap`. `EventuallyProcessed` still holds: a dormancy ends when a
+  backoff its round saw passes, every head the round examined was in
+  backoff, and that passing is fair. So no liveness property fails for want
+  of the cap, which bounds a wait in time only; this configuration holds so
+  that liveness is seen not to rest on it: 287 281 states.
+- `InboxPgSleepsPastBackoff.cfg`: the same with a dormancy that the backoffs
+  its round saw do not end, as a `dormant_until` set to the cap would be.
+  TLC finds `EventuallyProcessed` violated: a backoff the round saw passes,
+  and the slot sleeps on past its head, the take finding it asleep for
+  ever. With the cap the same mutation breaks `NoDueHeadAsleep`.
+- `InboxPgDormantAfterAtWalk.cfg`: `dormant_after` read by the walk that ends
+  the round, as ADR-0041 first had it. TLC finds `NoDueHeadAsleep` violated:
+  - m1 of Tenant 2 and m2 of Tenant 3 fail in turn, and the cursor is at 3;
+  - a walk examines Tenant 2 and passes, and the round begins at 3;
+  - m3 of Tenant 1 commits behind the walk;
+  - the next walk examines Tenant 3, passes the round's start, and puts the
+    slot to sleep with m3 below `dormant_after`, due and never in flight.
+- `InboxPgNoRoundEnd.cfg`: a round that never ends. TLC finds
+  `PassedPerRound` violated.
+- `InboxPgPassedStays.cfg`: a walk that finds nothing and leaves the cursor.
+  TLC finds `PassedPerRound` violated: the next walk examines the same
+  Tenants.
+- `InboxPgNewestOfTenant.cfg` (`MCInboxPg.tla`): a walk taking its Tenant's
+  newest row, m1 and m2 of one Tenant in one slot. TLC finds `ArrivalOrder`
+  violated.
 
 ## Bridge — `Bridge.tla`
 
@@ -491,26 +669,55 @@ marked, and how the slot's transaction closed. One recorder
 watching an outbox that feeds an inbox keeps the order across both.
 
 ```bash
-ASCETIC_DDD_TRACE_DIR=verify/tla/traces \
-    cargo test -p ascetic-ddd-outbox -p ascetic-ddd-inbox --test pg --test bridge -- --include-ignored
-./verify/tla/check.sh
+make traces    # records every trace again, at ASCETIC_DDD_TEST_PG_URL, and checks the covered ones
 ```
 
-The traces under `traces/` were recorded once, and fit the models whatever
-the code does now. `make traces` records the runs afresh, into a directory
-of its own, and `check.sh --traces DIR` checks the fresh run of every
-inbox scenario committed under `traces/`: committing a run declares its
-scenario covered. The outbox's runs, and the bridges', are ADR-0035's owed
-refinement: `TraceOutbox.tla` follows the outbox before its epochs. A committed scenario that no test records any more fails, unless
-`traces/RECORDED_ONCE` names it with its reason; a run recorded under no
-committed name is counted and left. ADR-0040 § Executors lists the
-scenarios the tests record and the trace models do not yet follow. A
-failure's park says whether its verdict was permanent: `MaxAttempts` is read
-off the parks of exhausted attempts alone, and a permanent one is the
-model's `FailPermanent`. Read as an exhausted one, a single permanent
-failure would fit as `MaxAttempts = 1`, for the wrong reason. A dispatch
-closed with an outcome the mapping does not know is refused, rather than
-ended without a step.
+**What is covered.** The traces under `traces/` are the covered ones, and
+the list. `make traces` records every test's trace into a directory of its
+own, then:
+- replaces each covered trace by its new recording, and fails when no test
+  recorded one again: its test is gone or renamed;
+- names each recording that is not covered, and checks none of them;
+- runs `check.sh traces` over the covered ones.
+
+A failure's park says whether its verdict was permanent: `MaxAttempts` is
+read off the parks of exhausted attempts alone, and a permanent one is the
+model's `FailPermanent`. Read as an exhausted one, a single permanent failure
+would fit as `MaxAttempts = 1`, for the wrong reason. A dispatch closed with
+an outcome the mapping does not know is refused, rather than ended without a
+step; a walk that passed took no head, and is no step. A hold for a stage's
+outage (ADR-0040 decision 4) is refused: `Inbox.tla` has no hold yet.
+
+A recording that fits is covered by committing it. A test that writes a row
+behind the observers (by SQL, as an older producer or a hand would) records
+no trace: its run has a step the trace lacks, and it fits no run of the
+model.
+
+Not covered, as of 2026-11-16 (recorded again on ADR-0040's branch; 49
+fit):
+- **The outbox's epochs (ADR-0035).** `TraceOutbox.tla` follows `Outbox.tla`,
+  which releases below `xmin`. `outbox-visibility`, checked: a committed
+  version leaves past an open one in an epoch of its own, which that model
+  refuses. Ten more, of tests of the epochs and what they brought — commit
+  order, rewinds, lanes, the replay horizon, the reset — not checked one by
+  one: `outbox-backlog`, `outbox-between` and `outbox-rewind_epoch` do not
+  translate (their fetches carry an epoch of `null`); `outbox-commit_order`,
+  `outbox-lane_start`, `outbox-position`, `outbox-replay_horizon`,
+  `outbox-reset`, `outbox-rewind_open` and `outbox-uri` do not fit. The epoch
+  relay is checked statement by statement, in `OutboxPg.tla`; its trace
+  validation is owed.
+- **Two inbox traces that do not fit, not yet diagnosed:**
+  `inbox-held_by_concurrent`, `inbox-window_passed`.
+- **Two runs of no step, which `trace2tla.py` refuses: committed, each
+  would fit whatever the model said.** `inbox-identity_past`: its test's
+  intake sets both messages aside. `outbox-refused_wire`: its producer
+  refuses each message at the commit, which aborts, and nothing is
+  recorded. (Both branches had committed the second, recorded empty, and
+  ADR-0040's the first; each fit with no step.)
+- **A rotating run.** `TraceInbox.tla` substitutes a cursor that never moves,
+  so it follows a slot served in arrival order: a run whose walk passed a
+  Tenant, or served a later Tenant's head before an earlier one's, does not
+  fit, and no test of the rotation is covered (ADR-0041 § Owed).
 
 `trace2tla.py` maps the lines onto the model's steps — an acknowledgement and
 the commit that follows it become one `Ack`, a rolled-back batch a `Crash`, a

@@ -209,6 +209,17 @@ Read them before changing the bus, the outbox or the inbox. ADR-0036
   dependencies are bounded before they are read, and the dispatcher parks a
   row it cannot read or write for its own values *(Accepted, built in
   the library; the host's adoption next; revises ADR-0036 R3)*.
+- [ADR-0038](docs/src/adr/0038-a-message-s-identity-is-one-text-at-the-outbox-and-one-value-at-the-inbox.md) —
+  a message's identity is one text at the outbox and one value at the
+  inbox: the outbox refuses at the producer's commit every message whose
+  identity is not the bus's one spelling of it, or that the inbox would set
+  aside, and aborts its transaction *(Accepted, built)*.
+- [ADR-0041](docs/src/adr/0041-a-slot-serves-its-tenants-in-turn-and-a-failure-holds-only-what-its-cause-reaches.md) —
+  a slot serves its Tenants in turn, and a failure holds only what its cause
+  reaches: arrival order per (slot, Tenant), a rotation with dormancy, the
+  environment's verdict and a bounded deferral, the stages before the inbox
+  kept short rather than fair *(Proposed; amends ADR-0005 decision 2,
+  ADR-0008 decisions 2 and 4, ADR-0010 decision 4)*.
 
 ## Specifications
 

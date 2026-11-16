@@ -261,6 +261,7 @@ impl InboxObserver for JsonTrace {
                 Ok(Outcome::SetAside) => "set_aside",
                 Ok(Outcome::Parked) => "parked",
                 Ok(Outcome::Nothing) => "nothing",
+                Ok(Outcome::Passed) => "passed",
                 Err(_) => "rolled_back",
             },
         }));
