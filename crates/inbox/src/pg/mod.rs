@@ -43,9 +43,14 @@
 //! dependency processed puts every row waiting for it back, in the same
 //! statement. Nothing polls for a dependency. The wait and the mark take a
 //! transaction-level advisory lock on the dependency's identity, so that a
-//! mark cannot slip between the check and the wait (ADR-0009). With
-//! [`PgInbox::with_max_wait`] a row waiting longer is parked with the
-//! dependency named; by default it waits for ever (ADR-0006).
+//! mark cannot slip between the check and the wait (ADR-0009). A row that
+//! has waited longer than [`PgInbox::with_max_wait`], an hour by default, is
+//! parked with the reason named when its dependency never arrived, is
+//! parked, or reaches no queued row within 8 hops of waiting rows; one whose
+//! dependency is there and on its way waits on. The expiry runs on a timer
+//! of [`PgInbox::run`], off the dispatch path, and [`PgInbox::expire`] is
+//! its call for a host that drives the dispatch itself (ADR-0042 decision
+//! 7).
 //!
 //! # Failures
 //!
@@ -86,6 +91,7 @@
 mod dispatch;
 #[cfg(test)]
 mod exit_tests;
+mod expiry;
 mod intake;
 #[cfg(test)]
 mod measure_tests;
@@ -96,6 +102,7 @@ mod release_tests;
 mod store;
 mod surface;
 
+pub use expiry::Expiry;
 pub use intake::Admission;
 pub use surface::{
     ParkedUnder, Readmission, Readmitted, SetAsideCount, SetAsideCursor, SetAsidePage, SetAsideRow,
@@ -518,6 +525,8 @@ pub struct PgInbox<P, O = ()> {
     /// next statement starts, so that dead index entries a held vacuum
     /// horizon keeps are not walked again.
     swept_to: Mutex<HashMap<String, String>>,
+    /// Where this process's pass of the expiry stands ([`PgInbox::expire`]).
+    expired_to: expiry::Cursor,
     /// Whether a message of a stream type may arrive on a channel (ADR-0036
     /// R5): [`PgInbox::admitting`].
     admission: Admits,
@@ -557,6 +566,7 @@ impl<P> PgInbox<P> {
             retention: InboxRetention::default(),
             breaker: Arc::new(std::sync::Mutex::new(Breaker::new(Breaking::default()))),
             swept_to: Mutex::new(HashMap::new()),
+            expired_to: expiry::Cursor::default(),
             admission: Arc::new(|_, _| true),
             readmission: Arc::new(|_| false),
             bounds: Bounds::default(),
@@ -581,6 +591,7 @@ impl<P, O> PgInbox<P, O> {
             retention: self.retention,
             breaker: self.breaker,
             swept_to: self.swept_to,
+            expired_to: self.expired_to,
             admission: self.admission,
             readmission: self.readmission,
             bounds: self.bounds,
@@ -711,7 +722,9 @@ impl<P, O> PgInbox<P, O> {
     }
 
     /// The same inbox, parking a message that has waited longer than
-    /// `max_wait` for a dependency, with the dependency named.
+    /// `max_wait` for a dependency that never arrived, is parked, or reaches
+    /// no queued row within 8 hops, with the dependency and the reason named
+    /// ([`PgInbox::expire`]).
     pub fn with_max_wait(self, max_wait: Duration) -> Self {
         PgInbox {
             max_wait: Some(max_wait),

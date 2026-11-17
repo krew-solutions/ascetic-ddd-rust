@@ -18,7 +18,9 @@ use ascetic_ddd_session::pg::tokio_postgres::{Config, NoTls};
 use serde_json::Value;
 
 use super::PgInbox;
-use super::store::{held_counts_sql, parked_counts_sql, take_sql, walk_sql};
+use super::store::{
+    EXPIRY_BATCH, expire_sql, held_counts_sql, parked_counts_sql, take_sql, walk_sql,
+};
 use super::surface::unpark_batch;
 use crate::partition::ByStream;
 
@@ -224,9 +226,14 @@ fn by_the_indexes(plan: &Value, table: &str, indexes: &[String], sorted: f64) {
         let kind = node["Node Type"].as_str().unwrap_or_default();
         if node["Relation Name"].as_str() == Some(table) {
             assert!(
+                // a write is no read: the rows it writes are its child's
                 matches!(
                     kind,
-                    "Index Scan" | "Index Only Scan" | "Bitmap Heap Scan" | "Tid Scan"
+                    "Index Scan"
+                        | "Index Only Scan"
+                        | "Bitmap Heap Scan"
+                        | "Tid Scan"
+                        | "ModifyTable"
                 ),
                 "the table is read by a {kind}: {node}"
             );
@@ -410,19 +417,159 @@ async fn the_take_and_the_walk_go_by_the_queue_s_indexes() {
     }
 }
 
-/// The take and the walk are planned once a connection (ADR-0041 decision
-/// 6): the walk's function forces the generic plan, so that a session asking
-/// for custom plans, as the specification crate's queries need (ADR-0027),
-/// does not plan it at every call; the take's statement has no parameter.
+/// E1 (ADR-0042 decision 7): a statement of the expiry examines at most a
+/// batch of the waiters, by `__waiting_since_idx` in its keyset's order,
+/// and follows each one's chain by the primary key, a probe a hop: no scan
+/// of the table, no sort of more than a batch, whatever the waiters behind
+/// the batch and the rows the expiry parked before. Its generic plan, the
+/// one its function runs, is held to the same. Red when the batch bounds
+/// the rows parked rather than those examined: the index then reads every
+/// waiter past `max_wait`.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_expiry_examines_a_batch_by_its_index() {
+    let table = "inbox_expiry_plan";
+    let inbox = PgInbox::new(PgSessionPool::new(pool()))
+        .with_table(
+            Identifier::new(table).unwrap(),
+            Identifier::new("inbox_expiry_plan_seq").unwrap(),
+        )
+        .partitioned_by(ByStream);
+    inbox.teardown().await.unwrap();
+    inbox.migrate().await.unwrap();
+    let client = pool().get().await.unwrap();
+    // 20,000 processed rows of history; 5,000 waiters past `max_wait`, each
+    // on a chain of two hops to a queued row; 2,000 rows the expiry parked
+    let identity = |stream: &str| {
+        format!(
+            "jsonb_build_object('tenant_id', 'tenant-1', 'stream_type', 'orders.Order', \
+             'stream_id', to_jsonb({stream}), 'stream_position', 1)"
+        )
+    };
+    client
+        .batch_execute(&format!(
+            "INSERT INTO {table} (tenant_id, stream_type, stream_id, stream_position, uri, payload, \
+                 metadata, processed_position) \
+             SELECT 'tenant-1', 'orders.Order', to_jsonb('h-' || g), 1, 'kafka://orders/h', 'x', \
+                 '{{}}', g FROM generate_series(1, 20000) g; \
+             INSERT INTO {table} (tenant_id, stream_type, stream_id, stream_position, uri, payload, \
+                 metadata) \
+             SELECT 'tenant-1', 'orders.Order', to_jsonb('q-' || g), 1, 'kafka://orders/q', 'x', \
+                 '{{}}' FROM generate_series(1, 5000) g; \
+             INSERT INTO {table} (tenant_id, stream_type, stream_id, stream_position, uri, payload, \
+                 metadata, waiting_for, waiting_since) \
+             SELECT 'tenant-1', 'orders.Order', to_jsonb('m-' || g), 1, 'kafka://orders/m', 'x', \
+                 '{{}}', {mid}, now() - interval '3 hours' \
+             FROM generate_series(1, 5000) g; \
+             INSERT INTO {table} (tenant_id, stream_type, stream_id, stream_position, uri, payload, \
+                 metadata, waiting_for, waiting_since) \
+             SELECT 'tenant-1', 'orders.Order', to_jsonb('w-' || g), 1, 'kafka://orders/w', 'x', \
+                 '{{}}', {head}, now() - interval '2 hours' + g * interval '1 millisecond' \
+             FROM generate_series(1, 5000) g; \
+             INSERT INTO {table} (tenant_id, stream_type, stream_id, stream_position, uri, payload, \
+                 metadata, waiting_for, parked_at) \
+             SELECT 'tenant-1', 'orders.Order', to_jsonb('e-' || g), 1, 'kafka://orders/e', 'x', \
+                 '{{}}', {never}, now() FROM generate_series(1, 2000) g",
+            mid = identity("'q-' || g"),
+            head = identity("'m-' || g"),
+            never = identity("'never'::text"),
+        ))
+        .await
+        .unwrap();
+    client
+        .batch_execute(&format!("VACUUM ANALYZE {table}"))
+        .await
+        .unwrap();
+    let indexes = [format!("{table}__waiting_since_idx"), format!("{table}_pk")];
+    let held = |plan: &Value| {
+        by_the_indexes(plan, table, &indexes, f64::from(EXPIRY_BATCH));
+        let nodes = nodes(plan);
+        let examined: Vec<f64> = nodes
+            .iter()
+            .filter(|node| {
+                node["Index Name"].as_str() == Some(&format!("{table}__waiting_since_idx"))
+            })
+            .filter_map(|node| node["Actual Rows"].as_f64())
+            .collect();
+        assert!(!examined.is_empty(), "the waiting index: {plan}");
+        assert!(
+            examined.iter().all(|rows| *rows <= f64::from(EXPIRY_BATCH)),
+            "a batch examined at most: {examined:?} {plan}"
+        );
+        // a hop is one probe of the key, its position among the key's
+        // columns, not a walk of its stream's history
+        let probes: Vec<&str> = nodes
+            .iter()
+            .filter(|node| node["Index Name"].as_str() == Some(&format!("{table}_pk")))
+            .filter_map(|node| node["Index Cond"].as_str())
+            .collect();
+        assert!(!probes.is_empty(), "the hops probe the key: {plan}");
+        assert!(
+            probes.iter().all(|cond| cond.contains("stream_position")),
+            "{probes:?}"
+        );
+        nodes.iter().any(|node| {
+            node["Index Cond"]
+                .as_str()
+                .is_some_and(|cond| cond.contains("$3"))
+        })
+    };
+    let explained = client
+        .query_one(
+            &format!("EXPLAIN (ANALYZE, FORMAT JSON) {}", expire_sql(table)),
+            &[
+                &3600.0f64,
+                // a `LIMIT` sent as text is a bigint; the function's is its integer argument
+                &i64::from(EXPIRY_BATCH),
+                &None::<std::time::SystemTime>,
+                &None::<i64>,
+            ],
+        )
+        .await
+        .unwrap()
+        .get::<_, Value>(0);
+    held(&explained[0]["Plan"]);
+    client
+        .batch_execute(&format!(
+            "SET plan_cache_mode = force_generic_plan; \
+             PREPARE generic_expire (double precision, integer, timestamptz, bigint) AS {};",
+            expire_sql(table)
+        ))
+        .await
+        .unwrap();
+    let generic = client
+        .query_one(
+            "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE generic_expire (3600, 100, NULL, NULL)",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get::<_, Value>(0);
+    assert!(
+        held(&generic[0]["Plan"]),
+        "a generic plan, the key a parameter of the index's condition: {generic}"
+    );
+    client
+        .batch_execute("DEALLOCATE ALL; RESET plan_cache_mode")
+        .await
+        .unwrap();
+    inbox.teardown().await.unwrap();
+}
+
+/// The take, the walk and the expiry are planned once a connection
+/// (ADR-0041 decision 6, ADR-0042 decision 7): the walk's and the expiry's
+/// functions force the generic plan, so that a session asking for custom
+/// plans, as the specification crate's queries need (ADR-0027), does not
+/// plan them at every call; the take's statement has no parameter.
 /// Counted from the server's own report of each plan it makes
 /// (`debug_print_plan`), on a connection of the test's: ten calls of each,
 /// each call planned — the call is a statement sent as text — and each
-/// function's statement once. Red when the walk's `SET plan_cache_mode` is
-/// dropped, or the take's statement given a parameter: then planned at each
-/// of its ten.
+/// function's statement once. Red when the walk's or the expiry's `SET
+/// plan_cache_mode` is dropped, or the take's statement given a parameter:
+/// then planned at each of its ten.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
-async fn the_take_and_the_walk_are_planned_once_a_connection() {
+async fn the_take_the_walk_and_the_expiry_are_planned_once_a_connection() {
     use ascetic_ddd_session::pg::tokio_postgres::{self, AsyncMessage};
     let table = "inbox_walk_planned";
     let inbox = PgInbox::new(PgSessionPool::new(pool()))
@@ -481,6 +628,22 @@ async fn the_take_and_the_walk_are_planned_once_a_connection() {
             .await
             .unwrap();
         assert_eq!(row.get::<_, String>(5), "taken");
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT * FROM {table}__expire($1::double precision, $2::integer, \
+                     $3::timestamptz, $4::bigint)"
+                ),
+                &[
+                    &3600.0f64,
+                    &100i32,
+                    &None::<std::time::SystemTime>,
+                    &None::<i64>,
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "no row parked, the key's row");
     }
     client
         .batch_execute("RESET debug_print_plan; RESET client_min_messages")
@@ -494,8 +657,8 @@ async fn the_take_and_the_walk_are_planned_once_a_connection() {
     }
     assert_eq!(
         plans,
-        2 * CALLS + 2,
-        "each call planned, and the take's and the walk's statements once"
+        3 * CALLS + 3,
+        "each call planned, and the take's, the walk's and the expiry's statements once"
     );
     inbox.teardown().await.unwrap();
 }

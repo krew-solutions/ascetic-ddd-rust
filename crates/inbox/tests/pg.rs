@@ -22,8 +22,9 @@ use ascetic_ddd_inbox::observer::{
     Swept, Unparked, Waiting,
 };
 use ascetic_ddd_inbox::{
-    ByStream, CausalDependency, Error, Failure, Ground, Hold, Inbox, InboxMessage, InboxRetention,
-    Loops, MAX_IDENTITY_BYTES, Outcome, Parked, PartitionKey, PgInbox, Receipt, Retries, Rotation,
+    ByStream, CausalDependency, Error, Expiry, Failure, Ground, Hold, Inbox, InboxMessage,
+    InboxRetention, Loops, MAX_IDENTITY_BYTES, Outcome, Parked, PartitionKey, PgInbox, Receipt,
+    Retries, Rotation,
 };
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -203,6 +204,11 @@ impl<O: InboxObserver> Fixture<O> {
         Fut: std::future::Future<Output = Result<(), Failure>> + Send,
     {
         self.inbox.dispatch(subscriber).await.unwrap()
+    }
+
+    /// One statement of the expiry that must not fail on the database.
+    async fn expire(&self) -> Expiry {
+        self.inbox.expire().await.unwrap()
     }
 
     async fn parked_messages(&self) -> Vec<Parked> {
@@ -1625,7 +1631,7 @@ async fn a_hole_filled_after_the_wait_ran_out_wakes_its_dependent() {
     let (seen, subscriber) = collector();
     assert_eq!(f.dispatch(&subscriber).await, Outcome::SetAside);
     tokio::time::sleep(Duration::from_millis(350)).await;
-    assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
+    assert_eq!(f.expire().await.parked, 1);
     assert_eq!(f.parked().await, ["order@1"], "the wait ran out");
 
     f.publish(std::slice::from_ref(&cause)).await;
@@ -1651,7 +1657,7 @@ async fn an_unparked_row_whose_wait_ran_out_waits_again() {
     let (_, subscriber) = collector();
     assert_eq!(f.dispatch(&subscriber).await, Outcome::SetAside);
     tokio::time::sleep(Duration::from_millis(350)).await;
-    assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
+    assert_eq!(f.expire().await.parked, 1);
     assert_eq!(f.parked().await, ["order@1"]);
 
     let at = f.position_of(&effect).await;
@@ -1667,13 +1673,14 @@ async fn an_unparked_row_whose_wait_ran_out_waits_again() {
         "waits again"
     );
     tokio::time::sleep(Duration::from_millis(350)).await;
-    assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
+    assert_eq!(f.expire().await.parked, 1);
     assert_eq!(f.parked().await, ["order@1"], "and runs out again");
 }
 
 /// A message whose dependency never arrives waits out of the queue, costing
 /// the walk nothing, and with `max_wait` set is parked with the dependency
-/// named (ADR-0006).
+/// named (ADR-0006) — by the expiry, not by a dispatch, which takes its
+/// slot's work and no other (ADR-0042 decision 7).
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_dependency_that_never_arrives_parks_the_message_after_max_wait() {
@@ -1705,9 +1712,14 @@ async fn a_dependency_that_never_arrives_parks_the_message_after_max_wait() {
     );
 
     tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
+    assert!(f.parked().await.is_empty(), "no dispatch expires a row");
     assert_eq!(
-        f.dispatch(&subscriber).await,
-        Outcome::Nothing,
+        f.expire().await,
+        Expiry {
+            parked: 1,
+            more: false
+        },
         "expired and parked"
     );
     assert_eq!(f.parked().await, ["order@1"]);
@@ -1749,10 +1761,12 @@ async fn a_dependency_that_never_arrives_parks_the_message_after_max_wait() {
 /// walk's functions the same day; on 2026-11-17 it took ADR-0042's rows —
 /// a row's cause, the count and kind of its holds, their CHECKs, the held
 /// index, the guest's cursor and the walk's paused channels — and ADR-0040's
-/// causes migration with them; the databases made before are recreated.
-/// Once the library is live, the exception is gone: the checksum covers the
-/// functions' bodies, so an edit of either statement is then a new
-/// function by a new migration, and ADR-0042 § Owed lists the steps.
+/// causes migration with them, and the same day the expiry's function, its
+/// index's key and the CHECK that a row with a time of wait waits; the
+/// databases made before are recreated. Once the library is live, the
+/// exception is gone: the checksum covers the functions' bodies, so an edit
+/// of a statement is then a new function by a new migration, and ADR-0042
+/// § Owed lists the steps.
 #[test]
 fn the_released_migrations_keep_their_checksums() {
     let inbox = PgInbox::new(PgSessionPool::new(pool()));
@@ -1767,7 +1781,7 @@ fn the_released_migrations_keep_their_checksums() {
         [
             (
                 "20261027T000000Z_baseline".to_owned(),
-                "fnv1a64:68fe5f2fa07f40c0:12727".to_owned()
+                "fnv1a64:d93838f3e0f6b303:19292".to_owned()
             ),
             (
                 "20261104T000000Z_processed_at".to_owned(),
@@ -2587,9 +2601,19 @@ async fn an_expiry_parks_a_batch_at_a_time_without_the_payloads() {
         )
         .await
         .unwrap();
-    let (_, subscriber) = collector();
-    f.dispatch(&subscriber).await;
-    f.dispatch(&subscriber).await;
+    assert_eq!(
+        [f.expire().await, f.expire().await],
+        [
+            Expiry {
+                parked: 100,
+                more: true
+            },
+            Expiry {
+                parked: 5,
+                more: false
+            }
+        ]
+    );
     assert_eq!(*batches.0.lock().unwrap(), [(100, true), (5, true)]);
 }
 
@@ -2715,7 +2739,7 @@ async fn the_parked_rows_are_counted_by_channel_and_ground_and_each_exit_leaves_
         .batch_execute(&format!(
             "UPDATE {t} SET parked_at = now(), attempts = 3 \
                  WHERE stream_id IN ('{{\"id\": \"p1\"}}', '{{\"id\": \"p2\"}}'); \
-             UPDATE {t} SET parked_at = now(), waiting_since = now(), \
+             UPDATE {t} SET parked_at = now(), \
                  waiting_for = jsonb_build_object('tenant_id', 'tenant-1', 'stream_type', \
                      'pay.Payment', 'stream_id', '\"gone\"'::jsonb, 'stream_position', 1) \
                  WHERE stream_id = '{{\"id\": \"p3\"}}'",

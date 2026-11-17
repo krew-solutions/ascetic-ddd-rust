@@ -808,7 +808,8 @@ async fn a_cause_is_kept_while_its_state_lasts_and_cleared_at_every_exit() {
 
 /// A row waiting for a dependency that arrived and is held for an
 /// `Unavailable` does not expire: what holds the dependency holds what
-/// waits for it. Once the dependency is processed, the waiter goes on.
+/// waits for it (ADR-0042 decision 7). Once the dependency is processed,
+/// the waiter goes on.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_row_waiting_for_a_held_dependency_does_not_expire() {
@@ -820,11 +821,15 @@ async fn a_row_waiting_for_a_held_dependency_does_not_expire() {
     f.publish(std::slice::from_ref(&cause)).await;
     assert_eq!(f.dispatch(|| stage_down(None)).await, held(0));
 
-    f.execute("UPDATE {table} SET waiting_since = now() - interval '20 minutes'")
-        .await;
+    f.execute(
+        "UPDATE {table} SET waiting_since = now() - interval '20 minutes' \
+         WHERE waiting_since IS NOT NULL",
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(220)).await;
     f.due().await;
     assert_eq!(f.dispatch(|| stage_down(None)).await, held(0));
+    assert_eq!(f.inbox.expire().await.unwrap().parked, 0);
     assert!(!f.row("b").await.parked, "spared while a@1 holds");
     tokio::time::sleep(Duration::from_millis(220)).await;
     f.due().await;
@@ -1546,6 +1551,11 @@ async fn no_history_leaves_a_hold_on_a_row_out_of_the_queue() {
                         if cause.stream_id != message.stream_id {
                             message = message.depending_on(&[CausalDependency::on(cause)]);
                         }
+                    } else if step % 5 == 1 {
+                        // a dependency that never arrives, the expiry's;
+                        // by the step, so that the seed's draws stay its own
+                        let hole = message_of(&tenant, "hole", 1);
+                        message = message.depending_on(&[CausalDependency::on(&hole)]);
                     }
                     f.publish(std::slice::from_ref(&message)).await;
                     last = Some(message);
@@ -1605,9 +1615,21 @@ async fn no_history_leaves_a_hold_on_a_row_out_of_the_queue() {
                     } else {
                         f.execute(
                             "UPDATE {table} SET waiting_since = now() - interval '1 hour' \
-                                   WHERE waiting_for IS NOT NULL",
+                                   WHERE waiting_since IS NOT NULL",
                         )
                         .await;
+                        loop {
+                            let expiry =
+                                f.inbox.expire().await.unwrap_or_else(|error| {
+                                    panic!("{seed:x} step {step}: {error}")
+                                });
+                            if expiry.parked > 0 {
+                                met.insert("expired");
+                            }
+                            if !expiry.more {
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -1622,7 +1644,14 @@ async fn no_history_leaves_a_hold_on_a_row_out_of_the_queue() {
                 .await;
             assert_eq!(torn, 0, "{seed:x}: a row torn at step {step} (op {op})");
         }
-        for kind in ["held", "parked", "spent", "processed", "set aside"] {
+        for kind in [
+            "held",
+            "parked",
+            "spent",
+            "processed",
+            "set aside",
+            "expired",
+        ] {
             assert!(
                 met.contains(kind),
                 "{seed:x}: a history without a row {kind}: {met:?}"

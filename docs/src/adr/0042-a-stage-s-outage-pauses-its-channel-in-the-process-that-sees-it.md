@@ -5,7 +5,8 @@
 Proposed (2026-11-16). Built (2026-11-17): slice 1, the breaker's and the memo's pure core
 (`crates/inbox/src/breaker.rs`), C1–C13 its tests; slice 2, the DEK stage's causes and its sentinel read (§ 9,
 D1); slice 3, the breaker in the dispatch — the rows, the exits and their CHECKs, the walk's paused channels and
-the guest, the trial, the isolation per transaction (R1, X1, G1, P1, C5, C8, C10, I1). § Slices orders the rest.
+the guest, the trial, the isolation per transaction (R1, X1, G1, P1, C5, C8, C10, I1); slice 4, the expiry off
+the dispatch path (E1). § Slices orders the rest.
 
 It supersedes ADR-0040's decisions 4, 5, 7, 9 and its `park_held` (decision 8), and ADR-0041's decision 3 (the
 environment's verdict, its slice 2). It keeps ADR-0040's verdicts and causes (decisions 1–3, 6) and
@@ -192,17 +193,40 @@ A violation (23514) is a defect that stops the loops: the fault of the library's
 
 ### 7. The expiry leaves the dispatch path
 
-- A timer of `run`, and `PgInbox::expire()`, which takes no session, for a host that drives `dispatch` itself.
-- One statement, `<table>__expire(max_wait, batch, after)`: a single `WITH RECURSIVE` over the dependency chain,
-  an inner unlocked `LIMIT` over the candidates, and `FOR UPDATE … SKIP LOCKED` on the expiring rows only; no cast
-  a malformed `waiting_for` could abort; a keyset on `(waiting_since, received_position)`; it returns the last key
-  examined, and `batch` bounds the rows examined.
+- A timer of `run`: a pass at the start, its statements one after another while each examined a whole batch,
+  then a rest of `max_wait / 10`; an error of the moment waits as a loop's does, a defect stops the loops, as
+  when the expiry ran in the dispatch (ADR-0010). `PgInbox::expire()`, which takes no session, is one statement
+  of it for a host that drives `dispatch` itself, and returns `Expiry { parked, more }`: call again at once while
+  `more`. The process keeps the pass's key.
+- One statement, `<table>__expire(max_wait, batch, after_since, after_position)`, a function of the baseline
+  planned once a connection, its plan forced generic, as the walk is: a single `WITH RECURSIVE` over the
+  dependency chain, an inner unlocked `LIMIT` over the candidates, and `FOR UPDATE … SKIP LOCKED` on the expiring
+  rows only, their wait tested again on the row locked; no cast a malformed `waiting_for` could abort — the
+  position is read as an integer only when it is an integral JSON number within the column's range, so that a
+  hop is one probe of the primary key and not a walk of its stream's history; a keyset on `(waiting_since,
+  received_position)` by `__waiting_since_idx` on those columns `WHERE waiting_since IS NOT NULL`; it returns
+  the last key examined and how many, and `batch` (100) bounds the rows examined.
+- A row with a `waiting_since` is a waiter in wait: `CHECK (waiting_since IS NULL OR (waiting_for IS NOT NULL AND
+  parked_at IS NULL AND processed_position IS NULL))`, so that the index holds the waiters alone. A row the
+  expiry parked keeps its `waiting_for`, without the time, and is not examined again.
 - A waiter is **spared** while its dependency is unparked and either queued or itself waiting on a spared one,
-  within 8 hops; a ninth hop or a cycle expires it. A spared row is neither written nor locked. `max_wait` so
-  means "the dependency never arrived", which a held head, a row behind one, an untried head and a long backlog
-  are not.
-- A waiter whose dependency is missing or parked expires within `max_wait + max(max_wait/10, ⌈spared/batch⌉ ·
-  interval)`.
+  within 8 hops; a ninth hop or a cycle expires it. A spared row is neither written nor locked, and a statement
+  over spared rows takes no transaction id. `max_wait` so means "the dependency never arrived", which a held
+  head, a row behind one, an untried head and a long backlog are not. A row expired names where its chain broke,
+  after the dependency in `last_error`: it `never arrived` or `is parked`; the waiter `waits on` another
+  identity through waiting rows, `which never arrived` or `which is parked`; or it `reaches no queued row within 8
+  hops`, a chain too long or a cycle.
+- A waiter whose dependency is missing or parked expires within `max_wait + max_wait/10` and the time of
+  ⌈W/batch⌉ statements, W the waiters past `max_wait`, spared or not, itself among them: a waiter that becomes a
+  candidate during a pass lies past its key and is reached by that pass, one that becomes it during a rest by the
+  next. On the reference machine (12 cores, NVMe, PostgreSQL 14): 20,000 spared at one hop, 201 statements of
+  1.1 ms each (E1); 220,001 waiters, 200,000 of them at one hop and 20,000 on chains of 8, 2,201 statements in
+  2.3 s, those over the chains 3.4 ms each — a pass of a process.
+- Under a held vacuum horizon a pass also reads the heap of every waiter woken since the hold began: the wake is
+  not HOT, and its old version's entry in the index cannot be removed while the horizon holds. 20,000 woken
+  cost a statement 798 buffers against 6 (counted on E1's table), each statement of each pass, until a vacuum
+  after the hold. The walk pays the same for every message processed since. A `statement_timeout` a host sets is
+  then a defect of the expiry, which stops the loops, as it is of a dispatch.
 
 ### 8. The operator's verbs
 
@@ -236,7 +260,9 @@ reporting what it did, what it passed by and whether more remain; each wakes the
 
 `<table>__take` returns the transaction's isolation; a trial and a `resolve` read it as their first statement;
 anything but READ COMMITTED is refused for that transaction (`Error::Refused`), since a session's level may
-change between two. `unpark` is one statement that waits for no lock it then reads past, and needs no check.
+change between two. `unpark` is one statement that waits for no lock it then reads past, and needs no check; so
+is a statement of the expiry, which locks `SKIP LOCKED`: under REPEATABLE READ a waiter woken between its read
+and its lock fails it with 40001, an error of the moment, where READ COMMITTED passes the row by.
 
 ### 11. Names
 
@@ -333,7 +359,7 @@ histories with a manual clock; the shell's with a `Clock` and a paused runtime; 
 | C12 | effects unanswered | `tick(now + d)` re-issues within d | in flight without a deadline |
 | C13 | more memo keys than capacity | an entry in flight or not run out is never evicted | plain LRU |
 | G1 | at S = 1, K = 4, a memo of 16, at 8 and 64 Tenants, driven until every slot is paused, then n more dispatches | calls ≤ trials; changed rows ≤ calls; no head held unasked; a guest's step ≤ K; only the pause and the stall logged, as many lines at 64 as at 8; onset calls = `fewest` | drop the walk's filter (a hold on each paused head met, the same observable); no K; a held row logged at `warn` |
-| E1 | the expiry: a present chain, an untried head, a row behind a held head, a missing and a parked dependency, 8 and 9 hops, a cycle under `statement_timeout`, 20,000 spared with one missing last, ties at one `waiting_since`, a malformed `waiting_for`, parked-expired rows; the spared rows' `(ctid, xmin, xmax)` and no xid in one transaction | spared or expired as stated, within the bound, ≤ `batch` rows examined | drop `present`; drop `parked_at IS NULL`; bounds 7 and 16; the cursor on expired rows; `LIMIT` after the filter; a `ctid` tiebreak; a plain cast; renew by write; lock before the spare test |
+| E1 | the expiry (`tests/expiry.rs`, the expiry's plan in `pg/plan_tests.rs`): a present chain, an untried head, a row behind a held head, a missing and a parked dependency, 8 and 9 hops, a cycle under `statement_timeout`, 20,000 spared with one missing last, ties at one `waiting_since` with rows moved in the heap, a malformed `waiting_for`, parked-expired rows; the spared rows' `(ctid, xmin, xmax)` and no xid in one transaction; `run`'s timer, and no dispatch expiring; a defect stopping `run`; the CHECK of a time of wait; the function as the start check requires it, planned once a connection | spared or expired as stated, each with its reason; 201 statements for 20,000 spared; ≤ `batch` rows examined by `__waiting_since_idx`, a hop one probe of the key | drop `present`; drop `parked_at IS NULL`; bounds 7, 16 and none; the cursor on expired rows; `LIMIT` after the filter; a `ctid` tiebreak; the key `waiting_since` alone; a plain cast; renew by write; lock before the spare test; the dispatch expiring; `run` without the timer; a defect logged; `more` by the rows parked; the observer untold; the start check without the set or the function; the CHECK dropped; the index's old predicate or no tiebreak; the exit's fragment; the plan not forced generic |
 | R1 | the rows: 20 asks, no spend; `holds` at its cap; a `Transient` resets, its back-off kept; every wait bound to `clock_timestamp()`, read from the source (a process's clock an hour fast agrees with the server's on one host, so no run tells the two apart); a hold after a 1.5 s subscriber; the kinds of a held head asked and of one held unasked; the counts by `__held_idx`, and answerable from it alone, the heap's scans set off | as stated | spend; no cap; the holds kept by a spend; the back-off dropped; `CURRENT_TIMESTAMP`; the kind from `holds`; `uri` out of the index |
 | X1 | the exits: random operation histories on a live database; every `UPDATE` that sets `processed_position`, `parked_at` or `waiting_for` carries the fragment; the spend that keeps a row queued keeps its back-off; `unpark_all` clears `cause` | no 23514 | drop the fragment; an unconditional fragment; keep `cause` |
 | V1 | the verbs: a locked head passed by; a walk waiting on a verb's lock reads vanished; a slot asleep after a verb wakes within `max_dormancy` and the poll; the canary with `tries` above `max_attempts`; `park_queue` then `unpark_all` in order; the audit | as stated | as stated |
@@ -354,7 +380,8 @@ configuration that must fail lists one property and has a twin generated from it
 configuration's count of distinct states.
 
 **Measurements owed.** M1 the walk with nothing paused, server side, committed per call; M3 the guest at a backlog
-of 20 rows on an unpaused channel; M4 the expiry at the host's count of spared waiters; M5 a one-hour scaled drill
+of 20 rows on an unpaused channel; M4 the expiry at the host's count of spared waiters, against 220,001 in 2.3 s a pass on the reference machine
+(§ 7); M5 a one-hour scaled drill
 at 7 channels and a 200 ms poll, with a KMS quota below the drain's rate; M6 the share of opens served from the
 cache during an outage; a two-session run of a verb's `ctid` join against a concurrent hold.
 
@@ -442,3 +469,46 @@ payloads), its generated Vault policies.
     statement, by the server's log, not the library's. One waker now.
   - **The migrations' checksums** were the baseline's before this slice and listed ADR-0040's causes migration,
     which the baseline took (ADR-0041 decision 6's exception, nothing deployed; § Owed 3 for a live one).
+- 2026-11-17: Slice 4 built: the expiry off the dispatch path — `<table>__expire`, a function of the baseline;
+  `run`'s timer; `PgInbox::expire()` and `Expiry`. Its executors: `tests/expiry.rs` (E1), the expiry's plan and
+  its planning once a connection (`pg/plan_tests.rs`), the start check's cases for it (`tests/intake.rs`), the
+  tests that waited for an expiry by a dispatch now asking `expire()` and one asserting that no dispatch
+  expires; 29 mutations, each red. What building it found:
+  - **The bound of decision 7 was wrong.** `max_wait + max(max_wait/10, ⌈spared/batch⌉ · interval)` takes the
+    larger of the rest and the pass, where a waiter that becomes a candidate during a rest waits for the rest
+    and then for the next pass's statements before it: the sum. Decision 7 now states the sum, and its pass
+    runs its statements one after another, not an interval apart: at an interval a pass over 20,000 spared at
+    the host's `max_wait` of 600 s and a rest of 60 s would take 200 rests, over three hours. One after another,
+    220,001 waiters take 2.3 s a pass on the reference machine (§ 7).
+  - **A hop walked its dependency's stream.** The probe by tenant, stream type and stream id, the identity then
+    compared whole, reads every row of the stream, and a stream that is waited for keeps its rows (ADR-0033
+    decision 4). The position is now part of the probe, read as an integer only when it is an integral number
+    within the column's range: `1.0` is the number 1, as the mark's comparison of identities has it, and `"x"`,
+    `1.5`, `1e12` match nothing. The plan test holds every hop to one probe of the key.
+  - **A row with a time of wait had no invariant.** The index's predicate, `waiting_since IS NOT NULL`, holds
+    the waiters alone only if no statement leaves a time on a row that does not wait; the baseline now refuses
+    one (`__wait_is_open`). It found a test that wrote a parked row with a time of wait, a state the library
+    never makes, and X1's step that aged every row with a `waiting_for`, the parked among them.
+  - **A defect of the expiry stopped the loops when it ran in the dispatch**, and stops them still: the timer
+    returns it to `run`, and an error of the moment waits as a loop's does.
+  - **X1's histories expired nothing under the new rule**: each waiter waited for a message the history had
+    published, queued and so spared. Every fifth step's publish now depends on a message that never arrives.
+  - **A row expired names its reason**, the dependency's absence, its park or the chain's length, where one text
+    named every case as never arrived.
+  - **The plan check took a write for a read**: `ModifyTable` names the table it writes, and the rows it writes
+    are its child's, which the check reads.
+  - **The baseline took the expiry's function, its index's key and the CHECK** (ADR-0041 decision 6's exception,
+    nothing deployed; § Owed 3 for a live one): the checksum test says so.
+  - A round of roles (database with distributed systems) on the built slice found no row parked that should
+    wait, no lost wake and no deadlock, and these, each taken:
+    - **The reason named the direct dependency only**: a waiter whose chain ended at a message that never
+      arrived read "no queued row within 8 hops", the text of a cycle. It now names where the chain broke.
+    - **A pass's statements waited a millisecond each**: the timer slept `Duration::ZERO` between them, which
+      tokio rounds up to its next tick. It now yields.
+    - **A host that drives `dispatch` itself expires nothing** unless it calls `expire()`: `dispatch`'s
+      documentation says so. Every service of the host runs `run`.
+    - **A held vacuum horizon** costs a pass the heap of every waiter woken since (§ 7), counted.
+    - **The expiry is not checked for READ COMMITTED**, and needs not be (decision 10).
+    - **Nothing counts the spared waiters** until slice 5's `waiting_counts` (§ 6): a dependency that fails for
+      ever without a permanent verdict spares its waiters for ever, where they expired before. The dependency
+      shows in `held_counts` as a back-off.

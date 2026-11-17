@@ -95,9 +95,29 @@ wait for the first missing one, `waiting_for`, out of the queue, and the
 statement that marks that dependency processed puts every row waiting for it
 back, in the same transaction. Nothing polls for a dependency, and a waiting
 row costs the walk nothing. The row stays in the table, so a later arrival of
-the same message is still a duplicate. With `with_max_wait` a row waiting
-longer is parked with the dependency named in `last_error`; by default it
-waits for ever (ADR-0006).
+the same message is still a duplicate.
+
+A row that has waited longer than `with_max_wait`, an hour by default
+(ADR-0037 decision 6), is parked by the expiry with the dependency and the
+reason named in `last_error`: its dependency never arrived or is parked,
+it waits through waiting rows on one that never arrived or is parked, or no
+queued row is within 8 hops of waiting rows. A row whose dependency
+is there and on its way — untried, held for its stage's outage, behind a
+held head or a long backlog — waits on, and the expiry neither writes nor
+locks it: `max_wait` means that the dependency never arrived (ADR-0042
+decision 7). A parked row keeps the identity it waited for, so the
+dependency's mark, when it comes after all, puts it back in the queue.
+
+The expiry is off the dispatch path: `run` drives it on a timer of its own,
+a pass of statements one after another while each examines a whole batch of
+waiters, then a rest of a tenth of `max_wait`, so a row whose dependency
+never arrived is parked within `max_wait`, a tenth of it and one pass. A host
+that drives `dispatch` itself calls `expire()` the same way: again at once
+while `Expiry::more`, after its rest otherwise. A pass goes from the key its
+last statement stopped at, `(waiting_since, received_position)`, so a waiter
+behind any number of spared ones is reached: 220,001 waiters take 2,201
+statements, 2.3 s, on a 12-core NVMe machine under PostgreSQL 14. A defect
+of the expiry stops `run`'s loops, as one of a dispatch does.
 
 Setting a head aside is the whole of that `dispatch`, `Outcome::SetAside`:
 the wait is committed at once, and the next call takes the slot's next

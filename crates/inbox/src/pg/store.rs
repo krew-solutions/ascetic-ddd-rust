@@ -1,7 +1,7 @@
 //! The tables and the statements: what the inbox does to PostgreSQL. The
 //! loop that drives them is in `dispatch`.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use ascetic_ddd_migration::{
     Applied, Component, Migration, Options as MigrationOptions, forget, migrate,
@@ -231,6 +231,132 @@ pub(super) fn walk_sql(table: &str) -> String {
             "#
     )
 }
+
+/// How many hops of a waiter's chain of dependencies the expiry follows
+/// (ADR-0042 decision 7): a queued row within them spares the waiter.
+const EXPIRY_HOPS: u32 = 8;
+
+/// The condition that `alias` is the row of `identity`, a `jsonb` the
+/// statement holds: one probe of the primary key, the identity compared
+/// whole, as a dependency's mark compares it. No cast that an identity
+/// written otherwise could abort: the position is read as an integer only
+/// when it is an integral JSON number within the column's range, the CASEs
+/// nested so that no cast runs before its test has held; any other value
+/// matches no row.
+fn row_of(alias: &str, identity: &str) -> String {
+    let position = format!("({identity}->'stream_position')");
+    format!(
+        "{alias}.tenant_id = {identity}->>'tenant_id' \
+         AND {alias}.stream_type = {identity}->>'stream_type' \
+         AND {alias}.stream_id = {identity}->'stream_id' \
+         AND {alias}.stream_position = \
+             CASE WHEN jsonb_typeof({position}) = 'number' THEN \
+                 CASE WHEN {position}::numeric BETWEEN -2147483648 AND 2147483647 \
+                           AND {position}::numeric = trunc({position}::numeric) \
+                      THEN {position}::numeric::integer END END \
+         AND jsonb_build_object('tenant_id', {alias}.tenant_id, 'stream_type', {alias}.stream_type, \
+                                'stream_id', {alias}.stream_id, \
+                                'stream_position', {alias}.stream_position) = {identity}"
+    )
+}
+
+/// The expiry's statement over `table` ([`PgInbox::expire`]), its
+/// parameters `max_wait` in seconds, the batch, and the key `(waiting_since,
+/// received_position)` the pass stopped at, none at its start (ADR-0042
+/// decision 7). The body of `{table}__expire`, planned once a connection as
+/// the walk is.
+/// - It examines at most a batch of the waiters past `max_wait`, after the
+///   key, in the order of `__waiting_since_idx`, unlocked: a waiter is
+///   spared while its chain reaches a queued row within [`EXPIRY_HOPS`]
+///   hops, each hop a waiting row, none parked; and a spared row is neither
+///   written nor locked, so that it costs no transaction id and no version.
+/// - Only the waiters it expires are locked, `SKIP LOCKED`, their wait
+///   tested again on the row locked: one a dependency's mark has woken is
+///   passed by, and one it is about to wake keeps the identity it waited for,
+///   which the mark matches. Each names where its chain broke: its
+///   dependency never arrived or is parked; it waits through waiting rows on
+///   one that never arrived or is parked; or no queued row is within the
+///   hops, a chain too long or a cycle.
+/// - A row with a `waiting_since` is a waiter in wait, by the baseline's
+///   `__wait_is_open`, so that the index holds the waiters alone.
+/// - It returns the key of the last row it examined, and how many, beside
+///   the rows it parked: the pass goes on from that key while a whole batch
+///   was examined, so that a waiter past any number of spared ones is
+///   reached, and new waiters past `max_wait` join at the key's far end.
+pub(super) fn expire_sql(table: &str) -> String {
+    let dependency_of_examined = row_of("d", "e.dependency");
+    let dependency_of_hop = row_of("d", "h.next");
+    let where_it_broke = row_of("d", "coalesce(h.next, w.waiting_for)");
+    format!(
+        r#"
+            WITH RECURSIVE examined AS MATERIALIZED (
+                SELECT w.ctid AS place, w.waiting_for AS dependency,
+                       w.waiting_since AS since, w.received_position AS position
+                FROM {table} w
+                WHERE w.waiting_since IS NOT NULL
+                  AND (w.waiting_since, w.received_position)
+                      > (coalesce($3, '-infinity'::timestamptz), coalesce($4, 0::bigint))
+                  AND w.waiting_since < CURRENT_TIMESTAMP - make_interval(secs => $1)
+                ORDER BY w.waiting_since, w.received_position
+                LIMIT $2
+            ), hop (origin, next, hops) AS (
+                SELECT e.place, d.waiting_for, 1
+                FROM examined e JOIN {table} d ON {dependency_of_examined}
+                WHERE d.processed_position IS NULL AND d.parked_at IS NULL
+                UNION ALL
+                SELECT h.origin, d.waiting_for, h.hops + 1
+                FROM hop h JOIN {table} d ON {dependency_of_hop}
+                WHERE h.next IS NOT NULL AND h.hops < {EXPIRY_HOPS}
+                  AND d.processed_position IS NULL AND d.parked_at IS NULL
+            ), present AS (
+                SELECT h.origin FROM hop h WHERE h.next IS NULL
+            ), expiring AS (
+                SELECT w.ctid AS place,
+                       CASE WHEN h.hops IS NULL THEN
+                                CASE WHEN d.parked IS NULL THEN ' never arrived'
+                                     WHEN d.parked THEN ' is parked'
+                                     ELSE ' is processed' END
+                            WHEN h.hops >= {EXPIRY_HOPS}
+                                THEN ' reaches no queued row within {EXPIRY_HOPS} hops'
+                            ELSE ' waits on ' || h.next::text ||
+                                CASE WHEN d.parked IS NULL THEN ', which never arrived'
+                                     WHEN d.parked THEN ', which is parked'
+                                     ELSE ', which is processed' END
+                       END AS why
+                FROM {table} w
+                -- where the chain broke: its last waiting row's dependency
+                LEFT JOIN LATERAL (
+                    SELECT h.next, h.hops FROM hop h WHERE h.origin = w.ctid
+                    ORDER BY h.hops DESC LIMIT 1
+                ) h ON true
+                LEFT JOIN LATERAL (
+                    SELECT d.parked_at IS NOT NULL AS parked FROM {table} d
+                    WHERE {where_it_broke}
+                ) d ON true
+                WHERE w.ctid = ANY (ARRAY(
+                          SELECT e.place FROM examined e
+                          WHERE NOT EXISTS (SELECT 1 FROM present p WHERE p.origin = e.place)))
+                  AND w.waiting_since IS NOT NULL
+                  AND w.waiting_since < CURRENT_TIMESTAMP - make_interval(secs => $1)
+                FOR UPDATE OF w SKIP LOCKED
+            ), expired AS (
+                UPDATE {table} r SET parked_at = CURRENT_TIMESTAMP,
+                    last_error = 'dependency ' || waiting_for::text || x.why,
+                    waiting_since = NULL, cause = NULL, {LEAVE_QUEUE}
+                FROM expiring x WHERE r.ctid = x.place
+                RETURNING {NARROW}
+            )
+            SELECT k.since, k.position, (SELECT count(*) FROM examined),
+                   x.tenant_id::text, x.stream_type::text, x.stream_id, x.stream_position,
+                   x.uri::text, x.received_position, x.waiting_for
+            FROM (SELECT 1) AS one
+            LEFT JOIN (SELECT e.since, e.position FROM examined e
+                       ORDER BY e.since DESC, e.position DESC LIMIT 1) k ON true
+            LEFT JOIN expired x ON true
+            "#
+    )
+}
+
 /// Refuses a transaction under an isolation other than READ COMMITTED: the
 /// take's, the trial's and the resolve's locks and waits hold under it only
 /// — a lock waited for and then a statement that reads past it see what
@@ -247,8 +373,9 @@ pub(super) fn read_committed(isolation: &str) -> Result<(), Error> {
     }
 }
 
-/// How many rows one statement of the expiry parks.
-const EXPIRY_BATCH: i64 = 100;
+/// How many waiters one statement of the expiry examines, and so parks at
+/// most (ADR-0042 decision 7).
+pub(super) const EXPIRY_BATCH: i32 = 100;
 /// The most characters of a failure's text a row keeps (ADR-0037 decision
 /// 7): `last_error` is stored unsealed, beside the row.
 const FAILURE_WIDTH: usize = 4096;
@@ -269,19 +396,21 @@ pub(super) const LEAVE_QUEUE: &str =
 /// The inbox's sequence, tables, indexes and functions as created,
 /// `{table}`, `{sequence}`, `{slots}` and `{key}` standing for their names,
 /// the cut and the partition key's expression, `{key_text}` for that
-/// expression as a literal, `{queue}` for [`QUEUE`], and `{take}` and
-/// `{walk}` for the functions' bodies: the baseline of its component, its
-/// checksum the template's with the queue and the bodies written out
-/// ([`baseline_template`]), so that an edit of the take's or the walk's
-/// statement is an edit of the baseline.
+/// expression as a literal, `{queue}` for [`QUEUE`], and `{take}`, `{walk}`
+/// and `{expire}` for the functions' bodies: the baseline of its component,
+/// its checksum the template's with the queue and the bodies written out
+/// ([`baseline_template`]), so that an edit of the take's, the walk's or the
+/// expiry's statement is an edit of the baseline.
 ///
-/// The take and the walk are functions the dispatch calls, not statements
-/// it sends (ADR-0041 decision 6): a statement sent as text is parsed and
-/// planned at every call, which cost the walk 3.3 ms against its 0.4 of
-/// execution; a function's statement is parsed once a connection and its
-/// plan kept until its tables' definition or statistics change. The walk's plan is forced generic, so that it is planned once
-/// whatever the session asks — the specification crate's queries need custom
-/// plans (ADR-0027) — and its generic plan is the one E8 holds to the
+/// The take and the walk are functions the dispatch calls, and the expiry
+/// one its timer calls, not statements they send (ADR-0041 decision 6,
+/// ADR-0042 decision 7): a statement sent as text is parsed and planned at
+/// every call, which cost the walk 3.3 ms against its 0.4 of execution; a
+/// function's statement is parsed once a connection and its plan kept until
+/// its tables' definition or statistics change. The walk's and the expiry's
+/// plans are forced generic, so that each is planned once whatever the
+/// session asks — the specification crate's queries need custom plans
+/// (ADR-0027) — and their generic plans are the ones E8 and E1 hold to the
 /// indexes. The take's statement has no parameter, and a plan without one
 /// is generic already. `CREATE`, not `CREATE OR REPLACE`: a function left
 /// behind by a teardown that missed it fails the next baseline.
@@ -313,7 +442,9 @@ const BASELINE: &str = r#"
         CONSTRAINT {table}__hold_in_queue CHECK (
             (held_since IS NULL AND next_attempt_at IS NULL AND holds IS NULL AND hold_kind IS NULL)
             OR (processed_position IS NULL AND parked_at IS NULL AND waiting_for IS NULL)),
-        CONSTRAINT {table}__cause_unprocessed CHECK (cause IS NULL OR processed_position IS NULL)
+        CONSTRAINT {table}__cause_unprocessed CHECK (cause IS NULL OR processed_position IS NULL),
+        CONSTRAINT {table}__wait_is_open CHECK (waiting_since IS NULL
+            OR (waiting_for IS NOT NULL AND parked_at IS NULL AND processed_position IS NULL))
     );
     CREATE INDEX IF NOT EXISTS {table}__head_idx
         ON {table} (slot, received_position) WHERE {queue};
@@ -325,7 +456,7 @@ const BASELINE: &str = r#"
     CREATE INDEX IF NOT EXISTS {table}__waiting_idx
         ON {table} (waiting_for) WHERE waiting_for IS NOT NULL;
     CREATE INDEX IF NOT EXISTS {table}__waiting_since_idx
-        ON {table} (waiting_since) WHERE waiting_for IS NOT NULL;
+        ON {table} (waiting_since, received_position) WHERE waiting_since IS NOT NULL;
     CREATE UNIQUE INDEX IF NOT EXISTS {table}__message_id_uniq
         ON {table} (((metadata->>'message_id')::uuid));
     CREATE TABLE IF NOT EXISTS {table}_meta (slots integer NOT NULL, partition_key text NOT NULL);
@@ -353,6 +484,14 @@ const BASELINE: &str = r#"
         OUT walk_snapshot text, OUT met_tenants text[], OUT met_channels text[])
         LANGUAGE plpgsql VOLATILE SET plan_cache_mode = force_generic_plan
         AS $fn${walk}$fn$;
+    CREATE FUNCTION {table}__expire(double precision, integer, timestamptz, bigint,
+        OUT expiry_since timestamptz, OUT expiry_position bigint, OUT expiry_examined bigint,
+        OUT expired_tenant text, OUT expired_type text, OUT expired_stream jsonb,
+        OUT expired_position integer, OUT expired_uri text, OUT expired_received bigint,
+        OUT expired_waiting_for jsonb)
+        RETURNS SETOF record
+        LANGUAGE plpgsql VOLATILE SET plan_cache_mode = force_generic_plan
+        AS $fn${expire}$fn$;
 "#;
 
 /// The baseline with the queue and the functions' bodies written out,
@@ -362,6 +501,7 @@ fn baseline_template() -> String {
         .replace("{queue}", QUEUE)
         .replace("{take}", &take_body("{table}"))
         .replace("{walk}", &walk_body("{table}"))
+        .replace("{expire}", &expire_body("{table}"))
 }
 
 /// The body of `{table}__take`: the take's statement, its one row into the
@@ -388,7 +528,16 @@ pub(super) fn walk_body(table: &str) -> String {
     )
 }
 
-/// A function the dispatch calls, as the start check requires it: its name
+/// The body of `{table}__expire`: the expiry's statement, its rows the
+/// function's ([`expire_sql`]).
+pub(super) fn expire_body(table: &str) -> String {
+    format!(
+        "\n    #variable_conflict use_column\n    BEGIN\n    RETURN QUERY{};\n    END\n    ",
+        expire_sql(table).trim_end()
+    )
+}
+
+/// A function the inbox calls, as the start check requires it: its name
 /// after the table's; its arguments, in and out, as the catalogue holds them
 /// — their types, modes and names, as array literals — not as the server
 /// renders them, a rendering that `quote_all_identifiers` changes (ADR-0037's
@@ -401,6 +550,8 @@ struct Called {
     modes: &'static str,
     names: &'static str,
     setting: Option<&'static str>,
+    /// Whether it returns a set of rows rather than one.
+    set: bool,
 }
 
 /// `{table}__take()`.
@@ -411,6 +562,7 @@ const TAKE_FUNCTION: Called = Called {
     modes: "{o,o,o,o}",
     names: "{taken_slot,take_snapshot,slot_count,take_isolation}",
     setting: None,
+    set: false,
 };
 
 /// `{table}__walk(slot, walk, max_dormancy, paused)`.
@@ -421,7 +573,27 @@ const WALK_FUNCTION: Called = Called {
     modes: "{i,i,i,i,o,o,o,o,o,o,o,o,o}",
     names: "{\"\",\"\",\"\",\"\",head_position,head_place,head_tenant,head_channel,head_holds,walk_outcome,walk_snapshot,met_tenants,met_channels}",
     setting: Some("plan_cache_mode=force_generic_plan"),
+    set: false,
 };
+
+/// `{table}__expire(max_wait, batch, after_since, after_position)`.
+const EXPIRE_FUNCTION: Called = Called {
+    suffix: "__expire",
+    identity: "(double precision, integer, timestamp with time zone, bigint)",
+    types: "{\"double precision\",integer,\"timestamp with time zone\",bigint,\"timestamp with time zone\",bigint,bigint,text,text,jsonb,integer,text,bigint,jsonb}",
+    modes: "{i,i,i,i,o,o,o,o,o,o,o,o,o,o}",
+    names: "{\"\",\"\",\"\",\"\",expiry_since,expiry_position,expiry_examined,expired_tenant,expired_type,expired_stream,expired_position,expired_uri,expired_received,expired_waiting_for}",
+    setting: Some("plan_cache_mode=force_generic_plan"),
+    set: true,
+};
+
+/// What a statement of the expiry did: the rows it parked, oldest first,
+/// narrow; the key of the last row it examined; how many it examined.
+pub(super) struct Examined {
+    pub(super) parked: Vec<InboxMessage>,
+    pub(super) last: Option<(SystemTime, i64)>,
+    pub(super) examined: i64,
+}
 
 /// What a failure did to its row.
 pub(super) struct Recorded {
@@ -628,8 +800,8 @@ where
     /// traffic without locking them — and refuses to go on when the table
     /// is cut into another number of slots or by another key: that is a
     /// migration, not a restart; when the tables hold what the library did
-    /// not make (ADR-0037 decision 5); or when a function the dispatch calls
-    /// is not as the library makes it (ADR-0041 decision 6).
+    /// not make (ADR-0037 decision 5); or when a function the dispatch or the
+    /// expiry calls is not as the library makes it (ADR-0041 decision 6).
     pub async fn migrate(&self) -> Result<Applied, Error> {
         let applied = migrate(&self.pool, &self.component(), &MigrationOptions::default())
             .await
@@ -669,7 +841,7 @@ where
     /// on no table it reads, and outlives them.
     pub async fn teardown(&self) -> Result<(), Error> {
         let (table, sequence) = (&self.table, &self.sequence);
-        let (take, walk) = (&TAKE_FUNCTION, &WALK_FUNCTION);
+        let (take, walk, expire) = (&TAKE_FUNCTION, &WALK_FUNCTION, &EXPIRE_FUNCTION);
         self.pool
             .session(async |session: P::Session| {
                 session
@@ -680,7 +852,7 @@ where
                          DROP TABLE IF EXISTS {table}_rejects;"
                     ))
                     .await?;
-                // Every function of the dispatch's names the search path sees,
+                // Every function of the inbox's names the search path sees,
                 // whatever its arguments: a release that changed a signature
                 // leaves the earlier one, which the start check refuses
                 // (ADR-0041 decision 6).
@@ -689,12 +861,12 @@ where
                     .batch_execute(&format!(
                         "DO $teardown$ DECLARE f regprocedure; BEGIN \
                            FOR f IN SELECT p.oid::regprocedure FROM pg_proc p \
-                                    WHERE p.proname IN ('{table}{}', '{table}{}') \
+                                    WHERE p.proname IN ('{table}{}', '{table}{}', '{table}{}') \
                                       AND pg_function_is_visible(p.oid) LOOP \
                              EXECUTE 'DROP FUNCTION ' || f; \
                            END LOOP; \
                          END $teardown$;",
-                        take.suffix, walk.suffix
+                        take.suffix, walk.suffix, expire.suffix
                     ))
                     .await?;
                 Ok::<_, Error>(())
@@ -931,48 +1103,44 @@ where
         Ok(changed == 1)
     }
 
-    /// Parks the rows that have waited longer than `max_wait`, naming the
-    /// dependency in their `last_error`, and returns them, oldest first. A
-    /// row parked so keeps the identity it waited for, so that the mark of
-    /// that identity — the hole readmitted, or arrived late — puts it back
-    /// in the queue (ADR-0036 R8); without the time of its wait, it does not
-    /// expire again. A row whose dependency is present and holds for its
-    /// stage's outage does not expire: the dependency did arrive, and
-    /// the outage that holds it holds what waits for it (ADR-0040 decision
-    /// 7). Its dependency is found by the primary key's stream, its identity
-    /// compared whole, so that no value is cast.
-    pub(super) async fn expire_waiting(
+    /// One statement of the expiry (ADR-0042 decision 7), on a session of
+    /// its own, outside any dispatch: it examines a batch of the waiters past
+    /// `max_wait` after `after`, parks those whose dependency never arrived,
+    /// is parked, or reaches no queued row within the chain's hops — each
+    /// keeping the identity it waited for, so that that identity's mark, the
+    /// hole readmitted or arrived late, puts it back in the queue (ADR-0036
+    /// R8) — and returns them, oldest first, with the key it stopped at. The
+    /// statement is `{table}__expire`, whose body is [`expire_sql`].
+    pub(super) async fn expire_batch(
         &self,
         session: &P::Session,
         max_wait: Duration,
-    ) -> Result<Vec<InboxMessage>, Error> {
+        after: Option<(SystemTime, i64)>,
+    ) -> Result<Examined, Error> {
         let sql = format!(
-            "UPDATE {table} SET parked_at = CURRENT_TIMESTAMP, \
-                last_error = 'dependency ' || waiting_for::text || ' never arrived', \
-                waiting_since = NULL, cause = NULL, {LEAVE_QUEUE} \
-             WHERE ctid IN ( \
-                SELECT w.ctid FROM {table} w \
-                WHERE w.waiting_for IS NOT NULL \
-                  AND w.waiting_since < CURRENT_TIMESTAMP - make_interval(secs => $1::double precision) \
-                  AND NOT EXISTS ( \
-                    SELECT 1 FROM {table} \
-                    WHERE tenant_id = w.waiting_for->>'tenant_id' \
-                      AND stream_type = w.waiting_for->>'stream_type' \
-                      AND stream_id = w.waiting_for->'stream_id' \
-                      AND {IDENTITY_OF_ROW} = w.waiting_for \
-                      AND hold_kind = 'unavailable') \
-                LIMIT $2 \
-                FOR UPDATE OF w SKIP LOCKED) \
-             RETURNING {NARROW}",
-            table = self.table
+            "SELECT * FROM {}{}($1::double precision, $2::integer, $3::timestamptz, $4::bigint)",
+            self.table, EXPIRE_FUNCTION.suffix
         );
+        let (since, position) = after.unzip();
         let rows = session
             .connection()
-            .query(&sql, &[&max_wait.as_secs_f64(), &EXPIRY_BATCH])
+            .query(
+                &sql,
+                &[&max_wait.as_secs_f64(), &EXPIRY_BATCH, &since, &position],
+            )
             .await?;
-        let mut expired: Vec<InboxMessage> = rows.iter().map(|row| narrow_of(row, 0)).collect();
-        expired.sort_by_key(|message| message.received_position);
-        Ok(expired)
+        let Some(first) = rows.first() else {
+            return Err(Error::Malformed("the expiry returned no row".to_owned()));
+        };
+        let last = match (first.get::<_, Option<SystemTime>>(0), first.get(1)) {
+            (Some(since), Some(position)) => Some((since, position)),
+            _ => None,
+        };
+        Ok(Examined {
+            parked: woken_of(&rows, 3),
+            last,
+            examined: first.get(2),
+        })
     }
 
     async fn is_processed(
@@ -1603,9 +1771,10 @@ where
     }
 }
 
-/// Refuses a function the dispatch calls that is not as the library makes
-/// it (ADR-0041 decision 6): missing; not a function, or of other argument
-/// types, modes or names, or another result, by the catalogue's values; of
+/// Refuses a function the dispatch or the expiry calls that is not as the
+/// library makes it (ADR-0041 decision 6): missing; not a function, or of
+/// other argument types, modes or names, or another result — a row for a
+/// set, or a set for a row — by the catalogue's values; of
 /// another language, body, volatility or setting; run with its owner's
 /// rights; not executable by
 /// this role; in another schema than its table; or beside another function
@@ -1618,7 +1787,7 @@ where
 /// walk's lock at every dispatch, a dropped setting brings the planning at
 /// every call back. A procedure of the same name has no result, and is
 /// refused by its signature. Other functions named after the table are not
-/// the dispatch's, and are let be, as a newer release's would be.
+/// the inbox's, and are let be, as a newer release's would be.
 async fn refuse_a_function_the_library_did_not_make<S: PgAccess>(
     session: &S,
     table: &str,
@@ -1626,6 +1795,7 @@ async fn refuse_a_function_the_library_did_not_make<S: PgAccess>(
     for (called, body) in [
         (&TAKE_FUNCTION, take_body(table)),
         (&WALK_FUNCTION, walk_body(table)),
+        (&EXPIRE_FUNCTION, expire_body(table)),
     ] {
         let name = format!("{table}{}{}", called.suffix, called.identity);
         let row = session
@@ -1634,7 +1804,8 @@ async fn refuse_a_function_the_library_did_not_make<S: PgAccess>(
                 "SELECT p.prokind = 'f' AND p.prorettype = 'record'::regtype \
                         AND p.proallargtypes IS NOT DISTINCT FROM $3::text::regtype[]::oid[] \
                         AND p.proargmodes IS NOT DISTINCT FROM $4::text::\"char\"[] \
-                        AND p.proargnames IS NOT DISTINCT FROM $5::text::text[], \
+                        AND p.proargnames IS NOT DISTINCT FROM $5::text::text[] \
+                        AND p.proretset = $6, \
                         coalesce(pg_get_function_arguments(p.oid), ''), \
                         l.lanname::text, p.prosrc, p.provolatile::text, p.prosecdef, \
                         array_to_string(p.proconfig, ','), has_function_privilege(p.oid, 'EXECUTE'), \
@@ -1645,12 +1816,12 @@ async fn refuse_a_function_the_library_did_not_make<S: PgAccess>(
                               AND (o.pronamespace = p.pronamespace OR pg_function_is_visible(o.oid))) \
                  FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang \
                  WHERE p.oid = to_regprocedure($1)",
-                &[&name, &table, &called.types, &called.modes, &called.names],
+                &[&name, &table, &called.types, &called.modes, &called.names, &called.set],
             )
             .await?;
         let Some(row) = row else {
             return Err(Error::Malformed(format!(
-                "function `{name}` is missing: the dispatch calls it"
+                "function `{name}` is missing: the inbox calls it"
             )));
         };
         let setting = row.get::<_, Option<String>>(6);

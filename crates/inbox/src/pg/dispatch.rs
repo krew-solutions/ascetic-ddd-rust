@@ -16,8 +16,8 @@ use crate::error::{Error, Failure};
 use crate::intake;
 use crate::message::InboxMessage;
 use crate::observer::{
-    BreakerChanged, Dispatched, Expired, Failed, Fetched, Handled, InboxObserver, Marked,
-    ParkedAtOnce, Resolved, Unparked, Waiting, Withheld,
+    BreakerChanged, Dispatched, Failed, Fetched, Handled, InboxObserver, Marked, ParkedAtOnce,
+    Resolved, Unparked, Waiting, Withheld,
 };
 
 /// The outcome of a statement over a row's values, classified (ADR-0037
@@ -139,24 +139,14 @@ where
     /// committed instead of the mark. `Err` is for the database; a failing
     /// subscriber is an [`Outcome`]. A dispatcher has no identity: any number
     /// of them, in any number of processes, share the slots through the locks
-    /// alone.
+    /// alone. A dispatch expires no waiting row: [`PgInbox::run`] does, on a
+    /// timer, and a host that calls `dispatch` itself calls
+    /// [`PgInbox::expire`] (ADR-0042 decision 7).
     pub async fn dispatch<F, Fut>(&self, subscriber: F) -> Result<Outcome, Error>
     where
         F: Fn(&P::Session, &InboxMessage) -> Fut + Send + Sync,
         Fut: Future<Output = Result<(), Failure>> + Send,
     {
-        if let Some(max_wait) = self.max_wait {
-            // A statement of its own, outside the dispatch transaction: a
-            // transaction holding expired rows must never wait for a lock a
-            // marker holds (ADR-0009).
-            let expired = self
-                .pool
-                .session(async |session| self.expire_waiting(&session, max_wait).await)
-                .await?;
-            if !expired.is_empty() {
-                self.observer.on_expired(&Expired { messages: &expired });
-            }
-        }
         // The breaker's tick: a trial due is this call's work, and the
         // channels paused are the walk's (ADR-0042 decision 1). Every
         // dispatch ticks it, a host's own as well as `run`'s.
@@ -693,6 +683,10 @@ where
     /// Beside the loops, on a session of its own, the sweep forgets the
     /// processed rows whose channel's window has passed, once an interval of
     /// [`InboxRetention`](super::InboxRetention); see [`PgInbox::sweep`].
+    /// And the expiry parks the rows whose dependency never arrived, a pass
+    /// a tenth of `max_wait`, on sessions of its own: off the dispatch path,
+    /// so that a dispatch's work is its slot's (ADR-0042 decision 7); see
+    /// [`PgInbox::expire`]. Its defect stops the loops as theirs does.
     pub async fn run<F, Fut>(
         &self,
         subscriber: F,
@@ -750,9 +744,10 @@ where
             }
         });
         let sweeper = self.sweep_until(stop.subscribe());
-        let futures = futures::future::join(join_all(futures), sweeper);
+        let expirer = self.expire_until(&stop, loops);
+        let futures = futures::future::join3(join_all(futures), sweeper, expirer);
         tokio::pin!(futures);
-        let (outcomes, ()) = tokio::select! {
+        let (outcomes, (), expired) = tokio::select! {
             outcomes = &mut futures => outcomes,
             _ = shutdown => {
                 let _ = stop.send(true);
@@ -760,7 +755,7 @@ where
             }
         };
         outcomes.into_iter().collect::<Result<Vec<()>, Error>>()?;
-        Ok(())
+        expired
     }
 
     /// A page of the parked rows, oldest first, after `after`'s order of

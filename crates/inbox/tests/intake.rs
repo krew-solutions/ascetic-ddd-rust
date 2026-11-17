@@ -718,15 +718,17 @@ async fn a_host_object_on_the_inbox_s_tables_is_refused_at_migrate() {
     }
 }
 
-/// A function the dispatch calls that is not as the library made it is
-/// refused at `migrate` (ADR-0041 decision 6), by what differs: the server
-/// would otherwise run another statement, refuse the walk at every dispatch,
-/// plan it at every call, or find the call ambiguous. Another function named
+/// A function the dispatch or the expiry calls that is not as the library
+/// made it is refused at `migrate` (ADR-0041 decision 6), by what differs:
+/// the server would otherwise run another statement, refuse the walk at
+/// every dispatch, plan it at every call, find the call ambiguous, or
+/// return one row of an expiry's set. Another function named
 /// after the table, under a name the dispatch does not call, is let be.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_dispatch_function_not_as_the_library_made_it_is_refused_at_migrate() {
     const WALK: &str = "{t}__walk(smallint, integer, double precision, text[])";
+    const EXPIRE: &str = "{t}__expire(double precision, integer, timestamptz, bigint)";
     let schema = "intake_function_schema";
     let sessions = PgSessionPool::new(pool());
     let setup = async |sql: String| {
@@ -764,6 +766,24 @@ async fn a_dispatch_function_not_as_the_library_made_it_is_refused_at_migrate() 
             ),
             "",
         ),
+        // The expiry's function returning one row, not a set: its columns,
+        // modes and names all the library's.
+        (
+            "its signature",
+            format!(
+                "DROP FUNCTION {EXPIRE}; \
+                 CREATE FUNCTION {{t}}__expire(double precision, integer, timestamptz, bigint, \
+                     OUT expiry_since timestamptz, OUT expiry_position bigint, \
+                     OUT expiry_examined bigint, OUT expired_tenant text, OUT expired_type text, \
+                     OUT expired_stream jsonb, OUT expired_position integer, \
+                     OUT expired_uri text, OUT expired_received bigint, \
+                     OUT expired_waiting_for jsonb) \
+                 LANGUAGE plpgsql VOLATILE SET plan_cache_mode = force_generic_plan \
+                 AS $$ BEGIN END $$"
+            ),
+            "",
+        ),
+        ("is missing", format!("DROP FUNCTION {EXPIRE}"), ""),
         // A procedure of the name: no result to read.
         (
             "its signature",
