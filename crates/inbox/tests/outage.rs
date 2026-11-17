@@ -353,6 +353,17 @@ impl Fixture {
             .await;
     }
 
+    /// Wakes the slots no dispatch holds, beside dispatchers that run: a wake
+    /// of every slot waits on the slot a hanging ask holds, and meanwhile
+    /// keeps locked the slots it has already woken, which a take then skips.
+    async fn wake_free(&self) {
+        self.elapse(
+            "UPDATE {table}_slots SET dormant_until = now() \
+             WHERE slot IN (SELECT slot FROM {table}_slots FOR UPDATE SKIP LOCKED)",
+        )
+        .await;
+    }
+
     fn told(&self) -> Vec<Told> {
         self.told.0.lock().unwrap().clone()
     }
@@ -1253,6 +1264,78 @@ async fn a_sparse_paused_channel_s_head_is_tried_by_its_witness() {
     }
 }
 
+/// Two channels paused in one process, their ticks due together: a tick call
+/// issues one trial and the dispatch runs it, the other channel's at the next
+/// call, so that every trial issued asks its witness and none expires unasked
+/// as a failed tick (ADR-0042 decision 1). Red when a tick issues a trial for
+/// each channel due: the dispatch runs the first, and the other expires.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn two_channels_paused_together_run_every_trial_they_issue() {
+    let tick = Duration::from_millis(500);
+    let f = fixture_cut(
+        "two_paused",
+        Retries::up_to(3),
+        1,
+        quick().with_tick(tick, tick),
+    )
+    .await;
+    // Tenants of their own on each channel: a Tenant's head is its oldest row
+    // across channels, so a shared one would hide the second channel's rows
+    // behind the first's paused head.
+    for topic in ["orders", "payments"] {
+        for n in 1..=3 {
+            let tenant = format!("{topic}-t{n}");
+            f.publish(&[message_on(topic, &tenant, &tenant, 1)]).await;
+        }
+    }
+    let paused = |effects: &[Effect]| {
+        let mut channels: Vec<String> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Paused { channel, .. } => Some(channel.clone()),
+                _ => None,
+            })
+            .collect();
+        channels.sort();
+        channels.dedup();
+        channels.len()
+    };
+    let mut calls = 0;
+    while paused(&f.effects()) < 2 {
+        f.dispatch(|| stage_down(None)).await;
+        f.wake().await;
+        calls += 1;
+        assert!(calls < 200, "both never paused: {:?}", f.effects());
+    }
+    let issued = |effects: &[Effect]| {
+        effects
+            .iter()
+            .filter(|e| matches!(e, Effect::Trial { .. }))
+            .count()
+    };
+    let before = issued(&f.effects());
+    let asked = AtomicU32::new(0);
+    let counting = |_: &InboxMessage| {
+        asked.fetch_add(1, Ordering::SeqCst);
+        stage_down(None)
+    };
+    for _ in 0..6 {
+        // both channels' ticks due before the next call
+        tokio::time::sleep(tick + Duration::from_millis(100)).await;
+        f.wake().await;
+        f.dispatch_on(counting).await;
+        f.dispatch_on(counting).await;
+    }
+    let trials = issued(&f.effects()) - before;
+    assert!(trials >= 8, "trials of both channels: {trials}");
+    assert_eq!(
+        asked.load(Ordering::SeqCst) as usize,
+        trials,
+        "every trial issued asked its witness"
+    );
+}
+
 /// C5: one ask in flight a (channel, Tenant) in a process. A throttled
 /// Tenant's subscriber hangs; four dispatchers share the process's breaker
 /// and eight slots, the Tenant a head in each, twenty healthy Tenants
@@ -1309,12 +1392,14 @@ async fn a_hanging_tenant_is_asked_by_one_dispatcher_at_a_time() {
             f.inbox.dispatch(subscriber).await.unwrap();
         }
     };
-    // one waker: the test's wake updates every slot, and two at once lock
-    // them in each other's order
+    // one waker, of the slots no dispatch holds: a wake of every slot waits
+    // on the hanging ask's, its woken slots locked meanwhile, so that no
+    // other dispatcher could take one — a healthy Tenant then asked beside
+    // no hang, the assertion below red once a run in eight under load
     let waker = async {
         while std::time::Instant::now() < until {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            f.wake().await;
+            f.wake_free().await;
         }
     };
     // twenty healthy Tenants arrive once an ask of x hangs: what the other
@@ -1341,9 +1426,11 @@ async fn a_hanging_tenant_is_asked_by_one_dispatcher_at_a_time() {
     let asks = asked.load(Ordering::SeqCst) - 1;
     assert_eq!(most.load(Ordering::SeqCst), 1, "one ask of x at a time");
     assert!(asks >= 1, "x asked");
+    // each of x's seven other heads held once before the first hanging ask,
+    // by the memo of x's first `Unavailable`, and once a hang
     let held = f.withheld() - withheld;
     assert!(
-        held <= 7 * asks,
+        held <= 7 * (asks + 1),
         "{held} holds of x's other heads over {asks} hanging asks"
     );
     // the healthy go on while x hangs, never behind it: told by what ran

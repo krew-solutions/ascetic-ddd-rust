@@ -392,24 +392,24 @@ group_inbox_pg_rotation_deps() {
 # expiry's spare and the operator's verbs.
 group_inbox_outage() {
   echo "== inbox outage (ADR-0042): the stage down once and back, a process cut off once, a Tenant's keys cached, a row failing once, a rollback: an Unavailable spends nothing and never parks, holds stay queued, causes current, keys in order, every row processed"
-  must_hold InboxOutage MCInboxOutage.tla 17368
+  must_hold InboxOutage MCInboxOutage.tla 446210
   echo "== inbox outage: a Tenant failing alone, its rows in two slots, two workers of one process: one ask of it at a time once remembered, every row processed"
   must_hold InboxOutageTenant MCInboxOutage.tla 1936
   echo "== inbox outage: a process cut off for good: it pauses, and the other processes every row"
-  must_hold InboxOutageCutOff MCInboxOutage.tla 544
+  must_hold InboxOutageCutOff MCInboxOutage.tla 4588
   echo "== inbox outage: a waiter on a queued row is spared and processed, one on a row that never arrives expires"
   must_hold InboxOutageDeps MCInboxOutage.tla 36
   echo "== inbox outage: the operator re-arming with a canary, giving heads and a queue up: the canary exact, what is given up the end of each key"
-  must_hold InboxOutageOperators MCInboxOutage.tla 23986
+  must_hold InboxOutageOperators MCInboxOutage.tla 3685902
   for case in \
-    "InboxOutageUnavailableSpends:Action property UnavailableNeverSpends is violated:2430" \
+    "InboxOutageUnavailableSpends:Action property UnavailableNeverSpends is violated:152158" \
     "InboxOutageNoFlightMark:Action property OneAskPerReach is violated:1936" \
     "InboxOutageExpirePresent:Action property PresentDependencyNeverExpires is violated:36" \
-    "InboxOutageMarkKeepsCause:Invariant CauseIsCurrent is violated:4040" \
-    "InboxOutageMarkKeepsHold:Invariant HoldIsQueued is violated:2430" \
-    "InboxOutageCanaryKeeps:Invariant CanaryExact is violated:23986" \
+    "InboxOutageMarkKeepsCause:Invariant CauseIsCurrent is violated:248192" \
+    "InboxOutageMarkKeepsHold:Invariant HoldIsQueued is violated:152158" \
+    "InboxOutageCanaryKeeps:Invariant CanaryExact is violated:3685902" \
     "InboxOutageQueueOldest:Invariant GivenUpIsTheEnd is violated:228" \
-    "InboxOutageRearmBesideAnAsk:Invariant KeyOrder is violated:23986"; do
+    "InboxOutageRearmBesideAnAsk:Invariant KeyOrder is violated:3685902"; do
     name=${case%%:*}; rest=${case#*:}; property=${rest%:*}; twin=${rest##*:}
     echo "== inbox outage: $name, a refuted design, must fail, and its twin hold"
     must_fail_with_twin "$name" MCInboxOutage.tla "$property" "$twin"

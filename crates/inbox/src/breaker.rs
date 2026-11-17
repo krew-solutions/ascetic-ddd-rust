@@ -154,9 +154,14 @@ pub enum Verdict {
 pub enum Trial {
     /// The subscriber returned this verdict on the witness's head.
     Told(Verdict),
-    /// The witness's head was no longer a head of the channel, or its slot was
-    /// taken: nothing was asked.
+    /// The witness's head was no longer a head of the channel: nothing was
+    /// asked.
     Gone,
+    /// Nothing was asked, and nothing was learnt of the witness: its slot was
+    /// taken by a dispatch, or the trial's transaction failed before a verdict
+    /// was told. The trial counts nothing; the witness is tried again at the
+    /// tick's first step, and a hastened trial's haste is not spent.
+    Busy,
     /// The subscriber ran past the trial's wait and was rolled back.
     TimedOut,
 }
@@ -310,6 +315,15 @@ struct Open {
     inconclusive: Vec<String>,
     /// When the stall was last said in the log.
     reminded: Option<Instant>,
+    /// When the stall was last reported: a stalled channel is reported at
+    /// least once a tick's cap, whether or not a call's one trial is its.
+    refreshed: Option<Instant>,
+    /// Whether the next tick was brought forward by a head met.
+    hastened: bool,
+    /// Whether the latest trial issued was a hastened one: a head met hastens
+    /// no other until a scheduled trial has been issued, so that a stream of
+    /// heads met adds at most one trial a tick.
+    haste_spent: bool,
 }
 
 #[derive(Debug)]
@@ -318,6 +332,8 @@ struct Asked {
     deadline: Instant,
     slot: i16,
     tenant: String,
+    /// Whether a head met brought it forward.
+    hastened: bool,
 }
 
 impl Breaker {
@@ -472,29 +488,53 @@ impl Breaker {
         Told { hold, effects }
     }
 
-    /// Time has passed: the trials due, the failed ticks of unanswered
-    /// trials, and the stalls to refresh.
+    /// Time has passed: the failed ticks of unanswered trials, the stalls to
+    /// refresh, and at most one trial — a dispatch runs one, and a trial
+    /// issued and not run would expire as a failed tick that asked nothing.
+    /// The channels due take their turns, the one due longest first; a
+    /// channel whose tick finds no witness waits its next tick and leaves the
+    /// call's trial to another.
     pub fn tick(&mut self, now: Instant) -> Vec<Effect> {
         let mut names: Vec<String> = self.channels.keys().cloned().collect();
         names.sort_unstable();
-        names
-            .into_iter()
-            .flat_map(|name| self.tick_channel(now, &name))
-            .collect()
+        let mut effects = Vec::new();
+        for name in &names {
+            effects.extend(self.expire(now, name));
+        }
+        let mut due: Vec<(Instant, &String)> = names
+            .iter()
+            .filter_map(|name| match &self.channels.get(name)?.state {
+                State::Open(open) if open.trial.is_none() && open.next_tick <= now => {
+                    Some((open.next_tick, name))
+                }
+                _ => None,
+            })
+            .collect();
+        due.sort_unstable();
+        for (_, name) in due {
+            let (trial, more) = self.try_witness(now, name);
+            effects.extend(more);
+            if trial {
+                break;
+            }
+        }
+        effects
     }
 
-    fn tick_channel(&mut self, now: Instant, name: &str) -> Vec<Effect> {
+    /// A channel's trial unanswered by its deadline is a failed tick; and a
+    /// stalled channel not reported for a tick's cap is reported now.
+    fn expire(&mut self, now: Instant, name: &str) -> Vec<Effect> {
         let settings = self.settings;
-        let id = self.next + 1;
         let Some(channel) = self.channels.get_mut(name) else {
             return Vec::new();
         };
         let State::Open(open) = &mut channel.state else {
             return Vec::new();
         };
-        let mut ticked = false;
+        let mut ticked = open
+            .refreshed
+            .is_some_and(|at| now.saturating_duration_since(at) >= settings.tick.1);
         if let Some(asked) = open.trial.take_if(|asked| asked.deadline <= now) {
-            // Unanswered by its deadline: a failed tick.
             open.expired.push_back(asked.id);
             if open.expired.len() > 8 {
                 open.expired.pop_front();
@@ -503,46 +543,74 @@ impl Breaker {
             channel.schedule(&settings, now);
             ticked = true;
         }
-        let mut effects = Vec::new();
-        let State::Open(open) = &mut channel.state else {
-            return effects;
+        if ticked {
+            channel.stall(&settings, name, now).into_iter().collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// A channel's tick, due: its trial, if it has a witness, and its next
+    /// tick; whether a trial was issued.
+    fn try_witness(&mut self, now: Instant, name: &str) -> (bool, Vec<Effect>) {
+        let settings = self.settings;
+        let id = self.next + 1;
+        let Some(channel) = self.channels.get_mut(name) else {
+            return (false, Vec::new());
         };
-        if open.trial.is_none() && open.next_tick <= now {
-            ticked = true;
-            if let Some((slot, tenant)) = channel.witness(now) {
-                let deadline = now + settings.trial_wait + settings.tick.0;
-                if let State::Open(open) = &mut channel.state {
-                    open.trial = Some(Asked {
-                        id,
-                        deadline,
-                        slot,
-                        tenant: tenant.clone(),
-                    });
-                    open.last_trial = Some(now);
-                }
-                self.next = id;
-                effects.push(Effect::Trial {
-                    id,
+        let mut effects = Vec::new();
+        let witness = channel.witness(now);
+        let trial = witness.is_some();
+        if !trial && !channel.awaits_witness() {
+            // No witness, and none to wait for: every head it knew was tried
+            // inconclusively. Nothing proves the stage down, and the channel
+            // closes; a head still refused at the stage's scope opens it
+            // again, its failing Tenants kept across the close.
+            if let Some((cause, stalled)) = channel.close(now) {
+                effects.push(Effect::Resumed {
                     channel: name.to_owned(),
-                    slot,
-                    tenant,
-                    deadline,
+                    cause,
+                    stalled,
                 });
             }
-            // The next tick, whatever this one asked: a verdict reschedules.
-            channel.schedule(&settings, now);
+            return (false, effects);
         }
-        if ticked {
-            effects.extend(channel.stall(&settings, name, now));
+        if let Some((slot, tenant)) = witness {
+            let deadline = now + settings.trial_wait + settings.tick.0;
+            if let State::Open(open) = &mut channel.state {
+                open.trial = Some(Asked {
+                    id,
+                    deadline,
+                    slot,
+                    tenant: tenant.clone(),
+                    hastened: open.hastened,
+                });
+                open.haste_spent = open.hastened;
+                open.hastened = false;
+                open.last_trial = Some(now);
+            }
+            self.next = id;
+            effects.push(Effect::Trial {
+                id,
+                channel: name.to_owned(),
+                slot,
+                tenant,
+                deadline,
+            });
         }
-        effects
+        // The next tick, whatever this one asked: a verdict reschedules.
+        channel.schedule(&settings, now);
+        effects.extend(channel.stall(&settings, name, now));
+        (trial, effects)
     }
 
     /// A guest walk met these heads of `channel` while it was paused, not
     /// asked: they are witnesses, and one whose Tenant the memo does not hold
-    /// is tried at the next tick, now, at most once a tick's first step: the
-    /// next [`Breaker::tick`] asks it, so that no trial is issued that the
-    /// shell is not about to run.
+    /// is tried at the next tick, now — at most once a tick's first step, and
+    /// not after a hastened trial that left the channel open until a
+    /// scheduled one has been issued, so that heads met add at most one trial
+    /// a tick. The next [`Breaker::tick`] asks it, so that no trial is issued
+    /// that the shell is not about to run.
     pub fn met(&mut self, now: Instant, channel: &str, heads: &[(i16, String)]) {
         let settings = self.settings;
         let Some(c) = self.channels.get_mut(channel) else {
@@ -566,24 +634,9 @@ impl Breaker {
         let rested = open
             .last_trial
             .is_none_or(|at| now.saturating_duration_since(at) >= settings.tick.0);
-        if fresh && open.trial.is_none() && rested {
+        if fresh && open.trial.is_none() && rested && !open.haste_spent {
             open.next_tick = now;
-        }
-    }
-
-    /// A guest walked every slot once and met no head of `channel`: nothing
-    /// is left to try, and the channel closes.
-    pub fn circled(&mut self, now: Instant, channel: &str) -> Vec<Effect> {
-        let Some(c) = self.channels.get_mut(channel) else {
-            return Vec::new();
-        };
-        match c.close(now) {
-            Some((cause, stalled)) => vec![Effect::Resumed {
-                channel: channel.to_owned(),
-                cause,
-                stalled,
-            }],
-            None => Vec::new(),
+            open.hastened = true;
         }
     }
 
@@ -633,8 +686,26 @@ impl Breaker {
             return told;
         }
         let asked = asked.expect("a trial in flight");
-        channel.witnesses.retain(|(_, t)| *t != asked.tenant);
+        if trial != Trial::Busy {
+            channel.witnesses.retain(|(_, t)| *t != asked.tenant);
+        }
         match trial {
+            Trial::Busy => {
+                // Nothing asked, nothing learnt: the witness again at the
+                // first step, a met one first in line, and a hastened trial's
+                // haste not spent.
+                if let State::Open(open) = &mut channel.state {
+                    open.next_tick = now + settings.tick.0;
+                    if asked.hastened {
+                        open.haste_spent = false;
+                    }
+                }
+                if !channel.memo.contains_key(&asked.tenant)
+                    && !channel.witnesses.iter().any(|(_, t)| *t == asked.tenant)
+                {
+                    channel.witnesses.push_front((asked.slot, asked.tenant));
+                }
+            }
             Trial::Told(Verdict::Processed) => {
                 channel.memo.remove(&asked.tenant);
                 if let Some((cause, stalled)) = channel.close(now) {
@@ -867,6 +938,9 @@ impl Channel {
             last_trial: None,
             inconclusive: Vec::new(),
             reminded: None,
+            refreshed: None,
+            hastened: false,
+            haste_spent: false,
         }));
         self.schedule(settings, now);
     }
@@ -924,6 +998,18 @@ impl Channel {
             .map(|(t, e)| (e.slot, t.clone()))
     }
 
+    /// Whether a witness may still come without a guest meeting one: a head
+    /// met, or a memoised Tenant, not yet tried inconclusively — a memoised
+    /// one whether its back-off has run out or not.
+    fn awaits_witness(&self) -> bool {
+        let tried: &[String] = match &self.state {
+            State::Open(open) => &open.inconclusive,
+            State::Closed => &[],
+        };
+        self.witnesses.iter().any(|(_, t)| !tried.contains(t))
+            || self.memo.keys().any(|t| !tried.contains(t))
+    }
+
     fn stall(&mut self, settings: &Breaking, name: &str, now: Instant) -> Option<Effect> {
         let failed = self.failed;
         let State::Open(open) = &mut self.state else {
@@ -938,6 +1024,7 @@ impl Channel {
         if remind {
             open.reminded = Some(now);
         }
+        open.refreshed = Some(now);
         Some(Effect::Stalled {
             channel: name.to_owned(),
             cause: open.cause,

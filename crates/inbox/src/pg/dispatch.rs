@@ -513,7 +513,9 @@ where
                             )
                             .await?;
                         if locked.is_none() {
-                            return Ok((Trial::Gone, Outcome::Nothing));
+                            // A dispatch holds the slot: nothing asked, the
+                            // witness tried again at the next first step.
+                            return Ok((Trial::Busy, Outcome::Nothing));
                         }
                         let head = connection
                             .query_opt(
@@ -624,8 +626,8 @@ where
             })
             .await;
         match tried {
-            Ok((Trial::Gone, outcome)) => {
-                let told = self.breaker().tried(now(), id, Trial::Gone);
+            Ok((trial @ (Trial::Gone | Trial::Busy), outcome)) => {
+                let told = self.breaker().tried(now(), id, trial);
                 self.tell(&told.effects);
                 Ok(outcome)
             }
@@ -635,7 +637,14 @@ where
                 self.tell(&told.effects);
                 Ok(Outcome::Nothing)
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                // Failed before a verdict was told, or after one: nothing the
+                // breaker has not heard, so not a failed tick (after a
+                // verdict told it finds no trial and changes nothing).
+                let told = self.breaker().tried(now(), id, Trial::Busy);
+                self.tell(&told.effects);
+                Err(error)
+            }
         }
     }
 

@@ -416,13 +416,16 @@ and memo of Tenants:
   Tenant's key cached; a Tenant whose keys fail alone answers `Unavailable`
   at Tenant scope, the stage at Stage scope; a permanent row parks at once; a
   flaky one fails its first time, spending an attempt;
-- an `Unavailable` holds its row and spends nothing; a Tenant's is
-  remembered in the process's memo, which holds the Tenant's other heads
-  unasked (`HoldUnasked`) and then lets one ask through, in flight, at a time;
+- an `Unavailable` holds its row and spends nothing; an ask's, of either
+  scope, is remembered in the process's memo, which holds the Tenant's other
+  heads unasked (`HoldUnasked`) and then lets one ask through, in flight, at a
+  time; a trial's Stage verdict is the breaker's, not the memo's;
 - a Stage `Unavailable` may open the process's breaker (the thresholds are
   the core's, so the model takes either branch); an open breaker asks only by
-  its trial, one at a time, which a processed verdict closes, and a circle
-  that finds no head closes it (`Circle`).
+  its trial, one at a time, which a processed verdict closes, and a breaker
+  with no head left to try closes (`Circle`): the core closes at a tick that
+  finds no witness and none to wait for, which a channel with no head reaches
+  once its known witnesses are tried.
 
 A head whose dependency is not processed is set aside, and its dependency's
 mark wakes it. The expiry parks a waiter whose chain reaches no queued row
@@ -443,16 +446,24 @@ configuration with `Mutant = "none"` — where that property must hold, so
 that the property and no other tells the two apart. `check.sh` pins every
 passing configuration's and every twin's count of distinct states.
 
+Since the memo holds a Tenant at the stage's scope too (ADR-0042, slice 8),
+the instances with the stage down grew: `InboxOutage.cfg` from 17 368
+states to 446 210, `InboxOutageOperators.cfg` from 23 986 to 3 685 902. On
+the reference machine (12 cores) the group takes some 50 minutes, 42 of them
+`InboxOutageOperators.cfg`'s liveness, `EventuallyOutOfTheWay`; its
+invariants alone take 87 s. Kept whole: without the rollback it halves, and
+a rollback beside the operator's verbs is checked nowhere else.
+
 `MCInboxOutage.tla` fixes the instances: m1 and m2 of Tenant t1 under one
 key in slot s1, m3 of t2 in s2; m4 and x where an instance names them.
 
 | Configuration | Rule | Expected |
 | --- | --- | --- |
-| `InboxOutage.cfg` | the stage down once and back, p2 cut off once and back, t1's keys cached in p1, m2 failing once, a rollback | every invariant and property holds; 17 368 states |
+| `InboxOutage.cfg` | the stage down once and back, p2 cut off once and back, t1's keys cached in p1, m2 failing once, a rollback | every invariant and property holds; 446 210 states |
 | `InboxOutageTenant.cfg` | t1 failing alone, its rows in both slots, two workers of one process | `OneAskPerReach`, `EventuallyProcessed`; 1 936 |
-| `InboxOutageCutOff.cfg` | p2 cut off for good, the stage up | the other process processes every row; 544 |
+| `InboxOutageCutOff.cfg` | p2 cut off for good, the stage up | the other process processes every row; 4 588 |
 | `InboxOutageDeps.cfg` | m3 waits for m2, queued; m4 for x, which never arrives | m3 spared and processed, m4 expires; 36 |
-| `InboxOutageOperators.cfg` | m1 failing and parking, m3 permanent, the operator acting | `CanaryExact`, `GivenUpIsTheEnd`, `KeyOrder`; 23 986 |
+| `InboxOutageOperators.cfg` | m1 failing and parking, m3 permanent, the operator acting | `CanaryExact`, `GivenUpIsTheEnd`, `KeyOrder`; 3 685 902 |
 | `InboxOutageUnavailableSpends.cfg` | an `Unavailable` that spends | `UnavailableNeverSpends` violated |
 | `InboxOutageNoFlightMark.cfg` | a memo that lets every worker ask a Tenant in flight | `OneAskPerReach` violated |
 | `InboxOutageExpirePresent.cfg` | an expiry that parks a waiter whose dependency is queued | `PresentDependencyNeverExpires` violated |

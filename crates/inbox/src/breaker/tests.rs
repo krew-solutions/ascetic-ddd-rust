@@ -394,14 +394,26 @@ fn c6_three_inconclusive_trials_close_the_channel() {
     assert!(!sim.breaker.is_paused(CHANNEL));
 }
 
-/// C7: a guest's full circle that meets no head of the paused channel closes
-/// it, and no stall is refreshed after. Red when the stall keeps refreshing.
+/// C7: paused, the heads of both its memoised Tenants given up by a person: a
+/// trial of each finds its head gone, two inconclusive verdicts of the three
+/// that close a channel; the next tick finds no witness and none to wait for,
+/// and closes it — a process's guests cannot see a whole circle of a slot,
+/// their cursor shared — and no stall is refreshed after. Red when a tick
+/// without a witness only waits for the next.
 #[test]
-fn c7_a_circle_without_a_head_closes_the_channel() {
+fn c7_no_witness_left_closes_the_channel() {
     let mut sim = Sim::new(Breaking::default());
     sim.open();
-    let effects = sim.breaker.circled(sim.now, CHANNEL);
-    assert!(resumed(&effects));
+    let mut effects = Vec::new();
+    for _ in 0..2 {
+        sim.advance(Duration::from_secs(5));
+        let (id, _) = sim.next_trial();
+        effects.extend(sim.breaker.tried(sim.now, id, Trial::Gone).effects);
+    }
+    assert!(!resumed(&effects), "two inconclusive trials closed it");
+    sim.advance(Duration::from_secs(5));
+    effects.extend(sim.tick());
+    assert!(resumed(&effects), "no witness left: {effects:?}");
     for _ in 0..100 {
         sim.advance(Duration::from_secs(1));
         assert!(
@@ -592,6 +604,162 @@ fn c14_a_stall_opened_again_within_the_window_is_reported_at_its_opening() {
         effects.iter().any(|e| matches!(e, Effect::Stalled { .. })),
         "the stall said at the opening: {effects:?}"
     );
+}
+
+/// Opens `channel` in `breaker`: two Tenants failing at `Stage` scope.
+fn open_channel(breaker: &mut Breaker, now: Instant, channel: &str) {
+    for tenant in ["a", "b"] {
+        let Before::Ask(flight) = breaker.before(now, channel, tenant, 0, 0) else {
+            panic!("a closed channel asks a Tenant without a memo");
+        };
+        breaker.told(now, flight, stage());
+    }
+    assert!(breaker.is_paused(channel), "{channel}: two of two failing");
+}
+
+/// C15: guests meet a fresh Tenant's head every 200 ms through ten minutes of
+/// a stage down (ADR-0042 decision 1, its trials' haste): a head met hastens
+/// a trial at most once a tick, so the trials are at most twice the scheduled
+/// ones (C1's 30–45), not one a second. Red when a head met hastens a trial
+/// whenever a second has passed since the last.
+#[test]
+fn c15_heads_met_add_at_most_one_trial_a_tick() {
+    let mut sim = Sim::new(Breaking::default());
+    sim.open();
+    let mut trials = 0;
+    for step in 0..3_000u32 {
+        sim.advance(Duration::from_millis(200));
+        let fresh = format!("guest{step}");
+        sim.breaker
+            .met(sim.now, CHANNEL, &[((step % 64) as i16, fresh)]);
+        for effect in sim.tick() {
+            if let Effect::Trial { id, .. } = effect {
+                trials += 1;
+                sim.breaker.tried(sim.now, id, Trial::Told(stage()));
+            }
+        }
+    }
+    assert!(
+        (30..=90).contains(&trials),
+        "{trials} trials in ten minutes of heads met every 200 ms"
+    );
+}
+
+/// C16: one trial a tick call, whatever the channels due (a dispatch runs
+/// one; another issued would expire unasked as a failed tick), the one due
+/// longest first; and under one caller, twenty channels stalled each report
+/// their stall within its ttl, though each waits its turn for a trial of two
+/// seconds. Red with a trial for every channel due, or with a stall reported
+/// only at its channel's own trial.
+#[test]
+fn c16_one_trial_a_tick_call_and_every_stall_refreshed() {
+    let settings = Breaking::default();
+    let mut breaker = Breaker::new(settings);
+    let start = Instant::now();
+    let names: Vec<String> = (0..20).map(|i| format!("kafka://c{i:02}")).collect();
+    for name in &names {
+        open_channel(&mut breaker, start, name);
+    }
+    let mut now = start + Duration::from_secs(5);
+    let first: Vec<u64> = breaker
+        .tick(now)
+        .into_iter()
+        .filter_map(|e| match e {
+            Effect::Trial { id, .. } => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(first.len(), 1, "one trial a call, of twenty channels due");
+    breaker.tried(now, first[0], Trial::Told(stage()));
+    let second = breaker.tick(now);
+    assert_eq!(
+        second
+            .iter()
+            .filter(|e| matches!(e, Effect::Trial { .. }))
+            .count(),
+        1,
+        "the next call asks the next channel's"
+    );
+    for effect in second {
+        if let Effect::Trial { id, .. } = effect {
+            breaker.tried(now, id, Trial::Told(stage()));
+        }
+    }
+    // one caller, each trial two seconds, for ten minutes
+    let mut last: HashMap<String, Instant> = HashMap::new();
+    let ttl = settings.stall_ttl();
+    for _ in 0..300 {
+        now += Duration::from_secs(2);
+        let effects = breaker.tick(now);
+        for effect in &effects {
+            if let Effect::Stalled { channel, .. } = effect {
+                if let Some(at) = last.insert(channel.clone(), now) {
+                    assert!(
+                        now - at <= ttl,
+                        "{channel}'s stall unreported for {:?}, past its ttl {ttl:?}",
+                        now - at
+                    );
+                }
+            }
+        }
+        for effect in effects {
+            if let Effect::Trial { id, .. } = effect {
+                breaker.tried(now, id, Trial::Told(stage()));
+            }
+        }
+    }
+    assert_eq!(last.len(), names.len(), "every channel stalled");
+}
+
+/// C17: a trial whose slot a dispatch held, or whose transaction failed,
+/// asked nothing: it is no inconclusive verdict and no failed tick, and its
+/// witness is tried again at the tick's first step. Red when a busy slot
+/// counts as a head gone — three busy slots on distinct witnesses would close
+/// a channel whose stage is down.
+#[test]
+fn c17_a_busy_slot_asks_nothing_and_counts_nothing() {
+    let mut sim = Sim::new(Breaking::default());
+    sim.open();
+    sim.advance(Duration::from_secs(5));
+    // one failed tick: the schedule's next step is two seconds, the busy
+    // witness's one
+    let (id, _) = sim.next_trial();
+    sim.breaker.tried(sim.now, id, Trial::Told(stage()));
+    let met: Vec<(i16, String)> = ["p", "q", "r", "s"]
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (i as i16, (*t).to_owned()))
+        .collect();
+    sim.breaker.met(sim.now, CHANNEL, &met);
+    let (id, first) = sim.next_trial();
+    sim.breaker.tried(sim.now, id, Trial::Busy);
+    for _ in 0..8 {
+        let before = sim.now;
+        let (id, tenant) = sim.next_trial();
+        assert_eq!(tenant, first, "the busy witness tried again, first in line");
+        assert!(
+            sim.now - before <= Duration::from_millis(1_100),
+            "tried again {:?} later",
+            sim.now - before
+        );
+        let told = sim.breaker.tried(sim.now, id, Trial::Busy);
+        assert!(!resumed(&told.effects), "busy slots closed the channel");
+    }
+    assert!(sim.breaker.is_paused(CHANNEL), "still paused");
+    // busy trials counted no failed tick: one failed tick so far, none
+    // stalled the channel
+    for _ in 0..50 {
+        sim.advance(Duration::from_millis(100));
+        for effect in sim.tick() {
+            assert!(
+                !matches!(effect, Effect::Stalled { .. }),
+                "a busy slot counted a failed tick"
+            );
+            if let Effect::Trial { id, .. } = effect {
+                sim.breaker.tried(sim.now, id, Trial::Busy);
+            }
+        }
+    }
 }
 
 proptest! {

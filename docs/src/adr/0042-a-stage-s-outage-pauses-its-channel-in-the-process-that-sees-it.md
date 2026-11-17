@@ -10,6 +10,13 @@ the dispatch path (E1); slice 5, the reads, the stalls' report and the operator'
 names; slice 6, the model; slice 7, the traces and B1's gates (T1, B1). Every slice is built; § Owed keeps the
 measurements, the host's adoption and a live deployment's steps.
 
+Revised (2026-11-17): the revision of decision 2 that M6 asked for — whether a verdict at the stage's scope holds
+the row and not the Tenant — was decided under the library's gate (a blind solver, a main position, a
+discriminator, three rounds of roles) and rejected (§ Alternatives Considered). The round found defects of the
+build: slice 8 fixes those of decision 1's trials (one a tick call, hastened at most once a tick, a busy slot that
+asks nothing, the close with no witness left) and brings the model's memo to the stage's scope; the memo's clock
+written on rows it did not ask is owed, with its two remedies and the measurements that choose (§ Owed, 1).
+
 It supersedes ADR-0040's decisions 4, 5, 7, 9 and its `park_held` (decision 8), and ADR-0041's decision 3 (the
 environment's verdict, its slice 2). It keeps ADR-0040's verdicts and causes (decisions 1–3, 6) and
 `unpark_all` (decision 8, widened here), and ADR-0041's rotation (decisions 1, 2, 5, 6).
@@ -94,10 +101,16 @@ number of failed ticks f is kept across a close shorter than W and reset after W
 **stalled** at f ≥ 2.
 
 **Half-open: the trial.** At a tick, one ask of a **witness**:
-1. a head of the channel whose Tenant has no memo, met by a guest walk (§ 5); meeting one issues a trial at once,
-   at most one a second;
+1. a head of the channel whose Tenant has no memo, met by a guest walk (§ 5); meeting one brings the next trial
+   forward to now — at most once a tick's first step, and not again after a hastened trial that left the channel
+   open until a scheduled one has been issued: heads met add at most one trial a tick;
 2. else a memoised Tenant's head whose memo has run out: the trial honours the Tenant's back-off;
 3. else none at this tick.
+
+**One trial a tick call.** A dispatch runs one trial, so a tick issues at most one: the channels due take their
+turns, the one due longest first, and a channel whose tick finds no witness waits its next tick and leaves the
+call's trial to another. A stalled channel is reported at least once a tick's cap, whether or not a call's trial
+is its, so that its report outlives the turns of many channels.
 
 The trial locks the witness's slot as `take` does, locates the Tenant's head in a statement after the lock with
 `FOR UPDATE`, and runs the subscriber under `trial_wait` (the stage's own wait), past which its future is dropped
@@ -108,7 +121,13 @@ Its verdict:
 - a `Tenant`-scoped `Unavailable` → that Tenant's memo, and the witness drops out;
 - the row's own verdict, a head gone, or the timeout → inconclusive; **three inconclusive verdicts in a row, on
   distinct witnesses, close the channel**;
-- **no witness**: a guest's full circle that meets no head of the channel closes it.
+- a busy slot — a dispatch holds it — or a transaction that failed before a verdict was told → nothing: no failed
+  tick and no inconclusive verdict, the witness again at the tick's first step, a hastened trial's haste not
+  spent;
+- **no witness left**: a tick that finds no witness and none to wait for — every head met and every memoised
+  Tenant tried inconclusively — closes the channel; a head still refused at the stage's scope opens it again, its
+  failing Tenants kept across the close. A process's guests cannot see a whole circle of a slot: their cursor is
+  shared by every replica's, and a walk covers K Tenants.
 
 Every effect carries an id and a deadline: one unanswered by its deadline is a failed tick; an answer after it
 changes nothing but a close. At most 64 witnesses a channel, oldest out.
@@ -126,7 +145,8 @@ those: a healthy Tenant never enters it.
   released on every exit of the dispatch, with a deadline.
 - A head of a memoised Tenant met before `until`, or while an ask is in flight, is held to the later of `until`
   and the in-flight deadline, always ahead of now, and the subscriber is not called. A Tenant without an entry is
-  never held.
+  never held. That interval is this process's, and § 3 writes it on the row, where every process reads it (§ Owed,
+  1).
 
 ### 3. The rows
 
@@ -139,7 +159,10 @@ those: a healthy Tenant never enters it.
   now)`, `holds + 1`, `hold_kind = unavailable`, `next_attempt_at = clock_timestamp() + interval`. The interval is
   the memo's `until` for a `Tenant` scope, and **at most the tick cap** for a `Stage` scope, the longer clock kept
   in memory only: a replica cut off alone delays a healthy replica's head by at most 15 s.
-- A held head (§ 2) writes `cause`, `held_since`, `hold_kind` and `next_attempt_at` as above, and not `holds`.
+- A head held unasked (§ 2) writes `cause`, `held_since`, `hold_kind` and `next_attempt_at`, and not `holds`; its
+  interval is the memo's — `until`, or the in-flight deadline — at either scope, not capped at the tick. So the 15 s
+  above bounds the row a subscriber refused, not the Tenant's other heads, which a replica's memo holds from every
+  process for up to 300 s (§ Owed, 1).
 - Every interval is bound against the database's clock, never a process's.
 
 ### 4. The exits
@@ -322,11 +345,13 @@ inbox's and the outbox's both, since a host reads the two together.
 At 2,000 Tenants in each of 64 slots, 3 replicas of 8 loops, K = 32:
 - **A full outage**: nothing parks and no attempt is spent; before the pause, at most max(32, ⌈S/3⌉) distinct
   Tenants asked and failed a channel a process (S, the Tenants processed within W, at most 1,024: so 342),
-  each once before its memo holds it, and L in flight; then one trial a tick a channel a process (at most 240 an hour); guests R · L / poll; the expiry's
+  each once before its memo holds it, and L in flight; then a trial a tick a channel a process, and one more a
+  tick that a head met brought forward (at most 480 an hour); guests R · L / poll; the expiry's
   re-reads grow with the waiters, not the Tenants. Detection after recovery takes at most the tick cap and one
   trial. **No term in T.** Today: 427 asks and 4,032 walks a second.
-- **A misread** pauses the process that made it; a healthy replica's head waits at most the tick cap for its
-  holds; at one slot a trial holds the slot at most `trial_wait` a tick.
+- **A misread** pauses the process that made it; a healthy replica's head that process refused waits at most the
+  tick cap, one it held unasked its memo's clock, up to 300 s (§ Owed, 1); at one slot a trial holds the slot at
+  most `trial_wait` a tick.
 - **A brownout** of 5 % reaches neither threshold; a flapping stage pages by § 6 (b).
 - **One Tenant's trouble**: one ask in flight a process, `log2(cap/floor) + t/cap` asks; a quiet channel with one
   failing Tenant is never paused.
@@ -339,7 +364,8 @@ At 2,000 Tenants in each of 64 slots, 3 replicas of 8 loops, K = 32:
 - Tenants whose keys are cached stall while their channel is paused, and on a channel not paused once one of their
   heads is refused: the memo holds a (channel, Tenant) on a verdict of either scope (decision 2), its cached heads
   with it. They would have flowed at most `keep` (5 min by default) longer; M6 measured half of a launch's backlog
-  so held for the outage's length (§ Measured).
+  so held for the outage's length (§ Measured). Kept: the alternatives that freed them cost more than they freed
+  (§ Alternatives Considered).
 
 ## Rule of Three
 
@@ -371,6 +397,24 @@ At 2,000 Tenants in each of 64 slots, 3 replicas of 8 loops, K = 32:
   per waiter per `max_wait`.
 - **Rolling back and pausing the loops on an environment's verdict** (ADR-0041 decision 3). Superseded: it stops
   every channel and Tenant of the process for one channel's dependency.
+- **A verdict at the stage's scope holding the row, not the Tenant** (the revision M6 asked for, decided
+  2026-11-17 under the library's gate). Three forms, each refuted by roles against the code:
+  - *a short stage clock per Tenant, and a Tenant's never-refused heads asked under a stage entry*: some ten times
+    the KMS's calls and twenty times the rows written below the pause's threshold; the damper of M5's recovery
+    under the quota lost; cached witnesses closing a pause while the stage is down, so that nothing pages for the
+    cache's `keep`; a Tenant late at the dek filling the stage's flights, its neighbours then refused at the
+    stage's scope;
+  - *every stage entry forgotten on a success proven on a row the stage refused, the count restarted at a change
+    of scope*: a herd on every success under a quota; and the dek's scope alternates within one Tenant's trouble —
+    `Stage` right after each failed call, `Tenant` later in its back-off once another key has landed — so the
+    exponent never grew;
+  - *a memoised Tenant made not due for its process's walk, the process walking as a guest*: a guest's fruitless
+    walk sleeps the poll, which a healthy Tenant's head then waits in a partial outage (some 25 s at C4's shape),
+    and the keys sent with every walk cost some 0.75 µs a key — tens of MB a second at the host's walks.
+  The root: the inbox cannot tell a cache's success from the KMS's; the dek's scope is one process's and
+  alternates; and at the host's scale a shared outage pauses every channel within seconds, so that the cached
+  rows freed are few. The memo keeps both scopes, its count combined across them: the combination is what absorbs
+  the dek's alternation.
 
 ## Executors
 
@@ -385,13 +429,16 @@ histories with a manual clock; the shell's with a `Clock` and a paused runtime; 
 | C4 | 70 % of Tenants failing at `Tenant` scope, four times the memo's capacity | no pause; no healthy head delayed; asks ≤ F · S · (log2(cap/floor) + t/cap + c) | pause at capacity; the exponent from the memo only |
 | C5 | one Tenant hanging 10 s, 64 heads, 2,000 healthy Tenants | ≤ 1 concurrent ask; ≤ 63 row versions during one ask | no in-flight mark; hold to a past `until` |
 | C6 | recovery, then every row `Transient` | closed within 3 trials | close only on processed |
-| C7 | paused, every head parked by a person | closed after one guest circle; the stall lapses within its ttl | keep refreshing |
-| C8 | one replica cut off, caches warm | a healthy replica's head delayed ≤ the tick cap; at one slot its throughput ≥ (tick − `trial_wait`)/tick | hold to `until` on the row; no trial timeout |
+| C7 | paused, the heads of its memoised Tenants given up by a person | closed at the tick that finds no witness and none to wait for; no stall after | a tick without a witness only waits; one closing at once (C10, C11, C14 red) |
+| C8 | one replica cut off, caches warm | a row it refused held ≤ the tick cap, a `Tenant`-scoped one to its back-off; at one slot its throughput ≥ (tick − `trial_wait`)/tick (a head it held unasked carries its memo's clock: § Owed, 1) | hold to `until` on the row; no trial timeout |
 | C9 | a trial answered after its deadline | f unchanged | count a stale answer |
 | C10 | one head of the channel among T ≫ K | processed within 2 ticks of recovery, the slot's oldest rows another channel's | the trial takes the slot's head rather than its witness's |
 | C11 | mixed causes during a pause | one row a (channel, reporter); a stable cause | a cause per verdict |
 | C12 | effects unanswered | `tick(now + d)` re-issues within d | in flight without a deadline |
 | C13 | more memo keys than capacity | an entry in flight or not run out is never evicted | plain LRU |
+| C15 | ten minutes of a stage down, a fresh Tenant's head met every 200 ms | trials 30–90: at most one hastened a tick | a head met hastens whenever a second has passed |
+| C16 | twenty channels paused in one process; then one caller, a trial of 2 s at a time, ten minutes; in the database, two channels paused, their ticks due together | one trial a tick call, the next call the next channel's; every channel's stall reported within its ttl; every trial issued asked its witness | a trial for every channel due; a stall reported only at its channel's trial |
+| C17 | trials whose slot a dispatch held, after a failed tick | the witness again within the tick's first step, first in line; no channel closed, no failed tick | a busy slot counted as a head gone; the busy witness waiting the schedule; a busy trial a failed tick |
 | G1 | at S = 1, K = 4, a memo of 16, at 8 and 64 Tenants, driven until every slot is paused, then n more dispatches | calls ≤ trials; changed rows ≤ calls; no head held unasked; a guest's step ≤ K; only the pause and the stall logged, as many lines at 64 as at 8; onset calls = `fewest` | drop the walk's filter (a hold on each paused head met, the same observable); no K; a held row logged at `warn` |
 | E1 | the expiry (`tests/expiry.rs`, the expiry's plan in `pg/plan_tests.rs`): a present chain, an untried head, a row behind a held head, a missing and a parked dependency, 8 and 9 hops, a cycle under `statement_timeout`, 20,000 spared with one missing last, ties at one `waiting_since` with rows moved in the heap, a malformed `waiting_for`, parked-expired rows; the spared rows' `(ctid, xmin, xmax)` and no xid in one transaction; `run`'s timer, and no dispatch expiring; a defect stopping `run`; the CHECK of a time of wait; the function as the start check requires it, planned once a connection | spared or expired as stated, each with its reason; 201 statements for 20,000 spared; ≤ `batch` rows examined by `__waiting_since_idx`, a hop one probe of the key | drop `present`; drop `parked_at IS NULL`; bounds 7, 16 and none; the cursor on expired rows; `LIMIT` after the filter; a `ctid` tiebreak; the key `waiting_since` alone; a plain cast; renew by write; lock before the spare test; the dispatch expiring; `run` without the timer; a defect logged; `more` by the rows parked; the observer untold; the start check without the set or the function; the CHECK dropped; the index's old predicate or no tiebreak; the exit's fragment; the plan not forced generic |
 | R1 | the rows: 20 asks, no spend; `holds` at its cap; a `Transient` resets, its back-off kept; every wait bound to `clock_timestamp()`, read from the source (a process's clock an hour fast agrees with the server's on one host, so no run tells the two apart); a hold after a 1.5 s subscriber; the kinds of a held head asked and of one held unasked; the counts by `__held_idx`, and answerable from it alone, the heap's scans set off | as stated | spend; no cap; the holds kept by a spend; the back-off dropped; `CURRENT_TIMESTAMP`; the kind from `holds`; `uri` out of the index |
@@ -404,8 +451,10 @@ histories with a manual clock; the shell's with a `Clock` and a paused runtime; 
 | B1 | the buffers the take and the walk read to find a message at 64 slots, the walk's to pass two Tenants, an idle take's, and the walks' steps, the take's looks by its index alone (`pg/plan_tests.rs`, under `test-pg`); a happy dispatch's statements, at one slot and at 64; the take, walk and expiry planned once a connection, a reset of the plan cache counted by a canary | 198, 24, 19 and 2 buffers, 3 and 2 steps, 10 and 11 statements, on 14 and 18 alike | an added heap fetch; a second slot-row read; a take's look reading outside its index; an idle take looking at every slot; the take's isolation read as its own statement; the mark locking its identity twice; the walk's or the expiry's plan not forced generic |
 
 **The model.** `InboxOutage.tla` is rewritten over (slot, Tenant) heads with processes of workers, an ask split
-into its start and its verdict with a rollback between, the breaker per process, the memo, a process cut off and
-cached keys, the expiry's spare and the operator's verbs. Properties: `UnavailableNeverSpends`,
+into its start and its verdict with a rollback between, the breaker per process, the memo — an ask's verdict of
+either scope remembered, a trial's at the stage's scope the breaker's, as the core has it since slice 3 and the
+model since slice 8 — a process cut off and cached keys, the expiry's spare and the operator's verbs. The trials'
+rates (one a tick call, one hastened a tick) are not the model's: it has no time, and C15–C17 are their executors. Properties: `UnavailableNeverSpends`,
 `UnavailableNeverParks`, `HoldIsQueued`, `CauseIsCurrent`, `KeyOrder` (the order of a stream; the rows of a
 (slot, Tenant) are its streams'), `OneAskPerReach`, `PresentDependencyNeverExpires`, `CanaryExact`,
 `GivenUpIsTheEnd`; and the liveness of the others going on (a process cut off for good), of a held Tenant asked
@@ -500,7 +549,10 @@ down, so the outage meets the launch's backlog and nothing new. Two runs, the se
   none, their keys out of the cache. What held them is the memo: a head refused for want of its key holds its
   (channel, Tenant) in that process, every head of it, for a hold doubling to 300 s (decision 2) — the cached ones
   with it. They waited for the outage's end and then their turn in the drain, some 25 minutes, where the cache
-  would have served them in its first five. The revision this asks for is owed (§ Owed, 1).
+  would have served them in its first five. The memo held them by three paths, read from the code since: in each
+  process that refused a head; in the rows, its holds written on the heads it met, which every other process then
+  skips (§ Owed, 1); and on the paused channel by the pause, its heads first in their queues' order across
+  channels. The revision this asked for was decided and rejected (§ Alternatives Considered).
 
 **M4** is the host's: the expiry at its own count of spared waiters, on its machine. Here, 220,001 waiters took
 2.3 s a pass on the reference machine (§ 7).
@@ -515,17 +567,46 @@ false, does not hold: `passed` is what a batch examined and did not park, `more`
 
 ## Owed
 
-1. A revision of decision 2 for a verdict at the stage's scope, under the library's gate (a blind solver, a
-   discriminator, roles): whether the memo holds the Tenant when the stage, not the Tenant, refused, or only the
-   row. M6 measured its cost — half of a launch's backlog, cached and let through by the order, held for the
-   outage's length on channels never paused — and M5 its gain, the asks of a KMS down bounded at some 250 in 20
-   minutes; the core's C1–C13, M5's drill and the trace and the model are the revision's executors.
-2. The host's adoption (§ 12), in its own records.
-3. A live deployment's steps, when there is a live client: expand and contract for `cause` and the dropped
+1. **A process's memo writes its own clock on rows it did not ask** (§ 2, § 3): a stage-scoped entry, one
+   process's evidence, holds the Tenant's other heads from every process for up to 300 s, and for up to 30 s under
+   an ask in flight — where decision 3 bounds the row refused at 15 s. No test covered it: C8 and its database twin
+   assert the row asked. Two remedies, chosen by measurement on the reference machine:
+   - *(b) the interval of a head held unasked under a stage-scoped entry or an ask in flight, capped at the tick*:
+     decision 3's bound as it reads. Its cost, read from the code: a row written per head held per ≤ 15 s below the
+     pause's threshold — some 1,459 a second at the host's worst, 342 Tenants × 64 heads, against some 73 today,
+     for as long as a partial failure lasts; and a replica cut off alone still wins the race for a Tenant's fresh
+     heads, some 7.5 s a row at one take in three.
+   - *(d) the memo's Tenants made not due for their process in the walk*, nothing written on a row not asked, a
+     slot of only such heads sleeping at most a poll — not as a guest, whose fruitless walk sleeps the poll that a
+     healthy head would wait. No row written, a healthy replica's head delayed a poll at most. Its cost: the keys
+     sent with every walk — measured on a walk-shaped statement at 64 slots × 2,000 Tenants, 32 steps, on 14 and
+     18: a `jsonb` object looked up with `?` flat in its size, 0.54 and 0.62 ms a walk against 0.46 and 0.54 held
+     by time; parsed from the parameter, some 0.75 µs a key a walk, 2.3 ms at 2,400 keys and 5.5–6.1 at 7,200; a
+     `text[]` with `= ANY` linear, 3.4–4.0 ms at 2,400 — times the walks a second; and a new term in the walk's
+     round.
+   The measurements that choose: (b)'s rows written and a healthy channel's p99 beside 342 × 64 held heads; (d)'s
+   walk end to end through `locate_head` at 0, 300, 2,400 and 7,200 keys — messages a second, the backend's CPU,
+   bytes sent, time under the breaker's lock; for both, a drill with one replica of three cut off and the launch's
+   Tenant alone on a channel — the drain's time and the healthy replicas' p99.
+2. **The risks the round found, each with the measurement that decides it.**
+   - A trial that times out is inconclusive (§ 1), and three close the channel: with the KMS hanging —
+     black-holed, or the brownout's 2 % — a channel may close, hang its asks, pause again, and never stall or page.
+     Masked until slice 8 by the trials issued and not run, whose expiry counted failed ticks. A drill with the KMS
+     hanging decides whether `trial_wait` must exceed the stage's own wait, or a timeout count as a failed tick.
+   - A `Tenant`-scoped hold of up to 300 s on a row rests on one process's evidence — the dek reads `Tenant` once a
+     key landed in that process: a replica partly failing (a lossy link, a cold start under the quota) holds rows
+     the others would serve. The drill's cut-off variant at 50 % failing calls decides it.
+   - At the stage's return the memo's cap, 300 s, is the stall M5 measured; its count, combined across scopes,
+     carries the outage into a `Tenant`-scoped verdict at the return (`Waited`, `Late`). The cap's trade-off — the
+     stall against asks ∝ 1/cap — is a setting (`Breaking::with_hold`), decided by a drill at the host's scale: at
+     least 2,000 Tenants with backlog, the quota a stated multiple of the steady rate, A/B, reporting the asks
+     offered, the pauses, the stall rows and the drain's time.
+3. The host's adoption (§ 12), in its own records.
+4. A live deployment's steps, when there is a live client: expand and contract for `cause` and the dropped
    columns; the CHECKs added `NOT VALID` after a backfill; the take, walk, expiry and trial under new names while
    old binaries run; the indexes rebuilt concurrently; old and new replicas side by side spend, park and expire
    what new ones hold and spare.
-4. The trace check of this decision's steps (T1 lists the runs it leaves out, `verify/tla/traces/uncovered.tsv`):
+5. The trace check of this decision's steps (T1 lists the runs it leaves out, `verify/tla/traces/uncovered.tsv`):
    - `Inbox.tla` gains a hold — a row held, no attempt spent, its next attempt later — and the operator's verbs
      over named rows; the recorder names each row a verb moves, an event of the observer's a row, where `Operated`
      only counts them;
@@ -549,6 +630,9 @@ false, does not hold: `passed` is what a batch examined and did not park, `more`
 5. The verbs and the reads, the stalls table (V1, § 6).
 6. The model (§ Executors).
 7. The traces (T1), and B1's gates.
+8. The revision's round (2026-11-17): decision 1's trials one a tick call, hastened at most once a tick, a busy
+   slot that asks nothing, the close with no witness left (C7, C15–C17, the two channels' test of C16); the
+   model's memo at the stage's scope.
 
 ## References
 
@@ -809,3 +893,41 @@ payloads), its generated Vault policies.
   scope is owed, under the library's gate (§ Owed, 1). M4 is the host's, at its count.
 - 2026-11-17: § Owed gains the trace check of this decision's steps (4): what `Inbox.tla`, the recorder and
   `TraceInbox.tla` lack to check the runs of holds and verbs, and when it is taken up.
+- 2026-11-17: The revision of decision 2 owed for the stage's scope, decided under the library's gate: a blind
+  solver, a main position written before it, a discriminator, then three rounds of roles (distributed systems with
+  the database and performance; verifiability with operability), each on the synthesis the last refuted.
+  Rejected, in its three forms (§ Alternatives Considered); the memo keeps both scopes. What the round found in
+  the build:
+  - *Trials were hastened up to once a second for ever*: a head met whose Tenant the memo did not hold brought the
+    tick forward whenever a second had passed, and a trial refused at the stage's scope memoises no witness — up
+    to 3,600 trials an hour a channel a process, where this record said both "at most one a second" and "at most
+    240 an hour". Now at most one hastened a tick (decision 1; C15).
+  - *A tick issued a trial for every channel due, and a dispatch ran the first*: the others expired as failed
+    ticks that asked nothing, counting toward a stall. Now one a call, the channel due longest first, and a stall
+    reported at least once a tick's cap whatever the turns (decision 1; C16, and in the database two channels
+    paused together).
+  - *A slot a dispatch held was a head gone*: inconclusive, three of them closing a channel whose stage was down,
+    a hastened trial's haste spent. And a trial whose transaction failed told the breaker nothing, expiring as a
+    failed tick. Both are now a busy trial that asks nothing (decision 1; C17).
+  - *The close with no witness had no caller*: `Breaker::circled` was called by the core's tests alone, and a
+    process's guests cannot see a whole circle of a slot, their cursor shared. A tick that finds no witness and
+    none to wait for now closes the channel (decision 1; C7), and `circled` is gone.
+  - *The model held no memo at the stage's scope*, which the core has kept since slice 3: an ask's verdict of
+    either scope is remembered now, a trial's at the stage's scope left to the breaker (§ Executors). Every
+    property holds and every mutant still breaks its own; the instances with the stage down grew, the outage's
+    from 17,368 states to 446,210 and the operators' from 23,986 to 3,685,902, whose liveness takes some 42
+    minutes on the reference machine (`verify/tla/README.md` § Inbox outage).
+  - *A process's memo writes its own clock on rows it did not ask*, up to 300 s for every process, where decision
+    3 bounded a stage-scoped hold at 15 s for the row refused; decision 2's text and the build agreed, decision
+    3's "as above" and C8 did not, and no test saw it. Decisions 2 and 3, the consequence of a misread and C8 now
+    say what the build does; the remedy is owed with its two candidates and the measurements that choose (§ Owed,
+    1), the round's other risks with theirs (§ Owed, 2). M6's paragraph names the three paths by which the memo
+    held the cached rows.
+  - *C5's database test failed once in a gate's run on 18*, "no healthy Tenant asked while x hung". Measured under
+    six busy loops of the CPU: a run in ten failed, before slice 8 as after it. The test's own wake updated every
+    slot, waited on the slot the hanging ask held, and kept locked meanwhile the slots it had already woken, which
+    the other dispatchers' takes then skipped. Its waker now wakes the slots no dispatch holds (`SKIP LOCKED`);
+    and its bound on holds counts the window before the first hanging ask, where x's first `Unavailable` already
+    holds each other head once — 7 · (asks + 1), which a waker that works reaches (8 and 9 holds over one hanging
+    ask). No failure in thirty runs under the same load; its two mutations still red (two asks of x at once; 421
+    holds over three asks with the hold met in flight cut to the back-off).

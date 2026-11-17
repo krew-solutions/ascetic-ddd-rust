@@ -18,9 +18,10 @@
 (*     scope; a permanent row parks at once; a flaky one fails its first   *)
 (*     time on its own, spending an attempt;                               *)
 (*   - an `Unavailable` holds its row and spends nothing, at either scope; *)
-(*     a Tenant's is remembered in the process's memo, which holds the     *)
-(*     Tenant's other heads unasked (HoldUnasked) until it runs out, and   *)
-(*     then lets one ask through, in flight, at a time;                    *)
+(*     an ask's, of either scope, is remembered in the process's memo,     *)
+(*     which holds the Tenant's other heads unasked (HoldUnasked) until it *)
+(*     runs out, and then lets one ask through, in flight, at a time; a    *)
+(*     trial's Stage verdict is the breaker's, not the memo's;             *)
 (*   - a Stage `Unavailable` may open the process's breaker -- the         *)
 (*     thresholds are the core's, and the model takes either branch; an   *)
 (*     open breaker asks no head but by its trial, one at a time, which a  *)
@@ -192,7 +193,9 @@ SetAside(w) ==
                 flaked, rearmed, env, breaker, memo, flight, trial, admin, rollbacks>>
 
 \* A head of a Tenant the process's memo holds is held unasked: its row
-\* written held under the Tenant's cause, its count of verdicts untouched.
+\* written held under the memo's cause, its count of verdicts untouched.  The
+\* memo's cause is its latest verdict's, of either scope; the model writes an
+\* Unavailable's cause, "tenant", the only fact of it the properties read.
 HoldUnasked(w) ==
   LET p == ProcOf[w] IN
   /\ flight[w] = None /\ breaker[p] = "closed"
@@ -278,11 +281,13 @@ AskEnd(w) ==
         /\ Hold(m, "tenant")
         /\ memo' = [memo EXCEPT ![p][t] = "held"]
         /\ UNCHANGED <<processed, procOrder, waiting, byHand, expired, flaked, breaker>>
-     \/ \* the stage's Unavailable: the breaker may open, or stay as it is
+     \/ \* the stage's Unavailable: remembered by the process as a Tenant's is,
+        \* but for a trial's, which is the breaker's; the breaker may open, or
+        \* stay as it is
         /\ ~Reachable(p, m)
         /\ Hold(m, "stage")
         /\ breaker' \in {breaker, [breaker EXCEPT ![p] = "open"]}
-        /\ memo' = IF memo[p][t] = "flight" THEN [memo EXCEPT ![p][t] = "due"] ELSE memo
+        /\ memo' = IF trial[w] THEN memo ELSE [memo EXCEPT ![p][t] = "held"]
         /\ UNCHANGED <<processed, procOrder, waiting, byHand, expired, flaked>>
   /\ UNCHANGED <<env, admin, rollbacks>>
 
