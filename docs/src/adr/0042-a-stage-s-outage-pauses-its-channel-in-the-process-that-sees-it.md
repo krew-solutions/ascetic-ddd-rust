@@ -413,13 +413,39 @@ configuration that must fail lists one property and has a twin, its `Mutant` set
 generates and runs; `check.sh` pins each passing configuration's and each twin's count of distinct states
 (`verify/tla/README.md` § Inbox outage).
 
-**Measurements owed.** M1 the walk with nothing paused, server side, committed per call; M3 the guest at a backlog
+**Measurements owed.** M3 the guest at a backlog
 of 20 rows on an unpaused channel; M7 the verbs at the host's scale: `park_queue` re-reads the Tenant's queue rows of other channels in its slots each
 batch, and `held` sorts the held heads each page, at most one a (slot, Tenant); and the dispatch's takes during a
 bulk verb, which passes its slots by; M4 the expiry at the host's count of spared waiters, against 220,001 in 2.3 s a pass on the reference machine
 (§ 7); M5 a one-hour scaled drill
 at 7 channels and a 200 ms poll, with a KMS quota below the drain's rate; M6 the share of opens served from the
 cache during an outage; a two-session run of a verb's `ctid` join against a concurrent hold.
+
+## Measured
+
+On the reference machine: 12 threads (Intel Core i5-1235U), NVMe, PostgreSQL 14.24 as packaged, its settings
+the defaults (`shared_buffers` 160 MB). Times compare only with each other on it; counts compare anywhere.
+
+**M1, the happy path's statements before the decision and after** (R9: nothing new above 0.1 ms a message;
+`pg/measure_tests.rs`, `breaker/tests.rs`). The statements of 47d6848, the library before slice 3, beside today's,
+on one table of the host's launch shape: 64 slots, 2,000 Tenants of a hundred streams each, 1,584 Tenants a slot,
+a processed history of 200,000. The server times blocks of 5,000 calls, each call committed as a dispatch commits,
+`synchronous_commit` off; A B B A, four rounds, the median of each. Two runs:
+
+| | before, µs | after, µs | the change, µs |
+|---|---|---|---|
+| the take | 278.7, 281.6 | 286.4, 280.8 | +7.8, −0.8 |
+| the walk, every head due | 82.9, 82.0 | 102.2, 108.5 | +19.3, +26.5 |
+| the walk, nine heads in ten in back-off | 225.9, 224.6 | 254.0, 256.4 | +28.1, +31.8 |
+| the mark, against one that sets as many columns as 47d6848's, on a twin without the three CHECKs | 113.8, 119.9 | 119.5, 115.9 | +5.7, −4.0 |
+| the breaker's work in the process, an optimised build | — | 1.1 | +1.1 |
+| the expiry's statement a dispatch ran before every message, on no waiter | 150.5 | — | −150.5, and a round trip |
+
+The take's and the mark's changes lie within their blocks' spread (some 8 µs); the walk's do not: it reads the
+channel of each row it examines, tests it against the paused ones, and gathers the heads met, 20 to 30 µs a call,
+a quarter of its cost. The new work on a happy message is so some 30 µs, under R9's 0.1 ms; and a dispatch no
+longer runs the expiry's statement, 150 µs and a round trip, so the happy path costs less than before the
+decision.
 
 ## Owed
 

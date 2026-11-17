@@ -633,3 +633,57 @@ proptest! {
         }
     }
 }
+
+/// M1 (ADR-0042 § Executors, R9): the breaker's work in the process for a
+/// happy message, as a dispatch does it — a tick and the paused channels,
+/// then before and told, each under the inbox's mutex — over seven channels
+/// and 2,000 Tenants, a million messages. A measurement, run by hand on an
+/// optimised build:
+///
+/// ```text
+/// ASCETIC_DDD_MEASURE=1 cargo test --release -p ascetic-ddd-inbox --lib -- \
+///     --ignored --nocapture m1_the_breaker
+/// ```
+#[test]
+#[ignore = "a measurement (ADR-0042 M1): run by hand"]
+fn m1_the_breaker_s_work_for_a_happy_message() {
+    if std::env::var_os("ASCETIC_DDD_MEASURE").is_none() {
+        return;
+    }
+    const MESSAGES: usize = 1_000_000;
+    let channels: Vec<String> = (0..7).map(|c| format!("kafka://channel-{c}")).collect();
+    let tenants: Vec<String> = (0..2_000).map(|t| format!("t{t:04}")).collect();
+    let breaker = std::sync::Mutex::new(Breaker::new(Breaking::default()));
+    let lock = || {
+        breaker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    let mut now = Instant::now();
+    let started = Instant::now();
+    let mut asked = 0usize;
+    for i in 0..MESSAGES {
+        now += Duration::from_micros(500);
+        let paused = {
+            let mut breaker = lock();
+            let effects = breaker.tick(now);
+            std::hint::black_box(&effects);
+            breaker.paused()
+        };
+        std::hint::black_box(&paused);
+        let channel = &channels[i % channels.len()];
+        let tenant = &tenants[(i / channels.len()) % tenants.len()];
+        let before = lock().before(now, channel, tenant, (i % 64) as i16, 0);
+        if let Before::Ask(flight) = before {
+            asked += 1;
+            let told = lock().told(now, flight, Verdict::Processed);
+            std::hint::black_box(&told);
+        }
+    }
+    let elapsed = started.elapsed();
+    assert_eq!(asked, MESSAGES, "a healthy message is always asked");
+    println!(
+        "M1, the breaker: {:.3} µs a happy message ({MESSAGES} messages in {elapsed:?})",
+        elapsed.as_secs_f64() * 1e6 / MESSAGES as f64
+    );
+}

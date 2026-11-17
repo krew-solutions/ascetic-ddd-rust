@@ -1,8 +1,9 @@
-//! The measurements behind ADR-0041, M7 and M9: run by hand, on one machine
-//! at a time, against a database of one's own; no gate runs them. `test-pg`
-//! runs every ignored test of the library's `--lib`, so they return at once
-//! unless `ASCETIC_DDD_MEASURE` is set. Their times compare only with each
-//! other, on the machine they ran on (ADR-0041 § Measured):
+//! The measurements behind ADR-0041, M7 and M9, and ADR-0042's: run by hand,
+//! on one machine at a time, against a database of one's own; no gate runs
+//! them. `test-pg` runs every ignored test of the library's `--lib`, so they
+//! return at once unless `ASCETIC_DDD_MEASURE` is set. Their times compare
+//! only with each other, on the machine they ran on (ADR-0041 § Measured,
+//! ADR-0042 § Measured):
 //!
 //! ```text
 //! ASCETIC_DDD_MEASURE=1 ASCETIC_DDD_TEST_PG_URL=… cargo test -p ascetic-ddd-inbox --lib -- \
@@ -10,7 +11,8 @@
 //! ```
 //!
 //! They explain and run the library's own statements, as `plan_tests.rs` does,
-//! not copies a change would leave behind.
+//! not copies a change would leave behind; an A/B against the library as it
+//! was keeps that version's statements as constants, named by its commit.
 
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -155,6 +157,8 @@ async fn m7_the_take_and_the_walk_at_ten_thousand_tenants() {
             .unwrap()
             .get::<_, Value>(0)
     };
+    // No channel paused: the walk of a process whose breaker is closed.
+    let nothing_paused: Vec<String> = Vec::new();
     let reset = format!(
         "UPDATE {table}_slots SET last_tenant = NULL, round_from = NULL, dormant_until = NULL, \
          dormant_after = NULL"
@@ -179,7 +183,7 @@ async fn m7_the_take_and_the_walk_at_ten_thousand_tenants() {
         let mut walks = Vec::new();
         let mut planned = Vec::new();
         for slot in 0..SLOTS as i16 {
-            let walk = explain(&walk_sql(table), &[&slot, &32i32, &1.0f64]).await;
+            let walk = explain(&walk_sql(table), &[&slot, &32i32, &1.0f64, &nothing_paused]).await;
             planned.push(planning(&walk));
             walks.push(cost(&walk));
         }
@@ -221,7 +225,7 @@ async fn m7_the_take_and_the_walk_at_ten_thousand_tenants() {
     for i in 0..50i16 {
         let slot = i % SLOTS as i16;
         client
-            .query_one(&sql, &[&slot, &32i32, &1.0f64])
+            .query_one(&sql, &[&slot, &32i32, &1.0f64, &nothing_paused])
             .await
             .unwrap();
     }
@@ -231,7 +235,7 @@ async fn m7_the_take_and_the_walk_at_ten_thousand_tenants() {
     for i in 0..50i16 {
         let slot = i % SLOTS as i16;
         client
-            .query_one(&prepared, &[&slot, &32i32, &1.0f64])
+            .query_one(&prepared, &[&slot, &32i32, &1.0f64, &nothing_paused])
             .await
             .unwrap();
     }
@@ -330,4 +334,398 @@ async fn m9_the_happy_path_with_and_without_the_new_indexes() {
         per(without[1]),
         per(with[1]) - per(without[1]),
     );
+}
+
+/// `VACUUM ANALYZE` of an inbox's table and its slots' table, each a
+/// statement of its own: a vacuum runs outside a transaction block.
+async fn vacuum(client: &ascetic_ddd_session::pg::deadpool_postgres::Object, table: &str) {
+    for name in [table.to_owned(), format!("{table}_slots")] {
+        client
+            .batch_execute(&format!("VACUUM ANALYZE {name}"))
+            .await
+            .unwrap();
+    }
+}
+
+/// The take as it was before ADR-0042 (the library at 47d6848): its
+/// statement read no isolation. The A of M1's A/B, beside the take of today.
+const TAKE_BEFORE: &str = r#"
+    WITH taken AS (
+        SELECT s.slot FROM {table}_slots s
+        CROSS JOIN LATERAL (
+            SELECT r.received_position AS newest FROM {table} r
+            WHERE r.slot = s.slot AND processed_position IS NULL AND parked_at IS NULL AND waiting_for IS NULL
+            ORDER BY r.received_position DESC LIMIT 1
+        ) q
+        WHERE (SELECT true FROM {table} q WHERE processed_position IS NULL AND parked_at IS NULL AND waiting_for IS NULL
+               ORDER BY q.slot, q.received_position LIMIT 1) IS TRUE
+          AND (s.round_from IS NOT NULL
+               OR s.dormant_until IS NULL
+               OR s.dormant_until <= CURRENT_TIMESTAMP
+               OR q.newest > s.dormant_after)
+        ORDER BY s.served_at
+        LIMIT 1
+        FOR UPDATE OF s SKIP LOCKED
+    )
+    SELECT t.slot, pg_current_snapshot()::text, (SELECT slots FROM {table}_meta)
+    FROM (SELECT 1) AS one
+    LEFT JOIN taken t ON true
+"#;
+
+/// The walk as it was before ADR-0042 (the library at 47d6848): no paused
+/// channels, no channel read at each step, no Tenants met, no guest.
+const WALK_BEFORE: &str = r#"
+    WITH RECURSIVE here AS (
+        SELECT coalesce(last_tenant, '') AS c, round_from, dormant_until, dormant_after
+        FROM {table}_slots WHERE slot = $1
+    ), walk (n, phase, tenant_id, place, due, retry_at) AS (
+        SELECT 0, 0, c, NULL::tid, false, NULL::timestamptz FROM here
+        UNION ALL
+        SELECT w.n + 1, h.phase, h.tenant_id, h.place, h.due, h.retry_at
+        FROM walk w CROSS JOIN here CROSS JOIN LATERAL (
+            SELECT * FROM (
+                (SELECT w.phase AS phase, after.* FROM (
+                     SELECT r.tenant_id, r.ctid AS place,
+                            (r.next_attempt_at IS NULL OR r.next_attempt_at <= CURRENT_TIMESTAMP) AS due,
+                            r.next_attempt_at AS retry_at
+                     FROM {table} r
+                     WHERE r.slot = $1 AND processed_position IS NULL AND parked_at IS NULL
+                       AND waiting_for IS NULL AND r.tenant_id > w.tenant_id
+                     ORDER BY r.tenant_id, r.received_position LIMIT 1) after
+                 WHERE w.phase = 0 OR after.tenant_id <= here.c)
+                UNION ALL
+                (SELECT 1, r.tenant_id, r.ctid AS place,
+                        (r.next_attempt_at IS NULL OR r.next_attempt_at <= CURRENT_TIMESTAMP) AS due,
+                        r.next_attempt_at AS retry_at
+                 FROM {table} r
+                 WHERE w.phase = 0 AND r.slot = $1 AND processed_position IS NULL AND parked_at IS NULL
+                   AND waiting_for IS NULL AND r.tenant_id <= here.c
+                 ORDER BY r.tenant_id, r.received_position LIMIT 1)
+            ) next ORDER BY phase LIMIT 1
+        ) h
+        WHERE w.n < $2 AND NOT w.due
+    ), last AS (
+        SELECT * FROM walk WHERE n > 0 AND n = (SELECT max(n) FROM walk)
+    ), head AS (
+        SELECT r.received_position, r.ctid::text AS place, r.tenant_id
+        FROM {table} r JOIN last ON r.ctid = last.place
+        WHERE last.due AND processed_position IS NULL AND parked_at IS NULL AND waiting_for IS NULL
+        FOR UPDATE OF r
+    ), verdict AS (
+        SELECT h.tenant_id IS NOT NULL AS taken, h.tenant_id AS taken_tenant,
+               l.tenant_id AS u, l.phase AS u_phase,
+               coalesce(l.due, false) AND h.tenant_id IS NULL AS vanished,
+               seen.n < $2 AND NOT coalesce(l.due, false) AS exhausted,
+               seen.earliest, here.c, here.round_from, here.dormant_until, here.dormant_after,
+               here.round_from IS NULL AS starts
+        FROM here
+        CROSS JOIN (SELECT max(n) AS n, min(retry_at) FILTER (WHERE NOT due) AS earliest
+                    FROM walk) seen
+        LEFT JOIN last l ON true
+        LEFT JOIN head h ON true
+    ), decided AS (
+        SELECT v.*,
+               CASE WHEN v.starts THEN v.c ELSE v.round_from END AS r_from,
+               v.exhausted OR (NOT v.starts AND
+                   ROW(CASE WHEN v.round_from > v.c THEN 0 ELSE 1 END, v.round_from)
+                       <= ROW(v.u_phase, v.u)) AS ends,
+               CASE WHEN v.starts THEN v.earliest
+                    ELSE least(v.dormant_until, v.earliest) END AS round_earliest,
+               CASE WHEN v.starts
+                    THEN (SELECT q.received_position FROM {table} q
+                          WHERE q.slot = $1 AND processed_position IS NULL AND parked_at IS NULL
+                            AND waiting_for IS NULL
+                          ORDER BY q.received_position DESC LIMIT 1)
+                    ELSE v.dormant_after END AS round_after
+        FROM verdict v
+    ), updated AS (
+        UPDATE {table}_slots s SET
+            served_at = CURRENT_TIMESTAMP,
+            last_tenant = CASE WHEN d.taken THEN d.taken_tenant
+                               WHEN d.u IS NOT NULL AND NOT d.vanished THEN d.u
+                               ELSE s.last_tenant END,
+            round_from = CASE WHEN d.taken OR d.u IS NULL OR d.vanished OR d.ends THEN NULL
+                              ELSE d.r_from END,
+            dormant_until = CASE WHEN d.taken OR d.u IS NULL OR d.vanished THEN NULL
+                                 WHEN d.ends THEN least(d.round_earliest,
+                                     CURRENT_TIMESTAMP + make_interval(secs => $3))
+                                 ELSE d.round_earliest END,
+            dormant_after = CASE WHEN d.taken OR d.u IS NULL OR d.vanished THEN NULL
+                                 ELSE d.round_after END
+        FROM decided d
+        WHERE s.slot = $1
+        RETURNING CASE WHEN d.taken THEN 'taken'
+                       WHEN d.u IS NULL OR d.vanished OR d.ends THEN 'nothing'
+                       ELSE 'passed' END AS outcome
+    )
+    SELECT h.received_position, h.place, u.outcome, pg_current_snapshot()::text
+    FROM updated u LEFT JOIN head h ON true
+"#;
+
+/// M1 (ADR-0042 § Executors, R9: nothing new on the happy path above 0.1 ms
+/// a message): the statements of a happy dispatch as they were before
+/// ADR-0042 and as they are, an A/B on one machine and one table, timed by
+/// the server in a procedure that commits each call, as a dispatch commits
+/// its transaction, `synchronous_commit` off to keep the disk out of it.
+/// Blocks of 5,000 calls, A and B alternated, A B B A, four rounds.
+/// - The take, and the walk with nothing paused: the functions of
+///   [`TAKE_BEFORE`] and [`WALK_BEFORE`] beside the baseline's own, over
+///   the host's launch shape — 64 slots, 2,000 Tenants of a hundred
+///   streams each, some 1,600 Tenants a slot, a processed history of
+///   200,000 — every head due, then nine heads in ten in back-off.
+/// - The mark: today's statement, which also ends a hold and checks the
+///   decision's three CHECKs, against one that sets as many columns as the
+///   mark of 47d6848 did, on a twin table without those CHECKs.
+///
+/// The dispatch no longer runs the expiry's statement (decision 7): the
+/// statement of 47d6848 is timed too, the column it tested for a hold then
+/// `held_since`, on a table with no waiter, the cost of a dispatch then
+/// spared. The breaker's own work in the process is
+/// `breaker::tests::m1_*`'s.
+#[tokio::test]
+#[ignore = "a measurement (ADR-0042 M1): run by hand"]
+async fn m1_the_happy_path_s_statements_before_the_decision_and_after() {
+    if !asked() {
+        return;
+    }
+    const SLOTS: u32 = 64;
+    const ROUNDS: usize = 4;
+    // `ASCETIC_DDD_MEASURE=small` tries the measurement on a tenth of the
+    // shape and of the calls, to see that it runs; its figures mean nothing.
+    let small = std::env::var("ASCETIC_DDD_MEASURE").as_deref() == Ok("small");
+    let (calls, tenants, history): (i32, i32, i32) = if small {
+        (500, 200, 20_000)
+    } else {
+        (5_000, 2_000, 200_000)
+    };
+    let client = pool().get().await.unwrap();
+    let mut tables = Vec::new();
+    for table in ["inbox_m1", "inbox_m1_twin"] {
+        let inbox = PgInbox::new(PgSessionPool::new(pool()))
+            .with_table(
+                Identifier::new(table).unwrap(),
+                Identifier::new(format!("{table}_seq")).unwrap(),
+            )
+            .with_slots(SLOTS)
+            .partitioned_by(ByStream);
+        inbox.teardown().await.unwrap();
+        inbox.migrate().await.unwrap();
+        client
+            .batch_execute(&format!(
+                "INSERT INTO {table} (tenant_id, stream_type, stream_id, stream_position, uri, \
+                     payload, metadata, processed_position) \
+                 SELECT 't' || lpad((g % {tenants})::text, 4, '0'), 'orders.Order', \
+                     to_jsonb('h-' || g), 1, 'kafka://orders/h', 'x', '{{}}', g \
+                 FROM generate_series(1, {history}) g; \
+                 INSERT INTO {table} (tenant_id, stream_type, stream_id, stream_position, uri, \
+                     payload, metadata) \
+                 SELECT 't' || lpad(t::text, 4, '0'), 'orders.Order', \
+                     to_jsonb('s-' || t || '-' || k), 1, 'kafka://orders/s', 'x', '{{}}' \
+                 FROM generate_series(0, {tenants} - 1) t, generate_series(1, 100) k"
+            ))
+            .await
+            .unwrap();
+        vacuum(&client, table).await;
+        tables.push(inbox);
+    }
+    let table = "inbox_m1";
+    let twin = "inbox_m1_twin";
+    let tenants: f64 = client
+        .query_one(
+            &format!(
+                "SELECT avg(n)::float8 FROM (SELECT count(DISTINCT tenant_id) n FROM {table} \
+                 WHERE processed_position IS NULL GROUP BY slot) s"
+            ),
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    println!("M1: {tenants:.0} Tenants a slot on average");
+    let body = |sql: &str, into: &str| {
+        format!(
+            "\n    #variable_conflict use_column\n    BEGIN\n{}\n    INTO STRICT {into};\n    END\n    ",
+            sql.replace("{table}", table)
+        )
+    };
+    client
+        .batch_execute(&format!(
+            "DROP FUNCTION IF EXISTS {table}__take_before(); \
+             DROP FUNCTION IF EXISTS {table}__walk_before(smallint, integer, double precision); \
+             CREATE FUNCTION {table}__take_before(OUT taken_slot smallint, OUT take_snapshot text, \
+                 OUT slot_count integer) LANGUAGE plpgsql VOLATILE AS $fn${}$fn$; \
+             CREATE FUNCTION {table}__walk_before(smallint, integer, double precision, \
+                 OUT head_position bigint, OUT head_place text, OUT walk_outcome text, \
+                 OUT walk_snapshot text) \
+                 LANGUAGE plpgsql VOLATILE SET plan_cache_mode = force_generic_plan \
+                 AS $fn${}$fn$; \
+             ALTER TABLE {twin} DROP CONSTRAINT {twin}__hold_in_queue, \
+                 DROP CONSTRAINT {twin}__cause_unprocessed, DROP CONSTRAINT {twin}__wait_is_open;",
+            body(TAKE_BEFORE, "taken_slot, take_snapshot, slot_count"),
+            body(
+                WALK_BEFORE,
+                "head_position, head_place, walk_outcome, walk_snapshot"
+            ),
+        ))
+        .await
+        .unwrap();
+    // A block of calls, each committed; the marks take the queue's oldest
+    // rows of their table, read before the clock starts.
+    let mark_after = format!(
+        "processed_at = statement_timestamp(), cause = NULL, {}",
+        super::store::LEAVE_QUEUE
+    );
+    let mark_before = "processed_at = statement_timestamp(), held_since = NULL, cause = NULL, \
+                       holds = NULL, hold_kind = NULL";
+    let procedure = format!(
+        r#"
+        CREATE OR REPLACE PROCEDURE m1_block(kind text, n integer, INOUT micros double precision)
+        LANGUAGE plpgsql AS $$
+        DECLARE t0 timestamptz; r record; s smallint; places tid[]; target text;
+        BEGIN
+          IF kind LIKE 'mark%' THEN
+            target := CASE kind WHEN 'mark_before' THEN '{twin}' ELSE '{table}' END;
+            EXECUTE format('SELECT array_agg(ctid) FROM (SELECT ctid FROM %I WHERE processed_position IS NULL
+                            AND parked_at IS NULL AND waiting_for IS NULL ORDER BY received_position LIMIT %s) q',
+                           target, n) INTO places;
+          END IF;
+          t0 := clock_timestamp();
+          FOR i IN 1..n LOOP
+            s := (i % {SLOTS})::smallint;
+            CASE kind
+              WHEN 'take_before' THEN SELECT * INTO r FROM {table}__take_before();
+              WHEN 'take_after' THEN SELECT * INTO r FROM {table}__take();
+              WHEN 'walk_before' THEN SELECT * INTO r FROM {table}__walk_before(s, 32, 1.0);
+              WHEN 'walk_after' THEN SELECT * INTO r FROM {table}__walk(s, 32, 1.0, '{{}}');
+              WHEN 'expire_before' THEN
+                EXECUTE 'UPDATE {table} SET parked_at = CURRENT_TIMESTAMP, '
+                     || 'last_error = ''dependency '' || waiting_for::text || '' never arrived'', '
+                     || 'waiting_since = NULL WHERE ctid IN (SELECT w.ctid FROM {table} w '
+                     || 'WHERE w.waiting_for IS NOT NULL AND w.waiting_since < CURRENT_TIMESTAMP '
+                     || '- make_interval(secs => $1::double precision) AND NOT EXISTS (SELECT 1 FROM {table} '
+                     || 'WHERE tenant_id = w.waiting_for->>''tenant_id'' AND stream_type = w.waiting_for->>''stream_type'' '
+                     || 'AND stream_id = w.waiting_for->''stream_id'' AND jsonb_build_object(''tenant_id'', tenant_id, '
+                     || '''stream_type'', stream_type, ''stream_id'', stream_id, ''stream_position'', stream_position) '
+                     || '= w.waiting_for AND held_since IS NOT NULL) LIMIT $2 FOR UPDATE OF w SKIP LOCKED) '
+                     || 'RETURNING received_position'
+                  USING 600.0::double precision, 100::bigint;
+              WHEN 'mark_before' THEN
+                EXECUTE 'WITH marked AS (UPDATE {twin} SET processed_position = nextval(''{twin}_seq''), '
+                     || '{mark_before} WHERE ctid = $1 RETURNING processed_position, '
+                     || 'jsonb_build_object(''tenant_id'', tenant_id, ''stream_type'', stream_type, '
+                     || '''stream_id'', stream_id, ''stream_position'', stream_position) AS identity), '
+                     || 'woken AS (UPDATE {twin} SET waiting_for = NULL, waiting_since = NULL, parked_at = NULL '
+                     || 'WHERE waiting_for = (SELECT identity FROM marked) RETURNING received_position) '
+                     || 'SELECT marked.processed_position, woken.* FROM marked LEFT JOIN woken ON true'
+                  INTO r USING places[i];
+              WHEN 'mark_after' THEN
+                EXECUTE 'WITH marked AS (UPDATE {table} SET processed_position = nextval(''{table}_seq''), '
+                     || '{mark_after} WHERE ctid = $1 RETURNING processed_position, '
+                     || 'jsonb_build_object(''tenant_id'', tenant_id, ''stream_type'', stream_type, '
+                     || '''stream_id'', stream_id, ''stream_position'', stream_position) AS identity), '
+                     || 'woken AS (UPDATE {table} SET waiting_for = NULL, waiting_since = NULL, parked_at = NULL '
+                     || 'WHERE waiting_for = (SELECT identity FROM marked) RETURNING received_position) '
+                     || 'SELECT marked.processed_position, woken.* FROM marked LEFT JOIN woken ON true'
+                  INTO r USING places[i];
+            END CASE;
+            COMMIT;
+          END LOOP;
+          micros := extract(epoch FROM clock_timestamp() - t0) * 1e6 / n;
+        END $$;
+        "#
+    );
+    client.batch_execute(&procedure).await.unwrap();
+    client
+        .batch_execute("SET synchronous_commit = off")
+        .await
+        .unwrap();
+    // A procedure that commits is called by the simple protocol, outside a
+    // transaction block.
+    let block = async |kind: &str| -> f64 {
+        let messages = client
+            .simple_query(&format!("CALL m1_block('{kind}', {calls}, 0)"))
+            .await
+            .unwrap();
+        messages
+            .iter()
+            .find_map(|message| match message {
+                ascetic_ddd_session::pg::tokio_postgres::SimpleQueryMessage::Row(row) => {
+                    row.get(0).map(|micros| micros.parse::<f64>().unwrap())
+                }
+                _ => None,
+            })
+            .unwrap()
+    };
+    let ab = async |before: &str, after: &str| {
+        // one block of each to warm the caches and the plans
+        block(before).await;
+        block(after).await;
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        for round in 0..ROUNDS {
+            if round % 2 == 0 {
+                a.push(block(before).await);
+                b.push(block(after).await);
+            } else {
+                b.push(block(after).await);
+                a.push(block(before).await);
+            }
+        }
+        let median = |v: &mut Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            (v[v.len() / 2 - 1] + v[v.len() / 2]) / 2.0
+        };
+        let (ma, mb) = (median(&mut a), median(&mut b));
+        println!(
+            "M1, {before} / {after}: {ma:.1} / {mb:.1} µs a call (medians of {ROUNDS} blocks of \
+             {calls}; before {a:.1?}, after {b:.1?}): {:+.1} µs",
+            mb - ma
+        );
+    };
+    block("expire_before").await;
+    let mut expiring = Vec::new();
+    for _ in 0..ROUNDS {
+        expiring.push(block("expire_before").await);
+    }
+    expiring.sort_by(f64::total_cmp);
+    println!(
+        "M1, the expiry's statement a dispatch ran before: {:.1} µs a call ({expiring:.1?}), spared",
+        (expiring[ROUNDS / 2 - 1] + expiring[ROUNDS / 2]) / 2.0
+    );
+    ab("take_before", "take_after").await;
+    ab("walk_before", "walk_after").await;
+    client
+        .batch_execute(&format!(
+            "UPDATE {table} SET next_attempt_at = now() + interval '1 hour', attempts = 1 \
+             WHERE processed_position IS NULL AND random() < 0.9; \
+             UPDATE {table}_slots SET last_tenant = NULL, round_from = NULL, \
+                 dormant_until = NULL, dormant_after = NULL"
+        ))
+        .await
+        .unwrap();
+    vacuum(&client, table).await;
+    println!("M1: nine heads in ten in back-off");
+    ab("walk_before", "walk_after").await;
+    client
+        .batch_execute(&format!(
+            "UPDATE {table} SET next_attempt_at = NULL, attempts = 0 \
+             WHERE processed_position IS NULL"
+        ))
+        .await
+        .unwrap();
+    vacuum(&client, table).await;
+    ab("mark_before", "mark_after").await;
+    client
+        .batch_execute("DROP PROCEDURE m1_block; RESET synchronous_commit")
+        .await
+        .unwrap();
+    client
+        .batch_execute(&format!(
+            "DROP FUNCTION {table}__take_before(); \
+             DROP FUNCTION {table}__walk_before(smallint, integer, double precision)"
+        ))
+        .await
+        .unwrap();
+    for inbox in tables {
+        inbox.teardown().await.unwrap();
+    }
 }
