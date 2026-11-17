@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use ascetic_ddd_bus::{Cause, Scope};
 use proptest::prelude::*;
 
-use super::{Before, Breaker, Breaking, Effect, Told, Trial, Verdict};
+use super::{Before, Breaker, Breaking, Effect, Flight, Told, Trial, Verdict};
 
 const CHANNEL: &str = "kafka://device.lifecycle";
 
@@ -105,6 +105,9 @@ impl Sim {
                 self.due.insert(key, self.now + wait);
                 None
             }
+            // kept from the walk to this process: nothing written, the row
+            // due for every process as it was
+            Before::Pass => None,
         }
     }
 
@@ -394,14 +397,26 @@ fn c6_three_inconclusive_trials_close_the_channel() {
     assert!(!sim.breaker.is_paused(CHANNEL));
 }
 
-/// C7: a guest's full circle that meets no head of the paused channel closes
-/// it, and no stall is refreshed after. Red when the stall keeps refreshing.
+/// C7: paused, the heads of both its memoised Tenants given up by a person: a
+/// trial of each finds its head gone, two inconclusive verdicts of the three
+/// that close a channel; the next tick finds no witness and none to wait for,
+/// and closes it — a process's guests cannot see a whole circle of a slot,
+/// their cursor shared — and no stall is refreshed after. Red when a tick
+/// without a witness only waits for the next.
 #[test]
-fn c7_a_circle_without_a_head_closes_the_channel() {
+fn c7_no_witness_left_closes_the_channel() {
     let mut sim = Sim::new(Breaking::default());
     sim.open();
-    let effects = sim.breaker.circled(sim.now, CHANNEL);
-    assert!(resumed(&effects));
+    let mut effects = Vec::new();
+    for _ in 0..2 {
+        sim.advance(Duration::from_secs(5));
+        let (id, _) = sim.next_trial();
+        effects.extend(sim.breaker.tried(sim.now, id, Trial::Gone).effects);
+    }
+    assert!(!resumed(&effects), "two inconclusive trials closed it");
+    sim.advance(Duration::from_secs(5));
+    effects.extend(sim.tick());
+    assert!(resumed(&effects), "no witness left: {effects:?}");
     for _ in 0..100 {
         sim.advance(Duration::from_secs(1));
         assert!(
@@ -594,7 +609,446 @@ fn c14_a_stall_opened_again_within_the_window_is_reported_at_its_opening() {
     );
 }
 
+/// Opens `channel` in `breaker`: two Tenants failing at `Stage` scope.
+fn open_channel(breaker: &mut Breaker, now: Instant, channel: &str) {
+    for tenant in ["a", "b"] {
+        let Before::Ask(flight) = breaker.before(now, channel, tenant, 0, 0) else {
+            panic!("a closed channel asks a Tenant without a memo");
+        };
+        breaker.told(now, flight, stage());
+    }
+    assert!(breaker.is_paused(channel), "{channel}: two of two failing");
+}
+
+/// C15: guests meet a fresh Tenant's head every 200 ms through ten minutes of
+/// a stage down (ADR-0042 decision 1, its trials' haste): a head met hastens
+/// a trial at most once a tick, so the trials are at most twice the scheduled
+/// ones (C1's 30–45), not one a second. Red when a head met hastens a trial
+/// whenever a second has passed since the last.
+#[test]
+fn c15_heads_met_add_at_most_one_trial_a_tick() {
+    let mut sim = Sim::new(Breaking::default());
+    sim.open();
+    let mut trials = 0;
+    for step in 0..3_000u32 {
+        sim.advance(Duration::from_millis(200));
+        let fresh = format!("guest{step}");
+        sim.breaker
+            .met(sim.now, CHANNEL, &[((step % 64) as i16, fresh)]);
+        for effect in sim.tick() {
+            if let Effect::Trial { id, .. } = effect {
+                trials += 1;
+                sim.breaker.tried(sim.now, id, Trial::Told(stage()));
+            }
+        }
+    }
+    assert!(
+        (30..=90).contains(&trials),
+        "{trials} trials in ten minutes of heads met every 200 ms"
+    );
+}
+
+/// C16: one trial a tick call, whatever the channels due (a dispatch runs
+/// one; another issued would expire unasked as a failed tick), the one due
+/// longest first; and under one caller, twenty channels stalled each report
+/// their stall within its ttl, though each waits its turn for a trial of two
+/// seconds. Red with a trial for every channel due, or with a stall reported
+/// only at its channel's own trial.
+#[test]
+fn c16_one_trial_a_tick_call_and_every_stall_refreshed() {
+    let settings = Breaking::default();
+    let mut breaker = Breaker::new(settings);
+    let start = Instant::now();
+    let names: Vec<String> = (0..20).map(|i| format!("kafka://c{i:02}")).collect();
+    for name in &names {
+        open_channel(&mut breaker, start, name);
+    }
+    let mut now = start + Duration::from_secs(5);
+    let first: Vec<u64> = breaker
+        .tick(now)
+        .into_iter()
+        .filter_map(|e| match e {
+            Effect::Trial { id, .. } => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(first.len(), 1, "one trial a call, of twenty channels due");
+    breaker.tried(now, first[0], Trial::Told(stage()));
+    let second = breaker.tick(now);
+    assert_eq!(
+        second
+            .iter()
+            .filter(|e| matches!(e, Effect::Trial { .. }))
+            .count(),
+        1,
+        "the next call asks the next channel's"
+    );
+    for effect in second {
+        if let Effect::Trial { id, .. } = effect {
+            breaker.tried(now, id, Trial::Told(stage()));
+        }
+    }
+    // one caller, each trial two seconds, for ten minutes
+    let mut last: HashMap<String, Instant> = HashMap::new();
+    let ttl = settings.stall_ttl();
+    for _ in 0..300 {
+        now += Duration::from_secs(2);
+        let effects = breaker.tick(now);
+        for effect in &effects {
+            if let Effect::Stalled { channel, .. } = effect {
+                if let Some(at) = last.insert(channel.clone(), now) {
+                    assert!(
+                        now - at <= ttl,
+                        "{channel}'s stall unreported for {:?}, past its ttl {ttl:?}",
+                        now - at
+                    );
+                }
+            }
+        }
+        for effect in effects {
+            if let Effect::Trial { id, .. } = effect {
+                breaker.tried(now, id, Trial::Told(stage()));
+            }
+        }
+    }
+    assert_eq!(last.len(), names.len(), "every channel stalled");
+}
+
+/// C17: a trial whose slot a dispatch held, or whose transaction failed,
+/// asked nothing: it is no inconclusive verdict and no failed tick, and its
+/// witness is tried again at the tick's first step. Red when a busy slot
+/// counts as a head gone — three busy slots on distinct witnesses would close
+/// a channel whose stage is down.
+#[test]
+fn c17_a_busy_slot_asks_nothing_and_counts_nothing() {
+    let mut sim = Sim::new(Breaking::default());
+    sim.open();
+    sim.advance(Duration::from_secs(5));
+    // one failed tick: the schedule's next step is two seconds, the busy
+    // witness's one
+    let (id, _) = sim.next_trial();
+    sim.breaker.tried(sim.now, id, Trial::Told(stage()));
+    let met: Vec<(i16, String)> = ["p", "q", "r", "s"]
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (i as i16, (*t).to_owned()))
+        .collect();
+    sim.breaker.met(sim.now, CHANNEL, &met);
+    let (id, first) = sim.next_trial();
+    sim.breaker.tried(sim.now, id, Trial::Busy);
+    for _ in 0..8 {
+        let before = sim.now;
+        let (id, tenant) = sim.next_trial();
+        assert_eq!(tenant, first, "the busy witness tried again, first in line");
+        assert!(
+            sim.now - before <= Duration::from_millis(1_100),
+            "tried again {:?} later",
+            sim.now - before
+        );
+        let told = sim.breaker.tried(sim.now, id, Trial::Busy);
+        assert!(!resumed(&told.effects), "busy slots closed the channel");
+    }
+    assert!(sim.breaker.is_paused(CHANNEL), "still paused");
+    // busy trials counted no failed tick: one failed tick so far, none
+    // stalled the channel
+    for _ in 0..50 {
+        sim.advance(Duration::from_millis(100));
+        for effect in sim.tick() {
+            assert!(
+                !matches!(effect, Effect::Stalled { .. }),
+                "a busy slot counted a failed tick"
+            );
+            if let Effect::Trial { id, .. } = effect {
+                sim.breaker.tried(sim.now, id, Trial::Busy);
+            }
+        }
+    }
+}
+
+/// The walk's excluded keys recomputed from the memo, as the cache must read:
+/// the set of `"<channel>/<tenant>"` keys.
+fn recomputed(breaker: &Breaker, now: Instant) -> std::collections::BTreeSet<String> {
+    let mut keys = std::collections::BTreeSet::new();
+    for (name, channel) in &breaker.channels {
+        if matches!(channel.state, super::State::Open(_)) {
+            continue;
+        }
+        for (tenant, entry) in &channel.memo {
+            if entry.excludes(now) {
+                keys.insert(format!("{name}/{tenant}"));
+            }
+        }
+    }
+    keys
+}
+
+/// The keys of the walk's object, as the server reads it.
+fn keys_of(json: &str) -> std::collections::BTreeSet<String> {
+    let value: serde_json::Value = serde_json::from_str(json).expect("a JSON object");
+    value
+        .as_object()
+        .expect("an object")
+        .iter()
+        .map(|(key, one)| {
+            assert_eq!(one, &serde_json::json!(1));
+            key.clone()
+        })
+        .collect()
+}
+
+/// C19: a head of a Tenant the memo holds at the stage's scope, met while it
+/// holds it, is passed and nothing written — one process's evidence stays in
+/// the process; at the Tenant's scope it is held to its back-off, written on
+/// the row for every process. Red when a stage-scoped entry holds the head.
+#[test]
+fn c19_a_stage_scoped_entry_passes_its_heads_a_tenant_scoped_one_holds_them() {
+    let mut breaker = Breaker::new(Breaking::default());
+    let now = Instant::now();
+    for (tenant, verdict) in [("s", stage()), ("t", tenant_scope(None))] {
+        let Before::Ask(flight) = breaker.before(now, CHANNEL, tenant, 0, 0) else {
+            panic!("asked");
+        };
+        breaker.told(now, flight, verdict);
+    }
+    assert_eq!(breaker.before(now, CHANNEL, "s", 1, 0), Before::Pass);
+    assert!(matches!(
+        breaker.before(now, CHANNEL, "t", 1, 0),
+        Before::Hold { .. }
+    ));
+    let json = breaker.excluded(now);
+    assert_eq!(
+        keys_of(&json),
+        [format!("{CHANNEL}/s")].into_iter().collect()
+    );
+    // keys built without s, by a change missed: its head met is passed, and
+    // the object rebuilt by it
+    breaker.keys = Some(super::Keys {
+        json: "{}".into(),
+        until: None,
+    });
+    assert_eq!(breaker.before(now, CHANNEL, "s", 2, 0), Before::Pass);
+    assert_eq!(
+        keys_of(&breaker.excluded(now)),
+        [format!("{CHANNEL}/s")].into_iter().collect()
+    );
+    // a head of a channel paused after the walk began: passed, not held
+    let mut paused = Breaker::new(Breaking::default());
+    paused_with(&mut paused, now);
+    assert_eq!(paused.before(now, CHANNEL, "z", 0, 0), Before::Pass);
+}
+
+/// C21: a Tenant asked twice at once, in two slots, before it had an entry;
+/// one ask refused at the stage's scope with another Tenant's pauses the
+/// channel, the other still in flight; both Tenants' trials find their heads
+/// gone; the late ask is refused after, renewing its Tenant's entry while the
+/// channel is paused; the next tick finds no witness and none to wait for, and
+/// closes the channel — whose renewed entry the walk must now leave out. Red
+/// when a tick's close does not rebuild the walk's keys: the Tenant's heads
+/// then met and passed, loop after loop, for its back-off.
+#[test]
+fn c21_a_close_after_a_late_refusal_rebuilds_the_walk_s_keys() {
+    let mut breaker = Breaker::new(Breaking::default());
+    let mut now = Instant::now();
+    let ask = |breaker: &mut Breaker, now: Instant, tenant: &str, slot: i16| {
+        let Before::Ask(flight) = breaker.before(now, CHANNEL, tenant, slot, 0) else {
+            panic!("{tenant} asked");
+        };
+        flight
+    };
+    let early = ask(&mut breaker, now, "a", 0);
+    let late = ask(&mut breaker, now, "a", 1);
+    let other = ask(&mut breaker, now, "b", 2);
+    breaker.told(now, early, stage());
+    breaker.told(now, other, stage());
+    assert!(breaker.is_paused(CHANNEL), "two Tenants failing pause it");
+    for _ in 0..2 {
+        now += Duration::from_secs(3);
+        let trial = breaker
+            .tick(now)
+            .into_iter()
+            .find_map(|e| match e {
+                Effect::Trial { id, .. } => Some(id),
+                _ => None,
+            })
+            .expect("a trial of a memoised witness");
+        breaker.tried(now, trial, Trial::Gone);
+    }
+    assert!(breaker.is_paused(CHANNEL), "two inconclusive of three");
+    breaker.told(now, late, stage());
+    assert_eq!(
+        &*breaker.excluded(now),
+        "{}",
+        "a paused channel's Tenants are not keys"
+    );
+    now += Duration::from_secs(1);
+    let effects = breaker.tick(now);
+    assert!(resumed(&effects), "no witness left: {effects:?}");
+    assert_eq!(
+        keys_of(&breaker.excluded(now)),
+        [format!("{CHANNEL}/a")].into_iter().collect(),
+        "a's renewed entry keeps it from the walk"
+    );
+}
+
+/// `breaker`'s channel paused: two Tenants failing at the stage's scope.
+fn paused_with(breaker: &mut Breaker, now: Instant) {
+    for tenant in ["a", "b"] {
+        let Before::Ask(flight) = breaker.before(now, CHANNEL, tenant, 0, 0) else {
+            panic!("asked");
+        };
+        breaker.told(now, flight, stage());
+    }
+    assert!(breaker.is_paused(CHANNEL));
+}
+
+/// C20: what the memo keeps from the walk, counted by channel and cause with
+/// the oldest run's start, never a Tenant; nothing once the back-off ran out.
+/// Red when a Tenant-scoped entry is counted, or a run's start is its latest
+/// verdict's.
+#[test]
+fn c20_the_excluded_are_counted_without_their_tenants() {
+    let mut breaker = Breaker::new(Breaking::default());
+    let start = Instant::now();
+    // a warm window: two Tenants failing among ten processed pause nothing
+    for healthy in 0..10 {
+        let Before::Ask(flight) = breaker.before(start, CHANNEL, &format!("h{healthy}"), 0, 0)
+        else {
+            panic!("asked");
+        };
+        breaker.told(start, flight, Verdict::Processed);
+    }
+    for (at, tenant, verdict) in [
+        (0, "a", stage()),
+        (2, "b", stage()),
+        (2, "t", tenant_scope(None)),
+        (3, "a", stage()),
+    ] {
+        let now = start + Duration::from_secs(at);
+        match breaker.before(now, CHANNEL, tenant, 0, 0) {
+            Before::Ask(flight) => {
+                breaker.told(now, flight, verdict);
+            }
+            // a's back-off ran out at 2 s: a second refusal renews it
+            other => panic!("{tenant} at {at} s: {other:?}"),
+        }
+    }
+    let counts = breaker.excluded_counts(start + Duration::from_secs(3));
+    assert_eq!(counts.len(), 1, "{counts:?}");
+    assert_eq!(counts[0].channel, CHANNEL);
+    assert_eq!(counts[0].tenants, 2, "a and b, not the Tenant-scoped t");
+    assert_eq!(counts[0].since, start, "a's run began at its first refusal");
+    assert!(
+        breaker
+            .excluded_counts(start + Duration::from_secs(600))
+            .is_empty(),
+        "nothing left once the back-offs ran out"
+    );
+    // a's back-off ran out at 7 s; refused again ten minutes on, its run
+    // begins anew
+    let later = start + Duration::from_secs(600);
+    let Before::Ask(flight) = breaker.before(later, CHANNEL, "a", 0, 0) else {
+        panic!("asked");
+    };
+    breaker.told(later, flight, stage());
+    let counts = breaker.excluded_counts(later);
+    assert_eq!(
+        counts[0].since, later,
+        "a run after a quiet window begins anew"
+    );
+}
+
 proptest! {
+    /// C18: the walk's excluded keys, kept built while nothing changes, are
+    /// after every step what the memo says now — over random histories of
+    /// asks of both scopes, rollbacks, ticks with their trials of every
+    /// outcome, heads met, asks held across steps and told after their channel
+    /// paused, was tried and closed, and steps of time alone, two channels;
+    /// and while an ask is in flight, as the process's other loops walk. Red
+    /// when the object outlives an entry's back-off, a flight marked or
+    /// abandoned, a verdict, a trial or a tick's close, unrebuilt: a Tenant
+    /// kept from the walk for good, or its heads met again and again.
+    #[test]
+    fn c18_the_excluded_keys_are_what_the_memo_says_now(
+        steps in proptest::collection::vec((0u8..9, 0u8..5, 0u8..2, 0u16..4_000), 1..300)
+    ) {
+        let mut breaker = Breaker::new(Breaking::default().with_window(Duration::from_secs(30)));
+        let mut now = Instant::now();
+        let channels = ["kafka://one", "kafka://two"];
+        // asks held across steps: told later, after the channel may have
+        // paused, been tried and closed
+        let mut flying: Vec<Flight> = Vec::new();
+        for (op, tenant, channel, millis) in steps {
+            let tenant = format!("t{tenant}");
+            let channel = channels[channel as usize];
+            match op {
+                // an ask and its verdict, by the Tenant's own lot
+                0 | 1 => {
+                    if let Before::Ask(flight) = breaker.before(now, channel, &tenant, 0, 0) {
+                        // while the ask is in flight, as the process's other
+                        // loops walk
+                        let cached = keys_of(&breaker.excluded(now));
+                        prop_assert_eq!(cached, recomputed(&breaker, now));
+                        let verdict = match (millis % 5, op) {
+                            (0, _) => Verdict::Processed,
+                            (1, _) => Verdict::Own,
+                            (2, _) => tenant_scope(None),
+                            _ => stage(),
+                        };
+                        breaker.told(now, flight, verdict);
+                    }
+                }
+                // an ask rolled back
+                2 => {
+                    if let Before::Ask(flight) = breaker.before(now, channel, &tenant, 0, 0) {
+                        let cached = keys_of(&breaker.excluded(now));
+                        prop_assert_eq!(cached, recomputed(&breaker, now));
+                        breaker.abandoned(&flight);
+                    }
+                }
+                // a tick, its trial answered by lot
+                3 => {
+                    for effect in breaker.tick(now) {
+                        if let Effect::Trial { id, .. } = effect {
+                            let trial = match millis % 7 {
+                                0 => Trial::Told(Verdict::Processed),
+                                1 => Trial::Busy,
+                                2 => Trial::Gone,
+                                3 => Trial::TimedOut,
+                                4 => Trial::Told(Verdict::Own),
+                                5 => Trial::Told(tenant_scope(None)),
+                                _ => Trial::Told(stage()),
+                            };
+                            breaker.tried(now, id, trial);
+                        }
+                    }
+                }
+                // a head met by a guest
+                4 => breaker.met(now, channel, &[(0, tenant.clone())]),
+                // an ask begun and held, or a held one told
+                6 => {
+                    if let Before::Ask(flight) = breaker.before(now, channel, &tenant, 1, 0) {
+                        flying.push(flight);
+                    }
+                }
+                7 if !flying.is_empty() => {
+                    let flight = flying.remove(usize::from(millis) % flying.len());
+                    let verdict = match millis % 4 {
+                        0 => Verdict::Processed,
+                        1 => tenant_scope(None),
+                        2 => Verdict::Own,
+                        _ => stage(),
+                    };
+                    breaker.told(now, flight, verdict);
+                }
+                // time alone
+                _ => {}
+            }
+            now += Duration::from_millis(u64::from(millis));
+            let cached = keys_of(&breaker.excluded(now));
+            prop_assert_eq!(cached, recomputed(&breaker, now));
+        }
+    }
+
     /// C13: a memoised Tenant is held until its back-off has run out, however
     /// many other Tenants fail meanwhile and fill the memo: an entry in flight
     /// or not run out is never evicted. Red with a plain LRU.
@@ -620,6 +1074,7 @@ proptest! {
                 Before::Hold { wait, .. } => {
                     held_until.insert(tenant, now + wait);
                 }
+                Before::Pass => prop_assert!(false, "{tenant} passed at the Tenant's scope"),
                 Before::Ask(flight) => {
                     let verdict = match kind {
                         0 => Verdict::Processed,
@@ -664,13 +1119,13 @@ fn m1_the_breaker_s_work_for_a_happy_message() {
     let mut asked = 0usize;
     for i in 0..MESSAGES {
         now += Duration::from_micros(500);
-        let paused = {
+        let (paused, excluded) = {
             let mut breaker = lock();
             let effects = breaker.tick(now);
             std::hint::black_box(&effects);
-            breaker.paused()
+            (breaker.paused(), breaker.excluded(now))
         };
-        std::hint::black_box(&paused);
+        std::hint::black_box((&paused, &excluded));
         let channel = &channels[i % channels.len()];
         let tenant = &tenants[(i / channels.len()) % tenants.len()];
         let before = lock().before(now, channel, tenant, (i % 64) as i16, 0);
@@ -685,5 +1140,80 @@ fn m1_the_breaker_s_work_for_a_happy_message() {
     println!(
         "M1, the breaker: {:.3} µs a happy message ({MESSAGES} messages in {elapsed:?})",
         elapsed.as_secs_f64() * 1e6 / MESSAGES as f64
+    );
+}
+
+/// M9 (ADR-0042 § Executors, R9): the walk's excluded keys at the memo's
+/// bound — seven channels, 1,024 Tenants each held at the stage's scope among
+/// 1,024 processed, none paused — as a dispatch reads them under the inbox's
+/// mutex: kept built, and rebuilt after a verdict on a memoised Tenant. A
+/// measurement, run by hand on an optimised build:
+///
+/// ```text
+/// ASCETIC_DDD_MEASURE=1 cargo test --release -p ascetic-ddd-inbox --lib -- \
+///     --ignored --nocapture m9_the_walk_s_keys
+/// ```
+#[test]
+#[ignore = "a measurement (ADR-0042 M9): run by hand"]
+fn m9_the_walk_s_keys_at_the_memo_s_bound() {
+    if std::env::var_os("ASCETIC_DDD_MEASURE").is_none() {
+        return;
+    }
+    const CALLS: u32 = 20_000;
+    let settings =
+        Breaking::default().with_hold(Duration::from_secs(300), Duration::from_secs(300));
+    let mut breaker = Breaker::new(settings);
+    let start = Instant::now();
+    let channels: Vec<String> = (0..7).map(|c| format!("kafka://channel-{c}")).collect();
+    // 290 s: each channel 20 Tenants processed a second, and a new one refused
+    // at the stage's scope every 283 ms, 1,024 in all, their back-offs of
+    // 300 s all running at the end — fewer than a quarter of the window's
+    // Tenants failing, so that nothing pauses
+    let mut now = start;
+    let mut refused = 0usize;
+    for step in 0..2_900u32 {
+        now += Duration::from_millis(100);
+        for channel in &channels {
+            for h in 0..2 {
+                let healthy = format!("healthy-{:04}", (step * 2 + h) % 1_024);
+                if let Before::Ask(flight) = breaker.before(now, channel, &healthy, 0, 0) {
+                    breaker.told(now, flight, Verdict::Processed);
+                }
+            }
+        }
+        if refused < 1_024 && step * 1_024 / 2_900 >= refused as u32 {
+            for channel in &channels {
+                let tenant = format!("{refused:04}-a-tenant-identifier-of-36-chars");
+                if let Before::Ask(flight) = breaker.before(now, channel, &tenant, 0, 0) {
+                    breaker.told(now, flight, stage());
+                }
+            }
+            refused += 1;
+        }
+    }
+    assert!(
+        breaker.paused().is_empty(),
+        "nothing paused: {:?}",
+        breaker.paused()
+    );
+    let keys = breaker.excluded(now);
+    let tenants = keys.matches(":1").count();
+    let built = Instant::now();
+    for _ in 0..CALLS {
+        std::hint::black_box(breaker.excluded(now));
+    }
+    let kept = built.elapsed();
+    let rebuilt = Instant::now();
+    for _ in 0..CALLS / 20 {
+        breaker.keys = None;
+        std::hint::black_box(breaker.excluded(now));
+    }
+    let rebuilding = rebuilt.elapsed();
+    println!(
+        "M9, the walk's keys: {tenants} excluded, {} bytes; {:.3} µs a dispatch kept built, {:.1} µs \
+         rebuilt",
+        keys.len(),
+        kept.as_secs_f64() * 1e6 / f64::from(CALLS),
+        rebuilding.as_secs_f64() * 1e6 / f64::from(CALLS / 20)
     );
 }

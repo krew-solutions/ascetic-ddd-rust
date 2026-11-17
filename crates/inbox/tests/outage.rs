@@ -353,6 +353,17 @@ impl Fixture {
             .await;
     }
 
+    /// Wakes the slots no dispatch holds, beside dispatchers that run: a wake
+    /// of every slot waits on the slot a hanging ask holds, and meanwhile
+    /// keeps locked the slots it has already woken, which a take then skips.
+    async fn wake_free(&self) {
+        self.elapse(
+            "UPDATE {table}_slots SET dormant_until = now() \
+             WHERE slot IN (SELECT slot FROM {table}_slots FOR UPDATE SKIP LOCKED)",
+        )
+        .await;
+    }
+
     fn told(&self) -> Vec<Told> {
         self.told.0.lock().unwrap().clone()
     }
@@ -1253,6 +1264,255 @@ async fn a_sparse_paused_channel_s_head_is_tried_by_its_witness() {
     }
 }
 
+/// The slot's cursor, round, sleep and the guests' own cursor: what a walk
+/// wrote of the slot's row.
+async fn slot_state(f: &Fixture) -> Vec<String> {
+    let sql = format!(
+        "SELECT coalesce(last_tenant, ''), coalesce(round_from, ''), \
+                coalesce(dormant_until::text, ''), coalesce(dormant_after::text, ''), \
+                coalesce(guest_tenant, '') \
+         FROM {}_slots",
+        f.table
+    );
+    f.sessions
+        .session(async |session| {
+            let row = session.connection().query_one(&sql, &[]).await?;
+            Ok::<_, Error>((0..5).map(|i| row.get::<_, String>(i)).collect::<Vec<_>>())
+        })
+        .await
+        .unwrap()
+}
+
+/// A Tenant refused at the stage's scope, its back-off running: the process
+/// that heard it leaves the Tenant's head to the others — its walk does not
+/// take it, nothing is written on its row, the walk a guest's, the slot's
+/// cursor, round and sleep untouched — and another process, which never
+/// heard it, takes the head at once (ADR-0042 decisions 2 and 5): one
+/// process's evidence of the stage stays in the process. Red when the walk
+/// is not told the Tenant (the head met and passed), or the process walks as
+/// it would with nothing kept (the slot's row written).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_tenant_the_stage_refused_is_left_by_its_process_to_the_others() {
+    let breaking = Breaking::default().with_hold(Duration::from_secs(60), Duration::from_secs(60));
+    let f = fixture_cut("excluded", Retries::up_to(3), 1, breaking).await;
+    let f = Fixture {
+        inbox: f.inbox.with_rotation(Rotation {
+            walk: 4,
+            max_dormancy: Duration::from_secs(1),
+        }),
+        ..f
+    };
+    f.publish(&[message_of("cut", "cut-a", 1), message_of("cut", "cut-a", 2)])
+        .await;
+    for tenant in ["h1", "h2", "h3"] {
+        f.publish(&[message_of(tenant, &format!("{tenant}-a"), 1)])
+            .await;
+    }
+    let calls = AtomicU32::new(0);
+    let refused = |message: &InboxMessage| {
+        if message.tenant_id == "cut" {
+            calls.fetch_add(1, Ordering::SeqCst);
+            stage_down(None)
+        } else {
+            Ok(())
+        }
+    };
+    // the healthy Tenants processed, and the cut one refused once
+    for _ in 0..8 {
+        f.dispatch_on(refused).await;
+        f.wake().await;
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "the Tenant asked once");
+    assert!(!f.paused(), "one Tenant failing pauses nothing");
+    let excluded = f.inbox.excluded();
+    assert_eq!(excluded.len(), 1, "{excluded:?}");
+    assert_eq!(
+        (excluded[0].channel.as_str(), excluded[0].tenants),
+        ("kafka://orders", 1),
+        "what the process keeps, counted for its host"
+    );
+    // its row due again for every process, its back-off still running here
+    f.due().await;
+    let versions = f.versions().await;
+    let before = slot_state(&f).await;
+    let outcome = f.dispatch_on(refused).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "not asked again here");
+    assert_eq!(
+        outcome,
+        Outcome::Paused,
+        "the walk, a guest's, found nothing due for this process"
+    );
+    assert_eq!(f.versions().await, versions, "nothing written on a row");
+    let after = slot_state(&f).await;
+    assert_eq!(
+        before[..4],
+        after[..4],
+        "the slot's cursor, round and sleep untouched"
+    );
+    // another process, which never heard it, takes the Tenant's head at once
+    let beside = f.beside(Breaking::default());
+    let taken = beside
+        .dispatch(|_: &PgSession, _: &InboxMessage| std::future::ready(Ok::<(), Failure>(())))
+        .await
+        .unwrap();
+    assert_eq!(taken, Outcome::Processed, "the other process asks it");
+    assert_eq!(
+        f.count("SELECT count(*) FROM {table} WHERE tenant_id = 'cut' AND processed_position IS NOT NULL")
+            .await,
+        1,
+        "its head processed by the other process"
+    );
+}
+
+/// A Tenant the stage refused, alone in its process: once its back-off runs
+/// out it is asked again, though no verdict, no other ask and no channel's
+/// change told the process anything since — the walk's keys end with the
+/// back-off by time alone. Red when the keys outlive it: the Tenant kept from
+/// the walk for good.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_tenant_the_stage_refused_is_asked_again_once_its_back_off_runs_out() {
+    // a back-off of 500 ms, past the next dispatch's look at the keys; the
+    // row's own hold a tick's cap of 200 ms at most
+    let breaking = quick().with_hold(Duration::from_millis(500), Duration::from_millis(500));
+    let f = fixture_cut("excluded_ends", Retries::up_to(3), 1, breaking).await;
+    f.publish(&[message_of("cut", "cut-a", 1)]).await;
+    let calls = AtomicU32::new(0);
+    let refused = |_: &InboxMessage| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        stage_down(None)
+    };
+    f.dispatch_on(refused).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let asked_again = std::time::Instant::now();
+    while calls.load(Ordering::SeqCst) < 2 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        f.wake().await;
+        f.dispatch_on(refused).await;
+        assert!(
+            asked_again.elapsed() < Duration::from_secs(3),
+            "the Tenant not asked again since its back-off ran out"
+        );
+    }
+}
+
+/// The walk's key of a (channel, Tenant) is unambiguous whatever the Tenant's
+/// identifier holds — a slash, a space, a quote, a backslash: `t/1 "x\` refused
+/// at the stage's scope is kept from its process's walk and not asked again,
+/// `t/1` beside it is taken. Red with a key the identifier could confuse, or
+/// one not escaped as JSON: the refused Tenant asked again, or the call failing.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_walk_s_keys_tell_tenants_apart_whatever_their_identifiers_hold() {
+    const ODD: &str = "t/1 \"x\\";
+    let breaking = Breaking::default().with_hold(Duration::from_secs(60), Duration::from_secs(60));
+    let f = fixture_cut("excluded_keys", Retries::up_to(3), 1, breaking).await;
+    f.publish(&[message_of(ODD, "x-a", 1)]).await;
+    let asked = AtomicU32::new(0);
+    let refused = |message: &InboxMessage| {
+        if message.tenant_id == ODD {
+            asked.fetch_add(1, Ordering::SeqCst);
+            stage_down(None)
+        } else {
+            Ok(())
+        }
+    };
+    f.dispatch_on(refused).await;
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    f.due().await;
+    f.publish(&[message_of("t/1", "y-a", 1)]).await;
+    let mut outcomes = Vec::new();
+    for _ in 0..4 {
+        outcomes.push(f.dispatch_on(refused).await);
+        f.wake().await;
+    }
+    assert!(f.row("y-a").await.processed, "t/1 taken beside the odd one");
+    // a key the walk and the process tell apart differently returns the odd
+    // head, which the process then passes
+    assert!(
+        !outcomes.contains(&Outcome::Passed),
+        "the odd head walked to and passed: {outcomes:?}"
+    );
+    assert_eq!(
+        asked.load(Ordering::SeqCst),
+        1,
+        "the odd Tenant kept from the walk, not asked again"
+    );
+}
+
+/// Two channels paused in one process, their ticks due together: a tick call
+/// issues one trial and the dispatch runs it, the other channel's at the next
+/// call, so that every trial issued asks its witness and none expires unasked
+/// as a failed tick (ADR-0042 decision 1). Red when a tick issues a trial for
+/// each channel due: the dispatch runs the first, and the other expires.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn two_channels_paused_together_run_every_trial_they_issue() {
+    let tick = Duration::from_millis(500);
+    let f = fixture_cut(
+        "two_paused",
+        Retries::up_to(3),
+        1,
+        quick().with_tick(tick, tick),
+    )
+    .await;
+    // Tenants of their own on each channel: a Tenant's head is its oldest row
+    // across channels, so a shared one would hide the second channel's rows
+    // behind the first's paused head.
+    for topic in ["orders", "payments"] {
+        for n in 1..=3 {
+            let tenant = format!("{topic}-t{n}");
+            f.publish(&[message_on(topic, &tenant, &tenant, 1)]).await;
+        }
+    }
+    let paused = |effects: &[Effect]| {
+        let mut channels: Vec<String> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Paused { channel, .. } => Some(channel.clone()),
+                _ => None,
+            })
+            .collect();
+        channels.sort();
+        channels.dedup();
+        channels.len()
+    };
+    let mut calls = 0;
+    while paused(&f.effects()) < 2 {
+        f.dispatch(|| stage_down(None)).await;
+        f.wake().await;
+        calls += 1;
+        assert!(calls < 200, "both never paused: {:?}", f.effects());
+    }
+    let issued = |effects: &[Effect]| {
+        effects
+            .iter()
+            .filter(|e| matches!(e, Effect::Trial { .. }))
+            .count()
+    };
+    let before = issued(&f.effects());
+    let asked = AtomicU32::new(0);
+    let counting = |_: &InboxMessage| {
+        asked.fetch_add(1, Ordering::SeqCst);
+        stage_down(None)
+    };
+    for _ in 0..6 {
+        // both channels' ticks due before the next call
+        tokio::time::sleep(tick + Duration::from_millis(100)).await;
+        f.wake().await;
+        f.dispatch_on(counting).await;
+        f.dispatch_on(counting).await;
+    }
+    let trials = issued(&f.effects()) - before;
+    assert!(trials >= 8, "trials of both channels: {trials}");
+    assert_eq!(
+        asked.load(Ordering::SeqCst) as usize,
+        trials,
+        "every trial issued asked its witness"
+    );
+}
+
 /// C5: one ask in flight a (channel, Tenant) in a process. A throttled
 /// Tenant's subscriber hangs; four dispatchers share the process's breaker
 /// and eight slots, the Tenant a head in each, twenty healthy Tenants
@@ -1309,12 +1569,14 @@ async fn a_hanging_tenant_is_asked_by_one_dispatcher_at_a_time() {
             f.inbox.dispatch(subscriber).await.unwrap();
         }
     };
-    // one waker: the test's wake updates every slot, and two at once lock
-    // them in each other's order
+    // one waker, of the slots no dispatch holds: a wake of every slot waits
+    // on the hanging ask's, its woken slots locked meanwhile, so that no
+    // other dispatcher could take one — a healthy Tenant then asked beside
+    // no hang, the assertion below red once a run in eight under load
     let waker = async {
         while std::time::Instant::now() < until {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            f.wake().await;
+            f.wake_free().await;
         }
     };
     // twenty healthy Tenants arrive once an ask of x hangs: what the other
@@ -1341,9 +1603,11 @@ async fn a_hanging_tenant_is_asked_by_one_dispatcher_at_a_time() {
     let asks = asked.load(Ordering::SeqCst) - 1;
     assert_eq!(most.load(Ordering::SeqCst), 1, "one ask of x at a time");
     assert!(asks >= 1, "x asked");
+    // each of x's seven other heads held once before the first hanging ask,
+    // by the memo of x's first `Unavailable`, and once a hang
     let held = f.withheld() - withheld;
     assert!(
-        held <= 7 * asks,
+        held <= 7 * (asks + 1),
         "{held} holds of x's other heads over {asks} hanging asks"
     );
     // the healthy go on while x hangs, never behind it: told by what ran

@@ -154,9 +154,14 @@ pub enum Verdict {
 pub enum Trial {
     /// The subscriber returned this verdict on the witness's head.
     Told(Verdict),
-    /// The witness's head was no longer a head of the channel, or its slot was
-    /// taken: nothing was asked.
+    /// The witness's head was no longer a head of the channel: nothing was
+    /// asked.
     Gone,
+    /// Nothing was asked, and nothing was learnt of the witness: its slot was
+    /// taken by a dispatch, or the trial's transaction failed before a verdict
+    /// was told. The trial counts nothing; the witness is tried again at the
+    /// tick's first step, and a hastened trial's haste is not spent.
+    Busy,
     /// The subscriber ran past the trial's wait and was rolled back.
     TimedOut,
 }
@@ -187,6 +192,11 @@ pub enum Before {
         /// The cause that holds it: the memo's, or the pause's.
         cause: Cause,
     },
+    /// Do not ask it, and write nothing on it: its Tenant is held by this
+    /// process's memo at the stage's scope, one process's evidence, which
+    /// the walk keeps to the process ([`Breaker::excluded`]); met here only
+    /// when the memo took the Tenant after the walk began.
+    Pass,
 }
 
 /// What a verdict asks of the row, and what the shell is to do.
@@ -256,6 +266,62 @@ pub struct Breaker {
     settings: Breaking,
     channels: HashMap<String, Channel>,
     next: u64,
+    /// The walk's excluded (channel, Tenant)s as last built, and until when
+    /// they hold by time alone; `None` once the memo or a channel's state
+    /// changed. On the happy path nothing changes, and the object stays
+    /// built: `{}`.
+    keys: Option<Keys>,
+}
+
+/// The Tenants a process's memo keeps from its walk on one channel under one
+/// cause ([`Breaker::excluded_counts`]): how many, never which.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Excluded {
+    /// The channel.
+    pub channel: String,
+    /// The cause of the entries' latest verdicts.
+    pub cause: Cause,
+    /// How many Tenants.
+    pub tenants: usize,
+    /// When the oldest one's run of `Unavailable` verdicts began.
+    pub since: Instant,
+}
+
+/// The walk's excluded (channel, Tenant)s ([`Breaker::excluded`]).
+#[derive(Debug)]
+struct Keys {
+    /// A `jsonb` object of `"<channel>/<tenant>"` keys.
+    json: std::sync::Arc<str>,
+    /// The earliest instant an excluded entry's back-off and flight both end,
+    /// when it leaves the object without any verdict.
+    until: Option<Instant>,
+}
+
+/// Writes the (channel, Tenant) key the walk tests, as a JSON string: a
+/// channel is `scheme://authority`, with no third slash, so the first one
+/// after it begins the Tenant.
+fn push_key(out: &mut String, channel: &str, tenant: &str) {
+    out.push('"');
+    push_escaped(out, channel);
+    out.push('/');
+    push_escaped(out, tenant);
+    out.push('"');
+}
+
+/// `s` escaped for a JSON string, without its quotes.
+fn push_escaped(out: &mut String, s: &str) {
+    if !s.bytes().any(|b| b == b'"' || b == b'\\' || b < 0x20) {
+        out.push_str(s);
+        return;
+    }
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if u32::from(c) < 0x20 => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -285,6 +351,26 @@ struct Entry {
     /// The step that set `until`: the entry is protected a step past it.
     step: Duration,
     flight: Option<(u64, Instant)>,
+    /// The scope of its latest verdict: at the stage's, the walk keeps the
+    /// Tenant to this process; at the Tenant's, the rows carry its hold.
+    scope: Scope,
+    /// When the Tenant's run of `Unavailable` verdicts began.
+    since: Instant,
+}
+
+impl Entry {
+    /// Whether the walk excludes the Tenant now: held at the stage's scope,
+    /// its back-off running or an ask of it in flight.
+    fn excludes(&self, now: Instant) -> bool {
+        self.scope == Scope::Stage
+            && (self.until > now || self.flight.is_some_and(|(_, deadline)| deadline > now))
+    }
+
+    /// When, unchanged, it stops excluding.
+    fn excludes_until(&self) -> Instant {
+        self.flight
+            .map_or(self.until, |(_, deadline)| self.until.max(deadline))
+    }
 }
 
 /// A channel's state. An open channel's record is boxed: a process holds a
@@ -310,6 +396,15 @@ struct Open {
     inconclusive: Vec<String>,
     /// When the stall was last said in the log.
     reminded: Option<Instant>,
+    /// When the stall was last reported: a stalled channel is reported at
+    /// least once a tick's cap, whether or not a call's one trial is its.
+    refreshed: Option<Instant>,
+    /// Whether the next tick was brought forward by a head met.
+    hastened: bool,
+    /// Whether the latest trial issued was a hastened one: a head met hastens
+    /// no other until a scheduled trial has been issued, so that a stream of
+    /// heads met adds at most one trial a tick.
+    haste_spent: bool,
 }
 
 #[derive(Debug)]
@@ -318,6 +413,8 @@ struct Asked {
     deadline: Instant,
     slot: i16,
     tenant: String,
+    /// Whether a head met brought it forward.
+    hastened: bool,
 }
 
 impl Breaker {
@@ -328,6 +425,7 @@ impl Breaker {
             settings,
             channels: HashMap::new(),
             next: 0,
+            keys: None,
         }
     }
 
@@ -358,6 +456,82 @@ impl Breaker {
             .is_some_and(|channel| matches!(channel.state, State::Open(_)))
     }
 
+    /// The (channel, Tenant)s this process's memo holds at the stage's
+    /// scope on a channel it has not paused — an entry whose back-off runs,
+    /// or whose ask is in flight — as the walk's argument beside the paused
+    /// channels: a `jsonb` object of `"<channel>/<tenant>"` keys. Such a head
+    /// is not due for this process, which walks as a guest while it holds any
+    /// (ADR-0042 decision 5): one process's evidence of the stage stays in the
+    /// process, and the other processes take the Tenant's heads. A paused
+    /// channel's heads are not due already. Built once while nothing changes
+    /// and no excluded entry's back-off or flight ends.
+    pub fn excluded(&mut self, now: Instant) -> std::sync::Arc<str> {
+        if let Some(keys) = &self.keys {
+            if keys.until.is_none_or(|until| now < until) {
+                return std::sync::Arc::clone(&keys.json);
+            }
+        }
+        // in the memo's order: a `jsonb` object orders its own keys
+        let mut until: Option<Instant> = None;
+        let mut json = String::from("{");
+        for (name, channel) in &self.channels {
+            if matches!(channel.state, State::Open(_)) {
+                continue;
+            }
+            for (tenant, entry) in &channel.memo {
+                if entry.excludes(now) {
+                    if json.len() > 1 {
+                        json.push(',');
+                    }
+                    push_key(&mut json, name, tenant);
+                    json.push_str(":1");
+                    let ends = entry.excludes_until();
+                    until = Some(until.map_or(ends, |u| u.min(ends)));
+                }
+            }
+        }
+        json.push('}');
+        let json: std::sync::Arc<str> = json.into();
+        self.keys = Some(Keys {
+            json: std::sync::Arc::clone(&json),
+            until,
+        });
+        json
+    }
+
+    /// What this process's memo holds at the stage's scope and the walk so
+    /// keeps from it, by channel and cause — how many Tenants, and since when
+    /// the oldest's run began — never a Tenant (ADR-0042 decision 6): what a
+    /// host reports of a process cut off from a stage alone, which writes
+    /// nothing on the rows it leaves.
+    #[must_use]
+    pub fn excluded_counts(&self, now: Instant) -> Vec<Excluded> {
+        let mut counts: HashMap<(&str, Cause), (usize, Instant)> = HashMap::new();
+        for (name, channel) in &self.channels {
+            if matches!(channel.state, State::Open(_)) {
+                continue;
+            }
+            for entry in channel.memo.values().filter(|e| e.excludes(now)) {
+                let count = counts
+                    .entry((name.as_str(), entry.cause))
+                    .or_insert((0, entry.since));
+                count.0 += 1;
+                count.1 = count.1.min(entry.since);
+            }
+        }
+        let mut out: Vec<Excluded> = counts
+            .into_iter()
+            .map(|((channel, cause), (tenants, since))| Excluded {
+                channel: channel.to_owned(),
+                cause,
+                tenants,
+                since,
+            })
+            .collect();
+        out.sort_unstable_by(|a, b| (&a.channel, a.cause).cmp(&(&b.channel, b.cause)));
+        out
+    }
+
     fn id(&mut self) -> u64 {
         self.next += 1;
         self.next
@@ -378,20 +552,25 @@ impl Breaker {
         let settings = self.settings;
         let id = self.id();
         let entry = self.channels.get_mut(channel).and_then(|c| {
-            if let State::Open(open) = &c.state {
-                // A head of a paused channel is asked only by a trial.
-                let wait = open.next_tick.saturating_duration_since(now);
-                return Some(Err((
-                    wait.max(settings.tick.0).min(settings.tick.1),
-                    open.cause,
-                )));
+            if matches!(c.state, State::Open(_)) {
+                // A head of a paused channel is asked only by a trial, and
+                // met here only when the pause came after the walk began:
+                // passed, the pause one process's evidence, written on no row.
+                return Some(Err(()));
             }
             c.memo.get_mut(tenant).map(Ok)
         });
         let marked = match entry {
-            Some(Err((wait, cause))) => return Before::Hold { wait, cause },
+            Some(Err(())) => return Before::Pass,
             Some(Ok(entry)) => {
                 let cause = entry.cause;
+                if entry.excludes(now) {
+                    // the walk began before the memo took the Tenant, or the
+                    // keys it was given missed it: rebuilt, the next walk
+                    // leaves it
+                    self.keys = None;
+                    return Before::Pass;
+                }
                 if let Some((_, deadline)) = entry.flight.filter(|(_, deadline)| *deadline > now) {
                     let until = entry.until.max(deadline).max(now + settings.hold.0);
                     return Before::Hold {
@@ -406,6 +585,9 @@ impl Breaker {
                     };
                 }
                 entry.flight = Some((id, now + settings.flight));
+                if entry.scope == Scope::Stage {
+                    self.keys = None;
+                }
                 true
             }
             None => false,
@@ -430,6 +612,9 @@ impl Breaker {
         {
             if entry.flight.is_some_and(|(id, _)| id == flight.id) {
                 entry.flight = None;
+                if entry.scope == Scope::Stage {
+                    self.keys = None;
+                }
             }
         }
     }
@@ -439,6 +624,10 @@ impl Breaker {
         self.abandoned(&flight);
         let settings = self.settings;
         let channel = self.channels.entry(flight.channel.clone()).or_default();
+        // the walk's excluded keys change with any entry made, renewed or
+        // dropped, and with a channel paused
+        let changes = channel.memo.contains_key(&flight.tenant)
+            || matches!(verdict, Verdict::Unavailable { .. });
         let hold = channel.weigh(
             &settings,
             now,
@@ -469,32 +658,59 @@ impl Breaker {
                 effects.extend(channel.stall(&settings, &flight.channel, now));
             }
         }
+        if changes {
+            self.keys = None;
+        }
         Told { hold, effects }
     }
 
-    /// Time has passed: the trials due, the failed ticks of unanswered
-    /// trials, and the stalls to refresh.
+    /// Time has passed: the failed ticks of unanswered trials, the stalls to
+    /// refresh, and at most one trial — a dispatch runs one, and a trial
+    /// issued and not run would expire as a failed tick that asked nothing.
+    /// The channels due take their turns, the one due longest first; a
+    /// channel whose tick finds no witness waits its next tick and leaves the
+    /// call's trial to another.
     pub fn tick(&mut self, now: Instant) -> Vec<Effect> {
         let mut names: Vec<String> = self.channels.keys().cloned().collect();
         names.sort_unstable();
-        names
-            .into_iter()
-            .flat_map(|name| self.tick_channel(now, &name))
-            .collect()
+        let mut effects = Vec::new();
+        for name in &names {
+            effects.extend(self.expire(now, name));
+        }
+        let mut due: Vec<(Instant, &String)> = names
+            .iter()
+            .filter_map(|name| match &self.channels.get(name)?.state {
+                State::Open(open) if open.trial.is_none() && open.next_tick <= now => {
+                    Some((open.next_tick, name))
+                }
+                _ => None,
+            })
+            .collect();
+        due.sort_unstable();
+        for (_, name) in due {
+            let (trial, more) = self.try_witness(now, name);
+            effects.extend(more);
+            if trial {
+                break;
+            }
+        }
+        effects
     }
 
-    fn tick_channel(&mut self, now: Instant, name: &str) -> Vec<Effect> {
+    /// A channel's trial unanswered by its deadline is a failed tick; and a
+    /// stalled channel not reported for a tick's cap is reported now.
+    fn expire(&mut self, now: Instant, name: &str) -> Vec<Effect> {
         let settings = self.settings;
-        let id = self.next + 1;
         let Some(channel) = self.channels.get_mut(name) else {
             return Vec::new();
         };
         let State::Open(open) = &mut channel.state else {
             return Vec::new();
         };
-        let mut ticked = false;
+        let mut ticked = open
+            .refreshed
+            .is_some_and(|at| now.saturating_duration_since(at) >= settings.tick.1);
         if let Some(asked) = open.trial.take_if(|asked| asked.deadline <= now) {
-            // Unanswered by its deadline: a failed tick.
             open.expired.push_back(asked.id);
             if open.expired.len() > 8 {
                 open.expired.pop_front();
@@ -503,46 +719,78 @@ impl Breaker {
             channel.schedule(&settings, now);
             ticked = true;
         }
-        let mut effects = Vec::new();
-        let State::Open(open) = &mut channel.state else {
-            return effects;
-        };
-        if open.trial.is_none() && open.next_tick <= now {
-            ticked = true;
-            if let Some((slot, tenant)) = channel.witness(now) {
-                let deadline = now + settings.trial_wait + settings.tick.0;
-                if let State::Open(open) = &mut channel.state {
-                    open.trial = Some(Asked {
-                        id,
-                        deadline,
-                        slot,
-                        tenant: tenant.clone(),
-                    });
-                    open.last_trial = Some(now);
-                }
-                self.next = id;
-                effects.push(Effect::Trial {
-                    id,
-                    channel: name.to_owned(),
-                    slot,
-                    tenant,
-                    deadline,
-                });
-            }
-            // The next tick, whatever this one asked: a verdict reschedules.
-            channel.schedule(&settings, now);
-        }
         if ticked {
-            effects.extend(channel.stall(&settings, name, now));
+            channel.stall(&settings, name, now).into_iter().collect()
+        } else {
+            Vec::new()
         }
-        effects
+    }
+
+    /// A channel's tick, due: its trial, if it has a witness, and its next
+    /// tick; whether a trial was issued.
+    fn try_witness(&mut self, now: Instant, name: &str) -> (bool, Vec<Effect>) {
+        let settings = self.settings;
+        let id = self.next + 1;
+        let Some(channel) = self.channels.get_mut(name) else {
+            return (false, Vec::new());
+        };
+        let mut effects = Vec::new();
+        let witness = channel.witness(now);
+        let trial = witness.is_some();
+        if !trial && !channel.awaits_witness() {
+            // No witness, and none to wait for: every head it knew was tried
+            // inconclusively. Nothing proves the stage down, and the channel
+            // closes; a head still refused at the stage's scope opens it
+            // again, its failing Tenants kept across the close.
+            if let Some((cause, stalled)) = channel.close(now) {
+                effects.push(Effect::Resumed {
+                    channel: name.to_owned(),
+                    cause,
+                    stalled,
+                });
+                // its stage-scoped entries are the walk's again: one renewed
+                // by an ask begun before the pause and told after its trial
+                // keeps its Tenant
+                self.keys = None;
+            }
+            return (false, effects);
+        }
+        if let Some((slot, tenant)) = witness {
+            let deadline = now + settings.trial_wait + settings.tick.0;
+            if let State::Open(open) = &mut channel.state {
+                open.trial = Some(Asked {
+                    id,
+                    deadline,
+                    slot,
+                    tenant: tenant.clone(),
+                    hastened: open.hastened,
+                });
+                open.haste_spent = open.hastened;
+                open.hastened = false;
+                open.last_trial = Some(now);
+            }
+            self.next = id;
+            effects.push(Effect::Trial {
+                id,
+                channel: name.to_owned(),
+                slot,
+                tenant,
+                deadline,
+            });
+        }
+        // The next tick, whatever this one asked: a verdict reschedules.
+        channel.schedule(&settings, now);
+        effects.extend(channel.stall(&settings, name, now));
+        (trial, effects)
     }
 
     /// A guest walk met these heads of `channel` while it was paused, not
     /// asked: they are witnesses, and one whose Tenant the memo does not hold
-    /// is tried at the next tick, now, at most once a tick's first step: the
-    /// next [`Breaker::tick`] asks it, so that no trial is issued that the
-    /// shell is not about to run.
+    /// is tried at the next tick, now — at most once a tick's first step, and
+    /// not after a hastened trial that left the channel open until a
+    /// scheduled one has been issued, so that heads met add at most one trial
+    /// a tick. The next [`Breaker::tick`] asks it, so that no trial is issued
+    /// that the shell is not about to run.
     pub fn met(&mut self, now: Instant, channel: &str, heads: &[(i16, String)]) {
         let settings = self.settings;
         let Some(c) = self.channels.get_mut(channel) else {
@@ -566,24 +814,9 @@ impl Breaker {
         let rested = open
             .last_trial
             .is_none_or(|at| now.saturating_duration_since(at) >= settings.tick.0);
-        if fresh && open.trial.is_none() && rested {
+        if fresh && open.trial.is_none() && rested && !open.haste_spent {
             open.next_tick = now;
-        }
-    }
-
-    /// A guest walked every slot once and met no head of `channel`: nothing
-    /// is left to try, and the channel closes.
-    pub fn circled(&mut self, now: Instant, channel: &str) -> Vec<Effect> {
-        let Some(c) = self.channels.get_mut(channel) else {
-            return Vec::new();
-        };
-        match c.close(now) {
-            Some((cause, stalled)) => vec![Effect::Resumed {
-                channel: channel.to_owned(),
-                cause,
-                stalled,
-            }],
-            None => Vec::new(),
+            open.hastened = true;
         }
     }
 
@@ -591,6 +824,8 @@ impl Breaker {
     /// what follows. An answer after the trial's deadline changes nothing but
     /// a close.
     pub fn tried(&mut self, now: Instant, id: u64, trial: Trial) -> Told {
+        // a trial may drop or make an entry, or close its channel
+        self.keys = None;
         let settings = self.settings;
         let found = self
             .channels
@@ -633,8 +868,26 @@ impl Breaker {
             return told;
         }
         let asked = asked.expect("a trial in flight");
-        channel.witnesses.retain(|(_, t)| *t != asked.tenant);
+        if trial != Trial::Busy {
+            channel.witnesses.retain(|(_, t)| *t != asked.tenant);
+        }
         match trial {
+            Trial::Busy => {
+                // Nothing asked, nothing learnt: the witness again at the
+                // first step, a met one first in line, and a hastened trial's
+                // haste not spent.
+                if let State::Open(open) = &mut channel.state {
+                    open.next_tick = now + settings.tick.0;
+                    if asked.hastened {
+                        open.haste_spent = false;
+                    }
+                }
+                if !channel.memo.contains_key(&asked.tenant)
+                    && !channel.witnesses.iter().any(|(_, t)| *t == asked.tenant)
+                {
+                    channel.witnesses.push_front((asked.slot, asked.tenant));
+                }
+            }
             Trial::Told(Verdict::Processed) => {
                 channel.memo.remove(&asked.tenant);
                 if let Some((cause, stalled)) = channel.close(now) {
@@ -730,6 +983,13 @@ impl Channel {
                 retry_after,
             } => {
                 let previous = self.memo.get(tenant).map_or(0, |e| e.unavailable);
+                // a run of refusals: one after a back-off that ended more than a
+                // window ago begins another
+                let since = self
+                    .memo
+                    .get(tenant)
+                    .filter(|e| now.saturating_duration_since(e.until) < settings.window)
+                    .map_or(now, |e| e.since);
                 let unavailable = previous.saturating_add(1);
                 let exponent = unavailable.max(row_holds.saturating_add(1)).min(30);
                 let step = settings
@@ -750,6 +1010,8 @@ impl Channel {
                         until,
                         step,
                         flight: None,
+                        scope,
+                        since,
                     },
                 );
                 match scope {
@@ -867,6 +1129,9 @@ impl Channel {
             last_trial: None,
             inconclusive: Vec::new(),
             reminded: None,
+            refreshed: None,
+            hastened: false,
+            haste_spent: false,
         }));
         self.schedule(settings, now);
     }
@@ -924,6 +1189,18 @@ impl Channel {
             .map(|(t, e)| (e.slot, t.clone()))
     }
 
+    /// Whether a witness may still come without a guest meeting one: a head
+    /// met, or a memoised Tenant, not yet tried inconclusively — a memoised
+    /// one whether its back-off has run out or not.
+    fn awaits_witness(&self) -> bool {
+        let tried: &[String] = match &self.state {
+            State::Open(open) => &open.inconclusive,
+            State::Closed => &[],
+        };
+        self.witnesses.iter().any(|(_, t)| !tried.contains(t))
+            || self.memo.keys().any(|t| !tried.contains(t))
+    }
+
     fn stall(&mut self, settings: &Breaking, name: &str, now: Instant) -> Option<Effect> {
         let failed = self.failed;
         let State::Open(open) = &mut self.state else {
@@ -938,6 +1215,7 @@ impl Channel {
         if remind {
             open.reminded = Some(now);
         }
+        open.refreshed = Some(now);
         Some(Effect::Stalled {
             channel: name.to_owned(),
             cause: open.cause,

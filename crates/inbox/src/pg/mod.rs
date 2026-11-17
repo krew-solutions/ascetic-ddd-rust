@@ -229,9 +229,11 @@ pub enum Outcome {
     /// and it is held under that cause without its subscriber called
     /// (ADR-0042 decision 2).
     Held,
-    /// The slot's walk found no head due but heads of channels this process
-    /// has paused (ADR-0042 decision 5): the loop waits its poll, and the
-    /// slot's sleep and cursor are left to the processes that ask them.
+    /// The slot's walk, a guest's, found no head due for this process: heads
+    /// of channels it has paused, or of Tenants its memo keeps from it at the
+    /// stage's scope (ADR-0042 decisions 2 and 5): the loop waits its poll,
+    /// and the slot's sleep and cursor are left to the processes that ask
+    /// them.
     Paused,
     /// The head could not be read, or its wait, its failure or its mark
     /// written, for its own values, and was parked at once in the
@@ -730,6 +732,17 @@ impl<P, O> PgInbox<P, O> {
             breaker: Arc::new(std::sync::Mutex::new(Breaker::new(breaking))),
             ..self
         }
+    }
+
+    /// What this process's memo keeps from its walk at the stage's scope, by
+    /// channel and cause: how many Tenants, and since when the oldest's run
+    /// of `Unavailable` verdicts began — never which (ADR-0042 decisions 2
+    /// and 6). A process cut off from a stage alone writes nothing on the
+    /// rows it leaves to the others, and pauses no channel where one Tenant
+    /// alone fails: this is where a host sees it, as a gauge of its own.
+    #[must_use]
+    pub fn excluded(&self) -> Vec<crate::breaker::Excluded> {
+        self.breaker().excluded_counts(dispatch::now())
     }
 
     /// The process's breaker, under its lock; a poisoned lock is taken as it

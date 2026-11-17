@@ -139,10 +139,10 @@ pub(super) fn walk_sql(table: &str) -> String {
     format!(
         r#"
             WITH RECURSIVE here AS (
-                SELECT coalesce(CASE WHEN cardinality($4::text[]) > 0 THEN guest_tenant END,
+                SELECT coalesce(CASE WHEN cardinality($4::text[]) > 0 OR $5::jsonb <> '{{}}'::jsonb THEN guest_tenant END,
                                 last_tenant, '') AS c,
                        round_from, dormant_until, dormant_after,
-                       cardinality($4::text[]) > 0 AS guest
+                       (cardinality($4::text[]) > 0 OR $5::jsonb <> '{{}}'::jsonb) AS guest
                 FROM {table}_slots WHERE slot = $1
             ), walk (n, phase, tenant_id, place, due, retry_at, paused, channel) AS (
                 SELECT 0, 0, c, NULL::tid, false, NULL::timestamptz, false, NULL::text FROM here
@@ -498,7 +498,7 @@ const BASELINE: &str = r#"
         OUT take_isolation text)
         LANGUAGE plpgsql VOLATILE
         AS $fn${take}$fn$;
-    CREATE FUNCTION {table}__walk(smallint, integer, double precision, text[],
+    CREATE FUNCTION {table}__walk(smallint, integer, double precision, text[], jsonb,
         OUT head_position bigint, OUT head_place text, OUT head_tenant text,
         OUT head_channel text, OUT head_holds integer, OUT walk_outcome text,
         OUT walk_snapshot text, OUT met_tenants text[], OUT met_channels text[])
@@ -585,13 +585,13 @@ const TAKE_FUNCTION: Called = Called {
     set: false,
 };
 
-/// `{table}__walk(slot, walk, max_dormancy, paused)`.
+/// `{table}__walk(slot, walk, max_dormancy, paused, excluded)`.
 const WALK_FUNCTION: Called = Called {
     suffix: "__walk",
-    identity: "(smallint, integer, double precision, text[])",
-    types: "{smallint,integer,\"double precision\",\"text[]\",bigint,text,text,text,integer,text,text,\"text[]\",\"text[]\"}",
-    modes: "{i,i,i,i,o,o,o,o,o,o,o,o,o}",
-    names: "{\"\",\"\",\"\",\"\",head_position,head_place,head_tenant,head_channel,head_holds,walk_outcome,walk_snapshot,met_tenants,met_channels}",
+    identity: "(smallint, integer, double precision, text[], jsonb)",
+    types: "{smallint,integer,\"double precision\",\"text[]\",jsonb,bigint,text,text,text,integer,text,text,\"text[]\",\"text[]\"}",
+    modes: "{i,i,i,i,i,o,o,o,o,o,o,o,o,o}",
+    names: "{\"\",\"\",\"\",\"\",\"\",head_position,head_place,head_tenant,head_channel,head_holds,walk_outcome,walk_snapshot,met_tenants,met_channels}",
     setting: Some("plan_cache_mode=force_generic_plan"),
     set: false,
 };
@@ -665,7 +665,8 @@ pub(super) struct Located {
 /// paused, and its channel. `r` is the queue row read.
 const WALKED: &str = "r.tenant_id, r.ctid AS place, \
      (r.next_attempt_at IS NULL OR r.next_attempt_at <= CURRENT_TIMESTAMP) \
-         AND NOT ((split_part(r.uri, '/', 1) || '//' || split_part(r.uri, '/', 3)) = ANY($4::text[])) AS due, \
+         AND NOT ((split_part(r.uri, '/', 1) || '//' || split_part(r.uri, '/', 3)) = ANY($4::text[])) \
+         AND NOT ($5::jsonb ? ((split_part(r.uri, '/', 1) || '//' || split_part(r.uri, '/', 3)) || '/' || r.tenant_id)) AS due, \
      r.next_attempt_at AS retry_at, \
      (split_part(r.uri, '/', 1) || '//' || split_part(r.uri, '/', 3)) = ANY($4::text[]) AS paused, \
      (split_part(r.uri, '/', 1) || '//' || split_part(r.uri, '/', 3)) AS channel";
@@ -953,7 +954,7 @@ where
     /// the index's own; any order serves the rotation, and the host's
     /// databases order by bytes.
     ///
-    /// Called as `{table}__walk(slot, walk, max_dormancy)`, whose body is
+    /// Called as `{table}__walk(slot, walk, max_dormancy, paused, excluded)`, whose body is
     /// [`walk_sql`]: in a function that is not stable, each statement takes
     /// a snapshot of its own, so the walk's is taken at the call, after the
     /// slot's lock, and `pg_current_snapshot()` in it is that one. The
@@ -964,9 +965,11 @@ where
         session: &P::Session,
         slot: u32,
         paused: &[String],
+        excluded: &str,
     ) -> Result<Located, Error> {
         let sql = format!(
-            "SELECT * FROM {}{}($1::smallint, $2::integer, $3::double precision, $4::text[])",
+            "SELECT * FROM {}{}($1::smallint, $2::integer, $3::double precision, $4::text[], \
+             $5::text::jsonb)",
             self.table, WALK_FUNCTION.suffix
         );
         let rotation = self.rotation();
@@ -979,6 +982,7 @@ where
                     &(rotation.walk.max(1) as i32),
                     &rotation.max_dormancy.as_secs_f64(),
                     &paused,
+                    &excluded,
                 ],
             )
             .await?;

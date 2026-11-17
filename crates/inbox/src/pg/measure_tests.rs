@@ -596,7 +596,7 @@ async fn m1_the_happy_path_s_statements_before_the_decision_and_after() {
               WHEN 'take_before' THEN SELECT * INTO r FROM {table}__take_before();
               WHEN 'take_after' THEN SELECT * INTO r FROM {table}__take();
               WHEN 'walk_before' THEN SELECT * INTO r FROM {table}__walk_before(s, 32, 1.0);
-              WHEN 'walk_after' THEN SELECT * INTO r FROM {table}__walk(s, 32, 1.0, '{{}}');
+              WHEN 'walk_after' THEN SELECT * INTO r FROM {table}__walk(s, 32, 1.0, '{{}}', '{{}}');
               WHEN 'expire_before' THEN
                 EXECUTE 'UPDATE {table} SET parked_at = CURRENT_TIMESTAMP, '
                      || 'last_error = ''dependency '' || waiting_for::text || '' never arrived'', '
