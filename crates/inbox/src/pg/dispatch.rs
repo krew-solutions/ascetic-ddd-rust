@@ -10,7 +10,7 @@ use futures::future::join_all;
 use tokio::sync::watch;
 
 use super::store::read_committed;
-use super::{Ground, HeldCount, Hold, Loops, Outcome, Parked, ParkedCount, PgInbox};
+use super::{Ground, HeldCount, Hold, Loops, Outcome, Parked, ParkedCount, PgInbox, WaitingCount};
 use crate::breaker::{Before, Breaker, Effect, Flight, Told, Trial, Verdict};
 use crate::error::{Error, Failure};
 use crate::intake;
@@ -78,7 +78,7 @@ fn lock(breaker: &std::sync::Mutex<Breaker>) -> std::sync::MutexGuard<'_, Breake
 }
 
 /// The breaker's clock: tokio's, so that a paused runtime moves it.
-fn now() -> std::time::Instant {
+pub(super) fn now() -> std::time::Instant {
     tokio::time::Instant::now().into_std()
 }
 
@@ -156,6 +156,10 @@ where
             (effects, breaker.paused())
         };
         self.tell(&effects);
+        // The stalls told by this tick or by the trials and verdicts since
+        // the last, on a session of their own, never failing the dispatch
+        // (ADR-0042 decision 6).
+        self.report().await;
         if let Some(Effect::Trial {
             id,
             channel,
@@ -638,7 +642,8 @@ where
     /// The breaker's effects told: to the observer, and to the log — a pause
     /// and a resume once each, a stall at its first tick and every
     /// [`crate::breaker::REMINDER`], by channel and cause and never a Tenant
-    /// (ADR-0042 decision 6).
+    /// (ADR-0042 decision 6); and a stall to its report, written by the next
+    /// dispatch's [`Self::report`].
     fn tell(&self, effects: &[Effect]) {
         for effect in effects {
             match effect {
@@ -649,20 +654,24 @@ where
                     channel,
                     cause,
                     since,
-                    remind: true,
-                    ..
+                    ttl,
+                    remind,
                 } => {
-                    log::error!(
-                        "inbox: the channel {channel} stalled in this process ({cause}), paused for {:?}",
-                        now().saturating_duration_since(*since)
-                    );
+                    if *remind {
+                        log::error!(
+                            "inbox: the channel {channel} stalled in this process ({cause}), paused for {:?}",
+                            now().saturating_duration_since(*since)
+                        );
+                    }
+                    self.stall_state()
+                        .stalled(channel, cause.as_str(), *since, *ttl);
                 }
                 Effect::Resumed { channel, cause, .. } => {
                     log::warn!(
                         "inbox: the channel {channel} asked again in this process ({cause})"
                     );
                 }
-                Effect::Stalled { .. } | Effect::Trial { .. } => {}
+                Effect::Trial { .. } => {}
             }
             self.observer.on_breaker(&BreakerChanged { effect });
         }
@@ -674,7 +683,7 @@ where
     /// cooperative: a loop finishes its message, commits, and only then
     /// stops. A loop that meets an error of the moment — a lock cycle the
     /// server broke, a connection lost, a server going down — waits, longer
-    /// with each such error in a row up to `loops.max_pause`, and goes on:
+    /// with each such error in a row up to `loops.max_error_wait`, and goes on:
     /// its transaction was rolled back and the message comes back. On any
     /// other error of the database, a defect, the loops are all stopped and
     /// the error is returned (ADR-0010). A failing subscriber is neither: it
@@ -727,7 +736,7 @@ where
                         }
                         Err(error) if error.is_transient() => {
                             passing += 1;
-                            let pause = loops.pause_after(passing);
+                            let pause = loops.error_wait_after(passing);
                             log::warn!("inbox: a loop met an error of the moment, waiting {pause:?}: {error}");
                             pause
                         }
@@ -851,6 +860,41 @@ where
                     tenants: u64::try_from(row.try_get::<_, i64>(3)?).unwrap_or_default(),
                     heads: u64::try_from(row.try_get::<_, i64>(4)?).unwrap_or_default(),
                     oldest: row.try_get(5)?,
+                })
+            })
+            .collect()
+    }
+
+    /// The rows waiting for a dependency, by channel, with the oldest wait
+    /// (ADR-0042 decision 6): what a host samples beside the held and the
+    /// parked, since a waiter whose dependency is on its way is spared by the
+    /// expiry for as long as it is. In a transaction of its own bounded by
+    /// `within`.
+    ///
+    /// # Errors
+    /// [`Error`] when the database cannot be read within `within`.
+    pub async fn waiting_counts(&self, within: Duration) -> Result<Vec<WaitingCount>, Error> {
+        let sql = super::store::waiting_counts_sql(self.table.as_str());
+        let millis = i32::try_from(within.as_millis()).unwrap_or(i32::MAX).max(1);
+        let rows = self
+            .pool
+            .session(async |session: P::Session| {
+                session
+                    .atomic(async |tx| {
+                        tx.connection()
+                            .batch_execute(&format!("SET LOCAL statement_timeout = {millis}"))
+                            .await?;
+                        Ok::<_, Error>(tx.connection().query(&sql, &[]).await?)
+                    })
+                    .await
+            })
+            .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(WaitingCount {
+                    channel: row.try_get(0)?,
+                    waiting: u64::try_from(row.try_get::<_, i64>(1)?).unwrap_or_default(),
+                    oldest: row.try_get(2)?,
                 })
             })
             .collect()

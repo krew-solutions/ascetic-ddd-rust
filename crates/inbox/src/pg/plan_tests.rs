@@ -19,9 +19,11 @@ use serde_json::Value;
 
 use super::PgInbox;
 use super::store::{
-    EXPIRY_BATCH, expire_sql, held_counts_sql, parked_counts_sql, take_sql, walk_sql,
+    EXPIRY_BATCH, expire_sql, held_counts_sql, parked_counts_sql, take_sql, waiting_counts_sql,
+    walk_sql,
 };
 use super::surface::unpark_batch;
+use super::verbs::{park_heads_batch, park_queue_batch};
 use crate::partition::ByStream;
 
 const DEFAULT_URL: &str = "postgresql://devel:devel@localhost:5432/devel_karmabot_test";
@@ -417,6 +419,210 @@ async fn the_take_and_the_walk_go_by_the_queue_s_indexes() {
     }
 }
 
+/// V1 (ADR-0042 decision 8): a statement of `park_queue` reads the Tenant's
+/// queue rows alone, probed slot by slot by `__tenant_head_idx`, at 64
+/// slots beside a thousand other Tenants' rows and its own processed
+/// history of 10,000: no scan of the table, no sort of more than the
+/// Tenant's queue. Run in a transaction rolled back:
+/// the statement parks what it reads. Red when the slots are not part of
+/// the probe: the index is then read whole.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_queue_given_up_is_read_by_its_tenant_s_index() {
+    let table = "inbox_park_queue_plan";
+    let inbox = PgInbox::new(PgSessionPool::new(pool()))
+        .with_table(
+            Identifier::new(table).unwrap(),
+            Identifier::new("inbox_park_queue_plan_seq").unwrap(),
+        )
+        .with_slots(64)
+        .partitioned_by(ByStream);
+    inbox.teardown().await.unwrap();
+    inbox.migrate().await.unwrap();
+    let client = pool().get().await.unwrap();
+    client
+        .batch_execute(&format!(
+            "INSERT INTO {table} (tenant_id, stream_type, stream_id, stream_position, uri, payload, \
+                 metadata) \
+             SELECT 't' || (g % 1000), 'orders.Order', to_jsonb('s-' || g), 1, 'kafka://orders/k', \
+                 'x', '{{}}' FROM generate_series(1, 20000) g; \
+             INSERT INTO {table} (tenant_id, stream_type, stream_id, stream_position, uri, payload, \
+                 metadata) \
+             SELECT 'tx', 'orders.Order', to_jsonb('x-' || g), 1, 'kafka://orders/k', 'x', '{{}}' \
+             FROM generate_series(1, 50) g; \
+             INSERT INTO {table} (tenant_id, stream_type, stream_id, stream_position, uri, payload, \
+                 metadata, processed_position) \
+             SELECT 'tx', 'orders.Order', to_jsonb('h-' || g), 1, 'kafka://orders/k', 'x', '{{}}', g \
+             FROM generate_series(1, 10000) g"
+        ))
+        .await
+        .unwrap();
+    client
+        .batch_execute(&format!("VACUUM ANALYZE {table}"))
+        .await
+        .unwrap();
+    let slots: Vec<i16> = (0..64).collect();
+    client.batch_execute("BEGIN").await.unwrap();
+    let explained = client
+        .query_one(
+            &format!("EXPLAIN (ANALYZE, FORMAT JSON) {}", park_queue_batch(table)),
+            &[
+                &"kafka://orders",
+                &"tx",
+                &"operator.given_up",
+                &100_i64,
+                &slots,
+            ],
+        )
+        .await
+        .unwrap()
+        .get::<_, Value>(0);
+    client.batch_execute("ROLLBACK").await.unwrap();
+    let plan = &explained[0]["Plan"];
+    by_the_indexes(plan, table, &[format!("{table}__tenant_head_idx")], 50.0);
+    let read: f64 = nodes(plan)
+        .iter()
+        .filter(|node| node["Index Name"].as_str() == Some(&format!("{table}__tenant_head_idx")))
+        .filter_map(|node| node["Actual Rows"].as_f64())
+        .sum();
+    assert!(
+        read > 0.0 && read <= 50.0,
+        "the Tenant's rows alone: {read} {plan}"
+    );
+    inbox.teardown().await.unwrap();
+}
+
+/// V1 (ADR-0042 decision 8): a statement of `park_heads` reads a batch of
+/// `__held_idx` in its order and sorts nothing, whatever the heads held
+/// under its cause: 4,000 of them here, against a batch of 100. Run in a
+/// transaction rolled back. Red when the batch is ordered otherwise than the
+/// index: every held head of the cause is then read and sorted.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_heads_given_up_are_read_a_batch_at_a_time_by_their_index() {
+    let table = "inbox_park_heads_plan";
+    let inbox = PgInbox::new(PgSessionPool::new(pool()))
+        .with_table(
+            Identifier::new(table).unwrap(),
+            Identifier::new("inbox_park_heads_plan_seq").unwrap(),
+        )
+        .partitioned_by(ByStream);
+    inbox.teardown().await.unwrap();
+    inbox.migrate().await.unwrap();
+    let client = pool().get().await.unwrap();
+    client
+        .batch_execute(&format!(
+            "INSERT INTO {table} (tenant_id, stream_type, stream_id, stream_position, uri, payload, \
+                 metadata, held_since, next_attempt_at, hold_kind, holds, cause) \
+             SELECT 't' || g, 'orders.Order', to_jsonb('o-' || g), 1, 'kafka://orders/k', 'x', '{{}}', \
+                 now() - g * interval '1 second', now() + interval '1 hour', 'unavailable', 1, \
+                 'kms.unavailable' FROM generate_series(1, 4000) g; \
+             INSERT INTO {table} (tenant_id, stream_type, stream_id, stream_position, uri, payload, \
+                 metadata, processed_position) \
+             SELECT 'h' || (g % 100), 'orders.Order', to_jsonb('h-' || g), 1, 'kafka://orders/k', \
+                 'x', '{{}}', g FROM generate_series(1, 40000) g"
+        ))
+        .await
+        .unwrap();
+    client
+        .batch_execute(&format!("VACUUM ANALYZE {table}"))
+        .await
+        .unwrap();
+    client.batch_execute("BEGIN").await.unwrap();
+    let explained = client
+        .query_one(
+            &format!("EXPLAIN (ANALYZE, FORMAT JSON) {}", park_heads_batch(table)),
+            &[
+                &"kafka://orders",
+                &"kms.unavailable",
+                &None::<&str>,
+                &100_i64,
+            ],
+        )
+        .await
+        .unwrap()
+        .get::<_, Value>(0);
+    client.batch_execute("ROLLBACK").await.unwrap();
+    let plan = &explained[0]["Plan"];
+    by_the_indexes(plan, table, &[format!("{table}__held_idx")], 100.0);
+    // the candidates' read and the locked rows' recheck, each a batch at most
+    let read: Vec<f64> = nodes(plan)
+        .iter()
+        .filter(|node| node["Index Name"].as_str() == Some(&format!("{table}__held_idx")))
+        .filter_map(|node| node["Actual Rows"].as_f64())
+        .collect();
+    assert!(
+        !read.is_empty() && read.iter().all(|rows| *rows <= 100.0),
+        "a batch of the index: {read:?} {plan}"
+    );
+    inbox.teardown().await.unwrap();
+}
+
+/// § 6 (ADR-0042 decision 6): the waiting rows are counted by
+/// `__waiting_since_idx`, and no row but the waiting is read.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_waiting_rows_are_counted_by_their_index() {
+    let table = "inbox_waiting_plan";
+    let inbox = PgInbox::new(PgSessionPool::new(pool()))
+        .with_table(
+            Identifier::new(table).unwrap(),
+            Identifier::new("inbox_waiting_plan_seq").unwrap(),
+        )
+        .partitioned_by(ByStream);
+    inbox.teardown().await.unwrap();
+    inbox.migrate().await.unwrap();
+    let client = pool().get().await.unwrap();
+    client
+        .batch_execute(&format!(
+            "INSERT INTO {table} (tenant_id, stream_type, stream_id, stream_position, uri, payload, \
+                 metadata, processed_position, waiting_for, waiting_since) \
+             SELECT 'tenant-' || (g % 500), 'orders.Order', to_jsonb('o-' || g), 1, \
+                 'kafka://' || (ARRAY['orders', 'pay'])[1 + g % 2] || '/k', 'x', '{{}}', \
+                 CASE WHEN g % 50 <> 0 THEN g END, \
+                 CASE WHEN g % 50 = 0 THEN '{{\"tenant_id\": \"never\"}}'::jsonb END, \
+                 CASE WHEN g % 50 = 0 THEN now() END \
+             FROM generate_series(1, 100000) g"
+        ))
+        .await
+        .unwrap();
+    client
+        .batch_execute(&format!("VACUUM ANALYZE {table}"))
+        .await
+        .unwrap();
+    let explained = client
+        .query_one(
+            &format!(
+                "EXPLAIN (ANALYZE, FORMAT JSON) {}",
+                waiting_counts_sql(table)
+            ),
+            &[],
+        )
+        .await
+        .unwrap()
+        .get::<_, Value>(0);
+    let plan = &explained[0]["Plan"];
+    let nodes = nodes(plan);
+    assert!(
+        nodes
+            .iter()
+            .all(|node| node["Node Type"].as_str() != Some("Seq Scan")),
+        "{plan}"
+    );
+    let fetched: Vec<f64> = nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node["Node Type"].as_str(),
+                Some("Bitmap Heap Scan" | "Index Scan" | "Index Only Scan")
+            )
+        })
+        .filter_map(|node| node["Actual Rows"].as_f64())
+        .collect();
+    assert_eq!(fetched, [2000.0], "the waiting rows alone: {plan}");
+    inbox.teardown().await.unwrap();
+}
+
 /// E1 (ADR-0042 decision 7): a statement of the expiry examines at most a
 /// batch of the waiters, by `__waiting_since_idx` in its keyset's order,
 /// and follows each one's chain by the primary key, a probe a hop: no scan
@@ -721,6 +927,7 @@ async fn a_bulk_unpark_walks_the_parked_index_and_reads_no_other_row() {
                 &100_i64,
                 &4_i32,
                 &false,
+                &"failure",
             ],
         )
         .await

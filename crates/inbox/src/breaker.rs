@@ -462,6 +462,11 @@ impl Breaker {
                     channel: flight.channel.clone(),
                     cause,
                 });
+                // Opened again within the window of a stall: still stalled,
+                // and reported now, not at the first tick, which its failed
+                // ticks put up to a cap away — the gap a flapping stage's
+                // report must not lapse in (ADR-0042 decision 6).
+                effects.extend(channel.stall(&settings, &flight.channel, now));
             }
         }
         Told { hold, effects }

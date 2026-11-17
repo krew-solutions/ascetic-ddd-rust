@@ -34,7 +34,7 @@ pub(super) const CHANNEL_OF_ROW: &str =
 /// A parked row's ground ([`super::Ground`]), from its columns: a row parked
 /// at once never waits (the park takes it from the queue), and every exit
 /// from the parked state clears `unreadable_at` with `parked_at`.
-const GROUND_OF_ROW: &str = "CASE WHEN unreadable_at IS NOT NULL THEN 'at_once' \
+pub(super) const GROUND_OF_ROW: &str = "CASE WHEN unreadable_at IS NOT NULL THEN 'at_once' \
      WHEN waiting_for IS NOT NULL THEN 'expired' ELSE 'failure' END";
 
 /// The parked rows by channel, ground and cause, with the oldest park: one
@@ -60,6 +60,17 @@ pub(super) fn held_counts_sql(table: &str) -> String {
         "SELECT {CHANNEL_OF_ROW}, coalesce(hold_kind, 'backoff'), cause, \
                 count(DISTINCT tenant_id), count(*), min(held_since)::text \
          FROM {table} WHERE held_since IS NOT NULL GROUP BY 1, 2, 3 ORDER BY 1, 2, 3"
+    )
+}
+/// The rows waiting for a dependency, by channel, with the oldest wait: one
+/// statement over `__waiting_since_idx`'s predicate, so that its work is
+/// the waiters', not the table's (ADR-0042 decision 6). A waiter the expiry
+/// spares waits as long as its dependency is on its way; this is what counts
+/// them. No Tenant's identifier leaves the database.
+pub(super) fn waiting_counts_sql(table: &str) -> String {
+    format!(
+        "SELECT {CHANNEL_OF_ROW}, count(*), min(waiting_since)::text \
+         FROM {table} WHERE waiting_since IS NOT NULL GROUP BY 1 ORDER BY 1"
     )
 }
 /// The take's statement over `table` ([`PgInbox::take`]): a function, so
@@ -473,6 +484,15 @@ const BASELINE: &str = r#"
     );
     INSERT INTO {table}_slots (slot) SELECT s FROM generate_series(0, {slots} - 1) AS s
         ON CONFLICT DO NOTHING;
+    CREATE TABLE IF NOT EXISTS {table}_stalls (
+        channel text NOT NULL,
+        cause varchar(64) NOT NULL,
+        reporter varchar(32) NOT NULL,
+        since timestamptz NOT NULL,
+        valid_until timestamptz NOT NULL,
+        openings integer NOT NULL,
+        PRIMARY KEY (channel, cause, reporter)
+    );
     CREATE FUNCTION {table}__take(
         OUT taken_slot smallint, OUT take_snapshot text, OUT slot_count integer,
         OUT take_isolation text)
@@ -849,7 +869,7 @@ where
                     .batch_execute(&format!(
                         "DROP TABLE IF EXISTS {table}; DROP SEQUENCE IF EXISTS {sequence}; \
                          DROP TABLE IF EXISTS {table}_meta; DROP TABLE IF EXISTS {table}_slots; \
-                         DROP TABLE IF EXISTS {table}_rejects;"
+                         DROP TABLE IF EXISTS {table}_rejects; DROP TABLE IF EXISTS {table}_stalls;"
                     ))
                     .await?;
                 // Every function of the inbox's names the search path sees,
@@ -1381,6 +1401,10 @@ where
         session: &P::Session,
         received_position: i64,
     ) -> Result<Option<InboxMessage>, Error> {
+        // No slot row written: the statement runs in the caller's session,
+        // maybe in its transaction, and a slot's lock held to its commit
+        // would keep the slot from every take; the row is taken within
+        // `max_dormancy` (ADR-0041 decision 3), as a woken one is.
         let sql = format!(
             "UPDATE {} SET parked_at = NULL, unreadable_at = NULL, attempts = 0, \
                  waiting_for = NULL, waiting_since = NULL, cause = NULL, {LEAVE_QUEUE} \
@@ -2296,7 +2320,7 @@ fn message_checked(row: &Row, at: usize) -> Result<InboxMessage, &'static str> {
 
 /// Whether `stream_id`, read back, is in the bus's domain: it writes and
 /// reads back as itself.
-fn in_domain(stream_id: &serde_json::Value) -> bool {
+pub(super) fn in_domain(stream_id: &serde_json::Value) -> bool {
     let text = ascetic_ddd_bus::identity::write_stream_id(stream_id);
     ascetic_ddd_bus::identity::read_stream_id(&text).as_ref() == Ok(stream_id)
 }

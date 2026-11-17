@@ -6,7 +6,8 @@ Proposed (2026-11-16). Built (2026-11-17): slice 1, the breaker's and the memo's
 (`crates/inbox/src/breaker.rs`), C1–C13 its tests; slice 2, the DEK stage's causes and its sentinel read (§ 9,
 D1); slice 3, the breaker in the dispatch — the rows, the exits and their CHECKs, the walk's paused channels and
 the guest, the trial, the isolation per transaction (R1, X1, G1, P1, C5, C8, C10, I1); slice 4, the expiry off
-the dispatch path (E1). § Slices orders the rest.
+the dispatch path (E1); slice 5, the reads, the stalls' report and the operator's verbs (V1, § 6, C14), and the
+names. § Slices orders the rest.
 
 It supersedes ADR-0040's decisions 4, 5, 7, 9 and its `park_held` (decision 8), and ADR-0041's decision 3 (the
 environment's verdict, its slice 2). It keeps ADR-0040's verdicts and causes (decisions 1–3, 6) and
@@ -176,15 +177,26 @@ A violation (23514) is a defect that stops the loops: the fault of the library's
 - `<table>_stalls (channel, cause, reporter, since, valid_until, openings)`, one row a (channel, cause, process).
   A process writes it when its channel stalls and refreshes it every tick, `valid_until = clock_timestamp() + ttl`
   with ttl at least twice the tick cap plus `trial_wait`. The reporter is a random value drawn at the process's
-  start: a label of the report, not an owner (ADR-0008 decision 3).
+  start: a label of the report, not an owner (ADR-0008 decision 3). As built: the breaker's stall effects are
+  written by the next dispatch, on a session of its own, its statements bounded by a second (statement and lock
+  timeout); a failure is logged and never fails the dispatch — the report is for people. A row lapsed is a new
+  stall, from the pause's start; one still valid keeps its start and counts an opening when its pause is a new
+  one, the pause marked when a loop takes it, so that two loops count it once; the rows are written in one
+  order, so that two loops wait rather than cycle. A channel opened again within the window after a stall is
+  still stalled and reports so at its opening, not at its first tick, which its failed ticks put up to the cap
+  away; a resumed channel's row is refreshed no more and lapses. So a stage back for less than the ttl less the
+  asks that open it again keeps one stall with two openings — the flap rule (b) reads. Other processes' rows
+  lapsed for an hour are removed by a statement of their own, `SKIP LOCKED`. No statement of the inbox reads the
+  table to decide.
 - **The host pages** a channel on (a) a valid stall row unless its processed counter rose over the window, or
   (b) a valid stall row of every up replica continuously for N minutes (a flapping stage), grouped by cause and
   naming the channels, with `keep_firing_for`, and the sampler's companion rules as the parked rows have.
 - **The oldest `Unavailable` hold** over a threshold pages unless the channel is stalled on every replica, with a
   `for` longer than the hold cap: the net under a fault mislabelled `Unavailable` and under one Tenant's long
   trouble.
-- `stalls()`; `held_counts(within)` by (channel, kind, cause); `waiting_counts(within)` by channel;
-  `parked_counts` by (channel, ground, cause).
+- `stalls(within)`; `held_counts(within)` by (channel, kind, cause); `waiting_counts(within)` by channel, by
+  `__waiting_since_idx`; `parked_counts(within)` by (channel, ground, cause); each in a transaction of its own
+  bounded by `within`.
 - `__held_idx` carries every column `held_counts` reads, the row's `uri` its channel is computed from among
   them, so that the count can be answered from the index alone, on 14 as on 18. The planner takes that plan
   when the heap's pages are visible enough: on a vacuumed table of 100,000 rows, 4,000 held, 18 read 70 pages
@@ -231,12 +243,29 @@ A violation (23514) is a defect that stops the loops: the fault of the library's
 ### 8. The operator's verbs
 
 Each takes a principal and is audited (`Operated`); each batch is one autocommitted statement with `SKIP LOCKED`,
-reporting what it did, what it passed by and whether more remain; each wakes the slots it touched.
-- `held(after, limit)`: a page of the held heads with their identity, as `parked` pages the parked rows.
-- `park_heads(channel, cause, tenant, limit)`.
-- `park_queue(channel, tenant, cause, limit)`: a (channel, Tenant)'s queue rows in position order, given up whole.
-- `unpark_all(channel, ground: Failure(cause) | Expired | AtOnce, tenant, within, tries, limit, overtaken)`:
-  `attempts = max(0, max_attempts − tries)`, `cause = NULL`.
+reporting what it did, what it passed by and whether more remain (`GivenUp { parked, passed, more }`,
+`UnparkedAll::more`); each wakes the slots it touched that no dispatcher holds, `SKIP LOCKED` in the same
+statement, so that a slot asleep goes on at once and a held one within its holder's next sleep. The single
+`unpark` and `resolve` write no slot row: `unpark` runs in the caller's session, maybe its transaction, where a
+slot's lock held to its commit would keep the slot from every take, and `resolve` holds a mark's advisory lock,
+after which ADR-0009 acquires nothing but woken rows; their rows are taken within `max_dormancy`, as a mark's
+woken rows are (ADR-0041 decision 3). The audit is told after each batch, with the Tenant and the cause the
+verb names.
+- `held(principal, after, limit)`: a page of the held heads with their hold, cause, count of holds and identity,
+  as `parked` pages the parked rows.
+- `park_heads(principal, &ParkingHeads { channel, cause, tenant, limit })`: the heads keep their cause and
+  attempts and park on the failure ground, the oldest hold first, in `__held_idx`'s order.
+- `park_queue(principal, &ParkingQueue { channel, tenant, cause, limit })`: a (channel, Tenant)'s queue rows,
+  given up whole, under the operator's cause, the newest first: a dispatcher that serves the Tenant between two
+  batches takes its oldest row, older than every row parked, so what is parked is the end of each stream and the
+  re-arm, oldest first, overtakes nothing. The Tenant's rows are probed slot by slot by `__tenant_head_idx`, as
+  the walk probes: a probe of the Tenant by its key read its processed history.
+- A verb's batch reads a batch of candidates unlocked, then locks those still named `SKIP LOCKED` and parks them:
+  a held one is examined again by the next batch, and the verb ends when a batch examined fewer than it asked
+  (the rows not parked are the held, `passed`), parked none, or reached its limit (`more`).
+- `unpark_all(principal, &Unparking { channel, ground: ParkedFor::Failure(cause) | Expired | AtOnce, tenant,
+  within, tries, limit, overtaken })`: `attempts = max(0, max_attempts − tries)`, `cause = NULL`, and the wait
+  and the unreadable mark cleared, each row re-armed by its ground's remedy.
 - ADR-0009 decision 4 is amended: a verb may lock a queue head's row for one statement; a walk that waits on it
   reads it as vanished.
 - `park_held` is withdrawn: under the rotation it freed nothing.
@@ -268,7 +297,8 @@ and its lock fails it with 40001, an error of the moment, where READ COMMITTED p
 
 A channel a process does not ask is **paused**; the reported state is a **stall**; a **trial** asks a paused
 channel's **witness**; a **guest** is the walk of a process with paused channels; the **memo** keeps a Tenant's
-`Unavailable`. `Loops::max_pause` and `pause_after` become `max_error_wait` and `error_wait_after`.
+`Unavailable`. `Loops::max_pause` and `pause_after` become `max_error_wait` and `error_wait_after`, the
+inbox's and the outbox's both, since a host reads the two together.
 
 ### 12. What the host's adoption needs, in order
 
@@ -282,7 +312,7 @@ channel's **witness**; a **guest** is the walk of a process with paused channels
 4. The alert rules of § 6, each with test series: every replica stalled; one cut off; every replica restarted
    mid-stall; a stage up 20 s and down 40 s; a quiet channel with one Tenant held; the sampler stale; one Tenant
    held 30 minutes.
-5. An operator's command per service for the verbs of § 8.
+5. An operator's command per service for the verbs of § 8; the renamed fields of both `Loops` (§ 11).
 6. A KMS quota sized for the drain's rate of unwraps.
 
 ## Consequences
@@ -362,7 +392,7 @@ histories with a manual clock; the shell's with a `Clock` and a paused runtime; 
 | E1 | the expiry (`tests/expiry.rs`, the expiry's plan in `pg/plan_tests.rs`): a present chain, an untried head, a row behind a held head, a missing and a parked dependency, 8 and 9 hops, a cycle under `statement_timeout`, 20,000 spared with one missing last, ties at one `waiting_since` with rows moved in the heap, a malformed `waiting_for`, parked-expired rows; the spared rows' `(ctid, xmin, xmax)` and no xid in one transaction; `run`'s timer, and no dispatch expiring; a defect stopping `run`; the CHECK of a time of wait; the function as the start check requires it, planned once a connection | spared or expired as stated, each with its reason; 201 statements for 20,000 spared; ≤ `batch` rows examined by `__waiting_since_idx`, a hop one probe of the key | drop `present`; drop `parked_at IS NULL`; bounds 7, 16 and none; the cursor on expired rows; `LIMIT` after the filter; a `ctid` tiebreak; the key `waiting_since` alone; a plain cast; renew by write; lock before the spare test; the dispatch expiring; `run` without the timer; a defect logged; `more` by the rows parked; the observer untold; the start check without the set or the function; the CHECK dropped; the index's old predicate or no tiebreak; the exit's fragment; the plan not forced generic |
 | R1 | the rows: 20 asks, no spend; `holds` at its cap; a `Transient` resets, its back-off kept; every wait bound to `clock_timestamp()`, read from the source (a process's clock an hour fast agrees with the server's on one host, so no run tells the two apart); a hold after a 1.5 s subscriber; the kinds of a held head asked and of one held unasked; the counts by `__held_idx`, and answerable from it alone, the heap's scans set off | as stated | spend; no cap; the holds kept by a spend; the back-off dropped; `CURRENT_TIMESTAMP`; the kind from `holds`; `uri` out of the index |
 | X1 | the exits: random operation histories on a live database; every `UPDATE` that sets `processed_position`, `parked_at` or `waiting_for` carries the fragment; the spend that keeps a row queued keeps its back-off; `unpark_all` clears `cause` | no 23514 | drop the fragment; an unconditional fragment; keep `cause` |
-| V1 | the verbs: a locked head passed by; a walk waiting on a verb's lock reads vanished; a slot asleep after a verb wakes within `max_dormancy` and the poll; the canary with `tries` above `max_attempts`; `park_queue` then `unpark_all` in order; the audit | as stated | as stated |
+| V1 | the verbs (the last tests of `tests/outage.rs`, the verbs' plans in `pg/plan_tests.rs`): the held page with its hold and identity; heads given up by cause and Tenant, the rows behind going on at once, their slot woken from an hour's sleep, and re-armed by their cause; a locked head passed by and the verb waiting for nothing, its rows and its slots; a walk waiting on a verb's lock reads its head vanished; a queue given up whole, the newest first across slots, re-armed in order; a queue given up while it is served ends a prefix processed and a suffix parked; the canary with `tries` above `max_attempts`; a bulk unpark by each ground's remedy; the waiting counted; a stall reported, refreshed with its start kept, lapsing after its resume, an opening again counted; a report that cannot be written failing no dispatch; the audit with its Tenant and cause; the batches' plans, a batch of `__held_idx` and the Tenant's queue alone by `__tenant_head_idx`; C14 in the core | as stated | park_heads without its cause; no wake; a wake or a lock without `SKIP LOCKED`; the queue oldest first, outer or inner; the queue probed without its slots; the canary below none; the ground not selected; an expired row re-armed keeping its wait; a refresh resetting the start; an opening not counted; a resumed row refreshed; the waiting counted with the expired; the audit untold, or without its Tenant; no `more`; nothing passed; the park leaving a hold; the walk passing a verb's lock by; a report's failure failing the dispatch; the heads read out of the index's order; a reopened stall waiting for its tick |
 | P1 | the guest: more than K paused Tenants and a due head beyond K; three backlogged Tenants of an unpaused channel in turn; a guest that serves clears the round, one that does not leaves it; at 128-character ids, no index of the slots' table reads what a guest writes, the condition of its write's being HOT | as stated | drop the cursor; keep it on a take; keep the round; index `guest_tenant` |
 | I1 | a dispatch, a trial and a `resolve` inside REPEATABLE READ, the trial's session set to it after the process began | refused | a trial or a `resolve` without the check; the check at start only |
 | D1 | the dek: a distinct cause per class, `Forbidden` `Permanent`; the sentinel by a key read on a channel the consumer only receives; `kms.unexplained`'s detail without a path; no Tenant in a log line | as stated | draw the sentinel's key; collapse two causes; store the text |
@@ -380,7 +410,9 @@ configuration that must fail lists one property and has a twin generated from it
 configuration's count of distinct states.
 
 **Measurements owed.** M1 the walk with nothing paused, server side, committed per call; M3 the guest at a backlog
-of 20 rows on an unpaused channel; M4 the expiry at the host's count of spared waiters, against 220,001 in 2.3 s a pass on the reference machine
+of 20 rows on an unpaused channel; M7 the verbs at the host's scale: `park_queue` re-reads the Tenant's queue rows of other channels in its slots each
+batch, and `held` sorts the held heads each page, at most one a (slot, Tenant); and the dispatch's takes during a
+bulk verb, which passes its slots by; M4 the expiry at the host's count of spared waiters, against 220,001 in 2.3 s a pass on the reference machine
 (§ 7); M5 a one-hour scaled drill
 at 7 channels and a 200 ms poll, with a KMS quota below the drain's rate; M6 the share of opens served from the
 cache during an outage; a two-session run of a verb's `ctid` join against a concurrent hold.
@@ -512,3 +544,47 @@ payloads), its generated Vault policies.
     - **Nothing counts the spared waiters** until slice 5's `waiting_counts` (§ 6): a dependency that fails for
       ever without a permanent verdict spares its waiters for ever, where they expired before. The dependency
       shows in `held_counts` as a back-off.
+- 2026-11-17: Slice 5 built: the reads and the operator's verbs (§§ 6, 8) and the names (§ 11). Its executors:
+  the last tests of `tests/outage.rs` (V1, the stalls, the waiting counts), the verbs' and the waiting count's
+  plans (`pg/plan_tests.rs`), C14 in the core, the exit gate over `verbs.rs`; 24 mutations, each red. What
+  building it found:
+  - **A probe of a Tenant's queue read its history.** By `slot = ANY(…)` the planner priced 64 descents of
+    `__tenant_head_idx` above one bitmap scan of `__message_id_uniq`, which reads every row of the Tenant, its
+    processed history among them: 10,050 for 50 queued. The batch probes slot by slot in a lateral, as the walk
+    does, and reads the Tenant's queue alone.
+  - **A lateral probe cannot lock as it fills its limit**, so a batch reads its candidates unlocked and then locks
+    those still named; the verb counts by the rows examined, a held one examined again by the next batch.
+  - **The canary was guarded twice**, in the call and in the statement, and a mutation of either survived; the
+    statement's guard is gone.
+  - **ADR-0040's `Operation::ParkedHeld`** outlived `park_held`; `PagedHeld`, `ParkedHeads` and `ParkedQueue`
+    replace it, and `Operated` names the Tenant and the cause a verb moves rows by.
+  - **The stall test waited for a pause in the whole run's effects**, so the second pause read the first's row; it
+    waits for the nth.
+  - **`Loops`' names are renamed in the outbox as well**: a host reads the two together.
+  - **The baseline took the stalls' table** (ADR-0041 decision 6's exception, nothing deployed).
+  - A round of roles (database, distributed systems, operability, security) on the built slice found, each
+    taken:
+    - **`park_queue` reordered a stream.** Parking the oldest first, a dispatcher took the row behind a batch
+      between two, and the rows parked before it were then overtaken at their re-arm. The verb parks the newest
+      first: what it parks is the end of each stream, every row processed meanwhile older. The test splits the
+      verb at a batch and dispatches between.
+    - **The stall report could stop every channel**: written on the dispatch path, its error failed the dispatch
+      and a defect stopped the loops, against "a report for people, never a gate". It is bounded and its failure
+      logged; a missed refresh is the next tick's.
+    - **Two loops reporting one stall could cycle on its rows, or count one opening twice**, and the purge ran in
+      the same statement as the upsert, where replicas could cycle. Rows in one order, a pause marked when taken,
+      the purge its own statement `SKIP LOCKED`.
+    - **A stall opened again reported at its first tick**, up to the tick's cap later, so a flapping stage's report
+      could lapse between two openings. It is reported at its opening (C14).
+    - **The audit of a verb that failed half-way was lost**, and it named neither the Tenant nor the cause. It is
+      told after each batch, with both.
+    - **A single `unpark` in a caller's transaction would hold the slots it woke** to that commit, and every take
+      would pass them by. `unpark` writes no slot row again; its row is taken within `max_dormancy`, as
+      ADR-0041's test asserts.
+    - **`park_heads` read every held head of its cause each batch**, sorted by arrival, where `__held_idx` orders
+      by the hold's start. It takes the oldest hold first, a batch of the index (plan test: 100 read, against
+      4,000 in arrival order).
+    - **`park_queue`'s test of what remains read the Tenant's history**: it probes slot by slot too.
+    - Kept as they are, with their reasons: `unpark_all(AtOnce)` clears the unreadable mark, so a repaired
+      arrival before the row is read again is set aside rather than superseding it — as the single `unpark` has
+      always done, and readmitted; `held` and the verbs' cost at the host's scale is M7.

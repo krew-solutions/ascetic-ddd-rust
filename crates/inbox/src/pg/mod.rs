@@ -99,16 +99,21 @@ mod measure_tests;
 mod plan_tests;
 #[cfg(test)]
 mod release_tests;
+mod stalls;
 mod store;
 mod surface;
 
 pub use expiry::Expiry;
 pub use intake::Admission;
+pub use stalls::Stall;
 pub use surface::{
-    ParkedUnder, Readmission, Readmitted, SetAsideCount, SetAsideCursor, SetAsidePage, SetAsideRow,
-    UnparkedAll, Unparking,
+    ParkedFor, ParkedUnder, Readmission, Readmitted, SetAsideCount, SetAsideCursor, SetAsidePage,
+    SetAsideRow, UnparkedAll, Unparking,
 };
 mod sweep;
+mod verbs;
+
+pub use verbs::{GivenUp, HeldHead, ParkingHeads, ParkingQueue};
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -134,15 +139,15 @@ pub struct Loops {
     /// The longest a loop waits after an error of the moment — a lock cycle
     /// the server broke, a connection lost — before it goes on: the wait
     /// starts at `poll_interval` and doubles with each such error in a row.
-    pub max_pause: Duration,
+    pub max_error_wait: Duration,
 }
 
 impl Loops {
     /// The wait after the `n`th error of the moment in a row, `n` from 1.
-    pub fn pause_after(&self, n: u32) -> Duration {
+    pub fn error_wait_after(&self, n: u32) -> Duration {
         self.poll_interval
             .checked_mul(1u32 << n.saturating_sub(1).min(31))
-            .map_or(self.max_pause, |pause| pause.min(self.max_pause))
+            .map_or(self.max_error_wait, |pause| pause.min(self.max_error_wait))
     }
 }
 
@@ -151,7 +156,7 @@ impl Default for Loops {
         Loops {
             concurrency: 1,
             poll_interval: Duration::from_secs(1),
-            max_pause: Duration::from_secs(60),
+            max_error_wait: Duration::from_secs(60),
         }
     }
 }
@@ -168,9 +173,11 @@ pub struct Rotation {
     pub walk: u32,
     /// The longest a slot sleeps once a round of walks found every head of
     /// its Tenants waiting for its backoff. It wakes sooner, at the earliest
-    /// of those backoffs or for a row arriving after the round began; this
-    /// bounds the rest — an insert that was in flight when the round began, a
-    /// row a mark woke, a row unparked. A second by default: the poll's own
+    /// of those backoffs or for a row arriving after the round began, or
+    /// when an operator's bulk verb moves a row into it and no dispatcher
+    /// holds it (ADR-0042 decision 8); this bounds the rest — an insert that
+    /// was in flight when the round began, a row a mark woke, a row
+    /// unparked by hand, a row a verb moved while a dispatcher held the slot. A second by default: the poll's own
     /// granularity, and well inside the host's tightest hop (ADR-0041 § 5).
     pub max_dormancy: Duration,
 }
@@ -340,6 +347,19 @@ pub struct HeldCount {
     /// How many heads are held.
     pub heads: u64,
     /// When the oldest hold began, as PostgreSQL prints a `timestamptz`.
+    pub oldest: String,
+}
+
+/// The rows of one channel waiting for a dependency (ADR-0042 decision 6):
+/// those the expiry spares — their dependency queued, or waiting on one
+/// queued — wait as long as it is on its way, and this is their count.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WaitingCount {
+    /// The channel the rows arrived on, without the key.
+    pub channel: String,
+    /// How many rows wait.
+    pub waiting: u64,
+    /// When the oldest wait began, as PostgreSQL prints a `timestamptz`.
     pub oldest: String,
 }
 
@@ -521,6 +541,8 @@ pub struct PgInbox<P, O = ()> {
     /// The process's breaker and Tenants' memo (ADR-0042): what this
     /// process does not ask, and when it asks again.
     breaker: Arc<std::sync::Mutex<Breaker>>,
+    /// The stalls this process reports (ADR-0042 decision 6).
+    stalls: Arc<std::sync::Mutex<stalls::Stalls>>,
     /// Per channel, the latest `processed_at` the sweep forgot: where its
     /// next statement starts, so that dead index entries a held vacuum
     /// horizon keeps are not walked again.
@@ -565,6 +587,7 @@ impl<P> PgInbox<P> {
             slots: 1,
             retention: InboxRetention::default(),
             breaker: Arc::new(std::sync::Mutex::new(Breaker::new(Breaking::default()))),
+            stalls: Arc::new(std::sync::Mutex::new(stalls::Stalls::new())),
             swept_to: Mutex::new(HashMap::new()),
             expired_to: expiry::Cursor::default(),
             admission: Arc::new(|_, _| true),
@@ -590,6 +613,7 @@ impl<P, O> PgInbox<P, O> {
             slots: self.slots,
             retention: self.retention,
             breaker: self.breaker,
+            stalls: self.stalls,
             swept_to: self.swept_to,
             expired_to: self.expired_to,
             admission: self.admission,

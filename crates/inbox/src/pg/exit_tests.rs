@@ -10,11 +10,13 @@
 //! subscriber left behind.
 
 /// The sources whose SQL writes the inbox table.
-const SOURCES: [(&str, &str); 4] = [
+const SOURCES: [(&str, &str); 6] = [
     ("store.rs", include_str!("store.rs")),
     ("surface.rs", include_str!("surface.rs")),
     ("dispatch.rs", include_str!("dispatch.rs")),
     ("sweep.rs", include_str!("sweep.rs")),
+    ("verbs.rs", include_str!("verbs.rs")),
+    ("stalls.rs", include_str!("stalls.rs")),
 ];
 
 /// The `SET` clause of every `UPDATE` of the inbox table in `source`: the
@@ -79,8 +81,9 @@ fn every_statement_that_takes_a_row_out_of_the_queue_clears_its_holds() {
         }
     }
     // mark, resolve, set aside, the expiry, the park of a row's own values,
-    // the spend: a gate that matched fewer reads nothing
-    assert!(exits >= 6, "{exits} exits found");
+    // the spend, the operator's park of held heads or of a queue (one
+    // statement for both): a gate that matched fewer reads nothing
+    assert!(exits >= 7, "{exits} exits found");
 }
 
 #[test]

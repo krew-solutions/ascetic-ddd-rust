@@ -185,7 +185,7 @@ the message is parked at once, attempts left or not. Errors of the database
 are the loop's business, not the subscriber's: a loop of `run` that meets an
 error of the moment — a lock cycle the server broke, a connection lost, a
 server going down, told by SQLSTATE in `ascetic_ddd_session::pg::transient`
-— waits, longer with each one in a row up to `Loops::max_pause`, and goes on;
+— waits, longer with each one in a row up to `Loops::max_error_wait`, and goes on;
 a defect stops every loop and `run` returns it (ADR-0010).
 Through the bus, a handler or a stage says the same with the one verdict the
 bus carries, `ascetic_ddd_bus::Permanent`: the inbox's consumer reads it
@@ -325,16 +325,52 @@ loop goes on at once. A round over the slot's Tenants that finds no head due
 puts the slot to sleep until the earliest backoff it saw, a row arriving
 after the round began, or `Rotation::max_dormancy`, a second by default —
 the bound on a row made due behind its back: an insert in flight when the
-round began, a row a mark in another slot woke, a row unparked. So a slot
+round began, a row a mark in another slot woke, a row unparked by hand, a
+row a bulk verb moved while a dispatcher held the slot (a bulk verb wakes
+the slots no one holds).
+So a slot
 whose every head waits writes ⌈T/K⌉ `Passed` and one `Nothing`, then nothing
 until it wakes. `PgInbox::with_rotation` sets both.
 
-What holds a slot's Tenants is counted from the table, for a host's gauges:
-`held_counts(within)` gives, by channel, kind and cause, how many Tenants
-have a head held and how many heads, and the oldest hold, never which: a
-head waiting its own back-off, or held for an `Unavailable` (ADR-0042
-decision 6). `unpark_all(principal, unparking)` re-arms the rows one cause
-parked, each with a canary of `tries` failures before it parks again.
+What holds a slot's Tenants is counted from the table, for a host's gauges
+(ADR-0042 decision 6), each in a transaction of its own bounded by `within`:
+- `held_counts(within)`: by channel, kind and cause, how many Tenants have a
+  head held and how many heads, and the oldest hold, never which — a head
+  waiting its own back-off, or held for an `Unavailable`;
+- `waiting_counts(within)`: by channel, the rows waiting for a dependency
+  and the oldest wait — those the expiry spares wait as long as their
+  dependency is on its way;
+- `parked_counts(within)`: by channel, ground and cause;
+- `stalls(within)`: the stalls each process reports, one row a (channel,
+  cause, process) in `<table>_stalls`, written when its breaker finds the
+  channel stalled and refreshed every tick, valid for twice the tick's cap
+  and a trial; a resumed channel's row lapses, and a pause again while it
+  holds counts another opening. The process's label is `reporter()`, drawn
+  at its start. No statement of the inbox reads the report to decide.
+
+The operator's verbs (ADR-0042 decision 8) each take a principal, are told
+to the observer as `Operated` — with the Tenant and the cause they name —
+after each batch commits, move rows a batch at a time
+in autocommitted statements that lock `SKIP LOCKED` — a head a dispatcher
+holds is passed by and counted — and wake the slots they moved rows into
+that no dispatcher holds:
+- `held(principal, after, limit)`: a page of the held heads with their hold,
+  cause and identity;
+- `park_heads(principal, &ParkingHeads { channel, cause, tenant, limit })`:
+  the heads held under a cause given up, the rows behind them going on;
+- `park_queue(principal, &ParkingQueue { channel, tenant, cause, limit })`:
+  a (channel, Tenant)'s queue given up whole, the newest first, under the
+  operator's cause, so that a row a dispatcher takes meanwhile is older than
+  every row parked and the re-arm overtakes nothing;
+- `unpark_all(principal, &Unparking { channel, ground, tenant, within, tries,
+  limit, overtaken })`: the parked rows of a ground re-armed — a failure's
+  under its cause, each with a canary of `tries` failures before it parks
+  again; an expired row to look for its dependency again; one parked at once
+  to be read again.
+
+Each reports what it did, what it passed by and whether more remain. A walk
+that waits on a verb's lock of its head reads the head, once the verb
+commits, as vanished, and takes the next at its next call.
 
 ## Forgetting
 

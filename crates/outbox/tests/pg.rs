@@ -899,7 +899,7 @@ async fn run_outlives_a_failing_subscriber() {
     let loops = Loops {
         concurrency: 1,
         poll_interval: Duration::from_millis(20),
-        max_pause: Duration::from_millis(50),
+        max_error_wait: Duration::from_millis(50),
     };
 
     let shutdown = async { done.notified().await };
@@ -2904,7 +2904,7 @@ async fn the_dispatcher_s_loops_work_the_reclamation() {
         Loops {
             concurrency: 2,
             poll_interval: Duration::from_millis(20),
-            max_pause: Duration::from_millis(100),
+            max_error_wait: Duration::from_millis(100),
         },
         async {
             let _ = stopped.await;
@@ -3223,7 +3223,7 @@ async fn the_reclamation_laps_the_ring_while_the_relay_is_busy() {
         Loops {
             concurrency: 4,
             poll_interval: Duration::from_millis(5),
-            max_pause: Duration::from_millis(50),
+            max_error_wait: Duration::from_millis(50),
         },
         async {
             let _ = stopped.await;

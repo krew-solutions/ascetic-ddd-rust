@@ -553,6 +553,47 @@ fn c12_an_unanswered_trial_is_asked_again() {
     );
 }
 
+/// C14: a channel opened again within the window after a stall is still
+/// stalled, and says so at its opening, not at its first tick, which the
+/// failed ticks it kept put up to the cap away: a stage that comes back for
+/// less than the stall's ttl keeps its report valid across the gap (ADR-0042
+/// decision 6). Red when a reopened stall waits for its first tick.
+#[test]
+fn c14_a_stall_opened_again_within_the_window_is_reported_at_its_opening() {
+    let mut sim = Sim::new(Breaking::default());
+    sim.open();
+    let mut stalled = false;
+    for _ in 0..4 {
+        sim.advance(Duration::from_secs(1));
+        let (id, _) = sim.next_trial();
+        let told = sim.breaker.tried(sim.now, id, Trial::Told(stage()));
+        stalled |= told
+            .effects
+            .iter()
+            .any(|e| matches!(e, Effect::Stalled { .. }));
+    }
+    assert!(stalled, "failed trials stall the channel");
+    sim.advance(Duration::from_secs(1));
+    let (id, _) = sim.next_trial();
+    let told = sim
+        .breaker
+        .tried(sim.now, id, Trial::Told(Verdict::Processed));
+    assert!(resumed(&told.effects), "a processed trial resumes it");
+    // back for 20 s, within the 30 s window, and down again
+    sim.advance(Duration::from_secs(20));
+    let mut effects = Vec::new();
+    for tenant in ["a", "b", "c"] {
+        if let Some(told) = sim.ask(tenant, 0, stage()) {
+            effects.extend(told.effects);
+        }
+    }
+    assert!(paused(&effects), "opened again: {effects:?}");
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Stalled { .. })),
+        "the stall said at the opening: {effects:?}"
+    );
+}
+
 proptest! {
     /// C13: a memoised Tenant is held until its back-off has run out, however
     /// many other Tenants fail meanwhile and fill the memo: an entry in flight

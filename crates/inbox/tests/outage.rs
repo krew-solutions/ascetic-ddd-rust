@@ -22,8 +22,9 @@ use ascetic_ddd_inbox::observer::{
     BreakerChanged, Failed, InboxObserver, Operated, Operation, Withheld,
 };
 use ascetic_ddd_inbox::{
-    Breaking, ByStream, CausalDependency, Error, Failure, Hold, Inbox, InboxMessage,
-    InboxRetention, Outcome, ParkedUnder, PgInbox, Retries, Rotation, UnparkedAll, Unparking,
+    Breaking, ByStream, CausalDependency, Error, Failure, GivenUp, Hold, Inbox, InboxMessage,
+    InboxRetention, Outcome, ParkedFor, ParkedUnder, ParkingHeads, ParkingQueue, PgInbox, Retries,
+    Rotation, UnparkedAll, Unparking, WaitingCount,
 };
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -78,12 +79,16 @@ struct Told {
     retry_after: Duration,
 }
 
+/// What a verb's audit named: its operation, its Tenant and its cause.
+type Named = (Operation, Option<String>, Option<String>);
+
 #[derive(Default)]
 struct Failures(
     Mutex<Vec<Told>>,
     Mutex<Vec<(String, Operation, u64)>>,
     Mutex<Vec<Effect>>,
     AtomicU32,
+    Mutex<Vec<Named>>,
 );
 
 impl InboxObserver for Failures {
@@ -92,6 +97,11 @@ impl InboxObserver for Failures {
             .lock()
             .unwrap()
             .push((event.principal.to_owned(), event.operation, event.rows));
+        self.4.lock().unwrap().push((
+            event.operation,
+            event.tenant.map(str::to_owned),
+            event.cause.map(str::to_owned),
+        ));
     }
 
     fn on_failed(&self, event: &Failed<'_>) {
@@ -1603,11 +1613,11 @@ async fn no_history_leaves_a_hold_on_a_row_out_of_the_queue() {
                 _ => {
                     if next(2) == 0 {
                         f.unpark_all(&Unparking {
-                            cause: ParkedUnder::Cause(if next(2) == 0 {
+                            ground: ParkedFor::Failure(ParkedUnder::Cause(if next(2) == 0 {
                                 "kms.gone"
                             } else {
                                 "db.timeout"
-                            }),
+                            })),
                             tries: 1,
                             ..refused_within_an_hour()
                         })
@@ -1667,7 +1677,7 @@ const REFUSED: Cause = cause!("kms.refused");
 fn refused_within_an_hour<'a>() -> Unparking<'a> {
     Unparking {
         channel: "kafka://orders",
-        cause: ParkedUnder::Cause("kms.refused"),
+        ground: ParkedFor::Failure(ParkedUnder::Cause("kms.refused")),
         tenant: None,
         within: Duration::from_secs(3600),
         tries: 1,
@@ -1738,7 +1748,7 @@ async fn an_operator_re_arms_the_rows_parked_for_a_cause_and_a_canary_parks_agai
     assert!(f.row("b").await.parked && f.row("c").await.parked);
     let unrecorded = f
         .unpark_all(&Unparking {
-            cause: ParkedUnder::Unrecorded,
+            ground: ParkedFor::Failure(ParkedUnder::Unrecorded),
             tries: 2,
             ..refused_within_an_hour()
         })
@@ -1929,4 +1939,763 @@ fn a_verdict_is_read_off_the_error_s_top() {
     }
     let wrapped = Failure::from(Wrapped(Permanent::because(KMS_GONE, "x")));
     assert!(!wrapped.is_permanent(), "never read off its sources");
+}
+
+const GIVEN_UP: Cause = cause!("operator.given_up");
+
+/// A slot that sleeps an hour once its heads are all held: what a verb
+/// wakes, the tests not waiting it out.
+fn asleep_for_an_hour(f: Fixture) -> Fixture {
+    Fixture {
+        inbox: f.inbox.with_rotation(Rotation {
+            walk: 32,
+            max_dormancy: Duration::from_secs(3600),
+        }),
+        ..f
+    }
+}
+
+/// Holds the heads of `streams` (their first rows) for `cause` as a verdict
+/// would: an `Unavailable` counted twice, or a back-off for `db.timeout`.
+async fn hold(f: &Fixture, cause: &str, streams: &[&str]) {
+    let kind = if cause == "db.timeout" {
+        "backoff"
+    } else {
+        "unavailable"
+    };
+    let holds = if kind == "backoff" { "NULL" } else { "2" };
+    let streams = streams
+        .iter()
+        .map(|stream| format!("'{stream}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    f.execute(&format!(
+        "UPDATE {{table}} SET held_since = now(), next_attempt_at = now() + interval '1 hour', \
+             hold_kind = '{kind}', holds = {holds}, cause = '{cause}' \
+         WHERE stream_id->>'id' IN ({streams}) AND stream_position = 1"
+    ))
+    .await;
+}
+
+/// The streams the dispatches processed, in their order.
+#[derive(Default)]
+struct Seen(Mutex<Vec<String>>);
+
+impl Seen {
+    fn ok(&self, message: &InboxMessage) -> Result<(), Failure> {
+        self.0
+            .lock()
+            .unwrap()
+            .push(message.stream_id["id"].as_str().unwrap_or("?").to_owned());
+        Ok(())
+    }
+
+    fn all(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// V1: the held heads are paged by their place, oldest first, each with its
+/// hold, its cause, its count of holds and its identity; a read told to the
+/// observer as the principal's (ADR-0042 decision 8).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_held_heads_are_paged_with_their_hold_and_identity() {
+    let f = fixture("held_page", Retries::up_to(3)).await;
+    f.publish(&[
+        message_of("t1", "a", 1),
+        message_of("t2", "b", 1),
+        message_of("t3", "c", 1),
+        message_of("t3", "c", 2),
+    ])
+    .await;
+    hold(&f, "kms.unavailable", &["a", "c"]).await;
+    hold(&f, "db.timeout", &["b"]).await;
+    let first = f.inbox.held("ops", None, 2).await.unwrap();
+    let rest = f
+        .inbox
+        .held("ops", Some(first[1].received_position), 2)
+        .await
+        .unwrap();
+    let page: Vec<_> = first
+        .iter()
+        .chain(&rest)
+        .map(|head| {
+            (
+                head.identity
+                    .as_ref()
+                    .map(|identity| identity.stream_id["id"].as_str().unwrap().to_owned()),
+                head.hold,
+                head.cause.clone(),
+                head.holds,
+                head.until.is_some(),
+            )
+        })
+        .collect();
+    let some = |text: &str| Some(text.to_owned());
+    assert_eq!(
+        page,
+        [
+            (
+                some("a"),
+                Hold::Unavailable,
+                some("kms.unavailable"),
+                Some(2),
+                true
+            ),
+            (some("b"), Hold::Backoff, some("db.timeout"), None, true),
+            (
+                some("c"),
+                Hold::Unavailable,
+                some("kms.unavailable"),
+                Some(2),
+                true
+            ),
+        ]
+    );
+    assert_eq!(
+        f.operated(),
+        [
+            ("ops".to_owned(), Operation::PagedHeld, 2),
+            ("ops".to_owned(), Operation::PagedHeld, 1)
+        ]
+    );
+}
+
+/// V1: the heads held under a cause are given up, a batch at a time up to
+/// the limit, of one Tenant when named; a head held under another cause
+/// stays; the rows behind them go on at once, their slot woken from a sleep
+/// of an hour; and they are re-armed by their cause (ADR-0042 decision 8).
+/// Red when the verb parks another cause's heads, or wakes no slot.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_heads_held_under_a_cause_are_given_up_and_the_rows_behind_them_go_on() {
+    let f = asleep_for_an_hour(fixture("park_heads", Retries::up_to(3)).await);
+    f.publish(&[
+        message_of("t1", "a", 1),
+        message_of("t1", "x", 1),
+        message_of("t2", "b", 1),
+        message_of("t3", "c", 1),
+    ])
+    .await;
+    hold(&f, "kms.unavailable", &["a", "b"]).await;
+    hold(&f, "db.timeout", &["c"]).await;
+    let seen = Seen::default();
+    assert_eq!(f.dispatch_on(|m| seen.ok(m)).await, Outcome::Nothing);
+    assert_eq!(
+        f.text("SELECT (dormant_until > now() + interval '30 minutes')::text FROM {table}_slots")
+            .await,
+        "true",
+        "the slot sleeps"
+    );
+    let heads = |limit, tenant| ParkingHeads {
+        channel: "kafka://orders",
+        cause: "kms.unavailable",
+        tenant,
+        limit,
+    };
+    let given = f.inbox.park_heads("ops", &heads(1, None)).await.unwrap();
+    assert_eq!(
+        given,
+        GivenUp {
+            parked: 1,
+            passed: 0,
+            more: true
+        }
+    );
+    let given = f.inbox.park_heads("ops", &heads(100, None)).await.unwrap();
+    assert_eq!(
+        given,
+        GivenUp {
+            parked: 1,
+            passed: 0,
+            more: false
+        }
+    );
+    assert!(f.row("a").await.parked && f.row("b").await.parked);
+    assert_eq!(f.row("a").await.cause.as_deref(), Some("kms.unavailable"));
+    let c = f.row("c").await;
+    assert!(c.held && !c.parked, "another cause's head stays held");
+    assert_eq!(
+        f.dispatch_on(|m| seen.ok(m)).await,
+        Outcome::Processed,
+        "the row behind a@1 at once, its slot woken"
+    );
+    assert_eq!(seen.all(), ["x"]);
+    let tenant_of = |tenant| ParkingHeads {
+        cause: "db.timeout",
+        ..heads(100, Some(tenant))
+    };
+    assert_eq!(
+        f.inbox
+            .park_heads("ops", &tenant_of("t9"))
+            .await
+            .unwrap()
+            .parked,
+        0
+    );
+    assert_eq!(
+        f.inbox
+            .park_heads("ops", &tenant_of("t3"))
+            .await
+            .unwrap()
+            .parked,
+        1
+    );
+    let unparked = f
+        .unpark_all(&Unparking {
+            ground: ParkedFor::Failure(ParkedUnder::Cause("kms.unavailable")),
+            tries: 1,
+            ..refused_within_an_hour()
+        })
+        .await;
+    assert_eq!((unparked.unparked, unparked.more), (2, false));
+    let operations: Vec<_> = f
+        .operated()
+        .into_iter()
+        .filter(|(_, operation, _)| *operation == Operation::ParkedHeads)
+        .map(|(principal, _, rows)| (principal, rows))
+        .collect();
+    assert_eq!(
+        operations,
+        [1, 1, 0, 1].map(|rows| ("ops".to_owned(), rows))
+    );
+    let named: Vec<_> = f.told.4.lock().unwrap().clone();
+    assert!(
+        named.contains(&(
+            Operation::ParkedHeads,
+            Some("t3".to_owned()),
+            Some("db.timeout".to_owned())
+        )),
+        "the audit names the Tenant and the cause: {named:?}"
+    );
+}
+
+/// V1: a (channel, Tenant)'s queue given up while a dispatcher serves it
+/// ends a prefix processed and a suffix parked: every row one or the other,
+/// each processed row older than every parked one, so that the re-arm
+/// overtakes nothing (ADR-0042 decision 8). A dispatch between two batches
+/// takes the Tenant's head, as a dispatcher does between two statements of
+/// one call. Red when the verb parks the oldest first: the dispatch then
+/// takes the row behind the first batch.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_queue_given_up_while_it_is_served_ends_a_prefix_processed_and_a_suffix_parked() {
+    let f = fixture("park_served", Retries::up_to(3)).await;
+    for n in 1..=300 {
+        f.publish(&[message_of("tx", "s", n)]).await;
+    }
+    let queue = |limit| ParkingQueue {
+        channel: "kafka://orders",
+        tenant: "tx",
+        cause: GIVEN_UP,
+        limit,
+    };
+    assert_eq!(
+        f.inbox.park_queue("ops", &queue(100)).await.unwrap().parked,
+        100
+    );
+    assert_eq!(
+        f.dispatch(ok).await,
+        Outcome::Processed,
+        "between two batches"
+    );
+    f.inbox.park_queue("ops", &queue(1000)).await.unwrap();
+    let positions = |state: &str| {
+        let sql = format!(
+            "SELECT coalesce(array_agg(stream_position ORDER BY stream_position), '{{}}') \
+             FROM {} WHERE {state}",
+            f.table
+        );
+        let sessions = &f.sessions;
+        async move {
+            sessions
+                .session(async |session| {
+                    Ok::<Vec<i32>, Error>(session.connection().query_one(&sql, &[]).await?.get(0))
+                })
+                .await
+                .unwrap()
+        }
+    };
+    let processed = positions("processed_position IS NOT NULL").await;
+    let parked = positions("parked_at IS NOT NULL").await;
+    assert_eq!(
+        processed.len() + parked.len(),
+        300,
+        "every row one or the other"
+    );
+    assert!(!parked.is_empty(), "the verb parked");
+    if let (Some(last), Some(first)) = (processed.last(), parked.first()) {
+        assert!(
+            last < first,
+            "a processed row behind a parked one: {last} after {first}"
+        );
+    }
+}
+
+/// V1: a head a dispatcher holds is passed by and counted, and the verb
+/// waits for nothing — not for that head's row, not for the slot its holder
+/// holds: the rest of the Tenant's queue is given up while the holder's
+/// subscriber runs (ADR-0009 decision 4 as ADR-0042 decision 8 amends it).
+/// Red when a verb locks its rows or its slots otherwise than `SKIP LOCKED`.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_head_a_dispatcher_holds_is_passed_by_and_the_verb_waits_for_nothing() {
+    let f = fixture("passed_by", Retries::up_to(3)).await;
+    f.publish(&[
+        message_of("tx", "x1", 1),
+        message_of("tx", "x2", 1),
+        message_of("tx", "x3", 1),
+    ])
+    .await;
+    let (entered, release) = (tokio::sync::Notify::new(), tokio::sync::Notify::new());
+    let holding = f.inbox.dispatch(|_: &PgSession, _: &InboxMessage| async {
+        entered.notify_one();
+        release.notified().await;
+        Ok::<(), Failure>(())
+    });
+    let verb = async {
+        entered.notified().await;
+        let given = tokio::time::timeout(
+            Duration::from_secs(5),
+            f.inbox.park_queue(
+                "ops",
+                &ParkingQueue {
+                    channel: "kafka://orders",
+                    tenant: "tx",
+                    cause: GIVEN_UP,
+                    limit: 100,
+                },
+            ),
+        )
+        .await
+        .expect("the verb waits for nothing")
+        .unwrap();
+        release.notify_one();
+        given
+    };
+    let (outcome, given) = tokio::join!(holding, verb);
+    assert_eq!(outcome.unwrap(), Outcome::Processed, "x1, by its holder");
+    assert_eq!(
+        given,
+        GivenUp {
+            parked: 2,
+            passed: 1,
+            more: false
+        }
+    );
+    assert!(f.row("x2").await.parked && f.row("x3").await.parked);
+}
+
+/// V1: a walk that waits on a verb's lock of its head reads the head, once
+/// the verb commits, as vanished, and the next dispatch takes the Tenant's
+/// next row (ADR-0009 decision 4 as ADR-0042 decision 8 amends it). The
+/// verb's statement is a transaction of the test's, held open until the
+/// walk waits on it.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_walk_that_waits_on_a_verb_s_lock_reads_its_head_vanished() {
+    let f = fixture("vanished", Retries::up_to(3)).await;
+    f.publish(&[message_of("tx", "x1", 1), message_of("tx", "x2", 1)])
+        .await;
+    let verb = pool().get().await.unwrap();
+    verb.batch_execute(&format!(
+        "BEGIN; UPDATE {} SET parked_at = now(), cause = 'operator.given_up' \
+         WHERE stream_id->>'id' = 'x1'",
+        f.table
+    ))
+    .await
+    .unwrap();
+    let seen = Seen::default();
+    let walk = f.dispatch_on(|m| seen.ok(m));
+    let commit = async {
+        let started = std::time::Instant::now();
+        loop {
+            let waiting: i64 = verb
+                .query_one(
+                    "SELECT count(*) FROM pg_stat_activity \
+                     WHERE wait_event_type = 'Lock' AND datname = current_database()",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            if waiting > 0 {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the walk never waited"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        verb.batch_execute("COMMIT").await.unwrap();
+    };
+    let (outcome, ()) = tokio::join!(walk, commit);
+    assert_eq!(outcome, Outcome::Nothing, "the head vanished");
+    assert!(seen.all().is_empty());
+    assert_eq!(f.dispatch_on(|m| seen.ok(m)).await, Outcome::Processed);
+    assert_eq!(seen.all(), ["x2"]);
+}
+
+/// V1: a (channel, Tenant)'s queue is given up whole — held or not, the
+/// limit taking the newest first, so that what is parked is the end of each
+/// stream — another Tenant's and another channel's rows untouched; re-armed
+/// by its cause, it is processed in its order (ADR-0042 decision 8). Red
+/// when the verb takes the oldest first.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_queue_given_up_whole_is_re_armed_in_its_order() {
+    let f = fixture("park_queue", Retries::up_to(3)).await;
+    for n in 1..=5 {
+        f.publish(&[message_of("tx", &format!("x{n}"), 1)]).await;
+    }
+    f.publish(&[message_of("ty", "y1", 1), message_on("pay", "tx", "p1", 1)])
+        .await;
+    hold(&f, "kms.unavailable", &["x1"]).await;
+    let queue = |limit| ParkingQueue {
+        channel: "kafka://orders",
+        tenant: "tx",
+        cause: GIVEN_UP,
+        limit,
+    };
+    assert_eq!(
+        f.inbox.park_queue("ops", &queue(2)).await.unwrap(),
+        GivenUp {
+            parked: 2,
+            passed: 0,
+            more: true
+        }
+    );
+    assert!(f.row("x5").await.parked && f.row("x4").await.parked);
+    assert!(!f.row("x3").await.parked, "the newest first");
+    assert_eq!(
+        f.inbox.park_queue("ops", &queue(100)).await.unwrap().parked,
+        3
+    );
+    assert!(!f.row("y1").await.parked && !f.row("p1").await.parked);
+    assert_eq!(
+        f.row("x1").await.cause.as_deref(),
+        Some("operator.given_up")
+    );
+    assert!(!f.row("x1").await.held, "no hold on a parked row");
+    // across slots, the limit takes the Tenant's oldest of every slot's
+    let cut = fixture_cut("park_queue_cut", Retries::up_to(3), 4, quick()).await;
+    for n in 1..=8 {
+        cut.publish(&[message_of("tx", &format!("x{n}"), 1)]).await;
+    }
+    assert_eq!(
+        cut.inbox.park_queue("ops", &queue(3)).await.unwrap().parked,
+        3
+    );
+    let mut parked = Vec::new();
+    for n in 1..=8 {
+        if cut.row(&format!("x{n}")).await.parked {
+            parked.push(n);
+        }
+    }
+    assert_eq!(parked, [6, 7, 8], "the newest first, whatever their slots");
+
+    let unparked = f
+        .unpark_all(&Unparking {
+            ground: ParkedFor::Failure(ParkedUnder::Cause("operator.given_up")),
+            tries: 1,
+            ..refused_within_an_hour()
+        })
+        .await;
+    assert_eq!(unparked.unparked, 5);
+    let seen = Seen::default();
+    while f.dispatch_on(|m| seen.ok(m)).await != Outcome::Nothing {}
+    let xs: Vec<String> = seen
+        .all()
+        .into_iter()
+        .filter(|stream| stream.starts_with('x'))
+        .collect();
+    assert_eq!(xs, ["x1", "x2", "x3", "x4", "x5"]);
+}
+
+/// V1: a canary of more tries than `max_attempts` re-arms a row to none
+/// spent, never fewer: it parks again at `max_attempts` failures (ADR-0042
+/// decision 8). Red when the attempts set may fall below none.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_canary_of_more_tries_than_attempts_parks_again_at_the_attempts() {
+    let f = fixture("canary_above", Retries::up_to(5)).await;
+    f.publish(&[message("r", 1)]).await;
+    f.execute(
+        "UPDATE {table} SET parked_at = now(), attempts = 5, cause = 'db.timeout' \
+         WHERE stream_id->>'id' = 'r'",
+    )
+    .await;
+    let unparked = f
+        .unpark_all(&Unparking {
+            ground: ParkedFor::Failure(ParkedUnder::Cause("db.timeout")),
+            tries: 10,
+            ..refused_within_an_hour()
+        })
+        .await;
+    assert_eq!(unparked.unparked, 1);
+    assert_eq!(f.row("r").await.attempts, 0);
+    let mut failures = 0;
+    while !f.row("r").await.parked {
+        assert!(failures < 20, "never parked again");
+        f.dispatch(|| Err(Transient::because(DB_TIMEOUT, "a moment").into()))
+            .await;
+        f.due().await;
+        failures += 1;
+    }
+    assert_eq!(failures, 5);
+}
+
+/// V1: a bulk unpark re-arms the rows of the ground it names, each by its
+/// remedy: a failure's tried again; an expired one looks for its dependency
+/// again and waits for it anew; one parked at once is read again — and no
+/// other ground's (ADR-0042 decision 8). Red when the ground is not
+/// selected.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_bulk_unpark_re_arms_the_ground_it_names_by_its_remedy() {
+    let f = fixture_waiting("grounds", Retries::up_to(3), Duration::from_secs(60)).await;
+    let never = message("never", 1);
+    f.publish(&[message("e", 1).depending_on(&[CausalDependency::on(&never)])])
+        .await;
+    assert_eq!(f.dispatch(ok).await, Outcome::SetAside);
+    f.execute(
+        "UPDATE {table} SET waiting_since = now() - interval '1 hour' \
+         WHERE waiting_since IS NOT NULL",
+    )
+    .await;
+    assert_eq!(f.inbox.expire().await.unwrap().parked, 1);
+    f.publish(&[message("u", 1), message("g", 1)]).await;
+    f.execute(
+        "UPDATE {table} SET parked_at = now(), unreadable_at = now() \
+             WHERE stream_id->>'id' = 'u'; \
+         UPDATE {table} SET parked_at = now(), attempts = 3, cause = 'db.timeout' \
+             WHERE stream_id->>'id' = 'g'",
+    )
+    .await;
+    let by = |ground| Unparking {
+        ground,
+        ..refused_within_an_hour()
+    };
+    let failure = ParkedFor::Failure(ParkedUnder::Cause("db.timeout"));
+    assert_eq!(f.unpark_all(&by(failure)).await.unparked, 1);
+    assert!(f.row("e").await.parked && f.row("u").await.parked);
+    assert!(!f.row("g").await.parked);
+    assert_eq!(f.unpark_all(&by(ParkedFor::Expired)).await.unparked, 1);
+    assert!(f.row("u").await.parked);
+    assert_eq!(f.unpark_all(&by(ParkedFor::AtOnce)).await.unparked, 1);
+    let seen = Seen::default();
+    let mut outcomes = Vec::new();
+    loop {
+        let outcome = f.dispatch_on(|m| seen.ok(m)).await;
+        if outcome == Outcome::Nothing {
+            break;
+        }
+        outcomes.push(outcome);
+    }
+    let mut processed = seen.all();
+    processed.sort();
+    assert_eq!(
+        processed,
+        ["g", "u"],
+        "the failure tried, the unreadable read"
+    );
+    assert!(outcomes.contains(&Outcome::SetAside), "e waits again");
+    assert_eq!(
+        f.count("SELECT count(*) FROM {table} WHERE stream_id->>'id' = 'e' AND waiting_since IS NOT NULL")
+            .await,
+        1
+    );
+}
+
+/// § 6: the rows waiting for a dependency are counted by channel, with the
+/// oldest wait; a row the expiry parked waits no more and is not counted
+/// (ADR-0042 decision 6).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_rows_waiting_are_counted_by_channel() {
+    let f = fixture("waiting_counts", Retries::up_to(3)).await;
+    let never = message("never", 1);
+    for (topic, stream) in [
+        ("orders", "w1"),
+        ("orders", "w2"),
+        ("pay", "w3"),
+        ("pay", "w4"),
+    ] {
+        f.publish(&[
+            message_on(topic, "tenant-1", stream, 1).depending_on(&[CausalDependency::on(&never)])
+        ])
+        .await;
+        assert_eq!(f.dispatch(ok).await, Outcome::SetAside);
+    }
+    f.execute(
+        "UPDATE {table} SET parked_at = now(), waiting_since = NULL \
+         WHERE stream_id->>'id' = 'w4'",
+    )
+    .await;
+    let counts: Vec<(String, u64)> = f
+        .inbox
+        .waiting_counts(Duration::from_secs(5))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(
+            |WaitingCount {
+                 channel,
+                 waiting,
+                 oldest,
+             }| {
+                assert!(!oldest.is_empty());
+                (channel, waiting)
+            },
+        )
+        .collect();
+    assert_eq!(
+        counts,
+        [
+            ("kafka://orders".to_owned(), 2),
+            ("kafka://pay".to_owned(), 1)
+        ]
+    );
+}
+
+/// § 6, C7: a channel this process finds stalled is reported — one row a
+/// (channel, cause, process), the process's own label, valid ahead of the
+/// database's clock and refreshed while the stall lasts; resumed, its row
+/// is refreshed no more and lapses within its ttl; paused again while the
+/// row holds, it counts another opening and keeps its start (ADR-0042
+/// decision 6). Red when a refresh resets the start, or an opening is not
+/// counted, or a resumed channel's row is refreshed.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_stall_is_reported_while_it_lasts_and_lapses_after() {
+    let f = fixture("stalls", Retries::up_to(3)).await;
+    for tenant in ["t1", "t2", "t3"] {
+        f.publish(&[message_of(tenant, &format!("{tenant}-a"), 1)])
+            .await;
+    }
+    // stalled the nth time: paused, two ticks' trials failed, and a stall
+    // told after that pause, which the next dispatch reports
+    let stall_down = async |nth: usize| {
+        let started = std::time::Instant::now();
+        loop {
+            f.dispatch(|| stage_down(None)).await;
+            f.due().await;
+            let effects = f.effects();
+            let paused = effects
+                .iter()
+                .enumerate()
+                .filter(|(_, effect)| matches!(effect, Effect::Paused { .. }))
+                .nth(nth - 1)
+                .map(|(at, _)| at);
+            if let Some(at) = paused {
+                if effects[at..]
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::Stalled { .. }))
+                {
+                    f.dispatch(|| stage_down(None)).await;
+                    return f.inbox.stalls(Duration::from_secs(5)).await.unwrap();
+                }
+            }
+            assert!(started.elapsed() < Duration::from_secs(20), "never stalled");
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    };
+    let stalls = stall_down(1).await;
+    assert_eq!(stalls.len(), 1, "{stalls:?}");
+    let first = stalls[0].clone();
+    assert_eq!(
+        (first.channel.as_str(), first.cause.as_str(), first.openings),
+        ("kafka://orders", "kms.unavailable", 1)
+    );
+    assert_eq!(first.reporter, f.inbox.reporter());
+    // refreshed while it lasts, its start kept
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    f.dispatch(|| stage_down(None)).await;
+    let refreshed = f.inbox.stalls(Duration::from_secs(5)).await.unwrap();
+    assert_eq!(refreshed[0].since, first.since);
+    assert!(refreshed[0].valid_until >= first.valid_until);
+    // resumed: a trial's processed row
+    let resumed = std::time::Instant::now();
+    loop {
+        f.dispatch(ok).await;
+        f.due().await;
+        if f.effects()
+            .iter()
+            .any(|effect| matches!(effect, Effect::Resumed { .. }))
+        {
+            break;
+        }
+        assert!(resumed.elapsed() < Duration::from_secs(20), "never resumed");
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    let held = f.inbox.stalls(Duration::from_secs(5)).await.unwrap();
+    assert!(held[0].valid, "a resumed channel's row holds until its ttl");
+    for tenant in ["t4", "t5", "t6"] {
+        f.publish(&[message_of(tenant, &format!("{tenant}-a"), 1)])
+            .await;
+    }
+    let again = stall_down(2).await;
+    assert_eq!(again.len(), 1, "{again:?}");
+    assert_eq!(again[0].since, first.since, "one stall across the gap");
+    assert_eq!(again[0].openings, 2, "and two openings");
+    // resumed, its row lapses within its ttl, refreshed by no dispatch
+    loop {
+        f.dispatch(ok).await;
+        f.due().await;
+        if f.effects()
+            .iter()
+            .filter(|effect| matches!(effect, Effect::Resumed { .. }))
+            .count()
+            == 2
+        {
+            break;
+        }
+        assert!(
+            resumed.elapsed() < Duration::from_secs(40),
+            "never resumed again"
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    tokio::time::sleep(quick().stall_ttl() + Duration::from_millis(200)).await;
+    f.dispatch(ok).await;
+    let lapsed = f.inbox.stalls(Duration::from_secs(5)).await.unwrap();
+    assert!(!lapsed[0].valid, "lapsed: {lapsed:?}");
+}
+
+/// § 6: the stall report is for people, never a gate — a report that cannot
+/// be written, its table gone, leaves the dispatches to go on, the channel
+/// paused and tried as ever (ADR-0042 decision 6). Red when a report's
+/// failure fails its dispatch.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_report_that_cannot_be_written_fails_no_dispatch() {
+    let f = fixture("report_fails", Retries::up_to(3)).await;
+    for tenant in ["t1", "t2", "t3"] {
+        f.publish(&[message_of(tenant, &format!("{tenant}-a"), 1)])
+            .await;
+    }
+    f.execute("DROP TABLE {table}_stalls").await;
+    let started = std::time::Instant::now();
+    while !f
+        .effects()
+        .iter()
+        .any(|effect| matches!(effect, Effect::Stalled { .. }))
+    {
+        assert!(started.elapsed() < Duration::from_secs(20), "never stalled");
+        f.inbox
+            .dispatch(|_: &PgSession, _: &InboxMessage| std::future::ready(stage_down(None)))
+            .await
+            .expect("a dispatch the report cannot fail");
+        f.due().await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    for _ in 0..3 {
+        f.inbox
+            .dispatch(|_: &PgSession, _: &InboxMessage| std::future::ready(stage_down(None)))
+            .await
+            .expect("a dispatch the report cannot fail");
+        f.due().await;
+    }
 }

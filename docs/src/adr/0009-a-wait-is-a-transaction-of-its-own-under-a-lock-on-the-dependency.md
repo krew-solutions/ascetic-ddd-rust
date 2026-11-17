@@ -9,6 +9,13 @@ different premises, eleven two-session experiments in PostgreSQL
 are to the commit that accepted this ADR, before the change; the two tests
 named under Consequences fail at that commit on purpose.
 
+Decision 4 amended by ADR-0042 decision 8 (2026-11-17): a queue head is
+locked by its slot's holder and, for one statement, by an operator's verb
+(`park_heads`, `park_queue`), which locks its rows and the slots it wakes
+`SKIP LOCKED` and so waits for nothing; a walk that waits on such a lock
+reads the head, once the verb commits, as vanished. No cycle passes through
+a verb. `resolve` writes no slot row: it holds the mark's advisory lock.
+
 ## Context
 
 ADR-0006 made a message ahead of its dependency wait out of the queue, woken

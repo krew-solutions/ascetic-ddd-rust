@@ -74,6 +74,12 @@ pub struct Operated<'a> {
     pub channel: Option<&'a str>,
     /// The row's digest, when the call named one.
     pub digest: Option<&'a str>,
+    /// The Tenant, when the call named one: whose rows a verb moved
+    /// (ADR-0042 decision 8).
+    pub tenant: Option<&'a str>,
+    /// The cause, when the call named one: the cause a verb parked or
+    /// re-armed rows by.
+    pub cause: Option<&'a str>,
     /// How many rows the call read or changed.
     pub rows: u64,
 }
@@ -91,10 +97,16 @@ pub enum Operation {
     Readmitted,
     /// Closed a row as discarded, a tombstone.
     Discarded,
-    /// Parked the heads held for their stage's outage, by cause (ADR-0040
+    /// Read a page of the held heads (ADR-0042 decision 8).
+    PagedHeld,
+    /// Parked the heads held under a cause, a batch of them (ADR-0042
     /// decision 8): the rows behind them go on.
-    ParkedHeld,
-    /// Re-armed parked rows by cause, a batch of them (ADR-0040 decision 8).
+    ParkedHeads,
+    /// Parked a (channel, Tenant)'s queue rows, a batch of them (ADR-0042
+    /// decision 8): its queue given up whole.
+    ParkedQueue,
+    /// Re-armed parked rows by ground and cause, a batch of them (ADR-0040
+    /// decision 8, ADR-0042 decision 8).
     UnparkedAll,
 }
 
@@ -470,6 +482,8 @@ mod tests {
             operation: Operation::Counted,
             channel: None,
             digest: None,
+            tenant: None,
+            cause: None,
             rows: 0,
         });
         observer.on_parked_at_once(&ParkedAtOnce {

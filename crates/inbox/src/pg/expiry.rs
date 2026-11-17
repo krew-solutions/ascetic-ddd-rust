@@ -130,7 +130,7 @@ where
                 }
                 Err(error) if error.is_transient() => {
                     passing += 1;
-                    let pause = loops.pause_after(passing);
+                    let pause = loops.error_wait_after(passing);
                     log::warn!(
                         "inbox: the expiry met an error of the moment, waiting {pause:?}: {error}"
                     );

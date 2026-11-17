@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use ascetic_ddd_session::{PgAccess, SessionPool};
 
-use super::store::CHANNEL_OF_ROW;
+use super::store::{CHANNEL_OF_ROW, GROUND_OF_ROW, LEAVE_QUEUE};
 use super::{Admission, PgInbox};
 use crate::error::Error;
 use crate::intake::{self, Reason};
@@ -289,11 +289,28 @@ where
         digest: Option<&str>,
         rows: usize,
     ) {
+        self.operated_on(principal, operation, channel, digest, None, None, rows);
+    }
+
+    /// The same, naming the Tenant and the cause a verb moved rows by.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn operated_on(
+        &self,
+        principal: &str,
+        operation: Operation,
+        channel: Option<&str>,
+        digest: Option<&str>,
+        tenant: Option<&str>,
+        cause: Option<&str>,
+        rows: usize,
+    ) {
         self.observer.on_operated(&Operated {
             principal,
             operation,
             channel,
             digest,
+            tenant,
+            cause,
             rows: u64::try_from(rows).unwrap_or(u64::MAX),
         });
     }
@@ -321,7 +338,8 @@ pub struct Readmitted {
 /// How many rows a bulk readmit reads at a time.
 const READMIT_BATCH: i64 = 100;
 
-/// The cause a parked row was parked under, for [`PgInbox::unpark_all`].
+/// The cause a row parked on the failure ground was parked under, for
+/// [`PgInbox::unpark_all`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParkedUnder<'a> {
     /// This cause.
@@ -330,13 +348,41 @@ pub enum ParkedUnder<'a> {
     Unrecorded,
 }
 
+/// The ground of the parked rows [`PgInbox::unpark_all`] re-arms (ADR-0042
+/// decision 8), each with its own remedy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParkedFor<'a> {
+    /// Their subscriber failed, under this cause: re-armed, each is tried
+    /// again.
+    Failure(ParkedUnder<'a>),
+    /// Their wait for a dependency ran out: re-armed, each looks for its
+    /// dependency again, and waits for it anew when it is still missing.
+    Expired,
+    /// Their own values could not be read or written: re-armed, each is
+    /// read again.
+    AtOnce,
+}
+
+impl<'a> ParkedFor<'a> {
+    /// The ground's name, as [`super::Ground::as_str`] has it, and the
+    /// cause on the failure ground: what a batch selects by.
+    fn selector(self) -> (&'static str, Option<&'a str>) {
+        match self {
+            ParkedFor::Failure(ParkedUnder::Cause(cause)) => ("failure", Some(cause)),
+            ParkedFor::Failure(ParkedUnder::Unrecorded) => ("failure", None),
+            ParkedFor::Expired => ("expired", None),
+            ParkedFor::AtOnce => ("at_once", None),
+        }
+    }
+}
+
 /// Which parked rows [`PgInbox::unpark_all`] re-arms, and how.
 #[derive(Clone, Copy, Debug)]
 pub struct Unparking<'a> {
     /// Their channel, without its key.
     pub channel: &'a str,
-    /// The cause they were parked under.
-    pub cause: ParkedUnder<'a>,
+    /// The ground they are parked on, and the cause on the failure ground.
+    pub ground: ParkedFor<'a>,
     /// Their Tenant, when only one's.
     pub tenant: Option<&'a str>,
     /// Parked within this long before the call.
@@ -359,15 +405,54 @@ pub struct UnparkedAll {
     pub unparked: u64,
     /// Rows left parked because they were overtaken.
     pub overtaken: u64,
+    /// Whether rows it names remain past `limit`.
+    pub more: bool,
     /// The end of the window, the database's clock at the call.
     pub as_of: String,
 }
 
-/// A batch of a bulk unpark: the parked rows of a channel on the failure
-/// ground, parked within the window ending at `$3`, after the cursor, by
-/// the parked index; each told whether a processed row of its stream at a
-/// higher position overtook it. It reads no clock: the window is the
-/// call's.
+/// The parked rows a bulk unpark selects, as `r`: of a channel (`$1`), on
+/// a ground (`ground`, a parameter) and, on the failure ground, under a
+/// cause (`$5`), of one Tenant when named (`$6`), parked within the window
+/// ending at `$3` and as long as `$4`, after the cursor (`$2`), by the
+/// parked index. It reads no clock: the window is the call's.
+fn unpark_selection(ground: &str) -> String {
+    format!(
+        "{channel} = $1 AND r.parked_at IS NOT NULL AND r.received_position > $2 \
+         AND {of_row} = {ground}::text \
+         AND ({ground}::text <> 'failure' OR CASE WHEN $5::text IS NULL THEN r.cause IS NULL \
+                                             ELSE r.cause = $5::text END) \
+         AND r.parked_at <= $3::text::timestamptz \
+         AND r.parked_at >= $3::text::timestamptz - make_interval(secs => $4::double precision) \
+         AND ($6::text IS NULL OR r.tenant_id = $6::text)",
+        channel = CHANNEL_OF_ROW.replace("uri", "r.uri"),
+        of_row = GROUND_OF_ROW
+            .replace("unreadable_at", "r.unreadable_at")
+            .replace("waiting_for", "r.waiting_for"),
+    )
+}
+
+/// Whether rows a bulk unpark selects remain after its cursor (`$2`), the
+/// ground `$7`, the overtaken among them only when `$8`: past its limit.
+fn unpark_remains(table: &str) -> String {
+    format!(
+        "SELECT EXISTS (SELECT 1 FROM {table} r WHERE {selection} \
+                        AND ($8::boolean OR NOT EXISTS ( \
+                            SELECT 1 FROM {table} later \
+                            WHERE later.tenant_id = r.tenant_id \
+                              AND later.stream_type = r.stream_type \
+                              AND later.stream_id = r.stream_id \
+                              AND later.stream_position > r.stream_position \
+                              AND later.processed_position IS NOT NULL)))",
+        selection = unpark_selection("$7"),
+    )
+}
+
+/// A batch of a bulk unpark: the rows [`unpark_selection`] names, oldest
+/// first, each told whether a processed row of its stream at a higher
+/// position overtook it; re-armed in the queue — its park, its wait, its
+/// unreadable mark and its cause cleared, no hold on it — and the slots it
+/// moved rows into woken ([`super::verbs::wake`]).
 pub(super) fn unpark_batch(table: &str) -> String {
     format!(
         "WITH chosen AS ( \
@@ -378,25 +463,21 @@ pub(super) fn unpark_batch(table: &str) -> String {
                              AND later.stream_position > r.stream_position \
                              AND later.processed_position IS NOT NULL) AS overtaken \
             FROM {table} r \
-            WHERE {channel} = $1 AND r.parked_at IS NOT NULL AND r.received_position > $2 \
-              AND r.unreadable_at IS NULL AND r.waiting_for IS NULL \
-              AND r.parked_at <= $3::text::timestamptz \
-              AND r.parked_at >= $3::text::timestamptz - make_interval(secs => $4::double precision) \
-              AND CASE WHEN $5::text IS NULL THEN r.cause IS NULL \
-                       ELSE r.cause = $5::text END \
-              AND ($6::text IS NULL OR r.tenant_id = $6::text) \
+            WHERE {selection} \
             ORDER BY r.received_position LIMIT $7 \
             FOR UPDATE OF r SKIP LOCKED \
          ), unparked AS ( \
-            UPDATE {table} SET parked_at = NULL, cause = NULL, \
-                next_attempt_at = NULL, attempts = GREATEST(0, $8::integer) \
+            UPDATE {table} SET parked_at = NULL, unreadable_at = NULL, waiting_for = NULL, \
+                waiting_since = NULL, cause = NULL, {LEAVE_QUEUE}, \
+                attempts = $8::integer \
             WHERE ctid IN (SELECT place FROM chosen WHERE $9::boolean OR NOT overtaken) \
-            RETURNING 1 \
-         ) \
+            RETURNING slot \
+         ), {wake} \
          SELECT (SELECT count(*) FROM chosen), (SELECT count(*) FROM unparked), \
                 (SELECT count(*) FROM chosen WHERE overtaken AND NOT $9::boolean), \
-                (SELECT max(received_position) FROM chosen)",
-        channel = CHANNEL_OF_ROW.replace("uri", "r.uri")
+                (SELECT max(received_position) FROM chosen), (SELECT count(*) FROM woke)",
+        selection = unpark_selection("$10"),
+        wake = super::verbs::wake(table, "unparked"),
     )
 }
 
@@ -578,15 +659,18 @@ where
         }
     }
 
-    /// Re-arms the parked rows `unparking` names (ADR-0040 decision 8):
-    /// those of a channel, on the failure ground, parked under a cause — of
-    /// one Tenant, when named — within a window before the call, oldest
-    /// first, a batch at a time, each its own transaction, the observer
-    /// told after each commits. A row re-armed loses its park and its cause,
-    /// has its attempts set so that `tries` more failures park it again, however it was parked. A row a
-    /// later row of its stream overtook stays parked unless asked for: its
+    /// Re-arms the parked rows `unparking` names (ADR-0040 decision 8,
+    /// ADR-0042 decision 8): those of a channel, on a ground — on the
+    /// failure ground under a cause — of one Tenant when named, within a
+    /// window before the call, oldest first, a batch at a time, each its own
+    /// statement, the observer told after each commits. A row re-armed
+    /// loses its park, its wait, its unreadable mark and its cause, has its
+    /// attempts set so that `tries` more failures park it again, however it
+    /// was parked, and its slot is woken unless a dispatcher holds it. A row
+    /// a later row of its stream overtook stays parked unless asked for: its
     /// stream has gone on without it. The window's ends are read once, as
-    /// [`PgInbox::readmit_all`]'s are.
+    /// [`PgInbox::readmit_all`]'s are. [`UnparkedAll::more`] says whether
+    /// rows it names remain past the limit.
     ///
     /// # Errors
     /// [`Error::Refused`] when the window is longer than the channel keeps
@@ -624,10 +708,7 @@ where
             })
             .await?;
         let sql = unpark_batch(self.table.as_str());
-        let cause = match unparking.cause {
-            ParkedUnder::Cause(cause) => Some(cause),
-            ParkedUnder::Unrecorded => None,
-        };
+        let (ground, cause) = unparking.ground.selector();
         let left = i32::try_from(self.retries.max_attempts.saturating_sub(unparking.tries))
             .unwrap_or(i32::MAX);
         let mut done = UnparkedAll {
@@ -658,6 +739,7 @@ where
                                 &batch,
                                 &left,
                                 &unparking.overtaken,
+                                &ground,
                             ],
                         )
                         .await?;
@@ -672,17 +754,46 @@ where
             let unparked = u64::try_from(unparked).unwrap_or_default();
             done.unparked += unparked;
             done.overtaken += u64::try_from(overtaken).unwrap_or_default();
-            self.operated(
+            self.operated_on(
                 principal,
                 Operation::UnparkedAll,
                 Some(unparking.channel),
                 None,
+                unparking.tenant,
+                cause,
                 usize::try_from(unparked).unwrap_or(usize::MAX),
             );
             match last {
                 Some(last) if chosen >= batch => after = last,
                 _ => break,
             }
+        }
+        if done.unparked >= u64::from(unparking.limit) {
+            let remains = unpark_remains(self.table.as_str());
+            done.more = self
+                .pool
+                .session(async |session: P::Session| {
+                    Ok::<_, Error>(
+                        session
+                            .connection()
+                            .query_one(
+                                &remains,
+                                &[
+                                    &unparking.channel,
+                                    &after,
+                                    &as_of,
+                                    &unparking.within.as_secs_f64(),
+                                    &cause,
+                                    &unparking.tenant,
+                                    &ground,
+                                    &unparking.overtaken,
+                                ],
+                            )
+                            .await?
+                            .get::<_, bool>(0),
+                    )
+                })
+                .await?;
         }
         log::warn!(
             "inbox: {} re-armed {} parked rows of {}, {} overtaken left parked",

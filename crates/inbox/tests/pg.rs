@@ -1267,7 +1267,7 @@ async fn a_loop_outlives_a_lost_connection() {
     let loops = Loops {
         concurrency: 1,
         poll_interval: Duration::from_millis(20),
-        max_pause: Duration::from_millis(100),
+        max_error_wait: Duration::from_millis(100),
     };
 
     tokio::time::timeout(
@@ -1762,7 +1762,8 @@ async fn a_dependency_that_never_arrives_parks_the_message_after_max_wait() {
 /// a row's cause, the count and kind of its holds, their CHECKs, the held
 /// index, the guest's cursor and the walk's paused channels — and ADR-0040's
 /// causes migration with them, and the same day the expiry's function, its
-/// index's key and the CHECK that a row with a time of wait waits; the
+/// index's key, the CHECK that a row with a time of wait waits, and the
+/// stalls' table; the
 /// databases made before are recreated. Once the library is live, the
 /// exception is gone: the checksum covers the functions' bodies, so an edit
 /// of a statement is then a new function by a new migration, and ADR-0042
@@ -1781,7 +1782,7 @@ fn the_released_migrations_keep_their_checksums() {
         [
             (
                 "20261027T000000Z_baseline".to_owned(),
-                "fnv1a64:d93838f3e0f6b303:19292".to_owned()
+                "fnv1a64:c65014f42a4e75f5:19613".to_owned()
             ),
             (
                 "20261104T000000Z_processed_at".to_owned(),
@@ -1980,7 +1981,7 @@ async fn the_inbox_s_run_sweeps_beside_its_loops_after_its_grace() {
             Loops {
                 concurrency: 1,
                 poll_interval: Duration::from_millis(10),
-                max_pause: Duration::from_millis(50),
+                max_error_wait: Duration::from_millis(50),
             },
             async {
                 let _ = stopped.await;
@@ -3265,7 +3266,10 @@ async fn a_row_committed_during_a_round_behind_its_walk_wakes_the_slot() {
 /// E4, the cap: a row made due behind a sleeping slot's back is taken
 /// within `max_dormancy` — here a parked row unparked, and an insert that
 /// was in flight when the round began, whose position lies below the
-/// round's. Neither wakes the slot by itself; the cap does.
+/// round's. Neither wakes the slot by itself; the cap does. The single
+/// unpark runs in the caller's session, maybe in its transaction, and
+/// writes no slot row; the operator's bulk verbs, each its own statement,
+/// wake the slots they move rows into (ADR-0042 decision 8).
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_row_made_due_behind_a_sleeping_slot_is_taken_within_the_cap() {

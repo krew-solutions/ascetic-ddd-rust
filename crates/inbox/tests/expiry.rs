@@ -649,7 +649,7 @@ async fn run_expires_on_its_timer() {
     let loops = Loops {
         concurrency: 1,
         poll_interval: Duration::from_millis(50),
-        max_pause: Duration::from_millis(200),
+        max_error_wait: Duration::from_millis(200),
     };
     let deadline = Instant::now() + Duration::from_secs(10);
     let watched = async {
