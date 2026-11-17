@@ -729,3 +729,551 @@ async fn m1_the_happy_path_s_statements_before_the_decision_and_after() {
         inbox.teardown().await.unwrap();
     }
 }
+
+/// A pool of `size` connections, for a measurement that runs dispatchers
+/// beside a verb.
+fn pool_of(size: usize) -> Pool {
+    let url = std::env::var("ASCETIC_DDD_TEST_PG_URL").unwrap_or_else(|_| DEFAULT_URL.to_owned());
+    let manager = Manager::from_config(
+        Config::from_str(&url).expect("a valid PostgreSQL URL"),
+        NoTls,
+        ManagerConfig {
+            recycling_method: RecyclingMethod::Fast,
+        },
+    );
+    Pool::builder(manager)
+        .max_size(size)
+        .build()
+        .expect("the pool can be built")
+}
+
+/// The median and the largest of `samples`, in milliseconds.
+fn spread(samples: &mut [Duration]) -> (f64, f64, f64) {
+    samples.sort();
+    let at = |q: f64| {
+        samples[((samples.len() as f64 - 1.0) * q).round() as usize].as_secs_f64() * 1000.0
+    };
+    (at(0.5), at(0.99), at(1.0))
+}
+
+/// M7 (ADR-0042 § Executors): the operator's verbs at the host's scale, on
+/// its launch shape in a full outage — 64 slots, 2,000 Tenants of a hundred
+/// streams over seven channels, a Tenant with a backlog of 70,000 rows, a
+/// processed history of 200,000, every head held under one cause, some
+/// 100,000 held heads. Timed at the client, the verb's own statements:
+/// - a page of the held heads, which sorts the held heads each page;
+/// - `park_heads` of one channel, batch after batch;
+/// - `park_queue` of the backlogged Tenant on one channel, whose batches
+///   re-read its rows of the other channels in its slots;
+/// - `unpark_all` of what `park_heads` parked;
+/// - eight dispatchers' dispatches, without a verb and beside `park_heads`
+///   of another channel: a walk that meets a head the verb's batch locks
+///   waits for the batch.
+#[tokio::test]
+#[ignore = "a measurement (ADR-0042 M7): run by hand"]
+async fn m7_the_operator_s_verbs_at_the_host_s_scale() {
+    use super::{ParkedFor, ParkedUnder, ParkingHeads, ParkingQueue, Unparking};
+    if !asked() {
+        return;
+    }
+    let small = std::env::var("ASCETIC_DDD_MEASURE").as_deref() == Ok("small");
+    let (tenants, backlog, history): (i32, i32, i32) = if small {
+        (200, 7_000, 20_000)
+    } else {
+        (2_000, 70_000, 200_000)
+    };
+    let table = "inbox_m7v";
+    let inbox = PgInbox::new(PgSessionPool::new(pool_of(12)))
+        .with_table(
+            Identifier::new(table).unwrap(),
+            Identifier::new("inbox_m7v_seq").unwrap(),
+        )
+        .with_slots(64)
+        .partitioned_by(ByStream);
+    inbox.teardown().await.unwrap();
+    inbox.migrate().await.unwrap();
+    let client = pool().get().await.unwrap();
+    client
+        .batch_execute(&format!(
+            "INSERT INTO {table} (tenant_id, stream_type, stream_id, stream_position, uri, \
+                 payload, metadata, processed_position) \
+             SELECT 't' || lpad((g % {tenants})::text, 4, '0'), 'orders.Order', \
+                 to_jsonb('h-' || g), 1, 'kafka://c' || (g % 7) || '/h', 'x', '{{}}', g \
+             FROM generate_series(1, {history}) g; \
+             INSERT INTO {table} (tenant_id, stream_type, stream_id, stream_position, uri, \
+                 payload, metadata) \
+             SELECT 't' || lpad(t::text, 4, '0'), 'orders.Order', \
+                 to_jsonb('s-' || t || '-' || k), 1, 'kafka://c' || (k % 7) || '/s', 'x', '{{}}' \
+             FROM generate_series(0, {tenants} - 1) t, generate_series(1, 100) k; \
+             INSERT INTO {table} (tenant_id, stream_type, stream_id, stream_position, uri, \
+                 payload, metadata) \
+             SELECT 'tbig', 'orders.Order', to_jsonb('b-' || k), 1, \
+                 'kafka://c' || (k % 7) || '/b', 'x', '{{}}' \
+             FROM generate_series(1, {backlog}) k; \
+             UPDATE {table} SET held_since = now(), next_attempt_at = now() + interval '1 hour', \
+                 hold_kind = 'unavailable', holds = 1, cause = 'kms.unavailable' \
+             WHERE (slot, tenant_id, received_position) IN ( \
+                 SELECT slot, tenant_id, min(received_position) FROM {table} \
+                 WHERE processed_position IS NULL GROUP BY slot, tenant_id)"
+        ))
+        .await
+        .unwrap();
+    vacuum(&client, table).await;
+    let held: i64 = client
+        .query_one(
+            &format!("SELECT count(*) FROM {table} WHERE held_since IS NOT NULL"),
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    println!("M7v: {held} heads held");
+    // the held page, first and from the middle, five times each
+    let middle: i64 = client
+        .query_one(
+            &format!(
+                "SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY received_position) \
+                 FROM {table} WHERE held_since IS NOT NULL"
+            ),
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    for (name, after) in [
+        ("the first page", None),
+        ("a page from the middle", Some(middle)),
+    ] {
+        let mut times = Vec::new();
+        for _ in 0..6 {
+            let started = Instant::now();
+            let page = inbox.held("ops", after, 100).await.unwrap();
+            assert_eq!(page.len(), 100);
+            times.push(started.elapsed());
+        }
+        let (median, _, most) = spread(&mut times[1..]);
+        println!("M7v, the held heads, {name} of 100: {median:.1} ms, at most {most:.1}");
+    }
+    let cause = "kms.unavailable";
+    let started = Instant::now();
+    let given = inbox
+        .park_heads(
+            "ops",
+            &ParkingHeads {
+                channel: "kafka://c0",
+                cause,
+                tenant: None,
+                limit: u32::MAX,
+            },
+        )
+        .await
+        .unwrap();
+    println!(
+        "M7v, park_heads of one channel, every head: {:.0} ms, {given:?}",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    let started = Instant::now();
+    let given = inbox
+        .park_queue(
+            "ops",
+            &ParkingQueue {
+                channel: "kafka://c1",
+                tenant: "tbig",
+                cause: ascetic_ddd_bus::Cause::new("operator.given_up").unwrap(),
+                limit: u32::MAX,
+            },
+        )
+        .await
+        .unwrap();
+    println!(
+        "M7v, park_queue of the backlogged Tenant on one channel: {:.0} ms, {given:?}",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    let started = Instant::now();
+    let unparked = inbox
+        .unpark_all(
+            "ops",
+            &Unparking {
+                channel: "kafka://c0",
+                ground: ParkedFor::Failure(ParkedUnder::Cause(cause)),
+                tenant: None,
+                within: Duration::from_secs(3600),
+                tries: 1,
+                limit: u32::MAX,
+                overtaken: false,
+            },
+        )
+        .await
+        .unwrap();
+    println!(
+        "M7v, unpark_all of what park_heads parked: {:.0} ms, {unparked:?}",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    // Dispatchers on c0, re-armed and due, without a verb and beside
+    // park_heads of the other channels, one after another, five seconds
+    // each, after a second unrecorded that opens their connections and
+    // plans their statements.
+    let dispatching = async |verb: bool, seconds: u64| -> Vec<Duration> {
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let loops = (0..8).map(|_| async {
+            let mut times = Vec::new();
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let started = Instant::now();
+                inbox
+                    .dispatch(|_: &_, _: &InboxMessage| std::future::ready(Ok(())))
+                    .await
+                    .unwrap();
+                times.push(started.elapsed());
+            }
+            times
+        });
+        let clock = async {
+            let started = Instant::now();
+            if verb {
+                for channel in [
+                    "kafka://c2",
+                    "kafka://c3",
+                    "kafka://c4",
+                    "kafka://c5",
+                    "kafka://c6",
+                ] {
+                    if started.elapsed() >= Duration::from_secs(seconds) {
+                        break;
+                    }
+                    let given = inbox
+                        .park_heads(
+                            "ops",
+                            &ParkingHeads {
+                                channel,
+                                cause,
+                                tenant: None,
+                                limit: u32::MAX,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    println!(
+                        "M7v, beside the dispatchers, {channel} at {:.1} s: {given:?}",
+                        started.elapsed().as_secs_f64()
+                    );
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(seconds).saturating_sub(started.elapsed()))
+                .await;
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        };
+        let (times, ()) = tokio::join!(futures::future::join_all(loops), clock);
+        times.into_iter().flatten().collect()
+    };
+    dispatching(false, 1).await;
+    for verb in [false, true] {
+        let mut all = dispatching(verb, 5).await;
+        let n = all.len();
+        let (median, p99, most) = spread(&mut all);
+        println!(
+            "M7v, eight dispatchers{}: {n} dispatches, {median:.2} ms median, {p99:.2} at the \
+             99th centile, {most:.2} at most",
+            if verb {
+                " beside park_heads of the other channels"
+            } else {
+                ""
+            }
+        );
+    }
+
+    inbox.teardown().await.unwrap();
+}
+
+/// The two-session run of ADR-0042 § Executors: `park_heads` beside a
+/// dispatcher that holds the same heads again and processes some, each
+/// change committed between a batch's reading of its candidates and its
+/// lock. A head a batch read and another session changed meanwhile is
+/// locked at its newest version, its selection tested again there: parked
+/// if still held under the cause, passed by otherwise, and read again by
+/// the next batch. So a verb asked until it reports nothing left parks every
+/// head still held under the cause, and none processed; the passes counted
+/// say how often the race was met.
+#[tokio::test]
+#[ignore = "a measurement (ADR-0042 M7): run by hand"]
+async fn m7_park_heads_beside_a_dispatcher_changing_the_same_heads() {
+    use super::ParkingHeads;
+    if !asked() {
+        return;
+    }
+    const HEADS: i32 = 4_000;
+    let table = "inbox_m7r";
+    let inbox = PgInbox::new(PgSessionPool::new(pool_of(4)))
+        .with_table(
+            Identifier::new(table).unwrap(),
+            Identifier::new("inbox_m7r_seq").unwrap(),
+        )
+        .with_slots(8)
+        .partitioned_by(ByStream);
+    inbox.teardown().await.unwrap();
+    inbox.migrate().await.unwrap();
+    let client = pool().get().await.unwrap();
+    client
+        .batch_execute(&format!(
+            "INSERT INTO {table} (tenant_id, stream_type, stream_id, stream_position, uri, \
+                 payload, metadata, held_since, next_attempt_at, hold_kind, holds, cause) \
+             SELECT 't' || g, 'orders.Order', to_jsonb('s-' || g), 1, 'kafka://c0/s', 'x', '{{}}', \
+                 now(), now() + interval '1 hour', 'unavailable', 1, 'kms.unavailable' \
+             FROM generate_series(1, {HEADS}) g"
+        ))
+        .await
+        .unwrap();
+    vacuum(&client, table).await;
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    // Four sessions that hold a head again or process one, at random,
+    // a statement committed at a time.
+    let changers = (0..4).map(|_| async {
+        let session = pool().get().await.unwrap();
+        let (mut held, mut processed) = (0u64, 0u64);
+        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+            let rows = session
+                .execute(
+                    &format!(
+                        "WITH one AS (SELECT ctid FROM {table} WHERE held_since IS NOT NULL \
+                             AND parked_at IS NULL AND processed_position IS NULL \
+                             OFFSET floor(random() * 50) LIMIT 1 FOR UPDATE SKIP LOCKED) \
+                         UPDATE {table} t SET holds = holds + 1, \
+                             next_attempt_at = now() + interval '1 hour' \
+                         FROM one WHERE t.ctid = one.ctid AND random() < 0.8"
+                    ),
+                    &[],
+                )
+                .await
+                .unwrap();
+            held += rows;
+            let rows = session
+                .execute(
+                    &format!(
+                        "WITH one AS (SELECT ctid FROM {table} WHERE held_since IS NOT NULL \
+                             AND parked_at IS NULL AND processed_position IS NULL \
+                             OFFSET floor(random() * 50) LIMIT 1 FOR UPDATE SKIP LOCKED) \
+                         UPDATE {table} t SET processed_position = nextval('{table}_seq'), \
+                             processed_at = now(), cause = NULL, {} \
+                         FROM one WHERE t.ctid = one.ctid AND random() < 0.05",
+                        super::store::LEAVE_QUEUE
+                    ),
+                    &[],
+                )
+                .await
+                .unwrap();
+            processed += rows;
+        }
+        (held, processed)
+    });
+    let verb = async {
+        let (mut parked, mut passed, mut calls) = (0u64, 0u64, 0u64);
+        loop {
+            let given = inbox
+                .park_heads(
+                    "ops",
+                    &ParkingHeads {
+                        channel: "kafka://c0",
+                        cause: "kms.unavailable",
+                        tenant: None,
+                        limit: 100,
+                    },
+                )
+                .await
+                .unwrap();
+            calls += 1;
+            parked += given.parked;
+            passed += given.passed;
+            if given.parked == 0 && given.passed == 0 && !given.more {
+                break;
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        (parked, passed, calls)
+    };
+    let (changed, (parked, passed, calls)) =
+        tokio::join!(futures::future::join_all(changers), verb);
+    let held_again: u64 = changed.iter().map(|c| c.0).sum();
+    let processed: u64 = changed.iter().map(|c| c.1).sum();
+    let count = async |sql: &str| -> i64 {
+        client
+            .query_one(&sql.replace("{table}", table), &[])
+            .await
+            .unwrap()
+            .get(0)
+    };
+    let left = count(
+        "SELECT count(*) FROM {table} WHERE held_since IS NOT NULL AND parked_at IS NULL \
+         AND processed_position IS NULL",
+    )
+    .await;
+    let both = count(
+        "SELECT count(*) FROM {table} WHERE parked_at IS NOT NULL AND processed_position IS NOT NULL",
+    )
+    .await;
+    let parked_rows = count("SELECT count(*) FROM {table} WHERE parked_at IS NOT NULL").await;
+    let processed_rows =
+        count("SELECT count(*) FROM {table} WHERE processed_position IS NOT NULL").await;
+    println!(
+        "M7r: {calls} calls parked {parked} and passed {passed} by, beside {held_again} heads \
+         held again and {processed} processed; left held {left}, parked and processed {both}, \
+         parked {parked_rows}, processed {processed_rows} of {HEADS}"
+    );
+    assert_eq!((left, both), (0, 0));
+    assert_eq!(parked_rows + processed_rows, i64::from(HEADS));
+    assert_eq!(u64::try_from(parked_rows).unwrap(), parked);
+    inbox.teardown().await.unwrap();
+}
+
+/// What M3 watches: when the process paused a channel, and how many walks
+/// of its guests found nothing due.
+#[derive(Default)]
+struct Guests {
+    paused: std::sync::Mutex<Option<Instant>>,
+    walks: std::sync::atomic::AtomicU64,
+}
+
+impl crate::observer::InboxObserver for Guests {
+    fn on_breaker(&self, event: &crate::observer::BreakerChanged<'_>) {
+        if matches!(event.effect, crate::breaker::Effect::Paused { .. }) {
+            self.paused.lock().unwrap().get_or_insert_with(Instant::now);
+        }
+    }
+
+    fn on_dispatched(&self, event: &crate::observer::Dispatched<'_>) {
+        if matches!(event.outcome, Ok(Outcome::Paused)) {
+            self.walks
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// M3 (ADR-0042 § Rule of Three, 1): a head of another channel waits for a
+/// guest while one channel alone is paused — at most a circle of the
+/// guests' walks over the paused heads, N / (L · K / poll), 33 s at the
+/// host's 128,000 heads, three replicas of eight loops and a 200 ms poll.
+/// One process of eight loops, a 200 ms poll, K = 32, 64 slots, 32,000
+/// Tenants with a head on a channel whose every ask fails at the stage's
+/// scope: once the process paused it, 20 rows arrive on another channel,
+/// each a Tenant's head, after every paused head in their slots' order of
+/// Tenants. Timed: when each of the 20 was processed after it arrived, and
+/// the guests' walks a second meanwhile — the guest's sweep, its cost.
+#[tokio::test]
+#[ignore = "a measurement (ADR-0042 M3): run by hand"]
+async fn m3_a_backlog_of_another_channel_beside_a_paused_one() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    if !asked() {
+        return;
+    }
+    let small = std::env::var("ASCETIC_DDD_MEASURE").as_deref() == Ok("small");
+    let paused_heads: i32 = if small { 3_200 } else { 32_000 };
+    const ARRIVING: usize = 20;
+    const LOOPS: u32 = 8;
+    const POLL: Duration = Duration::from_millis(200);
+    let table = "inbox_m3";
+    let watch = Arc::new(Guests::default());
+    let inbox = PgInbox::new(PgSessionPool::new(pool_of(12)))
+        .with_table(
+            Identifier::new(table).unwrap(),
+            Identifier::new("inbox_m3_seq").unwrap(),
+        )
+        .with_slots(64)
+        .partitioned_by(ByStream)
+        .observed_by(Arc::clone(&watch));
+    inbox.teardown().await.unwrap();
+    inbox.migrate().await.unwrap();
+    let client = pool().get().await.unwrap();
+    client
+        .batch_execute(&format!(
+            "INSERT INTO {table} (tenant_id, stream_type, stream_id, stream_position, uri, \
+                 payload, metadata) \
+             SELECT 'x' || lpad(g::text, 6, '0'), 'orders.Order', to_jsonb('x-' || g), 1, \
+                 'kafka://x/s', 'x', '{{}}' FROM generate_series(1, {paused_heads}) g"
+        ))
+        .await
+        .unwrap();
+    vacuum(&client, table).await;
+    let started = Instant::now();
+    let arrived = std::sync::Mutex::new(None::<Instant>);
+    let served = std::sync::Mutex::new(Vec::<Duration>::new());
+    let count = AtomicUsize::new(0);
+    let subscriber = |_: &_, message: &InboxMessage| {
+        let verdict = if message.uri.starts_with("kafka://x") {
+            Err(crate::Failure::from(ascetic_ddd_bus::Unavailable::new(
+                ascetic_ddd_bus::Cause::new("kms.unavailable").unwrap(),
+                ascetic_ddd_bus::Scope::Stage,
+                None,
+                "Vault is sealed",
+            )))
+        } else {
+            if let Some(at) = *arrived.lock().unwrap() {
+                served.lock().unwrap().push(at.elapsed());
+            }
+            count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        };
+        std::future::ready(verdict)
+    };
+    let walks_at = std::sync::Mutex::new(0u64);
+    let arrive = async {
+        while watch.paused.lock().unwrap().is_none() {
+            assert!(started.elapsed() < Duration::from_secs(120), "never paused");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        // a few seconds of guests alone, then the arrivals
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        for y in 0..ARRIVING {
+            crate::port::Inbox::publish(
+                &inbox,
+                &InboxMessage::new(
+                    format!("y{y:02}"),
+                    "orders.Order",
+                    serde_json::json!({ "id": format!("y-{y}") }),
+                    1,
+                    "kafka://y/s",
+                    "y",
+                )
+                .with_metadata(serde_json::json!({
+                    "message_id": format!("00000000-0000-4000-8000-{y:012x}")
+                })),
+            )
+            .await
+            .unwrap();
+        }
+        *walks_at.lock().unwrap() = watch.walks.load(Ordering::Relaxed);
+        *arrived.lock().unwrap() = Some(Instant::now());
+    };
+    let shutdown = async {
+        while count.load(Ordering::SeqCst) < ARRIVING
+            && started.elapsed() < Duration::from_secs(600)
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    let loops = super::Loops {
+        concurrency: LOOPS,
+        poll_interval: POLL,
+        max_error_wait: Duration::from_secs(1),
+    };
+    let (ran, ()) = tokio::join!(inbox.run(subscriber, loops, shutdown), arrive);
+    ran.unwrap();
+    let waited = arrived.lock().unwrap().unwrap().elapsed();
+    let walks = watch.walks.load(Ordering::Relaxed) - *walks_at.lock().unwrap();
+    let paused_after = watch.paused.lock().unwrap().unwrap() - started;
+    let mut times = served.lock().unwrap().clone();
+    times.sort();
+    let seconds = |d: &Duration| d.as_secs_f64();
+    let circle = f64::from(paused_heads) / (f64::from(LOOPS) * 32.0 / POLL.as_secs_f64());
+    println!(
+        "M3: paused after {:.1} s; the {ARRIVING} rows processed {:.1} s after they arrived at \
+         the latest, {:.1} s at the median, the first after {:.1} s; a circle of the guests' walks \
+         over {paused_heads} paused heads, N / (L · K / poll): {circle:.1} s; {walks} walks that \
+         found nothing in {:.1} s, {:.1} a second",
+        seconds(&paused_after),
+        seconds(times.last().unwrap()),
+        seconds(&times[times.len() / 2]),
+        seconds(&times[0]),
+        seconds(&waited),
+        walks as f64 / seconds(&waited)
+    );
+    inbox.teardown().await.unwrap();
+}

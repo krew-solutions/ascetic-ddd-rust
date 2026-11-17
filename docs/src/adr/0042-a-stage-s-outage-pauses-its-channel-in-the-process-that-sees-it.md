@@ -165,8 +165,9 @@ A violation (23514) is a defect that stops the loops: the fault of the library's
   unpaused round as `take` does. Finding none, it writes `served_at` and `guest_tenant` only, never the cursor,
   the round or the dormancy, returns `Outcome::Paused` with the heads of paused channels it met, and the loop
   sleeps its poll.
-- A head of another channel waits for a guest at most N / (R · L · K / poll) per message: 33 s at the host's
-  200 ms poll. Under a KMS outage every channel of a host's inbox is paused, so nothing waits on a guest.
+- A head of another channel waits for a guest at most N / (R · L · K / (poll + w)) per message, w a walk's own
+  time, some 18 ms (M3): 36 s at the host's 200 ms poll. Under a KMS outage every channel of a host's inbox is
+  paused, so nothing waits on a guest.
 - A trial is the dispatch's own statements, not a function of the baseline: the slot locked `SKIP LOCKED`, then
   the witness's head by its Tenant and channel `FOR UPDATE`, never the slot's head. The take and the walk are
   functions, planned once a connection (ADR-0027), because every dispatch runs them; a trial runs once a tick a
@@ -340,9 +341,9 @@ At 2,000 Tenants in each of 64 slots, 3 replicas of 8 loops, K = 32:
 
 ## Rule of Three
 
-1. **Another channel's head waits for a guest**, 33 s per message at the host's poll, when one channel alone is
+1. **Another channel's head waits for a guest**, 36 s per message at the host's poll, when one channel alone is
    paused. Checked: every channel of a host's inbox is sealed by one KMS, so a KMS outage pauses all of them; the
-   case waits for a channel-specific dependency, and M3 measures it.
+   case waits for a channel-specific dependency, and M3 measured it.
 2. **A fault of the message's own, labelled `Unavailable`, never parks.** Checked: the dek keeps every fault of
    the message `Permanent` (§ 9, executor D1); the oldest-hold page and `park_queue` give it up.
 3. **A missed exit stops every loop with 23514.** Kept: the CHECK makes the omission loud and the executors find
@@ -413,13 +414,10 @@ configuration that must fail lists one property and has a twin, its `Mutant` set
 generates and runs; `check.sh` pins each passing configuration's and each twin's count of distinct states
 (`verify/tla/README.md` § Inbox outage).
 
-**Measurements owed.** M3 the guest at a backlog
-of 20 rows on an unpaused channel; M7 the verbs at the host's scale: `park_queue` re-reads the Tenant's queue rows of other channels in its slots each
-batch, and `held` sorts the held heads each page, at most one a (slot, Tenant); and the dispatch's takes during a
-bulk verb, which passes its slots by; M4 the expiry at the host's count of spared waiters, against 220,001 in 2.3 s a pass on the reference machine
+**Measurements owed.** M4 the expiry at the host's count of spared waiters, against 220,001 in 2.3 s a pass on the reference machine
 (§ 7); M5 a one-hour scaled drill
 at 7 channels and a 200 ms poll, with a KMS quota below the drain's rate; M6 the share of opens served from the
-cache during an outage; a two-session run of a verb's `ctid` join against a concurrent hold.
+cache during an outage.
 
 ## Measured
 
@@ -446,6 +444,40 @@ channel of each row it examines, tests it against the paused ones, and gathers t
 a quarter of its cost. The new work on a happy message is so some 30 µs, under R9's 0.1 ms; and a dispatch no
 longer runs the expiry's statement, 150 µs and a round trip, so the happy path costs less than before the
 decision.
+
+**M7, the operator's verbs at the host's scale** (`pg/measure_tests.rs`). The launch shape in a full outage: 64
+slots, 2,000 Tenants of a hundred streams over seven channels, a Tenant with a backlog of 70,000 rows, a processed
+history of 200,000, every head held under one cause: 101,452 held heads. Timed at the client:
+- a page of 100 held heads: 39 ms the first, 31 ms one from the middle — the page sorts the held heads each time;
+- `park_heads` of one channel: 13,741 heads in 784 ms, 5.7 ms a batch of 100;
+- `park_queue` of the backlogged Tenant on one channel: 10,000 rows in 5.3 s, 52 ms a batch. Each batch probes
+  the Tenant's newest rows in each of the 64 slots by `__tenant_head_idx` and reads their channel from the heap:
+  some 45,000 rows a batch, 450 for each row parked, the batch's cost the Tenant's queue in its slots, not the
+  table's. A Tenant's backlog of a million would take some 75 s a channel; an operator's verb, each batch
+  committed, holding nothing between them. Kept;
+- `unpark_all` of what `park_heads` parked: 13,741 rows in 861 ms;
+- eight dispatchers on a channel re-armed and due, five seconds each: alone, 6,775 dispatches, 5.20 ms median,
+  11.4 at the 99th centile, 13.8 at most; beside `park_heads` of the five other held channels one after another
+  (72,189 heads in 6.2 s), 7,858 dispatches, 5.33 ms, 11.7, 40.0. A walk that meets a head a batch locks waits
+  for the batch, some 6 ms; a verb does not stall the dispatch.
+
+**M3, a backlog of another channel beside a paused one** (`pg/measure_tests.rs`). One process of eight loops, a
+200 ms poll, K = 32, 64 slots, 32,000 Tenants with a head on a channel whose every ask fails at the stage's scope;
+the process paused it after 0.3 s, and three seconds later 20 rows arrived on another channel, each a Tenant's
+head after every paused head in its slot's order of Tenants. Two runs: the first processed 21.6 and 22.9 s after
+they arrived, the median 23.9 and 24.2 s, the last 27.4 and 27.5 s; the guests made 36.7 walks a second that found
+nothing, each of K steps and a slot row's HOT write. N / (L · K / poll) is 25.0 s; a walk's own time, some 18 ms,
+lengthens the circle to N · (poll + w) / (L · K) = 27.2 s, which the last met. At the host's 128,000 heads, three
+replicas of eight loops, the wait is so 36 s, not the 33 s decision 5 first stated; decision 5 and the Rule of
+Three now say 36.
+
+**The two-session run of a verb against a concurrent hold** (`pg/measure_tests.rs`). `park_heads` of 4,000 held
+heads, a batch a call, beside four sessions that held a head again or processed one, each change committed:
+63 calls parked 3,975 and passed 1,699 by, beside 427 heads held again and 25 processed; at the end no head was
+left held, none was both parked and processed, and every one was parked or processed. A head changed between a
+batch's read and its lock is locked at its newest version, its selection tested there, and passed by — counted —
+or parked; the next batch reads it again. The concern that such a head is neither parked nor counted, and `more`
+false, does not hold: `passed` is what a batch examined and did not park, `more` an `EXISTS` after.
 
 ## Owed
 
@@ -708,3 +740,15 @@ payloads), its generated Vault policies.
     - Not taken, as measurements by hand on one machine: the figures at the host's 2,000 Tenants a slot (three
       levels of index), the walk that wraps and a guest's walk, and a table with churned index entries — an
       absolute figure for those would move in a parallel suite with the cluster's oldest snapshot (M1, M3).
+- 2026-11-17: Measured (§ Measured), on the reference machine: M1, the happy path's statements before the decision
+  and after — the new work some 30 µs a message, under R9, and the expiry's statement no longer run by a dispatch;
+  M7, the verbs at the host's scale, and the two-session run of a verb against a concurrent hold; M3, a backlog
+  beside a paused channel. What they found:
+  - **A walk's own time lengthens the guests' circle**: 36 s at the host's scale, not 33; decision 5 and the Rule
+    of Three say so.
+  - **`park_queue` reads some 450 rows for each it parks**, its batches probing the Tenant's newest rows in every
+    slot and reading their channel from the heap: 5.3 s for 10,000 rows of a Tenant with 70,000. Kept, an
+    operator's verb whose batches hold nothing between them; a third queue index by channel would cost every
+    write (R9).
+  - **ADR-0041's M7 measurement called the walk with three arguments** since slice 3 added the fourth; it passes
+    an empty list of paused channels now.
