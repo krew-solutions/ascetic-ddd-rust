@@ -274,7 +274,7 @@ where
     /// stops. A loop whose subscriber failed — the batch rolled back, to be
     /// delivered again — or that met an error of the moment in the database
     /// — a connection lost, a server going down — waits, longer with each
-    /// failure in a row up to `loops.max_pause`, and goes on. On any other
+    /// failure in a row up to `loops.max_error_wait`, and goes on. On any other
     /// error of the database, a defect, the loops are all stopped and the
     /// error is returned (ADR-0010).
     ///
@@ -321,7 +321,7 @@ where
                             if matches!(error, Error::Subscriber(_)) || error.is_transient() =>
                         {
                             failures += 1;
-                            let pause = loops.pause_after(failures);
+                            let pause = loops.error_wait_after(failures);
                             log::warn!("outbox: a loop failed, waiting {pause:?}: {error}");
                             pause
                         }

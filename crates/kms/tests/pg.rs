@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ascetic_ddd_kms::{
-    Algorithm, Error, KekOptions, Key, KeyCustody, KeyManagementService, PgKeyManagementService,
-    WrappedKey,
+    Algorithm, Class, Error, KekOptions, Key, KeyCustody, KeyManagementService,
+    PgKeyManagementService, WrappedKey,
 };
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -122,6 +122,23 @@ async fn a_dek_wrapped_after_a_rotation_unwraps() {
     .unwrap();
 }
 
+/// Whether a tenant has a key is a read that makes none (seedwork ADR-0042
+/// decision 9).
+#[tokio::test]
+#[ignore = "needs a live PostgreSQL"]
+async fn whether_a_tenant_has_a_key_is_a_read_that_makes_none() {
+    let f = fixture("key_exists").await;
+    f.atomic(|tx, kms| async move {
+        assert!(!kms.key_exists(&tx, "1").await?, "none before");
+        assert!(!kms.key_exists(&tx, "1").await?, "the read made none");
+        kms.create_kek(&tx, "1", &KekOptions::default()).await?;
+        assert!(kms.key_exists(&tx, "1").await?, "one after");
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 #[ignore = "needs a live PostgreSQL"]
 async fn a_generated_dek_is_thirty_two_bytes_and_unwraps() {
@@ -217,11 +234,27 @@ async fn deleting_the_keks_shreds_what_they_wrapped() {
     f.atomic(|tx, kms| async move {
         kms.create_kek(&tx, "1", &KekOptions::default()).await?;
         let wrapped = kms.encrypt_dek(&tx, "1", &key()).await?;
+        // A version the tenant never had, beside the one it has: the
+        // message's, refused; the tenant's other keys still serve.
+        let unknown = WrappedKey::new(9, WrappedKey::parse(&wrapped)?.sealed().to_vec());
+        let error = kms
+            .decrypt_dek(&tx, "1", &unknown.to_bytes())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::KekNotFound { key_version: Some(9), .. }),
+            "{error}"
+        );
+        assert_eq!(error.class(), Class::Refused);
         kms.delete_kek(&tx, "1").await?;
-        assert!(matches!(
-            kms.decrypt_dek(&tx, "1", &wrapped).await,
-            Err(Error::KekNotFound { tenant_id, key_version: Some(1) }) if tenant_id == "1"
-        ));
+        // No key left: the tenant is gone, whatever version the message
+        // names (ADR-0040: its rows park under kms.gone).
+        let error = kms.decrypt_dek(&tx, "1", &wrapped).await.unwrap_err();
+        assert!(
+            matches!(&error, Error::KekNotFound { tenant_id, key_version: None } if tenant_id == "1"),
+            "{error}"
+        );
+        assert_eq!(error.class(), Class::Gone);
         Ok(())
     })
     .await

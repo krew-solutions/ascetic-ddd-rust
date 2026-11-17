@@ -25,6 +25,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use ascetic_ddd_bus::Cause;
+
 use crate::error::{BoxError, Error};
 use crate::intake::Reason;
 use crate::message::{CausalDependency, InboxMessage};
@@ -72,6 +74,12 @@ pub struct Operated<'a> {
     pub channel: Option<&'a str>,
     /// The row's digest, when the call named one.
     pub digest: Option<&'a str>,
+    /// The Tenant, when the call named one: whose rows a verb moved
+    /// (ADR-0042 decision 8).
+    pub tenant: Option<&'a str>,
+    /// The cause, when the call named one: the cause a verb parked or
+    /// re-armed rows by.
+    pub cause: Option<&'a str>,
     /// How many rows the call read or changed.
     pub rows: u64,
 }
@@ -89,6 +97,17 @@ pub enum Operation {
     Readmitted,
     /// Closed a row as discarded, a tombstone.
     Discarded,
+    /// Read a page of the held heads (ADR-0042 decision 8).
+    PagedHeld,
+    /// Parked the heads held under a cause, a batch of them (ADR-0042
+    /// decision 8): the rows behind them go on.
+    ParkedHeads,
+    /// Parked a (channel, Tenant)'s queue rows, a batch of them (ADR-0042
+    /// decision 8): its queue given up whole.
+    ParkedQueue,
+    /// Re-armed parked rows by ground and cause, a batch of them (ADR-0040
+    /// decision 8, ADR-0042 decision 8).
+    UnparkedAll,
 }
 
 /// The intake set a message aside beside the inbox, never storing it as a
@@ -202,15 +221,45 @@ pub struct Failed<'a> {
     pub message: &'a InboxMessage,
     /// What the subscriber returned.
     pub error: &'a BoxError,
+    /// Why, by name: a column's and a label's value, never the error's text
+    /// (ADR-0040 decision 2).
+    pub cause: Cause,
     /// The subscriber's verdict that no retry will succeed (ADR-0010).
     pub permanent: bool,
-    /// Failed attempts so far, this one included.
+    /// Failed attempts so far, this one included when it spent one.
     pub attempts: u32,
     /// Whether this attempt was the last: the message is parked, its
     /// attempts run out or the failure permanent.
     pub parked: bool,
+    /// Whether the subscriber's verdict was `Unavailable`, which holds the
+    /// message and spends no attempt (ADR-0042): its Tenant's rows of its
+    /// slot wait behind it (ADR-0041 decision 2).
+    pub held: bool,
     /// How long the message waits before it may be taken again.
     pub retry_after: Duration,
+}
+
+/// A head held without its subscriber called (ADR-0042 decision 2): its
+/// Tenant's `Unavailable` remembered, an ask of it in flight, or its channel
+/// paused in this process. No Tenant is named.
+#[derive(Debug)]
+pub struct Withheld<'a> {
+    /// The slot taken.
+    pub slot: u32,
+    /// The head's channel, without the key.
+    pub channel: &'a str,
+    /// The cause it is held under.
+    pub cause: Cause,
+    /// How long it is held.
+    pub wait: Duration,
+}
+
+/// What the process's breaker did to a channel (ADR-0042 decision 1): the
+/// pause, the stall to report, the resume.
+#[derive(Debug)]
+pub struct BreakerChanged<'a> {
+    /// The breaker's effect.
+    pub effect: &'a crate::breaker::Effect,
 }
 
 /// The dispatcher's transaction closed: committed, with what it did, or
@@ -304,6 +353,11 @@ observer! {
     fn on_marked(&self, _event: &Marked<'_>);
     /// The attempt was recorded after the subscriber failed.
     fn on_failed(&self, _event: &Failed<'_>);
+    /// A head was held without its subscriber called (ADR-0042 decision 2).
+    fn on_withheld(&self, _event: &Withheld<'_>);
+    /// The process's breaker paused, stalled or resumed a channel (ADR-0042
+    /// decision 1).
+    fn on_breaker(&self, _event: &BreakerChanged<'_>);
     /// The head was parked at once for its own values.
     fn on_parked_at_once(&self, _event: &ParkedAtOnce<'_>);
     /// Waits ran out; the rows were parked.
@@ -393,9 +447,11 @@ mod tests {
             slot: 0,
             message: &message,
             error: &error,
+            cause: Cause::UNEXPLAINED,
             permanent: false,
             attempts: 1,
             parked: false,
+            held: false,
             retry_after: Duration::ZERO,
         });
         observer.on_expired(&Expired { messages: none });
@@ -426,6 +482,8 @@ mod tests {
             operation: Operation::Counted,
             channel: None,
             digest: None,
+            tenant: None,
+            cause: None,
             rows: 0,
         });
         observer.on_parked_at_once(&ParkedAtOnce {

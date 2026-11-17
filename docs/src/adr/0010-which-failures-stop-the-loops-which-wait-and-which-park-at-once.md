@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted (2026-09-17).
+Accepted (2026-09-17). Decision 4 amended by ADR-0040: the subscriber's
+`Failure` has a third verdict, `Unavailable` with its scope, and every
+verdict a cause; an error converts by the bus verdict at its top.
 
 ## Context
 

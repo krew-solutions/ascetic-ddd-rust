@@ -1198,3 +1198,116 @@ async fn custody_makes_a_key_of_its_type_and_refuses_another() {
         &json!({ "type": "hmac", "key_size": 32 })
     );
 }
+
+/// A `200` whose body is not what Vault writes — no `data.plaintext`, or
+/// one that is not base64, a signature that is not JWS — is an answer that
+/// could not be read: `Vault { status: 200 }`, of the moment, never the
+/// request's fault, so that the message it would open is not parked for
+/// good (ADR-0039 decision 8, ADR-0040).
+#[tokio::test]
+async fn an_answer_that_cannot_be_read_is_of_the_moment_never_the_request_s_fault() {
+    let plaintext = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
+    for (path, body) in [
+        ("/decrypt/t", json!({ "data": {} })),
+        (
+            "/decrypt/t",
+            json!({ "data": { "plaintext": "not base64!" } }),
+        ),
+        (
+            "/datakey/plaintext/t",
+            json!({ "data": { "plaintext": plaintext } }),
+        ),
+        (
+            "/datakey/plaintext/t",
+            json!({ "data": { "ciphertext": "vault:v1:abc" } }),
+        ),
+    ] {
+        let mut script = vec![("POST", path, 200, body.clone())];
+        if path.starts_with("/datakey") {
+            script.insert(0, ("POST", "/keys/t", 204, json!({})));
+        }
+        let transport = Scripted::answering(script);
+        let outcome = with(&transport, |tx, kms| async move {
+            if path.starts_with("/decrypt") {
+                kms.decrypt_dek(&tx, "t", b"vault:v1:abc").await.map(|_| ())
+            } else {
+                kms.generate_dek(&tx, "t").await.map(|_| ())
+            }
+        })
+        .await;
+        let error = outcome.unwrap_err();
+        assert!(
+            matches!(&error, Error::Vault { status: 200, path: asked, .. } if asked == path),
+            "{path} {body}: {error}"
+        );
+        assert_eq!(error.class(), Class::Moment, "{path} {body}");
+    }
+    let transport = Scripted::answering(vec![
+        ("POST", "/keys/t.sign.ed25519", 200, json!({})),
+        (
+            "POST",
+            "/sign/t.sign.ed25519",
+            200,
+            json!({ "data": { "signature": "vault:v1:!!" } }),
+        ),
+    ]);
+    let signed = with(&transport, |tx, kms| async move {
+        kms.sign(&tx, "t", ED25519, b"message").await
+    })
+    .await;
+    let error = signed.unwrap_err();
+    assert_eq!(error.class(), Class::Moment, "{error}");
+}
+
+/// Whether a tenant has a key is one read of it, which makes none (seedwork
+/// ADR-0042 decision 9): a service that may only unwrap on a channel holds
+/// the read, and an opening end tells a key gone from a mount wiped by it.
+#[tokio::test]
+async fn whether_a_tenant_has_a_key_is_one_read_that_makes_none() {
+    let transport = Scripted::answering(vec![
+        (
+            "GET",
+            "/keys/sentinel",
+            200,
+            json!({ "data": { "latest_version": 1 } }),
+        ),
+        ("GET", "/keys/shredded", 404, json!({ "errors": [] })),
+    ]);
+    let (there, gone) = with(&transport, |tx, kms| async move {
+        Ok((
+            kms.key_exists(&tx, "sentinel").await?,
+            kms.key_exists(&tx, "shredded").await?,
+        ))
+    })
+    .await
+    .unwrap();
+    assert!(there, "a key there reads as there");
+    assert!(!gone, "a key not there reads as not there");
+    let asked = transport.asked();
+    assert_eq!(asked.len(), 2, "two reads, nothing made: {asked:?}");
+    assert!(asked.iter().all(|(method, _, _)| method == "GET"));
+}
+
+/// A refusal Vault did not explain names no path in its text — a key's name
+/// is its tenant's — and a `403` of it is the caller's credentials.
+#[tokio::test]
+async fn an_unexplained_refusal_names_no_path_and_a_403_is_unauthorized() {
+    let transport = Scripted::answering(vec![(
+        "GET",
+        "/keys/tenant-secret",
+        403,
+        json!({ "errors": ["permission denied"] }),
+    )]);
+    let error = with(&transport, |tx, kms| async move {
+        kms.key_exists(&tx, "tenant-secret").await
+    })
+    .await
+    .unwrap_err();
+    let text = error.to_string();
+    assert!(
+        !text.contains("tenant-secret"),
+        "a tenant in the text: {text}"
+    );
+    assert!(text.contains("403") && text.contains("GET"), "{text}");
+    assert!(error.unauthorized(), "{error:?}");
+}

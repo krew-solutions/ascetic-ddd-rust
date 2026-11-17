@@ -62,6 +62,7 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod breaker;
 pub mod channel;
 mod error;
 pub mod intake;
@@ -72,6 +73,7 @@ pub mod pg;
 mod port;
 mod snapshot;
 
+pub use crate::breaker::Breaking;
 pub use crate::channel::{INBOX_SCHEME, InboxChannel};
 pub use crate::error::{BoxError, Error, Failure};
 pub use crate::intake::{Bounds, Reason};
@@ -79,8 +81,10 @@ pub use crate::message::{CausalDependency, InboxMessage, MAX_DEPENDENCIES, MAX_I
 pub use crate::observer::{InboxObserver, Receipt};
 pub use crate::partition::{ByStream, ByUri, PartitionKey};
 pub use crate::pg::{
-    Admission, Ground, InboxRetention, Loops, Outcome, Parked, ParkedCount, PgInbox, Readmission,
-    Readmitted, Retries, SetAsideCount, SetAsideCursor, SetAsidePage, SetAsideRow,
+    Admission, Expiry, GivenUp, Ground, HeldCount, HeldHead, Hold, InboxRetention, Loops, Outcome,
+    Parked, ParkedCount, ParkedFor, ParkedUnder, ParkingHeads, ParkingQueue, PgInbox, Readmission,
+    Readmitted, Retries, Rotation, SetAsideCount, SetAsideCursor, SetAsidePage, SetAsideRow, Stall,
+    UnparkedAll, Unparking, WaitingCount,
 };
 pub use crate::port::Inbox;
 pub use crate::snapshot::Snapshot;

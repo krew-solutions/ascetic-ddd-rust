@@ -3,6 +3,10 @@
 
     trace2tla.py <trace.jsonl> <out dir>
 
+Exits 3 when it refuses the run, printing the reason on stderr, and the
+module of the steps before the refusal, if there are any, as for a run it
+takes.
+
 Reads the lines `ascetic-ddd-trace` writes, one JSON object per event, and
 writes `<out dir>/<Name>.tla` defining `TraceDef`, the sequence of steps the
 model takes, plus `<Name>.cfg`. Prints `<Name>`. Which model is read off the
@@ -50,6 +54,21 @@ The inbox mapping:
     expired                   -> expire    (msg), one per row parked
     unparked                  -> unpark    (msg)
     resolved                  -> resolve   (msg, woken)
+    operated, a read or a call on the rows the intake set aside
+                              -> nothing: no row of the inbox moved
+
+Refused, what the models do not describe: a row stored again after the
+sweep forgot it (Inbox.tla forgets nothing; InboxForget.tla does), and an
+outbox's epoch delivered with nothing of its selection's, an acknowledgement
+that moves no position (ADR-0035's relay).
+
+Refused, what the model does not describe yet (ADR-0042), named without the
+slot or the count of rows, which a run's timing may move: a head held
+without its subscriber called (`withheld`), a row held for an `Unavailable`
+(`failed`, held), a guest's walk among paused heads (`dispatched paused`),
+and a verb over many rows that moved some (`operated` parked_heads,
+parked_queue or unparked_all), whose rows the trace does not name. The
+reason refused is the one `traces/uncovered.tsv` lists, word for word.
 
 Messages are named in order of first mention, a dependency that never arrives
 included; a dispatcher is the slot it holds, whoever ran it: the events
@@ -152,6 +171,11 @@ def outbox_steps(events, names=None):
             if e["ok"]:
                 yield record(side="outbox", event="handle", d=d, msg=names.known(e["message_id"], "a handling"))
         elif kind == "acked":
+            if e["position"] is None:
+                # an epoch with nothing of the selection's, delivered at once:
+                # the epoch relay's step, which Outbox.tla does not take
+                raise SystemExit(f"{group} delivered an epoch with nothing of its selection's, moving no position: "
+                                 "TraceOutbox.tla follows the relay without epochs (ADR-0035)")
             acked[d] = (e["xid"], e["position"])
         elif kind == "dispatched":
             outcome = e["outcome"]
@@ -178,6 +202,7 @@ def inbox_steps(events, names=None, by_message_id=False):
     the outbox does, so that a bridge trace names a message once."""
     names = names or Names()
     rows = {}     # row identity -> name
+    stored = {}  # the row identities stored so far, and where
     # how many slots the table is cut into: one number, logged with every fetch
     slots = next((e["slots"] for e in events if e["event"] == "fetched"), 1)
     holding = {}  # slot -> the row its open dispatch fetched, if any
@@ -206,6 +231,14 @@ def inbox_steps(events, names=None, by_message_id=False):
         if kind == "unparked":
             yield record(side="inbox", event="unpark", msg=row(e["id"], "an unpark"))
             continue
+        if kind == "behind":
+            raise SystemExit("rows written behind the observers, by the test's own statement: "
+                             "the model takes no step for them")
+        if kind == "operated":
+            if e["operation"] in ("parked_heads", "parked_queue", "unparked_all") and e["rows"] > 0:
+                raise SystemExit(f"an operator's {e['operation']} moved rows the trace does not name: "
+                                 "Inbox.tla has no verb over many rows yet (ADR-0042)")
+            continue
         if kind == "resolved":
             yield record(side="inbox", event="resolve", msg=row(e["id"], "a resolve"),
                          woken=[row(w, "a waking") for w in e["woken"]])
@@ -223,6 +256,14 @@ def inbox_steps(events, names=None, by_message_id=False):
                 rows[e["id"]] = names.of(e["id"])
             msg = rows[e["id"]]
             deps = [names.of(dep) for dep in e["deps"]]
+            if e["received_position"] not in (None, stored.get(e["id"], e["received_position"])):
+                # its row was forgotten by the sweep, and a repeat past its
+                # window stored it again, at a new position (ADR-0033):
+                # Inbox.tla forgets nothing
+                raise SystemExit(f"{msg} was stored again after its row was forgotten: TraceInbox.tla follows "
+                                 "Inbox.tla, which forgets nothing (InboxForget.tla does)")
+            if e["received_position"] is not None:
+                stored[e["id"]] = e["received_position"]
             if e["received_position"] is None:
                 yield record(side="inbox", event="duplicate", msg=msg)
             else:
@@ -248,8 +289,16 @@ def inbox_steps(events, names=None, by_message_id=False):
             holding[slot] = None
             yield record(side="inbox", event="wait", slot=slot, of=slots, msg=row(e["id"], "a wait"),
                          dep=dependency(e["dependency"]), snap=snapshot(e))
+        elif kind == "withheld":
+            raise SystemExit(f"a head held unasked under {e['cause']}: Inbox.tla has no hold yet (ADR-0042)")
         elif kind == "failed":
-            failed[slot] = (e["attempts"], e["parked"])
+            if e.get("held"):
+                # an Unavailable holds its row and spends no attempt (ADR-0042
+                # decision 3): Inbox.tla has no hold yet, and a hold read as a
+                # failure would fit wrongly
+                raise SystemExit(f"a row held under {e['cause']}, spending nothing: "
+                                 "Inbox.tla has no hold yet (ADR-0042)")
+            failed[slot] = (e["attempts"], e["parked"], e["permanent"])
         elif kind == "handled":
             if e["ok"]:
                 yield record(side="inbox", event="handle", slot=slot, of=slots, msg=row(e["id"], "a handling"))
@@ -268,11 +317,20 @@ def inbox_steps(events, names=None, by_message_id=False):
             if outcome == "processed":
                 yield record(side="inbox", event="commit", slot=slot, of=slots, woken=woken.get(slot, []))
             elif outcome == "failed":
-                attempts, parked = failed[slot]
+                attempts, parked, permanent = failed[slot]
                 yield record(side="inbox", event="fail", slot=slot, of=slots, msg=holding[slot],
-                             attempts=attempts, parked=parked)
+                             attempts=attempts, parked=parked, permanent=permanent)
             elif outcome == "rolled_back" and holding[slot] is not None:
                 yield record(side="inbox", event="crash", slot=slot, of=slots)
+            elif outcome == "paused":
+                raise SystemExit("a guest's walk among paused heads: Inbox.tla has no pause yet (ADR-0042)")
+            # "passed": a walk that found no due head among the Tenants it
+            # examined took none, its fetch an empty one; the cursor it moved is
+            # not followed, TraceInbox.tla being FIFO (ADR-0041 § Owed)
+            elif outcome not in ("rolled_back", "nothing", "set_aside", "parked", "passed"):
+                # an outcome the mapping does not know would otherwise end the
+                # dispatch without a step, and a run would fit for the wrong reason
+                raise SystemExit(f"slot {slot} closed a dispatch with an outcome not mapped: {outcome}")
             del holding[slot]
             failed.pop(slot, None)
             woken.pop(slot, None)
@@ -355,7 +413,23 @@ def main(trace, out):
         if foreign:
             raise SystemExit(f"{trace.name} holds {foreign[0]} events; name it bridge-*.jsonl to check both sides")
     name = "Trace_" + re.sub(r"[^A-Za-z0-9_]", "_", trace.stem)
-    produced = list(steps(events))
+    # A run refused at a step the model does not describe is still checked up
+    # to that step: its prefix is written, its name printed, and the reason
+    # is the exit's, with status 3, so that a refusal hides no step before it
+    # that would not fit.
+    produced, refusal = [], None
+    try:
+        for step in steps(events):
+            produced.append(step)
+    except SystemExit as refused:
+        refusal = refused.code
+    # A run without a step fits whatever the model says: covered, it would
+    # check nothing (an intake that only set messages aside, say).
+    if not produced and refusal is None:
+        refusal = f"{trace.name} maps to no step: there is nothing to check"
+    if not produced:
+        print(refusal, file=sys.stderr)
+        sys.exit(3)
     body = ",\n  ".join(str(step) for step in produced)
     # The order of arrival is a promise only with one slot.
     if crate == "inbox" and all(step["fields"].get("of", 1) == 1 for step in produced):
@@ -372,6 +446,9 @@ def main(trace, out):
         + "".join(f"  {inv}\n" for inv in invariants)
     )
     print(name)
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        sys.exit(3)
 
 
 if __name__ == "__main__":

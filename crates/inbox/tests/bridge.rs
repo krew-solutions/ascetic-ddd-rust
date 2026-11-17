@@ -52,10 +52,20 @@ struct Fixture {
 /// names the trace file: `inbox-…` for a run the inbox model checks alone,
 /// `bridge-…` for one with an outbox in front.
 async fn fixture(name: &str, stem: &str) -> Fixture {
+    fixture_traced(name, TraceFile::from_env(stem)).await
+}
+
+/// The same for a test that writes a row behind the observers: its trace
+/// would lack a step the run took, so it would be no run of the model, and
+/// it records none.
+async fn fixture_unrecorded(name: &str) -> Fixture {
+    fixture_traced(name, TraceFile::off()).await
+}
+
+async fn fixture_traced(name: &str, trace: TraceFile) -> Fixture {
     let table = format!("inbox_bridge_{name}");
     let sequence = format!("{table}_seq");
     let sessions = PgSessionPool::new(pool());
-    let trace = TraceFile::from_env(stem);
     let inbox = Arc::new(
         PgInbox::new(PgSessionPool::new(pool()))
             .with_table(
@@ -279,11 +289,13 @@ async fn the_outbox_feeds_the_inbox_without_a_broker() {
 /// the row after it (ADR-0036 decision 1). Before, the intake's error held
 /// the lane on that row for ever. The outbox now refuses such a message at
 /// its producer's commit (ADR-0038), so the row is written as an older
-/// producer's would be, around it: the lane must still move past it.
+/// producer's would be, around it: the lane must still move past it. That
+/// row is written behind the outbox's observer, so the run records no
+/// trace: one without its publication fits no run of the model.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_row_the_intake_cannot_store_does_not_stop_the_lane() {
-    let fixture = fixture("outbox_unplaced", "bridge-outbox-set-aside").await;
+    let fixture = fixture_unrecorded("outbox_unplaced").await;
     let outbox = Arc::new(
         PgOutbox::new(PgSessionPool::new(pool()))
             .with_tables(

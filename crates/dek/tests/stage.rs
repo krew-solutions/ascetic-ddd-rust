@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use ascetic_ddd_bus::{Bridge, Bus, Message, Permanent, Stage, Target};
 use ascetic_ddd_dek::stage::{DEK, DEK_ALGORITHM, DEK_BOUND_TO, MESSAGE_ID, TENANT_ID};
-use ascetic_ddd_dek::{EnvelopeStage, Reuse, Sealing, SealingParameters};
+use ascetic_ddd_dek::{EnvelopeStage, Opening, Pacing, Reuse, Sealing, SealingParameters};
 use ascetic_ddd_inbox::{INBOX_SCHEME, Loops as InboxLoops, PgInbox};
-use ascetic_ddd_kms::{Algorithm, Cached, KeyCustody, PgKeyManagementService};
+use ascetic_ddd_kms::{Algorithm, KeyCustody, PgKeyManagementService};
 use ascetic_ddd_outbox::{Loops as OutboxLoops, OUTBOX_SCHEME, PgOutbox};
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -47,6 +47,24 @@ fn pool() -> Pool {
 }
 
 type PgStage = EnvelopeStage<PgSessionPool, PgKeyManagementService>;
+
+/// The pacing `Pacing::fitted` makes for `reuse`, a seal waiting two
+/// seconds for its draw instead of a quarter, its back-off's first step
+/// twice that, as the pacing's rules ask. These tests check what a stage
+/// seals and opens, not how soon a draw lands; on a machine of four cores
+/// and a spinning disk a draw ran past the quarter, the tests at once or
+/// one at a time where the draw made the tenant's KEK (measured
+/// 2026-11-16: four or five tests unavailable in each of three runs at
+/// once; one in a run of one test at a time on PostgreSQL 18). The wait
+/// itself is checked by the draws' tests (`draws.rs`), on a paused clock.
+fn patient(reuse: Reuse) -> Pacing {
+    Pacing::fitted(reuse)
+        .with_wait(Duration::from_secs(2))
+        .with_backoff(Duration::from_secs(4), Duration::from_secs(30))
+}
+
+/// The keys an opening holds, as `Sealing::over` fits them.
+const KEYS: usize = 16_384;
 
 /// A KMS under `master` whose tables are the test's own: the KEKs' in
 /// `table`, the signing and MAC keys' beside it.
@@ -217,11 +235,14 @@ async fn a_reused_dek_serves_so_many_messages_and_each_opens() {
     let master_key = Algorithm::Aes256Gcm.generate_key().unwrap();
     let kms = || kms_in(&master_key, "kek_stage_reuse");
     fresh(&kms()).await;
-    let sealing = EnvelopeStage::new(PgSessionPool::new(pool()), kms()).reusing(Reuse {
+    let reuse = Reuse {
         messages: 2,
         lifetime: Duration::from_secs(3600),
-    });
-    let opening = EnvelopeStage::new(PgSessionPool::new(pool()), Cached::new(kms()));
+    };
+    let sealing = EnvelopeStage::new(PgSessionPool::new(pool()), kms())
+        .paced(reuse, patient(reuse))
+        .unwrap();
+    let opening = EnvelopeStage::new(PgSessionPool::new(pool()), kms());
 
     let mut sealed = Vec::new();
     for i in 0..5u8 {
@@ -259,7 +280,11 @@ async fn a_message_without_a_tenant_is_refused_for_good() {
         .inbound(Message::new(b"secret".to_vec()))
         .await
         .unwrap_err();
-    assert!(error.is::<Permanent>(), "{error}");
+    assert_eq!(
+        error.downcast_ref::<Permanent>().map(Permanent::cause),
+        Some(ascetic_ddd_dek::causes::MALFORMED),
+        "{error}"
+    );
 }
 
 #[tokio::test]
@@ -277,7 +302,11 @@ async fn a_shredded_tenant_s_messages_are_refused_for_good() {
         .await
         .unwrap();
     let error = sealing.inbound(sealed).await.unwrap_err();
-    assert!(error.is::<Permanent>(), "{error}");
+    assert_eq!(
+        error.downcast_ref::<Permanent>().map(Permanent::cause),
+        Some(ascetic_ddd_dek::causes::GONE),
+        "{error}"
+    );
 }
 
 #[tokio::test]
@@ -292,6 +321,24 @@ async fn a_kms_out_of_reach_is_a_failure_of_the_moment() {
         .await
         .unwrap_err();
     assert!(!error.is::<Permanent>(), "{error}");
+    // At the opening end a KMS out of reach answers no tenant: the inbox
+    // holds the message over the stage (ADR-0040 decision 3).
+    let sealed = stage("unreachable")
+        .await
+        .outbound(message("tenant-1", "secret"))
+        .await
+        .unwrap();
+    let error = sealing.inbound(sealed).await.unwrap_err();
+    let told = error
+        .downcast_ref::<ascetic_ddd_bus::Unavailable>()
+        .unwrap_or_else(|| panic!("unavailable: {error}"));
+    assert_eq!(
+        (told.cause(), told.scope()),
+        (
+            ascetic_ddd_dek::causes::UNAVAILABLE,
+            ascetic_ddd_bus::Scope::Stage
+        )
+    );
 }
 
 /// The whole path of ADR-0002: the command's transaction seals into the
@@ -515,14 +562,23 @@ async fn the_channel_s_other_end_opens_what_was_sealed_for_it_and_no_other_chann
 
 /// The sealing of the channels, as a composition root builds it: the KMS
 /// of `table` under `master`, an instance per channel serving the channel
-/// as its context, making no key.
+/// as its context, making no key; as `Sealing::over` builds it, but
+/// [`patient`].
 fn sealing_of(table: &str, master: &ascetic_ddd_kms::Key, channels: &[&str]) -> Sealing {
     let master = master.clone();
     let table = Identifier::new(table).unwrap();
-    Sealing::over(
+    let parameters = SealingParameters::default();
+    Sealing::over_paced(
         Arc::new(PgSessionPool::new(pool())),
         channels.iter().copied(),
-        SealingParameters::default(),
+        (
+            parameters,
+            patient(parameters.reuse),
+            Opening::fitted(parameters.cache, KEYS),
+        ),
+        None,
+        None,
+        |_| Arc::new(()),
         move |channel| {
             PgKeyManagementService::new(master.clone())
                 .with_table(table.clone())
@@ -530,6 +586,7 @@ fn sealing_of(table: &str, master: &ascetic_ddd_kms::Key, channels: &[&str]) -> 
                 .managed_keys()
         },
     )
+    .unwrap()
 }
 
 #[tokio::test]

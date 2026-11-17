@@ -58,7 +58,12 @@ InboxEvents == {r \in Events : r.side = "inbox"}
 Receives == {r \in Events : \/ r.side = "inbox" /\ r.event = "receive"
                             \/ r.side = "bridge" /\ r.event = "forward" /\ ~r.dup}
 Dispatching == {r \in InboxEvents : r.event \in {"wait", "fetch", "nofetch", "handle", "commit", "fail", "crash"}}
-Parks == {r \in InboxEvents : r.event = "fail" /\ r.parked}
+\* The parks of exhausted attempts: they say what MaxAttempts is.  A park
+\* for a verdict that no retry will succeed says nothing of it, and read
+\* as one, a single permanent failure would fit as MaxAttempts = 1.
+Parks == {r \in InboxEvents : r.event = "fail" /\ r.parked /\ ~r.permanent}
+\* The messages whose subscriber said no retry will succeed.
+Permanents == {r.msg : r \in {r \in InboxEvents : r.event = "fail" /\ r.permanent}}
 Expires == {r \in InboxEvents : r.event = "expire"}
 
 Arrives == {r.msg : r \in Receives}
@@ -72,7 +77,10 @@ PosOf == [m \in Arrives |-> Stored(m).pos]
 SetAside == {r.msg : r \in {r \in Events : r.side = "bridge" /\ r.event = "set_aside"}}
 Msgs == Arrives \cup UNION {Range(r.deps) : r \in Receives} \cup SetAside
 Deps == [m \in Msgs |-> IF m \in Arrives THEN Range((CHOOSE r \in Receives : r.msg = m).deps) ELSE {}]
-Slots == IF Dispatching = {} THEN {0} ELSE 0..((CHOOSE r \in Dispatching : TRUE).of - 1)
+\* A run, or the steps of a refused one before its refusal, with no dispatch
+\* names no count of slots: the slots are those its rows landed in.
+Slots == IF Dispatching = {} THEN {0} \cup {r.slot : r \in Receives}
+         ELSE 0..((CHOOSE r \in Dispatching : TRUE).of - 1)
 MaxCrashes == Cardinality({j \in 1..Len(Trace) : Trace[j].side = "inbox" /\ Trace[j].event \in {"crash", "fail"}})
 WaitsOnDependencies == TRUE
 WaitExpires == Expires # {}
@@ -93,7 +101,7 @@ VARIABLES part, received, recvPos, nextRecv, processed, effects, holding, procOr
 vars == <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
           attempts, due, parked, resolved, admin, waiting, expired, i>>
 
-O == INSTANCE Inbox WITH Unreadable <- {}, unread <- {},  Msgs <- Msgs, Deps <- Deps, Arrives <- Arrives, Slots <- Slots,
+O == INSTANCE Inbox WITH Unreadable <- {}, unread <- {}, Permanent <- Permanents, cursor <- [s \in Slots |-> 0], guest <- [s \in Slots |-> 0], Msgs <- Msgs, Deps <- Deps, Arrives <- Arrives, Slots <- Slots,
                          MaxCrashes <- MaxCrashes,
                          WaitsOnDependencies <- WaitsOnDependencies, WaitExpires <- WaitExpires, None <- None,
                          Poison <- Poison, MaxAttempts <- MaxAttempts,
@@ -189,7 +197,7 @@ Logged ==
         /\ O!Commit(Step.slot)
      \/ /\ Step.event = "fail"
         /\ holding[Step.slot] = Step.msg
-        /\ O!Fail(Step.slot)
+        /\ IF Step.permanent THEN O!FailPermanent(Step.slot) ELSE O!Fail(Step.slot)
         /\ (MaxAttempts > 0 => attempts'[Step.msg] = Step.attempts)
         /\ (Step.msg \in parked') = Step.parked
      \/ /\ Step.event = "crash"

@@ -2,7 +2,11 @@
 
 ## Status
 
-Accepted (2026-09-15).
+Accepted (2026-09-15). Amended by ADR-0040: a message unavailable for its
+stage's outage holds its partition without spending an attempt, weighed
+against the channel's evidence past its budget; one unavailable for its
+Tenant spends one, never sooner than its back-off; every failure and park
+carries its cause.
 
 ## Context
 

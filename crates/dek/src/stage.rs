@@ -18,8 +18,10 @@
 //! back rests nowhere. A fresh DEK per message is one KMS call per message;
 //! where that is a network round trip, [`EnvelopeStage::reusing`] keeps a
 //! tenant's DEK for so many messages or so long, as the AWS Encryption
-//! SDK's caching materials manager does, and the opening side keeps what it
-//! unwraps with [`Cached`][ascetic_ddd_kms::Cached] in front of its KMS.
+//! SDK's caching materials manager does. The opening side unwraps each
+//! wrapped key once for its waiters and keeps what it unwraps from the
+//! unwrap's start for its `keep`, its entries capped, a key gone told before
+//! any key held ([`EnvelopeStage::opened`], ADR-0039 slice 4).
 //!
 //! The payload is bound to the message's identity: its associated data is
 //! the canonical text of the headers the stage is bound to — the tenant and
@@ -47,7 +49,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ascetic_ddd_bus::{BoxError, Message, Permanent, Stage};
+use ascetic_ddd_bus::{BoxError, Message, Permanent, Scope, Stage, Unavailable};
 use ascetic_ddd_kms::{Algorithm, Class, Error as KmsError, KeyManagementService};
 use ascetic_ddd_session::SessionPool;
 use base64::Engine as _;
@@ -56,8 +58,10 @@ use futures::future::BoxFuture;
 use serde_json::Value;
 
 use crate::domain::canonical;
-use crate::draws::{Draws, Held, SealingObserver};
+use crate::draws::{Draws, Held, SealingObserver, causes};
+use crate::opens::{Opener, OpeningHeld};
 use crate::supply::{InvalidParameters, LONGEST, Supply, SupplyParameters};
+use crate::unwraps::Opening;
 
 /// The header naming the tenant, and the associated data of the payload.
 pub const TENANT_ID: &str = "tenant_id";
@@ -232,10 +236,16 @@ fn bounded(lifetime: Duration) -> Duration {
 /// The envelope stage over the KMS `K`, reached through sessions of `P`.
 pub struct EnvelopeStage<P, K> {
     draws: Arc<Draws<P, K>>,
+    opener: Arc<Opener<P, K>>,
+    sentinel: Option<String>,
     algorithm: Algorithm,
     bound_to: Vec<String>,
     reuse: Reuse,
 }
+
+/// The entries an opening end holds by default: keys unwrapped and
+/// memories of refusals.
+const KEYS: usize = 16_384;
 
 /// A key per message: what a stage that reuses none draws.
 const PER_MESSAGE: Reuse = Reuse {
@@ -256,8 +266,16 @@ impl<P, K> EnvelopeStage<P, K> {
         let supply = Pacing::fitted(PER_MESSAGE)
             .supply(PER_MESSAGE)
             .expect("a fitted pacing fits its reuse");
+        let draws = Arc::new(Draws::new(sessions, kms, supply));
+        let opener = Arc::new(Opener::over(
+            Arc::clone(&draws.parts),
+            Opening::fitted(PER_MESSAGE.lifetime, KEYS),
+            None,
+        ));
         EnvelopeStage {
-            draws: Arc::new(Draws::new(sessions, kms, supply)),
+            draws,
+            opener,
+            sentinel: None,
             algorithm: Algorithm::Aes256Gcm,
             bound_to: vec![TENANT_ID.to_owned(), MESSAGE_ID.to_owned()],
             reuse: PER_MESSAGE,
@@ -331,6 +349,63 @@ impl<P, K> EnvelopeStage<P, K> {
         self.redrawn(supply, |draws| draws.with_observer(observer))
     }
 
+    /// The same stage drawing for `sentinel` — the host's own account,
+    /// under the same KMS and policy — when it refuses a seal on no evidence
+    /// of whether its KMS serves: at most once per `wait`, so that a quiet
+    /// stage tells a tenant's trouble from its KMS's (ADR-0040 decision 3).
+    pub fn with_sentinel(self, sentinel: impl Into<String>) -> Self
+    where
+        P: SessionPool + Send + Sync + 'static,
+        P::Session: Sync,
+        K: KeyManagementService<P::Session> + 'static,
+    {
+        let supply = self.draws.supply();
+        let sentinel = sentinel.into();
+        let opening = *self.opener.opening();
+        let stage = self.redrawn(supply, |draws| draws.with_sentinel(sentinel.clone()));
+        let opener = Arc::new(Opener::over(
+            Arc::clone(&stage.draws.parts),
+            opening,
+            Some(sentinel.clone()),
+        ));
+        EnvelopeStage {
+            opener,
+            sentinel: Some(sentinel),
+            ..stage
+        }
+    }
+
+    /// The same stage opening as `opening` says (ADR-0039 slice 4): each key
+    /// unwrapped once for its waiters, kept from its unwrap's start for
+    /// `keep`, its entries capped. What the old opening held stays its own.
+    ///
+    /// # Errors
+    /// [`InvalidParameters`] naming the rule broken.
+    pub fn opened(self, opening: Opening) -> Result<Self, InvalidParameters>
+    where
+        P: SessionPool + Send + Sync + 'static,
+        P::Session: Sync,
+        K: KeyManagementService<P::Session> + 'static,
+    {
+        let opening = opening.validated()?;
+        let opener = Arc::new(Opener::over(
+            Arc::clone(&self.draws.parts),
+            opening,
+            self.sentinel.clone(),
+        ));
+        Ok(EnvelopeStage { opener, ..self })
+    }
+
+    /// What the opening end holds now: its keys, its entries, its unwraps.
+    pub fn opening_held(&self) -> OpeningHeld
+    where
+        P: SessionPool + Send + Sync + 'static,
+        P::Session: Sync,
+        K: KeyManagementService<P::Session> + 'static,
+    {
+        self.opener.held()
+    }
+
     /// What the stage holds now: its keys, its tenants, its draws.
     pub fn held(&self) -> Held
     where
@@ -394,14 +469,7 @@ where
                 .map(str::to_owned)
                 .collect();
             let aad = associated_data(&message, &bound_to)?;
-            let parts = &self.draws.parts;
-            let dek = parts
-                .sessions
-                .session(async |session| {
-                    parts.kms.decrypt_dek(&session, &tenant_id, &wrapped).await
-                })
-                .await
-                .map_err(verdict)?;
+            let dek = self.opener.key(&tenant_id, &wrapped).await?;
             let cipher = algorithm.cipher(&dek, aad).map_err(verdict)?;
             let opened = cipher.decrypt(message.payload()).map_err(verdict)?;
             Ok(message
@@ -455,18 +523,135 @@ fn header<'a>(message: &'a Message, name: &str) -> Result<&'a str, BoxError> {
 }
 
 fn refused(what: String) -> BoxError {
-    Permanent::new(what).into()
+    Permanent::because(causes::MALFORMED, what).into()
 }
 
-/// Which failures at the opening end, and of a cipher, no retry will mend,
-/// by the KMS's own class (ADR-0039 decision 8): a key that is gone, a
-/// ciphertext that does not open, an operation refused, bytes that are not
-/// what they should be. The rest — the session, the database, the KMS out
-/// of reach, what the KMS did not explain — are of the moment. At the
-/// sealing end the draws decide (`draws.rs`): only a key gone is for good.
+/// The bus's verdict on a failure at the opening end, by the KMS's own
+/// class (ADR-0039 decision 8, ADR-0040 decisions 2 and 3):
+/// - a key that is gone, for good, under `kms.gone`;
+/// - an operation refused, a ciphertext that does not open, bytes that are
+///   not what they should be, for good, each under the cause of its remedy
+///   ([`causes::of`]): a deploy, not a retry, mends a policy;
+/// - the KMS out of reach, unavailable over the stage: a Vault that answers
+///   no one answers no tenant, and the inbox holds the message without
+///   spending its attempts;
+/// - the rest — the session, the database, what the KMS did not explain —
+///   of the moment.
+///
+/// At the sealing end the draws decide (`draws.rs`).
 fn verdict(error: KmsError) -> BoxError {
+    let cause = causes::of(&error);
     match error.class() {
-        Class::Gone | Class::Refused => Permanent::new(error).into(),
-        Class::Unavailable | Class::Moment => error.into(),
+        Class::Gone | Class::Refused => Permanent::because(cause, error).into(),
+        Class::Unavailable => Unavailable::new(cause, Scope::Stage, None, error).into(),
+        Class::Moment => error.into(),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
+mod tests {
+    use ascetic_ddd_bus::Cause;
+    use ascetic_ddd_session::SessionError;
+
+    use super::*;
+
+    /// Every failure of the KMS has the cause of its remedy, and two remedies
+    /// never share a cause (seedwork ADR-0042 decision 9): an operator tells
+    /// them apart without the error's text, which may name a tenant.
+    #[test]
+    fn every_kms_failure_has_the_cause_of_its_remedy() {
+        let tenant = || "t".to_owned();
+        let cases: Vec<(KmsError, Cause)> = vec![
+            (
+                KmsError::KekNotFound {
+                    tenant_id: tenant(),
+                    key_version: None,
+                },
+                causes::GONE,
+            ),
+            (
+                KmsError::KekNotFound {
+                    tenant_id: tenant(),
+                    key_version: Some(3),
+                },
+                causes::KEY_VERSION,
+            ),
+            (
+                KmsError::WrongKeyVersion {
+                    expected: 1,
+                    found: 2,
+                },
+                causes::KEY_VERSION,
+            ),
+            (KmsError::NoKeyOfVersion(4), causes::KEY_VERSION),
+            (KmsError::Decrypt, causes::CIPHERTEXT),
+            (KmsError::InvalidSignature, causes::CIPHERTEXT),
+            (KmsError::Malformed("x".into()), causes::KMS_MALFORMED),
+            (KmsError::Unsupported("x"), causes::UNSUPPORTED),
+            (
+                KmsError::Conflict {
+                    tenant_id: tenant(),
+                    detail: "x".into(),
+                },
+                causes::CONFLICT,
+            ),
+            (
+                KmsError::Forbidden {
+                    tenant_id: tenant(),
+                    operation: "decrypt",
+                },
+                causes::FORBIDDEN,
+            ),
+            (
+                KmsError::Session(SessionError::Acquire("down".into())),
+                causes::UNAVAILABLE,
+            ),
+            (
+                KmsError::Session(SessionError::Abandoned),
+                causes::UNEXPLAINED,
+            ),
+        ];
+        for (error, cause) in &cases {
+            assert_eq!(causes::of(error), *cause, "{error:?}");
+        }
+        let distinct: std::collections::HashSet<Cause> =
+            cases.iter().map(|(_, cause)| *cause).collect();
+        assert_eq!(distinct.len(), 9, "a remedy per cause: {distinct:?}");
+    }
+
+    /// Each class of the KMS's failures at the opening end comes to its
+    /// verdict on the bus, under its cause (ADR-0040 decisions 2 and 3).
+    #[test]
+    fn an_opening_failure_comes_to_its_class_s_verdict() {
+        let gone = verdict(KmsError::KekNotFound {
+            tenant_id: "t".into(),
+            key_version: None,
+        });
+        assert_eq!(
+            gone.downcast_ref::<Permanent>().map(Permanent::cause),
+            Some(causes::GONE)
+        );
+        let refused = verdict(KmsError::Forbidden {
+            tenant_id: "t".into(),
+            operation: "decrypt",
+        });
+        assert_eq!(
+            refused.downcast_ref::<Permanent>().map(Permanent::cause),
+            Some(causes::FORBIDDEN)
+        );
+        let away = verdict(KmsError::Session(SessionError::Acquire("down".into())));
+        let away = away
+            .downcast_ref::<Unavailable>()
+            .expect("unavailable, the stage's");
+        assert_eq!(
+            (away.cause(), away.scope()),
+            (causes::UNAVAILABLE, Scope::Stage)
+        );
+        let moment = verdict(KmsError::Session(SessionError::Abandoned));
+        assert!(
+            !moment.is::<Permanent>() && !moment.is::<Unavailable>(),
+            "of the moment: {moment}"
+        );
     }
 }

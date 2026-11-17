@@ -65,6 +65,14 @@ impl JsonTrace {
         std::fs::write(path, text)
     }
 
+    /// Notes that the run's own statement wrote the rows of `observer`'s
+    /// table behind the observers — a test's SQL, as an older producer or a
+    /// hand would write: the model takes no step for it, so `trace2tla.py`
+    /// refuses the run rather than let it fit for a reason not its own.
+    pub fn written_behind(&self, observer: &str) {
+        self.record(json!({ "observer": observer, "event": "behind" }));
+    }
+
     fn record(&self, line: Value) {
         self.lines
             .lock()
@@ -232,6 +240,8 @@ impl InboxObserver for JsonTrace {
             "attempts": event.attempts,
             "parked": event.parked,
             "permanent": event.permanent,
+            "cause": event.cause.as_str(),
+            "held": event.held,
             "retry_after_ms": event.retry_after.as_millis() as u64,
             "error": event.error.to_string(),
         }));
@@ -258,6 +268,12 @@ impl InboxObserver for JsonTrace {
                 Ok(Outcome::SetAside) => "set_aside",
                 Ok(Outcome::Parked) => "parked",
                 Ok(Outcome::Nothing) => "nothing",
+                Ok(Outcome::Passed) => "passed",
+                // A head held unasked, a guest's walk among paused heads
+                // (ADR-0042): the model does not take these steps yet, and the
+                // trace check refuses a run that has them.
+                Ok(Outcome::Held) => "held",
+                Ok(Outcome::Paused) => "paused",
                 Err(_) => "rolled_back",
             },
         }));
@@ -276,6 +292,39 @@ impl InboxObserver for JsonTrace {
             "id": inbox_id(event.message),
             "processed_position": event.processed_position,
             "woken": event.woken.iter().map(inbox_id).collect::<Vec<_>>(),
+        }));
+    }
+    /// A head held without its subscriber called (ADR-0042 decision 2): a
+    /// step `Inbox.tla` does not take yet, which `trace2tla.py` refuses.
+    fn on_withheld(&self, event: &inbox::Withheld<'_>) {
+        self.record(json!({
+            "observer": "inbox",
+            "event": "withheld",
+            "slot": event.slot,
+            "channel": event.channel,
+            "cause": event.cause.as_str(),
+        }));
+    }
+    /// A call of the operator's surface: a verb over many rows moves rows the
+    /// trace does not name one by one (ADR-0042 decision 8), which
+    /// `trace2tla.py` refuses; a read, or a call on the rows the intake set
+    /// aside, moves none of the inbox's.
+    fn on_operated(&self, event: &inbox::Operated<'_>) {
+        self.record(json!({
+            "observer": "inbox",
+            "event": "operated",
+            "operation": match event.operation {
+                inbox::Operation::Counted => "counted",
+                inbox::Operation::Paged => "paged",
+                inbox::Operation::Read => "read",
+                inbox::Operation::Readmitted => "readmitted",
+                inbox::Operation::Discarded => "discarded",
+                inbox::Operation::PagedHeld => "paged_held",
+                inbox::Operation::ParkedHeads => "parked_heads",
+                inbox::Operation::ParkedQueue => "parked_queue",
+                inbox::Operation::UnparkedAll => "unparked_all",
+            },
+            "rows": event.rows,
         }));
     }
     /// A message set aside is named by its digest alone: its identity may be

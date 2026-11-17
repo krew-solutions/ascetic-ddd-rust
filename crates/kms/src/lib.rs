@@ -3,7 +3,6 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
-pub mod cache;
 pub mod domain;
 mod error;
 #[cfg(feature = "pg")]
@@ -13,7 +12,6 @@ pub mod testing;
 #[cfg(feature = "vault")]
 pub mod vault;
 
-pub use crate::cache::Cached;
 pub use crate::domain::{
     Aes256Gcm, Algorithm, Cipher, Kek, Key, KeyLabel, MASTER_KEY_VERSION, Mac, MacKey, MasterKey,
     PublicKey, PublicKeyring, Signature, SignatureAlgorithm, SigningKey, WrappedKey,

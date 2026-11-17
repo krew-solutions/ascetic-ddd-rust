@@ -18,9 +18,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ascetic_ddd_bus::{BoxError, Message, Permanent, Stage};
+use ascetic_ddd_dek::Scope;
 use ascetic_ddd_dek::stage::{DEK, MESSAGE_ID, TENANT_ID};
 use ascetic_ddd_dek::supply::Reason;
-use ascetic_ddd_dek::{EnvelopeStage, Pacing, Reuse, Unavailable};
+use ascetic_ddd_dek::{EnvelopeStage, Landed, Pacing, Reuse, Unavailable};
 use ascetic_ddd_kms::{Error, Key, KeyManagementService};
 use ascetic_ddd_session::testing::{MemorySession, MemorySessionPool};
 use tokio::sync::Notify;
@@ -108,6 +109,10 @@ impl std::ops::Deref for Kms {
 impl KeyManagementService<MemorySession> for Kms {
     async fn encrypt_dek(&self, _: &MemorySession, _: &str, dek: &Key) -> Result<Vec<u8>, Error> {
         Ok(dek.as_bytes().to_vec())
+    }
+
+    async fn key_exists(&self, _: &MemorySession, _: &str) -> Result<bool, Error> {
+        Ok(true)
     }
 
     async fn decrypt_dek(&self, _: &MemorySession, _: &str, wrapped: &[u8]) -> Result<Key, Error> {
@@ -291,7 +296,7 @@ async fn a_dropped_caller_does_not_cancel_the_draw() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_shredded_tenant_is_told_once_and_not_asked_again_for_a_while() {
+async fn a_shredded_tenant_is_told_by_every_seal_and_not_asked_again_for_a_while() {
     let kms = Gated::new([Answer::Gone]);
     let stage = stage(&kms, reuse(), |p| p);
     let drew = seal(&stage, "a", 1).await;
@@ -299,8 +304,18 @@ async fn a_shredded_tenant_is_told_once_and_not_asked_again_for_a_while() {
         permanent(&drew),
         "the one who drew is told the key is gone: {drew:?}"
     );
-    let after = seal(&stage, "a", 2).await;
-    assert_eq!(unavailable(&after).reason, Reason::BackingOff);
+    for n in 2..5 {
+        let after = seal(&stage, "a", n).await;
+        assert_eq!(
+            after
+                .as_ref()
+                .err()
+                .and_then(|error| error.downcast_ref::<Permanent>())
+                .map(Permanent::cause),
+            Some(ascetic_ddd_dek::causes::GONE),
+            "every seal within gone is told, under kms.gone: {after:?}"
+        );
+    }
     assert_eq!(kms.draws(), 1, "no call within gone");
     advance(Duration::from_secs(10)).await;
     let again = seal(&stage, "a", 3).await;
@@ -324,7 +339,9 @@ async fn a_sealing_side_refusal_backs_off_and_is_never_for_good() {
     );
     let refused = unavailable(&refused);
     assert!(
-        refused.last.is_some_and(|last| last.contains("refused")),
+        refused
+            .last
+            .is_some_and(|last| last.landed == Landed::Refused && last.text.contains("refused")),
         "the cause told"
     );
     let backing = seal(&stage, "a", 2).await;
@@ -336,6 +353,58 @@ async fn a_sealing_side_refusal_backs_off_and_is_never_for_good() {
             .is_some_and(|after| after > Duration::ZERO)
     );
     assert_eq!(kms.draws(), 1);
+    assert_eq!(
+        backing
+            .verdict()
+            .downcast_ref::<Permanent>()
+            .map(Permanent::cause),
+        Some(ascetic_ddd_dek::causes::FORBIDDEN),
+        "the bus's verdict: for good, under kms.forbidden, for a deploy to mend"
+    );
+}
+
+/// A stage that refuses a tenant on no evidence of whether its KMS serves
+/// draws for its sentinel, and once that lands in time, the tenant's
+/// refusal is its own: the inbox spends an attempt rather than holding the
+/// slot for an outage that is not there (ADR-0040 decision 3). Without a
+/// sentinel the refusal stays the stage's.
+#[tokio::test(start_paused = true)]
+async fn a_sentinel_tells_a_tenant_s_trouble_from_the_kms_s() {
+    for sentinel in [true, false] {
+        let kms = Gated::new([Answer::Unreachable, Answer::Key]);
+        let built = EnvelopeStage::new(MemorySessionPool::new(), Kms(Arc::clone(&kms)))
+            .paced(reuse(), Pacing::fitted(reuse()))
+            .unwrap()
+            .seeded(7);
+        let stage: Tested = Arc::new(if sentinel {
+            built.with_sentinel("s")
+        } else {
+            built
+        });
+        let first = unavailable(&seal(&stage, "a", 1).await);
+        assert_eq!(first.scope, Scope::Stage, "no evidence yet");
+        sleep(Duration::from_millis(50)).await;
+        let second = unavailable(&seal(&stage, "a", 2).await);
+        assert_eq!(second.reason, Reason::BackingOff);
+        if sentinel {
+            assert_eq!(kms.draws(), 2, "a's draw, and the sentinel's");
+            assert_eq!(second.scope, Scope::Tenant, "the sentinel landed in time");
+            let verdict = second.verdict();
+            let told = verdict
+                .downcast_ref::<ascetic_ddd_bus::Unavailable>()
+                .expect("unavailable");
+            assert_eq!(
+                (told.scope(), told.cause()),
+                (
+                    ascetic_ddd_bus::Scope::Tenant,
+                    ascetic_ddd_dek::causes::UNAVAILABLE
+                )
+            );
+        } else {
+            assert_eq!(kms.draws(), 1, "no sentinel, no draw for evidence");
+            assert_eq!(second.scope, Scope::Stage);
+        }
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -674,7 +743,7 @@ async fn a_kms_out_of_reach_is_asked_less_and_less_however_often_a_tenant_seals(
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_key_gone_is_told_to_the_first_seal_to_ask_though_its_draw_outlived_the_wait() {
+async fn a_key_gone_is_told_to_every_seal_though_its_draw_outlived_the_wait() {
     let kms = Gated::new([Answer::Gone]);
     kms.slow(Duration::from_secs(1));
     let stage = stage(&kms, reuse(), |p| p);
@@ -690,8 +759,7 @@ async fn a_key_gone_is_told_to_the_first_seal_to_ask_though_its_draw_outlived_th
         permanent(&seal(&stage, "a", 2).await),
         "the first to ask is told"
     );
-    let after = seal(&stage, "a", 3).await;
-    assert_eq!(unavailable(&after).reason, Reason::BackingOff, "once");
+    assert!(permanent(&seal(&stage, "a", 3).await), "and so is the next");
     assert_eq!(kms.draws(), 1);
 }
 
@@ -873,15 +941,20 @@ fn a_sealing_whose_keys_would_outlive_its_ceiling_is_refused() {
         ascetic_ddd_dek::Sealing::over_paced(
             Arc::new(MemorySessionPool::new()),
             ["c"],
-            (parameters, pacing),
+            (
+                parameters,
+                pacing,
+                ascetic_ddd_dek::Opening::fitted(parameters.cache, 16),
+            ),
             Some(ceiling),
+            None,
             |_| Arc::new(()),
             |_| Kms(Arc::clone(&kms)),
         )
     };
     assert_eq!(
         build(window - Duration::from_nanos(1)).unwrap_err(),
-        ascetic_ddd_dek::InvalidParameters("lifetime + cache + draw ≤ the ceiling")
+        ascetic_ddd_dek::InvalidParameters("lifetime + keep + draw ≤ the ceiling")
     );
     let sealing = build(window).unwrap();
     assert_eq!(
@@ -890,8 +963,10 @@ fn a_sealing_whose_keys_would_outlive_its_ceiling_is_refused() {
     );
 }
 
-/// The log lines a test binary wrote: one logger for the process.
-static LOGGED: Mutex<Vec<(log::Level, String)>> = Mutex::new(Vec::new());
+/// The log lines a test binary wrote, with the thread that wrote each: one
+/// logger for the process, and a test on a current-thread runtime reads its
+/// own by its thread.
+static LOGGED: Mutex<Vec<(std::thread::ThreadId, log::Level, String)>> = Mutex::new(Vec::new());
 
 struct Logged;
 
@@ -900,10 +975,11 @@ impl log::Log for Logged {
         true
     }
     fn log(&self, record: &log::Record<'_>) {
-        LOGGED
-            .lock()
-            .unwrap()
-            .push((record.level(), record.args().to_string()));
+        LOGGED.lock().unwrap().push((
+            std::thread::current().id(),
+            record.level(),
+            record.args().to_string(),
+        ));
     }
     fn flush(&self) {}
 }
@@ -918,28 +994,43 @@ async fn an_outage_of_every_tenant_is_logged_a_line_at_a_time() {
     for n in 0..50 {
         let _ = seal(&stage, &format!("told-{n}"), n).await;
     }
-    let warned = LOGGED
-        .lock()
-        .unwrap()
+    const LINE: &str = "a tenant's data key was not drawn";
+    let this = std::thread::current().id();
+    let ours = || -> Vec<(log::Level, String)> {
+        LOGGED
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(thread, _, _)| *thread == this)
+            .map(|(_, level, line)| (*level, line.clone()))
+            .collect()
+    };
+    let warned = ours()
         .iter()
-        .filter(|(level, line)| *level == log::Level::Warn && line.contains("told-"))
+        .filter(|(level, line)| *level == log::Level::Warn && line.contains(LINE))
         .count();
     assert_eq!(warned, 1, "fifty tenants failing at once: one line");
     advance(Duration::from_secs(11)).await;
     let _ = seal(&stage, "told-late", 99).await;
     sleep(Duration::from_millis(1)).await;
-    let last = LOGGED
-        .lock()
-        .unwrap()
+    let logged = ours();
+    let last = logged
         .iter()
         .rev()
-        .find(|(level, line)| *level == log::Level::Warn && line.contains("told-"))
+        .find(|(level, line)| *level == log::Level::Warn && line.contains(LINE))
         .map(|(_, line)| line.clone())
         .unwrap();
     assert!(
         last.contains("49 more"),
         "the next line counts the quiet: {last}"
     );
+    // No line names a tenant: a key's name and a path carry it (seedwork
+    // ADR-0042 decision 9).
+    let named: Vec<_> = logged
+        .iter()
+        .filter(|(_, line)| line.contains("told-"))
+        .collect();
+    assert!(named.is_empty(), "a tenant named in the log: {named:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1005,7 +1096,12 @@ async fn a_sealing_tells_each_channel_s_observer_of_its_own_stage() {
     let sealing = ascetic_ddd_dek::Sealing::over_paced(
         Arc::new(MemorySessionPool::new()),
         ["c", "d"],
-        (parameters, Pacing::fitted(parameters.reuse)),
+        (
+            parameters,
+            Pacing::fitted(parameters.reuse),
+            ascetic_ddd_dek::Opening::fitted(parameters.cache, 16),
+        ),
+        None,
         None,
         |channel| {
             let recorded = Arc::new(Recorded::default());

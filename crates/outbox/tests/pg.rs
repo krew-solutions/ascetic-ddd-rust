@@ -642,10 +642,27 @@ async fn two_dispatchers_of_one_group_do_not_overlap() {
     assert_eq!(*seen.lock().unwrap(), [1, 2, 3]);
 }
 
-/// Two slots, two dispatchers, a subscriber that takes its time: the locks
-/// are per slot, so the two run side by side, not one after the other. The
-/// selection's position rows exist already: their creation, at first
-/// contact, is one transaction's work and would serialize the pair.
+/// Two connections in the pool, opened by two dispatches at once that find
+/// nothing, so that the second of two loops starts without a handshake: in a
+/// debug build on a loaded machine, SCRAM takes long enough for the first
+/// loop to drain every slot alone, and a test of two at once then sees one
+/// (measured: eight spans in a row, 345 ms, the second loop never in).
+async fn two_connections(f: &Fixture, selection: &Selection) {
+    let quick = |_: &OutboxMessage| async { Ok::<(), BoxError>(()) };
+    let (a, b) = tokio::join!(
+        f.outbox.dispatch(quick, selection),
+        f.outbox.dispatch(quick, selection),
+    );
+    assert!(!a.unwrap() && !b.unwrap(), "nothing was published yet");
+}
+
+/// Two slots, two dispatchers, a subscriber that takes its time and notes
+/// when it ran: the locks are per slot, so the two run side by side, not one
+/// after the other. The selection's position rows exist already: their
+/// creation, at first contact, is one transaction's work and would serialize
+/// the pair. The overlap of the two spans is the evidence, not the pair's
+/// length: that one counts the second connection's handshake as well, and a
+/// loaded machine stretches it past any bound a serial pair would exceed.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn two_slots_are_dispatched_at_once() {
@@ -653,24 +670,40 @@ async fn two_slots_are_dispatched_at_once() {
     let selection = Selection::group("broker");
     let quick = |_: &OutboxMessage| async { Ok::<(), BoxError>(()) };
     assert!(!f.outbox.dispatch(quick, &selection).await.unwrap());
+    two_connections(&f, &selection).await;
     let (first, second) = f.uris_in_different_slots().await;
     f.publish(&[message(&first, 1), message(&second, 2)]).await;
-    let slow = |_: &OutboxMessage| async {
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        Ok::<(), BoxError>(())
+    let spans: Arc<Mutex<Vec<(std::time::Instant, std::time::Instant)>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let slow = {
+        let spans = Arc::clone(&spans);
+        move |_: &OutboxMessage| {
+            let spans = Arc::clone(&spans);
+            async move {
+                let started = std::time::Instant::now();
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                spans
+                    .lock()
+                    .unwrap()
+                    .push((started, std::time::Instant::now()));
+                Ok::<(), BoxError>(())
+            }
+        }
     };
 
-    let started = std::time::Instant::now();
     let (a, b) = tokio::join!(
-        f.outbox.dispatch(slow, &selection),
+        f.outbox.dispatch(slow.clone(), &selection),
         f.outbox.dispatch(slow, &selection),
     );
-    let elapsed = started.elapsed();
 
     assert_eq!((a.unwrap(), b.unwrap()), (true, true));
+    let spans = spans.lock().unwrap().clone();
+    let [(a_started, a_ended), (b_started, b_ended)] = spans[..] else {
+        panic!("two messages in the subscriber, not {}", spans.len());
+    };
     assert!(
-        elapsed < Duration::from_millis(550),
-        "two slots took {elapsed:?}: one after the other"
+        a_started < b_ended && b_started < a_ended,
+        "the two slots ran one after the other: {spans:?}"
     );
 }
 
@@ -691,6 +724,7 @@ async fn messages_of_one_uri_are_never_dispatched_at_once() {
     // one transaction's work, and the other loop would wait for its batch
     let quick = |_: &OutboxMessage| async { Ok::<(), BoxError>(()) };
     assert!(!f.outbox.dispatch(quick, &selection).await.unwrap());
+    two_connections(&f, &selection).await;
     let (first, second) = f.uris_in_different_slots().await;
     let messages: Vec<OutboxMessage> = (1..=4)
         .flat_map(|i| [message(&first, i), message(&second, 10 + i)])
@@ -865,7 +899,7 @@ async fn run_outlives_a_failing_subscriber() {
     let loops = Loops {
         concurrency: 1,
         poll_interval: Duration::from_millis(20),
-        max_pause: Duration::from_millis(50),
+        max_error_wait: Duration::from_millis(50),
     };
 
     let shutdown = async { done.notified().await };
@@ -2870,7 +2904,7 @@ async fn the_dispatcher_s_loops_work_the_reclamation() {
         Loops {
             concurrency: 2,
             poll_interval: Duration::from_millis(20),
-            max_pause: Duration::from_millis(100),
+            max_error_wait: Duration::from_millis(100),
         },
         async {
             let _ = stopped.await;
@@ -3189,7 +3223,7 @@ async fn the_reclamation_laps_the_ring_while_the_relay_is_busy() {
         Loops {
             concurrency: 4,
             poll_interval: Duration::from_millis(5),
-            max_pause: Duration::from_millis(50),
+            max_error_wait: Duration::from_millis(50),
         },
         async {
             let _ = stopped.await;

@@ -1,50 +1,145 @@
 //! What can go wrong in the inbox.
 
 use std::fmt;
+use std::time::Duration;
+
+use ascetic_ddd_bus::{self as bus, Cause, Scope};
 
 use ascetic_ddd_session::SessionError;
 
 /// An error of a subscriber, boxed: the inbox does not know what it does.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// What a subscriber says when it fails: whether trying again can help.
+/// What a subscriber says when it fails: whether trying again can help,
+/// and why it failed (ADR-0040).
 ///
 /// By default it can: any error converts into `Transient`, so `?` keeps
 /// working in a subscriber, and the message is tried again after its backoff
 /// and parked after its attempts (ADR-0005). `Permanent` is the subscriber's
 /// verdict that no retry will ever succeed — a payload it cannot read, an
 /// invariant the message breaks — and the message is parked at once,
-/// whatever attempts it had left (ADR-0010).
+/// whatever attempts it had left (ADR-0010). `Unavailable` is the verdict
+/// that the message cannot be handled now for a cause not its own: of the
+/// stage, it holds its Tenant's rows of its slot without spending an attempt
+/// (ADR-0041 decision 2: the slot's other Tenants go on); of the Tenant, it
+/// spends one, never sooner than its `retry_after` (ADR-0040 decisions 4
+/// and 5).
+///
+/// An error converts by what it is at its top, never by its sources: a
+/// [`bus::Permanent`], [`bus::Unavailable`] or [`bus::Transient`] keeps its
+/// verdict and cause, anything else is `Transient` for no named cause.
 #[derive(Debug)]
 pub enum Failure {
     /// Trying again may succeed.
-    Transient(BoxError),
+    Transient {
+        /// Why.
+        cause: Cause,
+        /// The subscriber's error.
+        error: BoxError,
+    },
+    /// Not now, for a cause not the message's own.
+    Unavailable {
+        /// Why.
+        cause: Cause,
+        /// Whose messages it stops.
+        scope: Scope,
+        /// When to ask again, when the teller knows.
+        retry_after: Option<Duration>,
+        /// The subscriber's error.
+        error: BoxError,
+    },
     /// Trying again never will.
-    Permanent(BoxError),
+    Permanent {
+        /// Why.
+        cause: Cause,
+        /// The subscriber's error.
+        error: BoxError,
+    },
 }
 
 impl Failure {
-    /// The verdict that no retry will succeed.
+    /// The verdict that no retry will succeed, for no named cause.
     pub fn permanent(error: impl Into<BoxError>) -> Self {
-        Failure::Permanent(error.into())
+        Failure::Permanent {
+            cause: Cause::UNEXPLAINED,
+            error: error.into(),
+        }
+    }
+
+    /// The verdict `error` carries at its top: a bus verdict keeps its own,
+    /// anything else is of the moment for no named cause.
+    pub fn of(error: BoxError) -> Self {
+        let error = match error.downcast::<bus::Permanent>() {
+            Ok(permanent) => {
+                return Failure::Permanent {
+                    cause: permanent.cause(),
+                    error: permanent.into_inner(),
+                };
+            }
+            Err(error) => error,
+        };
+        let error = match error.downcast::<bus::Unavailable>() {
+            Ok(unavailable) => {
+                return Failure::Unavailable {
+                    cause: unavailable.cause(),
+                    scope: unavailable.scope(),
+                    retry_after: unavailable.retry_after(),
+                    error: unavailable.into_inner(),
+                };
+            }
+            Err(error) => error,
+        };
+        match error.downcast::<bus::Transient>() {
+            Ok(transient) => Failure::Transient {
+                cause: transient.cause(),
+                error: transient.into_inner(),
+            },
+            Err(error) => Failure::Transient {
+                cause: Cause::UNEXPLAINED,
+                error,
+            },
+        }
     }
 
     /// The subscriber's error.
     pub fn error(&self) -> &BoxError {
         match self {
-            Failure::Transient(error) | Failure::Permanent(error) => error,
+            Failure::Transient { error, .. }
+            | Failure::Unavailable { error, .. }
+            | Failure::Permanent { error, .. } => error,
+        }
+    }
+
+    /// Why it failed.
+    pub fn cause(&self) -> Cause {
+        match self {
+            Failure::Transient { cause, .. }
+            | Failure::Unavailable { cause, .. }
+            | Failure::Permanent { cause, .. } => *cause,
         }
     }
 
     /// Whether the subscriber's verdict is that no retry will succeed.
     pub fn is_permanent(&self) -> bool {
-        matches!(self, Failure::Permanent(_))
+        matches!(self, Failure::Permanent { .. })
+    }
+
+    /// Whether it holds without spending an attempt: unavailable for the
+    /// whole stage.
+    pub fn holds(&self) -> bool {
+        matches!(
+            self,
+            Failure::Unavailable {
+                scope: Scope::Stage,
+                ..
+            }
+        )
     }
 }
 
 impl<E: Into<BoxError>> From<E> for Failure {
     fn from(error: E) -> Self {
-        Failure::Transient(error.into())
+        Failure::of(error.into())
     }
 }
 

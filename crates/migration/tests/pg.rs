@@ -144,7 +144,11 @@ async fn a_component_is_migrated_once_and_then_only_read() {
 async fn a_current_schema_starts_beside_its_tables_held_exclusively() {
     let (name, a, b) = (unique("orders"), unique("a"), unique("b"));
     let component = orders(&name, &a, &b);
-    migrate(&sessions(), &component, &quick())
+    // One pool for both runs: the second reads over the connection the first
+    // left in it, so that the time below is the read's, not a handshake's —
+    // SCRAM in a debug build on a loaded machine takes most of the budget.
+    let pool = sessions();
+    migrate(&pool, &component, &quick())
         .await
         .expect("migrated");
     let live = another().await;
@@ -155,7 +159,7 @@ async fn a_current_schema_starts_beside_its_tables_held_exclusively() {
     .expect("held");
     let started = Instant::now();
     let read = migrate(
-        &sessions(),
+        &pool,
         &component,
         &Options {
             budget: Duration::from_millis(300),

@@ -86,7 +86,7 @@ pub use crate::adapter::{
     TransactionalWireProducer, WireConsumer, WireProducer,
 };
 pub use crate::bridge::{Bridge, Target};
-pub use crate::error::{BoxError, Error, Permanent};
+pub use crate::error::{BoxError, Cause, Error, Permanent, Scope, Transient, Unavailable};
 pub use crate::message::Message;
 pub use crate::stage::Stage;
 

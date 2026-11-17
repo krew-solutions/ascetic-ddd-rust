@@ -24,12 +24,15 @@
 //! bit cleared so that no key is left to nobody, computed once at insert and
 //! stored; the number of slots and the key are fixed for the life of the
 //! table (ADR-0008). A dispatcher has no identity: a call takes whichever
-//! slot has a due head and is held by nobody, least recently served first,
-//! locks that slot's row for the length of its transaction, and so one
-//! dispatcher at a time works a slot — the order of arrival within a slot
-//! is a guarantee, not a condition. A dispatcher that dies releases its
-//! slot with its transaction. With causal dependencies, cut by stream, so
-//! that a message and what it depends on land in one slot.
+//! slot has a queue row, is awake and is held by nobody, least recently
+//! served first, locks that slot's row for the length of its transaction,
+//! and so one dispatcher at a time works a slot. It serves the slot's
+//! Tenants in turn, from the cursor its row keeps (ADR-0041 decision 2):
+//! the order of arrival is kept per (slot, Tenant), a guarantee, not a
+//! condition, and Tenants have no order between them. A dispatcher that
+//! dies releases its slot with its transaction. With causal dependencies,
+//! cut by stream, so that a message and what it depends on land in one
+//! slot.
 //!
 //! # Dependencies
 //!
@@ -40,18 +43,23 @@
 //! dependency processed puts every row waiting for it back, in the same
 //! statement. Nothing polls for a dependency. The wait and the mark take a
 //! transaction-level advisory lock on the dependency's identity, so that a
-//! mark cannot slip between the check and the wait (ADR-0009). With
-//! [`PgInbox::with_max_wait`] a row waiting longer is parked with the
-//! dependency named; by default it waits for ever (ADR-0006).
+//! mark cannot slip between the check and the wait (ADR-0009). A row that
+//! has waited longer than [`PgInbox::with_max_wait`], an hour by default, is
+//! parked with the reason named when its dependency never arrived, is
+//! parked, or reaches no queued row within 8 hops of waiting rows; one whose
+//! dependency is there and on its way waits on. The expiry runs on a timer
+//! of [`PgInbox::run`], off the dispatch path, and [`PgInbox::expire`] is
+//! its call for a host that drives the dispatch itself (ADR-0042 decision
+//! 7).
 //!
 //! # Failures
 //!
 //! The subscriber runs in a savepoint. When it fails, its writes roll back to
 //! the savepoint and the transaction goes on to record the attempt:
 //! `attempts`, `last_error`, `next_attempt_at`. Until that time the row is
-//! not taken, and it holds its slot, so that the order of arrival survives
-//! the failure; a row whose dependencies are not processed is set aside
-//! instead. After [`Retries::max_attempts`] failures
+//! not taken, and it holds its (slot, Tenant), so that the order of arrival
+//! survives the failure, while the slot's other Tenants go on; a row whose
+//! dependencies are not processed is set aside instead. After [`Retries::max_attempts`] failures
 //! the row is parked, `parked_at`: out of the queue, in the table, so that a
 //! later arrival of the same message is still a duplicate. An operator lists
 //! the parked rows and either [`PgInbox::unpark`]s one or
@@ -81,17 +89,31 @@
 //! `dispatch`.
 
 mod dispatch;
+#[cfg(test)]
+mod exit_tests;
+mod expiry;
 mod intake;
 #[cfg(test)]
+mod measure_tests;
+#[cfg(test)]
 mod plan_tests;
+#[cfg(test)]
+mod release_tests;
+mod stalls;
 mod store;
 mod surface;
 
+pub use expiry::Expiry;
 pub use intake::Admission;
+pub use stalls::Stall;
 pub use surface::{
-    Readmission, Readmitted, SetAsideCount, SetAsideCursor, SetAsidePage, SetAsideRow,
+    ParkedFor, ParkedUnder, Readmission, Readmitted, SetAsideCount, SetAsideCursor, SetAsidePage,
+    SetAsideRow, UnparkedAll, Unparking,
 };
 mod sweep;
+mod verbs;
+
+pub use verbs::{GivenUp, HeldHead, ParkingHeads, ParkingQueue};
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -100,6 +122,7 @@ use std::time::Duration;
 
 use ascetic_ddd_session::pg::Identifier;
 
+use crate::breaker::{Breaker, Breaking};
 use crate::intake::Bounds;
 use crate::message::CausalDependency;
 use crate::observer::InboxObserver;
@@ -116,15 +139,15 @@ pub struct Loops {
     /// The longest a loop waits after an error of the moment — a lock cycle
     /// the server broke, a connection lost — before it goes on: the wait
     /// starts at `poll_interval` and doubles with each such error in a row.
-    pub max_pause: Duration,
+    pub max_error_wait: Duration,
 }
 
 impl Loops {
     /// The wait after the `n`th error of the moment in a row, `n` from 1.
-    pub fn pause_after(&self, n: u32) -> Duration {
+    pub fn error_wait_after(&self, n: u32) -> Duration {
         self.poll_interval
             .checked_mul(1u32 << n.saturating_sub(1).min(31))
-            .map_or(self.max_pause, |pause| pause.min(self.max_pause))
+            .map_or(self.max_error_wait, |pause| pause.min(self.max_error_wait))
     }
 }
 
@@ -133,7 +156,37 @@ impl Default for Loops {
         Loops {
             concurrency: 1,
             poll_interval: Duration::from_secs(1),
-            max_pause: Duration::from_secs(60),
+            max_error_wait: Duration::from_secs(60),
+        }
+    }
+}
+
+/// How a slot's holder serves its Tenants in turn (ADR-0041 decision 2): a
+/// setting of the inbox, read by every dispatch, as [`Retries`] is — not of
+/// [`Loops`], which only [`PgInbox::run`] reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rotation {
+    /// How many of a slot's Tenants one walk examines after its cursor, at
+    /// most, before it gives up the dispatch as [`Outcome::Passed`]: with nine
+    /// heads in ten waiting for their backoff, a walk of 32 comes back empty
+    /// 3 % of the time, one of 8 43 %.
+    pub walk: u32,
+    /// The longest a slot sleeps once a round of walks found every head of
+    /// its Tenants waiting for its backoff. It wakes sooner, at the earliest
+    /// of those backoffs or for a row arriving after the round began, or
+    /// when an operator's bulk verb moves a row into it and no dispatcher
+    /// holds it (ADR-0042 decision 8); this bounds the rest — an insert that
+    /// was in flight when the round began, a row a mark woke, a row
+    /// unparked by hand, a row a verb moved while a dispatcher held the slot. A second by default: the poll's own
+    /// granularity, and well inside the host's tightest hop (ADR-0041 § 5).
+    pub max_dormancy: Duration,
+}
+
+impl Default for Rotation {
+    fn default() -> Self {
+        Rotation {
+            walk: 32,
+            max_dormancy: Duration::from_secs(1),
         }
     }
 }
@@ -141,11 +194,17 @@ impl Default for Loops {
 /// What one `dispatch` call did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// Nothing was done: no slot had a due head; or the slot taken had none
-    /// once its head was read after the lock; or the head was about to wait
-    /// for a dependency that was marked meanwhile, and the next call takes
-    /// it again.
+    /// Nothing was done: no slot had a queue row and was awake; or the slot
+    /// taken had no queue row once it was read after the lock; or its walk
+    /// ended a round over its Tenants with no due head, and the slot sleeps
+    /// until the earliest backoff it saw, a row arriving, or `max_dormancy`
+    /// (ADR-0041 decision 2); or the head was about to wait for a dependency
+    /// that was marked meanwhile.
     Nothing,
+    /// The slot taken had queue rows, and its walk found no due head among
+    /// the Tenants it examined: the cursor moved past them, and the next
+    /// call goes on from there, without a pause (ADR-0041 decision 2).
+    Passed,
     /// The head of the slot taken was set aside to wait for a dependency
     /// (ADR-0006), and that wait is committed (ADR-0009); the next call
     /// takes the slot's next head.
@@ -160,7 +219,20 @@ pub enum Outcome {
         /// Whether the message was parked by this attempt: its attempts ran
         /// out, or the subscriber's verdict was permanent.
         parked: bool,
+        /// Whether the subscriber's verdict was `Unavailable`, which holds
+        /// the message and spends no attempt (ADR-0042): its Tenant's rows
+        /// of its slot wait behind it.
+        held: bool,
     },
+    /// The head was not asked: its Tenant's `Unavailable` is remembered, or
+    /// an ask of it is in flight, or its channel is paused in this process,
+    /// and it is held under that cause without its subscriber called
+    /// (ADR-0042 decision 2).
+    Held,
+    /// The slot's walk found no head due but heads of channels this process
+    /// has paused (ADR-0042 decision 5): the loop waits its poll, and the
+    /// slot's sleep and cursor are left to the processes that ask them.
+    Paused,
     /// The head could not be read, or its wait, its failure or its mark
     /// written, for its own values, and was parked at once in the
     /// dispatcher's transaction (ADR-0037 decision 6); the next call takes
@@ -206,19 +278,88 @@ impl Ground {
     }
 }
 
-/// The parked rows of one channel and ground (ADR-0036 decision 6): what a
-/// host's gauge pages on, read from the table, so that a page holds as long
-/// as a row stays parked, whatever the process that parked it did since.
+/// The parked rows of one channel, ground and cause (ADR-0036 decision 6,
+/// ADR-0042 decision 6): what a host's gauge pages on, read from the table,
+/// so that a page holds as long as a row stays parked, whatever the process
+/// that parked it did since.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParkedCount {
     /// The channel the rows arrived on, without the key.
     pub channel: String,
     /// Why they are parked.
     pub ground: Ground,
+    /// The cause they were parked under: a subscriber's failure's name;
+    /// `None` for a ground that is its own reason.
+    pub cause: Option<String>,
     /// How many rows are parked.
     pub open: u64,
     /// When the oldest of them was parked, as PostgreSQL prints a
     /// `timestamptz`: the database's clock, never a replica's.
+    pub oldest: String,
+}
+
+/// What holds a head (ADR-0041 decision 5, ADR-0042 decision 3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Hold {
+    /// The head failed on its own and waits for its backoff, holding its
+    /// (slot, Tenant): retried, it is processed or parked.
+    Backoff,
+    /// The head was told `Unavailable`, or held for a Tenant's or a
+    /// channel's `Unavailable` without being asked: it spends no attempt and
+    /// never parks for it.
+    Unavailable,
+}
+
+impl Hold {
+    /// The kind's name, as the row keeps it: `backoff` or `unavailable`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Hold::Backoff => "backoff",
+            Hold::Unavailable => "unavailable",
+        }
+    }
+
+    /// The kind a name names.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        [Hold::Backoff, Hold::Unavailable]
+            .into_iter()
+            .find(|hold| hold.as_str() == name)
+    }
+}
+
+/// The heads of one channel held by one kind and cause (ADR-0041 decision 5,
+/// ADR-0042 decision 6): what a host pages on — the oldest `Unavailable`
+/// hold over a threshold — and opens a ticket on — the count; a count rising
+/// across Tenants is a common cause. Read from the table, as [`ParkedCount`]
+/// is. No Tenant is named: only how many there are.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldCount {
+    /// The channel the rows arrived on, without the key.
+    pub channel: String,
+    /// What kind of hold.
+    pub hold: Hold,
+    /// The cause the heads are held under.
+    pub cause: Option<String>,
+    /// How many Tenants' heads are held.
+    pub tenants: u64,
+    /// How many heads are held.
+    pub heads: u64,
+    /// When the oldest hold began, as PostgreSQL prints a `timestamptz`.
+    pub oldest: String,
+}
+
+/// The rows of one channel waiting for a dependency (ADR-0042 decision 6):
+/// those the expiry spares — their dependency queued, or waiting on one
+/// queued — wait as long as it is on its way, and this is their count.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WaitingCount {
+    /// The channel the rows arrived on, without the key.
+    pub channel: String,
+    /// How many rows wait.
+    pub waiting: u64,
+    /// When the oldest wait began, as PostgreSQL prints a `timestamptz`.
     pub oldest: String,
 }
 
@@ -253,7 +394,9 @@ pub struct Retries {
     /// retried for ever.
     pub max_attempts: u32,
     /// How long the message waits after its `n`th failed attempt, `n` from 1.
-    /// While it waits it holds its slot.
+    /// While it waits it holds its Tenant's rows of its slot (ADR-0041
+    /// decision 2). An `Unavailable` spends no attempt: its hold is the
+    /// breaker's ([`crate::breaker::Breaking`]).
     pub backoff: Arc<dyn Fn(u32) -> Duration + Send + Sync>,
 }
 
@@ -390,14 +533,22 @@ pub struct PgInbox<P, O = ()> {
     sequence: Identifier,
     partition: Box<dyn PartitionKey>,
     loops: Loops,
+    rotation: Rotation,
     retries: Retries,
     max_wait: Option<Duration>,
     slots: u32,
     retention: InboxRetention,
+    /// The process's breaker and Tenants' memo (ADR-0042): what this
+    /// process does not ask, and when it asks again.
+    breaker: Arc<std::sync::Mutex<Breaker>>,
+    /// The stalls this process reports (ADR-0042 decision 6).
+    stalls: Arc<std::sync::Mutex<stalls::Stalls>>,
     /// Per channel, the latest `processed_at` the sweep forgot: where its
     /// next statement starts, so that dead index entries a held vacuum
     /// horizon keeps are not walked again.
     swept_to: Mutex<HashMap<String, String>>,
+    /// Where this process's pass of the expiry stands ([`PgInbox::expire`]).
+    expired_to: expiry::Cursor,
     /// Whether a message of a stream type may arrive on a channel (ADR-0036
     /// R5): [`PgInbox::admitting`].
     admission: Admits,
@@ -430,11 +581,15 @@ impl<P> PgInbox<P> {
             sequence: Identifier::new("inbox_received_position_seq").expect("a literal identifier"),
             partition: Box::new(ByUri),
             loops: Loops::default(),
+            rotation: Rotation::default(),
             retries: Retries::default(),
             max_wait: Some(Duration::from_secs(3600)),
             slots: 1,
             retention: InboxRetention::default(),
+            breaker: Arc::new(std::sync::Mutex::new(Breaker::new(Breaking::default()))),
+            stalls: Arc::new(std::sync::Mutex::new(stalls::Stalls::new())),
             swept_to: Mutex::new(HashMap::new()),
+            expired_to: expiry::Cursor::default(),
             admission: Arc::new(|_, _| true),
             readmission: Arc::new(|_| false),
             bounds: Bounds::default(),
@@ -452,11 +607,15 @@ impl<P, O> PgInbox<P, O> {
             sequence: self.sequence,
             partition: self.partition,
             loops: self.loops,
+            rotation: self.rotation,
             retries: self.retries,
             max_wait: self.max_wait,
             slots: self.slots,
             retention: self.retention,
+            breaker: self.breaker,
+            stalls: self.stalls,
             swept_to: self.swept_to,
+            expired_to: self.expired_to,
             admission: self.admission,
             readmission: self.readmission,
             bounds: self.bounds,
@@ -500,6 +659,17 @@ impl<P, O> PgInbox<P, O> {
 
     pub(crate) fn loops(&self) -> Loops {
         self.loops
+    }
+
+    /// The same inbox, its slots serving their Tenants by `rotation`: how
+    /// many Tenants a walk examines, how long a slot sleeps at most.
+    #[must_use]
+    pub fn with_rotation(self, rotation: Rotation) -> Self {
+        PgInbox { rotation, ..self }
+    }
+
+    pub(crate) fn rotation(&self) -> Rotation {
+        self.rotation
     }
 
     /// The same inbox in another table, with its own position sequence. The
@@ -552,13 +722,33 @@ impl<P, O> PgInbox<P, O> {
         PgInbox { retries, ..self }
     }
 
+    /// The same inbox, its breaker and Tenants' memo set by `breaking`
+    /// (ADR-0042 decisions 1 and 2): a fresh breaker, every channel closed.
+    #[must_use]
+    pub fn with_breaking(self, breaking: Breaking) -> Self {
+        PgInbox {
+            breaker: Arc::new(std::sync::Mutex::new(Breaker::new(breaking))),
+            ..self
+        }
+    }
+
+    /// The process's breaker, under its lock; a poisoned lock is taken as it
+    /// is: the core's state is whole after every call.
+    pub(crate) fn breaker(&self) -> std::sync::MutexGuard<'_, Breaker> {
+        self.breaker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// The same inbox, forgetting processed messages as `retention` says.
     pub fn with_retention(self, retention: InboxRetention) -> Self {
         PgInbox { retention, ..self }
     }
 
     /// The same inbox, parking a message that has waited longer than
-    /// `max_wait` for a dependency, with the dependency named.
+    /// `max_wait` for a dependency that never arrived, is parked, or reaches
+    /// no queued row within 8 hops, with the dependency and the reason named
+    /// ([`PgInbox::expire`]).
     pub fn with_max_wait(self, max_wait: Duration) -> Self {
         PgInbox {
             max_wait: Some(max_wait),

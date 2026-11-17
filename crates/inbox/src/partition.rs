@@ -11,7 +11,8 @@ pub trait PartitionKey: Send + Sync {
 }
 
 /// Partition by URI: messages of one URI go to one slot. For messages
-/// whose order comes from the broker's topic and partition.
+/// whose order comes from the broker's topic and partition. The order kept
+/// is per (URI, Tenant): a slot serves its Tenants in turn (ADR-0041).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ByUri;
 
@@ -24,7 +25,8 @@ impl PartitionKey for ByUri {
 /// Partition by stream: messages of one `(tenant, stream_type, stream_id)`
 /// go to one slot. For messages whose order is the stream's own — the
 /// usual case for aggregate events, and the right one when causal
-/// dependencies stay within a stream.
+/// dependencies stay within a stream. The order kept is the stream's,
+/// which holds its Tenant (ADR-0041).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ByStream;
 

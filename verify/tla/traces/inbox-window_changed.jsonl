@@ -1,0 +1,7 @@
+{"deps":[],"event":"received","id":"tenant-1/orders.Order/{\"id\":\"o1\"}/1","message_id":"00000000-0000-4000-8000-000000000001","observer":"inbox","received_position":1,"slot":0,"xid":2694530}
+{"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"o1\"}/1","observer":"inbox","slot":0,"slots":1,"snapshot":{"xip":[],"xmax":2694536,"xmin":2694536}}
+{"event":"handled","id":"tenant-1/orders.Order/{\"id\":\"o1\"}/1","observer":"inbox","ok":true,"slot":0}
+{"event":"marked","id":"tenant-1/orders.Order/{\"id\":\"o1\"}/1","observer":"inbox","processed_position":2,"slot":0,"woken":[]}
+{"event":"dispatched","observer":"inbox","outcome":"processed","slot":0}
+{"event":"fetched","id":null,"observer":"inbox","slot":null,"slots":1,"snapshot":{"xip":[],"xmax":2694537,"xmin":2694537}}
+{"event":"dispatched","observer":"inbox","outcome":"nothing","slot":null}

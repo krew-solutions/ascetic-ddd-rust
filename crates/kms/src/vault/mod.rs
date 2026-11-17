@@ -63,6 +63,7 @@ use futures::future::BoxFuture;
 use p256::pkcs8::DecodePublicKey as _;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
+use zeroize::Zeroize as _;
 
 use crate::domain::{
     Key, KeyLabel, Mac, MacKey, PublicKey, PublicKeyring, Signature, SignatureAlgorithm,
@@ -658,6 +659,44 @@ fn errors_of(body: Option<&Value>) -> String {
         .unwrap_or_default()
 }
 
+/// A Vault answer that could not be read, as the answer it was: a `200`
+/// with words for what was missing or garbled, of the moment rather than
+/// the request's fault (ADR-0039 decision 8). The helpers below read an
+/// answer as [`Error::Malformed`], since they do not know the request; the
+/// operation that sent it turns that into this, and passes anything else
+/// on.
+fn unread<'a>(method: &'static str, path: &'a str) -> impl FnOnce(Error) -> Error + 'a {
+    move |error| match error {
+        Error::Malformed(message) => Error::Vault {
+            status: 200,
+            method,
+            path: path.to_owned(),
+            message,
+        },
+        other => other,
+    }
+}
+
+/// `data.plaintext` of an answer, decoded into a key, the text in the
+/// answer wiped whether or not it decodes: the key's one copy this adapter
+/// keeps is the [`Key`]'s, which wipes itself. The transport's buffers it
+/// was read from are not this adapter's to wipe.
+fn plaintext_of(answer: &mut Value) -> Result<Key, Error> {
+    let Some(Value::String(text)) = answer
+        .get_mut("data")
+        .and_then(|data| data.get_mut("plaintext"))
+    else {
+        return Err(Error::Malformed(
+            "vault answered without `data.plaintext`".into(),
+        ));
+    };
+    let decoded = BASE64.decode(text.as_bytes());
+    text.zeroize();
+    decoded.map(Key::new).map_err(|error| {
+        Error::Malformed(format!("vault's `data.plaintext` is not base64: {error}"))
+    })
+}
+
 /// `data.<field>` of an answer, as text.
 fn text_field<'a>(answer: &'a Value, field: &str) -> Result<&'a str, Error> {
     answer
@@ -665,13 +704,6 @@ fn text_field<'a>(answer: &'a Value, field: &str) -> Result<&'a str, Error> {
         .and_then(|data| data.get(field))
         .and_then(Value::as_str)
         .ok_or_else(|| Error::Malformed(format!("vault answered without `data.{field}`")))
-}
-
-/// `data.<field>` of an answer, base64 as Vault writes it, decoded.
-fn base64_field(answer: &Value, field: &str) -> Result<Vec<u8>, Error> {
-    BASE64
-        .decode(text_field(answer, field)?)
-        .map_err(|error| Error::Malformed(format!("vault's `data.{field}` is not base64: {error}")))
 }
 
 /// A wrapped DEK is Vault's ciphertext text.
@@ -857,6 +889,13 @@ where
     S: Session + HttpAccess + Sync,
     S::Client: VaultTransport,
 {
+    async fn key_exists(&self, session: &S, tenant_id: &str) -> Result<bool, Error> {
+        Ok(self
+            .read_named(session, &Self::key_name(tenant_id))
+            .await?
+            .is_some())
+    }
+
     async fn encrypt_dek(&self, session: &S, tenant_id: &str, dek: &Key) -> Result<Vec<u8>, Error> {
         self.ensure_key(session, tenant_id).await?;
         let path = format!("/encrypt/{}", Self::key_name(tenant_id));
@@ -869,7 +908,10 @@ where
                     .await);
             }
         };
-        Ok(text_field(&answer, "ciphertext")?.as_bytes().to_vec())
+        Ok(text_field(&answer, "ciphertext")
+            .map_err(unread("POST", &path))?
+            .as_bytes()
+            .to_vec())
     }
 
     async fn decrypt_dek(
@@ -882,7 +924,7 @@ where
         let (key_version, _) = versioned(text, "ciphertext")?;
         let path = format!("/decrypt/{}", Self::key_name(tenant_id));
         let body = self.in_context(json!({ "ciphertext": text }));
-        let answer = match self.transit(session, "POST", &path, Some(body)).await {
+        let mut answer = match self.transit(session, "POST", &path, Some(body)).await {
             Ok(answer) => answer,
             Err(error) => {
                 return Err(self
@@ -890,14 +932,14 @@ where
                     .await);
             }
         };
-        Ok(Key::new(base64_field(&answer, "plaintext")?))
+        plaintext_of(&mut answer).map_err(unread("POST", &path))
     }
 
     async fn generate_dek(&self, session: &S, tenant_id: &str) -> Result<(Key, Vec<u8>), Error> {
         self.ensure_key(session, tenant_id).await?;
         let path = format!("/datakey/plaintext/{}", Self::key_name(tenant_id));
         let body = self.in_context(json!({ "bits": 256 }));
-        let answer = match self.transit(session, "POST", &path, Some(body)).await {
+        let mut answer = match self.transit(session, "POST", &path, Some(body)).await {
             Ok(answer) => answer,
             Err(error) => {
                 return Err(self
@@ -905,8 +947,11 @@ where
                     .await);
             }
         };
-        let dek = Key::new(base64_field(&answer, "plaintext")?);
-        let encrypted_dek = text_field(&answer, "ciphertext")?.as_bytes().to_vec();
+        let encrypted_dek = text_field(&answer, "ciphertext")
+            .map_err(unread("POST", &path))?
+            .as_bytes()
+            .to_vec();
+        let dek = plaintext_of(&mut answer).map_err(unread("POST", &path))?;
         Ok((dek, encrypted_dek))
     }
 
@@ -928,7 +973,10 @@ where
                     .await);
             }
         };
-        Ok(text_field(&answer, "ciphertext")?.as_bytes().to_vec())
+        Ok(text_field(&answer, "ciphertext")
+            .map_err(unread("POST", &path))?
+            .as_bytes()
+            .to_vec())
     }
 }
 
@@ -1041,7 +1089,7 @@ where
         let path = format!("/sign/{name}");
         let body = with_input(signing_parameters(algorithm), message);
         match self.transit(session, "POST", &path, Some(body)).await {
-            Ok(answer) => signature_of(algorithm, &answer),
+            Ok(answer) => signature_of(algorithm, &answer).map_err(unread("POST", &path)),
             Err(error) => Err(self
                 .explain_use(
                     session,
@@ -1086,7 +1134,7 @@ where
                     .await);
             }
         };
-        let signature = signature_of(algorithm, &answer)?;
+        let signature = signature_of(algorithm, &answer).map_err(unread("POST", &path))?;
         if signature.key_version() == key_version.get() {
             Ok(signature)
         } else {
@@ -1280,11 +1328,14 @@ where
                     .await);
             }
         };
-        let (key_version, payload) = versioned(text_field(&answer, "hmac")?, "hmac")?;
-        let bytes = BASE64
-            .decode(payload)
-            .map_err(|error| Error::Malformed(format!("vault's hmac is not base64: {error}")))?;
-        Ok(Mac::new(key_version, bytes))
+        let read = || {
+            let (key_version, payload) = versioned(text_field(&answer, "hmac")?, "hmac")?;
+            let bytes = BASE64.decode(payload).map_err(|error| {
+                Error::Malformed(format!("vault's hmac is not base64: {error}"))
+            })?;
+            Ok(Mac::new(key_version, bytes))
+        };
+        read().map_err(unread("POST", &path))
     }
 }
 
@@ -1450,5 +1501,21 @@ mod tests {
             "one; two"
         );
         assert_eq!(errors_of(None), "");
+    }
+
+    /// The plaintext's text in the answer is wiped once read, whether it
+    /// decodes or not: the key's one copy here is the `Key`'s.
+    #[test]
+    fn the_plaintext_s_text_is_wiped_once_read() {
+        let mut answer = json!({ "data": { "plaintext": BASE64.encode([7u8; 32]) } });
+        let key = plaintext_of(&mut answer).unwrap();
+        assert_eq!(key.as_bytes(), [7u8; 32]);
+        assert_eq!(answer["data"]["plaintext"], json!(""));
+        let mut garbled = json!({ "data": { "plaintext": "not base64!" } });
+        assert!(matches!(
+            plaintext_of(&mut garbled),
+            Err(Error::Malformed(_))
+        ));
+        assert_eq!(garbled["data"]["plaintext"], json!(""));
     }
 }

@@ -246,3 +246,16 @@ so a `403` proves nothing of the key); a `400` whose read fails stays the
 `400`, of the moment, never the request's fault; a direct `404` on a KEK
 operation is `Vault{404}`, a route, never `KekNotFound`. A read's `404` is a
 key not there only when Vault said no words.
+
+**2026-11-16, by ADR-0039's slice 4.** Decision 2's cache of unwrapped keys,
+`Cached<K>` in front of each channel's KMS, is deleted. Each channel's stage
+has an opening end of its own:
+- one unwrap per wrapped key for its waiters;
+- a key kept from its unwrap's start for the opening's `keep`, which the
+  sealing's `cache` parameter fits;
+- its entries capped;
+- a key gone told before any key held.
+`Cached` forgot a tenant's unwrapped keys on `delete_kek`. The opening end
+forgets them at a Gone, or at `keep` at the latest. The window ADR-0071
+bounds is lifetime + keep + draw, and `Sealing::over_paced`'s ceiling reads
+`keep`.

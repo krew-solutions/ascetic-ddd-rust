@@ -22,8 +22,9 @@ use ascetic_ddd_inbox::observer::{
     Swept, Unparked, Waiting,
 };
 use ascetic_ddd_inbox::{
-    ByStream, CausalDependency, Error, Failure, Ground, Inbox, InboxMessage, InboxRetention, Loops,
-    MAX_IDENTITY_BYTES, Outcome, Parked, PartitionKey, PgInbox, Receipt, Retries,
+    ByStream, CausalDependency, Error, Expiry, Failure, Ground, Hold, Inbox, InboxMessage,
+    InboxRetention, Loops, MAX_IDENTITY_BYTES, Outcome, Parked, PartitionKey, PgInbox, Receipt,
+    Retries, Rotation,
 };
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -54,7 +55,7 @@ struct Fixture<O = ()> {
     inbox: PgInbox<PgSessionPool, (O, Arc<JsonTrace>)>,
     table: String,
     /// Written when the fixture is dropped, if a trace directory is set.
-    _trace: TraceFile,
+    trace: TraceFile,
 }
 
 /// A table of its own per test, so tests run in parallel; one slot.
@@ -107,7 +108,7 @@ async fn fixture_cut<O: InboxObserver>(
         sessions,
         inbox,
         table,
-        _trace: trace,
+        trace,
     }
 }
 
@@ -126,6 +127,13 @@ impl<O: InboxObserver> Fixture<O> {
         }
     }
 
+    fn with_rotation(self, rotation: Rotation) -> Self {
+        Fixture {
+            inbox: self.inbox.with_rotation(rotation),
+            ..self
+        }
+    }
+
     fn with_retention(self, retention: InboxRetention) -> Self {
         Fixture {
             inbox: self.inbox.with_retention(retention),
@@ -133,8 +141,24 @@ impl<O: InboxObserver> Fixture<O> {
         }
     }
 
-    /// Runs `sql`, `{table}` standing for the inbox's table.
+    /// Runs `sql`, `{table}` standing for the inbox's table: rows written
+    /// behind the observers, which the trace notes, so that its check
+    /// refuses the run rather than let it fit for a reason not its own.
     async fn execute(&self, sql: &str) {
+        self.behind();
+        self.elapse(sql).await;
+    }
+
+    /// Notes in the trace that the test's own statement wrote rows behind
+    /// the observers.
+    fn behind(&self) {
+        self.trace.recorder().written_behind("inbox");
+    }
+
+    /// Runs `sql` that moves a time — a back-off's, a mark's, a slot's
+    /// sleep — or writes nothing: the passing of time is a step the model
+    /// takes unseen, and the trace need not note it.
+    async fn elapse(&self, sql: &str) {
         let sql = sql.replace("{table}", &self.table);
         self.sessions
             .session(async |session| {
@@ -159,18 +183,34 @@ impl<O: InboxObserver> Fixture<O> {
             .unwrap()
     }
 
-    /// Dispatches until nothing is left.
+    /// Dispatches until nothing is left, and fails the test, rather than
+    /// hanging it, when the inbox has not run dry within fifty dispatches
+    /// and three a row the table holds. The bound is generous, not a count
+    /// the protocol guarantees: the largest drain here takes 1,001 rows in
+    /// as many dispatches. An unbounded loop let a walk that never ended its
+    /// round hang the suite for hours, its trace growing in memory.
     async fn drain<F, Fut>(&self, subscriber: F)
     where
         F: Fn(&PgSession, &InboxMessage) -> Fut + Send + Sync,
         Fut: std::future::Future<Output = Result<(), Failure>> + Send,
     {
-        for _ in 0..50 {
-            if self.dispatch(&subscriber).await == Outcome::Nothing {
+        let sql = format!("SELECT count(*) FROM {}", self.table);
+        let rows = self
+            .sessions
+            .session(async |session| {
+                Ok::<i64, Error>(session.connection().query_one(&sql, &[]).await?.get(0))
+            })
+            .await
+            .unwrap();
+        let bound = 50 + 3 * rows;
+        let mut last = Outcome::Nothing;
+        for _ in 0..bound {
+            last = self.dispatch(&subscriber).await;
+            if last == Outcome::Nothing {
                 return;
             }
         }
-        panic!("the inbox never ran dry");
+        panic!("the inbox never ran dry: {bound} dispatches over {rows} rows, the last {last:?}");
     }
 
     /// One `dispatch` call that must not fail on the database.
@@ -180,6 +220,11 @@ impl<O: InboxObserver> Fixture<O> {
         Fut: std::future::Future<Output = Result<(), Failure>> + Send,
     {
         self.inbox.dispatch(subscriber).await.unwrap()
+    }
+
+    /// One statement of the expiry that must not fail on the database.
+    async fn expire(&self) -> Expiry {
+        self.inbox.expire().await.unwrap()
     }
 
     async fn parked_messages(&self) -> Vec<Parked> {
@@ -438,7 +483,15 @@ async fn an_ignored_message_names_the_one_holding_its_identity() {
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn the_holder_committed_while_the_insert_waited_is_named() {
     let recorder = Arc::new(Recorder::default());
-    let f = fixture_observed("held_by_concurrent", Arc::clone(&recorder)).await;
+    // The holder's row is written by SQL, behind the observers: the run
+    // records no trace (ADR-0042 T1).
+    let f = fixture_cut(
+        "held_by_concurrent",
+        Arc::clone(&recorder),
+        1,
+        TraceFile::off(),
+    )
+    .await;
     let holder = message("a", 1);
     let late = message("a", 1);
     let mut client = pool().get().await.unwrap();
@@ -496,7 +549,7 @@ async fn messages_are_processed_in_order_of_arrival() {
         .await;
     let (seen, subscriber) = collector();
 
-    while f.dispatch(&subscriber).await != Outcome::Nothing {}
+    f.drain(&subscriber).await;
 
     assert_eq!(*seen.lock().unwrap(), ["b@1", "a@1", "a@2"]);
 }
@@ -523,7 +576,7 @@ async fn a_message_waits_for_its_causal_dependencies() {
     assert_eq!(*seen.lock().unwrap(), ["other@1"], "the effect waits");
 
     f.publish(&[cause]).await;
-    while f.dispatch(&subscriber).await != Outcome::Nothing {}
+    f.drain(&subscriber).await;
 
     assert_eq!(*seen.lock().unwrap(), ["other@1", "user@5", "order@1"]);
 }
@@ -541,7 +594,8 @@ async fn a_failing_subscriber_leaves_the_message_unprocessed() {
         f.dispatch(&failing).await,
         Outcome::Failed {
             attempts: 1,
-            parked: false
+            parked: false,
+            held: false
         }
     );
     assert_eq!(f.processed().await, 0);
@@ -601,14 +655,16 @@ async fn a_poison_message_is_parked_after_its_attempts_and_the_partition_flows()
         f.dispatch(&subscriber).await,
         Outcome::Failed {
             attempts: 1,
-            parked: false
+            parked: false,
+            held: false
         }
     );
     assert_eq!(
         f.dispatch(&subscriber).await,
         Outcome::Failed {
             attempts: 2,
-            parked: true
+            parked: true,
+            held: false
         }
     );
     assert_eq!(f.dispatch(&subscriber).await, Outcome::Processed);
@@ -641,7 +697,8 @@ async fn a_message_in_backoff_holds_its_partition() {
         f.dispatch(&subscriber).await,
         Outcome::Failed {
             attempts: 1,
-            parked: false
+            parked: false,
+            held: false
         }
     );
     assert_eq!(
@@ -668,7 +725,8 @@ async fn an_unparked_message_is_tried_again() {
         f.dispatch(&subscriber).await,
         Outcome::Failed {
             attempts: 1,
-            parked: true
+            parked: true,
+            held: false
         }
     );
     assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
@@ -700,7 +758,8 @@ async fn a_resolved_message_releases_its_dependents() {
         f.dispatch(&subscriber).await,
         Outcome::Failed {
             attempts: 1,
-            parked: true
+            parked: true,
+            held: false
         }
     );
     assert_eq!(
@@ -778,7 +837,7 @@ async fn slots_share_the_streams_without_gaps_or_overlap() {
     .await;
     let (seen, subscriber) = collector();
 
-    while f.dispatch(&subscriber).await != Outcome::Nothing {}
+    f.drain(&subscriber).await;
 
     let mut all = seen.lock().unwrap().clone();
     all.sort();
@@ -1178,7 +1237,8 @@ async fn a_permanent_failure_parks_the_message_at_once() {
         f.dispatch(&judging).await,
         Outcome::Failed {
             attempts: 1,
-            parked: true
+            parked: true,
+            held: false
         }
     );
     assert_eq!(f.dispatch(&judging).await, Outcome::Processed, "b@1 flows");
@@ -1231,7 +1291,7 @@ async fn a_loop_outlives_a_lost_connection() {
     let loops = Loops {
         concurrency: 1,
         poll_interval: Duration::from_millis(20),
-        max_pause: Duration::from_millis(100),
+        max_error_wait: Duration::from_millis(100),
     };
 
     tokio::time::timeout(
@@ -1455,6 +1515,9 @@ impl InboxObserver for Recorder {
             Ok(Outcome::SetAside) => "dispatched a set-aside",
             Ok(Outcome::Parked) => "dispatched a park",
             Ok(Outcome::Nothing) => "dispatched nothing",
+            Ok(Outcome::Passed) => "dispatched a pass",
+            Ok(Outcome::Held) => "dispatched a hold",
+            Ok(Outcome::Paused) => "dispatched a paused walk",
             Err(_) => "rolled back",
         });
     }
@@ -1511,7 +1574,8 @@ async fn the_observer_sees_the_protocol() {
         f.dispatch(&flaky).await,
         Outcome::Failed {
             attempts: 1,
-            parked: false
+            parked: false,
+            held: false
         }
     );
     assert_eq!(f.dispatch(&flaky).await, Outcome::Processed);
@@ -1591,11 +1655,11 @@ async fn a_hole_filled_after_the_wait_ran_out_wakes_its_dependent() {
     let (seen, subscriber) = collector();
     assert_eq!(f.dispatch(&subscriber).await, Outcome::SetAside);
     tokio::time::sleep(Duration::from_millis(350)).await;
-    assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
+    assert_eq!(f.expire().await.parked, 1);
     assert_eq!(f.parked().await, ["order@1"], "the wait ran out");
 
     f.publish(std::slice::from_ref(&cause)).await;
-    while f.dispatch(&subscriber).await != Outcome::Nothing {}
+    f.drain(&subscriber).await;
 
     assert_eq!(*seen.lock().unwrap(), ["user@5", "order@1"]);
     assert!(f.parked().await.is_empty(), "woken, not unparked by hand");
@@ -1617,7 +1681,7 @@ async fn an_unparked_row_whose_wait_ran_out_waits_again() {
     let (_, subscriber) = collector();
     assert_eq!(f.dispatch(&subscriber).await, Outcome::SetAside);
     tokio::time::sleep(Duration::from_millis(350)).await;
-    assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
+    assert_eq!(f.expire().await.parked, 1);
     assert_eq!(f.parked().await, ["order@1"]);
 
     let at = f.position_of(&effect).await;
@@ -1633,13 +1697,14 @@ async fn an_unparked_row_whose_wait_ran_out_waits_again() {
         "waits again"
     );
     tokio::time::sleep(Duration::from_millis(350)).await;
-    assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
+    assert_eq!(f.expire().await.parked, 1);
     assert_eq!(f.parked().await, ["order@1"], "and runs out again");
 }
 
 /// A message whose dependency never arrives waits out of the queue, costing
 /// the walk nothing, and with `max_wait` set is parked with the dependency
-/// named (ADR-0006).
+/// named (ADR-0006) — by the expiry, not by a dispatch, which takes its
+/// slot's work and no other (ADR-0042 decision 7).
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_dependency_that_never_arrives_parks_the_message_after_max_wait() {
@@ -1671,9 +1736,14 @@ async fn a_dependency_that_never_arrives_parks_the_message_after_max_wait() {
     );
 
     tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Nothing);
+    assert!(f.parked().await.is_empty(), "no dispatch expires a row");
     assert_eq!(
-        f.dispatch(&subscriber).await,
-        Outcome::Nothing,
+        f.expire().await,
+        Expiry {
+            parked: 1,
+            more: false
+        },
         "expired and parked"
     );
     assert_eq!(f.parked().await, ["order@1"]);
@@ -1703,13 +1773,25 @@ async fn a_dependency_that_never_arrives_parks_the_message_after_max_wait() {
         .await
         .unwrap();
     assert!(unparked);
-    while f.dispatch(&subscriber).await != Outcome::Nothing {}
+    f.drain(&subscriber).await;
     assert_eq!(*seen.lock().unwrap(), ["user@5", "order@1"]);
 }
 
 /// A released migration is never edited (ADR-0029): every database that
 /// applied it would refuse to start. A new shape is a new migration,
-/// written here with its checksum when it is released.
+/// written here with its checksum when it is released. One exception, while
+/// nothing is deployed: the baseline took ADR-0041's schema on 2026-11-15,
+/// by the owner's decision (ADR-0041 decision 6), and the take's and the
+/// walk's functions the same day; on 2026-11-17 it took ADR-0042's rows —
+/// a row's cause, the count and kind of its holds, their CHECKs, the held
+/// index, the guest's cursor and the walk's paused channels — and ADR-0040's
+/// causes migration with them, and the same day the expiry's function, its
+/// index's key, the CHECK that a row with a time of wait waits, and the
+/// stalls' table; the
+/// databases made before are recreated. Once the library is live, the
+/// exception is gone: the checksum covers the functions' bodies, so an edit
+/// of a statement is then a new function by a new migration, and ADR-0042
+/// § Owed lists the steps.
 #[test]
 fn the_released_migrations_keep_their_checksums() {
     let inbox = PgInbox::new(PgSessionPool::new(pool()));
@@ -1724,7 +1806,7 @@ fn the_released_migrations_keep_their_checksums() {
         [
             (
                 "20261027T000000Z_baseline".to_owned(),
-                "fnv1a64:e803015b7116f1bd:1917".to_owned()
+                "fnv1a64:c65014f42a4e75f5:19613".to_owned()
             ),
             (
                 "20261104T000000Z_processed_at".to_owned(),
@@ -1893,7 +1975,7 @@ async fn rows_processed_before_the_mark_s_time_are_kept_until_stamped() {
     f.dispatch(&subscriber).await;
     f.dispatch(&subscriber).await;
     f.dispatch(&subscriber).await;
-    f.execute("UPDATE {table} SET processed_at = NULL").await;
+    f.elapse("UPDATE {table} SET processed_at = NULL").await;
     assert_eq!(f.inbox.sweep().await.unwrap(), 0);
     assert_eq!(f.inbox.stamp_processed().await.unwrap(), 5);
     assert_eq!(f.inbox.stamp_processed().await.unwrap(), 0);
@@ -1923,7 +2005,7 @@ async fn the_inbox_s_run_sweeps_beside_its_loops_after_its_grace() {
             Loops {
                 concurrency: 1,
                 poll_interval: Duration::from_millis(10),
-                max_pause: Duration::from_millis(50),
+                max_error_wait: Duration::from_millis(50),
             },
             async {
                 let _ = stopped.await;
@@ -1963,7 +2045,8 @@ async fn the_inbox_s_run_sweeps_beside_its_loops_after_its_grace() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_row_stored_with_structured_dependencies_still_waits_for_them() {
-    let f = fixture("causal_structured").await;
+    // the row is written behind the observer: no trace (no run of the model)
+    let f = fixture_cut("causal_structured", (), 1, TraceFile::off()).await;
     let cause = message("user", 5);
     let effect = message("order", 1).depending_on(&[CausalDependency::on(&cause)]);
     assert!(
@@ -1998,7 +2081,7 @@ async fn a_row_stored_with_structured_dependencies_still_waits_for_them() {
     assert_eq!(f.dispatch(&subscriber).await, Outcome::SetAside, "it waits");
 
     f.publish(&[cause]).await;
-    while f.dispatch(&subscriber).await != Outcome::Nothing {}
+    f.drain(&subscriber).await;
 
     assert_eq!(*seen.lock().unwrap(), ["user@5", "order@1"]);
 }
@@ -2127,7 +2210,7 @@ async fn the_largest_identity_admitted_is_stored_waited_for_and_woken() {
         );
         f.publish(std::slice::from_ref(&cause)).await;
         assert_eq!(f.rows().await, rows + 2, "{shape}: the cause is stored");
-        while f.dispatch(&subscriber).await != Outcome::Nothing {}
+        f.drain(&subscriber).await;
         assert_eq!(seen.lock().unwrap().len(), 2, "{shape}: both processed");
         assert_eq!(
             seen.lock().unwrap()[1],
@@ -2161,7 +2244,8 @@ async fn an_identity_past_the_bound_is_set_aside_at_the_intake() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_row_stored_with_a_list_the_intake_refuses_is_parked_and_the_slot_goes_on() {
-    let f = fixture("causal_refused").await;
+    // the row is written behind the observer: no trace (no run of the model)
+    let f = fixture_cut("causal_refused", (), 1, TraceFile::off()).await;
     let legacy = message("legacy", 1).with_metadata(json!({
         "message_id": "00000000-0000-4000-a000-000000000001",
         "causal_dependencies": [{ "tenant_id": "tenant-1", "stream_type": "orders.Order",
@@ -2189,7 +2273,7 @@ async fn a_row_stored_with_a_list_the_intake_refuses_is_parked_and_the_slot_goes
         .unwrap();
     f.publish(&[message("next", 1)]).await;
     let (seen, subscriber) = collector();
-    while f.dispatch(&subscriber).await != Outcome::Nothing {}
+    f.drain(&subscriber).await;
     assert_eq!(
         *seen.lock().unwrap(),
         ["next@1"],
@@ -2268,6 +2352,24 @@ async fn the_bound_on_an_identity_dominates_its_stored_size() {
 
 /// Inserts a row as a release before the bus's domain and ADR-0037 could
 /// have stored it, its values whatever SQL writes.
+/// When the row of `stream_id` arrived, in seconds since the epoch, as the
+/// table holds it.
+async fn received_at<O>(f: &Fixture<O>, stream_id: &str) -> f64 {
+    let client = pool().get().await.unwrap();
+    client
+        .query_one(
+            &format!(
+                "SELECT extract(epoch FROM received_at)::float8 FROM {} \
+                 WHERE stream_id = $1::text::jsonb",
+                f.table
+            ),
+            &[&stream_id],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
 async fn stored_before<O>(f: &Fixture<O>, stream_id: &str, metadata: &str) {
     let client = pool().get().await.unwrap();
     client
@@ -2363,7 +2465,7 @@ async fn a_head_that_cannot_be_read_is_parked_at_once_and_the_slot_goes_on() {
             [("kafka://orders".to_owned(), 1)],
             "{ground}: the park names its channel"
         );
-        while f.dispatch(&subscriber).await != Outcome::Nothing {}
+        f.drain(&subscriber).await;
         assert_eq!(
             *seen.lock().unwrap(),
             ["next@1"],
@@ -2387,15 +2489,17 @@ async fn a_failure_with_a_nul_is_recorded_and_the_row_tried_again() {
     let f = fixture("nul_failure").await;
     f.publish(&[message("a", 1)]).await;
     let failing = |_: &PgSession, _: &InboxMessage| {
-        std::future::ready(Err::<(), Failure>(Failure::Transient(
-            format!("unknown variant `\0{}`", "x".repeat(10_000)).into(),
-        )))
+        std::future::ready(Err::<(), Failure>(Failure::from(format!(
+            "unknown variant `\0{}`",
+            "x".repeat(10_000)
+        ))))
     };
     assert!(matches!(
         f.dispatch(failing).await,
         Outcome::Failed {
             attempts: 1,
-            parked: false
+            parked: false,
+            held: false
         }
     ));
     let client = pool().get().await.unwrap();
@@ -2442,7 +2546,7 @@ async fn a_parked_row_that_does_not_read_is_listed_resolved_and_unparked_by_its_
         .await
         .unwrap();
     let (seen, subscriber) = collector();
-    while f.dispatch(&subscriber).await != Outcome::Nothing {}
+    f.drain(&subscriber).await;
     let parked = f.parked_messages().await;
     assert_eq!(parked.len(), 2, "{parked:?}");
     assert!(
@@ -2459,7 +2563,7 @@ async fn a_parked_row_that_does_not_read_is_listed_resolved_and_unparked_by_its_
         .await
         .unwrap();
     assert!(resolved);
-    while f.dispatch(&subscriber).await != Outcome::Nothing {}
+    f.drain(&subscriber).await;
     assert_eq!(*seen.lock().unwrap(), ["waiter@1"], "woken by the resolve");
     let unparked = f
         .sessions
@@ -2500,7 +2604,8 @@ impl InboxObserver for ExpiredBatches {
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn an_expiry_parks_a_batch_at_a_time_without_the_payloads() {
     let batches = Arc::new(ExpiredBatches::default());
-    let f = fixture_observed("expiry_batches", Arc::clone(&batches))
+    // the rows are written behind the observer: no trace (no run of the model)
+    let f = fixture_cut("expiry_batches", Arc::clone(&batches), 1, TraceFile::off())
         .await
         .with_max_wait(Duration::from_secs(1));
     let client = pool().get().await.unwrap();
@@ -2521,9 +2626,19 @@ async fn an_expiry_parks_a_batch_at_a_time_without_the_payloads() {
         )
         .await
         .unwrap();
-    let (_, subscriber) = collector();
-    f.dispatch(&subscriber).await;
-    f.dispatch(&subscriber).await;
+    assert_eq!(
+        [f.expire().await, f.expire().await],
+        [
+            Expiry {
+                parked: 100,
+                more: true
+            },
+            Expiry {
+                parked: 5,
+                more: false
+            }
+        ]
+    );
     assert_eq!(*batches.0.lock().unwrap(), [(100, true), (5, true)]);
 }
 
@@ -2566,6 +2681,10 @@ async fn a_row_parked_at_once_is_superseded_by_the_next_arrival_at_its_identity(
         "the waiter waits"
     );
 
+    // A row arrives when it is stored, by the table's default, and again
+    // when a repaired message supersedes it: its wait is the new arrival's
+    // (ADR-0041 decision 5).
+    let first = received_at(&f, r#"{"id": "deep"}"#).await;
     let repaired = InboxMessage::new(
         "tenant-1",
         "orders.Order",
@@ -2575,9 +2694,31 @@ async fn a_row_parked_at_once_is_superseded_by_the_next_arrival_at_its_identity(
         "repaired",
     )
     .with_metadata(json!({ "message_id": "00000000-0000-4000-b000-000000000001" }));
+    // as a row that failed under a cause before a host's lower bounds made
+    // it unreadable: the supersede ends what its failures wrote (ADR-0042
+    // decision 4); a parked row holds nothing, which the baseline's CHECK
+    // keeps
+    f.execute("UPDATE {table} SET cause = 'kms.unavailable' WHERE unreadable_at IS NOT NULL")
+        .await;
     f.publish(std::slice::from_ref(&repaired)).await;
     assert_eq!(f.rows().await, 2, "superseded in place");
-    while f.dispatch(&subscriber).await != Outcome::Nothing {}
+    let causes = format!(
+        "SELECT count(*) FROM {} WHERE cause IS NOT NULL OR holds > 0 OR hold_kind IS NOT NULL",
+        f.table
+    );
+    let left: i64 = f
+        .sessions
+        .session(async |session| {
+            Ok::<_, Error>(session.connection().query_one(&causes, &[]).await?.get(0))
+        })
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "the supersede clears the causes and the hold");
+    assert!(
+        received_at(&f, r#"{"id": "deep"}"#).await > first,
+        "a superseded row arrives again"
+    );
+    f.drain(&subscriber).await;
     assert_eq!(*seen.lock().unwrap(), ["deep@1", "waiter@1"]);
     assert!(f.parked_messages().await.is_empty());
 }
@@ -2623,7 +2764,7 @@ async fn the_parked_rows_are_counted_by_channel_and_ground_and_each_exit_leaves_
         .batch_execute(&format!(
             "UPDATE {t} SET parked_at = now(), attempts = 3 \
                  WHERE stream_id IN ('{{\"id\": \"p1\"}}', '{{\"id\": \"p2\"}}'); \
-             UPDATE {t} SET parked_at = now(), waiting_since = now(), \
+             UPDATE {t} SET parked_at = now(), \
                  waiting_for = jsonb_build_object('tenant_id', 'tenant-1', 'stream_type', \
                      'pay.Payment', 'stream_id', '\"gone\"'::jsonb, 'stream_position', 1) \
                  WHERE stream_id = '{{\"id\": \"p3\"}}'",
@@ -2766,6 +2907,7 @@ async fn a_failure_past_the_attempts_range_saturates() {
     let f = fixture("attempts_saturate").await;
     f.publish(&[message("a", 1)]).await;
     let client = pool().get().await.unwrap();
+    f.behind();
     client
         .execute(
             &format!("UPDATE {} SET attempts = 2147483647", f.table),
@@ -2774,13 +2916,666 @@ async fn a_failure_past_the_attempts_range_saturates() {
         .await
         .unwrap();
     let failing = |_: &PgSession, _: &InboxMessage| {
-        std::future::ready(Err::<(), Failure>(Failure::Transient("again".into())))
+        std::future::ready(Err::<(), Failure>(Failure::from("again")))
     };
     assert!(matches!(
         f.dispatch(failing).await,
         Outcome::Failed {
             attempts: 2_147_483_647,
-            parked: false
+            parked: false,
+            held: false
         }
     ));
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0041: a slot serves its Tenants in turn (E1–E4)
+
+/// A message of `tenant`, otherwise as [`message`] makes one.
+fn of(tenant: &str, stream: &str, position: i32) -> InboxMessage {
+    let base = message(stream, position);
+    InboxMessage::new(
+        tenant,
+        base.stream_type,
+        base.stream_id,
+        position,
+        base.uri,
+        base.payload,
+    )
+    .with_metadata(base.metadata.unwrap())
+}
+
+/// Streams named `{prefix}N` whose rows of their Tenants land in one slot of
+/// the fixture's `slots`, under its key (`ByStream`): the first of
+/// `wanted`'s at `N = 0`, each other at the first `N` beside it.
+async fn streams_in_one_slot<O: InboxObserver>(
+    f: &Fixture<O>,
+    slots: u32,
+    wanted: &[(&str, &str)],
+) -> Vec<String> {
+    let slot_of = "(hashtext($1 || ':orders.Order:' || jsonb_build_object('id', x.s)::text) \
+                   & 2147483647) % $3";
+    f.sessions
+        .session(async |session| {
+            let mut streams: Vec<String> = Vec::new();
+            let mut slot: Option<i32> = None;
+            for (tenant, prefix) in wanted {
+                let row = session
+                    .connection()
+                    .query_one(
+                        &format!(
+                            "SELECT x.s, ({slot_of})::int FROM generate_series(0, 100000) n, \
+                             LATERAL (SELECT $2 || n AS s) x \
+                             WHERE $4::int IS NULL OR ({slot_of}) = $4::int ORDER BY n LIMIT 1"
+                        ),
+                        &[tenant, prefix, &(slots as i32), &slot],
+                    )
+                    .await?;
+                streams.push(row.get(0));
+                slot = Some(row.get(1));
+            }
+            Ok::<_, Error>(streams)
+        })
+        .await
+        .unwrap()
+}
+
+/// Counts the dispatcher's closed transactions, by outcome.
+#[derive(Clone, Default)]
+struct Dispatches(Arc<Mutex<Vec<String>>>);
+
+impl InboxObserver for Dispatches {
+    fn on_dispatched(&self, event: &Dispatched<'_>) {
+        self.0.lock().unwrap().push(match event.outcome {
+            Ok(outcome) => format!("{outcome:?}"),
+            Err(_) => "rolled back".to_owned(),
+        });
+    }
+}
+
+/// E1: a slot serves its Tenants in turn. Four slots and one loop; Tenant A
+/// has 1 000 rows across them, Tenant B one, stored after all of A's. B is
+/// processed within 2S dispatches whether it sorts before A or after, and
+/// every row is drained. As a FIFO, B waited for every A row of its slot.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn one_tenant_s_row_is_served_beside_another_s_thousand() {
+    const S: u32 = 4;
+    for (name, a, b) in [
+        ("turn_first", "tenant-m", "tenant-a"),
+        ("turn_last", "tenant-m", "tenant-z"),
+    ] {
+        let f = fixture_cut(name, (), S, TraceFile::off()).await;
+        f.execute(&format!(
+            "INSERT INTO {{table}} (tenant_id, stream_type, stream_id, stream_position, uri, payload, metadata) \
+             SELECT '{a}', 'orders.Order', jsonb_build_object('id', 'a' || n), 1, 'kafka://orders/a', 'a', \
+                    jsonb_build_object('message_id', gen_random_uuid()) \
+             FROM generate_series(1, 1000) n"
+        ))
+        .await;
+        f.publish(&[of(b, "b", 1)]).await;
+        let (seen, subscriber) = collector();
+        let mut dispatches = 0;
+        while !seen.lock().unwrap().iter().any(|label| label == "b@1") {
+            f.dispatch(&subscriber).await;
+            dispatches += 1;
+            assert!(dispatches <= 2 * S, "{b} waited {dispatches} dispatches");
+        }
+        f.drain(&subscriber).await;
+        assert_eq!(seen.lock().unwrap().len(), 1001, "every row is drained");
+    }
+}
+
+/// E2: a lone Tenant uses the loops. Four slots, four loops, a subscriber
+/// that takes its time: four of its messages are in the subscriber at once,
+/// and the loops drain more than S·C of its rows. A slot keyed by Tenant
+/// would hold it to one at a time.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_lone_tenant_is_served_by_every_loop() {
+    const S: u32 = 4;
+    const C: u32 = 4;
+    const ROWS: usize = 40;
+    let f = fixture_cut("lone_tenant", (), S, TraceFile::off()).await;
+    f.execute(&format!(
+        "INSERT INTO {{table}} (tenant_id, stream_type, stream_id, stream_position, uri, payload, metadata) \
+         SELECT 'tenant-1', 'orders.Order', jsonb_build_object('id', 's' || n), 1, 'kafka://orders/s', 's', \
+                jsonb_build_object('message_id', gen_random_uuid()) \
+         FROM generate_series(1, {ROWS}) n"
+    ))
+    .await;
+    let (in_flight, peak, done) = (
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let slow = {
+        let (in_flight, peak, done) =
+            (Arc::clone(&in_flight), Arc::clone(&peak), Arc::clone(&done));
+        move |_: &PgSession, _: &InboxMessage| {
+            let (in_flight, peak, done) =
+                (Arc::clone(&in_flight), Arc::clone(&peak), Arc::clone(&done));
+            async move {
+                let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                done.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), Failure>(())
+            }
+        }
+    };
+    let drained = {
+        let done = Arc::clone(&done);
+        async move {
+            while done.load(Ordering::SeqCst) < ROWS {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    };
+    let loops = Loops {
+        concurrency: C,
+        poll_interval: Duration::from_millis(10),
+        ..Loops::default()
+    };
+    tokio::time::timeout(Duration::from_secs(60), f.inbox.run(&slow, loops, drained))
+        .await
+        .expect("drained")
+        .unwrap();
+    assert_eq!(done.load(Ordering::SeqCst), ROWS);
+    assert!(ROWS > (S * C) as usize);
+    assert_eq!(
+        peak.load(Ordering::SeqCst),
+        C as usize,
+        "four in the subscriber at once"
+    );
+}
+
+/// E3: a head in its backoff holds its own (slot, Tenant), not the slot.
+/// Tenant A's head fails in a slot it shares with B; B's row is processed
+/// at the next dispatch, and A's second stream there waits behind A's head.
+/// At one slot and at 64, where the rows are placed side by side.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_head_in_backoff_holds_its_tenant_and_not_its_slot() {
+    for slots in [1, 64] {
+        let f = fixture_cut(&format!("held_tenant_{slots}"), (), slots, TraceFile::off())
+            .await
+            .with_retries(Retries::unlimited().with_backoff(|_| Duration::from_secs(3600)));
+        let streams = streams_in_one_slot(
+            &f,
+            slots,
+            &[("tenant-a", "a"), ("tenant-a", "c"), ("tenant-b", "b")],
+        )
+        .await;
+        let [a1, a2, b1] = &streams[..] else {
+            unreachable!()
+        };
+        f.publish(&[
+            of("tenant-a", a1, 1),
+            of("tenant-a", a2, 1),
+            of("tenant-b", b1, 1),
+        ])
+        .await;
+        f.elapse("DO $$ BEGIN ASSERT (SELECT count(DISTINCT slot) FROM {table}) = 1; END $$")
+            .await;
+        let poison = format!("{a1}@1");
+        let (seen, subscriber) = failing_on(&poison);
+        assert_eq!(
+            f.dispatch(&subscriber).await,
+            Outcome::Failed {
+                attempts: 1,
+                parked: false,
+                held: false
+            }
+        );
+        assert_eq!(
+            f.dispatch(&subscriber).await,
+            Outcome::Processed,
+            "B goes on, slots {slots}"
+        );
+        assert_ne!(
+            f.dispatch(&subscriber).await,
+            Outcome::Processed,
+            "slots {slots}"
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [format!("{b1}@1")],
+            "A's second stream waits"
+        );
+    }
+}
+
+/// E4, K: with a walk of two, five Tenants whose heads wait for their
+/// backoff ahead of one that is due are passed in exactly two dispatches,
+/// and the third takes the due head.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_walk_passes_at_most_its_bound_of_tenants() {
+    let f = fixture_cut("walk_bound", (), 1, TraceFile::off())
+        .await
+        .with_rotation(Rotation {
+            walk: 2,
+            ..Rotation::default()
+        });
+    let tenants = ["t1", "t2", "t3", "t4", "t5", "t6"];
+    let messages: Vec<_> = tenants
+        .iter()
+        .map(|t| of(t, &format!("s-{t}"), 1))
+        .collect();
+    f.publish(&messages).await;
+    f.execute(
+        "UPDATE {table} SET next_attempt_at = now() + interval '1 hour', attempts = 1 \
+         WHERE tenant_id <> 't6'",
+    )
+    .await;
+    let (seen, subscriber) = collector();
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Passed);
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Passed);
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Processed);
+    assert_eq!(*seen.lock().unwrap(), ["s-t6@1"]);
+}
+
+/// E4, the bound on writes: five Tenants, every head waiting for its
+/// backoff, a walk of two. A round is ⌈5/2⌉ = 3 walks, then the slot sleeps:
+/// a loop polling every 200 ms for a second dispatches at most 3 + 5 times.
+/// A round that never ended would pass for ever, without a pause.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_slot_whose_every_head_waits_sleeps_after_one_round() {
+    let dispatches = Dispatches::default();
+    let f = fixture_cut("round_sleeps", dispatches.clone(), 1, TraceFile::off())
+        .await
+        .with_rotation(Rotation {
+            walk: 2,
+            max_dormancy: Duration::from_secs(60),
+        });
+    let messages: Vec<_> = ["t1", "t2", "t3", "t4", "t5"]
+        .iter()
+        .map(|t| of(t, &format!("s-{t}"), 1))
+        .collect();
+    f.publish(&messages).await;
+    f.execute("UPDATE {table} SET next_attempt_at = now() + interval '1 hour', attempts = 1")
+        .await;
+    let (_, subscriber) = collector();
+    let loops = Loops {
+        poll_interval: Duration::from_millis(200),
+        ..Loops::default()
+    };
+    f.inbox
+        .run(
+            &subscriber,
+            loops,
+            tokio::time::sleep(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+    let seen = dispatches.0.lock().unwrap().clone();
+    assert_eq!(
+        seen.iter().filter(|o| *o == "Passed").count(),
+        2,
+        "{seen:?}"
+    );
+    assert!(seen.len() <= 3 + 5, "{seen:?}");
+}
+
+/// E4, a row arriving after the round began wakes a sleeping slot: the next
+/// dispatch takes it.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_row_arriving_in_a_sleeping_slot_is_taken_at_once() {
+    let f = fixture_cut("arrival_wakes", (), 1, TraceFile::off())
+        .await
+        .with_rotation(Rotation {
+            max_dormancy: Duration::from_secs(3600),
+            ..Rotation::default()
+        });
+    f.publish(&[of("tenant-p", "p", 1)]).await;
+    f.execute("UPDATE {table} SET next_attempt_at = now() + interval '1 hour', attempts = 1")
+        .await;
+    let (seen, subscriber) = collector();
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::Nothing,
+        "the slot sleeps"
+    );
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::Nothing,
+        "and stays asleep"
+    );
+    f.publish(&[of("tenant-n", "n", 1)]).await;
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Processed);
+    assert_eq!(*seen.lock().unwrap(), ["n@1"]);
+}
+
+/// E4, the round's own position: with a walk of one, Tenants 2 and 3 whose
+/// heads wait, and the cursor at 3, a round begins at 3 and passes Tenant 2;
+/// a row of Tenant 1, behind the walk, commits; the next walk passes the
+/// round's start and the slot sleeps. The row came after the round began,
+/// so it wakes the slot at once — not after `max_dormancy`, as it would
+/// were the queue's position read when the round ends
+/// (`InboxPgDormantAfterAtWalk.cfg`).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_row_committed_during_a_round_behind_its_walk_wakes_the_slot() {
+    let f = fixture_cut("round_behind", (), 1, TraceFile::off())
+        .await
+        .with_rotation(Rotation {
+            walk: 1,
+            max_dormancy: Duration::from_secs(3600),
+        });
+    f.publish(&[of("t2", "s-t2", 1), of("t3", "s-t3", 1)]).await;
+    f.execute(
+        "UPDATE {table} SET next_attempt_at = now() + interval '1 hour', attempts = 1; \
+         UPDATE {table}_slots SET last_tenant = 't3'",
+    )
+    .await;
+    let (seen, subscriber) = collector();
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::Passed,
+        "Tenant 2 passed"
+    );
+    f.publish(&[of("t1", "s-t1", 1)]).await;
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::Nothing,
+        "the round ends at 3"
+    );
+    assert_eq!(f.dispatch(&subscriber).await, Outcome::Processed);
+    assert_eq!(*seen.lock().unwrap(), ["s-t1@1"]);
+}
+
+/// E4, the cap: a row made due behind a sleeping slot's back is taken
+/// within `max_dormancy` — here a parked row unparked, and an insert that
+/// was in flight when the round began, whose position lies below the
+/// round's. Neither wakes the slot by itself; the cap does. The single
+/// unpark runs in the caller's session, maybe in its transaction, and
+/// writes no slot row; the operator's bulk verbs, each its own statement,
+/// wake the slots they move rows into (ADR-0042 decision 8).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_row_made_due_behind_a_sleeping_slot_is_taken_within_the_cap() {
+    const CAP: Duration = Duration::from_secs(2);
+    let rotation = Rotation {
+        max_dormancy: CAP,
+        ..Rotation::default()
+    };
+    let (seen, subscriber) = collector();
+    let within_the_cap = async |f: &Fixture, label: &str| {
+        let started = std::time::Instant::now();
+        while !seen.lock().unwrap().iter().any(|seen| seen == label) {
+            assert!(
+                started.elapsed() < CAP + Duration::from_secs(8),
+                "{label} was not taken within the cap"
+            );
+            f.dispatch(&subscriber).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+
+    // Unparked.
+    let f = fixture_cut("cap_unparked", (), 1, TraceFile::off())
+        .await
+        .with_rotation(rotation);
+    f.publish(&[of("tenant-q", "q", 1), of("tenant-p", "p", 1)])
+        .await;
+    f.execute(
+        "UPDATE {table} SET parked_at = now(), attempts = 3 WHERE tenant_id = 'tenant-q'; \
+         UPDATE {table} SET next_attempt_at = now() + interval '1 hour', attempts = 1 \
+         WHERE tenant_id = 'tenant-p'",
+    )
+    .await;
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::Nothing,
+        "the slot sleeps"
+    );
+    let at = f.parked_messages().await[0].received_position;
+    assert!(
+        f.sessions
+            .session(async |session| f.inbox.unpark(&session, at).await)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::Nothing,
+        "an unpark wakes nothing"
+    );
+    within_the_cap(&f, "q@1").await;
+
+    // In flight when the round began.
+    let f = fixture_cut("cap_in_flight", (), 1, TraceFile::off())
+        .await
+        .with_rotation(rotation);
+    let holder = pool().get().await.unwrap();
+    holder
+        .batch_execute(&format!(
+            "BEGIN; INSERT INTO {} (tenant_id, stream_type, stream_id, stream_position, uri, payload, metadata) \
+             VALUES ('tenant-x', 'orders.Order', '{{\"id\": \"x\"}}', 1, 'kafka://orders/x', 'x', \
+                     '{{\"message_id\": \"00000000-0000-4000-c000-000000000001\"}}')",
+            f.table
+        ))
+        .await
+        .unwrap();
+    f.publish(&[of("tenant-y", "y", 1)]).await;
+    f.execute("UPDATE {table} SET next_attempt_at = now() + interval '1 hour', attempts = 1")
+        .await;
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::Nothing,
+        "the slot sleeps"
+    );
+    holder.batch_execute("COMMIT").await.unwrap();
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::Nothing,
+        "below the round's position"
+    );
+    within_the_cap(&f, "x@1").await;
+
+    // Woken by a mark in another slot's transaction, which writes no slot
+    // row (ADR-0009's lock order): w waits for d, which lands in the other
+    // slot, beside p, whose head waits for its backoff.
+    let f = fixture_cut("cap_woken", (), 2, TraceFile::off())
+        .await
+        .with_rotation(rotation);
+    let beside = streams_in_one_slot(&f, 2, &[("tenant-w", "w"), ("tenant-p", "p")]).await;
+    let [w, p] = &beside[..] else { unreachable!() };
+    let d = f
+        .sessions
+        .session(async |session| {
+            let row = session
+                .connection()
+                .query_one(
+                    "SELECT 'd' || n FROM generate_series(0, 1000) n \
+                     WHERE (hashtext('tenant-d:orders.Order:' || jsonb_build_object('id', 'd' || n)::text) \
+                            & 2147483647) % 2 \
+                       <> (hashtext('tenant-w:orders.Order:' || jsonb_build_object('id', $1::text)::text) \
+                            & 2147483647) % 2 \
+                     ORDER BY n LIMIT 1",
+                    &[w],
+                )
+                .await?;
+            Ok::<String, Error>(row.get(0))
+        })
+        .await
+        .unwrap();
+    let dependency = of("tenant-d", &d, 1);
+    let waiter = of("tenant-w", w, 1).depending_on(&[CausalDependency::on(&dependency)]);
+    f.publish(&[waiter, of("tenant-p", p, 1)]).await;
+    f.execute(
+        "UPDATE {table} SET next_attempt_at = now() + interval '1 hour', attempts = 1 \
+         WHERE tenant_id = 'tenant-p'",
+    )
+    .await;
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::SetAside,
+        "w waits for d"
+    );
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::Nothing,
+        "the slot sleeps"
+    );
+    f.publish(std::slice::from_ref(&dependency)).await;
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::Processed,
+        "d in its own slot"
+    );
+    assert_eq!(
+        f.dispatch(&subscriber).await,
+        Outcome::Nothing,
+        "a wake wakes nothing"
+    );
+    within_the_cap(&f, &format!("{w}@1")).await;
+}
+
+/// E9: the heads held by their own failure are counted from the table, by
+/// channel and cause, as how many Tenants and the oldest hold (ADR-0041
+/// decision 5). A second inbox over the table — another process — counts
+/// the same, so the gauge is the table's, not an observer's. A retry keeps
+/// the hold's start; a mark ends it; a failure that parks leaves no hold; a
+/// count the database cannot give within its bound fails.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn the_held_heads_are_counted_by_channel_and_cause_from_the_table() {
+    let f = fixture_cut("held_counts", (), 1, TraceFile::off())
+        .await
+        .with_retries(Retries::unlimited().with_backoff(|_| Duration::from_secs(3600)));
+    let audit = |tenant: &str, stream: &str| {
+        let m = of(tenant, stream, 1);
+        InboxMessage {
+            uri: format!("kafka://audit/{stream}"),
+            ..m
+        }
+    };
+    f.publish(&[
+        of("tenant-a", "a1", 1),
+        of("tenant-a", "a2", 1),
+        of("tenant-b", "b1", 1),
+        audit("tenant-c", "c1"),
+    ])
+    .await;
+    let failing = |_: &PgSession, _: &InboxMessage| {
+        std::future::ready(Err::<(), Failure>("held on purpose".into()))
+    };
+    f.drain(failing).await;
+    let counts = f.inbox.held_counts(Duration::from_secs(5)).await.unwrap();
+    let seen: Vec<_> = counts
+        .iter()
+        .map(|c| (c.channel.as_str(), c.hold, c.tenants))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("kafka://audit", Hold::Backoff, 1),
+            ("kafka://orders", Hold::Backoff, 2)
+        ],
+        "a's second stream is behind its head, not held"
+    );
+    let other = PgInbox::new(PgSessionPool::new(pool())).with_table(
+        Identifier::new(&f.table).unwrap(),
+        Identifier::new(format!("{}_seq", f.table)).unwrap(),
+    );
+    assert_eq!(
+        other.held_counts(Duration::from_secs(5)).await.unwrap(),
+        counts
+    );
+
+    // A retry that fails again keeps when the hold began. b's backoff is
+    // made to pass, and the slot, asleep since its round saw every head
+    // wait, wakes at that backoff, as it would.
+    let b_due = "UPDATE {table} SET next_attempt_at = now() WHERE tenant_id = 'tenant-b'; \
+                 UPDATE {table}_slots SET dormant_until = now()";
+    // b's own hold, not the channel's oldest: a's began earlier.
+    let b_held_since = async || -> String {
+        let sql = format!(
+            "SELECT held_since::text FROM {} WHERE tenant_id = 'tenant-b'",
+            f.table
+        );
+        f.sessions
+            .session(async |session| {
+                Ok::<String, Error>(session.connection().query_one(&sql, &[]).await?.get(0))
+            })
+            .await
+            .unwrap()
+    };
+    let before = b_held_since().await;
+    f.elapse(b_due).await;
+    f.drain(failing).await;
+    f.elapse(
+        "DO $$ BEGIN \
+           ASSERT (SELECT attempts FROM {table} WHERE tenant_id = 'tenant-b') = 2, 'b was retried'; \
+         END $$",
+    )
+    .await;
+    assert_eq!(
+        b_held_since().await,
+        before,
+        "the hold began at the first failure"
+    );
+
+    // A mark ends the hold.
+    f.elapse(b_due).await;
+    let (_, subscriber) = collector();
+    f.drain(&subscriber).await;
+    let counts = f.inbox.held_counts(Duration::from_secs(5)).await.unwrap();
+    assert_eq!(counts[1].tenants, 1, "b's mark ended its hold: {counts:?}");
+
+    // Tenants, not heads: one Tenant held in two slots is one.
+    let two = fixture_cut("held_two_slots", (), 2, TraceFile::off())
+        .await
+        .with_retries(Retries::unlimited().with_backoff(|_| Duration::from_secs(3600)));
+    let (first, second) = two.streams_in_different_slots().await;
+    two.publish(&[of("tenant-1", &first, 1), of("tenant-1", &second, 1)])
+        .await;
+    two.drain(failing).await;
+    two.execute(
+        "DO $$ BEGIN ASSERT (SELECT count(*) FROM {table} WHERE held_since IS NOT NULL) = 2; END $$",
+    )
+    .await;
+    let held = two.inbox.held_counts(Duration::from_secs(5)).await.unwrap();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].tenants, 1, "two heads of one Tenant: {held:?}");
+
+    // A failure that parks leaves no hold.
+    let parking = fixture_cut("held_parks", (), 1, TraceFile::off())
+        .await
+        .with_retries(Retries::up_to(1));
+    parking.publish(&[of("tenant-a", "a1", 1)]).await;
+    parking.drain(failing).await;
+    assert_eq!(parking.parked_messages().await.len(), 1);
+    assert!(
+        parking
+            .inbox
+            .held_counts(Duration::from_secs(5))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Bounded: a table another session holds is a failure within the bound.
+    let holder = pool().get().await.unwrap();
+    holder
+        .batch_execute(&format!(
+            "BEGIN; LOCK TABLE {} IN ACCESS EXCLUSIVE MODE",
+            f.table
+        ))
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    assert!(
+        f.inbox
+            .held_counts(Duration::from_millis(200))
+            .await
+            .is_err()
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+    holder.batch_execute("ROLLBACK").await.unwrap();
 }

@@ -271,6 +271,38 @@ is bounded.
     starts beside a newer one (R12).
   - Any other object is refused at `migrate`: a host's index or trigger
     would change what the intake's statements can raise.
+  - **The columns are compared with twins the server renders.** After the
+    migrations, in a transaction of its own, `migrate` makes temporary
+    twins of both tables from the library's own declarations — their
+    columns in the migrations' order, the defaults, `slot`'s generation over
+    this inbox's key and count, the default naming this inbox's sequence —
+    and pairs each table's columns with its twin's by name. A default's or a
+    generation's text is the server's rendering, which depends on the major,
+    on the session's settings (`quote_all_identifiers`) and, for `slot`, on
+    the key and the columns' types; the twin is rendered under all of them
+    alike. Measured identical to the library's own tables on 14.24 and 18.6,
+    for the three keys the tests cut by.
+    - A column the twin lacks may be nullable without a default, a
+      generation or an identity, as a newer release's is; anything else is
+      refused.
+    - A column the twin has must be there, NOT NULL no more than the twin's
+      — a NOT NULL the library does not make raises 23502 for an insert
+      that leaves the column out, which is not the message's own, so the
+      source would hold — and filled as the twin's: the same identity, the
+      same generation and the same text.
+  - **A NOT NULL is judged with its column, never by a constraint's name.**
+    PostgreSQL 18 records each as a row of `pg_constraint` (`contype` `n`),
+    named by the server, truncated past 63 bytes and kept through a rename;
+    `attnotnull` is the column's on every major, 18 setting it for a NOT
+    VALID one too (measured on 18.6).
+  - **Both sides are rendered against the twin,** which names a column by
+    its place as the table does: no lock is taken on the live tables
+    (ADR-0029). The start is no longer a read: it needs TEMPORARY on the
+    database, and fails on a read-only database or a standby.
+  - **The deferrable check (ADR-0036 R2) covers both tables.**
+  - No release tightens a column's nullability or changes a column's
+    default or generation. It adds a column nullable, without a default
+    (R12), and leaves the others as it found them.
 
 ### 6. The dispatcher is total over the rows it reads
 
@@ -467,7 +499,32 @@ How this decision fails, each checked:
 - A test of the catalogue:
   - `migrate` passes on a table carrying a newer `{table}__x` trigger, a
     `{table}__x` unique index and an unknown ledger row;
-  - it refuses a host's trigger, index, rule or policy.
+  - it refuses a host's trigger, index, rule or policy;
+  - it refuses a NOT NULL set on `processed_position` and on the rows set
+    aside's `tenant_id`, on 14 and on 18 alike; a changed default on
+    `attempts`; a library column dropped (`last_error`); `slot` cut by another
+    key at the same count, which only the twin tells from its frame; an
+    identity on `stream_position`, whose every insert would raise 428C9;
+    either table's primary key re-made DEFERRABLE under its own name; and,
+    on 18, `slot` made VIRTUAL over the same expression.
+- `every_column_the_inbox_makes_is_held_at_migrate`: the columns read from
+  the tables just made, not from a list, and for each a default dropped, or
+  set where none is made, and a NOT NULL set where none is made. A column
+  the comparison misses is red there.
+- `a_current_inbox_starts_beside_its_tables_held_exclusively`: both tables
+  held ACCESS EXCLUSIVE by another session, and `migrate` returns at once.
+- `a_table_whose_sequence_is_named_otherwise_passes_its_check`: the twin's
+  default names the table's own sequence.
+- Each part has a mutation that turns one of these red (twelve, run on 14 and
+  18): the refusal of an unknown binding column, of a missing one, of a
+  tightened NOT NULL, of an identity, of a generation by kind and by text,
+  of a default, the deferrable check on either table, the rendering against
+  the twin (red by waiting on the lock), the twin's sequence, and the `n`
+  rows read as constraints (red on 18 alone).
+- **Not executable in CI, owed:** the encoding refusal and the block-size
+  refusal (CI's database is UTF8, its pages 8 kB); `NOT tgisinternal`, no
+  fixture having an internal trigger; the renderings across a `pg_upgrade`
+  from 14 to 18, which no test makes.
 
 **Decision 6:**
 - **One test per park ground,** each a row inserted by SQL with
@@ -525,6 +582,23 @@ How this decision fails, each checked:
 - **The outbox producer refusing a stream id outside D at its commit**,
   and its guard comparing identities by decision 1's value rather than by
   the header's text.
+- **What decision 5 does not compare, found 2026-11-15** — an extension
+  of the decision, for its own round:
+  - a column's type: `uri` narrowed, and a message too long for it is set
+    aside instead of stored;
+  - a library index or the primary key dropped, or made again otherwise
+    under its name: without the primary key a redelivery is stored and
+    handled twice; `{table}__message_id_uniq` over the whole table conflicts
+    with another Tenant's holder, which neither read finds, and the intake
+    answers `Conflict` until that holder is swept;
+  - a foreign key from a host's table: the sweep's `DELETE` raises, and
+    `sweep` stops at that channel, so the later channels and the rows set
+    aside are never swept;
+  - a table inheriting from the inbox: the statements that address a row by
+    `ctid` without `ONLY` reach the child's row at the same place
+    (speculative: it needs a host's rows in the child);
+  - a column of a domain type: a NOT NULL domain raises on an insert that
+    leaves the column out (unmeasured).
 - **The measurements the round could not run here:**
   - the SQLSTATE of a render past 1 GB, run on a machine with headroom,
     not a laptop;
@@ -945,3 +1019,61 @@ The host adopts them in one pin, after quoting its stream ids.
   `identity_digest` and the outbox's guard comparing identities by value.
   Decision 1's "a producer that means a string writes it quoted" now reads:
   through the writer, whose text is the one spelling.
+- 2026-11-15 — **A NOT NULL is judged with its column (decision 5).** On
+  PostgreSQL 18 `migrate` refused every inbox: 18 records a column's NOT
+  NULL as a row of `pg_constraint`, and the check read the library's own as
+  a host's constraints — 82 live tests failed on 18 for it, none on 14.
+  Found by the library's first CI run on 14 and 18 (ADR-0041 decision 8).
+  Decided by a blind solver and a discriminator:
+  - the `n` rows leave the constraints' list, and a NOT NULL is read in
+    `attnotnull` on both majors; matched by a name, the library's own would
+    be missed when the server truncates or a rename keeps one;
+  - a NOT NULL on a column the library makes nullable is now refused on
+    both: on 14 it passed `migrate`. The discriminator refuted this record's
+    first example, `metadata`, which the intake always fills; the class
+    holds for the columns its insert leaves out;
+  - the rule that no release tightens a column's nullability is written.
+
+  The round also found what the check misses on 14 as on 18. Within decision
+  5 — a known column's default and generation, and the rows set aside's
+  deferrable key under ADR-0036 R2 — it is owed as the next step (§
+  Executors). Outside it — types, dropped or redefined indexes, foreign
+  keys, inheritance, domains — it is owed as an extension (§ Owed).
+- 2026-11-15 — **Decision 5's columns, compared with twins.** The next step
+  the previous entry owed. A column the library makes was compared for its
+  NOT NULL alone; its default and its generation went unseen, and with them
+  a silent loss (`processed_position SET DEFAULT 0`), a stalled intake
+  (`DROP DEFAULT` on `received_position`), a panic (`slot DROP EXPRESSION`),
+  rows cut by another key, and an identity's 428C9. Decided as the blind
+  solver's column comparison, its expected strings replaced by twins the
+  server renders, and refuted by the database and verifiability roles:
+  - **Database.** Strings break under `quote_all_identifiers` and cannot
+    state a host's key; no DDL-free way renders an arbitrary key; so twins.
+    `pg_get_expr` over the live table takes ACCESS SHARE on it, so both
+    sides are rendered against the twin. An identity escaped: compared now.
+    The start needs TEMPORARY and is no longer a read (ADR-0029).
+  - **Verifiability.** The deferrable check had no executor on either
+    table; no row reached the generation's kind; the proposed `% 7` row was
+    refused by the rejected frame too; a twin's missing column and a
+    constant's extra entry went unseen; the `{sequence}` substitution had no
+    executor. Each has one now (§ Executors). The four column lists are
+    gone: the twin is the one declaration beside the migrations. A column
+    it lacked would be judged as a newer release's, by the same rules a
+    nullable column without a default has, and any other kind turns every
+    live test red.
+  - § Executors said the newer-release test carried an unknown ledger row;
+    it did not. It does now, and asserts it is reported.
+  - The owner (2026-11-15): backward compatibility and migration are not
+    required yet, the library's only client being the host's tests; the
+    live case of an older release beside a newer one's changed default is
+    not served, and the rule that no release changes a column's default or
+    generation is written for that day.
+- 2026-11-15 — **The start check covers the dispatch's functions.** ADR-0041
+  decision 6 makes the take and the walk functions of the baseline,
+  `<table>__take()` and `<table>__walk(…)`. `migrate` refuses either when
+  it is missing or not as the library makes it: signature, language, body,
+  volatility, setting, the owner's rights, EXECUTE for the pool's role, its
+  table's schema, or another function of its name a call could resolve to.
+  The requirements are written in the check, as decision 5's twins are its
+  one declaration beside the migrations. Other `<table>__…` functions are
+  let be, as other `<table>__…` indexes are (R12). Executor: ADR-0041 E8c.

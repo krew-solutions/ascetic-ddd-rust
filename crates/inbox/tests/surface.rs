@@ -308,6 +308,98 @@ async fn a_flood_is_readmitted_in_bulk_after_the_fix() {
     assert_eq!(f.one("SELECT count(*) FROM {table}").await, 3);
 }
 
+/// Sets one message more aside on `inbox://orders` at every row readmitted:
+/// a flood still arriving while a bulk readmit runs, as fast as it drains.
+struct StillArriving {
+    set_aside: Inbox,
+    sent: std::sync::atomic::AtomicUsize,
+}
+
+impl InboxObserver for StillArriving {
+    fn on_operated(&self, event: &Operated<'_>) {
+        if event.operation != Operation::Readmitted {
+            return;
+        }
+        let n = self.sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let message = order(
+            "billing.Invoice",
+            &(1000 + n).to_string(),
+            &format!("0190a01a-7e5b-7d80-b000-{n:012x}"),
+        );
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                digest_of(
+                    &self
+                        .set_aside
+                        .intake("inbox://orders/k", &message)
+                        .await
+                        .unwrap(),
+                )
+            })
+        });
+    }
+}
+
+/// A bulk readmit's window ends at the call: a flood still arriving while
+/// it runs, one row set aside for every row readmitted, neither keeps it
+/// running nor is readmitted by it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_flood_still_arriving_neither_keeps_a_bulk_readmit_running_nor_is_readmitted() {
+    let f = fixture("arriving").await;
+    let before = 150;
+    for i in 0..before {
+        f.intake(&order(
+            "billing.Invoice",
+            &(i + 1).to_string(),
+            &format!("0190a01a-7e5b-7d80-a000-{:012x}", 0x100 + i),
+        ))
+        .await;
+    }
+    let fixed = PgInbox::new(PgSessionPool::new(pool()))
+        .with_table(
+            Identifier::new(&f.table).unwrap(),
+            Identifier::new(format!("{}_seq", f.table)).unwrap(),
+        )
+        .partitioned_by(ByStream)
+        .observed_by(Arc::new(StillArriving {
+            set_aside: inbox(&f.table, &f.audit, false),
+            sent: std::sync::atomic::AtomicUsize::new(0),
+        }))
+        .admitting(|_, _| true)
+        .readmitting(|channel| channel == "inbox://orders");
+    let readmitted = tokio::time::timeout(
+        Duration::from_secs(60),
+        fixed.readmit_all(
+            "ops",
+            "inbox://orders",
+            Reason::Foreign,
+            Duration::from_secs(3600),
+        ),
+    )
+    .await
+    .expect("a flood still arriving kept the bulk readmit running")
+    .unwrap();
+    assert_eq!(
+        readmitted,
+        Readmitted {
+            closed: before,
+            still_set_aside: 0
+        },
+        "only the rows set aside before the call"
+    );
+    assert_eq!(
+        f.one("SELECT count(*) FROM {table}").await,
+        i64::try_from(before).unwrap()
+    );
+    assert_eq!(
+        f.one("SELECT count(*) FROM {table}_rejects WHERE disposed_at IS NULL")
+            .await,
+        i64::try_from(before).unwrap(),
+        "the flood that arrived meanwhile stays set aside, one row a readmission"
+    );
+}
+
 /// A discard closes the row as a tombstone; a repeat of the same bytes
 /// stays discarded, and is counted.
 #[tokio::test]

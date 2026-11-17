@@ -1,6 +1,7 @@
 //! The sealing of a bus's channels: one envelope stage per channel, each
 //! over a KMS instance that serves the channel as its derivation context,
-//! behind a cache of unwrapped keys of its own (ADR-0017 decision 2).
+//! its opening end keeping the keys it unwraps (ADR-0017 decision 2,
+//! ADR-0039 slice 4).
 //!
 //! A producer takes the stage of the channel it writes on its way out, a
 //! consumer the stage of the channel it reads on its way in; a data key
@@ -30,12 +31,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ascetic_ddd_bus::{BoxError, Message, Permanent, Stage, uri};
-use ascetic_ddd_kms::{Cached, KeyManagementService};
+use ascetic_ddd_kms::KeyManagementService;
 use ascetic_ddd_session::SessionPool;
 use futures::future::BoxFuture;
 
-use crate::draws::{Held, SealingObserver};
+use crate::draws::{Held, SealingObserver, causes};
 use crate::stage::{EnvelopeStage, Pacing, Reuse};
+use crate::unwraps::Opening;
+
+/// The entries an opening end holds by default.
+const KEYS: usize = 16_384;
 use crate::supply::InvalidParameters;
 
 /// The header an inbox row goes out with: the channel it was received on.
@@ -43,13 +48,15 @@ const DESTINATION: &str = "destination";
 
 /// The stage's parameters: deployment configuration, bounded from the
 /// security side — the window after an off-boarding in which a key already
-/// drawn or unwrapped still serves is the reuse's lifetime plus the cache's.
+/// drawn or unwrapped still serves is the reuse's lifetime plus the
+/// opening's keep.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SealingParameters {
     /// How many messages and how long one data key serves at the sealing
     /// end before a fresh one is drawn.
     pub reuse: Reuse,
-    /// How long an unwrapped data key is kept at the opening end.
+    /// How long an unwrapped data key is kept at the opening end: the
+    /// fitted opening's `keep` ([`Sealing::over`]).
     pub cache: Duration,
 }
 
@@ -97,8 +104,9 @@ impl std::fmt::Debug for Sealing {
 impl Sealing {
     /// The sealing of `channels` over sessions of `sessions`, with
     /// `parameters`, each channel's stage over the KMS `kms` makes for it —
-    /// an instance serving the channel as its derivation context — behind a
-    /// cache of its own. A channel named twice gets one stage.
+    /// an instance serving the channel as its derivation context — opening
+    /// as [`Opening::fitted`] fits `parameters.cache`. A channel named twice
+    /// gets one stage.
     ///
     /// Its data keys are drawn as [`Pacing::fitted`] fits the reuse
     /// (ADR-0039); [`Sealing::over_paced`] says otherwise.
@@ -116,7 +124,12 @@ impl Sealing {
         Self::over_paced(
             sessions,
             channels,
-            (parameters, Pacing::fitted(parameters.reuse)),
+            (
+                parameters,
+                Pacing::fitted(parameters.reuse),
+                Opening::fitted(parameters.cache, KEYS),
+            ),
+            None,
             None,
             |_| Arc::new(()),
             kms,
@@ -125,12 +138,15 @@ impl Sealing {
     }
 
     /// As [`Sealing::over`], each stage's data keys drawn as `pacing` says,
+    /// and opened as `opening` says (ADR-0039 slice 4),
     /// what becomes of them told to the observer `observer` makes for its
     /// channel. With a `ceiling`, the
     /// window after an off-boarding in which a key already drawn or
-    /// unwrapped still serves — the reuse's lifetime, the cache's, and a
-    /// draw's — is held under it (ADR-0039 decision 12; the consumer's
-    /// ADR-0071 decision 11 names the ceiling).
+    /// unwrapped still serves — the reuse's lifetime, the opening's keep, and
+    /// a draw's — is held under it (ADR-0039 decision 12; the consumer's
+    /// ADR-0071 decision 11 names the ceiling). With a `sentinel`, each
+    /// stage draws for the host's own account when it refuses on no
+    /// evidence of whether its KMS serves ([`EnvelopeStage::with_sentinel`]).
     ///
     /// # Errors
     /// [`InvalidParameters`] naming the rule broken: a composition root
@@ -138,8 +154,9 @@ impl Sealing {
     pub fn over_paced<P, K>(
         sessions: P,
         channels: impl IntoIterator<Item = impl Into<String>>,
-        (parameters, pacing): (SealingParameters, Pacing),
+        (parameters, pacing, opening): (SealingParameters, Pacing, Opening),
         ceiling: Option<Duration>,
+        sentinel: Option<&str>,
         observer: impl Fn(&str) -> Arc<dyn SealingObserver>,
         kms: impl Fn(&str) -> K,
     ) -> Result<Self, InvalidParameters>
@@ -149,15 +166,19 @@ impl Sealing {
         K: KeyManagementService<P::Session> + 'static,
     {
         pacing.supply(parameters.reuse)?;
+        let opening = opening.validated()?;
+        // What an unwrapped key serves for is the opening's `keep`: the
+        // window a key outlives its tenant's erasure is the draw's lifetime,
+        // that keep, and a draw.
         if let Some(ceiling) = ceiling
             && parameters
                 .reuse
                 .lifetime
-                .saturating_add(parameters.cache)
+                .saturating_add(opening.keep)
                 .saturating_add(pacing.draw)
                 > ceiling
         {
-            return Err(InvalidParameters("lifetime + cache + draw ≤ the ceiling"));
+            return Err(InvalidParameters("lifetime + keep + draw ≤ the ceiling"));
         }
         let mut stages: HashMap<String, Arc<dyn Stage>> = HashMap::new();
         let mut holding: HashMap<String, Arc<dyn Holding>> = HashMap::new();
@@ -166,12 +187,14 @@ impl Sealing {
             if stages.contains_key(&channel) {
                 continue;
             }
-            let cached = Cached::new(kms(&channel)).with_ttl(parameters.cache);
-            let stage = Arc::new(
-                EnvelopeStage::new(sessions.clone(), cached)
-                    .paced(parameters.reuse, pacing)?
-                    .observed_by(observer(&channel)),
-            );
+            let stage = EnvelopeStage::new(sessions.clone(), kms(&channel))
+                .paced(parameters.reuse, pacing)?
+                .opened(opening)?
+                .observed_by(observer(&channel));
+            let stage = Arc::new(match sentinel {
+                Some(sentinel) => stage.with_sentinel(sentinel),
+                None => stage,
+            });
             holding.insert(channel.clone(), Arc::clone(&stage) as Arc<dyn Holding>);
             stages.insert(channel, stage);
         }
@@ -289,7 +312,7 @@ impl ByDestination {
 }
 
 fn refused(what: String) -> BoxError {
-    Permanent::new(what).into()
+    Permanent::because(causes::MALFORMED, what).into()
 }
 
 impl Stage for ByDestination {
