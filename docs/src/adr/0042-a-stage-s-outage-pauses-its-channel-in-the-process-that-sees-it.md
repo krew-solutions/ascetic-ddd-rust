@@ -525,6 +525,17 @@ false, does not hold: `passed` is what a batch examined and did not park, `more`
    columns; the CHECKs added `NOT VALID` after a backfill; the take, walk, expiry and trial under new names while
    old binaries run; the indexes rebuilt concurrently; old and new replicas side by side spend, park and expire
    what new ones hold and spare.
+4. The trace check of this decision's steps (T1 lists the runs it leaves out, `verify/tla/traces/uncovered.tsv`):
+   - `Inbox.tla` gains a hold — a row held, no attempt spent, its next attempt later — and the operator's verbs
+     over named rows; the recorder names each row a verb moves, an event of the observer's a row, where `Operated`
+     only counts them;
+   - `TraceInbox.tla` reads a row's permanence by the attempt, not by the message: a row that fails for a moment
+     and then for good does not fit today (`inbox-outage_exits`), its `Permanent` a constant of `Inbox.tla`.
+
+   Taken up with the rotation in the traces (ADR-0041 § Owed), without which most of the outage's runs, rotating,
+   would not fit anyway; or sooner, should a defect of a hold or a verb pass the tests, the model `InboxOutage.tla`
+   and the mutations that hold them today. A model that learns a hold makes the list's entries stale, and
+   `make traces` fails until they are covered (T1).
 
 ## Slices
 
@@ -796,3 +807,5 @@ payloads), its generated Vault policies.
   Tenant's cached heads stall on a channel never paused once one of its heads is refused — half of a launch's
   backlog for the outage's length. The consequence now says so, and a revision of decision 2 for the stage's
   scope is owed, under the library's gate (§ Owed, 1). M4 is the host's, at its count.
+- 2026-11-17: § Owed gains the trace check of this decision's steps (4): what `Inbox.tla`, the recorder and
+  `TraceInbox.tla` lack to check the runs of holds and verbs, and when it is taken up.
