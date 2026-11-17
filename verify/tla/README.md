@@ -363,7 +363,23 @@ Tenant 3.
   `InboxRotation.cfg`'s two Tenants the same walk holds, with the same
   16 766 states as the rotation.
 
-`check.sh` requires each of the five violations.
+**Guests** (ADR-0042 decision 5). A process with a paused channel walks a
+slot as a guest, from a cursor of its own, `guest`, which it alone moves:
+it takes the head of the first Tenant after that cursor whose head is due,
+among the Tenants it does not skip (`GuestSkips`, standing for a paused
+channel's heads), and leaves the slot's cursor where it is (`GuestFetch`).
+`Guests`, `GuestSkips` and `GuestFromLowest` are definitions, off in every
+other instance, each of which maps `guest` to a constant. With guests a
+head due at every process — of a Tenant no guest skips — is overtaken at
+most twice by each other Tenant, once by each cursor's turn:
+`BoundedOvertaking` bounds it so (`OvertakeBound`).
+- `InboxRotationGuest.cfg` (`MCInboxThree.tla`): guests that skip Tenant 3.
+  Everything holds.
+- `InboxRotationGuestFromLowest.cfg`: guests without a cursor of their own,
+  from the lowest Tenant each time. TLC finds `BoundedOvertaking` violated:
+  Tenant 1 comes first at every guest's walk.
+
+`check.sh` requires each of the six violations.
 
 ## Inbox forgetting — `InboxForget.tla`
 
@@ -385,53 +401,74 @@ able to arrive again; two slots.
 
 ## Inbox outage — `InboxOutage.tla`
 
-ADR-0040: a message that cannot be handled now stops exactly the messages
-that share its cause. The inbox of `Inbox.tla` reduced to what the outage
-protocol turns on: slots and their heads, attempts, parks. Dependencies,
-waits, crashes and supersedes are left out, because a hold changes none of
-them; a held row is in the queue at its slot's head, as a row waiting for
-its backoff is.
+ADR-0042: a stage's outage pauses its channel in the process that sees it,
+and nothing is parked for it. The inbox of `Inbox.tla` reduced to what the
+outage protocol turns on, over ADR-0041's heads: a (slot, Tenant)'s head is
+its oldest queue row, and a head held holds its own (slot, Tenant) alone.
 
-The model has a stage that goes down, Tenants whose keys fail alone, and the
-verdict's scope. A Tenant's fault may be read as the stage's (a free choice
-of the model), since the stage cannot always tell. A dispatch of a slot's
-head ends in one transaction:
-- processed, when the stage and the head's Tenant serve;
-- held (`Defer`) on the stage's verdict, its attempts untouched, up to
-  `Budget` holds;
-- past the budget, weighed against the channel's evidence (a row processed
-  while it held): an unrefuted hold holds on, a refuted one spends
-  (`Outlast`);
-- spent on the Tenant's verdict (`FailTenant`), parked at `MaxAttempts`;
-- parked at once on a permanent one (`FailPermanent`).
+Processes share the table, each with workers (its loops) and its own breaker
+and memo of Tenants:
+- an ask is split into its start, which locks the head and its slot, and its
+  verdict, which commits; between the two a worker may roll back, writing
+  nothing (`AskStart`, `AskEnd`, `Rollback`);
+- the verdict is the environment's: a row is served when the stage is up for
+  that process (not down, not cut off from it) or when the process holds its
+  Tenant's key cached; a Tenant whose keys fail alone answers `Unavailable`
+  at Tenant scope, the stage at Stage scope; a permanent row parks at once; a
+  flaky one fails its first time, spending an attempt;
+- an `Unavailable` holds its row and spends nothing; a Tenant's is
+  remembered in the process's memo, which holds the Tenant's other heads
+  unasked (`HoldUnasked`) and then lets one ask through, in flight, at a time;
+- a Stage `Unavailable` may open the process's breaker (the thresholds are
+  the core's, so the model takes either branch); an open breaker asks only by
+  its trial, one at a time, which a processed verdict closes, and a circle
+  that finds no head closes it (`Circle`).
 
-Every failure writes its cause and every exit clears it. The operator parks
-a held row (`ParkHeld`), re-arms parked ones with a canary of `Tries`
-failures (`UnparkAll`), or unparks one afresh (`Unpark`).
-`MCInboxOutage.tla` fixes the instance: three rows, two slots; `m1` and
-`m2` of Tenant `t1` under one key, so in one slot, and `m3` of `t2` under
-its own.
+A head whose dependency is not processed is set aside, and its dependency's
+mark wakes it. The expiry parks a waiter whose chain reaches no queued row
+and spares the others (`Spared`); an expired row keeps the identity it waited
+for. The operator re-arms parked rows with exactly `Tries` failures left
+(`UnparkAll`, holding the row's slot), gives a held head up (`ParkHeads`), or
+gives a Tenant's queue up from its newest row, a row a step (`ParkQueue`).
+
+The fairness is strong for a worker's ask and for a hold's running out: a
+slot another process keeps taking and letting go is taken by this one in
+turn, as the take serves the least recently served slot `SKIP LOCKED`, and a
+hold a trial asks again runs out between two trials, its stage-scoped
+interval at most a tick's cap and the trials a tick apart.
+
+`Mutant` names a refuted design, `"none"` the decided one. Each refuted
+configuration names one property, and `check.sh` runs its twin — the same
+configuration with `Mutant = "none"` — where that property must hold, so
+that the property and no other tells the two apart. `check.sh` pins every
+passing configuration's and every twin's count of distinct states.
+
+`MCInboxOutage.tla` fixes the instances: m1 and m2 of Tenant t1 under one
+key in slot s1, m3 of t2 in s2; m4 and x where an instance names them.
 
 | Configuration | Rule | Expected |
 | --- | --- | --- |
-| `InboxOutage.cfg` | the stage down once and back, no Tenant failing alone | every invariant holds; `HoldSpendsNothing`, `EventuallyProcessed` |
-| `InboxOutageCounts.cfg` | a hold that spends as any failure, as before | `NoStageParks` violated |
-| `InboxOutageForever.cfg` | the stage down for good | `EventuallyOutOfTheWay` violated: a true outage holds for good, by design |
-| `InboxOutageOperators.cfg` | `t1` failing alone, `m3` permanent, the operator acting | `CauseIsCurrent`, `ParkedIsAside`, `CanaryReparks` hold |
-| `InboxOutageCommitKeepingCause.cfg` | a mark that keeps the cause | `CauseIsCurrent` violated |
-| `InboxOutageUnparkKeepingCause.cfg` | an unpark that keeps the cause | `CauseIsCurrent` violated |
-| `InboxOutageUnparkAllResetting.cfg` | a bulk unpark that resets the attempts | `CanaryReparks` violated |
-| `InboxOutageTenant.cfg` | `t1` failing alone for a while, read either way | `EventuallyOutOfTheWay` holds |
-| `InboxOutageQuietMisread.cfg` | `t1` failing for good, read as the stage's, nothing else served | `EventuallyOutOfTheWay` violated: the stage's sentinel probe and `park_held` answer it |
+| `InboxOutage.cfg` | the stage down once and back, p2 cut off once and back, t1's keys cached in p1, m2 failing once, a rollback | every invariant and property holds; 17 368 states |
+| `InboxOutageTenant.cfg` | t1 failing alone, its rows in both slots, two workers of one process | `OneAskPerReach`, `EventuallyProcessed`; 1 936 |
+| `InboxOutageCutOff.cfg` | p2 cut off for good, the stage up | the other process processes every row; 544 |
+| `InboxOutageDeps.cfg` | m3 waits for m2, queued; m4 for x, which never arrives | m3 spared and processed, m4 expires; 36 |
+| `InboxOutageOperators.cfg` | m1 failing and parking, m3 permanent, the operator acting | `CanaryExact`, `GivenUpIsTheEnd`, `KeyOrder`; 23 986 |
+| `InboxOutageUnavailableSpends.cfg` | an `Unavailable` that spends | `UnavailableNeverSpends` violated |
+| `InboxOutageNoFlightMark.cfg` | a memo that lets every worker ask a Tenant in flight | `OneAskPerReach` violated |
+| `InboxOutageExpirePresent.cfg` | an expiry that parks a waiter whose dependency is queued | `PresentDependencyNeverExpires` violated |
+| `InboxOutageMarkKeepsCause.cfg` | a mark that keeps the cause | `CauseIsCurrent` violated |
+| `InboxOutageMarkKeepsHold.cfg` | a mark that keeps the hold | `HoldIsQueued` violated |
+| `InboxOutageCanaryKeeps.cfg` | a re-arm that keeps a higher count | `CanaryExact` violated |
+| `InboxOutageQueueOldest.cfg` | a queue given up from its oldest row | `GivenUpIsTheEnd` violated |
+| `InboxOutageRearmBesideAnAsk.cfg` | a re-arm beside an ask of its slot | `KeyOrder` violated: a later row of the key, in flight while the overtaking is read, is processed past the row re-armed |
 
-`KeyOrder` is `ArrivalOrder` by partition key rather than by slot: which
-keys share a slot is the hash's accident, while the order of a key's rows is
-what a host relies on. A change that lets a slot serve past a held head
-(slice B of ADR-0040) is to keep `KeyOrder` and give up `ArrivalOrder`.
+The last was the model's finding, not a design the decision refuted: the
+library's bulk unpark read whether a later row of the stream had overtaken a
+row without holding the slot, and an ask in flight was then processed past
+it. The library now holds the slots of a batch before it reads.
 
-A recorded run with a hold is refused by `trace2tla.py`, which does not
-map it: a hold is checked here and by the PostgreSQL tests, and a trace
-refinement for it is owed (ADR-0040 § Owed).
+The bound on asks is not the model's: TLC has no rates, and the breaker's
+core tests (`crates/inbox/src/breaker/tests.rs`) are its executor.
 
 ## Inbox, statement by statement — `InboxPg.tla`
 

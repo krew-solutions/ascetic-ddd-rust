@@ -1,199 +1,335 @@
 ---------------------------- MODULE InboxOutage ----------------------------
 (***************************************************************************)
-(* ADR-0040: a message that cannot be handled now stops exactly the        *)
-(* messages that share its cause.                                          *)
+(* ADR-0042: a stage's outage pauses its channel in the process that sees  *)
+(* it, and nothing is parked for it.                                       *)
 (*                                                                         *)
-(* The inbox of Inbox.tla reduced to what the outage protocol turns on --  *)
-(* slots and their heads, attempts, parks -- with a stage that goes down,  *)
-(* Tenants whose keys fail alone, and the subscriber's verdict and its     *)
-(* scope.  A dispatch takes a slot's head and ends in one transaction:     *)
-(*   - processed, when the stage and the head's Tenant serve;              *)
-(*   - held (Defer), when the verdict is the stage's: the head keeps its   *)
-(*     slot, its attempts untouched, until Budget holds; past it the       *)
-(*     channel's evidence is weighed -- a row processed while it held --   *)
-(*     and an unrefuted hold holds on, a refuted one spends (Outlast);     *)
-(*   - spent, when the verdict is the Tenant's (FailTenant), parking the   *)
-(*     row at MaxAttempts;                                                  *)
-(*   - parked at once, when no retry mends it (FailPermanent).             *)
-(* A Tenant's fault may be read as the stage's -- the verdict's scope is a *)
-(* free choice then -- since the stage cannot always tell.  Every failure  *)
-(* writes its cause, and every exit clears it.  An operator parks a held   *)
-(* row (ParkHeld), re-arms parked ones with a canary of Tries failures     *)
-(* (UnparkAll), or unparks one afresh (Unpark).                            *)
+(* The inbox of Inbox.tla reduced to what the outage protocol turns on,    *)
+(* over ADR-0041's heads: a (slot, Tenant)'s head is its oldest queue row, *)
+(* and a head held holds its own (slot, Tenant) alone.  Several processes  *)
+(* share the table, each with workers -- its loops -- and each with its   *)
+(* own breaker over the channel and its own memo of Tenants:               *)
+(*   - an ask is split into its start, which locks the head and its slot,  *)
+(*     and its verdict, which commits; between the two a worker may roll  *)
+(*     back, writing nothing (AskStart, AskEnd, Rollback);                 *)
+(*   - the verdict is the environment's: a row is served when the stage is *)
+(*     up for that process -- not down, not cut off from it -- or when the *)
+(*     process holds its Tenant's key cached; a Tenant whose keys fail     *)
+(*     alone answers `Unavailable` at Tenant scope; the stage, at Stage    *)
+(*     scope; a permanent row parks at once; a flaky one fails its first   *)
+(*     time on its own, spending an attempt;                               *)
+(*   - an `Unavailable` holds its row and spends nothing, at either scope; *)
+(*     a Tenant's is remembered in the process's memo, which holds the     *)
+(*     Tenant's other heads unasked (HoldUnasked) until it runs out, and   *)
+(*     then lets one ask through, in flight, at a time;                    *)
+(*   - a Stage `Unavailable` may open the process's breaker -- the         *)
+(*     thresholds are the core's, and the model takes either branch; an   *)
+(*     open breaker asks no head but by its trial, one at a time, which a  *)
+(*     processed verdict closes; a circle that finds no head closes it.    *)
+(* A head whose dependency is not processed is set aside to wait, and the  *)
+(* mark of the dependency puts it back.  The expiry parks a waiter whose   *)
+(* chain reaches no queued row -- its dependency never arrived, is parked, *)
+(* or waits on one that does not reach one -- and spares the others        *)
+(* (ADR-0042 decision 7); an expired row keeps the identity it waited for, *)
+(* and its dependency's mark still wakes it.  The operator re-arms parked  *)
+(* rows with exactly Tries failures left, gives a held head up, or gives a *)
+(* Tenant's queue up from its newest row, a row a step, as the verb's      *)
+(* batches interleave with the dispatch.  Every row is in the table from   *)
+(* the start, in Order, but those of Missing, which never arrive.          *)
 (*                                                                         *)
-(* Dependencies, waits, crashes and supersedes are Inbox.tla's and left    *)
-(* out: a hold changes none of them -- a held row is in the queue, at its  *)
-(* slot's head, as a row waiting for its backoff is.  Every message is in  *)
-(* the table from the start, in Order.                                     *)
+(* Mutant names a refuted design, "none" the decided one: check.sh runs    *)
+(* each refuted configuration's twin with "none", where the one property   *)
+(* it names must hold.                                                     *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
   Msgs,
-  Order,        \* a sequence of Msgs, each once: the order of arrival
+  Order,        \* a sequence of the rows that arrive, each once: the order of arrival
+  Missing,      \* SUBSET Msgs: rows that never arrive, named by a dependency only
   Slots,
+  SlotOf,       \* [Msgs -> Slots]: a key's rows share a slot
   Tenants,
   TenantOf,     \* [Msgs -> Tenants]
-  KeyOf,        \* [Msgs -> keys]: the partition key; a key's messages share a slot
+  KeyOf,        \* [Msgs -> keys]: a stream; its rows in its order
+  Dep,          \* [Msgs -> Msgs \cup {None}]: the causal dependency, one at most
+  Procs,
+  Workers,
+  ProcOf,       \* [Workers -> Procs]
   Outages,      \* how many times the stage may go down
   OutageEnds,   \* TRUE: a stage that is down comes back up
+  CutOffs,      \* SUBSET Procs: processes that may be cut off from the stage alone, once each
+  CutEnds,      \* TRUE: a cut-off process reaches the stage again
+  Cached,       \* [Procs -> SUBSET Tenants]: whose keys a process holds cached
   TenantFaults, \* SUBSET Tenants: whose keys may fail alone, once each
   TenantEnds,   \* TRUE: a Tenant's fault ends
-  Permanent,    \* SUBSET Msgs: messages no retry mends, such as a key gone
-  MaxAttempts,  \* failed attempts after which a row is parked, > 0
-  Budget,       \* holds before the channel's evidence is weighed, > 0
-  Tries,        \* the failures a re-armed row has left
+  Permanent,    \* SUBSET Msgs: rows no retry mends
+  Flaky,        \* SUBSET Msgs: rows whose first verdict is their own failure, spending an attempt
+  MaxAttempts,  \* failed attempts after which a row parks, > 0
+  Tries,        \* the failures a re-armed row has left, 1..MaxAttempts
+  HoldCap,      \* the most holds a row counts
   MaxAdmin,     \* operator actions, in all
+  MaxRollbacks, \* rollbacks between an ask's start and its verdict, in all
+  Mutant,
   None
 
-ASSUME Order \in Seq(Msgs) /\ Len(Order) = Cardinality(Msgs)
-ASSUME TenantOf \in [Msgs -> Tenants]
-ASSUME TenantFaults \subseteq Tenants /\ Permanent \subseteq Msgs
-ASSUME MaxAttempts > 0 /\ Budget > 0 /\ Tries \in Nat /\ MaxAdmin \in Nat /\ Outages \in Nat
+Arrives == Msgs \ Missing
 
-Causes == {"stage", "tenant", "permanent"}
+ASSUME Order \in Seq(Arrives) /\ Len(Order) = Cardinality(Arrives)
+ASSUME TenantOf \in [Msgs -> Tenants] /\ SlotOf \in [Msgs -> Slots] /\ ProcOf \in [Workers -> Procs]
+ASSUME Dep \in [Msgs -> Msgs \cup {None}]
+ASSUME MaxAttempts > 0 /\ Tries \in 1..MaxAttempts /\ HoldCap \in Nat \ {0}
+
+Causes == {"stage", "tenant", "own", "permanent", "given"}
+Kinds == {"none", "backoff", "unavailable"}
+Memos == {"none", "held", "due", "flight"}
 
 VARIABLES
-  part,        \* [Msgs -> Slots], fixed at the start, a key's messages together
-  processed,   \* SUBSET Msgs
-  procOrder,   \* Seq(Msgs), the order of the marks
-  due,         \* [Msgs -> BOOLEAN], FALSE while a row waits to be asked again
+  processed,   \* SUBSET Arrives
+  procOrder,   \* Seq(Arrives): the order of the marks
   attempts,    \* [Msgs -> Nat]
-  parked,      \* SUBSET Msgs
-  byHand,      \* SUBSET parked: parked by the operator from a hold
-  cause,       \* [Msgs -> Causes \cup {None}]: last_cause
-  held,        \* [Msgs -> 0..Budget]: holds since the hold began; 0 when none
-  served,      \* [Msgs -> BOOLEAN]: a row was processed while this one held
-  stageDown,
-  outages,     \* the stage's outages so far
-  tenantDown,  \* SUBSET Tenants
-  faulted,     \* SUBSET Tenants: whose fault has happened
-  rearmed,     \* SUBSET Msgs: re-armed by UnparkAll, not unparked afresh since
-  admin
+  parked,      \* SUBSET Arrives
+  byHand,      \* SUBSET parked: given up by the operator, its cause kept
+  expired,     \* SUBSET parked: parked by the expiry, its dependency kept
+  waiting,     \* SUBSET Arrives: set aside for its dependency
+  cause,       \* [Msgs -> Causes \cup {None}]
+  kind,        \* [Msgs -> Kinds]: what holds a row
+  holds,       \* [Msgs -> 0..HoldCap]: the Unavailable verdicts it was told
+  due,         \* [Msgs -> BOOLEAN]: FALSE while a hold or a back-off runs
+  flaked,      \* SUBSET Flaky: whose own failure has happened
+  rearmed,     \* SUBSET Arrives: re-armed by the operator, not told a verdict since
+  stageDown, outages,
+  cut,         \* SUBSET Procs: cut off from the stage
+  cutDone,     \* SUBSET Procs: whose cut has happened
+  tenantDown, faulted,
+  breaker,     \* [Procs -> {"closed", "open"}]
+  memo,        \* [Procs -> [Tenants -> Memos]]
+  flight,      \* [Workers -> Arrives \cup {None}]: the head a worker's open ask holds
+  trial,       \* [Workers -> BOOLEAN]: whether that ask is its process's trial
+  admin, rollbacks
 
-vars == <<part, processed, procOrder, due, attempts, parked, byHand, cause, held, served,
-          stageDown, outages, tenantDown, faulted, rearmed, admin>>
+rows == <<processed, procOrder, attempts, parked, byHand, expired, waiting, cause, kind, holds,
+          due, flaked, rearmed>>
+env == <<stageDown, outages, cut, cutDone, tenantDown, faulted>>
+vars == <<rows, env, breaker, memo, flight, trial, admin, rollbacks>>
 
 Pos(m) == CHOOSE i \in 1..Len(Order) : Order[i] = m
 
 Init ==
-  /\ part \in {p \in [Msgs -> Slots] : \A a, b \in Msgs : KeyOf[a] = KeyOf[b] => p[a] = p[b]}
-  /\ processed = {}
-  /\ procOrder = <<>>
-  /\ due = [m \in Msgs |-> TRUE]
+  /\ processed = {} /\ procOrder = <<>>
   /\ attempts = [m \in Msgs |-> 0]
-  /\ parked = {}
-  /\ byHand = {}
+  /\ parked = {} /\ byHand = {} /\ expired = {} /\ waiting = {}
   /\ cause = [m \in Msgs |-> None]
-  /\ held = [m \in Msgs |-> 0]
-  /\ served = [m \in Msgs |-> FALSE]
-  /\ stageDown = FALSE
-  /\ outages = 0
-  /\ tenantDown = {}
-  /\ faulted = {}
-  /\ rearmed = {}
-  /\ admin = 0
+  /\ kind = [m \in Msgs |-> "none"]
+  /\ holds = [m \in Msgs |-> 0]
+  /\ due = [m \in Msgs |-> TRUE]
+  /\ flaked = {} /\ rearmed = {}
+  /\ stageDown = FALSE /\ outages = 0 /\ cut = {} /\ cutDone = {}
+  /\ tenantDown = {} /\ faulted = {}
+  /\ breaker = [p \in Procs |-> "closed"]
+  /\ memo = [p \in Procs |-> [t \in Tenants |-> "none"]]
+  /\ flight = [w \in Workers |-> None]
+  /\ trial = [w \in Workers |-> FALSE]
+  /\ admin = 0 /\ rollbacks = 0
 
 (* ------------------------------------------------------------------------ *)
-(* The slot's head, and what the environment lets its dispatch do            *)
+(* The queue and its heads                                                   *)
 
-Queue(d) == {m \in Msgs : part[m] = d /\ m \notin processed /\ m \notin parked}
-\* The oldest row of the queue, due or not: a row waiting to be asked again
-\* holds its slot (ADR-0005), and only a head is ever asked.
-HeadOf(d) == CHOOSE m \in Queue(d) : \A n \in Queue(d) : Pos(m) <= Pos(n)
-Asked(d, m) == Queue(d) # {} /\ m = HeadOf(d) /\ due[m]
+Queued(m) == m \in Arrives /\ m \notin processed /\ m \notin parked /\ m \notin waiting
+QueueOf(d, t) == {m \in Arrives : Queued(m) /\ SlotOf[m] = d /\ TenantOf[m] = t}
+\* A (slot, Tenant)'s head, due or not: a head held holds its own.
+Heads == {m \in Arrives : Queued(m) /\ \A n \in QueueOf(SlotOf[m], TenantOf[m]) : Pos(m) <= Pos(n)}
+Asking == {w \in Workers : flight[w] # None}
+InFlight == {flight[w] : w \in Asking}
+SlotBusy(d) == \E w \in Asking : SlotOf[flight[w]] = d
+DepDone(m) == Dep[m] = None \/ Dep[m] \in processed
 
-Serves(m) == ~stageDown /\ TenantOf[m] \notin tenantDown
-Down(m) == stageDown \/ TenantOf[m] \in tenantDown
+\* Whether a waiter's chain reaches a queued row: its dependency queued, or
+\* itself waiting on one that reaches it (ADR-0042 decision 7).
+RECURSIVE Spared(_, _)
+Spared(m, n) ==
+  /\ n > 0
+  /\ Dep[m] # None
+  /\ Dep[m] \in Arrives /\ Dep[m] \notin parked /\ Dep[m] \notin processed
+  /\ (Dep[m] \notin waiting \/ Spared(Dep[m], n - 1))
 
-\* A failure that spends an attempt, under cause c; the last one parks.  A
-\* hold refuted keeps its clock (keep), so that its next verdict is weighed
-\* at once, until it parks.
-Spend(m, c, keep) ==
+Reachable(p, m) == (~stageDown /\ p \notin cut) \/ TenantOf[m] \in Cached[p]
+
+(* ------------------------------------------------------------------------ *)
+(* A worker's ask                                                            *)
+
+\* A head is asked: by a closed breaker when it is due and its Tenant's memo
+\* lets it through -- one ask in flight once the memo holds the Tenant; by
+\* an open one only as its trial, one at a time, held or not.  The head's
+\* slot and row are locked until the verdict.
+AskStart(w) ==
+  LET p == ProcOf[w] IN
+  /\ flight[w] = None
+  /\ \E m \in Heads :
+       /\ ~SlotBusy(SlotOf[m])
+       /\ DepDone(m)
+       /\ \/ /\ breaker[p] = "closed" /\ due[m]
+             /\ IF Mutant = "no_flight_mark"
+                  THEN memo[p][TenantOf[m]] # "held"
+                  ELSE memo[p][TenantOf[m]] \in {"none", "due"}
+             /\ memo' = IF memo[p][TenantOf[m]] \in {"due", "flight"}
+                          THEN [memo EXCEPT ![p][TenantOf[m]] = "flight"] ELSE memo
+             /\ trial' = trial
+          \/ /\ breaker[p] = "open"
+             /\ \A v \in Workers : ProcOf[v] = p => ~trial[v]
+             /\ trial' = [trial EXCEPT ![w] = TRUE]
+             /\ memo' = memo
+       /\ flight' = [flight EXCEPT ![w] = m]
+  /\ UNCHANGED <<rows, env, breaker, admin, rollbacks>>
+
+\* A head whose dependency is not processed is set aside, the whole
+\* transaction (ADR-0009).
+SetAside(w) ==
+  /\ flight[w] = None /\ breaker[ProcOf[w]] = "closed"
+  /\ \E m \in Heads :
+       /\ ~SlotBusy(SlotOf[m]) /\ due[m] /\ ~DepDone(m)
+       /\ waiting' = waiting \cup {m}
+  /\ UNCHANGED <<processed, procOrder, attempts, parked, byHand, expired, cause, kind, holds, due,
+                flaked, rearmed, env, breaker, memo, flight, trial, admin, rollbacks>>
+
+\* A head of a Tenant the process's memo holds is held unasked: its row
+\* written held under the Tenant's cause, its count of verdicts untouched.
+HoldUnasked(w) ==
+  LET p == ProcOf[w] IN
+  /\ flight[w] = None /\ breaker[p] = "closed"
+  /\ \E m \in Heads :
+       /\ ~SlotBusy(SlotOf[m]) /\ due[m]
+       /\ memo[p][TenantOf[m]] \in {"held", "flight"}
+       /\ kind' = [kind EXCEPT ![m] = "unavailable"]
+       /\ cause' = [cause EXCEPT ![m] = "tenant"]
+       /\ due' = [due EXCEPT ![m] = FALSE]
+  /\ UNCHANGED <<processed, procOrder, attempts, parked, byHand, expired, waiting, holds, flaked,
+                rearmed, env, breaker, memo, flight, trial, admin, rollbacks>>
+
+\* The rows woken by the mark of m: its waiters, and the waiters the expiry
+\* parked, which kept the identity they waited for.
+Woken(m) == {n \in waiting \cup expired : Dep[n] = m}
+
+\* A verdict that spends an attempt under cause c; the last one parks.
+Spend(m, c) ==
   LET parks == attempts[m] + 1 >= MaxAttempts IN
   /\ attempts' = [attempts EXCEPT ![m] = @ + 1]
   /\ parked' = IF parks THEN parked \cup {m} ELSE parked
   /\ cause' = [cause EXCEPT ![m] = c]
-  /\ held' = [held EXCEPT ![m] = IF keep /\ ~parks THEN @ ELSE 0]
+  /\ kind' = [kind EXCEPT ![m] = IF parks THEN "none" ELSE "backoff"]
+  /\ holds' = [holds EXCEPT ![m] = 0]
   /\ due' = [due EXCEPT ![m] = FALSE]
+  /\ rearmed' = rearmed \ {m}
+
+\* An `Unavailable`: the row held and counted, nothing spent.
+Hold(m, c) ==
+  /\ kind' = [kind EXCEPT ![m] = "unavailable"]
+  /\ holds' = [holds EXCEPT ![m] = IF @ < HoldCap THEN @ + 1 ELSE @]
+  /\ cause' = [cause EXCEPT ![m] = c]
+  /\ due' = [due EXCEPT ![m] = FALSE]
+  /\ rearmed' = rearmed \ {m}
+  /\ IF Mutant = "unavailable_spends"
+       THEN /\ attempts' = [attempts EXCEPT ![m] = @ + 1]
+            /\ parked' = IF attempts[m] + 1 >= MaxAttempts THEN parked \cup {m} ELSE parked
+       ELSE UNCHANGED <<attempts, parked>>
+
+\* The verdict, committed with the ask's transaction.
+AskEnd(w) ==
+  LET p == ProcOf[w]
+      m == flight[w]
+      t == TenantOf[flight[w]]
+  IN
+  /\ flight[w] # None
+  /\ flight' = [flight EXCEPT ![w] = None]
+  /\ trial' = [trial EXCEPT ![w] = FALSE]
+  /\ \/ \* processed: its hold and its cause cleared, its waiters woken
+        /\ Reachable(p, m) /\ t \notin tenantDown /\ m \notin Permanent
+        /\ (m \notin Flaky \/ m \in flaked)
+        /\ processed' = processed \cup {m}
+        /\ procOrder' = Append(procOrder, m)
+        /\ waiting' = waiting \ Woken(m)
+        /\ parked' = parked \ Woken(m)
+        /\ expired' = expired \ Woken(m)
+        /\ cause' = [cause EXCEPT ![m] = IF Mutant = "mark_keeps_cause" THEN @ ELSE None]
+        /\ kind' = [kind EXCEPT ![m] = IF Mutant = "mark_keeps_hold" THEN @ ELSE "none"]
+        /\ holds' = [holds EXCEPT ![m] = IF Mutant = "mark_keeps_hold" THEN @ ELSE 0]
+        /\ due' = [n \in Msgs |-> IF n \in Woken(m) THEN TRUE ELSE due[n]]
+        /\ rearmed' = rearmed \ {m}
+        /\ memo' = [memo EXCEPT ![p][t] = "none"]
+        /\ breaker' = IF trial[w] THEN [breaker EXCEPT ![p] = "closed"] ELSE breaker
+        /\ UNCHANGED <<attempts, byHand, flaked>>
+     \/ \* its own failure, once
+        /\ Reachable(p, m) /\ m \in Flaky \ flaked /\ m \notin Permanent
+        /\ flaked' = flaked \cup {m}
+        /\ Spend(m, "own")
+        /\ memo' = [memo EXCEPT ![p][t] = "none"]
+        /\ UNCHANGED <<processed, procOrder, waiting, byHand, expired, breaker>>
+     \/ \* no retry mends it
+        /\ Reachable(p, m) /\ m \in Permanent
+        /\ attempts' = [attempts EXCEPT ![m] = @ + 1]
+        /\ parked' = parked \cup {m}
+        /\ cause' = [cause EXCEPT ![m] = "permanent"]
+        /\ kind' = [kind EXCEPT ![m] = "none"]
+        /\ holds' = [holds EXCEPT ![m] = 0]
+        /\ rearmed' = rearmed \ {m}
+        /\ memo' = [memo EXCEPT ![p][t] = "none"]
+        /\ UNCHANGED <<processed, procOrder, waiting, byHand, expired, due, flaked, breaker>>
+     \/ \* the Tenant's Unavailable, remembered by the process
+        /\ Reachable(p, m) /\ t \in tenantDown /\ m \notin Permanent
+        /\ Hold(m, "tenant")
+        /\ memo' = [memo EXCEPT ![p][t] = "held"]
+        /\ UNCHANGED <<processed, procOrder, waiting, byHand, expired, flaked, breaker>>
+     \/ \* the stage's Unavailable: the breaker may open, or stay as it is
+        /\ ~Reachable(p, m)
+        /\ Hold(m, "stage")
+        /\ breaker' \in {breaker, [breaker EXCEPT ![p] = "open"]}
+        /\ memo' = IF memo[p][t] = "flight" THEN [memo EXCEPT ![p][t] = "due"] ELSE memo
+        /\ UNCHANGED <<processed, procOrder, waiting, byHand, expired, flaked>>
+  /\ UNCHANGED <<env, admin, rollbacks>>
+
+\* Between the start and the verdict the transaction rolls back: nothing
+\* written, the flight's mark abandoned.
+Rollback(w) ==
+  LET p == ProcOf[w] IN
+  /\ flight[w] # None /\ rollbacks < MaxRollbacks
+  /\ rollbacks' = rollbacks + 1
+  /\ flight' = [flight EXCEPT ![w] = None]
+  /\ trial' = [trial EXCEPT ![w] = FALSE]
+  /\ memo' = IF memo[p][TenantOf[flight[w]]] = "flight"
+               THEN [memo EXCEPT ![p][TenantOf[flight[w]]] = "due"] ELSE memo
+  /\ UNCHANGED <<rows, env, breaker, admin>>
+
+\* A guest's circle that finds no head of the channel closes the breaker.
+Circle(p) ==
+  /\ breaker[p] = "open" /\ Heads = {}
+  /\ \A w \in Workers : ProcOf[w] = p => ~trial[w]
+  /\ breaker' = [breaker EXCEPT ![p] = "closed"]
+  /\ UNCHANGED <<rows, env, memo, flight, trial, admin, rollbacks>>
 
 (* ------------------------------------------------------------------------ *)
-(* Dispatching                                                               *)
+(* Time                                                                      *)
 
-\* The head is processed: its cause and its hold cleared, and every row
-\* holding meanwhile has the channel's evidence that rows are served.
-Commit(d) ==
-  \E m \in Msgs :
-    /\ Asked(d, m)
-    /\ m \notin Permanent
-    /\ Serves(m)
-    /\ processed' = processed \cup {m}
-    /\ procOrder' = Append(procOrder, m)
-    /\ cause' = [cause EXCEPT ![m] = None]
-    /\ held' = [held EXCEPT ![m] = 0]
-    /\ served' = [n \in Msgs |-> served[n] \/ held[n] > 0]
-    /\ UNCHANGED <<part, due, attempts, parked, byHand, stageDown, outages, tenantDown, faulted,
-                  rearmed, admin>>
-
-\* The verdict is the stage's: the head holds its slot, its attempts
-\* untouched, under Budget or past it unrefuted.  A hold that begins starts
-\* its evidence afresh.
-Defer(d) ==
-  \E m \in Msgs :
-    /\ Asked(d, m)
-    /\ m \notin Permanent
-    /\ Down(m)
-    /\ (held[m] < Budget \/ ~served[m])
-    /\ held' = [held EXCEPT ![m] = IF @ < Budget THEN @ + 1 ELSE Budget]
-    /\ served' = IF held[m] = 0 THEN [served EXCEPT ![m] = FALSE] ELSE served
-    /\ cause' = [cause EXCEPT ![m] = "stage"]
-    /\ due' = [due EXCEPT ![m] = FALSE]
-    /\ UNCHANGED <<part, processed, procOrder, attempts, parked, byHand, stageDown, outages,
-                  tenantDown, faulted, rearmed, admin>>
-
-\* Past its budget, refuted by the channel's evidence: the stage's verdict
-\* spends an attempt, as a Tenant's does, and keeps the hold's clock.
-Outlast(d) ==
-  \E m \in Msgs :
-    /\ Asked(d, m)
-    /\ m \notin Permanent
-    /\ Down(m)
-    /\ held[m] = Budget /\ served[m]
-    /\ Spend(m, "stage", TRUE)
-    /\ UNCHANGED <<part, processed, procOrder, byHand, served, stageDown, outages, tenantDown,
-                  faulted, rearmed, admin>>
-
-\* The verdict is the Tenant's, read right: an attempt spent, the hold over.
-FailTenant(d) ==
-  \E m \in Msgs :
-    /\ Asked(d, m)
-    /\ m \notin Permanent
-    /\ ~stageDown /\ TenantOf[m] \in tenantDown
-    /\ Spend(m, "tenant", FALSE)
-    /\ UNCHANGED <<part, processed, procOrder, byHand, served, stageDown, outages, tenantDown,
-                  faulted, rearmed, admin>>
-
-\* No retry mends it: parked at once.
-FailPermanent(d) ==
-  \E m \in Msgs :
-    /\ Asked(d, m)
-    /\ m \in Permanent
-    /\ attempts' = [attempts EXCEPT ![m] = @ + 1]
-    /\ parked' = parked \cup {m}
-    /\ cause' = [cause EXCEPT ![m] = "permanent"]
-    /\ held' = [held EXCEPT ![m] = 0]
-    /\ due' = [due EXCEPT ![m] = FALSE]
-    /\ UNCHANGED <<part, processed, procOrder, byHand, served, stageDown, outages, tenantDown,
-                  faulted, rearmed, admin>>
-
-Dispatch(d) == Commit(d) \/ Defer(d) \/ Outlast(d) \/ FailTenant(d) \/ FailPermanent(d)
-
-\* The while a row waits to be asked again has passed.
 Elapse(m) ==
-  /\ ~due[m]
+  /\ ~due[m] /\ m \notin InFlight
   /\ due' = [due EXCEPT ![m] = TRUE]
-  /\ UNCHANGED <<part, processed, procOrder, attempts, parked, byHand, cause, held, served,
-                stageDown, outages, tenantDown, faulted, rearmed, admin>>
+  /\ UNCHANGED <<processed, procOrder, attempts, parked, byHand, expired, waiting, cause, kind,
+                holds, flaked, rearmed, env, breaker, memo, flight, trial, admin, rollbacks>>
+
+\* A Tenant's memo runs out: one ask may go through.
+MemoElapse(p, t) ==
+  /\ memo[p][t] = "held"
+  /\ memo' = [memo EXCEPT ![p][t] = "due"]
+  /\ UNCHANGED <<rows, env, breaker, flight, trial, admin, rollbacks>>
+
+\* A waiter whose chain reaches no queued row is parked, the identity it
+\* waited for kept, so that a late mark still wakes it.
+Expire(m) ==
+  /\ m \in waiting
+  /\ IF Mutant = "expire_present" THEN TRUE ELSE ~Spared(m, Cardinality(Msgs))
+  /\ waiting' = waiting \ {m}
+  /\ parked' = parked \cup {m}
+  /\ expired' = expired \cup {m}
+  /\ UNCHANGED <<processed, procOrder, attempts, byHand, cause, kind, holds, due, flaked, rearmed,
+                env, breaker, memo, flight, trial, admin, rollbacks>>
 
 (* ------------------------------------------------------------------------ *)
 (* The environment                                                           *)
@@ -201,77 +337,118 @@ Elapse(m) ==
 StageFails ==
   /\ ~stageDown /\ outages < Outages
   /\ stageDown' = TRUE /\ outages' = outages + 1
-  /\ UNCHANGED <<part, processed, procOrder, due, attempts, parked, byHand, cause, held, served,
-                tenantDown, faulted, rearmed, admin>>
+  /\ UNCHANGED <<rows, cut, cutDone, tenantDown, faulted, breaker, memo, flight, trial, admin,
+                rollbacks>>
 
 StageMends ==
-  /\ stageDown /\ stageDown' = FALSE
-  /\ UNCHANGED <<part, processed, procOrder, due, attempts, parked, byHand, cause, held, served,
-                outages, tenantDown, faulted, rearmed, admin>>
+  /\ stageDown /\ OutageEnds /\ stageDown' = FALSE
+  /\ UNCHANGED <<rows, outages, cut, cutDone, tenantDown, faulted, breaker, memo, flight, trial,
+                admin, rollbacks>>
+
+CutOff(p) ==
+  /\ p \in CutOffs \ cutDone
+  /\ cut' = cut \cup {p} /\ cutDone' = cutDone \cup {p}
+  /\ UNCHANGED <<rows, stageDown, outages, tenantDown, faulted, breaker, memo, flight, trial,
+                admin, rollbacks>>
+
+CutMends(p) ==
+  /\ p \in cut /\ CutEnds /\ cut' = cut \ {p}
+  /\ UNCHANGED <<rows, stageDown, outages, cutDone, tenantDown, faulted, breaker, memo, flight,
+                trial, admin, rollbacks>>
 
 TenantFails(t) ==
   /\ t \in TenantFaults \ faulted
   /\ tenantDown' = tenantDown \cup {t} /\ faulted' = faulted \cup {t}
-  /\ UNCHANGED <<part, processed, procOrder, due, attempts, parked, byHand, cause, held, served,
-                stageDown, outages, rearmed, admin>>
+  /\ UNCHANGED <<rows, stageDown, outages, cut, cutDone, breaker, memo, flight, trial, admin,
+                rollbacks>>
 
 TenantMends(t) ==
-  /\ t \in tenantDown /\ tenantDown' = tenantDown \ {t}
-  /\ UNCHANGED <<part, processed, procOrder, due, attempts, parked, byHand, cause, held, served,
-                stageDown, outages, faulted, rearmed, admin>>
+  /\ t \in tenantDown /\ TenantEnds /\ tenantDown' = tenantDown \ {t}
+  /\ UNCHANGED <<rows, stageDown, outages, cut, cutDone, faulted, breaker, memo, flight, trial,
+                admin, rollbacks>>
 
 (* ------------------------------------------------------------------------ *)
 (* The operator                                                              *)
 
-\* park_held: a held row parked under its cause, so that its slot goes on.
-ParkHeld(m) ==
-  /\ held[m] > 0 /\ m \notin parked /\ m \notin processed
-  /\ admin < MaxAdmin /\ admin' = admin + 1
-  /\ parked' = parked \cup {m} /\ byHand' = byHand \cup {m}
-  /\ held' = [held EXCEPT ![m] = 0]
-  /\ UNCHANGED <<part, processed, procOrder, due, attempts, cause, served, stageDown, outages,
-                tenantDown, faulted, rearmed>>
+\* A row a later row of its key overtook: processed past it.
+Overtaken(m) == \E n \in processed : KeyOf[n] = KeyOf[m] /\ Pos(n) > Pos(m)
 
-\* unpark_all: a parked row re-armed with a canary of Tries failures left;
-\* it keeps its last cause, since it keeps its attempts.
+\* unpark_all: a parked row on the failure ground re-armed with exactly
+\* Tries failures left, its cause gone; one a later row of its key overtook
+\* stays parked, unless asked for, which the model never asks.  Its slot is
+\* locked for the statement, `SKIP LOCKED`: an ask holds its slot from its
+\* start to its verdict, so no later row of the key is in flight while the
+\* overtaking is read, and none can be processed past the row re-armed.
 UnparkAll(m) ==
-  /\ m \in parked
+  /\ m \in parked \ expired /\ m \notin Permanent /\ ~Overtaken(m)
+  /\ (Mutant = "rearm_beside_an_ask" \/ ~SlotBusy(SlotOf[m]))
   /\ admin < MaxAdmin /\ admin' = admin + 1
   /\ parked' = parked \ {m} /\ byHand' = byHand \ {m}
-  /\ attempts' = [attempts EXCEPT ![m] = IF @ >= MaxAttempts - Tries THEN @ ELSE MaxAttempts - Tries]
-  /\ held' = [held EXCEPT ![m] = 0]
+  /\ attempts' = [attempts EXCEPT ![m] =
+                    IF Mutant = "canary_keeps" /\ @ > MaxAttempts - Tries
+                      THEN @ ELSE MaxAttempts - Tries]
+  /\ cause' = [cause EXCEPT ![m] = None]
   /\ due' = [due EXCEPT ![m] = TRUE]
   /\ rearmed' = rearmed \cup {m}
-  /\ UNCHANGED <<part, processed, procOrder, cause, served, stageDown, outages, tenantDown,
-                faulted>>
+  /\ UNCHANGED <<processed, procOrder, expired, waiting, kind, holds, flaked, env, breaker, memo,
+                flight, trial, rollbacks>>
 
-\* unpark: a parked row given another go afresh, its cause and attempts gone.
-Unpark(m) ==
-  /\ m \in parked
+\* park_heads: a held head given up under its cause, the rows behind it
+\* going on.  A head an ask holds is passed by.
+ParkHeads(m) ==
+  /\ m \in Heads /\ kind[m] = "unavailable" /\ m \notin InFlight
   /\ admin < MaxAdmin /\ admin' = admin + 1
-  /\ parked' = parked \ {m} /\ byHand' = byHand \ {m}
-  /\ attempts' = [attempts EXCEPT ![m] = 0]
-  /\ cause' = [cause EXCEPT ![m] = None]
-  /\ held' = [held EXCEPT ![m] = 0]
+  /\ parked' = parked \cup {m} /\ byHand' = byHand \cup {m}
+  /\ kind' = [kind EXCEPT ![m] = "none"]
+  /\ holds' = [holds EXCEPT ![m] = 0]
   /\ due' = [due EXCEPT ![m] = TRUE]
-  /\ rearmed' = rearmed \ {m}
-  /\ UNCHANGED <<part, processed, procOrder, served, stageDown, outages, tenantDown, faulted>>
+  /\ UNCHANGED <<processed, procOrder, attempts, expired, waiting, cause, flaked, rearmed, env,
+                breaker, memo, flight, trial, rollbacks>>
+
+\* park_queue, a row at a time as its batches interleave with the dispatch:
+\* a Tenant's newest queue row given up under the operator's cause, so that
+\* what is given up is always the end of each key.  A row an ask holds is
+\* passed by.
+ParkQueue(t) ==
+  LET q == {m \in Arrives : Queued(m) /\ TenantOf[m] = t /\ m \notin InFlight} IN
+  /\ q # {}
+  /\ admin < MaxAdmin /\ admin' = admin + 1
+  /\ \E m \in q :
+       /\ IF Mutant = "queue_oldest"
+            THEN \A n \in q : Pos(m) <= Pos(n)
+            ELSE \A n \in q : Pos(m) >= Pos(n)
+       /\ parked' = parked \cup {m} /\ byHand' = byHand \cup {m}
+       /\ cause' = [cause EXCEPT ![m] = "given"]
+       /\ kind' = [kind EXCEPT ![m] = "none"]
+       /\ holds' = [holds EXCEPT ![m] = 0]
+       /\ due' = [due EXCEPT ![m] = TRUE]
+  /\ UNCHANGED <<processed, procOrder, attempts, expired, waiting, flaked, rearmed, env, breaker,
+                memo, flight, trial, rollbacks>>
 
 (* ------------------------------------------------------------------------ *)
 
 Next ==
-  \/ \E d \in Slots : Dispatch(d)
-  \/ \E m \in Msgs : Elapse(m) \/ ParkHeld(m) \/ UnparkAll(m) \/ Unpark(m)
+  \/ \E w \in Workers : AskStart(w) \/ AskEnd(w) \/ Rollback(w) \/ SetAside(w) \/ HoldUnasked(w)
+  \/ \E p \in Procs : Circle(p) \/ CutOff(p) \/ CutMends(p)
+  \/ \E p \in Procs, t \in Tenants : MemoElapse(p, t)
+  \/ \E m \in Msgs : Elapse(m) \/ Expire(m) \/ UnparkAll(m) \/ ParkHeads(m)
+  \/ \E t \in Tenants : ParkQueue(t) \/ TenantFails(t) \/ TenantMends(t)
   \/ StageFails \/ StageMends
-  \/ \E t \in Tenants : TenantFails(t) \/ TenantMends(t)
 
-\* Every dispatcher keeps asking its head; every while passes; a stage or a
-\* Tenant that comes back, comes back where the instance says so.
+\* Every worker keeps asking and ends what it asks -- strongly: a slot
+\* another process's asks keep taking and letting go is taken by this one
+\* in turn, as the take serves the least recently served slot `SKIP
+\* LOCKED`; every while passes -- strongly too: a hold a trial asks again
+\* runs out between two trials, its stage-scoped interval at most a tick's
+\* cap and the trials a tick apart (ADR-0042 decision 3); the expiry runs; a
+\* stage, a cut and a Tenant's fault that end, end.
 Fairness ==
-  /\ \A d \in Slots : WF_vars(Dispatch(d))
-  /\ \A m \in Msgs : WF_vars(Elapse(m))
-  /\ IF OutageEnds THEN WF_vars(StageMends) ELSE TRUE
-  /\ IF TenantEnds THEN \A t \in Tenants : WF_vars(TenantMends(t)) ELSE TRUE
+  /\ \A w \in Workers : SF_vars(AskStart(w) \/ SetAside(w) \/ HoldUnasked(w)) /\ WF_vars(AskEnd(w))
+  /\ \A p \in Procs : WF_vars(Circle(p)) /\ WF_vars(CutMends(p))
+  /\ \A p \in Procs, t \in Tenants : WF_vars(MemoElapse(p, t))
+  /\ \A m \in Msgs : SF_vars(Elapse(m)) /\ WF_vars(Expire(m))
+  /\ WF_vars(StageMends)
+  /\ \A t \in Tenants : WF_vars(TenantMends(t))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -279,59 +456,72 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 (* Properties                                                                *)
 
 TypeOK ==
-  /\ part \in [Msgs -> Slots]
-  /\ processed \subseteq Msgs
-  /\ due \in [Msgs -> BOOLEAN]
+  /\ processed \subseteq Arrives /\ parked \subseteq Arrives /\ waiting \subseteq Arrives
+  /\ byHand \subseteq parked /\ expired \subseteq parked
   /\ attempts \in [Msgs -> Nat]
-  /\ parked \subseteq Msgs /\ byHand \subseteq parked
   /\ cause \in [Msgs -> Causes \cup {None}]
-  /\ held \in [Msgs -> 0..Budget]
-  /\ served \in [Msgs -> BOOLEAN]
-  /\ rearmed \subseteq Msgs
+  /\ kind \in [Msgs -> Kinds] /\ holds \in [Msgs -> 0..HoldCap]
+  /\ due \in [Msgs -> BOOLEAN]
+  /\ breaker \in [Procs -> {"closed", "open"}]
+  /\ memo \in [Procs -> [Tenants -> Memos]]
+  /\ flight \in [Workers -> Arrives \cup {None}] /\ trial \in [Workers -> BOOLEAN]
 
-\* A hold spends no attempt (decision 4).  An action property, so that an
-\* instance whose Defer counts is caught at its first hold.
-HoldSpendsNothing == [][\A d \in Slots : Defer(d) => attempts' = attempts]_vars
+\* An Unavailable spends no attempt, at either scope (ADR-0042 decision 3):
+\* a verdict that leaves its row held for one spends nothing.
+UnavailableNeverSpends ==
+  [][\A w \in Workers :
+       (flight[w] # None /\ flight'[w] = None /\ cause'[flight[w]] \in {"stage", "tenant"})
+         => attempts' = attempts]_vars
+
+\* No row parks for an Unavailable but by the operator's hand.
+UnavailableNeverParks == \A m \in parked : cause[m] \in {"stage", "tenant"} => m \in byHand
+
+\* A held row is in the queue.
+HoldIsQueued ==
+  \A m \in Msgs : kind[m] # "none" => m \notin processed /\ m \notin parked /\ m \notin waiting
 
 \* A cause explains a state that lasts: a row not processed that is parked,
-\* has spent attempts, holds, or was re-armed keeping its attempts and so its
-\* last cause.  Every exit that ends that state clears it.
+\* held or in its back-off, has spent attempts, or was re-armed.
 CauseIsCurrent ==
   \A m \in Msgs : cause[m] # None =>
     /\ m \notin processed
-    /\ (m \in parked \/ attempts[m] > 0 \/ held[m] > 0 \/ m \in rearmed)
+    /\ (m \in parked \/ kind[m] # "none" \/ attempts[m] > 0 \/ m \in rearmed)
 
-\* A held row is in the queue: neither parked nor processed.
-HeldIsQueued == \A m \in Msgs : held[m] > 0 => m \notin parked /\ m \notin processed
+\* Once a process's memo holds a Tenant, no ask of the Tenant starts while
+\* one is in flight or the memo runs (ADR-0042 decision 2); a trial is the
+\* breaker's, not the memo's.
+OneAskPerReach ==
+  [][\A w \in Workers :
+       (flight[w] = None /\ flight'[w] # None /\ ~trial'[w])
+         => memo[ProcOf[w]][TenantOf[flight'[w]]] \in {"none", "due"}]_vars
 
-\* A parked row got there by its attempts, a permanent verdict, or the
-\* operator's hand from a hold.
-ParkedIsAside ==
-  \A m \in parked : attempts[m] >= MaxAttempts \/ m \in Permanent \/ m \in byHand
+\* No waiter expires while its chain reaches a queued row.
+PresentDependencyNeverExpires ==
+  [][\A m \in Msgs : (m \notin expired /\ m \in expired') => ~Spared(m, Cardinality(Msgs))]_vars
 
-\* A row re-armed has at most Tries failures left before it parks again.
-CanaryReparks == \A m \in rearmed : attempts[m] >= MaxAttempts - Tries
+\* A re-armed row has exactly Tries failures left until it is told a verdict.
+CanaryExact == \A m \in rearmed : attempts[m] = MaxAttempts - Tries
 
-\* With no Tenant faulting alone and no operator, the stage's outage parks
-\* nothing: a stage's verdict holds, never spends, unless refuted -- and
-\* with one outage no row is served while another holds.
-NoStageParks == \A m \in parked : cause[m] # "stage"
+\* What a Tenant's queue gave up is the end of each key: no row of a key is
+\* processed past one given up.
+GivenUpIsTheEnd ==
+  \A a \in processed, b \in byHand :
+    (KeyOf[a] = KeyOf[b] /\ cause[b] = "given") => Pos(a) < Pos(b)
 
 Index(m) == CHOOSE i \in 1..Len(procOrder) : procOrder[i] = m
 
-\* Rows of one partition key are processed in their order of arrival: the
-\* order a host can rely on, since which keys share a slot is the hash's
-\* accident.  An instance without parks keeps it through any outage.
+\* The rows of a key are processed in their order of arrival.
 KeyOrder ==
   \A a, b \in processed :
     (KeyOf[a] = KeyOf[b] /\ Pos(a) < Pos(b)) => Index(a) < Index(b)
 
-\* Every row no retry fails for good is processed, however long the stage
-\* is down, once it comes back.
-EventuallyProcessed == \A m \in Msgs \ Permanent : <>(m \in processed)
+\* Every row whose dependency arrives ends processed or parked.
+EventuallyOutOfTheWay ==
+  \A m \in Arrives : (Dep[m] = None \/ Dep[m] \in Arrives) => <>(m \in processed \/ m \in parked)
 
-\* Every row ends processed or parked.  A stage down for good holds its
-\* rows for good, by design: parking frees nothing, and the hold pages.
-EventuallyOutOfTheWay == \A m \in Msgs : <>(m \in processed \/ m \in parked)
+\* Every row no retry fails for good and no operator gives up, whose
+\* dependency arrives, is processed once what holds it ends.
+EventuallyProcessed ==
+  \A m \in Arrives \ Permanent : (Dep[m] = None \/ Dep[m] \in Arrives) => <>(m \in processed)
 
 =============================================================================

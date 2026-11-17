@@ -41,6 +41,37 @@ must_fail() {
   echo "   $3, as expected"
 }
 
+# A configuration that must hold, and the count of distinct states TLC
+# finds in it: a count that moves says the model or its instance changed,
+# which its author re-reads before pinning the new one.
+must_hold() {
+  log="${TMPDIR:-/tmp}/tlc-$1.log"
+  if ! tlc -config "$1.cfg" "$2" > "$log" 2>&1; then
+    echo "unexpected: $1 broke:"; grep -E "^Error" "$log" | head -3; exit 1
+  fi
+  found=$(grep -oE "[0-9]+ distinct states found" "$log" | tail -1 | cut -d' ' -f1)
+  [ "$found" = "$3" ] || { echo "unexpected: $1 found $found distinct states, pinned $3"; exit 1; }
+  echo "   holds, $found distinct states"
+}
+
+# A refuted design that must break the one property its configuration
+# names, and its twin -- the same configuration with the decided design,
+# Mutant "none" -- which must hold it: so the property, not another, tells
+# the two apart.
+must_fail_with_twin() {
+  must_fail "$1" "$2" "$3"
+  work=$(mktemp -d)
+  sed 's/^  Mutant = .*/  Mutant = "none"/' "$1.cfg" > "$work/$1Twin.cfg"
+  log="${TMPDIR:-/tmp}/tlc-$1Twin.log"
+  if ! tlc -config "$work/$1Twin.cfg" "$2" > "$log" 2>&1; then
+    echo "unexpected: $1's twin broke:"; grep -E "^Error" "$log" | head -3; exit 1
+  fi
+  found=$(grep -oE "[0-9]+ distinct states found" "$log" | tail -1 | cut -d' ' -f1)
+  [ "$found" = "$4" ] || { echo "unexpected: $1's twin found $found distinct states, pinned $4"; exit 1; }
+  echo "   its twin holds, $found distinct states"
+  rm -rf "$work"
+}
+
 # The checks fall into groups, each a function below, in the order a full
 # run takes them: `check.sh` runs every group, `check.sh <group> ...` those
 # alone, and `check.sh --groups` names them, one a line. A pipeline runs
@@ -179,6 +210,10 @@ group_inbox() {
   tlc -config InboxRotation.cfg MCInboxRotation.tla
   echo "== inbox, ADR-0041: the same over three Tenants in one slot, every property holds"
   tlc -config InboxRotationThree.cfg MCInboxThree.tla
+  echo "== inbox, ADR-0042 decision 5: the same with guests that skip a Tenant, walking from a cursor of their own: a head no guest skips is overtaken at most twice by each other Tenant"
+  must_hold InboxRotationGuest MCInboxThree.tla 57367
+  echo "== inbox, ADR-0042: guests without a cursor of their own, TLC must find a head overtaken more than twice"
+  must_fail InboxRotationGuestFromLowest MCInboxThree.tla "Invariant BoundedOvertaking is violated"
   echo "== inbox, ADR-0041: rotating, a poison message parked after its attempts, every property holds"
   tlc -config InboxRotationPoison.cfg MCInboxRotation.tla
   echo "== inbox, ADR-0041 beside ADR-0010: rotating, a permanent verdict parks its message at once, takes the cursor nowhere, every property holds"
@@ -270,32 +305,34 @@ group_inbox_pg_rotation_deps() {
   tlc -config InboxPgRotationDeps.cfg MCInboxPg.tla
 }
 
-# InboxOutage.tla holds a slot whole for its stage's outage, as the inbox
-# did before its slots served their Tenants in turn: since then a hold holds
-# its (slot, Tenant), the extent ADR-0040's revision owes (ADR-0040 § Owed).
+# InboxOutage.tla is ADR-0042's: (slot, Tenant) heads, processes with
+# workers, a breaker and a memo each, an ask split into its start and its
+# verdict with a rollback between, a process cut off and keys cached; the
+# expiry's spare and the operator's verbs.
 group_inbox_outage() {
-  echo "== inbox outage (ADR-0040), a slot held whole as before ADR-0041: the stage down once, a hold spends nothing, no row parks for it, keys keep their order, every row processed once it is back"
-  tlc -config InboxOutage.cfg MCInboxOutage.tla
-
-  echo "== inbox outage: with a hold that spends as any failure, TLC must find a row parked for the stage"
-  must_fail InboxOutageCounts MCInboxOutage.tla "Invariant NoStageParks is violated"
-
-  echo "== inbox outage: the stage down for good holds its rows for good, by design"
-  must_fail InboxOutageForever MCInboxOutage.tla "Temporal properties were violated"
-
-  echo "== inbox outage, with a Tenant failing alone and the operator: causes stay current, parks have their reason, a re-armed row has its canary"
-  tlc -config InboxOutageOperators.cfg MCInboxOutage.tla
-
-  echo "== inbox outage: a mark, or an unpark, that keeps the cause must break CauseIsCurrent; a bulk unpark that resets the attempts, CanaryReparks"
-  must_fail InboxOutageCommitKeepingCause MCInboxOutage.tla "Invariant CauseIsCurrent is violated"
-  must_fail InboxOutageUnparkKeepingCause MCInboxOutage.tla "Invariant CauseIsCurrent is violated"
-  must_fail InboxOutageUnparkAllResetting MCInboxOutage.tla "Invariant CanaryReparks is violated"
-
-  echo "== inbox outage, a Tenant failing alone for a while, read either way: every row ends processed or parked"
-  tlc -config InboxOutageTenant.cfg MCInboxOutage.tla
-
-  echo "== inbox outage: a Tenant failing for good, read as the stage's on a channel serving nothing else, holds for good -- the sentinel's and park_held's case"
-  must_fail InboxOutageQuietMisread MCInboxOutage.tla "Temporal properties were violated"
+  echo "== inbox outage (ADR-0042): the stage down once and back, a process cut off once, a Tenant's keys cached, a row failing once, a rollback: an Unavailable spends nothing and never parks, holds stay queued, causes current, keys in order, every row processed"
+  must_hold InboxOutage MCInboxOutage.tla 17368
+  echo "== inbox outage: a Tenant failing alone, its rows in two slots, two workers of one process: one ask of it at a time once remembered, every row processed"
+  must_hold InboxOutageTenant MCInboxOutage.tla 1936
+  echo "== inbox outage: a process cut off for good: it pauses, and the other processes every row"
+  must_hold InboxOutageCutOff MCInboxOutage.tla 544
+  echo "== inbox outage: a waiter on a queued row is spared and processed, one on a row that never arrives expires"
+  must_hold InboxOutageDeps MCInboxOutage.tla 36
+  echo "== inbox outage: the operator re-arming with a canary, giving heads and a queue up: the canary exact, what is given up the end of each key"
+  must_hold InboxOutageOperators MCInboxOutage.tla 23986
+  for case in \
+    "InboxOutageUnavailableSpends:Action property UnavailableNeverSpends is violated:2430" \
+    "InboxOutageNoFlightMark:Action property OneAskPerReach is violated:1936" \
+    "InboxOutageExpirePresent:Action property PresentDependencyNeverExpires is violated:36" \
+    "InboxOutageMarkKeepsCause:Invariant CauseIsCurrent is violated:4040" \
+    "InboxOutageMarkKeepsHold:Invariant HoldIsQueued is violated:2430" \
+    "InboxOutageCanaryKeeps:Invariant CanaryExact is violated:23986" \
+    "InboxOutageQueueOldest:Invariant GivenUpIsTheEnd is violated:228" \
+    "InboxOutageRearmBesideAnAsk:Invariant KeyOrder is violated:23986"; do
+    name=${case%%:*}; rest=${case#*:}; property=${rest%:*}; twin=${rest##*:}
+    echo "== inbox outage: $name, a refuted design, must fail, and its twin hold"
+    must_fail_with_twin "$name" MCInboxOutage.tla "$property" "$twin"
+  done
 }
 
 group_bridge() {

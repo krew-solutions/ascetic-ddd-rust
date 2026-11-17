@@ -647,7 +647,7 @@ Cursor == [s \in Slots |-> IF \E d \in Dispatchers : slot[d] = s /\ Walked(d)
                            THEN pendLast[CHOOSE d \in Dispatchers : slot[d] = s /\ Walked(d)]
                            ELSE lastTenant[s]]
 
-Abstract == INSTANCE Inbox WITH Unreadable <- {}, unread <- {}, Permanent <- {}, cursor <- Cursor,
+Abstract == INSTANCE Inbox WITH Unreadable <- {}, unread <- {}, Permanent <- {}, cursor <- Cursor, guest <- [s \in Slots |-> 0],
   Arrives <- Arrives, WaitsOnDependencies <- TRUE, WaitExpires <- Expires, Poison <- {},
   MaxAttempts <- 0, BlockOnBackoff <- TRUE, MaxAdmin <- 0, AtomicWait <- TRUE,
   received <- Received, recvPos <- RecvPos, nextRecv <- NextRecv, processed <- Processed,

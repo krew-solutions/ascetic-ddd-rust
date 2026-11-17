@@ -928,6 +928,9 @@ async fn a_bulk_unpark_walks_the_parked_index_and_reads_no_other_row() {
                 &4_i32,
                 &false,
                 &"failure",
+                // the window's end and the slots the batch holds: all of them
+                &i64::MAX,
+                &vec![0_i16],
             ],
         )
         .await

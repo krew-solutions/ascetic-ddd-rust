@@ -983,8 +983,9 @@ async fn a_row_s_holds_are_bounded_forgotten_by_a_spend_and_timed_from_the_verdi
 /// I1: a trial and a resolve under REPEATABLE READ are refused for their
 /// transaction, as a dispatch is (ADR-0042 decision 10). The level is read
 /// for each transaction: a session whose level changed after the process
-/// began is refused all the same. Red when a trial or a resolve skips the
-/// check, or when the level is read once.
+/// began is refused all the same; and a bulk unpark, whose batch holds its
+/// slots before it reads (ADR-0042 decision 10). Red when a trial, a bulk
+/// unpark or a resolve skips the check, or when the level is read once.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_trial_and_a_resolve_under_repeatable_read_are_refused() {
@@ -1038,6 +1039,19 @@ async fn a_trial_and_a_resolve_under_repeatable_read_are_refused() {
     )
     .await;
     let at = f.received_position("p").await;
+    // a bulk unpark holds its batch's slots, then reads: refused alike
+    let refused = inbox
+        .unpark_all(
+            "ops",
+            &Unparking {
+                ground: ParkedFor::Failure(ParkedUnder::Cause("kms.gone")),
+                ..refused_within_an_hour()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("isolation"), "{refused}");
+    assert!(f.row("p").await.parked, "the bulk unpark refused");
     let refused = f
         .sessions
         .session(async |session| {
@@ -2698,4 +2712,68 @@ async fn a_report_that_cannot_be_written_fails_no_dispatch() {
             .expect("a dispatch the report cannot fail");
         f.due().await;
     }
+}
+
+/// V1, found by the model (InboxOutageRearmBesideAnAsk): a bulk unpark
+/// passes a row by while a dispatcher holds its slot — an ask of a later row
+/// of its stream may be in flight, not yet processed, and a re-arm would be
+/// overtaken by it; asked again once the slot is free, it sees the later row
+/// processed and leaves the row parked as overtaken. Red when the batch
+/// re-arms without holding the row's slot: the row then runs after the one
+/// that overtook it.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_re_arm_beside_an_ask_of_its_slot_passes_the_row_by() {
+    let f = fixture("rearm_beside", Retries::up_to(1)).await;
+    f.publish(&[message("s", 1), message("s", 2)]).await;
+    assert_eq!(
+        f.dispatch(|| Err(Transient::because(DB_TIMEOUT, "a moment").into()))
+            .await,
+        spent(1, true),
+        "s@1 parks"
+    );
+    let (entered, release) = (tokio::sync::Notify::new(), tokio::sync::Notify::new());
+    let holding = f.inbox.dispatch(|_: &PgSession, _: &InboxMessage| async {
+        entered.notify_one();
+        release.notified().await;
+        Ok::<(), Failure>(())
+    });
+    let rearm = async {
+        entered.notified().await;
+        let unparked = tokio::time::timeout(
+            Duration::from_secs(5),
+            f.inbox.unpark_all(
+                "ops",
+                &Unparking {
+                    ground: ParkedFor::Failure(ParkedUnder::Cause("db.timeout")),
+                    tries: 1,
+                    ..refused_within_an_hour()
+                },
+            ),
+        )
+        .await
+        .expect("the re-arm waits for nothing")
+        .unwrap();
+        release.notify_one();
+        unparked
+    };
+    let (outcome, unparked) = tokio::join!(holding, rearm);
+    assert_eq!(outcome.unwrap(), Outcome::Processed, "s@2, by its holder");
+    assert_eq!(
+        (unparked.unparked, unparked.passed),
+        (0, 1),
+        "passed by while its slot is held"
+    );
+    let again = f
+        .unpark_all(&Unparking {
+            ground: ParkedFor::Failure(ParkedUnder::Cause("db.timeout")),
+            tries: 1,
+            ..refused_within_an_hour()
+        })
+        .await;
+    assert_eq!(
+        (again.unparked, again.overtaken),
+        (0, 1),
+        "overtaken, left parked"
+    );
 }

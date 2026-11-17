@@ -25,4 +25,9 @@ MCThreeTenants == (m1 :> 1) @@ (m2 :> 1) @@ (m3 :> 2) @@ (m4 :> 3)
 \* other, Tenant NT included.
 MCWalkFromLowest(c, t) == IF t = c THEN NT + 1 ELSE t
 
+\* Guests for InboxRotationGuest.cfg: Tenant 3's head stands for a paused
+\* channel's, which a guest never takes; the others are due at every
+\* process, and each other Tenant overtakes them at most twice.
+MCSkipThree == {3}
+
 =============================================================================

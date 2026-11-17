@@ -7,9 +7,9 @@
 
 use std::time::Duration;
 
-use ascetic_ddd_session::{PgAccess, SessionPool};
+use ascetic_ddd_session::{PgAccess, Session, SessionPool};
 
-use super::store::{CHANNEL_OF_ROW, GROUND_OF_ROW, LEAVE_QUEUE};
+use super::store::{CHANNEL_OF_ROW, GROUND_OF_ROW, LEAVE_QUEUE, read_committed};
 use super::{Admission, PgInbox};
 use crate::error::Error;
 use crate::intake::{self, Reason};
@@ -407,6 +407,10 @@ pub struct UnparkedAll {
     pub overtaken: u64,
     /// Whether rows it names remain past `limit`.
     pub more: bool,
+    /// Rows it named and passed by, their slot held by a dispatcher: an ask
+    /// of a later row of the stream may be in flight, and a re-arm then would
+    /// be overtaken by it. Asked again, it takes those whose slot is free.
+    pub passed: u64,
     /// The end of the window, the database's clock at the call.
     pub as_of: String,
 }
@@ -448,11 +452,28 @@ fn unpark_remains(table: &str) -> String {
     )
 }
 
+/// The window of a batch of a bulk unpark: the slots of the oldest rows
+/// [`unpark_selection`] names, at most `$7` of them, their last position and
+/// how many.
+fn unpark_window(table: &str) -> String {
+    format!(
+        "SELECT coalesce(array_agg(DISTINCT w.slot), '{{}}'), max(w.received_position), count(*) \
+         FROM (SELECT r.slot, r.received_position FROM {table} r WHERE {selection} \
+               ORDER BY r.received_position LIMIT $7) w",
+        selection = unpark_selection("$8"),
+    )
+}
+
 /// A batch of a bulk unpark: the rows [`unpark_selection`] names, oldest
-/// first, each told whether a processed row of its stream at a higher
-/// position overtook it; re-armed in the queue — its park, its wait, its
-/// unreadable mark and its cause cleared, no hold on it — and the slots it
-/// moved rows into woken ([`super::verbs::wake`]).
+/// first, up to the window's last position (`$11`) and in the slots the
+/// batch's transaction holds (`$12`), each told whether a processed row of
+/// its stream at a higher position overtook it; re-armed in the queue — its
+/// park, its wait, its unreadable mark and its cause cleared, no hold on it
+/// — and the slots it moved rows into woken ([`super::verbs::wake`]). The
+/// slots are held from the statement before, so that no ask of a later row
+/// of the stream is in flight while the overtaking is read, a read of this
+/// statement's own snapshot: one committed before the slot was held is
+/// seen, and none commits meanwhile.
 pub(super) fn unpark_batch(table: &str) -> String {
     format!(
         "WITH chosen AS ( \
@@ -463,7 +484,7 @@ pub(super) fn unpark_batch(table: &str) -> String {
                              AND later.stream_position > r.stream_position \
                              AND later.processed_position IS NOT NULL) AS overtaken \
             FROM {table} r \
-            WHERE {selection} \
+            WHERE {selection} AND r.received_position <= $11 AND r.slot = ANY ($12::smallint[]) \
             ORDER BY r.received_position LIMIT $7 \
             FOR UPDATE OF r SKIP LOCKED \
          ), unparked AS ( \
@@ -708,6 +729,7 @@ where
             })
             .await?;
         let sql = unpark_batch(self.table.as_str());
+        let window = unpark_window(self.table.as_str());
         let (ground, cause) = unparking.ground.selector();
         let left = i32::try_from(self.retries.max_attempts.saturating_sub(unparking.tries))
             .unwrap_or(i32::MAX);
@@ -722,35 +744,77 @@ where
             let room = u64::from(unparking.limit).saturating_sub(done.unparked);
             let batch =
                 i64::try_from(room.min(READMIT_BATCH.unsigned_abs())).unwrap_or(READMIT_BATCH);
-            let (chosen, unparked, overtaken, last) = self
+            let (window, chosen, unparked, overtaken, last) = self
                 .pool
                 .session(async |session: P::Session| {
-                    let row = session
-                        .connection()
-                        .query_one(
-                            &sql,
-                            &[
-                                &unparking.channel,
-                                &after,
-                                &as_of,
-                                &unparking.within.as_secs_f64(),
-                                &cause,
-                                &unparking.tenant,
-                                &batch,
-                                &left,
-                                &unparking.overtaken,
-                                &ground,
-                            ],
-                        )
-                        .await?;
-                    Ok::<_, Error>((
-                        row.get::<_, i64>(0),
-                        row.get::<_, i64>(1),
-                        row.get::<_, i64>(2),
-                        row.get::<_, Option<i64>>(3),
-                    ))
+                    session
+                        .atomic(async |tx: P::Session| {
+                            read_committed(&self.isolation(&tx).await?)?;
+                            let connection = tx.connection();
+                            let row = connection
+                                .query_one(
+                                    &window,
+                                    &[
+                                        &unparking.channel,
+                                        &after,
+                                        &as_of,
+                                        &unparking.within.as_secs_f64(),
+                                        &cause,
+                                        &unparking.tenant,
+                                        &batch,
+                                        &ground,
+                                    ],
+                                )
+                                .await?;
+                            let (slots, last, in_window): (Vec<i16>, Option<i64>, i64) =
+                                (row.get(0), row.get(1), row.get(2));
+                            let Some(last) = last else {
+                                return Ok::<_, Error>((0, 0, 0, 0, None));
+                            };
+                            let held: Vec<i16> = connection
+                                .query(
+                                    &format!(
+                                        "SELECT slot FROM {}_slots WHERE slot = ANY ($1::smallint[]) \
+                                         FOR UPDATE SKIP LOCKED",
+                                        self.table
+                                    ),
+                                    &[&slots],
+                                )
+                                .await?
+                                .iter()
+                                .map(|row| row.get(0))
+                                .collect();
+                            let row = connection
+                                .query_one(
+                                    &sql,
+                                    &[
+                                        &unparking.channel,
+                                        &after,
+                                        &as_of,
+                                        &unparking.within.as_secs_f64(),
+                                        &cause,
+                                        &unparking.tenant,
+                                        &batch,
+                                        &left,
+                                        &unparking.overtaken,
+                                        &ground,
+                                        &last,
+                                        &held,
+                                    ],
+                                )
+                                .await?;
+                            Ok((
+                                in_window,
+                                row.get::<_, i64>(0),
+                                row.get::<_, i64>(1),
+                                row.get::<_, i64>(2),
+                                Some(last),
+                            ))
+                        })
+                        .await
                 })
                 .await?;
+            done.passed += u64::try_from(window - chosen).unwrap_or_default();
             let unparked = u64::try_from(unparked).unwrap_or_default();
             done.unparked += unparked;
             done.overtaken += u64::try_from(overtaken).unwrap_or_default();
@@ -764,7 +828,7 @@ where
                 usize::try_from(unparked).unwrap_or(usize::MAX),
             );
             match last {
-                Some(last) if chosen >= batch => after = last,
+                Some(last) if window >= batch => after = last,
                 _ => break,
             }
         }

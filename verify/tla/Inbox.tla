@@ -103,6 +103,17 @@ ASSUME Permanent \subseteq Msgs
 TenantOf == [m \in Msgs |-> 1]
 Rotates == FALSE
 
+\* With Guests, a slot is walked by guests too -- the walks of processes
+\* with a paused channel (ADR-0042 decision 5) -- from a cursor of their
+\* own, which they alone move: a guest takes the head of the first Tenant
+\* after it whose head is due, among those it does not skip (GuestSkips,
+\* the Tenants a paused channel's heads stand for), and leaves the slot's
+\* cursor where it is.  GuestFromLowest is a mutation: a guest without a
+\* cursor of its own, walking from the lowest Tenant each time.
+Guests == FALSE
+GuestSkips == {}
+GuestFromLowest == FALSE
+
 Max(S) == CHOOSE x \in S : \A y \in S : y <= x
 \* The highest Tenant's number: the cursor cycles over 1..NT.
 NT == Max({TenantOf[m] : m \in Msgs})
@@ -125,10 +136,11 @@ VARIABLES
   waiting,    \* [Msgs -> Msgs \cup {None}], the dependency a row set aside waits for
   expired,    \* SUBSET Msgs, parked because their wait ran out
   unread,     \* SUBSET Msgs, rows the dispatcher cannot read yet: Unreadable until superseded
-  cursor      \* [Slots -> 0..NT], the Tenant a slot served last; 0: none yet (ADR-0041)
+  cursor,     \* [Slots -> 0..NT], the Tenant a slot served last; 0: none yet (ADR-0041)
+  guest       \* [Slots -> 0..NT], the Tenant a slot's guests served last (ADR-0042 decision 5)
 
 vars == <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
-          attempts, due, parked, resolved, admin, waiting, expired, unread, cursor>>
+          attempts, due, parked, resolved, admin, waiting, expired, unread, cursor, guest>>
 
 Locked == {holding[s] : s \in Slots} \ {None}
 
@@ -151,6 +163,7 @@ Init ==
   /\ expired = {}
   /\ unread = Unreadable
   /\ cursor = [s \in Slots |-> 0]
+  /\ guest = [s \in Slots |-> 0]
 
 (* ------------------------------------------------------------------------ *)
 (* Receiving                                                                  *)
@@ -167,7 +180,7 @@ ReceiveAs(m, p) ==
   /\ recvPos' = [recvPos EXCEPT ![m] = p]
   /\ nextRecv' = IF p >= nextRecv THEN p + 1 ELSE nextRecv
   /\ UNCHANGED <<part, processed, effects, holding, procOrder, crashes, attempts, due, parked, resolved, admin,
-                waiting, expired, unread, cursor>>
+                waiting, expired, unread, cursor, guest>>
 
 Receive(m) == ReceiveAs(m, nextRecv)
 
@@ -235,7 +248,7 @@ FetchFrom(d, rows) ==
      /\ holding' = [holding EXCEPT ![d] = m]
      /\ cursor' = Turned(d, m)
   /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, procOrder, crashes,
-                attempts, due, parked, resolved, admin, waiting, expired, unread>>
+                attempts, due, parked, resolved, admin, waiting, expired, unread, guest>>
 Fetch(d) == FetchFrom(d, received)
 
 \* The head of the queue depends on a message not yet processed: it is set
@@ -252,7 +265,7 @@ WaitIn(d, rows, m, dep) ==
   /\ holding' = IF AtomicWait THEN holding ELSE [holding EXCEPT ![d] = m]
   /\ cursor' = Turned(d, m)
   /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, procOrder, crashes,
-                attempts, due, parked, resolved, admin, expired, unread>>
+                attempts, due, parked, resolved, admin, expired, unread, guest>>
 Wait(d) == \E m \in Msgs, dep \in Msgs : WaitIn(d, received, m, dep)
 
 \* Rotating, a walk that examined some Tenants after the cursor and found no
@@ -267,8 +280,25 @@ PassTo(d, t) ==
   /\ \A u \in DueTenants(d, received) : Dist(cursor[d], t) < Dist(cursor[d], u)
   /\ cursor' = [cursor EXCEPT ![d] = t]
   /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
-                attempts, due, parked, resolved, admin, waiting, expired, unread>>
+                attempts, due, parked, resolved, admin, waiting, expired, unread, guest>>
 Pass(d) == \E t \in 1..NT : PassTo(d, t)
+
+\* A guest's walk: the head of the first Tenant after the guests' cursor
+\* whose head is due and not skipped, taken when it is ready; the slot's
+\* cursor left (ADR-0042 decision 5).
+GuestStart(d) == IF GuestFromLowest THEN 0 ELSE guest[d]
+GuestDue(d) == DueTenants(d, received) \ GuestSkips
+GuestFetch(d) ==
+  /\ Guests /\ Rotates
+  /\ holding[d] = None
+  /\ GuestDue(d) # {}
+  /\ LET t == CHOOSE t \in GuestDue(d) : \A u \in GuestDue(d) : Dist(GuestStart(d), t) <= Dist(GuestStart(d), u)
+         m == HeadOf(d, received, t)
+     IN /\ Ready(m)
+        /\ holding' = [holding EXCEPT ![d] = m]
+        /\ guest' = IF GuestFromLowest THEN guest ELSE [guest EXCEPT ![d] = t]
+  /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, procOrder, crashes,
+                attempts, due, parked, resolved, admin, waiting, expired, unread, cursor>>
 
 \* The wait commits, whatever was marked in between (AtomicWait = FALSE).
 Settle(d) ==
@@ -277,7 +307,7 @@ Settle(d) ==
   /\ waiting[holding[d]] # None
   /\ holding' = [holding EXCEPT ![d] = None]
   /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, procOrder, crashes,
-                attempts, due, parked, resolved, admin, waiting, expired, unread, cursor>>
+                attempts, due, parked, resolved, admin, waiting, expired, unread, cursor, guest>>
 
 \* What waited for m comes back into the queue: waiting_for IS NULL again.
 \* A wait not committed yet -- its row still held -- is not seen.
@@ -303,7 +333,7 @@ Commit(d) ==
   /\ parked' = parked \ WokenFromExpiry(holding[d])
   /\ expired' = expired \ WokenFromExpiry(holding[d])
   /\ holding' = [holding EXCEPT ![d] = None]
-  /\ UNCHANGED <<part, received, recvPos, nextRecv, crashes, attempts, due, resolved, admin, unread, cursor>>
+  /\ UNCHANGED <<part, received, recvPos, nextRecv, crashes, attempts, due, resolved, admin, unread, cursor, guest>>
 
 \* The subscriber returned an error: its writes roll back to the savepoint,
 \* the attempt is recorded in the same transaction, and the row is not due
@@ -325,7 +355,7 @@ Fail(d) ==
      /\ parked' = IF MaxAttempts > 0 /\ attempts[m] + 1 >= MaxAttempts THEN parked \cup {m} ELSE parked
   /\ holding' = [holding EXCEPT ![d] = None]
   /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, procOrder, resolved, admin,
-                waiting, expired, unread, cursor>>
+                waiting, expired, unread, cursor, guest>>
 
 \* The subscriber's verdict is that no retry will succeed: its writes roll
 \* back, the attempt is recorded, and the row is parked at once, whatever
@@ -342,7 +372,7 @@ FailPermanent(d) ==
      /\ parked' = parked \cup {m}
   /\ holding' = [holding EXCEPT ![d] = None]
   /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, procOrder, crashes, resolved, admin,
-                waiting, expired, unread, cursor>>
+                waiting, expired, unread, cursor, guest>>
 
 \* A row the dispatcher cannot read, or whose wait, failure or mark it
 \* cannot write, for the row's own values, is parked at once in the
@@ -356,14 +386,14 @@ ParkAtOnce(d) ==
   /\ parked' = parked \cup {holding[d]}
   /\ holding' = [holding EXCEPT ![d] = None]
   /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, procOrder, crashes,
-                attempts, due, resolved, admin, waiting, expired, unread, cursor>>
+                attempts, due, resolved, admin, waiting, expired, unread, cursor, guest>>
 
 \* The backoff of a failed row has passed.
 Elapse(m) ==
   /\ ~due[m]
   /\ due' = [due EXCEPT ![m] = TRUE]
   /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
-                attempts, parked, resolved, admin, waiting, expired, unread, cursor>>
+                attempts, parked, resolved, admin, waiting, expired, unread, cursor, guest>>
 
 \* The wait of a row set aside has run out: it is parked, with the
 \* dependency named, and the partition owes it nothing more.  It keeps the
@@ -376,7 +406,7 @@ Expire(m) ==
   /\ parked' = parked \cup {m}
   /\ expired' = expired \cup {m}
   /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
-                attempts, due, resolved, admin, waiting, unread, cursor>>
+                attempts, due, resolved, admin, waiting, unread, cursor, guest>>
 
 \* The expiry as it was before ADR-0036 R8, forgetting the identity waited
 \* for: InboxLateDepForgets.cfg puts it in Expire's place, and TLC finds the
@@ -389,7 +419,7 @@ ExpireForgetting(m) ==
   /\ parked' = parked \cup {m}
   /\ expired' = expired \cup {m}
   /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
-                attempts, due, resolved, admin, unread, cursor>>
+                attempts, due, resolved, admin, unread, cursor, guest>>
 
 \* The dispatcher dies: the transaction rolls back, writes and mark alike,
 \* nothing is recorded, and the row is free again.
@@ -400,7 +430,7 @@ Crash(d) ==
   /\ crashes' = crashes + 1
   /\ holding' = [holding EXCEPT ![d] = None]
   /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, procOrder,
-                attempts, due, parked, resolved, admin, waiting, expired, unread, cursor>>
+                attempts, due, parked, resolved, admin, waiting, expired, unread, cursor, guest>>
 
 (* ------------------------------------------------------------------------ *)
 (* Operators                                                                  *)
@@ -417,7 +447,7 @@ Unpark(m) ==
   /\ attempts' = [attempts EXCEPT ![m] = 0]
   /\ due' = [due EXCEPT ![m] = TRUE]
   /\ waiting' = [waiting EXCEPT ![m] = None]
-  /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes, resolved, unread, cursor>>
+  /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes, resolved, unread, cursor, guest>>
 
 \* A parked row is marked processed by hand, without the subscriber's
 \* effects; what waited for it comes back into the queue.
@@ -431,7 +461,7 @@ Resolve(m) ==
   /\ resolved' = resolved \cup {m}
   /\ procOrder' = Append(procOrder, m)
   /\ waiting' = [Woken(m) EXCEPT ![m] = None]
-  /\ UNCHANGED <<part, received, recvPos, nextRecv, effects, holding, crashes, attempts, due, unread, cursor>>
+  /\ UNCHANGED <<part, received, recvPos, nextRecv, effects, holding, crashes, attempts, due, unread, cursor, guest>>
 
 \* A row parked at once is superseded by an arrival at its identity: the
 \* producer's repaired message replaces its values, and it is back in the
@@ -449,14 +479,14 @@ Supersede(m) ==
   /\ attempts' = [attempts EXCEPT ![m] = 0]
   /\ due' = [due EXCEPT ![m] = TRUE]
   /\ UNCHANGED <<part, received, recvPos, nextRecv, processed, effects, holding, procOrder, crashes,
-                resolved, waiting, expired, cursor>>
+                resolved, waiting, expired, cursor, guest>>
 
 (* ------------------------------------------------------------------------ *)
 
 Next ==
   \/ \E m \in Msgs : Receive(m) \/ Elapse(m) \/ Expire(m) \/ Unpark(m) \/ Resolve(m) \/ Supersede(m)
   \/ \E d \in Slots : Fetch(d) \/ Wait(d) \/ Settle(d) \/ Commit(d) \/ Fail(d) \/ Crash(d) \/ ParkAtOnce(d)
-                    \/ FailPermanent(d) \/ Pass(d)
+                    \/ FailPermanent(d) \/ Pass(d) \/ GuestFetch(d)
 
 \* Every message that arrives at all arrives eventually; every backoff
 \* passes, and every wait runs out where waits do; every dispatcher keeps
@@ -489,6 +519,7 @@ TypeOK ==
   /\ expired \subseteq parked
   /\ unread \subseteq Unreadable
   /\ cursor \in [Slots -> 0..NT]
+  /\ guest \in [Slots -> 0..NT]
 
 \* The subscriber's writes for a message are committed at most once, however
 \* many dispatchers compete and however often the message arrives.

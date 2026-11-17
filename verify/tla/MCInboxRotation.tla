@@ -47,6 +47,12 @@ MCSpec == MCInit /\ [][Next /\ Overtake]_<<vars, overtaken>> /\ Fairness
 \* are overtaken without end -- a FIFO behind a poison head never parked --
 \* has an infinite state space here, and checks its liveness with Spec in
 \* MCInbox.tla instead.
-BoundedOvertaking == \A m \in Msgs : \A u \in 1..NT : overtaken[m][u] <= 1
+\* With guests (ADR-0042 decision 5), a head due at every process -- of a
+\* Tenant no guest skips -- is overtaken at most twice by each other Tenant:
+\* once by the slot's walk and once by the guests', each a turn of its own
+\* cursor.
+OvertakeBound == IF Guests THEN 2 ELSE 1
+BoundedOvertaking ==
+  \A m \in Msgs : TenantOf[m] \notin GuestSkips => \A u \in 1..NT : overtaken[m][u] <= OvertakeBound
 
 =============================================================================

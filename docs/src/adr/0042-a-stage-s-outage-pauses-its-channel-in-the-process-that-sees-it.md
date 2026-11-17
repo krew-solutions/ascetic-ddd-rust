@@ -7,7 +7,7 @@ Proposed (2026-11-16). Built (2026-11-17): slice 1, the breaker's and the memo's
 D1); slice 3, the breaker in the dispatch — the rows, the exits and their CHECKs, the walk's paused channels and
 the guest, the trial, the isolation per transaction (R1, X1, G1, P1, C5, C8, C10, I1); slice 4, the expiry off
 the dispatch path (E1); slice 5, the reads, the stalls' report and the operator's verbs (V1, § 6, C14), and the
-names. § Slices orders the rest.
+names; slice 6, the model. § Slices orders the rest.
 
 It supersedes ADR-0040's decisions 4, 5, 7, 9 and its `park_held` (decision 8), and ADR-0041's decision 3 (the
 environment's verdict, its slice 2). It keeps ADR-0040's verdicts and causes (decisions 1–3, 6) and
@@ -399,15 +399,18 @@ histories with a manual clock; the shell's with a `Clock` and a paused runtime; 
 | T1 | `outage.rs` recorded by `make traces`; a recording not covered fails unless listed with its reason, the reason the converter's | as stated | a recording test not listed; a stale entry |
 | B1 | buffers a message and walk steps under `test-pg`; statements a happy dispatch at an absolute count; the take, walk and expiry planned once a connection | absolute figures | a heap fetch; the take's isolation read as its own statement |
 
-**The model.** `InboxOutage.tla` is rewritten over (slot, Tenant) heads with processes of two loops, an ask split
+**The model.** `InboxOutage.tla` is rewritten over (slot, Tenant) heads with processes of workers, an ask split
 into its start and its verdict with a rollback between, the breaker per process, the memo, a process cut off and
-cached keys. Properties: `UnavailableNeverSpends`, `UnavailableNeverParks`, `HoldIsQueued`, `CauseIsCurrent`,
-`TenantOrder`, `OneAskPerReach`, `PresentDependencyNeverExpires`, `CanaryExact`; and the liveness of the others
-going on, of a held Tenant eventually asked, and of every row processed or parked. The bound on asks is not the
-model's: TLC has no rates, and the core's tests are its executor. `Inbox.tla` gains the guest's cursor, and
-`BoundedOvertaking` becomes at most two overtakings by each other Tenant for a head due at every process. Each
-configuration that must fail lists one property and has a twin generated from it; `check.sh` pins each
-configuration's count of distinct states.
+cached keys, the expiry's spare and the operator's verbs. Properties: `UnavailableNeverSpends`,
+`UnavailableNeverParks`, `HoldIsQueued`, `CauseIsCurrent`, `KeyOrder` (the order of a stream; the rows of a
+(slot, Tenant) are its streams'), `OneAskPerReach`, `PresentDependencyNeverExpires`, `CanaryExact`,
+`GivenUpIsTheEnd`; and the liveness of the others going on (a process cut off for good), of a held Tenant asked
+again (a Tenant's fault that ends), and of every row processed or parked. The bound on asks is not the model's:
+TLC has no rates, and the core's tests are its executor. `Inbox.tla` gains the guests' cursor, and
+`BoundedOvertaking` becomes at most two overtakings by each other Tenant for a head no guest skips. Each
+configuration that must fail lists one property and has a twin, its `Mutant` set to `"none"`, which `check.sh`
+generates and runs; `check.sh` pins each passing configuration's and each twin's count of distinct states
+(`verify/tla/README.md` § Inbox outage).
 
 **Measurements owed.** M1 the walk with nothing paused, server side, committed per call; M3 the guest at a backlog
 of 20 rows on an unpaused channel; M7 the verbs at the host's scale: `park_queue` re-reads the Tenant's queue rows of other channels in its slots each
@@ -588,3 +591,29 @@ payloads), its generated Vault policies.
     - Kept as they are, with their reasons: `unpark_all(AtOnce)` clears the unreadable mark, so a repaired
       arrival before the row is read again is set aside rather than superseding it — as the single `unpark` has
       always done, and readmitted; `held` and the verbs' cost at the host's scale is M7.
+- 2026-11-17: Slice 6 built: the model. `InboxOutage.tla` rewritten for this decision (the ADR-0040 model and its
+  nine configurations withdrawn), five configurations that hold and eight refuted designs, each with its twin;
+  `Inbox.tla`'s guests and their bound; `check.sh`'s pinned counts and twins. What building it found:
+  - **A bulk unpark could reorder a stream.** It read whether a later row of the stream had overtaken a row from
+    its own snapshot, without holding the slot: an ask of that later row in flight was not yet processed, the row
+    was re-armed, and the later row then committed past it (TLC's counterexample on the decided design, before
+    the fix). A batch now reads its window, holds the window's slots `SKIP LOCKED`, and re-arms in a statement of
+    its own snapshot, after the hold, only the rows in the slots it holds: an ask holds its slot from its start
+    to its verdict, so none is in flight and none commits meanwhile. The rows in a slot a dispatcher holds are
+    passed by (`UnparkedAll::passed`). The test dispatches the later row and re-arms beside it; the model's
+    `InboxOutageRearmBesideAnAsk.cfg` is the refuted design. A batch is so a transaction of three statements, and
+    reads its isolation first (decision 10).
+  - **The liveness needed strong fairness, twice.** A process cut off whose breaker the model kept closed, or
+    whose trial asked the same held head again, took the slot from another process at every turn under weak
+    fairness, and kept a held row's hold from running out. The fairness is now strong for a worker's ask — the
+    take serves the least recently served slot `SKIP LOCKED` — and for a hold's running out: a stage-scoped hold
+    is at most a tick's cap and the trials a tick apart (decision 3).
+  - **`OneAskPerReach` is a property of the steps**, not of the states: an ask started before the memo held its
+    Tenant is in flight when the memo begins, as in the library; once the memo holds a Tenant, no ask of it
+    starts while one is in flight.
+  - **`TenantOrder` is `KeyOrder`**: the rows of a (slot, Tenant) are its streams', and their order is what a
+    host relies on; with the operator's verbs, the re-arm's overtaking test and the queue given up from its end
+    keep it.
+  - **The guests' bound holds for a head no guest skips**: a paused channel's heads are skipped by its guests and
+    walked by the slot's cursor alone; a guest without a cursor of its own overtakes a head more than twice
+    (`InboxRotationGuestFromLowest.cfg`).
