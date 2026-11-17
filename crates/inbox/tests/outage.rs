@@ -9,6 +9,11 @@
 //! ASCETIC_DDD_TEST_PG_URL=postgresql://user:pass@localhost/db \
 //!     cargo test -p ascetic-ddd-inbox --test outage -- --ignored
 //! ```
+//!
+//! With `ASCETIC_DDD_TRACE_DIR` set, a test writes what its inbox reported
+//! as `inbox-outage_<name>.jsonl`, as `tests/pg.rs` does, for `make traces`
+//! to check against the model or to find in `verify/tla/traces/uncovered.tsv`
+//! with the reason it is not checked (ADR-0042 T1).
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -30,6 +35,7 @@ use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use ascetic_ddd_session::pg::tokio_postgres::{Config, NoTls};
 use ascetic_ddd_session::{PgAccess, PgSession, PgSessionPool, Session, SessionPool};
+use ascetic_ddd_trace::{JsonTrace, TraceFile};
 use serde_json::json;
 
 const DEFAULT_URL: &str = "postgresql://devel:devel@localhost:5432/devel_karmabot_test";
@@ -67,6 +73,16 @@ fn quick() -> Breaking {
     Breaking::default()
         .with_hold(Duration::from_millis(40), Duration::from_millis(200))
         .with_tick(Duration::from_millis(50), Duration::from_millis(200))
+}
+
+/// Breaking whose holds and ticks run out within a step of a history: a
+/// Tenant's back-off and a tick of 1 ms to 5 ms, so that a history's
+/// dispatches ask the verdicts its seed drew rather than wait on the wall's
+/// clock (X1).
+fn brisk() -> Breaking {
+    Breaking::default()
+        .with_hold(Duration::from_millis(1), Duration::from_millis(5))
+        .with_tick(Duration::from_millis(1), Duration::from_millis(5))
 }
 
 /// What the observer was told of each failure.
@@ -165,10 +181,11 @@ fn my_lines() -> Vec<String> {
 }
 
 struct Fixture {
-    inbox: PgInbox<PgSessionPool, Arc<Failures>>,
+    inbox: PgInbox<PgSessionPool, (Arc<Failures>, Arc<JsonTrace>)>,
     told: Arc<Failures>,
     sessions: PgSessionPool,
     table: String,
+    trace: TraceFile,
 }
 
 /// A table of its own, one slot, `retries` as given.
@@ -185,8 +202,26 @@ async fn fixture_waiting(name: &str, retries: Retries, max_wait: Duration) -> Fi
     }
 }
 
+/// The same for a test whose run the trace cannot follow, which records
+/// none: it writes rows by SQL, behind the observers, or moves them by an
+/// inbox the trace does not watch.
+async fn fixture_unrecorded(name: &str, retries: Retries) -> Fixture {
+    fixture_traced(name, retries, 1, quick(), TraceFile::off()).await
+}
+
 /// A table of its own, `slots` slots, `retries` and `breaking` as given.
 async fn fixture_cut(name: &str, retries: Retries, slots: u32, breaking: Breaking) -> Fixture {
+    let trace = TraceFile::from_env(&format!("inbox-outage_{name}"));
+    fixture_traced(name, retries, slots, breaking, trace).await
+}
+
+async fn fixture_traced(
+    name: &str,
+    retries: Retries,
+    slots: u32,
+    breaking: Breaking,
+    trace: TraceFile,
+) -> Fixture {
     let table = format!("outage_{name}");
     let told = Arc::new(Failures::default());
     let inbox = PgInbox::new(PgSessionPool::new(pool()))
@@ -199,7 +234,7 @@ async fn fixture_cut(name: &str, retries: Retries, slots: u32, breaking: Breakin
         .with_retries(retries)
         .with_max_wait(Duration::from_secs(600))
         .with_breaking(breaking)
-        .observed_by(Arc::clone(&told));
+        .observed_by((Arc::clone(&told), trace.recorder()));
     inbox.teardown().await.unwrap();
     inbox.migrate().await.unwrap();
     Fixture {
@@ -207,6 +242,7 @@ async fn fixture_cut(name: &str, retries: Retries, slots: u32, breaking: Breakin
         told,
         sessions: PgSessionPool::new(pool()),
         table,
+        trace,
     }
 }
 
@@ -251,8 +287,18 @@ impl Fixture {
             .unwrap()
     }
 
-    /// Runs `sql`, `{table}` standing for the inbox's table.
+    /// Runs `sql`, `{table}` standing for the inbox's table: rows written
+    /// behind the observers, which the trace notes, so that its check
+    /// refuses the run rather than let it fit for a reason not its own.
     async fn execute(&self, sql: &str) {
+        self.trace.recorder().written_behind("inbox");
+        self.elapse(sql).await;
+    }
+
+    /// Runs `sql` that moves a time — a back-off's, a wait's, a park's, a
+    /// slot's sleep — or touches no row of the queue: the passing of time is
+    /// a step the model takes unseen, and the trace need not note it.
+    async fn elapse(&self, sql: &str) {
         let sql = sql.replace("{table}", &self.table);
         self.sessions
             .session(async |session| {
@@ -294,10 +340,8 @@ impl Fixture {
     /// head due sleeps until the earliest back-off it saw (ADR-0041 decision
     /// 2), and the rows' clock moved by hand moves the slot's too.
     async fn due(&self) {
-        self.execute(
-            "UPDATE {table} SET next_attempt_at = now() WHERE next_attempt_at IS NOT NULL",
-        )
-        .await;
+        self.elapse("UPDATE {table} SET next_attempt_at = now() WHERE next_attempt_at IS NOT NULL")
+            .await;
         self.wake().await;
     }
 
@@ -305,7 +349,7 @@ impl Fixture {
     /// it sleeps at most `max_dormancy`, a second, and the tests do not wait
     /// it out (ADR-0041 decision 2).
     async fn wake(&self) {
-        self.execute("UPDATE {table}_slots SET dormant_until = now()")
+        self.elapse("UPDATE {table}_slots SET dormant_until = now()")
             .await;
     }
 
@@ -725,7 +769,9 @@ async fn a_channel_broadly_unavailable_is_paused_walked_as_a_guest_and_resumed_b
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_dispatch_under_repeatable_read_is_refused() {
-    let f = fixture("isolation", Retries::up_to(3)).await;
+    // Unrecorded: the dispatch refused is another inbox's, which the trace
+    // does not watch.
+    let f = fixture_unrecorded("isolation", Retries::up_to(3)).await;
     f.publish(&[message("a", 1)]).await;
     let mut config = Config::from_str(&url()).unwrap();
     config.options("-c default_transaction_isolation=repeatable\\ read");
@@ -831,7 +877,7 @@ async fn a_row_waiting_for_a_held_dependency_does_not_expire() {
     f.publish(std::slice::from_ref(&cause)).await;
     assert_eq!(f.dispatch(|| stage_down(None)).await, held(0));
 
-    f.execute(
+    f.elapse(
         "UPDATE {table} SET waiting_since = now() - interval '20 minutes' \
          WHERE waiting_since IS NOT NULL",
     )
@@ -939,7 +985,7 @@ async fn a_row_s_holds_are_bounded_forgotten_by_a_spend_and_timed_from_the_verdi
     assert_eq!(f.row("c").await.holds, Some(1));
     tokio::time::sleep(Duration::from_millis(200)).await;
     // c@1 due, a@1 still held by its Tenant's memo
-    f.execute("UPDATE {table} SET next_attempt_at = now() WHERE stream_id->>'id' = 'c'")
+    f.elapse("UPDATE {table} SET next_attempt_at = now() WHERE stream_id->>'id' = 'c'")
         .await;
     f.wake().await;
     assert_eq!(
@@ -989,7 +1035,8 @@ async fn a_row_s_holds_are_bounded_forgotten_by_a_spend_and_timed_from_the_verdi
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_trial_and_a_resolve_under_repeatable_read_are_refused() {
-    let f = fixture("isolated", Retries::up_to(3)).await;
+    // Unrecorded: an inbox the trace does not watch dispatches the rows.
+    let f = fixture_unrecorded("isolated", Retries::up_to(3)).await;
     let one = pool_of(Config::from_str(&url()).unwrap());
     one.resize(1);
     let inbox = PgInbox::new(PgSessionPool::new(one.clone()))
@@ -1503,7 +1550,7 @@ async fn a_guest_serves_what_is_due_beyond_the_paused_heads_in_turn() {
     // the round: a guest's take clears it; its empty walk leaves it
     f.publish(&[message_on("payments", &wide("u4"), "u4", 1)])
         .await;
-    f.execute("UPDATE {table}_slots SET round_from = 'z'").await;
+    f.elapse("UPDATE {table}_slots SET round_from = 'z'").await;
     assert_eq!(f.dispatch_on(verdict).await, Outcome::Processed);
     assert_eq!(
         f.text("SELECT coalesce(round_from, '') FROM {table}_slots")
@@ -1511,7 +1558,7 @@ async fn a_guest_serves_what_is_due_beyond_the_paused_heads_in_turn() {
         "",
         "a guest's take clears the round"
     );
-    f.execute("UPDATE {table}_slots SET round_from = 'z'").await;
+    f.elapse("UPDATE {table}_slots SET round_from = 'z'").await;
     assert_eq!(f.dispatch_on(verdict).await, Outcome::Paused);
     assert_eq!(
         f.text("SELECT coalesce(round_from, '') FROM {table}_slots")
@@ -1537,7 +1584,10 @@ async fn a_guest_serves_what_is_due_beyond_the_paused_heads_in_turn() {
 /// must succeed — the baseline's CHECKs refuse a statement that forgets
 /// (23514) — and after each, a row's hold fields are set together, and its
 /// count of holds only on an `Unavailable` hold. Red when an exit drops
-/// the fragment.
+/// the fragment. The breaker's holds and ticks run out within a step
+/// (`brisk`), so that what a history meets is its seed's, not the speed of
+/// the machine it runs on: under 40 ms to 200 ms, a fast run spent a whole
+/// history inside the holds and a pause, and processed nothing.
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn no_history_leaves_a_hold_on_a_row_out_of_the_queue() {
@@ -1546,12 +1596,17 @@ async fn no_history_leaves_a_hold_on_a_row_out_of_the_queue() {
         0xD1B5_4A32_D192_ED03,
         0x2545_F491_4F6C_DD1D,
     ] {
-        let f = fixture_waiting(
+        let f = fixture_cut(
             &format!("history_{:x}", seed & 0xffff),
             Retries::up_to(3),
-            Duration::from_millis(300),
+            1,
+            brisk(),
         )
         .await;
+        let f = Fixture {
+            inbox: f.inbox.with_max_wait(Duration::from_millis(300)),
+            ..f
+        };
         let mut state = seed;
         let mut next = move |n: u64| {
             state ^= state << 13;
@@ -1637,7 +1692,7 @@ async fn no_history_leaves_a_hold_on_a_row_out_of_the_queue() {
                         })
                         .await;
                     } else {
-                        f.execute(
+                        f.elapse(
                             "UPDATE {table} SET waiting_since = now() - interval '1 hour' \
                                    WHERE waiting_since IS NOT NULL",
                         )
@@ -1845,11 +1900,11 @@ async fn a_bulk_unpark_keeps_to_its_window_and_leaves_an_overtaken_row_unless_as
     assert_eq!(f.dispatch(refuse).await, spent(1, true), "e@1 parks");
     assert_eq!(f.dispatch(ok).await, Outcome::Processed, "e@2 overtakes it");
     assert_eq!(f.dispatch(refuse).await, spent(1, true));
-    f.execute(
+    f.elapse(
         "UPDATE {table} SET parked_at = now() - interval '2 hours' WHERE stream_id->>'id' = 'old'",
     )
     .await;
-    f.execute(
+    f.elapse(
         "UPDATE {table} SET parked_at = now() + interval '1 hour' WHERE stream_id->>'id' = 'late'",
     )
     .await;
@@ -2015,7 +2070,8 @@ impl Seen {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn the_held_heads_are_paged_with_their_hold_and_identity() {
-    let f = fixture("held_page", Retries::up_to(3)).await;
+    // Unrecorded: its holds are written by SQL, behind the observers.
+    let f = fixture_unrecorded("held_page", Retries::up_to(3)).await;
     f.publish(&[
         message_of("t1", "a", 1),
         message_of("t2", "b", 1),
@@ -2309,7 +2365,8 @@ async fn a_head_a_dispatcher_holds_is_passed_by_and_the_verb_waits_for_nothing()
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn a_walk_that_waits_on_a_verb_s_lock_reads_its_head_vanished() {
-    let f = fixture("vanished", Retries::up_to(3)).await;
+    // Unrecorded: the verb's statement is the test's own, behind the observers.
+    let f = fixture_unrecorded("vanished", Retries::up_to(3)).await;
     f.publish(&[message_of("tx", "x1", 1), message_of("tx", "x2", 1)])
         .await;
     let verb = pool().get().await.unwrap();
@@ -2474,7 +2531,7 @@ async fn a_bulk_unpark_re_arms_the_ground_it_names_by_its_remedy() {
     f.publish(&[message("e", 1).depending_on(&[CausalDependency::on(&never)])])
         .await;
     assert_eq!(f.dispatch(ok).await, Outcome::SetAside);
-    f.execute(
+    f.elapse(
         "UPDATE {table} SET waiting_since = now() - interval '1 hour' \
          WHERE waiting_since IS NOT NULL",
     )
@@ -2529,7 +2586,8 @@ async fn a_bulk_unpark_re_arms_the_ground_it_names_by_its_remedy() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn the_rows_waiting_are_counted_by_channel() {
-    let f = fixture("waiting_counts", Retries::up_to(3)).await;
+    // Unrecorded: a waiter is parked by SQL, behind the observers.
+    let f = fixture_unrecorded("waiting_counts", Retries::up_to(3)).await;
     let never = message("never", 1);
     for (topic, stream) in [
         ("orders", "w1"),
@@ -2690,7 +2748,7 @@ async fn a_report_that_cannot_be_written_fails_no_dispatch() {
         f.publish(&[message_of(tenant, &format!("{tenant}-a"), 1)])
             .await;
     }
-    f.execute("DROP TABLE {table}_stalls").await;
+    f.elapse("DROP TABLE {table}_stalls").await;
     let started = std::time::Instant::now();
     while !f
         .effects()

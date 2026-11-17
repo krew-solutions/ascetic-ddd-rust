@@ -1,2 +1,2 @@
-{"event":"published","message_id":"00000000-0000-4000-8000-0000000000f8","observer":"outbox","position":1,"uri":"kafka://orders","xid":2365690}
+{"event":"published","message_id":"00000000-0000-4000-8000-000000000118","observer":"outbox","position":1,"uri":"kafka://orders","xid":2699082}
 {"event":"dispatched","group":"broker","observer":"outbox","outcome":"rolled_back","slot":0}

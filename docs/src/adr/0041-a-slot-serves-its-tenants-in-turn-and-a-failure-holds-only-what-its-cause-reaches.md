@@ -965,9 +965,13 @@ Trace validation):
 - trace validation of the outbox's epoch relay (ADR-0035): eleven traces of
   its tests are recorded and not covered, since `TraceOutbox.tla` follows
   the relay that releases below `xmin`;
-- two inbox traces that do not fit, not yet diagnosed
-  (`inbox-held_by_concurrent`, `inbox-window_passed`); a third,
-  `inbox-identity_past`, maps to no step and is refused;
+- two inbox traces that did not fit, diagnosed by ADR-0042's T1:
+  `inbox-held_by_concurrent` wrote its holder's row by SQL, behind the
+  observers, and records no trace; `inbox-window_passed` stores a row again
+  after the sweep forgot it, which `trace2tla.py` refuses, since `Inbox.tla`
+  forgets nothing. A third, `inbox-identity_past`, maps to no step and is
+  refused. Each run not covered is listed with its reason in
+  `verify/tla/traces/uncovered.tsv`;
 - **the rotation in the traces.** `TraceInbox.tla` substitutes a cursor that
   never moves, so it follows a slot served in arrival order. A recorded walk
   that passed a Tenant, or served a later Tenant's head first, does not fit,
@@ -1548,3 +1552,7 @@ scheduler. So:
 - 2026-11-16 — Decision 3's environment's verdict superseded by ADR-0042: a
   stage's outage pauses its channel in the process that sees it, rather
   than rolling back and pausing every loop of the process.
+- 2026-11-17 — § Owed: the two inbox traces that did not fit are diagnosed
+  (ADR-0042, T1): `inbox-held_by_concurrent` wrote its holder's row by SQL
+  and no longer records; `inbox-window_passed` stores a forgotten row again,
+  which the trace check refuses for that reason.

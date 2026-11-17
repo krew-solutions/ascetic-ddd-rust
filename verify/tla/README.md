@@ -714,7 +714,18 @@ the list. `make traces` records every test's trace into a directory of its
 own, then:
 - replaces each covered trace by its new recording, and fails when no test
   recorded one again: its test is gone or renamed;
-- names each recording that is not covered, and checks none of them;
+- holds each recording that is not covered to its entry in
+  `traces/uncovered.tsv` (`check.sh --uncovered`, ADR-0042 T1), and fails on
+  a recording not listed, and on an entry whose recording no test made, that
+  is covered, or that stands otherwise than it says. An entry is `refused`,
+  its reason the one `trace2tla.py` gives for not translating the run, word
+  for word: what the run holds that the model does not describe yet. Or it is
+  `unfit`: the run translates and TLC refuses one of its steps, and the
+  reason names the record that owes the diagnosis. A refused run's steps
+  before its refusal are checked all the same, and must fit: a refusal
+  hides no step before it. A model that learns a step so makes the entries
+  it explains stale, and the runs it can now check are covered or
+  diagnosed, not forgotten;
 - runs `check.sh traces` over the covered ones.
 
 A failure's park says whether its verdict was permanent: `MaxAttempts` is
@@ -722,39 +733,74 @@ read off the parks of exhausted attempts alone, and a permanent one is the
 model's `FailPermanent`. Read as an exhausted one, a single permanent failure
 would fit as `MaxAttempts = 1`, for the wrong reason. A dispatch closed with
 an outcome the mapping does not know is refused, rather than ended without a
-step; a walk that passed took no head, and is no step. A hold for a stage's
-outage (ADR-0040 decision 4) is refused: `Inbox.tla` has no hold yet.
+step; a walk that passed took no head, and is no step. What ADR-0042 added
+and `Inbox.tla` does not describe yet is refused, each with its reason: a
+head held unasked, a row held for an `Unavailable`, a guest's walk among
+paused heads, and a verb over many rows that moved some, whose rows the
+trace does not name. A read of the operator's surface moves no row, and is
+no step.
 
-A recording that fits is covered by committing it. A test that writes a row
-behind the observers (by SQL, as an older producer or a hand would) records
-no trace: its run has a step the trace lacks, and it fits no run of the
-model.
+A recording that fits is covered by committing it. A run with a step the
+trace lacks fits no run of the model, or fits one for the wrong reason — a
+row held by SQL is no row held in the trace. So the tests' fixtures note in
+the trace each statement of their own that writes rows behind the
+observers (by SQL, as an older producer or a hand would), and
+`trace2tla.py` refuses the run at it; a statement that only moves a time —
+a back-off's, a wait's, a park's, a slot's sleep — is the step of time the
+model takes unseen, and is not noted. A test that moves rows by an inbox
+the trace does not watch records no trace.
 
-Not covered, as of 2026-11-16 (recorded again on ADR-0040's branch; 49
-fit):
-- **The outbox's epochs (ADR-0035).** `TraceOutbox.tla` follows `Outbox.tla`,
-  which releases below `xmin`. `outbox-visibility`, checked: a committed
-  version leaves past an open one in an epoch of its own, which that model
-  refuses. Ten more, of tests of the epochs and what they brought — commit
-  order, rewinds, lanes, the replay horizon, the reset — not checked one by
-  one: `outbox-backlog`, `outbox-between` and `outbox-rewind_epoch` do not
-  translate (their fetches carry an epoch of `null`); `outbox-commit_order`,
+Not covered, as of 2026-11-17 (`traces/uncovered.tsv` lists each):
+- **ADR-0042's steps, refused: 19 runs of `tests/outage.rs`.** A row held for
+  an `Unavailable` (15), and a verb over many rows that moved some (4). They
+  are covered once `Inbox.tla` holds a row and a verb's rows are named in
+  the trace; until then a run of them that the converter takes goes stale in
+  the list and is looked at.
+- **Rows written behind the observers, refused: nine runs.** Seven of
+  `tests/outage.rs`, whose holds, parks or waits a test sets by SQL, and two
+  of `tests/pg.rs` that were covered and fit for the wrong reason:
+  `inbox-attempts_saturate`, its attempts set by SQL, fit because the check of
+  attempts is skipped when nothing parks; `inbox-window_kept` has its waits
+  rewritten by SQL.
+- **A row forgotten and stored again, refused: `inbox-window_passed`.** The
+  sweep forgets a processed row, and a repeat past its window is stored
+  again, at a new position; `Inbox.tla` forgets nothing (`InboxForget.tla`
+  does).
+- **The outbox's epochs (ADR-0035), not fitting: eleven runs.**
+  `TraceOutbox.tla` follows `Outbox.tla`, which releases below `xmin`.
+  `outbox-visibility`, checked: a committed version leaves past an open one
+  in an epoch of its own, which that model refuses. Ten more, of the tests
+  of the epochs and what they brought, not checked one by one:
+  `outbox-backlog`, `outbox-between` and `outbox-rewind_epoch` go on to
+  deliver an epoch with nothing of their selection's, which the converter
+  refuses, after steps that already do not fit; `outbox-commit_order`,
   `outbox-lane_start`, `outbox-position`, `outbox-replay_horizon`,
-  `outbox-reset`, `outbox-rewind_open` and `outbox-uri` do not fit. The epoch
-  relay is checked statement by statement, in `OutboxPg.tla`; its trace
-  validation is owed.
-- **Two inbox traces that do not fit, not yet diagnosed:**
-  `inbox-held_by_concurrent`, `inbox-window_passed`.
-- **Two runs of no step, which `trace2tla.py` refuses: committed, each
-  would fit whatever the model said.** `inbox-identity_past`: its test's
-  intake sets both messages aside. `outbox-refused_wire`: its producer
-  refuses each message at the commit, which aborts, and nothing is
-  recorded. (Both branches had committed the second, recorded empty, and
-  ADR-0040's the first; each fit with no step.)
-- **A rotating run.** `TraceInbox.tla` substitutes a cursor that never moves,
-  so it follows a slot served in arrival order: a run whose walk passed a
-  Tenant, or served a later Tenant's head before an earlier one's, does not
-  fit, and no test of the rotation is covered (ADR-0041 § Owed).
+  `outbox-reset`, `outbox-rewind_open`, `outbox-uri`. The epoch relay is
+  checked statement by statement, in `OutboxPg.tla`; its trace validation is
+  owed (ADR-0041 § Owed). Recorded eight times, four of them beside a stream
+  of short transactions in another database of the cluster, the eight that
+  translate stood not fitting 63 times of 64, and the 64th was a TLC run that
+  ended with neither outcome, which `check.sh` runs once more.
+- **Rotating runs, not fitting: three of `tests/outage.rs`**
+  (`history_7c15`, `sparse`, `unparkall`). `TraceInbox.tla` substitutes a
+  cursor that never moves, so it follows a slot served in arrival order: a
+  walk that serves a later Tenant's head before an earlier one's does not
+  fit (ADR-0041 § Owed). The tests of the rotation in `tests/pg.rs` record
+  none.
+- **A row failing for a moment, then for good, not fitting:
+  `inbox-outage_exits`.** `TraceInbox.tla` reads off a run which messages
+  fail for good, a message's verdict, not an attempt's; the row's first
+  failure, transient, is refused for it.
+- **Two runs of no step, refused: each would fit whatever the model
+  said.** `inbox-identity_past`: its test's intake sets both messages
+  aside. `outbox-refused_wire`: its producer refuses each message at the
+  commit, which aborts, and nothing is recorded.
+
+Not recorded, each for its reason in its test: the tests with several
+dispatchers at once (above), and those that move rows by an inbox the trace
+does not watch, or write them by a session of their own — among them
+`held_by_concurrent` of `tests/pg.rs`, whose holder's row is inserted by SQL
+(it had been recorded, and did not fit), and five of `tests/outage.rs`.
 
 `trace2tla.py` maps the lines onto the model's steps — an acknowledgement and
 the commit that follows it become one `Ack`, a rolled-back batch a `Crash`, a

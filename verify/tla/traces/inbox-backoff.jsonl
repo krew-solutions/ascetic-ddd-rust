@@ -1,16 +1,16 @@
-{"deps":[],"event":"received","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","message_id":"00000000-0000-4000-8000-00000000001b","observer":"inbox","received_position":1,"slot":0,"xid":2361464}
-{"deps":[],"event":"received","id":"tenant-1/orders.Order/{\"id\":\"b\"}/1","message_id":"00000000-0000-4000-8000-00000000001c","observer":"inbox","received_position":2,"slot":0,"xid":2361465}
-{"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","slot":0,"slots":1,"snapshot":{"xip":[],"xmax":2361466,"xmin":2361466}}
+{"deps":[],"event":"received","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","message_id":"00000000-0000-4000-8000-00000000001b","observer":"inbox","received_position":1,"slot":0,"xid":2694794}
+{"deps":[],"event":"received","id":"tenant-1/orders.Order/{\"id\":\"b\"}/1","message_id":"00000000-0000-4000-8000-00000000001c","observer":"inbox","received_position":2,"slot":0,"xid":2694795}
+{"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","slot":0,"slots":1,"snapshot":{"xip":[],"xmax":2694796,"xmin":2694796}}
 {"event":"handled","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","ok":false,"slot":0}
-{"attempts":1,"cause":"bus.unexplained","error":"the first attempt fails on purpose","event":"failed","held":false,"id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","parked":false,"past_budget":false,"permanent":false,"retry_after_ms":300,"slot":0}
+{"attempts":1,"cause":"bus.unexplained","error":"the first attempt fails on purpose","event":"failed","held":false,"id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","parked":false,"permanent":false,"retry_after_ms":300,"slot":0}
 {"event":"dispatched","observer":"inbox","outcome":"failed","slot":0}
-{"event":"fetched","id":null,"observer":"inbox","slot":0,"slots":1,"snapshot":{"xip":[],"xmax":2361468,"xmin":2361468}}
+{"event":"fetched","id":null,"observer":"inbox","slot":0,"slots":1,"snapshot":{"xip":[],"xmax":2694798,"xmin":2694798}}
 {"event":"dispatched","observer":"inbox","outcome":"nothing","slot":0}
-{"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","slot":0,"slots":1,"snapshot":{"xip":[],"xmax":2361469,"xmin":2361469}}
+{"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","slot":0,"slots":1,"snapshot":{"xip":[],"xmax":2694799,"xmin":2694799}}
 {"event":"handled","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","ok":true,"slot":0}
 {"event":"marked","id":"tenant-1/orders.Order/{\"id\":\"a\"}/1","observer":"inbox","processed_position":3,"slot":0,"woken":[]}
 {"event":"dispatched","observer":"inbox","outcome":"processed","slot":0}
-{"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"b\"}/1","observer":"inbox","slot":0,"slots":1,"snapshot":{"xip":[],"xmax":2361470,"xmin":2361470}}
+{"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"b\"}/1","observer":"inbox","slot":0,"slots":1,"snapshot":{"xip":[],"xmax":2694800,"xmin":2694800}}
 {"event":"handled","id":"tenant-1/orders.Order/{\"id\":\"b\"}/1","observer":"inbox","ok":true,"slot":0}
 {"event":"marked","id":"tenant-1/orders.Order/{\"id\":\"b\"}/1","observer":"inbox","processed_position":4,"slot":0,"woken":[]}
 {"event":"dispatched","observer":"inbox","outcome":"processed","slot":0}

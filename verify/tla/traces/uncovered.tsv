@@ -1,0 +1,49 @@
+# The recordings `make traces` makes that no trace under traces/ covers, and why
+# (verify/tla/README.md § Trace validation): a line a recording, tab-separated:
+# its file, `refused` or `unfit`, and the reason.
+inbox-attempts_saturate.jsonl	refused	rows written behind the observers, by the test's own statement: the model takes no step for them
+inbox-identity_past.jsonl	refused	inbox-identity_past.jsonl maps to no step: there is nothing to check
+inbox-outage_canary_above.jsonl	refused	rows written behind the observers, by the test's own statement: the model takes no step for them
+inbox-outage_exits.jsonl	unfit	a row failing for a moment, then for good: TraceInbox.tla reads off the run which messages fail for good, a message's verdict, not an attempt's
+inbox-outage_flat_64.jsonl	refused	a row held under kms.unavailable, spending nothing: Inbox.tla has no hold yet (ADR-0042)
+inbox-outage_flat_8.jsonl	refused	a row held under kms.unavailable, spending nothing: Inbox.tla has no hold yet (ADR-0042)
+inbox-outage_flight.jsonl	refused	a row held under kms.throttled, spending nothing: Inbox.tla has no hold yet (ADR-0042)
+inbox-outage_grounds.jsonl	refused	rows written behind the observers, by the test's own statement: the model takes no step for them
+inbox-outage_guest.jsonl	refused	a row held under kms.unavailable, spending nothing: Inbox.tla has no hold yet (ADR-0042)
+inbox-outage_history_7c15.jsonl	unfit	a rotating run: the walk serves a later Tenant's head before an earlier one's, and TraceInbox.tla follows a cursor that never moves (ADR-0041 § Owed)
+inbox-outage_history_dd1d.jsonl	refused	a row held under kms.throttled, spending nothing: Inbox.tla has no hold yet (ADR-0042)
+inbox-outage_history_ed03.jsonl	refused	a row held under kms.unavailable, spending nothing: Inbox.tla has no hold yet (ADR-0042)
+inbox-outage_kinds.jsonl	refused	a row held under kms.throttled, spending nothing: Inbox.tla has no hold yet (ADR-0042)
+inbox-outage_memo.jsonl	refused	a row held under kms.throttled, spending nothing: Inbox.tla has no hold yet (ADR-0042)
+inbox-outage_never_spends_stage.jsonl	refused	a row held under kms.unavailable, spending nothing: Inbox.tla has no hold yet (ADR-0042)
+inbox-outage_never_spends_tenant.jsonl	refused	a row held under kms.throttled, spending nothing: Inbox.tla has no hold yet (ADR-0042)
+inbox-outage_park_heads.jsonl	refused	rows written behind the observers, by the test's own statement: the model takes no step for them
+inbox-outage_park_queue.jsonl	refused	rows written behind the observers, by the test's own statement: the model takes no step for them
+inbox-outage_park_queue_cut.jsonl	refused	an operator's parked_queue moved rows the trace does not name: Inbox.tla has no verb over many rows yet (ADR-0042)
+inbox-outage_park_served.jsonl	refused	an operator's parked_queue moved rows the trace does not name: Inbox.tla has no verb over many rows yet (ADR-0042)
+inbox-outage_passed_by.jsonl	refused	an operator's parked_queue moved rows the trace does not name: Inbox.tla has no verb over many rows yet (ADR-0042)
+inbox-outage_paused.jsonl	refused	a row held under kms.unavailable, spending nothing: Inbox.tla has no hold yet (ADR-0042)
+inbox-outage_report_fails.jsonl	refused	a row held under kms.unavailable, spending nothing: Inbox.tla has no hold yet (ADR-0042)
+inbox-outage_rows.jsonl	refused	rows written behind the observers, by the test's own statement: the model takes no step for them
+inbox-outage_spared.jsonl	refused	a row held under kms.unavailable, spending nothing: Inbox.tla has no hold yet (ADR-0042)
+inbox-outage_sparse.jsonl	unfit	a rotating run: the walk serves a later Tenant's head before an earlier one's, and TraceInbox.tla follows a cursor that never moves (ADR-0041 § Owed)
+inbox-outage_stalls.jsonl	refused	a row held under kms.unavailable, spending nothing: Inbox.tla has no hold yet (ADR-0042)
+inbox-outage_tick_hold.jsonl	refused	rows written behind the observers, by the test's own statement: the model takes no step for them
+inbox-outage_trial_wait.jsonl	refused	a row held under kms.unavailable, spending nothing: Inbox.tla has no hold yet (ADR-0042)
+inbox-outage_unparkall.jsonl	unfit	a rotating run: the walk serves a later Tenant's head before an earlier one's, and TraceInbox.tla follows a cursor that never moves (ADR-0041 § Owed)
+inbox-outage_unparkbatches.jsonl	refused	rows written behind the observers, by the test's own statement: the model takes no step for them
+inbox-outage_unparkwindow.jsonl	refused	an operator's unparked_all moved rows the trace does not name: Inbox.tla has no verb over many rows yet (ADR-0042)
+inbox-window_kept.jsonl	refused	rows written behind the observers, by the test's own statement: the model takes no step for them
+inbox-window_passed.jsonl	refused	m1 was stored again after its row was forgotten: TraceInbox.tla follows Inbox.tla, which forgets nothing (InboxForget.tla does)
+outbox-backlog.jsonl	unfit	the epoch relay (ADR-0035), not diagnosed one by one: TraceOutbox.tla follows the relay that releases below xmin; the relay's trace validation is owed (ADR-0041 § Owed)
+outbox-between.jsonl	unfit	the epoch relay (ADR-0035), not diagnosed one by one: TraceOutbox.tla follows the relay that releases below xmin; the relay's trace validation is owed (ADR-0041 § Owed)
+outbox-commit_order.jsonl	unfit	the epoch relay (ADR-0035), not diagnosed one by one: TraceOutbox.tla follows the relay that releases below xmin; the relay's trace validation is owed (ADR-0041 § Owed)
+outbox-lane_start.jsonl	unfit	the epoch relay (ADR-0035), not diagnosed one by one: TraceOutbox.tla follows the relay that releases below xmin; the relay's trace validation is owed (ADR-0041 § Owed)
+outbox-position.jsonl	unfit	the epoch relay (ADR-0035), not diagnosed one by one: TraceOutbox.tla follows the relay that releases below xmin; the relay's trace validation is owed (ADR-0041 § Owed)
+outbox-refused_wire.jsonl	refused	outbox-refused_wire.jsonl maps to no step: there is nothing to check
+outbox-replay_horizon.jsonl	unfit	the epoch relay (ADR-0035), not diagnosed one by one: TraceOutbox.tla follows the relay that releases below xmin; the relay's trace validation is owed (ADR-0041 § Owed)
+outbox-reset.jsonl	unfit	the epoch relay (ADR-0035), not diagnosed one by one: TraceOutbox.tla follows the relay that releases below xmin; the relay's trace validation is owed (ADR-0041 § Owed)
+outbox-rewind_epoch.jsonl	unfit	the epoch relay (ADR-0035), not diagnosed one by one: TraceOutbox.tla follows the relay that releases below xmin; the relay's trace validation is owed (ADR-0041 § Owed)
+outbox-rewind_open.jsonl	unfit	the epoch relay (ADR-0035), not diagnosed one by one: TraceOutbox.tla follows the relay that releases below xmin; the relay's trace validation is owed (ADR-0041 § Owed)
+outbox-uri.jsonl	unfit	the epoch relay (ADR-0035), not diagnosed one by one: TraceOutbox.tla follows the relay that releases below xmin; the relay's trace validation is owed (ADR-0041 § Owed)
+outbox-visibility.jsonl	unfit	the epoch relay (ADR-0035): a committed version leaves past an open one in an epoch of its own, which TraceOutbox.tla, following the relay that releases below xmin, refuses; the relay's trace validation is owed (ADR-0041 § Owed)

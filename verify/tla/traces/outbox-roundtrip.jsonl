@@ -1,9 +1,9 @@
-{"event":"published","message_id":"00000000-0000-4000-8000-000000000097","observer":"outbox","position":1,"uri":"kafka://orders","xid":2365367}
-{"event":"published","message_id":"00000000-0000-4000-8000-000000000098","observer":"outbox","position":2,"uri":"kafka://orders","xid":2365368}
-{"delivered":"2365365:2365365:","epoch":"2365369:2365369:","epoch_end":2,"epoch_offset":0,"event":"fetched","group":"broker","horizon":2365369,"limit":100,"messages":["00000000-0000-4000-8000-000000000097","00000000-0000-4000-8000-000000000098"],"observer":"outbox","slot":0,"slots":1,"statement":"2365369:2365369:"}
-{"event":"handled","group":"broker","message_id":"00000000-0000-4000-8000-000000000097","observer":"outbox","ok":true,"slot":0}
+{"event":"published","message_id":"00000000-0000-4000-8000-000000000098","observer":"outbox","position":1,"uri":"kafka://orders","xid":2698679}
+{"event":"published","message_id":"00000000-0000-4000-8000-000000000099","observer":"outbox","position":2,"uri":"kafka://orders","xid":2698680}
+{"delivered":"2698677:2698677:","epoch":"2698681:2698681:","epoch_end":2,"epoch_offset":0,"event":"fetched","group":"broker","horizon":2698681,"limit":100,"messages":["00000000-0000-4000-8000-000000000098","00000000-0000-4000-8000-000000000099"],"observer":"outbox","slot":0,"slots":1,"statement":"2698681:2698681:"}
 {"event":"handled","group":"broker","message_id":"00000000-0000-4000-8000-000000000098","observer":"outbox","ok":true,"slot":0}
-{"drained":true,"event":"acked","group":"broker","observer":"outbox","position":2,"short":false,"slot":0,"xid":2365368}
+{"event":"handled","group":"broker","message_id":"00000000-0000-4000-8000-000000000099","observer":"outbox","ok":true,"slot":0}
+{"drained":true,"event":"acked","group":"broker","observer":"outbox","position":2,"short":false,"slot":0,"xid":2698680}
 {"event":"dispatched","group":"broker","observer":"outbox","outcome":"batch","slot":0}
 {"delivered":null,"epoch":null,"epoch_end":0,"epoch_offset":0,"event":"fetched","group":"broker","horizon":0,"limit":100,"messages":[],"observer":"outbox","slot":null,"slots":1,"statement":null}
 {"event":"dispatched","group":"broker","observer":"outbox","outcome":"nothing","slot":null}

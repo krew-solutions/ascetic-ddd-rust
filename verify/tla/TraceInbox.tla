@@ -77,7 +77,10 @@ PosOf == [m \in Arrives |-> Stored(m).pos]
 SetAside == {r.msg : r \in {r \in Events : r.side = "bridge" /\ r.event = "set_aside"}}
 Msgs == Arrives \cup UNION {Range(r.deps) : r \in Receives} \cup SetAside
 Deps == [m \in Msgs |-> IF m \in Arrives THEN Range((CHOOSE r \in Receives : r.msg = m).deps) ELSE {}]
-Slots == IF Dispatching = {} THEN {0} ELSE 0..((CHOOSE r \in Dispatching : TRUE).of - 1)
+\* A run, or the steps of a refused one before its refusal, with no dispatch
+\* names no count of slots: the slots are those its rows landed in.
+Slots == IF Dispatching = {} THEN {0} \cup {r.slot : r \in Receives}
+         ELSE 0..((CHOOSE r \in Dispatching : TRUE).of - 1)
 MaxCrashes == Cardinality({j \in 1..Len(Trace) : Trace[j].side = "inbox" /\ Trace[j].event \in {"crash", "fail"}})
 WaitsOnDependencies == TRUE
 WaitExpires == Expires # {}

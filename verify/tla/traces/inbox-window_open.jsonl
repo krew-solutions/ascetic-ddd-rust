@@ -1,10 +1,10 @@
-{"deps":[],"event":"received","id":"tenant-1/orders.Order/{\"id\":\"o1\"}/1","message_id":"00000000-0000-4000-8000-000000000125","observer":"inbox","received_position":1,"slot":0,"xid":2364591}
-{"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"o1\"}/1","observer":"inbox","slot":0,"slots":1,"snapshot":{"xip":[],"xmax":2364592,"xmin":2364592}}
+{"deps":[],"event":"received","id":"tenant-1/orders.Order/{\"id\":\"o1\"}/1","message_id":"00000000-0000-4000-8000-000000000125","observer":"inbox","received_position":1,"slot":0,"xid":2697921}
+{"event":"fetched","id":"tenant-1/orders.Order/{\"id\":\"o1\"}/1","observer":"inbox","slot":0,"slots":1,"snapshot":{"xip":[],"xmax":2697922,"xmin":2697922}}
 {"event":"handled","id":"tenant-1/orders.Order/{\"id\":\"o1\"}/1","observer":"inbox","ok":true,"slot":0}
 {"event":"marked","id":"tenant-1/orders.Order/{\"id\":\"o1\"}/1","observer":"inbox","processed_position":2,"slot":0,"woken":[]}
 {"event":"dispatched","observer":"inbox","outcome":"processed","slot":0}
-{"event":"fetched","id":null,"observer":"inbox","slot":null,"slots":1,"snapshot":{"xip":[],"xmax":2364593,"xmin":2364593}}
+{"event":"fetched","id":null,"observer":"inbox","slot":null,"slots":1,"snapshot":{"xip":[],"xmax":2697923,"xmin":2697923}}
 {"event":"dispatched","observer":"inbox","outcome":"nothing","slot":null}
 {"deps":[],"event":"received","id":"tenant-1/orders.Order/{\"id\":\"o1\"}/1","message_id":"00000000-0000-4000-8000-000000000125","observer":"inbox","received_position":null,"slot":null,"xid":null}
-{"event":"fetched","id":null,"observer":"inbox","slot":null,"slots":1,"snapshot":{"xip":[],"xmax":2364593,"xmin":2364593}}
+{"event":"fetched","id":null,"observer":"inbox","slot":null,"slots":1,"snapshot":{"xip":[],"xmax":2697923,"xmin":2697923}}
 {"event":"dispatched","observer":"inbox","outcome":"nothing","slot":null}

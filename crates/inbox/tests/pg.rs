@@ -55,7 +55,7 @@ struct Fixture<O = ()> {
     inbox: PgInbox<PgSessionPool, (O, Arc<JsonTrace>)>,
     table: String,
     /// Written when the fixture is dropped, if a trace directory is set.
-    _trace: TraceFile,
+    trace: TraceFile,
 }
 
 /// A table of its own per test, so tests run in parallel; one slot.
@@ -108,7 +108,7 @@ async fn fixture_cut<O: InboxObserver>(
         sessions,
         inbox,
         table,
-        _trace: trace,
+        trace,
     }
 }
 
@@ -141,8 +141,24 @@ impl<O: InboxObserver> Fixture<O> {
         }
     }
 
-    /// Runs `sql`, `{table}` standing for the inbox's table.
+    /// Runs `sql`, `{table}` standing for the inbox's table: rows written
+    /// behind the observers, which the trace notes, so that its check
+    /// refuses the run rather than let it fit for a reason not its own.
     async fn execute(&self, sql: &str) {
+        self.behind();
+        self.elapse(sql).await;
+    }
+
+    /// Notes in the trace that the test's own statement wrote rows behind
+    /// the observers.
+    fn behind(&self) {
+        self.trace.recorder().written_behind("inbox");
+    }
+
+    /// Runs `sql` that moves a time — a back-off's, a mark's, a slot's
+    /// sleep — or writes nothing: the passing of time is a step the model
+    /// takes unseen, and the trace need not note it.
+    async fn elapse(&self, sql: &str) {
         let sql = sql.replace("{table}", &self.table);
         self.sessions
             .session(async |session| {
@@ -467,7 +483,15 @@ async fn an_ignored_message_names_the_one_holding_its_identity() {
 #[ignore = "requires PostgreSQL; run with --ignored"]
 async fn the_holder_committed_while_the_insert_waited_is_named() {
     let recorder = Arc::new(Recorder::default());
-    let f = fixture_observed("held_by_concurrent", Arc::clone(&recorder)).await;
+    // The holder's row is written by SQL, behind the observers: the run
+    // records no trace (ADR-0042 T1).
+    let f = fixture_cut(
+        "held_by_concurrent",
+        Arc::clone(&recorder),
+        1,
+        TraceFile::off(),
+    )
+    .await;
     let holder = message("a", 1);
     let late = message("a", 1);
     let mut client = pool().get().await.unwrap();
@@ -1951,7 +1975,7 @@ async fn rows_processed_before_the_mark_s_time_are_kept_until_stamped() {
     f.dispatch(&subscriber).await;
     f.dispatch(&subscriber).await;
     f.dispatch(&subscriber).await;
-    f.execute("UPDATE {table} SET processed_at = NULL").await;
+    f.elapse("UPDATE {table} SET processed_at = NULL").await;
     assert_eq!(f.inbox.sweep().await.unwrap(), 0);
     assert_eq!(f.inbox.stamp_processed().await.unwrap(), 5);
     assert_eq!(f.inbox.stamp_processed().await.unwrap(), 0);
@@ -2883,6 +2907,7 @@ async fn a_failure_past_the_attempts_range_saturates() {
     let f = fixture("attempts_saturate").await;
     f.publish(&[message("a", 1)]).await;
     let client = pool().get().await.unwrap();
+    f.behind();
     client
         .execute(
             &format!("UPDATE {} SET attempts = 2147483647", f.table),
@@ -3092,7 +3117,7 @@ async fn a_head_in_backoff_holds_its_tenant_and_not_its_slot() {
             of("tenant-b", b1, 1),
         ])
         .await;
-        f.execute("DO $$ BEGIN ASSERT (SELECT count(DISTINCT slot) FROM {table}) = 1; END $$")
+        f.elapse("DO $$ BEGIN ASSERT (SELECT count(DISTINCT slot) FROM {table}) = 1; END $$")
             .await;
         let poison = format!("{a1}@1");
         let (seen, subscriber) = failing_on(&poison);
@@ -3482,9 +3507,9 @@ async fn the_held_heads_are_counted_by_channel_and_cause_from_the_table() {
             .unwrap()
     };
     let before = b_held_since().await;
-    f.execute(b_due).await;
+    f.elapse(b_due).await;
     f.drain(failing).await;
-    f.execute(
+    f.elapse(
         "DO $$ BEGIN \
            ASSERT (SELECT attempts FROM {table} WHERE tenant_id = 'tenant-b') = 2, 'b was retried'; \
          END $$",
@@ -3497,7 +3522,7 @@ async fn the_held_heads_are_counted_by_channel_and_cause_from_the_table() {
     );
 
     // A mark ends the hold.
-    f.execute(b_due).await;
+    f.elapse(b_due).await;
     let (_, subscriber) = collector();
     f.drain(&subscriber).await;
     let counts = f.inbox.held_counts(Duration::from_secs(5)).await.unwrap();

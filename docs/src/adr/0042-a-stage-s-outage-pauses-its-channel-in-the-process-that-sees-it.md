@@ -7,7 +7,8 @@ Proposed (2026-11-16). Built (2026-11-17): slice 1, the breaker's and the memo's
 D1); slice 3, the breaker in the dispatch — the rows, the exits and their CHECKs, the walk's paused channels and
 the guest, the trial, the isolation per transaction (R1, X1, G1, P1, C5, C8, C10, I1); slice 4, the expiry off
 the dispatch path (E1); slice 5, the reads, the stalls' report and the operator's verbs (V1, § 6, C14), and the
-names; slice 6, the model. § Slices orders the rest.
+names; slice 6, the model; slice 7, the traces and B1's gates (T1, B1). Every slice is built; § Owed keeps the
+measurements, the host's adoption and a live deployment's steps.
 
 It supersedes ADR-0040's decisions 4, 5, 7, 9 and its `park_held` (decision 8), and ADR-0041's decision 3 (the
 environment's verdict, its slice 2). It keeps ADR-0040's verdicts and causes (decisions 1–3, 6) and
@@ -396,8 +397,8 @@ histories with a manual clock; the shell's with a `Clock` and a paused runtime; 
 | P1 | the guest: more than K paused Tenants and a due head beyond K; three backlogged Tenants of an unpaused channel in turn; a guest that serves clears the round, one that does not leaves it; at 128-character ids, no index of the slots' table reads what a guest writes, the condition of its write's being HOT | as stated | drop the cursor; keep it on a take; keep the round; index `guest_tenant` |
 | I1 | a dispatch, a trial and a `resolve` inside REPEATABLE READ, the trial's session set to it after the process began | refused | a trial or a `resolve` without the check; the check at start only |
 | D1 | the dek: a distinct cause per class, `Forbidden` `Permanent`; the sentinel by a key read on a channel the consumer only receives; `kms.unexplained`'s detail without a path; no Tenant in a log line | as stated | draw the sentinel's key; collapse two causes; store the text |
-| T1 | `outage.rs` recorded by `make traces`; a recording not covered fails unless listed with its reason, the reason the converter's | as stated | a recording test not listed; a stale entry |
-| B1 | buffers a message and walk steps under `test-pg`; statements a happy dispatch at an absolute count; the take, walk and expiry planned once a connection | absolute figures | a heap fetch; the take's isolation read as its own statement |
+| T1 | `outage.rs` recorded by `make traces`; a recording not covered fails unless `traces/uncovered.tsv` lists it with its reason: for a run the converter refuses, the converter's, word for word, the steps before the refusal fitting; for one with a step TLC refuses, the record that owes the diagnosis; a statement of a test's own that writes rows behind the observers noted in the trace, and refused | as stated | a recording test not listed; a stale entry, recorded by no test or covered; a reason changed; a run listed as not fitting that fits; the recorder without the verbs' `operated`; a write behind the observers not noted; a step before a refusal that does not fit |
+| B1 | the buffers the take and the walk read to find a message at 64 slots, the walk's to pass two Tenants, an idle take's, and the walks' steps, the take's looks by its index alone (`pg/plan_tests.rs`, under `test-pg`); a happy dispatch's statements, at one slot and at 64; the take, walk and expiry planned once a connection, a reset of the plan cache counted by a canary | 198, 24, 19 and 2 buffers, 3 and 2 steps, 10 and 11 statements, on 14 and 18 alike | an added heap fetch; a second slot-row read; a take's look reading outside its index; an idle take looking at every slot; the take's isolation read as its own statement; the mark locking its identity twice; the walk's or the expiry's plan not forced generic |
 
 **The model.** `InboxOutage.tla` is rewritten over (slot, Tenant) heads with processes of workers, an ask split
 into its start and its verdict with a rollback between, the breaker per process, the memo, a process cut off and
@@ -422,7 +423,7 @@ cache during an outage; a two-session run of a verb's `ctid` join against a conc
 
 ## Owed
 
-1. The slices below, each with its executors.
+1. The measurements § Executors names.
 2. The host's adoption (§ 12), in its own records.
 3. A live deployment's steps, when there is a live client: expand and contract for `cause` and the dropped
    columns; the CHECKs added `NOT VALID` after a backfill; the take, walk, expiry and trial under new names while
@@ -617,3 +618,67 @@ payloads), its generated Vault policies.
   - **The guests' bound holds for a head no guest skips**: a paused channel's heads are skipped by its guests and
     walked by the slot's cursor alone; a guest without a cursor of its own overtakes a head more than twice
     (`InboxRotationGuestFromLowest.cfg`).
+- 2026-11-17: Slice 7 built: the traces (T1) and B1's gates. `make traces` records `tests/outage.rs`, and a run
+  it records that no trace covers fails it unless `verify/tla/traces/uncovered.tsv` lists the run with its reason
+  (`check.sh --uncovered`); B1's figures are tests of `pg/plan_tests.rs`, with slice 4's test of the plans kept a
+  connection, rewritten. Sixteen mutations, each red: eight of T1, eight of B1. What building it found:
+  - **The recorder wrote neither a head held unasked nor an operator's verb.** A run in which a verb parked or
+    re-armed rows showed only those rows' later steps, and could fit the model for a reason not the run's. Both
+    are written now; the converter refuses a verb over many rows that moved some, as it refuses a hold, and names
+    neither a slot nor a count of rows, which a run's timing moves.
+  - **T1's reason is the converter's only for a run the converter refuses.** A run with a step TLC refuses has
+    no reason of the converter's; it is listed as `unfit`, held to TLC's refusal, its reason naming the record
+    that owes the diagnosis; one that comes to fit goes stale, and is covered.
+  - **ADR-0041's two undiagnosed inbox traces are diagnosed.** `held_by_concurrent` wrote its holder's row by
+    SQL, and records no trace now; `window_passed` stores again a row the sweep forgot, at a new position, which
+    the converter refuses, `Inbox.tla` forgetting nothing. Three runs of the epoch relay crashed the converter on
+    an acknowledgement without a position, an epoch delivered with nothing of its selection's: refused, with that
+    reason.
+  - **The covered traces had not been recorded since before this decision.** Recorded again, they fit, and
+    `inbox-outage_rearm_beside` (a re-arm beside an ask of its slot) joins them.
+  - **X1 passed by the machine's speed.** Under a breaker of 40 ms to 200 ms, a fast run — `make traces` runs
+    the tests one at a time — spent a seed's whole history inside the holds and a pause, and processed nothing.
+    Its breaker now runs out within a step, 1 ms to 5 ms, so that a history meets what its seed drew; slice 3's
+    mutation that drops an exit's fragment still turns it red.
+  - **B1's second slot-row read survived the walk that takes a head**, which reads no round. The walk that
+    passes two Tenants is a figure of its own, and the mutation turns it red.
+  - **The figures are 14's and 18's alike**, decomposed in the test: the take 198 at 64 slots, 3 a slot — an
+    index's root and leaf and the newest queue row's heap page, a queue's new rows not all-visible; the walk 24;
+    the walk that passes 19; the idle take 2. 18 prints a node's rows with two decimals, which the steps read as
+    a float.
+  - **A round of roles on the built slice** (verifiability, performance, database), its findings taken:
+    - *The statements were counted at one slot*; a host cuts its table, and the mark then first locks its row's
+      identity, which a waiter in another slot locks too: 10 at one slot, 11 at 64, both pinned.
+    - *The test that the take, the walk and the expiry are planned once a connection could fail with nothing
+      wrong.* A session that creates a schema — a backend's first temporary table in a database does, and the
+      suite's siblings make theirs at their start — resets every kept plan of every session of the database:
+      beside a schema created in a loop, each statement was planned at every call, 60 plans for 33. The test now
+      counts the plans call by call and the resets by a canary, a function's statement that each reset plans
+      again as it does the others': each of the three is planned in at most one call more than the canary, and
+      its ten rounds run again, up to five times, while resets reach more than half of them. A schema every half
+      second passes; a schema in a loop fails it, saying the count cannot tell. The walk's or the expiry's plan
+      not forced generic still turns it red, by the count.
+    - *A covered trace checked nothing*: `inbox-outage_isolation` was one receive, the refused dispatch another
+      inbox's. It records nothing now.
+    - *The buffer figures could not see a look turned into a heap fetch*, the table's visibility map empty: the
+      take's looks are asserted index-only. *The idle take had no figure*, though it is the host's most frequent:
+      2 buffers, its one look at an empty queue and the meta's, no slot's.
+    - *A refusal hid the steps before it.* The converter writes the steps before a refusal, and they must fit.
+      Seven did not: three runs of the epoch relay, three rotating runs of `outage.rs` (ADR-0041 § Owed), and one
+      whose row failed for a moment and then for good, which `TraceInbox.tla`, reading off a run which messages
+      fail for good, cannot say. Each is listed as not fitting, with its reason. A prefix with no dispatch named
+      no count of slots, and the checker now takes the slots its rows landed in.
+    - *That a run written behind the observers records no trace was a convention*, and two covered traces broke
+      it: `attempts_saturate`, its attempts set by SQL, fit since the check of attempts is skipped when nothing
+      parks; `window_kept` had its waits rewritten by SQL. The fixtures' `execute` now notes such a statement in
+      the trace, and the converter refuses the run at it; a statement that only moves a time is `elapse`, the
+      step of time the model takes unseen. Both traces are no longer covered; nine runs are listed for it.
+    - *A forgotten row was told by its identity alone*; it is told now by a new position, so that a row
+      superseded in place, at its own, is not.
+    - *Whether the runs listed as not fitting stay so* was measured: the eight epoch runs recorded eight times,
+      four of them beside a stream of short transactions in another database of the cluster: 63 of 64 verdicts
+      unfit, and one a TLC run that ended with neither outcome, unfit when run again. Such a run is now run once
+      more.
+    - Not taken, as measurements by hand on one machine: the figures at the host's 2,000 Tenants a slot (three
+      levels of index), the walk that wraps and a guest's walk, and a table with churned index entries — an
+      absolute figure for those would move in a parallel suite with the cluster's oldest snapshot (M1, M3).

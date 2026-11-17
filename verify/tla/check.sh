@@ -20,7 +20,9 @@ tlc() { java -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -workers auto -deadloc
 check_trace() {
   work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
   cp Outbox.tla TraceOutbox.tla Inbox.tla TraceInbox.tla Bridge.tla TraceBridge.tla "$work"
-  name=$(python3 trace2tla.py "$1" "$work")
+  if ! name=$(python3 trace2tla.py "$1" "$work"); then
+    echo "   $1: refused by trace2tla.py"; return 1
+  fi
   log="$work/tlc.log"
   if java -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -workers 1 -metadir "$work/states" -config "$work/$name.cfg" "$work/$name.tla" > "$log" 2>&1; then
     echo "   $1: TLC found nothing, which cannot happen; see $log"; return 1
@@ -29,6 +31,85 @@ check_trace() {
     echo "   $1: fits"; rm -rf "$work"; return 0
   fi
   echo "   $1: does not fit the model:"; grep -E "^Error|^/\\\\ i = " "$log" | head -4; return 1
+}
+
+# How a recorded run stands against its model, one line: `fits`; `unfit`,
+# TLC deadlocking at a step the model refuses; or `refused`, a tab, and the
+# reason trace2tla.py printed for refusing to translate it. A refused run's
+# steps before the refusal are checked all the same: when they do not fit,
+# it stands `refused, its steps before unfit`, which no entry lists.
+verdict() {
+  work=$(mktemp -d)
+  cp Outbox.tla TraceOutbox.tla Inbox.tla TraceInbox.tla Bridge.tla TraceBridge.tla "$work"
+  if name=$(python3 trace2tla.py "$1" "$work" 2> "$work/refused"); then status=0; else status=$?; fi
+  case $status in
+    0|3) ;;
+    *) echo "broken: trace2tla.py: $(head -1 "$work/refused")"; rm -rf "$work"; return ;;
+  esac
+  fit=none
+  # TLC once more when it ends with neither outcome: a run of it that does
+  # not start is no verdict on the trace, and an error of the model's comes
+  # back the second time.
+  for run in 1 2; do
+    [ -n "$name" ] || break
+    java -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -workers 1 -metadir "$work/states$run" \
+      -config "$work/$name.cfg" "$work/$name.tla" > "$work/tlc.log" 2>&1 < /dev/null || true
+    if grep -q "Invariant NotFinished is violated" "$work/tlc.log"; then
+      fit=fits; break
+    elif grep -q "Deadlock reached" "$work/tlc.log"; then
+      fit=unfit; break
+    else
+      fit="broken: $(grep -E '^Error' "$work/tlc.log" | head -1)"
+    fi
+  done
+  if [ "$status" -eq 3 ]; then
+    case $fit in
+      fits|none) printf 'refused\t%s\n' "$(cat "$work/refused")" ;;
+      *) printf 'refused, its steps before %s\t%s\n' "$fit" "$(cat "$work/refused")" ;;
+    esac
+  else
+    echo "$fit"
+  fi
+  rm -rf "$work"
+}
+
+# The recordings `make traces` made into the directory $1 that no trace
+# under traces/ covers. Each is listed in traces/uncovered.tsv, a line a
+# recording: its file, `refused` or `unfit`, and why, tab-separated. A
+# `refused` one's reason is trace2tla.py's, word for word: what the
+# recording holds that the model does not describe yet; its steps before
+# the refusal fit. An `unfit` one has a step TLC refuses, before any
+# refusal of trace2tla.py's; its reason names the record that owes its
+# diagnosis. A recording neither covered nor listed fails, and so does an
+# entry whose recording no test made, that is covered, or that stands
+# otherwise than its entry says: one that fits now, or is refused for
+# another reason.
+check_uncovered() {
+  list=traces/uncovered.tsv
+  bad=0
+  tab=$(printf '\t')
+  for made in "$1"/*.jsonl; do
+    [ -e "$made" ] || continue
+    base=${made##*/}
+    [ -f "traces/$base" ] && continue
+    stands=$(verdict "$made")
+    listed=$(awk -F '\t' -v n="$base" '$1 == n { print $2 "\t" $3 }' "$list")
+    case $listed in
+      "") echo "traces: $base is not covered and not listed; it stands: $stands"; bad=1 ;;
+      unfit*) case $stands in
+          unfit|"refused, its steps before unfit$tab"*) ;;
+          *) echo "traces: $base is listed as not fitting, and stands: $stands"; bad=1 ;;
+        esac ;;
+      *) [ "$stands" = "$listed" ] || {
+        echo "traces: $base is listed as: $listed"; echo "   and stands: $stands"; bad=1; } ;;
+    esac
+  done
+  while IFS="$tab" read -r base kind reason; do
+    case $base in ''|'#'*) continue ;; esac
+    [ -f "$1/$base" ] || { echo "traces: $base is listed, and no test recorded it"; bad=1; }
+    [ ! -f "traces/$base" ] || { echo "traces: $base is listed, and covered"; bad=1; }
+  done < "$list"
+  return "$bad"
 }
 
 # A configuration that must fail, and the property it must break.
@@ -410,6 +491,10 @@ group_traces() {
 
 if [ "${1:-}" = --groups ]; then
   printf '%s\n' $GROUPS
+  exit 0
+fi
+if [ "${1:-}" = --uncovered ]; then
+  check_uncovered "$2"
   exit 0
 fi
 [ $# -gt 0 ] || set -- $GROUPS

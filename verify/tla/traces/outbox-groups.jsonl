@@ -1,9 +1,9 @@
-{"event":"published","message_id":"00000000-0000-4000-8000-00000000006f","observer":"outbox","position":1,"uri":"kafka://orders","xid":2365279}
-{"delivered":"2365277:2365277:","epoch":"2365280:2365280:","epoch_end":1,"epoch_offset":0,"event":"fetched","group":"a","horizon":2365280,"limit":100,"messages":["00000000-0000-4000-8000-00000000006f"],"observer":"outbox","slot":0,"slots":1,"statement":"2365280:2365280:"}
+{"event":"published","message_id":"00000000-0000-4000-8000-00000000006f","observer":"outbox","position":1,"uri":"kafka://orders","xid":2698590}
+{"delivered":"2698588:2698588:","epoch":"2698591:2698591:","epoch_end":1,"epoch_offset":0,"event":"fetched","group":"a","horizon":2698591,"limit":100,"messages":["00000000-0000-4000-8000-00000000006f"],"observer":"outbox","slot":0,"slots":1,"statement":"2698591:2698591:"}
 {"event":"handled","group":"a","message_id":"00000000-0000-4000-8000-00000000006f","observer":"outbox","ok":true,"slot":0}
-{"drained":true,"event":"acked","group":"a","observer":"outbox","position":1,"short":false,"slot":0,"xid":2365279}
+{"drained":true,"event":"acked","group":"a","observer":"outbox","position":1,"short":false,"slot":0,"xid":2698590}
 {"event":"dispatched","group":"a","observer":"outbox","outcome":"batch","slot":0}
-{"delivered":"2365277:2365277:","epoch":"2365281:2365281:","epoch_end":1,"epoch_offset":0,"event":"fetched","group":"b","horizon":2365281,"limit":100,"messages":["00000000-0000-4000-8000-00000000006f"],"observer":"outbox","slot":0,"slots":1,"statement":"2365281:2365281:"}
+{"delivered":"2698588:2698588:","epoch":"2698592:2698592:","epoch_end":1,"epoch_offset":0,"event":"fetched","group":"b","horizon":2698592,"limit":100,"messages":["00000000-0000-4000-8000-00000000006f"],"observer":"outbox","slot":0,"slots":1,"statement":"2698592:2698592:"}
 {"event":"handled","group":"b","message_id":"00000000-0000-4000-8000-00000000006f","observer":"outbox","ok":true,"slot":0}
-{"drained":true,"event":"acked","group":"b","observer":"outbox","position":1,"short":false,"slot":0,"xid":2365279}
+{"drained":true,"event":"acked","group":"b","observer":"outbox","position":1,"short":false,"slot":0,"xid":2698590}
 {"event":"dispatched","group":"b","observer":"outbox","outcome":"batch","slot":0}

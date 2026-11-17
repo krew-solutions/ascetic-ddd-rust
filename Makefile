@@ -139,15 +139,13 @@ traces: ## the traces recorded again by the live tests at ASCETIC_DDD_TEST_PG_UR
 	recorded=$$(mktemp -d)
 	trap 'rm -rf "$$recorded"' EXIT
 	ASCETIC_DDD_TRACE_DIR="$$recorded" $(CARGO) test -p ascetic-ddd-outbox -p ascetic-ddd-inbox \
-	  --all-features --test pg --test bridge -- --include-ignored --test-threads=1
+	  --all-features --test pg --test bridge --test outage -- --include-ignored --test-threads=1
 	gone=0
 	for kept in verify/tla/traces/*.jsonl; do
 	  if [ -f "$$recorded/$${kept##*/}" ]; then cp "$$recorded/$${kept##*/}" "$$kept"
 	  else echo "traces: $${kept##*/} is covered, and no test recorded it again" >&2; gone=1; fi
 	done
-	for made in "$$recorded"/*.jsonl; do
-	  [ -f "verify/tla/traces/$${made##*/}" ] || echo "traces: not covered: $${made##*/}"
-	done
+	verify/tla/check.sh --uncovered "$$recorded" || gone=1
 	[ "$$gone" -eq 0 ]
 	verify/tla/check.sh traces
 

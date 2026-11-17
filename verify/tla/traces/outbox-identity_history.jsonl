@@ -1,2 +1,2 @@
-{"event":"published","message_id":"00000000-0000-4000-8000-0000000000cd","observer":"outbox","position":1,"uri":"kafka://orders/order-1","xid":2365503}
-{"event":"published","message_id":"00000000-0000-4000-8000-0000000000ce","observer":"outbox","position":2,"uri":"kafka://orders/order-2","xid":2365503}
+{"event":"published","message_id":"00000000-0000-4000-8000-0000000000ce","observer":"outbox","position":1,"uri":"kafka://orders/order-1","xid":2698815}
+{"event":"published","message_id":"00000000-0000-4000-8000-0000000000cf","observer":"outbox","position":2,"uri":"kafka://orders/order-2","xid":2698815}
