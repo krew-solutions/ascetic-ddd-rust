@@ -19,9 +19,11 @@
 (*     time on its own, spending an attempt;                               *)
 (*   - an `Unavailable` holds its row and spends nothing, at either scope; *)
 (*     an ask's, of either scope, is remembered in the process's memo,     *)
-(*     which holds the Tenant's other heads unasked (HoldUnasked) until it *)
-(*     runs out, and then lets one ask through, in flight, at a time; a    *)
-(*     trial's Stage verdict is the breaker's, not the memo's;             *)
+(*     which lets one ask through, in flight, at a time once it runs out;  *)
+(*     at the Tenant's scope it holds the Tenant's other heads unasked     *)
+(*     (HoldUnasked), at the stage's -- one process's evidence -- the      *)
+(*     process leaves them to the others, writing nothing; a trial's Stage *)
+(*     verdict is the breaker's, not the memo's;                           *)
 (*   - a Stage `Unavailable` may open the process's breaker -- the         *)
 (*     thresholds are the core's, and the model takes either branch; an   *)
 (*     open breaker asks no head but by its trial, one at a time, which a  *)
@@ -82,7 +84,13 @@ ASSUME MaxAttempts > 0 /\ Tries \in 1..MaxAttempts /\ HoldCap \in Nat \ {0}
 
 Causes == {"stage", "tenant", "own", "permanent", "given"}
 Kinds == {"none", "backoff", "unavailable"}
-Memos == {"none", "held", "due", "flight"}
+\* A memo entry of the Tenant's scope ("held", "due", "flight"), or of the
+\* stage's ("_s"): the latter one process's evidence, kept to the process.
+Memos == {"none", "held", "due", "flight", "held_s", "due_s", "flight_s"}
+Held(v) == v \in {"held", "held_s"}
+Due(v) == v \in {"due", "due_s"}
+InFlightOf(v) == v \in {"flight", "flight_s"}
+Stage(v) == v \in {"held_s", "due_s", "flight_s"}
 
 VARIABLES
   processed,   \* SUBSET Arrives
@@ -170,10 +178,12 @@ AskStart(w) ==
        /\ DepDone(m)
        /\ \/ /\ breaker[p] = "closed" /\ due[m]
              /\ IF Mutant = "no_flight_mark"
-                  THEN memo[p][TenantOf[m]] # "held"
-                  ELSE memo[p][TenantOf[m]] \in {"none", "due"}
-             /\ memo' = IF memo[p][TenantOf[m]] \in {"due", "flight"}
-                          THEN [memo EXCEPT ![p][TenantOf[m]] = "flight"] ELSE memo
+                  THEN ~Held(memo[p][TenantOf[m]])
+                  ELSE memo[p][TenantOf[m]] = "none" \/ Due(memo[p][TenantOf[m]])
+             /\ memo' = IF Due(memo[p][TenantOf[m]]) \/ InFlightOf(memo[p][TenantOf[m]])
+                          THEN [memo EXCEPT ![p][TenantOf[m]] =
+                                  IF Stage(@) THEN "flight_s" ELSE "flight"]
+                          ELSE memo
              /\ trial' = trial
           \/ /\ breaker[p] = "open"
              /\ \A v \in Workers : ProcOf[v] = p => ~trial[v]
@@ -192,18 +202,21 @@ SetAside(w) ==
   /\ UNCHANGED <<processed, procOrder, attempts, parked, byHand, expired, cause, kind, holds, due,
                 flaked, rearmed, env, breaker, memo, flight, trial, admin, rollbacks>>
 
-\* A head of a Tenant the process's memo holds is held unasked: its row
-\* written held under the memo's cause, its count of verdicts untouched.  The
-\* memo's cause is its latest verdict's, of either scope; the model writes an
-\* Unavailable's cause, "tenant", the only fact of it the properties read.
+\* A head of a Tenant the process's memo holds at the Tenant's scope is held
+\* unasked: its row written held under the memo's cause, its count of verdicts
+\* untouched.  At the stage's scope the process's walk does not take the head
+\* (ADR-0042 decisions 2 and 5): nothing is written, and the other processes
+\* take it -- but for the refuted design that writes it ("stage_held_unasked").
 HoldUnasked(w) ==
   LET p == ProcOf[w] IN
   /\ flight[w] = None /\ breaker[p] = "closed"
   /\ \E m \in Heads :
        /\ ~SlotBusy(SlotOf[m]) /\ due[m]
-       /\ memo[p][TenantOf[m]] \in {"held", "flight"}
+       /\ IF Mutant = "stage_held_unasked"
+            THEN Held(memo[p][TenantOf[m]]) \/ InFlightOf(memo[p][TenantOf[m]])
+            ELSE memo[p][TenantOf[m]] \in {"held", "flight"}
        /\ kind' = [kind EXCEPT ![m] = "unavailable"]
-       /\ cause' = [cause EXCEPT ![m] = "tenant"]
+       /\ cause' = [cause EXCEPT ![m] = IF Stage(memo[p][TenantOf[m]]) THEN "stage" ELSE "tenant"]
        /\ due' = [due EXCEPT ![m] = FALSE]
   /\ UNCHANGED <<processed, procOrder, attempts, parked, byHand, expired, waiting, holds, flaked,
                 rearmed, env, breaker, memo, flight, trial, admin, rollbacks>>
@@ -287,7 +300,7 @@ AskEnd(w) ==
         /\ ~Reachable(p, m)
         /\ Hold(m, "stage")
         /\ breaker' \in {breaker, [breaker EXCEPT ![p] = "open"]}
-        /\ memo' = IF trial[w] THEN memo ELSE [memo EXCEPT ![p][t] = "held"]
+        /\ memo' = IF trial[w] THEN memo ELSE [memo EXCEPT ![p][t] = "held_s"]
         /\ UNCHANGED <<processed, procOrder, waiting, byHand, expired, flaked>>
   /\ UNCHANGED <<env, admin, rollbacks>>
 
@@ -299,8 +312,9 @@ Rollback(w) ==
   /\ rollbacks' = rollbacks + 1
   /\ flight' = [flight EXCEPT ![w] = None]
   /\ trial' = [trial EXCEPT ![w] = FALSE]
-  /\ memo' = IF memo[p][TenantOf[flight[w]]] = "flight"
-               THEN [memo EXCEPT ![p][TenantOf[flight[w]]] = "due"] ELSE memo
+  /\ memo' = IF InFlightOf(memo[p][TenantOf[flight[w]]])
+               THEN [memo EXCEPT ![p][TenantOf[flight[w]]] = IF Stage(@) THEN "due_s" ELSE "due"]
+               ELSE memo
   /\ UNCHANGED <<rows, env, breaker, admin>>
 
 \* A guest's circle that finds no head of the channel closes the breaker.
@@ -321,8 +335,8 @@ Elapse(m) ==
 
 \* A Tenant's memo runs out: one ask may go through.
 MemoElapse(p, t) ==
-  /\ memo[p][t] = "held"
-  /\ memo' = [memo EXCEPT ![p][t] = "due"]
+  /\ Held(memo[p][t])
+  /\ memo' = [memo EXCEPT ![p][t] = IF Stage(@) THEN "due_s" ELSE "due"]
   /\ UNCHANGED <<rows, env, breaker, flight, trial, admin, rollbacks>>
 
 \* A waiter whose chain reaches no queued row is parked, the identity it
@@ -498,7 +512,13 @@ CauseIsCurrent ==
 OneAskPerReach ==
   [][\A w \in Workers :
        (flight[w] = None /\ flight'[w] # None /\ ~trial'[w])
-         => memo[ProcOf[w]][TenantOf[flight'[w]]] \in {"none", "due"}]_vars
+         => memo[ProcOf[w]][TenantOf[flight'[w]]] = "none"
+              \/ Due(memo[ProcOf[w]][TenantOf[flight'[w]]])]_vars
+
+\* A row held without a verdict told on it carries a Tenant's cause: a stage's
+\* refusal, one process's evidence, is written on the row refused alone.
+UnaskedHoldIsTheTenants ==
+  \A m \in Msgs : (kind[m] = "unavailable" /\ holds[m] = 0) => cause[m] = "tenant"
 
 \* No waiter expires while its chain reaches a queued row.
 PresentDependencyNeverExpires ==

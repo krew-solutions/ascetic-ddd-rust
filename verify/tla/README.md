@@ -417,9 +417,12 @@ and memo of Tenants:
   at Tenant scope, the stage at Stage scope; a permanent row parks at once; a
   flaky one fails its first time, spending an attempt;
 - an `Unavailable` holds its row and spends nothing; an ask's, of either
-  scope, is remembered in the process's memo, which holds the Tenant's other
-  heads unasked (`HoldUnasked`) and then lets one ask through, in flight, at a
-  time; a trial's Stage verdict is the breaker's, not the memo's;
+  scope, is remembered in the process's memo, which lets one ask through, in
+  flight, at a time once it runs out; at the Tenant's scope it holds the
+  Tenant's other heads unasked (`HoldUnasked`), at the stage's — one
+  process's evidence — the process leaves them to the others and writes
+  nothing on them (the entry's values end in `_s`); a trial's Stage verdict is
+  the breaker's, not the memo's;
 - a Stage `Unavailable` may open the process's breaker (the thresholds are
   the core's, so the model takes either branch); an open breaker asks only by
   its trial, one at a time, which a processed verdict closes, and a breaker
@@ -446,24 +449,23 @@ configuration with `Mutant = "none"` — where that property must hold, so
 that the property and no other tells the two apart. `check.sh` pins every
 passing configuration's and every twin's count of distinct states.
 
-Since the memo holds a Tenant at the stage's scope too (ADR-0042, slice 8),
-the instances with the stage down grew: `InboxOutage.cfg` from 17 368
-states to 446 210, `InboxOutageOperators.cfg` from 23 986 to 3 685 902. On
-the reference machine (12 cores) the group takes some 50 minutes, 42 of them
-`InboxOutageOperators.cfg`'s liveness, `EventuallyOutOfTheWay`; its
-invariants alone take 87 s. Kept whole: without the rollback it halves, and
-a rollback beside the operator's verbs is checked nowhere else.
+The memo holds a Tenant at the stage's scope too (ADR-0042, slice 8), and
+since slice 9 a process leaves such a Tenant's heads to the others: the
+instances with the stage down count `InboxOutage.cfg` 191 126 states and
+`InboxOutageOperators.cfg` 830 194 (slice 8, which held them unasked,
+446 210 and 3 685 902). On the reference machine (12 cores) the group takes
+some 11 minutes, 9 of them `InboxOutageOperators.cfg`'s liveness.
 
 `MCInboxOutage.tla` fixes the instances: m1 and m2 of Tenant t1 under one
 key in slot s1, m3 of t2 in s2; m4 and x where an instance names them.
 
 | Configuration | Rule | Expected |
 | --- | --- | --- |
-| `InboxOutage.cfg` | the stage down once and back, p2 cut off once and back, t1's keys cached in p1, m2 failing once, a rollback | every invariant and property holds; 446 210 states |
+| `InboxOutage.cfg` | the stage down once and back, p2 cut off once and back, t1's keys cached in p1, m2 failing once, a rollback | every invariant and property holds; 191 126 states |
 | `InboxOutageTenant.cfg` | t1 failing alone, its rows in both slots, two workers of one process | `OneAskPerReach`, `EventuallyProcessed`; 1 936 |
-| `InboxOutageCutOff.cfg` | p2 cut off for good, the stage up | the other process processes every row; 4 588 |
+| `InboxOutageCutOff.cfg` | p2 cut off for good, the stage up | the other process processes every row; 2 336 |
 | `InboxOutageDeps.cfg` | m3 waits for m2, queued; m4 for x, which never arrives | m3 spared and processed, m4 expires; 36 |
-| `InboxOutageOperators.cfg` | m1 failing and parking, m3 permanent, the operator acting | `CanaryExact`, `GivenUpIsTheEnd`, `KeyOrder`; 3 685 902 |
+| `InboxOutageOperators.cfg` | m1 failing and parking, m3 permanent, the operator acting | `CanaryExact`, `GivenUpIsTheEnd`, `KeyOrder`; 830 194 |
 | `InboxOutageUnavailableSpends.cfg` | an `Unavailable` that spends | `UnavailableNeverSpends` violated |
 | `InboxOutageNoFlightMark.cfg` | a memo that lets every worker ask a Tenant in flight | `OneAskPerReach` violated |
 | `InboxOutageExpirePresent.cfg` | an expiry that parks a waiter whose dependency is queued | `PresentDependencyNeverExpires` violated |
@@ -472,6 +474,7 @@ key in slot s1, m3 of t2 in s2; m4 and x where an instance names them.
 | `InboxOutageCanaryKeeps.cfg` | a re-arm that keeps a higher count | `CanaryExact` violated |
 | `InboxOutageQueueOldest.cfg` | a queue given up from its oldest row | `GivenUpIsTheEnd` violated |
 | `InboxOutageRearmBesideAnAsk.cfg` | a re-arm beside an ask of its slot | `KeyOrder` violated: a later row of the key, in flight while the overtaking is read, is processed past the row re-armed |
+| `InboxOutageStageHeldUnasked.cfg` | p2 cut off for good, its memo writing a stage's refusal on the Tenant's other heads, held unasked (the design before ADR-0042's slice 9) | `UnaskedHoldIsTheTenants` violated: a row never told an `Unavailable` holds under a stage's cause |
 
 The last was the model's finding, not a design the decision refuted: the
 library's bulk unpark read whether a later row of the stream had overtaken a

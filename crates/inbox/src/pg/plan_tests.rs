@@ -340,7 +340,12 @@ async fn the_take_and_the_walk_go_by_the_queue_s_indexes() {
             .await
             .unwrap();
         let none: Vec<String> = Vec::new();
-        let walk = explain(&walk_sql(&table), &[&slot, &32i32, &1.0f64, &none]).await;
+        let nothing = serde_json::json!({});
+        let walk = explain(
+            &walk_sql(&table),
+            &[&slot, &32i32, &1.0f64, &none, &nothing],
+        )
+        .await;
         by_the_indexes(
             &walk[0]["Plan"],
             &table,
@@ -366,7 +371,7 @@ async fn the_take_and_the_walk_go_by_the_queue_s_indexes() {
                      dormant_until = NULL, dormant_after = NULL WHERE slot = {slot}; \
                  SET plan_cache_mode = force_generic_plan; \
                  PREPARE generic_take AS {}; \
-                 PREPARE generic_walk (smallint, integer, double precision, text[]) AS {};",
+                 PREPARE generic_walk (smallint, integer, double precision, text[], jsonb) AS {};",
                 take_sql(&table),
                 walk_sql(&table)
             ))
@@ -389,7 +394,8 @@ async fn the_take_and_the_walk_go_by_the_queue_s_indexes() {
             &[format!("{table}__head_idx")],
             f64::from(slots),
         );
-        let walk = explain_generic(&format!("generic_walk ({slot}, 32, 1.0, '{{}}')")).await;
+        let walk =
+            explain_generic(&format!("generic_walk ({slot}, 32, 1.0, '{{}}', '{{}}')")).await;
         by_the_indexes(
             &walk[0]["Plan"],
             &table,
@@ -863,9 +869,9 @@ async fn the_take_the_walk_and_the_expiry_are_planned_once_a_connection() {
             .query_one(
                 &format!(
                     "SELECT * FROM {table}__walk($1::smallint, $2::integer, $3::double precision, \
-                     $4::text[])"
+                     $4::text[], $5::jsonb)"
                 ),
-                &[&0i16, &32i32, &1.0f64, &Vec::<String>::new()],
+                &[&0i16, &32i32, &1.0f64, &Vec::<String>::new(), &serde_json::json!({})],
             )
             .await
             .unwrap();
@@ -1216,13 +1222,13 @@ async fn a_message_is_found_at_its_buffers_and_the_walk_at_its_steps() {
             "UPDATE {table}_slots SET last_tenant = '{cursor}' WHERE slot = 0; \
              SET plan_cache_mode = force_generic_plan; \
              PREPARE found_take AS {}; \
-             PREPARE found_walk (smallint, integer, double precision, text[]) AS {};",
+             PREPARE found_walk (smallint, integer, double precision, text[], jsonb) AS {};",
             take_sql(table),
             walk_sql(table)
         ))
         .await
         .unwrap();
-    let walk = "EXECUTE found_walk (0, 32, 1.0, '{}')";
+    let walk = "EXECUTE found_walk (0, 32, 1.0, '{}', '{}')";
     client.batch_execute("BEGIN").await.unwrap();
     let taken = client.query_one(walk, &[]).await.unwrap();
     client.batch_execute("ROLLBACK").await.unwrap();
@@ -1264,7 +1270,7 @@ async fn a_message_is_found_at_its_buffers_and_the_walk_at_its_steps() {
     };
     // The same walk bounded at two: it passes the two waiting and takes
     // nothing, and decides the round the slot goes on with.
-    let passing = "EXECUTE found_walk (0, 2, 1.0, '{}')";
+    let passing = "EXECUTE found_walk (0, 2, 1.0, '{}', '{}')";
     client.batch_execute("BEGIN").await.unwrap();
     let passed = client.query_one(passing, &[]).await.unwrap();
     client.batch_execute("ROLLBACK").await.unwrap();

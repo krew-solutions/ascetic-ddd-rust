@@ -15,7 +15,12 @@ the row and not the Tenant — was decided under the library's gate (a blind sol
 discriminator, three rounds of roles) and rejected (§ Alternatives Considered). The round found defects of the
 build: slice 8 fixes those of decision 1's trials (one a tick call, hastened at most once a tick, a busy slot that
 asks nothing, the close with no witness left) and brings the model's memo to the stage's scope; the memo's clock
-written on rows it did not ask is owed, with its two remedies and the measurements that choose (§ Owed, 1).
+written on rows it did not ask was owed, with its two remedies and the measurements that choose.
+
+Revised (2026-11-18), slice 9: of the two, M8 chose. A replica cut off alone holding a launch Tenant's backlog on a
+channel it does not pause: as built, 551 of 20,000 rows served in 20 minutes; with the memo's clock capped at the
+tick on the rows, 8,894; with the memo's stage-scoped Tenants kept from the process's walk, its walk a guest's,
+all 20,000 in 160 s against 120 s with no replica cut off (§ Measured). Decisions 2, 3, 5 and 6 say so.
 
 It supersedes ADR-0040's decisions 4, 5, 7, 9 and its `park_held` (decision 8), and ADR-0041's decision 3 (the
 environment's verdict, its slice 2). It keeps ADR-0040's verdicts and causes (decisions 1–3, 6) and
@@ -69,6 +74,7 @@ evidence, and ends by evidence of the same kind. The inbox does not ask what a s
 |---|---|---|---|---|
 | `Permanent`, `Transient` | the head | the row: attempts, back-off | back-off; parks at `max_attempts` | time; a person |
 | `Unavailable`, `Tenant` scope | (channel, Tenant), this process | the process's memo | holds on the Tenant's heads this process meets; one ask in flight | time, then one ask |
+| `Unavailable`, `Stage` scope | (channel, Tenant), this process | the process's memo | the row refused held a tick at most; the walk treats the Tenant's other heads as not due in this process, writing nothing on them; one ask in flight | time, then one ask |
 | `Unavailable`, `Stage` scope, broad | (channel), this process | the process's breaker | the walk treats the channel's heads as not due | a trial's verdict |
 
 Two corollaries:
@@ -143,10 +149,18 @@ those: a healthy Tenant never enters it.
 - `until = now + min(cap, max(told, floor · 2^exponent))`, cap 300 s.
 - One ask in flight per (channel, Tenant) per process, after the Tenant's first `Unavailable`. The mark is a guard
   released on every exit of the dispatch, with a deadline.
-- A head of a memoised Tenant met before `until`, or while an ask is in flight, is held to the later of `until`
-  and the in-flight deadline, always ahead of now, and the subscriber is not called. A Tenant without an entry is
-  never held. That interval is this process's, and § 3 writes it on the row, where every process reads it (§ Owed,
-  1).
+- At the Tenant's scope, a head of a memoised Tenant met before `until`, or while an ask is in flight, is held to
+  the later of `until` and the in-flight deadline, always ahead of now, and the subscriber is not called: written
+  on the row (§ 3), the Tenant's own trouble for every process. A Tenant without an entry is never held.
+- **At the stage's scope the process keeps its evidence to itself.** While the entry's back-off runs or an ask of
+  it is in flight, the walk treats the Tenant's heads on that channel as not due in this process (§ 5), and
+  nothing is written on them: the other processes, which did not see the stage refuse, take them. A head met
+  anyway — the memo took the Tenant after the walk began, or the keys the walk was given missed it — is passed
+  (`Before::Pass`), unasked and unwritten, and the keys rebuilt by it; so is a head of a channel paused after the
+  walk began, the pause one process's evidence too. An entry's run of refusals begins anew after a back-off that
+  ended more than a window before the next. Until
+  slice 9 such a head was held to the memo's `until` on the row, up to 300 s for every process: M8 measured a
+  replica cut off alone so holding a Tenant's whole backlog from the two healthy ones (§ Measured).
 
 ### 3. The rows
 
@@ -159,10 +173,10 @@ those: a healthy Tenant never enters it.
   now)`, `holds + 1`, `hold_kind = unavailable`, `next_attempt_at = clock_timestamp() + interval`. The interval is
   the memo's `until` for a `Tenant` scope, and **at most the tick cap** for a `Stage` scope, the longer clock kept
   in memory only: a replica cut off alone delays a healthy replica's head by at most 15 s.
-- A head held unasked (§ 2) writes `cause`, `held_since`, `hold_kind` and `next_attempt_at`, and not `holds`; its
-  interval is the memo's — `until`, or the in-flight deadline — at either scope, not capped at the tick. So the 15 s
-  above bounds the row a subscriber refused, not the Tenant's other heads, which a replica's memo holds from every
-  process for up to 300 s (§ Owed, 1).
+- A head held unasked at the Tenant's scope (§ 2) writes `cause`, `held_since`, `hold_kind` and
+  `next_attempt_at`, and not `holds`; its interval is the memo's, `until` or the in-flight deadline. At the
+  stage's scope nothing is written but the row the subscriber refused, so the 15 s above is the most a replica
+  cut off alone delays a healthy replica's head, one row a re-ask.
 - Every interval is bound against the database's clock, never a process's.
 
 ### 4. The exits
@@ -181,9 +195,13 @@ A violation (23514) is a defect that stops the loops: the fault of the library's
 
 ### 5. The walk and the guest
 
-- `<table>__walk` gains the paused channels; a head is due when its own back-off has passed and its channel is
-  not paused. With none paused, today's statement.
-- A process with a paused channel walks as a **guest**, from the slot's own `guest_tenant` (a column not indexed,
+- `<table>__walk` gains the paused channels and the (channel, Tenant)s the memo keeps to the process at the
+  stage's scope (§ 2), a `jsonb` object of `"<channel>/<tenant>"` keys — a channel is `scheme://authority`, so the
+  first slash after it begins the Tenant — looked up with `?`, flat in its size; a head is due when its own
+  back-off has passed, its channel is not paused and its key is not in the object. With none paused and the object
+  empty, today's statement. The object is kept built while the memo and the channels' states do not change and no
+  excluded entry's back-off or flight ends (C18).
+- A process with a paused channel, or with any key in the object, walks as a **guest**, from the slot's own `guest_tenant` (a column not indexed,
   so the write stays HOT), shared by the guests of every replica. It serves a due head it finds, clearing an
   unpaused round as `take` does. Finding none, it writes `served_at` and `guest_tenant` only, never the cursor,
   the round or the dormancy, returns `Outcome::Paused` with the heads of paused channels it met, and the loop
@@ -219,6 +237,10 @@ A violation (23514) is a defect that stops the loops: the fault of the library's
 - **The oldest `Unavailable` hold** over a threshold pages unless the channel is stalled on every replica, with a
   `for` longer than the hold cap: the net under a fault mislabelled `Unavailable` and under one Tenant's long
   trouble.
+- `excluded()`, the process's own: the Tenants its memo keeps from its walk at the stage's scope, by (channel,
+  cause), how many and since when the oldest's run began, never which — what a host reports of a replica cut off
+  alone on a channel it does not pause, which writes nothing on the rows it leaves. A gauge of the host's; a run
+  begins anew after a quiet window, so that a Tenant refused once a week does not read as cut off for a week.
 - `stalls(within)`; `held_counts(within)` by (channel, kind, cause); `waiting_counts(within)` by channel, by
   `__waiting_since_idx`; `parked_counts(within)` by (channel, ground, cause); each in a transaction of its own
   bounded by `within`.
@@ -349,9 +371,9 @@ At 2,000 Tenants in each of 64 slots, 3 replicas of 8 loops, K = 32:
   tick that a head met brought forward (at most 480 an hour); guests R · L / poll; the expiry's
   re-reads grow with the waiters, not the Tenants. Detection after recovery takes at most the tick cap and one
   trial. **No term in T.** Today: 427 asks and 4,032 walks a second.
-- **A misread** pauses the process that made it; a healthy replica's head that process refused waits at most the
-  tick cap, one it held unasked its memo's clock, up to 300 s (§ Owed, 1); at one slot a trial holds the slot at
-  most `trial_wait` a tick.
+- **A misread** pauses the process that made it, or, on a channel where one Tenant alone fails, keeps that Tenant
+  to itself: a healthy replica's head waits at most the tick cap, for the one row the process refused a re-ask
+  (M8); at one slot a trial holds the slot at most `trial_wait` a tick.
 - **A brownout** of 5 % reaches neither threshold; a flapping stage pages by § 6 (b).
 - **One Tenant's trouble**: one ask in flight a process, `log2(cap/floor) + t/cap` asks; a quiet channel with one
   failing Tenant is never paused.
@@ -408,13 +430,24 @@ At 2,000 Tenants in each of 64 slots, 3 replicas of 8 loops, K = 32:
     of scope*: a herd on every success under a quota; and the dek's scope alternates within one Tenant's trouble —
     `Stage` right after each failed call, `Tenant` later in its back-off once another key has landed — so the
     exponent never grew;
-  - *a memoised Tenant made not due for its process's walk, the process walking as a guest*: a guest's fruitless
-    walk sleeps the poll, which a healthy Tenant's head then waits in a partial outage (some 25 s at C4's shape),
-    and the keys sent with every walk cost some 0.75 µs a key — tens of MB a second at the host's walks.
+  - *a memoised Tenant made not due for its process's walk, the process walking as a guest*, at either scope: a
+    guest's fruitless walk sleeps the poll, which a healthy Tenant's head then waits in a partial outage (some 25 s
+    at C4's shape, the Tenant's scope), and the keys sent with every walk cost some 0.75 µs a key. Kept to the
+    stage's scope, it is decision 2 since slice 9: a Tenant-scoped entry's Tenant is held on the rows, and the
+    stage-scoped keys are few but while a stage is down with caches warm (M9).
   The root: the inbox cannot tell a cache's success from the KMS's; the dek's scope is one process's and
   alternates; and at the host's scale a shared outage pauses every channel within seconds, so that the cached
   rows freed are few. The memo keeps both scopes, its count combined across them: the combination is what absorbs
   the dek's alternation.
+- **The memo's clock on the rows capped at the tick** (§ Owed's first remedy, slice 9's measurement). Refuted by
+  M8: a replica cut off alone re-holds each head it meets for 15 s, 4,636 heads in 20 minutes, and the launch's
+  backlog it holds from the healthy replicas stays unserved — 8,894 of 20,000 rows.
+- **The memo's stage-scoped Tenants kept from the walk, the process not a guest** (its cursor, round and sleep
+  written as with nothing kept, a slot of kept heads sleeping a poll). Refuted by reading before M8 measured it:
+  the shared cursor passes a head due for the other processes (`Inbox.tla`'s `PassTo` and the refinement no
+  longer hold, `BoundedOvertaking` unbounded for the Tenant kept), the slot sleeps on one process's view, and
+  fruitless walks multiply; M8 found it no better than the guest's (200 s against 180 s, a crowd's p99 1.8 s
+  against 1.9 s).
 
 ## Executors
 
@@ -430,7 +463,7 @@ histories with a manual clock; the shell's with a `Clock` and a paused runtime; 
 | C5 | one Tenant hanging 10 s, 64 heads, 2,000 healthy Tenants | ≤ 1 concurrent ask; ≤ 63 row versions during one ask | no in-flight mark; hold to a past `until` |
 | C6 | recovery, then every row `Transient` | closed within 3 trials | close only on processed |
 | C7 | paused, the heads of its memoised Tenants given up by a person | closed at the tick that finds no witness and none to wait for; no stall after | a tick without a witness only waits; one closing at once (C10, C11, C14 red) |
-| C8 | one replica cut off, caches warm | a row it refused held ≤ the tick cap, a `Tenant`-scoped one to its back-off; at one slot its throughput ≥ (tick − `trial_wait`)/tick (a head it held unasked carries its memo's clock: § Owed, 1) | hold to `until` on the row; no trial timeout |
+| C8 | one replica cut off, caches warm | a row it refused held ≤ the tick cap, a `Tenant`-scoped one to its back-off; at one slot its throughput ≥ (tick − `trial_wait`)/tick; its other heads left to the others (K1, M8) | hold to `until` on the row; no trial timeout |
 | C9 | a trial answered after its deadline | f unchanged | count a stale answer |
 | C10 | one head of the channel among T ≫ K | processed within 2 ticks of recovery, the slot's oldest rows another channel's | the trial takes the slot's head rather than its witness's |
 | C11 | mixed causes during a pause | one row a (channel, reporter); a stable cause | a cause per verdict |
@@ -439,6 +472,11 @@ histories with a manual clock; the shell's with a `Clock` and a paused runtime; 
 | C15 | ten minutes of a stage down, a fresh Tenant's head met every 200 ms | trials 30–90: at most one hastened a tick | a head met hastens whenever a second has passed |
 | C16 | twenty channels paused in one process; then one caller, a trial of 2 s at a time, ten minutes; in the database, two channels paused, their ticks due together | one trial a tick call, the next call the next channel's; every channel's stall reported within its ttl; every trial issued asked its witness | a trial for every channel due; a stall reported only at its channel's trial |
 | C17 | trials whose slot a dispatch held, after a failed tick | the witness again within the tick's first step, first in line; no channel closed, no failed tick | a busy slot counted as a head gone; the busy witness waiting the schedule; a busy trial a failed tick |
+| C18 | random histories of asks of both scopes, rollbacks, ticks and their trials of every outcome, heads met, asks held across steps, time alone, two channels; looked at also while an ask is in flight | the walk's keys, kept built, are what the memo says now | the keys outliving a back-off; a flight marked or abandoned, a verdict or a trial, not rebuilding them |
+| C19 | a stage-scoped and a Tenant-scoped entry, a head of each met; the keys left stale; a head of a channel paused after its walk began | the first passed, nothing written, its key in the walk's object; the second held; the stale keys rebuilt by the pass; the paused one passed | a stage-scoped entry holding its heads; a pass not rebuilding the keys; a paused channel's head held |
+| C20 | two Tenants kept at the stage's scope among processed ones, one at the Tenant's, a run renewed; a refusal after a quiet window | counted by channel and cause, the oldest run's start, no Tenant; none once the back-offs ran out; the late run's start its own | a Tenant-scoped entry counted; the latest verdict's time for the run's start; a run never begun anew |
+| C21 | a Tenant asked twice at once, paused with another, both tried inconclusively, its late ask refused after, the channel closed for want of a witness | its renewed entry's key in the walk's object | a tick's close not rebuilding the keys (C18's histories do not reach it) |
+| K1 | the database (`tests/outage.rs`): a process that heard a stage refuse a Tenant; a Tenant alone so refused; Tenants named with a slash, a space, a quote and a backslash | the first process takes no head of it, writes no row, walks a guest's walk (cursor, round, sleep untouched) and counts it in `excluded()`, and another process takes it at once; the lone one asked again once its back-off runs out; the odd one kept and `t/1` beside it taken, no head of it walked to | the walk not told the keys; the process not a guest; the keys outliving the back-off; a key unescaped, or of another separator than the walk's |
 | G1 | at S = 1, K = 4, a memo of 16, at 8 and 64 Tenants, driven until every slot is paused, then n more dispatches | calls ≤ trials; changed rows ≤ calls; no head held unasked; a guest's step ≤ K; only the pause and the stall logged, as many lines at 64 as at 8; onset calls = `fewest` | drop the walk's filter (a hold on each paused head met, the same observable); no K; a held row logged at `warn` |
 | E1 | the expiry (`tests/expiry.rs`, the expiry's plan in `pg/plan_tests.rs`): a present chain, an untried head, a row behind a held head, a missing and a parked dependency, 8 and 9 hops, a cycle under `statement_timeout`, 20,000 spared with one missing last, ties at one `waiting_since` with rows moved in the heap, a malformed `waiting_for`, parked-expired rows; the spared rows' `(ctid, xmin, xmax)` and no xid in one transaction; `run`'s timer, and no dispatch expiring; a defect stopping `run`; the CHECK of a time of wait; the function as the start check requires it, planned once a connection | spared or expired as stated, each with its reason; 201 statements for 20,000 spared; ≤ `batch` rows examined by `__waiting_since_idx`, a hop one probe of the key | drop `present`; drop `parked_at IS NULL`; bounds 7, 16 and none; the cursor on expired rows; `LIMIT` after the filter; a `ctid` tiebreak; the key `waiting_since` alone; a plain cast; renew by write; lock before the spare test; the dispatch expiring; `run` without the timer; a defect logged; `more` by the rows parked; the observer untold; the start check without the set or the function; the CHECK dropped; the index's old predicate or no tiebreak; the exit's fragment; the plan not forced generic |
 | R1 | the rows: 20 asks, no spend; `holds` at its cap; a `Transient` resets, its back-off kept; every wait bound to `clock_timestamp()`, read from the source (a process's clock an hour fast agrees with the server's on one host, so no run tells the two apart); a hold after a 1.5 s subscriber; the kinds of a held head asked and of one held unasked; the counts by `__held_idx`, and answerable from it alone, the heap's scans set off | as stated | spend; no cap; the holds kept by a spend; the back-off dropped; `CURRENT_TIMESTAMP`; the kind from `holds`; `uri` out of the index |
@@ -453,7 +491,8 @@ histories with a manual clock; the shell's with a `Clock` and a paused runtime; 
 **The model.** `InboxOutage.tla` is rewritten over (slot, Tenant) heads with processes of workers, an ask split
 into its start and its verdict with a rollback between, the breaker per process, the memo — an ask's verdict of
 either scope remembered, a trial's at the stage's scope the breaker's, as the core has it since slice 3 and the
-model since slice 8 — a process cut off and cached keys, the expiry's spare and the operator's verbs. The trials'
+model since slice 8, a stage-scoped one's Tenant left to the other processes, nothing written on its heads (slice 9,
+`UnaskedHoldIsTheTenants`, refuted design `stage_held_unasked`) — a process cut off and cached keys, the expiry's spare and the operator's verbs. The trials'
 rates (one a tick call, one hastened a tick) are not the model's: it has no time, and C15–C17 are their executors. Properties: `UnavailableNeverSpends`,
 `UnavailableNeverParks`, `HoldIsQueued`, `CauseIsCurrent`, `KeyOrder` (the order of a stream; the rows of a
 (slot, Tenant) are its streams'), `OneAskPerReach`, `PresentDependencyNeverExpires`, `CanaryExact`,
@@ -551,8 +590,32 @@ down, so the outage meets the launch's backlog and nothing new. Two runs, the se
   with it. They waited for the outage's end and then their turn in the drain, some 25 minutes, where the cache
   would have served them in its first five. The memo held them by three paths, read from the code since: in each
   process that refused a head; in the rows, its holds written on the heads it met, which every other process then
-  skips (§ Owed, 1); and on the paused channel by the pause, its heads first in their queues' order across
+  skips (until slice 9, § 2); and on the paused channel by the pause, its heads first in their queues' order across
   channels. The revision this asked for was decided and rejected (§ Alternatives Considered).
+
+**M8, a replica cut off alone** (`crates/dek/tests/drill.rs`, `a_replica_cut_off_alone_drilled`; slice 9). Three
+consuming processes of eight loops, a 50 ms handler, 64 slots, steady traffic of 500 Tenants on six channels; a
+launch Tenant's 20,000 messages alone on the seventh, a minute in, so that a process cut off never pauses that
+channel — one Tenant fails it; a cap of 20 minutes. On the reference machine, PostgreSQL 14, A/B:
+
+| Build | Drained | Served | p50 / p99 | Heads held unasked by the process cut off |
+|---|---|---|---|---|
+| no process cut off | 120 s | 20,000 | 9 s / 50 s | — |
+| one cut off, as built (slice 8) | not within 20 min | 551 | 95 s / 1,109 s | 458, each to its memo's `until` |
+| one cut off, the memo's clock on the rows capped at the tick | not within 20 min | 8,894 | 539 s / 1,103 s | 4,636 |
+| one cut off, the stage-scoped Tenants kept from the walk (slice 9) | 160 s | 20,000 | 33 s / 87 s | 8 (races of the prototype) |
+
+The process cut off there paused the six other channels and so walked as a guest. The same with only the launch
+Tenant's keys refused, nothing paused anywhere, a crowd of 200 Tenants × 50 messages sharing its slots on another
+channel: as built, 724 served in 20 minutes, the crowd's p99 24 s; kept from the walk with the process a guest
+(slice 9, its walks a guest's 4,743 times), drained in 180 s, p99 121 s, the crowd's 1.9 s; kept from the walk
+with the process not a guest, 200 s, p99 128 s, the crowd's 1.8 s. With two of three serving, 120 s × 3/2 = 180 s
+is the drain's own bound.
+
+**M9, the walk's keys at the memo's bound** (`breaker/tests.rs`, `m9_the_walk_s_keys_at_the_memo_s_bound`; slice
+9). Seven channels, 1,024 Tenants each kept at the stage's scope among 20 processed a second, none paused: 7,168
+keys, 423 KB; read kept built 0.033 µs a dispatch, rebuilt 1.3 ms (9.2 ms as first written, a string and a set's
+entry a key). M1 on the same machine with and without the keys read: 5.33 µs and 5.35 µs a happy message.
 
 **M4** is the host's: the expiry at its own count of spared waiters, on its machine. Here, 220,001 waiters took
 2.3 s a pass on the reference machine (§ 7).
@@ -567,27 +630,21 @@ false, does not hold: `passed` is what a batch examined and did not park, `more`
 
 ## Owed
 
-1. **A process's memo writes its own clock on rows it did not ask** (§ 2, § 3): a stage-scoped entry, one
-   process's evidence, holds the Tenant's other heads from every process for up to 300 s, and for up to 30 s under
-   an ask in flight — where decision 3 bounds the row refused at 15 s. No test covered it: C8 and its database twin
-   assert the row asked. Two remedies, chosen by measurement on the reference machine:
-   - *(b) the interval of a head held unasked under a stage-scoped entry or an ask in flight, capped at the tick*:
-     decision 3's bound as it reads. Its cost, read from the code: a row written per head held per ≤ 15 s below the
-     pause's threshold — some 1,459 a second at the host's worst, 342 Tenants × 64 heads, against some 73 today,
-     for as long as a partial failure lasts; and a replica cut off alone still wins the race for a Tenant's fresh
-     heads, some 7.5 s a row at one take in three.
-   - *(d) the memo's Tenants made not due for their process in the walk*, nothing written on a row not asked, a
-     slot of only such heads sleeping at most a poll — not as a guest, whose fruitless walk sleeps the poll that a
-     healthy head would wait. No row written, a healthy replica's head delayed a poll at most. Its cost: the keys
-     sent with every walk — measured on a walk-shaped statement at 64 slots × 2,000 Tenants, 32 steps, on 14 and
-     18: a `jsonb` object looked up with `?` flat in its size, 0.54 and 0.62 ms a walk against 0.46 and 0.54 held
-     by time; parsed from the parameter, some 0.75 µs a key a walk, 2.3 ms at 2,400 keys and 5.5–6.1 at 7,200; a
-     `text[]` with `= ANY` linear, 3.4–4.0 ms at 2,400 — times the walks a second; and a new term in the walk's
-     round.
-   The measurements that choose: (b)'s rows written and a healthy channel's p99 beside 342 × 64 held heads; (d)'s
-   walk end to end through `locate_head` at 0, 300, 2,400 and 7,200 keys — messages a second, the backend's CPU,
-   bytes sent, time under the breaker's lock; for both, a drill with one replica of three cut off and the launch's
-   Tenant alone on a channel — the drain's time and the healthy replicas' p99.
+1. **The walk's keys at the memo's bound** (§ 5, slice 9). While a stage is down with caches warm, keys run out
+   one by one within the opening's `keep`, and the Tenants refused trickle in without reaching the pause's
+   threshold (F counts a 30 s window, an entry lives 300 s): up to 1,024 kept a channel, 7,168 over seven. M9
+   measured the process's side there — kept built 0.033 µs a dispatch, rebuilt after a verdict on a memoised
+   Tenant 1.3 ms under the breaker's lock, the object 423 KB at 36-character Tenants — and the walk-shaped
+   statement the server's: parsed from the parameter some 0.75 µs a key, 5.5–6.1 ms a walk at 7,200 keys. Bounded
+   in time by `keep`, and paid by the process that keeps the Tenants alone. Owed: the walk end to end through
+   `locate_head` at 0, 300, 2,400 and 7,200 keys on the reference machine — messages a second, the backend's CPU,
+   bytes sent, time under the lock — and, should the lock's share or the walk's time matter at the host's scale,
+   the keys kept incrementally (an entry's key added or dropped at its change, not the object rebuilt) or a channel
+   paused past a count of kept Tenants, the coarser grain of the same exclusion. And the shape where every
+   process keeps a Tenant — one Tenant's trouble read at the stage's scope by every replica that asks it — so that
+   every walk is a guest's and no slot sleeps: each loop's fruitless walk sleeps the poll, R · L / poll walks a
+   second at most (M3 measured some 37 a process), against the rounds and the sleep the slots keep today; M8 had
+   one guest of three. Owed: that shape's walks and slot-row writes a second, beside a healthy load.
 2. **The risks the round found, each with the measurement that decides it.**
    - A trial that times out is inconclusive (§ 1), and three close the channel: with the KMS hanging —
      black-holed, or the brownout's 2 % — a channel may close, hang its asks, pause again, and never stall or page.
@@ -633,6 +690,9 @@ false, does not hold: `passed` is what a batch examined and did not park, `more`
 8. The revision's round (2026-11-17): decision 1's trials one a tick call, hastened at most once a tick, a busy
    slot that asks nothing, the close with no witness left (C7, C15–C17, the two channels' test of C16); the
    model's memo at the stage's scope.
+9. The memo's stage-scoped Tenants kept from the process's walk, the process a guest while it keeps any; a head
+   met anyway passed; the keys kept built, rebuilt by change and by time; `excluded()` (decisions 2, 3, 5, 6;
+   C18–C20, K1, M8, M9; the model's `UnaskedHoldIsTheTenants`).
 
 ## References
 
@@ -931,3 +991,37 @@ payloads), its generated Vault policies.
     holds each other head once — 7 · (asks + 1), which a waker that works reaches (8 and 9 holds over one hanging
     ask). No failure in thirty runs under the same load; its two mutations still red (two asks of x at once; 421
     holds over three asks with the hold met in flight cut to the back-off).
+- 2026-11-18: Slice 9, the remedy § Owed 1 kept open, chosen by M8 (§ Measured). A replica cut off from the KMS
+  alone, holding a launch Tenant's backlog on a channel it does not pause, kept it from the two healthy ones: as
+  built, 551 of 20,000 rows served in 20 minutes. The memo's clock capped at the tick on the rows changed little
+  (8,894; each head re-held for 15 s, 4,636 times). Kept from the process's walk, the process a guest while it
+  keeps any, the backlog drained in 160 s against 120 s with no replica cut off; with nothing paused anywhere,
+  in 180 s, the process a guest. The same exclusion with the process not a guest was refuted by the roles' reading
+  of the rotation (its shared cursor passes a head due for the others; `Inbox.tla`'s `PassTo` no longer holds)
+  and measured no better. What changed:
+  - decision 2: at the stage's scope the process keeps its evidence to itself; a head met anyway is passed
+    (`Before::Pass`), unasked and unwritten; an entry carries its scope and its run's start;
+  - decision 3: nothing is written at the stage's scope but the row refused, ≤ the tick's cap;
+  - decision 5: the walk takes the kept (channel, Tenant)s as a `jsonb` object of `"<channel>/<tenant>"` keys,
+    and a process with any walks as a guest; the object is kept built and rebuilt by a change of the memo or of a
+    channel's state and by an entry's back-off or flight ending (C18 checks it against the memo over random
+    histories with steps of time alone — a set rebuilt only at verdicts would keep a Tenant from the walk for
+    good, which the roles found in the first design of it);
+  - decision 6: `excluded()`, the count a host reports of a replica cut off alone, which writes nothing on rows;
+  - the model: a stage-scoped entry's heads untouched by its process, `UnaskedHoldIsTheTenants`, and the design
+    before as `stage_held_unasked`, which breaks it; the instances shrank (191,126 states, the operators'
+    830,194), the group some 11 minutes on the reference machine;
+  - M9: the keys at the memo's bound, 7,168, cost 1.3 ms a rebuild under the lock (9.2 ms as first written) and the
+    server some 5.5 ms a walk; § Owed 1 now holds that bound's end-to-end measurement and its levers. The roles'
+    other findings on the exclusion (the first design's stale set, its nested keys copied per row, its 200 ms
+    sleep with no source, its race written on the row) are answered in its form as built.
+- 2026-11-18: A review of slice 9's code found four things, fixed before it was committed:
+  - *a tick's close did not rebuild the walk's keys*, on a reading that no entry could exclude then; an ask begun
+    before the pause and refused after its Tenant's trial renews the entry, and the close leaves it out of a
+    stale object, its heads then met and passed loop after loop. The close rebuilds them (C21: C18's random
+    histories never reached it), and a pass rebuilds them too, so that a missed change heals at its first head;
+  - *a run's start was carried over any gap*: a Tenant refused once a week read as cut off for a week. It begins
+    anew after a back-off that ended more than a window before (C20);
+  - *a paused channel's head met by a walk begun before the pause was held on the row*, under the pause's cause:
+    one process's evidence on a shared row. It is passed (C19);
+  - *with every process keeping a Tenant no slot sleeps*: owed with its measurement (§ Owed, 1).

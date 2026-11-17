@@ -1787,7 +1787,8 @@ async fn a_dependency_that_never_arrives_parks_the_message_after_max_wait() {
 /// index, the guest's cursor and the walk's paused channels — and ADR-0040's
 /// causes migration with them, and the same day the expiry's function, its
 /// index's key, the CHECK that a row with a time of wait waits, and the
-/// stalls' table; the
+/// stalls' table; on 2026-11-18 the walk's fifth argument, the Tenants a
+/// process's memo keeps to it (ADR-0042 slice 9); the
 /// databases made before are recreated. Once the library is live, the
 /// exception is gone: the checksum covers the functions' bodies, so an edit
 /// of a statement is then a new function by a new migration, and ADR-0042
@@ -1806,7 +1807,7 @@ fn the_released_migrations_keep_their_checksums() {
         [
             (
                 "20261027T000000Z_baseline".to_owned(),
-                "fnv1a64:c65014f42a4e75f5:19613".to_owned()
+                "fnv1a64:23eecb1e8edca15e:19900".to_owned()
             ),
             (
                 "20261104T000000Z_processed_at".to_owned(),

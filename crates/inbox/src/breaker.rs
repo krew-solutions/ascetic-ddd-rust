@@ -192,6 +192,11 @@ pub enum Before {
         /// The cause that holds it: the memo's, or the pause's.
         cause: Cause,
     },
+    /// Do not ask it, and write nothing on it: its Tenant is held by this
+    /// process's memo at the stage's scope, one process's evidence, which
+    /// the walk keeps to the process ([`Breaker::excluded`]); met here only
+    /// when the memo took the Tenant after the walk began.
+    Pass,
 }
 
 /// What a verdict asks of the row, and what the shell is to do.
@@ -261,6 +266,62 @@ pub struct Breaker {
     settings: Breaking,
     channels: HashMap<String, Channel>,
     next: u64,
+    /// The walk's excluded (channel, Tenant)s as last built, and until when
+    /// they hold by time alone; `None` once the memo or a channel's state
+    /// changed. On the happy path nothing changes, and the object stays
+    /// built: `{}`.
+    keys: Option<Keys>,
+}
+
+/// The Tenants a process's memo keeps from its walk on one channel under one
+/// cause ([`Breaker::excluded_counts`]): how many, never which.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Excluded {
+    /// The channel.
+    pub channel: String,
+    /// The cause of the entries' latest verdicts.
+    pub cause: Cause,
+    /// How many Tenants.
+    pub tenants: usize,
+    /// When the oldest one's run of `Unavailable` verdicts began.
+    pub since: Instant,
+}
+
+/// The walk's excluded (channel, Tenant)s ([`Breaker::excluded`]).
+#[derive(Debug)]
+struct Keys {
+    /// A `jsonb` object of `"<channel>/<tenant>"` keys.
+    json: std::sync::Arc<str>,
+    /// The earliest instant an excluded entry's back-off and flight both end,
+    /// when it leaves the object without any verdict.
+    until: Option<Instant>,
+}
+
+/// Writes the (channel, Tenant) key the walk tests, as a JSON string: a
+/// channel is `scheme://authority`, with no third slash, so the first one
+/// after it begins the Tenant.
+fn push_key(out: &mut String, channel: &str, tenant: &str) {
+    out.push('"');
+    push_escaped(out, channel);
+    out.push('/');
+    push_escaped(out, tenant);
+    out.push('"');
+}
+
+/// `s` escaped for a JSON string, without its quotes.
+fn push_escaped(out: &mut String, s: &str) {
+    if !s.bytes().any(|b| b == b'"' || b == b'\\' || b < 0x20) {
+        out.push_str(s);
+        return;
+    }
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if u32::from(c) < 0x20 => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -290,6 +351,26 @@ struct Entry {
     /// The step that set `until`: the entry is protected a step past it.
     step: Duration,
     flight: Option<(u64, Instant)>,
+    /// The scope of its latest verdict: at the stage's, the walk keeps the
+    /// Tenant to this process; at the Tenant's, the rows carry its hold.
+    scope: Scope,
+    /// When the Tenant's run of `Unavailable` verdicts began.
+    since: Instant,
+}
+
+impl Entry {
+    /// Whether the walk excludes the Tenant now: held at the stage's scope,
+    /// its back-off running or an ask of it in flight.
+    fn excludes(&self, now: Instant) -> bool {
+        self.scope == Scope::Stage
+            && (self.until > now || self.flight.is_some_and(|(_, deadline)| deadline > now))
+    }
+
+    /// When, unchanged, it stops excluding.
+    fn excludes_until(&self) -> Instant {
+        self.flight
+            .map_or(self.until, |(_, deadline)| self.until.max(deadline))
+    }
 }
 
 /// A channel's state. An open channel's record is boxed: a process holds a
@@ -344,6 +425,7 @@ impl Breaker {
             settings,
             channels: HashMap::new(),
             next: 0,
+            keys: None,
         }
     }
 
@@ -374,6 +456,82 @@ impl Breaker {
             .is_some_and(|channel| matches!(channel.state, State::Open(_)))
     }
 
+    /// The (channel, Tenant)s this process's memo holds at the stage's
+    /// scope on a channel it has not paused — an entry whose back-off runs,
+    /// or whose ask is in flight — as the walk's argument beside the paused
+    /// channels: a `jsonb` object of `"<channel>/<tenant>"` keys. Such a head
+    /// is not due for this process, which walks as a guest while it holds any
+    /// (ADR-0042 decision 5): one process's evidence of the stage stays in the
+    /// process, and the other processes take the Tenant's heads. A paused
+    /// channel's heads are not due already. Built once while nothing changes
+    /// and no excluded entry's back-off or flight ends.
+    pub fn excluded(&mut self, now: Instant) -> std::sync::Arc<str> {
+        if let Some(keys) = &self.keys {
+            if keys.until.is_none_or(|until| now < until) {
+                return std::sync::Arc::clone(&keys.json);
+            }
+        }
+        // in the memo's order: a `jsonb` object orders its own keys
+        let mut until: Option<Instant> = None;
+        let mut json = String::from("{");
+        for (name, channel) in &self.channels {
+            if matches!(channel.state, State::Open(_)) {
+                continue;
+            }
+            for (tenant, entry) in &channel.memo {
+                if entry.excludes(now) {
+                    if json.len() > 1 {
+                        json.push(',');
+                    }
+                    push_key(&mut json, name, tenant);
+                    json.push_str(":1");
+                    let ends = entry.excludes_until();
+                    until = Some(until.map_or(ends, |u| u.min(ends)));
+                }
+            }
+        }
+        json.push('}');
+        let json: std::sync::Arc<str> = json.into();
+        self.keys = Some(Keys {
+            json: std::sync::Arc::clone(&json),
+            until,
+        });
+        json
+    }
+
+    /// What this process's memo holds at the stage's scope and the walk so
+    /// keeps from it, by channel and cause — how many Tenants, and since when
+    /// the oldest's run began — never a Tenant (ADR-0042 decision 6): what a
+    /// host reports of a process cut off from a stage alone, which writes
+    /// nothing on the rows it leaves.
+    #[must_use]
+    pub fn excluded_counts(&self, now: Instant) -> Vec<Excluded> {
+        let mut counts: HashMap<(&str, Cause), (usize, Instant)> = HashMap::new();
+        for (name, channel) in &self.channels {
+            if matches!(channel.state, State::Open(_)) {
+                continue;
+            }
+            for entry in channel.memo.values().filter(|e| e.excludes(now)) {
+                let count = counts
+                    .entry((name.as_str(), entry.cause))
+                    .or_insert((0, entry.since));
+                count.0 += 1;
+                count.1 = count.1.min(entry.since);
+            }
+        }
+        let mut out: Vec<Excluded> = counts
+            .into_iter()
+            .map(|((channel, cause), (tenants, since))| Excluded {
+                channel: channel.to_owned(),
+                cause,
+                tenants,
+                since,
+            })
+            .collect();
+        out.sort_unstable_by(|a, b| (&a.channel, a.cause).cmp(&(&b.channel, b.cause)));
+        out
+    }
+
     fn id(&mut self) -> u64 {
         self.next += 1;
         self.next
@@ -394,20 +552,25 @@ impl Breaker {
         let settings = self.settings;
         let id = self.id();
         let entry = self.channels.get_mut(channel).and_then(|c| {
-            if let State::Open(open) = &c.state {
-                // A head of a paused channel is asked only by a trial.
-                let wait = open.next_tick.saturating_duration_since(now);
-                return Some(Err((
-                    wait.max(settings.tick.0).min(settings.tick.1),
-                    open.cause,
-                )));
+            if matches!(c.state, State::Open(_)) {
+                // A head of a paused channel is asked only by a trial, and
+                // met here only when the pause came after the walk began:
+                // passed, the pause one process's evidence, written on no row.
+                return Some(Err(()));
             }
             c.memo.get_mut(tenant).map(Ok)
         });
         let marked = match entry {
-            Some(Err((wait, cause))) => return Before::Hold { wait, cause },
+            Some(Err(())) => return Before::Pass,
             Some(Ok(entry)) => {
                 let cause = entry.cause;
+                if entry.excludes(now) {
+                    // the walk began before the memo took the Tenant, or the
+                    // keys it was given missed it: rebuilt, the next walk
+                    // leaves it
+                    self.keys = None;
+                    return Before::Pass;
+                }
                 if let Some((_, deadline)) = entry.flight.filter(|(_, deadline)| *deadline > now) {
                     let until = entry.until.max(deadline).max(now + settings.hold.0);
                     return Before::Hold {
@@ -422,6 +585,9 @@ impl Breaker {
                     };
                 }
                 entry.flight = Some((id, now + settings.flight));
+                if entry.scope == Scope::Stage {
+                    self.keys = None;
+                }
                 true
             }
             None => false,
@@ -446,6 +612,9 @@ impl Breaker {
         {
             if entry.flight.is_some_and(|(id, _)| id == flight.id) {
                 entry.flight = None;
+                if entry.scope == Scope::Stage {
+                    self.keys = None;
+                }
             }
         }
     }
@@ -455,6 +624,10 @@ impl Breaker {
         self.abandoned(&flight);
         let settings = self.settings;
         let channel = self.channels.entry(flight.channel.clone()).or_default();
+        // the walk's excluded keys change with any entry made, renewed or
+        // dropped, and with a channel paused
+        let changes = channel.memo.contains_key(&flight.tenant)
+            || matches!(verdict, Verdict::Unavailable { .. });
         let hold = channel.weigh(
             &settings,
             now,
@@ -484,6 +657,9 @@ impl Breaker {
                 // report must not lapse in (ADR-0042 decision 6).
                 effects.extend(channel.stall(&settings, &flight.channel, now));
             }
+        }
+        if changes {
+            self.keys = None;
         }
         Told { hold, effects }
     }
@@ -572,6 +748,10 @@ impl Breaker {
                     cause,
                     stalled,
                 });
+                // its stage-scoped entries are the walk's again: one renewed
+                // by an ask begun before the pause and told after its trial
+                // keeps its Tenant
+                self.keys = None;
             }
             return (false, effects);
         }
@@ -644,6 +824,8 @@ impl Breaker {
     /// what follows. An answer after the trial's deadline changes nothing but
     /// a close.
     pub fn tried(&mut self, now: Instant, id: u64, trial: Trial) -> Told {
+        // a trial may drop or make an entry, or close its channel
+        self.keys = None;
         let settings = self.settings;
         let found = self
             .channels
@@ -801,6 +983,13 @@ impl Channel {
                 retry_after,
             } => {
                 let previous = self.memo.get(tenant).map_or(0, |e| e.unavailable);
+                // a run of refusals: one after a back-off that ended more than a
+                // window ago begins another
+                let since = self
+                    .memo
+                    .get(tenant)
+                    .filter(|e| now.saturating_duration_since(e.until) < settings.window)
+                    .map_or(now, |e| e.since);
                 let unavailable = previous.saturating_add(1);
                 let exponent = unavailable.max(row_holds.saturating_add(1)).min(30);
                 let step = settings
@@ -821,6 +1010,8 @@ impl Channel {
                         until,
                         step,
                         flight: None,
+                        scope,
+                        since,
                     },
                 );
                 match scope {

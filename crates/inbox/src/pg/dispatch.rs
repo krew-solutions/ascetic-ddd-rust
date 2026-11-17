@@ -148,12 +148,14 @@ where
         Fut: Future<Output = Result<(), Failure>> + Send,
     {
         // The breaker's tick: a trial due is this call's work, and the
-        // channels paused are the walk's (ADR-0042 decision 1). Every
-        // dispatch ticks it, a host's own as well as `run`'s.
-        let (effects, paused) = {
+        // channels paused and the Tenants the memo keeps to this process at
+        // the stage's scope are the walk's (ADR-0042 decisions 1, 2 and 5).
+        // Every dispatch ticks it, a host's own as well as `run`'s.
+        let (effects, paused, excluded) = {
             let mut breaker = self.breaker();
-            let effects = breaker.tick(now());
-            (effects, breaker.paused())
+            let now = now();
+            let effects = breaker.tick(now);
+            (effects, breaker.paused(), breaker.excluded(now))
         };
         self.tell(&effects);
         // The stalls told by this tick or by the trials and verdicts since
@@ -194,7 +196,7 @@ where
                             error,
                         };
                         let located = self
-                            .locate_head(&tx, slot, &paused)
+                            .locate_head(&tx, slot, &paused, &excluded)
                             .await
                             .map_err(in_slot)?;
                         let snapshot = located.snapshot;
@@ -245,6 +247,18 @@ where
                                     wait,
                                 });
                                 return Ok((Some(slot), Outcome::Held));
+                            }
+                            // the memo took its Tenant at the stage's scope
+                            // after the walk began: nothing written, and the
+                            // next walk leaves it
+                            Before::Pass => {
+                                self.observer.on_fetched(&Fetched {
+                                    slot: Some(slot),
+                                    slots: taken.slots,
+                                    message: None,
+                                    snapshot: &snapshot,
+                                });
+                                return Ok((Some(slot), Outcome::Passed));
                             }
                             Before::Ask(flight) => flight,
                         };
