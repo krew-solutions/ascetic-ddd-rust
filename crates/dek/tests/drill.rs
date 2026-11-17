@@ -1,0 +1,648 @@
+//! M5 and M6 of the inbox's ADR-0042: an outage of the KMS, drilled for an
+//! hour at a scale below the host's, through the path a host's service
+//! runs — producers sealing each channel's messages with the channel's
+//! stage and storing them in the inbox, three consuming processes of eight
+//! loops each opening them through the sealing's stage by destination, a
+//! breaker each, a handler of 50 ms — over a KMS whose answers follow a
+//! script: up, then down for a third of the hour, then up again under a
+//! quota of calls a second below what draining the backlog asks. A launch
+//! Tenant's 100,000 messages arrive in the two minutes before the outage,
+//! faster than the consumers drain them, so that the outage meets a
+//! backlog whose keys the consumers hold: a producer cannot seal while
+//! the KMS is down, and without a backlog nothing would be asked. A measurement, run by hand on one
+//! machine, against a database of one's own:
+//!
+//! ```text
+//! ASCETIC_DDD_MEASURE=1 ASCETIC_DDD_TEST_PG_URL=… cargo test -p ascetic-ddd-dek \
+//!     --test drill -- --ignored --nocapture
+//! ```
+//!
+//! `ASCETIC_DDD_MEASURE=small` runs it in six minutes instead of sixty, to
+//! see that it runs; its figures mean nothing. Every ten seconds a line of
+//! counts; at the end what the drill decides: nothing parked and no attempt
+//! spent for the outage; the KMS asked a bounded number of times while it
+//! was down; the backlog drained under the quota, and how long it took;
+//! and (M6) the share of the messages stored during the outage whose key a
+//! consumer had unwrapped within the opening's keep — what the cache could
+//! have served, had the channel not been paused.
+
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a measurement"
+)]
+
+use std::collections::{HashMap, VecDeque};
+use std::str::FromStr;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use ascetic_ddd_bus::identity::{STREAM_ID, STREAM_POSITION, STREAM_TYPE, TENANT_ID};
+use ascetic_ddd_bus::{Adapter, Message, Stage};
+use ascetic_ddd_dek::stage::MESSAGE_ID;
+use ascetic_ddd_dek::{Sealing, SealingParameters};
+use ascetic_ddd_inbox::breaker::Effect;
+use ascetic_ddd_inbox::observer::{BreakerChanged, Dispatched, Failed, InboxObserver};
+use ascetic_ddd_inbox::{Loops, Outcome, PgInbox};
+use ascetic_ddd_kms::{Error, Key, KeyManagementService};
+use ascetic_ddd_session::pg::Identifier;
+use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
+use ascetic_ddd_session::pg::tokio_postgres::{Config, NoTls};
+use ascetic_ddd_session::testing::{MemorySession, MemorySessionPool};
+use ascetic_ddd_session::{PgSessionPool, SessionError};
+use tokio::time::Instant;
+
+const DEFAULT_URL: &str = "postgresql://devel:devel@localhost:5432/devel_karmabot_test";
+const CHANNELS: usize = 7;
+const TENANTS: usize = 500;
+const STREAMS: usize = 3;
+const PROCESSES: usize = 3;
+const LOOPS: u32 = 8;
+const POLL: Duration = Duration::from_millis(200);
+/// Messages a second, sealed and stored, of Tenants at random.
+const RATE: u64 = 20;
+/// The launch Tenant's messages, in the two minutes before the outage, by
+/// four producers.
+const LAUNCH: u64 = 100_000;
+const LAUNCHERS: u64 = 4;
+/// What the handler does in the transaction, besides the inbox.
+const HANDLER: Duration = Duration::from_millis(50);
+/// The KMS's quota, calls a second: above the steady draws and unwraps,
+/// some 40, below what the drain asks.
+const QUOTA: f64 = 60.0;
+const TABLE: &str = "dek_drill_inbox";
+
+fn pool(size: usize) -> Pool {
+    let url = std::env::var("ASCETIC_DDD_TEST_PG_URL").unwrap_or_else(|_| DEFAULT_URL.to_owned());
+    let manager = Manager::from_config(
+        Config::from_str(&url).expect("a valid PostgreSQL URL"),
+        NoTls,
+        ManagerConfig {
+            recycling_method: RecyclingMethod::Fast,
+        },
+    );
+    Pool::builder(manager).max_size(size).build().unwrap()
+}
+
+fn channel(c: usize) -> String {
+    format!("inbox://c{c}")
+}
+
+/// Standard base64, as the stage writes a wrapped key in the `dek` header.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// The KMS's script and what it was asked.
+struct Script {
+    started: Instant,
+    down: (Duration, Duration),
+    bucket: Mutex<(f64, Instant)>,
+    draws: AtomicU64,
+    unwraps: AtomicU64,
+    refused_down: AtomicU64,
+    unwraps_down: AtomicU64,
+    throttled: AtomicU64,
+    /// When each process last unwrapped each wrapped key, by the key's
+    /// base64 (M6).
+    unwrapped: Mutex<HashMap<String, [Option<Instant>; PROCESSES]>>,
+}
+
+impl Script {
+    fn down(&self) -> bool {
+        let at = self.started.elapsed();
+        at >= self.down.0 && at < self.down.1
+    }
+
+    /// A call answered, or refused as an unreachable or rate-limited KMS
+    /// is: of the class `Unavailable`.
+    fn call(&self) -> Result<(), Error> {
+        if self.down() {
+            self.refused_down.fetch_add(1, Ordering::Relaxed);
+            return Err(Error::Session(SessionError::Acquire("down".into())));
+        }
+        let mut bucket = self.bucket.lock().unwrap();
+        let now = Instant::now();
+        bucket.0 = (bucket.0 + now.duration_since(bucket.1).as_secs_f64() * QUOTA).min(QUOTA);
+        bucket.1 = now;
+        if bucket.0 < 1.0 {
+            self.throttled.fetch_add(1, Ordering::Relaxed);
+            return Err(Error::Session(SessionError::Acquire("quota".into())));
+        }
+        bucket.0 -= 1.0;
+        Ok(())
+    }
+}
+
+/// The KMS as one process sees it: the producers' as `PROCESSES`.
+#[derive(Clone)]
+struct Kms(Arc<Script>, usize);
+
+impl KeyManagementService<MemorySession> for Kms {
+    async fn encrypt_dek(&self, _: &MemorySession, _: &str, dek: &Key) -> Result<Vec<u8>, Error> {
+        Ok(dek.as_bytes().to_vec())
+    }
+
+    async fn key_exists(&self, _: &MemorySession, _: &str) -> Result<bool, Error> {
+        self.0.call()?;
+        Ok(true)
+    }
+
+    async fn decrypt_dek(&self, _: &MemorySession, _: &str, wrapped: &[u8]) -> Result<Key, Error> {
+        if self.0.down() {
+            self.0.unwraps_down.fetch_add(1, Ordering::Relaxed);
+        }
+        self.0.call()?;
+        self.0.unwraps.fetch_add(1, Ordering::Relaxed);
+        if self.1 < PROCESSES {
+            self.0
+                .unwrapped
+                .lock()
+                .unwrap()
+                .entry(base64(wrapped))
+                .or_default()[self.1] = Some(Instant::now());
+        }
+        Ok(Key::new(wrapped.to_vec()))
+    }
+
+    async fn generate_dek(&self, _: &MemorySession, _: &str) -> Result<(Key, Vec<u8>), Error> {
+        self.0.call()?;
+        let n = self.0.draws.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut key = vec![0u8; 32];
+        key[..8].copy_from_slice(&n.to_be_bytes());
+        Ok((Key::new(key.clone()), key))
+    }
+
+    async fn rewrap_dek(
+        &self,
+        _: &MemorySession,
+        _: &str,
+        wrapped: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        Ok(wrapped.to_vec())
+    }
+}
+
+/// What a consuming process's inbox told.
+#[derive(Default)]
+struct Told {
+    process: usize,
+    started: Option<Instant>,
+    processed: AtomicU64,
+    held: AtomicU64,
+    spent: AtomicU64,
+    parked: AtomicU64,
+    paused: AtomicU64,
+    resumed: AtomicU64,
+    trials: AtomicU64,
+    guests: AtomicU64,
+    lines: Mutex<Vec<String>>,
+}
+
+impl InboxObserver for Told {
+    fn on_failed(&self, event: &Failed<'_>) {
+        if event.parked {
+            self.parked.fetch_add(1, Ordering::Relaxed);
+        } else if event.held {
+            self.held.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.spent.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn on_breaker(&self, event: &BreakerChanged<'_>) {
+        let at = self.started.map_or(0.0, |s| s.elapsed().as_secs_f64());
+        match event.effect {
+            Effect::Paused { .. } => {
+                self.paused.fetch_add(1, Ordering::Relaxed);
+                self.lines.lock().unwrap().push(format!(
+                    "{at:7.1} s process {}: paused {:?}",
+                    self.process, event.effect
+                ));
+            }
+            Effect::Resumed { .. } => {
+                self.resumed.fetch_add(1, Ordering::Relaxed);
+                self.lines.lock().unwrap().push(format!(
+                    "{at:7.1} s process {}: resumed {:?}",
+                    self.process, event.effect
+                ));
+            }
+            Effect::Trial { .. } => {
+                self.trials.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    fn on_dispatched(&self, event: &Dispatched<'_>) {
+        match event.outcome {
+            Ok(Outcome::Processed) => {
+                self.processed.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(Outcome::Paused) => {
+                self.guests.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn sum(told: &[Arc<Told>], of: impl Fn(&Told) -> &AtomicU64) -> u64 {
+    told.iter().map(|t| of(t).load(Ordering::Relaxed)).sum()
+}
+
+/// Milliseconds since the drill's first look at the clock: a message
+/// carries when it was made, its handler reads how long it waited.
+fn millis_now() -> u64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "a measurement (the inbox's ADR-0042 M5, M6): run by hand"]
+async fn an_outage_of_the_kms_drilled_for_an_hour() {
+    let Ok(asked) = std::env::var("ASCETIC_DDD_MEASURE") else {
+        eprintln!("a measurement: set ASCETIC_DDD_MEASURE to run it");
+        return;
+    };
+    let minute = if asked == "small" {
+        Duration::from_secs(6)
+    } else {
+        Duration::from_secs(60)
+    };
+    let (steady, outage, recovery) = (minute * 10, minute * 20, minute * 30);
+    // the small run's launch a tenth, its window a tenth too
+    let launch = if asked == "small" {
+        LAUNCH / 10
+    } else {
+        LAUNCH
+    };
+    let started = Instant::now();
+    let script = Arc::new(Script {
+        started,
+        down: (steady, steady + outage),
+        bucket: Mutex::new((QUOTA, Instant::now())),
+        draws: AtomicU64::new(0),
+        unwraps: AtomicU64::new(0),
+        refused_down: AtomicU64::new(0),
+        unwraps_down: AtomicU64::new(0),
+        throttled: AtomicU64::new(0),
+        unwrapped: Mutex::new(HashMap::new()),
+    });
+    let channels: Vec<String> = (0..CHANNELS).map(channel).collect();
+    let parameters = SealingParameters::default();
+    let sealing = |process: usize| {
+        Sealing::over(
+            Arc::new(MemorySessionPool::new()),
+            channels.clone(),
+            parameters,
+            |_: &str| Kms(Arc::clone(&script), process),
+        )
+    };
+    let producing: Sealing = sealing(PROCESSES);
+    // The table, made by the first process's inbox.
+    let told: Vec<Arc<Told>> = (0..PROCESSES)
+        .map(|process| {
+            Arc::new(Told {
+                process,
+                started: Some(started),
+                ..Told::default()
+            })
+        })
+        .collect();
+    let inboxes: Vec<Arc<PgInbox<PgSessionPool, Arc<Told>>>> = told
+        .iter()
+        .map(|told| {
+            Arc::new(
+                PgInbox::new(PgSessionPool::new(pool(LOOPS as usize + 4)))
+                    .with_table(
+                        Identifier::new(TABLE).unwrap(),
+                        Identifier::new(format!("{TABLE}_seq")).unwrap(),
+                    )
+                    .with_slots(64)
+                    .partitioned_by(ascetic_ddd_inbox::ByStream)
+                    .with_loops(Loops {
+                        concurrency: LOOPS,
+                        poll_interval: POLL,
+                        max_error_wait: Duration::from_secs(1),
+                    })
+                    .observed_by(Arc::clone(told)),
+            )
+        })
+        .collect();
+    inboxes[0].teardown().await.unwrap();
+    inboxes[0].migrate().await.unwrap();
+    // The consumers: each process's own sealing, its own cache of keys.
+    let latencies: Arc<Mutex<Vec<(Instant, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut subscriptions = Vec::new();
+    for (process, inbox) in inboxes.iter().enumerate() {
+        let opening = sealing(process)
+            .by_destination(channels.iter().map(|c| (c.clone(), c.clone())))
+            .unwrap();
+        let latencies = Arc::clone(&latencies);
+        let subscription = inbox
+            .consumer(|message: &Message| {
+                Ok(std::str::from_utf8(message.payload())?.parse::<u64>()?)
+            })
+            .through(Arc::new(opening) as Arc<dyn Stage>)
+            .subscribe(move |_tx, sent: u64| {
+                let latencies = Arc::clone(&latencies);
+                async move {
+                    tokio::time::sleep(HANDLER).await;
+                    latencies
+                        .lock()
+                        .unwrap()
+                        .push((Instant::now(), millis_now().saturating_sub(sent)));
+                }
+            })
+            .unwrap();
+        subscriptions.push(subscription);
+    }
+    // The producer: one queue in order, as an outbox is, sealing its head
+    // and storing it; a head that cannot be sealed waits a second.
+    let intake = inboxes[0].channel();
+    let stored = Arc::new(AtomicU64::new(0));
+    let pending = Arc::new(AtomicU64::new(0));
+    let end = steady + outage + recovery;
+    let producer = {
+        let (stored, pending) = (Arc::clone(&stored), Arc::clone(&pending));
+        let producing = producing.clone();
+        async move {
+            let mut queue: VecDeque<(usize, Message)> = VecDeque::new();
+            let mut positions: HashMap<(usize, usize, usize), u64> = HashMap::new();
+            let mut made = 0u64;
+            let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+            let mut next = move |n: usize| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                (seed % n as u64) as usize
+            };
+            let mut tick = tokio::time::interval(Duration::from_millis(1000 / RATE));
+            while started.elapsed() < end {
+                tick.tick().await;
+                let (t, c, s) = (next(TENANTS), next(CHANNELS), next(STREAMS));
+                let position = positions.entry((t, c, s)).or_default();
+                *position += 1;
+                made += 1;
+                let message = Message::new(millis_now().to_string().into_bytes())
+                    .with_header(TENANT_ID, format!("t{t:03}"))
+                    .with_header(STREAM_TYPE, "orders.Order")
+                    .with_header(STREAM_ID, format!("c{c}-s{s}"))
+                    .with_header(STREAM_POSITION, position.to_string())
+                    .with_header(MESSAGE_ID, format!("00000000-0000-4000-8000-{made:012x}"));
+                queue.push_back((c, message));
+                while let Some((c, message)) = queue.front() {
+                    let stage = producing.of(&channel(*c)).unwrap();
+                    let Ok(sealed) = stage.outbound(message.clone()).await else {
+                        break;
+                    };
+                    intake
+                        .producer(&format!("{}/{}", channel(*c), "k"))
+                        .unwrap()
+                        .publish(sealed)
+                        .await
+                        .unwrap();
+                    stored.fetch_add(1, Ordering::Relaxed);
+                    queue.pop_front();
+                }
+                pending.store(queue.len() as u64, Ordering::Relaxed);
+            }
+        }
+    };
+    // The launch: four producers of the launch Tenant's messages, each its
+    // own streams, in the two minutes before the outage.
+    let launchers = (0..LAUNCHERS).map(|l| {
+        let (stored, producing) = (Arc::clone(&stored), producing.clone());
+        let intake = inboxes[0].channel();
+        async move {
+            tokio::time::sleep(steady.saturating_sub(minute * 2)).await;
+            let window = minute * 2;
+            let each = launch / LAUNCHERS;
+            let begun = Instant::now();
+            for n in 0..each {
+                let due = window.mul_f64(n as f64 / each as f64);
+                if let Some(rest) = due.checked_sub(begun.elapsed()) {
+                    tokio::time::sleep(rest).await;
+                }
+                let c = (n % CHANNELS as u64) as usize;
+                let stream = (n / CHANNELS as u64) % 50;
+                let position = n / (CHANNELS as u64 * 50) + 1;
+                let message = Message::new(millis_now().to_string().into_bytes())
+                    .with_header(TENANT_ID, "tlaunch")
+                    .with_header(STREAM_TYPE, "orders.Order")
+                    .with_header(STREAM_ID, format!("l{l}-c{c}-s{stream}"))
+                    .with_header(STREAM_POSITION, position.to_string())
+                    .with_header(MESSAGE_ID, format!("00000000-0000-4000-9{l:03x}-{n:012x}"));
+                let stage = producing.of(&channel(c)).unwrap();
+                let Ok(sealed) = stage.outbound(message).await else {
+                    // the KMS went down: the launch's rest is not sealed
+                    break;
+                };
+                intake
+                    .producer(&format!("{}/{}", channel(c), "k"))
+                    .unwrap()
+                    .publish(sealed)
+                    .await
+                    .unwrap();
+                stored.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    });
+    let launching = futures::future::join_all(launchers);
+    // M6: at the outage's start and one, three and five minutes into it,
+    // the share of the queue whose key a consumer holds — any of them, the
+    // most the cache could serve; every one of them, the least — had its
+    // channel not been paused; and of it the rows the order lets through:
+    // a (slot, Tenant)'s queue up to its first row whose key no consumer
+    // holds, which holds the rest behind it across channels.
+    let cached = async {
+        let client = pool(1).get().await.unwrap();
+        for after in [0u32, 1, 3, 5] {
+            let at = steady + minute * after;
+            if let Some(rest) = at.checked_sub(started.elapsed()) {
+                tokio::time::sleep(rest).await;
+            }
+            let rows = client
+                .query(
+                    &format!(
+                        "SELECT metadata->>'dek', slot, tenant_id FROM {TABLE} \
+                         WHERE processed_position IS NULL AND parked_at IS NULL \
+                         ORDER BY slot, tenant_id, received_position"
+                    ),
+                    &[],
+                )
+                .await
+                .unwrap();
+            let now = Instant::now();
+            let unwrapped = script.unwrapped.lock().unwrap();
+            let kept = |when: &Option<Instant>| {
+                when.is_some_and(|u| now.duration_since(u) <= parameters.cache)
+            };
+            let (mut any, mut every) = (0usize, 0usize);
+            let (mut open_any, mut open_every) = (0usize, 0usize);
+            let mut queue: Option<(i16, String)> = None;
+            let (mut blocked_any, mut blocked_every) = (false, false);
+            for row in &rows {
+                let at: (i16, String) = (row.get(1), row.get(2));
+                if queue.as_ref() != Some(&at) {
+                    queue = Some(at);
+                    (blocked_any, blocked_every) = (false, false);
+                }
+                let key: Option<String> = row.get(0);
+                let by = key.and_then(|k| unwrapped.get(&k));
+                let (a, e) = by.map_or((false, false), |by| {
+                    (by.iter().any(kept), by.iter().all(kept))
+                });
+                any += usize::from(a);
+                every += usize::from(e);
+                blocked_any |= !a;
+                blocked_every |= !e;
+                open_any += usize::from(!blocked_any);
+                open_every += usize::from(!blocked_every);
+            }
+            let share = |n: usize| n as f64 / rows.len().max(1) as f64;
+            println!(
+                "M6, {after} min into the outage: {} rows queued; their key held by a consumer \
+                 for {any} ({:.3}), by every consumer for {every} ({:.3}); of them before the \
+                 first row of their (slot, Tenant) whose key is held by none, {open_any} ({:.3}), \
+                 by not every one, {open_every} ({:.3})",
+                rows.len(),
+                share(any),
+                share(every),
+                share(open_any),
+                share(open_every)
+            );
+        }
+    };
+    // Every ten seconds, a line of counts.
+    let client = pool(1).get().await.unwrap();
+    let sampler = async {
+        let mut tick = tokio::time::interval(minute / 6);
+        let mut last_processed = 0;
+        println!(
+            "{:>7} {:>7} {:>6} {:>8} {:>7} {:>6} {:>6} {:>6} {:>7} {:>7} {:>7} {:>9} {:>6} {:>6} {:>6} {:>8}",
+            "s",
+            "stored",
+            "wait",
+            "done",
+            "queue",
+            "held",
+            "parked",
+            "spent",
+            "draws",
+            "unwraps",
+            "down",
+            "throttled",
+            "paused",
+            "resume",
+            "trials",
+            "p99 ms"
+        );
+        while started.elapsed() < end + minute * 5 {
+            tick.tick().await;
+            let row = client
+                .query_one(
+                    &format!(
+                        "SELECT count(*) FILTER (WHERE processed_position IS NULL AND parked_at IS NULL), \
+                                count(*) FILTER (WHERE parked_at IS NOT NULL), \
+                                count(*) FILTER (WHERE processed_position IS NULL AND attempts > 0), \
+                                count(*) FILTER (WHERE held_since IS NOT NULL) \
+                         FROM {TABLE}"
+                    ),
+                    &[],
+                )
+                .await
+                .unwrap();
+            let (queued, parked, spent, held): (i64, i64, i64, i64) =
+                (row.get(0), row.get(1), row.get(2), row.get(3));
+            let processed = sum(&told, |t| &t.processed);
+            let mut recent: Vec<u64> = {
+                let mut all = latencies.lock().unwrap();
+                let window: Vec<u64> = all.iter().map(|(_, l)| *l).collect();
+                all.clear();
+                window
+            };
+            recent.sort_unstable();
+            let p99 = recent
+                .get(((recent.len() as f64 - 1.0) * 0.99).round() as usize)
+                .copied()
+                .unwrap_or_default();
+            println!(
+                "{:>7.0} {:>7} {:>6} {:>8} {:>7} {:>6} {:>6} {:>6} {:>7} {:>7} {:>7} {:>9} {:>6} {:>6} {:>6} {:>8}",
+                started.elapsed().as_secs_f64(),
+                stored.load(Ordering::Relaxed),
+                pending.load(Ordering::Relaxed),
+                processed,
+                queued,
+                held,
+                parked,
+                spent,
+                script.draws.load(Ordering::Relaxed),
+                script.unwraps.load(Ordering::Relaxed),
+                script.refused_down.load(Ordering::Relaxed),
+                script.throttled.load(Ordering::Relaxed),
+                sum(&told, |t| &t.paused),
+                sum(&told, |t| &t.resumed),
+                sum(&told, |t| &t.trials),
+                p99
+            );
+            last_processed = processed;
+            if started.elapsed() > end && queued == 0 && pending.load(Ordering::Relaxed) == 0 {
+                break;
+            }
+        }
+        last_processed
+    };
+    let ((), _, (), processed) = tokio::join!(producer, launching, cached, sampler);
+    for subscription in subscriptions {
+        subscription.cancel().await;
+    }
+    for t in &told {
+        for line in t.lines.lock().unwrap().iter() {
+            println!("{line}");
+        }
+    }
+    println!(
+        "M5: {} stored, {processed} processed; held {}, spent {}, parked {}; the KMS asked {} \
+         unwraps while down, refused {} calls while down and {} for the quota; {} draws, {} \
+         unwraps; {} pauses, {} resumes, {} trials, {} guest walks",
+        stored.load(Ordering::Relaxed),
+        sum(&told, |t| &t.held),
+        sum(&told, |t| &t.spent),
+        sum(&told, |t| &t.parked),
+        script.unwraps_down.load(Ordering::Relaxed),
+        script.refused_down.load(Ordering::Relaxed),
+        script.throttled.load(Ordering::Relaxed),
+        script.draws.load(Ordering::Relaxed),
+        script.unwraps.load(Ordering::Relaxed),
+        sum(&told, |t| &t.paused),
+        sum(&told, |t| &t.resumed),
+        sum(&told, |t| &t.trials),
+        sum(&told, |t| &t.guests),
+    );
+    inboxes[0].teardown().await.unwrap();
+}

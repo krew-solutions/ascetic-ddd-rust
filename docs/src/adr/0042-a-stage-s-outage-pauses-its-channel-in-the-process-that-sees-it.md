@@ -336,8 +336,10 @@ At 2,000 Tenants in each of 64 slots, 3 replicas of 8 loops, K = 32:
   present; the expiry runs on a timer; a missed exit stops the inbox; the causes of the KMS split by remedy;
   `last_error` is empty for named causes; `Outage { budget, cap }` and `past_budget` are gone; a session not READ
   COMMITTED is refused.
-- Tenants whose keys are cached stall while their channel is paused; they would have flowed at most `keep` (5 min
-  by default) longer.
+- Tenants whose keys are cached stall while their channel is paused, and on a channel not paused once one of their
+  heads is refused: the memo holds a (channel, Tenant) on a verdict of either scope (decision 2), its cached heads
+  with it. They would have flowed at most `keep` (5 min by default) longer; M6 measured half of a launch's backlog
+  so held for the outage's length (§ Measured).
 
 ## Rule of Three
 
@@ -414,10 +416,8 @@ configuration that must fail lists one property and has a twin, its `Mutant` set
 generates and runs; `check.sh` pins each passing configuration's and each twin's count of distinct states
 (`verify/tla/README.md` § Inbox outage).
 
-**Measurements owed.** M4 the expiry at the host's count of spared waiters, against 220,001 in 2.3 s a pass on the reference machine
-(§ 7); M5 a one-hour scaled drill
-at 7 channels and a 200 ms poll, with a KMS quota below the drain's rate; M6 the share of opens served from the
-cache during an outage.
+**Measurements owed.** M4 the expiry at the host's count of spared waiters, on the host's machine, against 220,001
+in 2.3 s a pass on the reference machine (§ 7): the host's, with its adoption (§ 12).
 
 ## Measured
 
@@ -471,6 +471,40 @@ lengthens the circle to N · (poll + w) / (L · K) = 27.2 s, which the last met.
 replicas of eight loops, the wait is so 36 s, not the 33 s decision 5 first stated; decision 5 and the Rule of
 Three now say 36.
 
+**M5 and M6, an outage of the KMS drilled for an hour** (`crates/dek/tests/drill.rs`). The path a host's service
+runs: producers sealing each of 7 channels' messages with the channel's stage (`Sealing::over`, a key reused for
+1,000 messages or 60 s) and storing them through the inbox's channel; three consuming processes of eight loops, a
+200 ms poll, each opening through a sealing of its own by destination (keys kept 5 minutes), a handler of 50 ms;
+64 slots, 500 Tenants at 20 messages a second, and a launch Tenant's 100,000 messages in the two minutes before
+the outage, faster than the consumers drain them. The KMS follows a script: up 10 minutes, down 20 (every call
+refused as unreachable), then up under a quota of 60 calls a second — above the steady 40, below what draining
+asks; a call past it is refused as a 429 is, of the class `Unavailable`. A producer cannot seal while the KMS is
+down, so the outage meets the launch's backlog and nothing new. Two runs, the second counting the order's prefix:
+- **Nothing parked, no attempt spent**: 171,998 and 171,997 messages stored, none left queued at the end; 16,000
+  holds in each run.
+- **The KMS while down**: 253 and 308 calls in 20 minutes, 196 and 250 of them unwraps — a Tenant's held heads
+  asked again at its memo's pace — not a term in the Tenants.
+- **Paused while down**: one channel of seven, in two or three processes, within some seventy seconds: where two
+  Tenants or more failed a channel in the window. A channel where the launch Tenant alone failed was never paused, as decision
+  1 has it of a quiet channel.
+- **Recovery under the quota**: twelve pauses and resumes in its first 25 s, the quota's refusals read for a
+  moment as the outage still on, the stall reported; then none, a call past the quota refused and its row held and
+  asked again. The launch's backlog of 54,453 and 58,464 rows drained in some 11 minutes, the producers' 24,000
+  sealed and drained in 20; the KMS answered 58 calls a second against its 60 meanwhile. The drain runs at the
+  quota's rate, without a herd: a host sizes the quota by the drain it accepts (§ 12, item 6).
+- **M6, what the cache could have served while the KMS was down.** At the outage's start 62,214 and 64,415 rows
+  were queued; 61 % were under a key a consumer held and 53 % before the first row of their (slot, Tenant) whose
+  key none held — what the order across channels lets through (ADR-0041 decision 2). The consumers served 9,932
+  and 6,040 of them in the first minutes, then none, on the channels never paused as on the paused one: at one
+  minute 30,498 rows (50 %) lay before such a head under a key a consumer held, at three 28,654 (49 %), and at five
+  none, their keys out of the cache. What held them is the memo: a head refused for want of its key holds its
+  (channel, Tenant) in that process, every head of it, for a hold doubling to 300 s (decision 2) — the cached ones
+  with it. They waited for the outage's end and then their turn in the drain, some 25 minutes, where the cache
+  would have served them in its first five. The revision this asks for is owed (§ Owed, 1).
+
+**M4** is the host's: the expiry at its own count of spared waiters, on its machine. Here, 220,001 waiters took
+2.3 s a pass on the reference machine (§ 7).
+
 **The two-session run of a verb against a concurrent hold** (`pg/measure_tests.rs`). `park_heads` of 4,000 held
 heads, a batch a call, beside four sessions that held a head again or processed one, each change committed:
 63 calls parked 3,975 and passed 1,699 by, beside 427 heads held again and 25 processed; at the end no head was
@@ -481,7 +515,11 @@ false, does not hold: `passed` is what a batch examined and did not park, `more`
 
 ## Owed
 
-1. The measurements § Executors names.
+1. A revision of decision 2 for a verdict at the stage's scope, under the library's gate (a blind solver, a
+   discriminator, roles): whether the memo holds the Tenant when the stage, not the Tenant, refused, or only the
+   row. M6 measured its cost — half of a launch's backlog, cached and let through by the order, held for the
+   outage's length on channels never paused — and M5 its gain, the asks of a KMS down bounded at some 250 in 20
+   minutes; the core's C1–C13, M5's drill and the trace and the model are the revision's executors.
 2. The host's adoption (§ 12), in its own records.
 3. A live deployment's steps, when there is a live client: expand and contract for `cause` and the dropped
    columns; the CHECKs added `NOT VALID` after a backfill; the take, walk, expiry and trial under new names while
@@ -752,3 +790,9 @@ payloads), its generated Vault policies.
     write (R9).
   - **ADR-0041's M7 measurement called the walk with three arguments** since slice 3 added the fourth; it passes
     an empty list of paused channels now.
+- 2026-11-17: Measured M5 and M6, the outage of the KMS drilled for an hour, twice (§ Measured): nothing parked, no
+  attempt spent, the KMS asked some 250 times while down, the backlog drained at the quota's rate. M6 found what
+  the decision had not stated: the memo holds a (channel, Tenant) on a verdict at the stage's scope too, so a
+  Tenant's cached heads stall on a channel never paused once one of its heads is refused — half of a launch's
+  backlog for the outage's length. The consequence now says so, and a revision of decision 2 for the stage's
+  scope is owed, under the library's gate (§ Owed, 1). M4 is the host's, at its count.
