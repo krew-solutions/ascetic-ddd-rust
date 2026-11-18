@@ -428,7 +428,18 @@ and memo of Tenants:
   its trial, one at a time, which a processed verdict closes, and a breaker
   with no head left to try closes (`Circle`): the core closes at a tick that
   finds no witness and none to wait for, which a channel with no head reaches
-  once its known witnesses are tried.
+  once its known witnesses are tried. That is the rows' source, a channel's
+  with no dependency registered;
+- with one (`Depends`, ADR-0042 decision 1 since slice 12) the stage's
+  refusal is its dependency's: it remembers the key refused and may make the
+  process's **gate** suspect (the thresholds' branch again); a check
+  (`Check`), beside the dispatch and past the process's memory, asks the head
+  met or the key remembered, and is served when the stage is up for the
+  process, whatever the process holds cached: served, the gate closes;
+  refused, it opens or stays open. A gate open with nothing to ask and no
+  head closes (`NothingToHold`); the dependency may forget its keys
+  (`Forget`, its control past its keep), never fairly. A row processed closes
+  no gate.
 
 A head whose dependency is not processed is set aside, and its dependency's
 mark wakes it. The expiry parks a waiter whose chain reaches no queued row
@@ -441,7 +452,9 @@ The fairness is strong for a worker's ask and for a hold's running out: a
 slot another process keeps taking and letting go is taken by this one in
 turn, as the take serves the least recently served slot `SKIP LOCKED`, and a
 hold a trial asks again runs out between two trials, its stage-scoped
-interval at most a tick's cap and the trials a tick apart.
+interval at most a tick's cap and the trials a tick apart. A gate's check and
+its close with nothing to hold are weakly fair; the dependency's forgetting
+is not, as a keep that outlasts the outage never reaches it.
 
 `Mutant` names a refuted design, `"none"` the decided one. Each refuted
 configuration names one property, and `check.sh` runs its twin — the same
@@ -454,7 +467,8 @@ since slice 9 a process leaves such a Tenant's heads to the others: the
 instances with the stage down count `InboxOutage.cfg` 191 126 states and
 `InboxOutageOperators.cfg` 830 194 (slice 8, which held them unasked,
 446 210 and 3 685 902). On the reference machine (12 cores) the group takes
-some 11 minutes, 9 of them `InboxOutageOperators.cfg`'s liveness.
+some 20 minutes since slice 12 added the dependency's configurations, 11
+before (9 of them `InboxOutageOperators.cfg`'s liveness).
 
 `MCInboxOutage.tla` fixes the instances: m1 and m2 of Tenant t1 under one
 key in slot s1, m3 of t2 in s2; m4 and x where an instance names them.
@@ -474,6 +488,10 @@ key in slot s1, m3 of t2 in s2; m4 and x where an instance names them.
 | `InboxOutageCanaryKeeps.cfg` | a re-arm that keeps a higher count | `CanaryExact` violated |
 | `InboxOutageQueueOldest.cfg` | a queue given up from its oldest row | `GivenUpIsTheEnd` violated |
 | `InboxOutageRearmBesideAnAsk.cfg` | a re-arm beside an ask of its slot | `KeyOrder` violated: a later row of the key, in flight while the overtaking is read, is processed past the row re-armed |
+| `InboxOutageDependency.cfg` | the dependency registered; the stage down once and back, p2 cut off once and back, t1's keys cached in p1, a rollback | `GateClosesOnItsEvidence`, `GateResumes`, `EventuallyProcessed` and the rest; 275 296 |
+| `InboxOutageDependencyCutOff.cfg` | the dependency registered; p2 cut off for good, the stage up | p2's gate stays open, p1 processes every row; 4 484 |
+| `InboxOutageCachedCheckCloses.cfg` | the dependency registered, t1's keys cached in p1, and a check the stage answers from its memory | `GateClosesOnItsEvidence` violated: a cached head's check closes the gate with the stage down |
+| `InboxOutageCheckNeedsAHead.cfg` | the dependency registered, and a check that asks a head alone | `GateResumes` violated: once the other process has processed every row, a gate that remembers a key to ask stays open with the stage up |
 | `InboxOutageStageHeldUnasked.cfg` | p2 cut off for good, its memo writing a stage's refusal on the Tenant's other heads, held unasked (the design before ADR-0042's slice 9) | `UnaskedHoldIsTheTenants` violated: a row never told an `Unavailable` holds under a stage's cause |
 
 The last was the model's finding, not a design the decision refuted: the

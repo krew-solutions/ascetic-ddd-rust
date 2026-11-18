@@ -28,6 +28,12 @@
 (*     thresholds are the core's, and the model takes either branch; an   *)
 (*     open breaker asks no head but by its trial, one at a time, which a  *)
 (*     processed verdict closes; a circle that finds no head closes it.    *)
+(*     That is the rows' source, a channel's with no dependency registered;*)
+(*     with one (Depends), the stage's refusal is its dependency's, and    *)
+(*     its own breaker -- the gate -- is suspected at a refusal, opened by *)
+(*     a check of the dependency refused, and closed by a check served --  *)
+(*     past the process's memory: a key held cached is no evidence -- or  *)
+(*     with nothing left to ask and no head to hold (ADR-0042 decision 1).*)
 (* A head whose dependency is not processed is set aside to wait, and the  *)
 (* mark of the dependency puts it back.  The expiry parks a waiter whose   *)
 (* chain reaches no queued row -- its dependency never arrived, is parked, *)
@@ -63,6 +69,7 @@ CONSTANTS
   CutOffs,      \* SUBSET Procs: processes that may be cut off from the stage alone, once each
   CutEnds,      \* TRUE: a cut-off process reaches the stage again
   Cached,       \* [Procs -> SUBSET Tenants]: whose keys a process holds cached
+  Depends,      \* TRUE: the stage's refusals are its dependency's, registered for the channel
   TenantFaults, \* SUBSET Tenants: whose keys may fail alone, once each
   TenantEnds,   \* TRUE: a Tenant's fault ends
   Permanent,    \* SUBSET Msgs: rows no retry mends
@@ -110,7 +117,9 @@ VARIABLES
   cut,         \* SUBSET Procs: cut off from the stage
   cutDone,     \* SUBSET Procs: whose cut has happened
   tenantDown, faulted,
-  breaker,     \* [Procs -> {"closed", "open"}]
+  breaker,     \* [Procs -> {"closed", "open"}]: the rows' source
+  gate,        \* [Procs -> {"closed", "suspect", "open"}]: the dependency's source
+  remembers,   \* [Procs -> BOOLEAN]: the dependency holds a key to ask, its control or its last refused
   memo,        \* [Procs -> [Tenants -> Memos]]
   flight,      \* [Workers -> Arrives \cup {None}]: the head a worker's open ask holds
   trial,       \* [Workers -> BOOLEAN]: whether that ask is its process's trial
@@ -119,7 +128,8 @@ VARIABLES
 rows == <<processed, procOrder, attempts, parked, byHand, expired, waiting, cause, kind, holds,
           due, flaked, rearmed>>
 env == <<stageDown, outages, cut, cutDone, tenantDown, faulted>>
-vars == <<rows, env, breaker, memo, flight, trial, admin, rollbacks>>
+deps == <<gate, remembers>>
+vars == <<rows, env, breaker, deps, memo, flight, trial, admin, rollbacks>>
 
 Pos(m) == CHOOSE i \in 1..Len(Order) : Order[i] = m
 
@@ -135,6 +145,7 @@ Init ==
   /\ stageDown = FALSE /\ outages = 0 /\ cut = {} /\ cutDone = {}
   /\ tenantDown = {} /\ faulted = {}
   /\ breaker = [p \in Procs |-> "closed"]
+  /\ gate = [p \in Procs |-> "closed"] /\ remembers = [p \in Procs |-> FALSE]
   /\ memo = [p \in Procs |-> [t \in Tenants |-> "none"]]
   /\ flight = [w \in Workers |-> None]
   /\ trial = [w \in Workers |-> FALSE]
@@ -163,6 +174,10 @@ Spared(m, n) ==
 
 Reachable(p, m) == (~stageDown /\ p \notin cut) \/ TenantOf[m] \in Cached[p]
 
+\* A channel is paused in a process while either source's breaker is open; a
+\* suspected gate does not pause it.
+Paused(p) == breaker[p] = "open" \/ gate[p] = "open"
+
 (* ------------------------------------------------------------------------ *)
 (* A worker's ask                                                            *)
 
@@ -176,7 +191,7 @@ AskStart(w) ==
   /\ \E m \in Heads :
        /\ ~SlotBusy(SlotOf[m])
        /\ DepDone(m)
-       /\ \/ /\ breaker[p] = "closed" /\ due[m]
+       /\ \/ /\ ~Paused(p) /\ due[m]
              /\ IF Mutant = "no_flight_mark"
                   THEN ~Held(memo[p][TenantOf[m]])
                   ELSE memo[p][TenantOf[m]] = "none" \/ Due(memo[p][TenantOf[m]])
@@ -190,17 +205,17 @@ AskStart(w) ==
              /\ trial' = [trial EXCEPT ![w] = TRUE]
              /\ memo' = memo
        /\ flight' = [flight EXCEPT ![w] = m]
-  /\ UNCHANGED <<rows, env, breaker, admin, rollbacks>>
+  /\ UNCHANGED <<rows, env, breaker, deps, admin, rollbacks>>
 
 \* A head whose dependency is not processed is set aside, the whole
 \* transaction (ADR-0009).
 SetAside(w) ==
-  /\ flight[w] = None /\ breaker[ProcOf[w]] = "closed"
+  /\ flight[w] = None /\ ~Paused(ProcOf[w])
   /\ \E m \in Heads :
        /\ ~SlotBusy(SlotOf[m]) /\ due[m] /\ ~DepDone(m)
        /\ waiting' = waiting \cup {m}
   /\ UNCHANGED <<processed, procOrder, attempts, parked, byHand, expired, cause, kind, holds, due,
-                flaked, rearmed, env, breaker, memo, flight, trial, admin, rollbacks>>
+                flaked, rearmed, env, breaker, deps, memo, flight, trial, admin, rollbacks>>
 
 \* A head of a Tenant the process's memo holds at the Tenant's scope is held
 \* unasked: its row written held under the memo's cause, its count of verdicts
@@ -209,7 +224,7 @@ SetAside(w) ==
 \* take it -- but for the refuted design that writes it ("stage_held_unasked").
 HoldUnasked(w) ==
   LET p == ProcOf[w] IN
-  /\ flight[w] = None /\ breaker[p] = "closed"
+  /\ flight[w] = None /\ ~Paused(p)
   /\ \E m \in Heads :
        /\ ~SlotBusy(SlotOf[m]) /\ due[m]
        /\ IF Mutant = "stage_held_unasked"
@@ -219,7 +234,7 @@ HoldUnasked(w) ==
        /\ cause' = [cause EXCEPT ![m] = IF Stage(memo[p][TenantOf[m]]) THEN "stage" ELSE "tenant"]
        /\ due' = [due EXCEPT ![m] = FALSE]
   /\ UNCHANGED <<processed, procOrder, attempts, parked, byHand, expired, waiting, holds, flaked,
-                rearmed, env, breaker, memo, flight, trial, admin, rollbacks>>
+                rearmed, env, breaker, deps, memo, flight, trial, admin, rollbacks>>
 
 \* The rows woken by the mark of m: its waiters, and the waiters the expiry
 \* parked, which kept the identity they waited for.
@@ -272,13 +287,13 @@ AskEnd(w) ==
         /\ rearmed' = rearmed \ {m}
         /\ memo' = [memo EXCEPT ![p][t] = "none"]
         /\ breaker' = IF trial[w] THEN [breaker EXCEPT ![p] = "closed"] ELSE breaker
-        /\ UNCHANGED <<attempts, byHand, flaked>>
+        /\ UNCHANGED <<attempts, byHand, flaked, deps>>
      \/ \* its own failure, once
         /\ Reachable(p, m) /\ m \in Flaky \ flaked /\ m \notin Permanent
         /\ flaked' = flaked \cup {m}
         /\ Spend(m, "own")
         /\ memo' = [memo EXCEPT ![p][t] = "none"]
-        /\ UNCHANGED <<processed, procOrder, waiting, byHand, expired, breaker>>
+        /\ UNCHANGED <<processed, procOrder, waiting, byHand, expired, breaker, deps>>
      \/ \* no retry mends it
         /\ Reachable(p, m) /\ m \in Permanent
         /\ attempts' = [attempts EXCEPT ![m] = @ + 1]
@@ -288,18 +303,25 @@ AskEnd(w) ==
         /\ holds' = [holds EXCEPT ![m] = 0]
         /\ rearmed' = rearmed \ {m}
         /\ memo' = [memo EXCEPT ![p][t] = "none"]
-        /\ UNCHANGED <<processed, procOrder, waiting, byHand, expired, due, flaked, breaker>>
+        /\ UNCHANGED <<processed, procOrder, waiting, byHand, expired, due, flaked, breaker, deps>>
      \/ \* the Tenant's Unavailable, remembered by the process
         /\ Reachable(p, m) /\ t \in tenantDown /\ m \notin Permanent
         /\ Hold(m, "tenant")
         /\ memo' = [memo EXCEPT ![p][t] = "held"]
-        /\ UNCHANGED <<processed, procOrder, waiting, byHand, expired, flaked, breaker>>
+        /\ UNCHANGED <<processed, procOrder, waiting, byHand, expired, flaked, breaker, deps>>
      \/ \* the stage's Unavailable: remembered by the process as a Tenant's is,
         \* but for a trial's, which is the breaker's; the breaker may open, or
-        \* stay as it is
+        \* stay as it is.  With a dependency, the refusal is its: the key
+        \* refused is remembered to ask again, and the gate may be suspected
+        \* -- the thresholds' branch -- and nothing else.
         /\ ~Reachable(p, m)
         /\ Hold(m, "stage")
-        /\ breaker' \in {breaker, [breaker EXCEPT ![p] = "open"]}
+        /\ IF Depends
+             THEN /\ gate' \in {gate, [gate EXCEPT ![p] = IF @ = "closed" THEN "suspect" ELSE @]}
+                  /\ remembers' = [remembers EXCEPT ![p] = TRUE]
+                  /\ breaker' = breaker
+             ELSE /\ breaker' \in {breaker, [breaker EXCEPT ![p] = "open"]}
+                  /\ UNCHANGED deps
         /\ memo' = IF trial[w] THEN memo ELSE [memo EXCEPT ![p][t] = "held_s"]
         /\ UNCHANGED <<processed, procOrder, waiting, byHand, expired, flaked>>
   /\ UNCHANGED <<env, admin, rollbacks>>
@@ -315,14 +337,42 @@ Rollback(w) ==
   /\ memo' = IF InFlightOf(memo[p][TenantOf[flight[w]]])
                THEN [memo EXCEPT ![p][TenantOf[flight[w]]] = IF Stage(@) THEN "due_s" ELSE "due"]
                ELSE memo
-  /\ UNCHANGED <<rows, env, breaker, admin>>
+  /\ UNCHANGED <<rows, env, breaker, deps, admin>>
 
 \* A guest's circle that finds no head of the channel closes the breaker.
 Circle(p) ==
   /\ breaker[p] = "open" /\ Heads = {}
   /\ \A w \in Workers : ProcOf[w] = p => ~trial[w]
   /\ breaker' = [breaker EXCEPT ![p] = "closed"]
-  /\ UNCHANGED <<rows, env, memo, flight, trial, admin, rollbacks>>
+  /\ UNCHANGED <<rows, env, deps, memo, flight, trial, admin, rollbacks>>
+
+\* The dependency's check, beside the dispatch (ADR-0042 decision 1): it
+\* asks the dependency past the stage's memory -- its control or its last
+\* refused key, and the head met, if any -- and is served when the stage is
+\* up for the process, whatever the process holds cached; refused, it opens
+\* the gate or keeps it open.  With nothing to ask it is unasked and changes
+\* nothing.  The refuted designs: a check the stage answers from its memory,
+\* a head of a Tenant whose keys the process holds cached served while the
+\* stage is down ("cached_check_closes"); and one that asks a head alone
+\* ("check_needs_a_head").
+Served(p, h) ==
+  IF Mutant = "cached_check_closes" /\ h # None
+    THEN Reachable(p, h)
+    ELSE ~stageDown /\ p \notin cut
+
+Check(p) ==
+  /\ gate[p] \in {"suspect", "open"}
+  /\ \E h \in Heads \cup {None} :
+       /\ h = None => remembers[p] /\ Mutant # "check_needs_a_head"
+       /\ gate' = [gate EXCEPT ![p] = IF Served(p, h) THEN "closed" ELSE "open"]
+  /\ UNCHANGED <<rows, env, breaker, remembers, memo, flight, trial, admin, rollbacks>>
+
+\* An open gate with nothing to ask and no head to hold closes: the core
+\* closes it after W with no head met at the tick's cap.
+NothingToHold(p) ==
+  /\ gate[p] = "open" /\ ~remembers[p] /\ Heads = {}
+  /\ gate' = [gate EXCEPT ![p] = "closed"]
+  /\ UNCHANGED <<rows, env, breaker, remembers, memo, flight, trial, admin, rollbacks>>
 
 (* ------------------------------------------------------------------------ *)
 (* Time                                                                      *)
@@ -331,13 +381,20 @@ Elapse(m) ==
   /\ ~due[m] /\ m \notin InFlight
   /\ due' = [due EXCEPT ![m] = TRUE]
   /\ UNCHANGED <<processed, procOrder, attempts, parked, byHand, expired, waiting, cause, kind,
-                holds, flaked, rearmed, env, breaker, memo, flight, trial, admin, rollbacks>>
+                holds, flaked, rearmed, env, breaker, deps, memo, flight, trial, admin, rollbacks>>
 
 \* A Tenant's memo runs out: one ask may go through.
 MemoElapse(p, t) ==
   /\ Held(memo[p][t])
   /\ memo' = [memo EXCEPT ![p][t] = IF Stage(@) THEN "due_s" ELSE "due"]
-  /\ UNCHANGED <<rows, env, breaker, flight, trial, admin, rollbacks>>
+  /\ UNCHANGED <<rows, env, breaker, deps, flight, trial, admin, rollbacks>>
+
+\* The dependency's keys run out: its control past its keep, its refused key
+\* dropped.
+Forget(p) ==
+  /\ remembers[p]
+  /\ remembers' = [remembers EXCEPT ![p] = FALSE]
+  /\ UNCHANGED <<rows, env, breaker, gate, memo, flight, trial, admin, rollbacks>>
 
 \* A waiter whose chain reaches no queued row is parked, the identity it
 \* waited for kept, so that a late mark still wakes it.
@@ -348,7 +405,7 @@ Expire(m) ==
   /\ parked' = parked \cup {m}
   /\ expired' = expired \cup {m}
   /\ UNCHANGED <<processed, procOrder, attempts, byHand, cause, kind, holds, due, flaked, rearmed,
-                env, breaker, memo, flight, trial, admin, rollbacks>>
+                env, breaker, deps, memo, flight, trial, admin, rollbacks>>
 
 (* ------------------------------------------------------------------------ *)
 (* The environment                                                           *)
@@ -356,34 +413,34 @@ Expire(m) ==
 StageFails ==
   /\ ~stageDown /\ outages < Outages
   /\ stageDown' = TRUE /\ outages' = outages + 1
-  /\ UNCHANGED <<rows, cut, cutDone, tenantDown, faulted, breaker, memo, flight, trial, admin,
+  /\ UNCHANGED <<rows, cut, cutDone, tenantDown, faulted, breaker, deps, memo, flight, trial, admin,
                 rollbacks>>
 
 StageMends ==
   /\ stageDown /\ OutageEnds /\ stageDown' = FALSE
-  /\ UNCHANGED <<rows, outages, cut, cutDone, tenantDown, faulted, breaker, memo, flight, trial,
+  /\ UNCHANGED <<rows, outages, cut, cutDone, tenantDown, faulted, breaker, deps, memo, flight, trial,
                 admin, rollbacks>>
 
 CutOff(p) ==
   /\ p \in CutOffs \ cutDone
   /\ cut' = cut \cup {p} /\ cutDone' = cutDone \cup {p}
-  /\ UNCHANGED <<rows, stageDown, outages, tenantDown, faulted, breaker, memo, flight, trial,
+  /\ UNCHANGED <<rows, stageDown, outages, tenantDown, faulted, breaker, deps, memo, flight, trial,
                 admin, rollbacks>>
 
 CutMends(p) ==
   /\ p \in cut /\ CutEnds /\ cut' = cut \ {p}
-  /\ UNCHANGED <<rows, stageDown, outages, cutDone, tenantDown, faulted, breaker, memo, flight,
+  /\ UNCHANGED <<rows, stageDown, outages, cutDone, tenantDown, faulted, breaker, deps, memo, flight,
                 trial, admin, rollbacks>>
 
 TenantFails(t) ==
   /\ t \in TenantFaults \ faulted
   /\ tenantDown' = tenantDown \cup {t} /\ faulted' = faulted \cup {t}
-  /\ UNCHANGED <<rows, stageDown, outages, cut, cutDone, breaker, memo, flight, trial, admin,
+  /\ UNCHANGED <<rows, stageDown, outages, cut, cutDone, breaker, deps, memo, flight, trial, admin,
                 rollbacks>>
 
 TenantMends(t) ==
   /\ t \in tenantDown /\ TenantEnds /\ tenantDown' = tenantDown \ {t}
-  /\ UNCHANGED <<rows, stageDown, outages, cut, cutDone, faulted, breaker, memo, flight, trial,
+  /\ UNCHANGED <<rows, stageDown, outages, cut, cutDone, faulted, breaker, deps, memo, flight, trial,
                 admin, rollbacks>>
 
 (* ------------------------------------------------------------------------ *)
@@ -409,8 +466,8 @@ UnparkAll(m) ==
   /\ cause' = [cause EXCEPT ![m] = None]
   /\ due' = [due EXCEPT ![m] = TRUE]
   /\ rearmed' = rearmed \cup {m}
-  /\ UNCHANGED <<processed, procOrder, expired, waiting, kind, holds, flaked, env, breaker, memo,
-                flight, trial, rollbacks>>
+  /\ UNCHANGED <<processed, procOrder, expired, waiting, kind, holds, flaked, env, breaker, deps,
+                memo, flight, trial, rollbacks>>
 
 \* park_heads: a held head given up under its cause, the rows behind it
 \* going on.  A head an ask holds is passed by.
@@ -422,7 +479,7 @@ ParkHeads(m) ==
   /\ holds' = [holds EXCEPT ![m] = 0]
   /\ due' = [due EXCEPT ![m] = TRUE]
   /\ UNCHANGED <<processed, procOrder, attempts, expired, waiting, cause, flaked, rearmed, env,
-                breaker, memo, flight, trial, rollbacks>>
+                breaker, deps, memo, flight, trial, rollbacks>>
 
 \* park_queue, a row at a time as its batches interleave with the dispatch:
 \* a Tenant's newest queue row given up under the operator's cause, so that
@@ -442,13 +499,13 @@ ParkQueue(t) ==
        /\ holds' = [holds EXCEPT ![m] = 0]
        /\ due' = [due EXCEPT ![m] = TRUE]
   /\ UNCHANGED <<processed, procOrder, attempts, expired, waiting, flaked, rearmed, env, breaker,
-                memo, flight, trial, rollbacks>>
+                deps, memo, flight, trial, rollbacks>>
 
 (* ------------------------------------------------------------------------ *)
 
 Next ==
   \/ \E w \in Workers : AskStart(w) \/ AskEnd(w) \/ Rollback(w) \/ SetAside(w) \/ HoldUnasked(w)
-  \/ \E p \in Procs : Circle(p) \/ CutOff(p) \/ CutMends(p)
+  \/ \E p \in Procs : Circle(p) \/ Check(p) \/ NothingToHold(p) \/ Forget(p) \/ CutOff(p) \/ CutMends(p)
   \/ \E p \in Procs, t \in Tenants : MemoElapse(p, t)
   \/ \E m \in Msgs : Elapse(m) \/ Expire(m) \/ UnparkAll(m) \/ ParkHeads(m)
   \/ \E t \in Tenants : ParkQueue(t) \/ TenantFails(t) \/ TenantMends(t)
@@ -460,10 +517,13 @@ Next ==
 \* LOCKED`; every while passes -- strongly too: a hold a trial asks again
 \* runs out between two trials, its stage-scoped interval at most a tick's
 \* cap and the trials a tick apart (ADR-0042 decision 3); the expiry runs; a
-\* stage, a cut and a Tenant's fault that end, end.
+\* gate's check runs, a tick apart, and so does its close with nothing to
+\* hold -- not the dependency's forgetting, which a keep that outlasts the
+\* outage never reaches; a stage, a cut and a Tenant's fault that end, end.
 Fairness ==
   /\ \A w \in Workers : SF_vars(AskStart(w) \/ SetAside(w) \/ HoldUnasked(w)) /\ WF_vars(AskEnd(w))
   /\ \A p \in Procs : WF_vars(Circle(p)) /\ WF_vars(CutMends(p))
+  /\ \A p \in Procs : WF_vars(Check(p)) /\ WF_vars(NothingToHold(p))
   /\ \A p \in Procs, t \in Tenants : WF_vars(MemoElapse(p, t))
   /\ \A m \in Msgs : SF_vars(Elapse(m)) /\ WF_vars(Expire(m))
   /\ WF_vars(StageMends)
@@ -482,6 +542,7 @@ TypeOK ==
   /\ kind \in [Msgs -> Kinds] /\ holds \in [Msgs -> 0..HoldCap]
   /\ due \in [Msgs -> BOOLEAN]
   /\ breaker \in [Procs -> {"closed", "open"}]
+  /\ gate \in [Procs -> {"closed", "suspect", "open"}] /\ remembers \in [Procs -> BOOLEAN]
   /\ memo \in [Procs -> [Tenants -> Memos]]
   /\ flight \in [Workers -> Arrives \cup {None}] /\ trial \in [Workers -> BOOLEAN]
 
@@ -539,6 +600,18 @@ Index(m) == CHOOSE i \in 1..Len(procOrder) : procOrder[i] = m
 KeyOrder ==
   \A a, b \in processed :
     (KeyOf[a] = KeyOf[b] /\ Pos(a) < Pos(b)) => Index(a) < Index(b)
+
+\* The gate closes from open on its own evidence alone: a check served while
+\* the stage is up for its process, or nothing left to ask and no head to
+\* hold -- never a key the process holds cached (ADR-0042 decision 1).
+GateClosesOnItsEvidence ==
+  [][\A p \in Procs :
+       (gate[p] = "open" /\ gate'[p] = "closed")
+         => (~stageDown /\ p \notin cut) \/ (~remembers[p] /\ Heads = {})]_vars
+
+\* An open gate closes once the stage is up for its process, a head left to
+\* ask or not.
+GateResumes == \A p \in Procs : (gate[p] = "open") ~> (gate[p] = "closed" \/ stageDown \/ p \in cut)
 
 \* Every row whose dependency arrives ends processed or parked.
 EventuallyOutOfTheWay ==

@@ -12,13 +12,19 @@
 //!   channel or keeps it open. A channel open for two failed ticks is
 //!   **stalled**, which the process reports.
 //!
+//! - **The dependency's breaker**, per channel whose stage declares what it
+//!   depends on ([`Breaker::register`]): a pause on the dependency's causes
+//!   opens on breadth confirmed by a **check** of the dependency, and ends only
+//!   on a check served — a row processed is no evidence of a dependency the
+//!   stage may answer for from memory; S counts what it served by a call.
+//!
 //! Nothing here reads a clock or does I/O: the time is an argument, and the
 //! core returns what the shell is to do ([`Effect`], [`Before`], [`Told`]).
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-use ascetic_ddd_bus::{Cause, Scope};
+use ascetic_ddd_bus::{Cause, Check, Scope};
 
 /// The breaker's and the memo's settings (ADR-0042 decisions 1 and 2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,9 +150,24 @@ pub enum Verdict {
         scope: Scope,
         /// When the teller says to ask again.
         retry_after: Option<Duration>,
+        /// Whose evidence a `Stage`-scoped one is.
+        source: Source,
     },
     /// The row's own failure: `Transient` or `Permanent`.
     Own,
+}
+
+/// Whose evidence a `Stage`-scoped `Unavailable` is (ADR-0042 decision 1).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Source {
+    /// The rows': a handler's own, or a stage's of a cause no dependency
+    /// registered for the channel answers for. A row processed is its
+    /// evidence of health.
+    #[default]
+    Rows,
+    /// The channel's registered dependency's: told by a stage, of a cause the
+    /// dependency answers for. Only a check served is its evidence of health.
+    Dependency,
 }
 
 /// What a trial came to.
@@ -254,6 +275,26 @@ pub enum Effect {
         /// every [`REMINDER`].
         remind: bool,
     },
+    /// Check the channel's dependency now, of `head` if given; answer with
+    /// [`Breaker::checked`] before `deadline`.
+    Check {
+        /// The check's id.
+        id: u64,
+        /// The channel.
+        channel: String,
+        /// The head to ask of: its slot and its Tenant.
+        head: Option<(i16, String)>,
+        /// When an unanswered check is a failed tick.
+        deadline: Instant,
+    },
+    /// A suspicion of the channel's dependency refuted by a check served: its
+    /// failing Tenants forgotten, the channel asked on.
+    Refuted {
+        /// The channel.
+        channel: String,
+        /// The suspicion's cause.
+        cause: Cause,
+    },
     /// The channel is asked again.
     Resumed {
         /// The channel.
@@ -276,6 +317,11 @@ pub enum Resumption {
     Inconclusive,
     /// No witness was left, and none to wait for.
     NoWitness,
+    /// A check of the channel's dependency was served.
+    Served,
+    /// The dependency's pause had nothing left to ask of, nor a head met, for
+    /// a window: nothing it held.
+    NothingToHold,
 }
 
 /// How often a stall is said again in the log while it lasts.
@@ -364,6 +410,345 @@ struct Channel {
     /// Set by a close that no processed trial made, cleared by a row of the
     /// channel processed.
     probation: Option<Probation>,
+    /// The breaker of the dependency registered for the channel, if any.
+    dependency: Option<Box<Gate>>,
+}
+
+impl Channel {
+    /// Whether the channel is paused: by its rows' breaker or its
+    /// dependency's.
+    fn is_paused(&self) -> bool {
+        matches!(self.state, State::Open(_))
+            || self
+                .dependency
+                .as_ref()
+                .is_some_and(|gate| matches!(gate.state, GateState::Open(_)))
+    }
+}
+
+/// The breaker of a channel's dependency (ADR-0042 decision 1).
+#[derive(Debug)]
+struct Gate {
+    /// The longest a check of it takes.
+    bound: Duration,
+    /// Tenants whose latest verdict was the dependency's `Stage`-scoped
+    /// `Unavailable`: when, and its cause.
+    failing: HashMap<String, (Instant, Cause)>,
+    /// What the dependency served, sampled at most once a second, within the
+    /// window.
+    served: VecDeque<(Instant, u64)>,
+    state: GateState,
+    /// Failed ticks.
+    failed: u32,
+    /// When it last closed.
+    closed_at: Option<Instant>,
+    /// Heads guests met while it was open.
+    witnesses: VecDeque<(i16, String)>,
+    /// The suspicion's step: the least time between two checks of a
+    /// suspicion refuted.
+    step: Duration,
+    /// When the breadth rule last tripped.
+    tripped_at: Option<Instant>,
+    /// When a check last refuted a suspicion.
+    refuted_at: Option<Instant>,
+}
+
+#[derive(Debug)]
+enum GateState {
+    /// Asked; suspect while a check is due or in flight.
+    Closed {
+        due: Option<Instant>,
+        check: Option<Checking>,
+    },
+    Open(Box<GateOpen>),
+}
+
+#[derive(Debug)]
+struct Checking {
+    id: u64,
+    deadline: Instant,
+    /// What the dependency had served when the check was issued.
+    served: u64,
+    /// Whether a head was given.
+    head: bool,
+    /// Whether a head met brought it forward.
+    hastened: bool,
+}
+
+#[derive(Debug)]
+struct GateOpen {
+    cause: Cause,
+    since: Instant,
+    next_tick: Instant,
+    check: Option<Checking>,
+    /// Checks whose deadline counted them: a served answer from one still
+    /// closes the channel.
+    expired: VecDeque<u64>,
+    last_check: Option<Instant>,
+    /// Heads asked of this pause.
+    tried: Vec<String>,
+    reminded: Option<Instant>,
+    refreshed: Option<Instant>,
+    hastened: bool,
+    haste_spent: bool,
+    /// Since when its checks had nothing to ask of and no head was met.
+    unasked_since: Option<Instant>,
+}
+
+impl Gate {
+    fn new(bound: Duration, settings: &Breaking) -> Self {
+        Gate {
+            bound,
+            failing: HashMap::new(),
+            served: VecDeque::new(),
+            state: GateState::Closed {
+                due: None,
+                check: None,
+            },
+            failed: 0,
+            closed_at: None,
+            witnesses: VecDeque::new(),
+            step: settings.tick.0,
+            tripped_at: None,
+            refuted_at: None,
+        }
+    }
+
+    /// The newest value served.
+    fn served_now(&self) -> u64 {
+        self.served.back().map_or(0, |(_, value)| *value)
+    }
+
+    fn sample(&mut self, settings: &Breaking, now: Instant, value: u64) {
+        match self.served.back_mut() {
+            Some((at, last)) if now.saturating_duration_since(*at) < Duration::from_secs(1) => {
+                *last = (*last).max(value);
+            }
+            _ => self.served.push_back((now, value)),
+        }
+        let horizon = now.checked_sub(settings.window);
+        while self.served.len() > 1
+            && self
+                .served
+                .front()
+                .is_some_and(|(at, _)| horizon.is_some_and(|h| *at < h))
+        {
+            self.served.pop_front();
+        }
+    }
+
+    /// S: what it served since the oldest sample within the window.
+    fn s(&self, settings: &Breaking, now: Instant) -> usize {
+        let horizon = now.checked_sub(settings.window);
+        let oldest = self
+            .served
+            .iter()
+            .find(|(at, _)| horizon.is_none_or(|h| *at >= h))
+            .map_or(self.served_now(), |(_, value)| *value);
+        usize::try_from(self.served_now().saturating_sub(oldest)).unwrap_or(usize::MAX)
+    }
+
+    /// The cause of a broad outage of the dependency within the window, if
+    /// its refusals are broad enough against what it served.
+    fn broad(&self, settings: &Breaking, now: Instant) -> Option<Cause> {
+        let horizon = now.checked_sub(settings.window);
+        let failing: Vec<Cause> = self
+            .failing
+            .values()
+            .filter(|(at, _)| horizon.is_none_or(|h| *at >= h))
+            .map(|(_, cause)| *cause)
+            .collect();
+        breadth(settings, &failing, self.s(settings, now))
+    }
+
+    /// The modal cause of its failing Tenants within the window, broad or
+    /// not.
+    fn modal(&self, settings: &Breaking, now: Instant) -> Cause {
+        let horizon = now.checked_sub(settings.window);
+        let failing: Vec<Cause> = self
+            .failing
+            .values()
+            .filter(|(at, _)| horizon.is_none_or(|h| *at >= h))
+            .map(|(_, cause)| *cause)
+            .collect();
+        modal_of(&failing).unwrap_or(Cause::UNEXPLAINED)
+    }
+
+    /// The next check of an open gate after a failed one.
+    fn schedule(&mut self, settings: &Breaking, now: Instant) {
+        let step = settings
+            .tick
+            .0
+            .saturating_mul(1u32 << self.failed.min(16))
+            .min(settings.tick.1);
+        if let GateState::Open(open) = &mut self.state {
+            open.next_tick = now + step;
+        }
+    }
+
+    fn stall_ttl(&self, settings: &Breaking) -> Duration {
+        settings.tick.1 * 2 + self.bound
+    }
+
+    fn stall(&mut self, settings: &Breaking, name: &str, now: Instant) -> Option<Effect> {
+        let (failed, ttl) = (self.failed, self.stall_ttl(settings));
+        let GateState::Open(open) = &mut self.state else {
+            return None;
+        };
+        if failed < 2 {
+            return None;
+        }
+        let remind = open
+            .reminded
+            .is_none_or(|at| now.saturating_duration_since(at) >= REMINDER);
+        if remind {
+            open.reminded = Some(now);
+        }
+        open.refreshed = Some(now);
+        Some(Effect::Stalled {
+            channel: name.to_owned(),
+            cause: open.cause,
+            since: open.since,
+            ttl,
+            remind,
+        })
+    }
+
+    /// Opens it under `cause`: a failed tick, the ones of a close shorter than
+    /// the window kept; stalled at once at two.
+    fn open(&mut self, settings: &Breaking, name: &str, now: Instant, cause: Cause) -> Vec<Effect> {
+        if self
+            .closed_at
+            .is_none_or(|at| now.saturating_duration_since(at) >= settings.window)
+        {
+            self.failed = 0;
+        }
+        self.failed = self.failed.saturating_add(1);
+        self.witnesses.clear();
+        self.state = GateState::Open(Box::new(GateOpen {
+            cause,
+            since: now,
+            next_tick: now,
+            check: None,
+            expired: VecDeque::new(),
+            last_check: None,
+            tried: Vec::new(),
+            reminded: None,
+            refreshed: None,
+            hastened: false,
+            haste_spent: false,
+            unasked_since: None,
+        }));
+        self.schedule(settings, now);
+        let mut effects = vec![Effect::Paused {
+            channel: name.to_owned(),
+            cause,
+        }];
+        effects.extend(self.stall(settings, name, now));
+        effects
+    }
+
+    fn close(&mut self, name: &str, now: Instant, by: Resumption) -> Option<Effect> {
+        let GateState::Open(open) = std::mem::replace(
+            &mut self.state,
+            GateState::Closed {
+                due: None,
+                check: None,
+            },
+        ) else {
+            return None;
+        };
+        self.failing.clear();
+        self.witnesses.clear();
+        self.closed_at = Some(now);
+        Some(Effect::Resumed {
+            channel: name.to_owned(),
+            cause: open.cause,
+            stalled: self.failed >= 2,
+            by,
+        })
+    }
+
+    /// The breadth rule tripped: a check is due at the suspicion's step,
+    /// pending though no further verdict comes.
+    fn trip(&mut self, settings: &Breaking, now: Instant) {
+        if self
+            .tripped_at
+            .is_none_or(|at| now.saturating_duration_since(at) >= settings.window)
+        {
+            self.step = settings.tick.0;
+        }
+        self.tripped_at = Some(now);
+        let earliest = self.refuted_at.map_or(now, |at| (at + self.step).max(now));
+        if let GateState::Closed { due, check } = &mut self.state
+            && check.is_none()
+            && due.is_none()
+        {
+            *due = Some(earliest);
+        }
+    }
+
+    /// The head of the next check: the first met of the heads not asked this
+    /// round whose Tenant the memo does not hold, else of those it holds;
+    /// once every head met was asked, a round begins anew, so that a head met
+    /// is never left unasked for good; with no head met, none.
+    fn head(&mut self, memo: &HashMap<String, Entry>) -> Option<(i16, String)> {
+        let Gate {
+            witnesses, state, ..
+        } = self;
+        let GateState::Open(open) = state else {
+            return None;
+        };
+        let pick = |tried: &[String]| {
+            witnesses
+                .iter()
+                .position(|(_, t)| !tried.contains(t) && !memo.contains_key(t))
+                .or_else(|| witnesses.iter().position(|(_, t)| !tried.contains(t)))
+        };
+        let index = match pick(&open.tried) {
+            Some(index) => index,
+            None if !witnesses.is_empty() => {
+                open.tried.clear();
+                pick(&open.tried)?
+            }
+            None => return None,
+        };
+        witnesses.remove(index)
+    }
+
+    /// Whether a refusal of the dependency's is left within the window: a
+    /// suspicion without one lapses.
+    fn suspected(&self, settings: &Breaking, now: Instant) -> bool {
+        let horizon = now.checked_sub(settings.window);
+        self.failing
+            .values()
+            .any(|(at, _)| horizon.is_none_or(|h| *at >= h))
+    }
+}
+
+/// Whether `failing`, the causes of the distinct Tenants failing within the
+/// window, against `s` weighed healthy, are broad enough: their modal cause.
+fn breadth(settings: &Breaking, failing: &[Cause], s: usize) -> Option<Cause> {
+    let f = failing.len();
+    let at_least = |(num, den): (usize, usize)| f * den >= num * (f + s);
+    let broad = f >= settings.fewest
+        && (at_least(settings.share) || (f >= settings.broad && at_least(settings.broad_share)));
+    if !broad {
+        return None;
+    }
+    modal_of(failing)
+}
+
+/// The most frequent of `causes`, ties by the cause.
+fn modal_of(causes: &[Cause]) -> Option<Cause> {
+    let mut tally: HashMap<Cause, usize> = HashMap::new();
+    for cause in causes {
+        *tally.entry(*cause).or_default() += 1;
+    }
+    tally
+        .into_iter()
+        .max_by(|(a, n), (b, m)| n.cmp(m).then_with(|| b.cmp(a)))
+        .map(|(cause, _)| cause)
 }
 
 /// A channel closed without a processed trial — three inconclusive, or no
@@ -487,7 +872,7 @@ impl Breaker {
         let mut paused: Vec<String> = self
             .channels
             .iter()
-            .filter(|(_, channel)| matches!(channel.state, State::Open(_)))
+            .filter(|(_, channel)| channel.is_paused())
             .map(|(name, _)| name.clone())
             .collect();
         paused.sort_unstable();
@@ -497,9 +882,7 @@ impl Breaker {
     /// Whether `channel` is paused.
     #[must_use]
     pub fn is_paused(&self, channel: &str) -> bool {
-        self.channels
-            .get(channel)
-            .is_some_and(|channel| matches!(channel.state, State::Open(_)))
+        self.channels.get(channel).is_some_and(Channel::is_paused)
     }
 
     /// The (channel, Tenant)s this process's memo holds at the stage's
@@ -521,7 +904,7 @@ impl Breaker {
         let mut until: Option<Instant> = None;
         let mut json = String::from("{");
         for (name, channel) in &self.channels {
-            if matches!(channel.state, State::Open(_)) {
+            if channel.is_paused() {
                 continue;
             }
             for (tenant, entry) in &channel.memo {
@@ -554,7 +937,7 @@ impl Breaker {
     pub fn excluded_counts(&self, now: Instant) -> Vec<Excluded> {
         let mut counts: HashMap<(&str, Cause), (usize, Instant)> = HashMap::new();
         for (name, channel) in &self.channels {
-            if matches!(channel.state, State::Open(_)) {
+            if channel.is_paused() {
                 continue;
             }
             for entry in channel.memo.values().filter(|e| e.excludes(now)) {
@@ -598,7 +981,7 @@ impl Breaker {
         let settings = self.settings;
         let id = self.id();
         let entry = self.channels.get_mut(channel).and_then(|c| {
-            if matches!(c.state, State::Open(_)) {
+            if c.is_paused() {
                 // A head of a paused channel is asked only by a trial, and
                 // met here only when the pause came after the walk began:
                 // passed, the pause one process's evidence, written on no row.
@@ -683,7 +1066,19 @@ impl Breaker {
             verdict,
         );
         let mut effects = Vec::new();
-        if matches!(
+        if let Verdict::Unavailable {
+            scope: Scope::Stage,
+            source: Source::Dependency,
+            ..
+        } = verdict
+            && let Some(gate) = channel.dependency.as_mut()
+        {
+            if matches!(gate.state, GateState::Closed { .. })
+                && gate.broad(&settings, now).is_some()
+            {
+                gate.trip(&settings, now);
+            }
+        } else if matches!(
             verdict,
             Verdict::Unavailable {
                 scope: Scope::Stage,
@@ -710,9 +1105,11 @@ impl Breaker {
         Told { hold, effects }
     }
 
-    /// Time has passed: the failed ticks of unanswered trials, the stalls to
-    /// refresh, and at most one trial — a dispatch runs one, and a trial
-    /// issued and not run would expire as a failed tick that asked nothing.
+    /// Time has passed: the failed ticks of unanswered trials and checks, the
+    /// stalls to refresh, the suspicions lapsed, at most one check of a
+    /// dependency — it runs beside the dispatch — and at most one trial — a
+    /// dispatch runs one, and a trial issued and not run would expire as a
+    /// failed tick that asked nothing.
     /// The channels due take their turns, the one due longest first; a
     /// channel whose tick finds no witness waits its next tick and leaves the
     /// call's trial to another.
@@ -722,22 +1119,285 @@ impl Breaker {
         let mut effects = Vec::new();
         for name in &names {
             effects.extend(self.expire(now, name));
+            effects.extend(self.expire_check(now, name));
         }
-        let mut due: Vec<(Instant, &String)> = names
-            .iter()
-            .filter_map(|name| match &self.channels.get(name)?.state {
-                State::Open(open) if open.trial.is_none() && open.next_tick <= now => {
-                    Some((open.next_tick, name))
+        // (when due, whether the dependency's, the channel)
+        let mut due: Vec<(Instant, bool, &String)> = Vec::new();
+        for name in &names {
+            let Some(channel) = self.channels.get(name) else {
+                continue;
+            };
+            if let State::Open(open) = &channel.state
+                && open.trial.is_none()
+                && open.next_tick <= now
+            {
+                due.push((open.next_tick, false, name));
+            }
+            match channel.dependency.as_deref().map(|gate| &gate.state) {
+                Some(GateState::Closed {
+                    due: Some(at),
+                    check: None,
+                }) if *at <= now => due.push((*at, true, name)),
+                Some(GateState::Open(open)) if open.check.is_none() && open.next_tick <= now => {
+                    due.push((open.next_tick, true, name));
+                }
+                _ => {}
+            }
+        }
+        due.sort_unstable();
+        // a check runs beside the dispatch, a trial in it: a call issues at
+        // most one of each
+        let (mut checked, mut trialled) = (false, false);
+        for (_, dependency, name) in due {
+            if dependency {
+                if !checked {
+                    let more = self.try_check(now, name);
+                    checked = more.iter().any(|e| matches!(e, Effect::Check { .. }));
+                    effects.extend(more);
+                }
+                continue;
+            }
+            if !trialled {
+                let (trial, more) = self.try_witness(now, name);
+                effects.extend(more);
+                trialled = trial;
+            }
+        }
+        effects
+    }
+
+    /// Registers the dependency of `channel`'s stage, whose check takes at
+    /// most `bound` (ADR-0042 decision 1): the channel's `Stage`-scoped
+    /// refusals of its causes are then its breaker's, which only a check
+    /// served closes.
+    pub fn register(&mut self, channel: &str, bound: Duration) {
+        let settings = self.settings;
+        let entry = self.channels.entry(channel.to_owned()).or_default();
+        match entry.dependency.as_mut() {
+            Some(gate) => gate.bound = bound,
+            None => entry.dependency = Some(Box::new(Gate::new(bound, &settings))),
+        }
+    }
+
+    /// What `channel`'s dependency has served so far, sampled.
+    pub fn served(&mut self, now: Instant, channel: &str, served: u64) {
+        let settings = self.settings;
+        if let Some(gate) = self
+            .channels
+            .get_mut(channel)
+            .and_then(|c| c.dependency.as_mut())
+        {
+            gate.sample(&settings, now, served);
+        }
+    }
+
+    /// A dependency's check unanswered by its deadline: a suspicion
+    /// confirmed, or a failed tick of a pause; and a stalled pause not
+    /// reported for a tick's cap reported now.
+    fn expire_check(&mut self, now: Instant, name: &str) -> Vec<Effect> {
+        let settings = self.settings;
+        let Some(channel) = self.channels.get_mut(name) else {
+            return Vec::new();
+        };
+        let Some(gate) = channel.dependency.as_mut() else {
+            return Vec::new();
+        };
+        let mut effects = Vec::new();
+        let suspected = gate.suspected(&settings, now);
+        match &mut gate.state {
+            GateState::Closed { due, check } => {
+                if check.as_ref().is_some_and(|c| c.deadline <= now) {
+                    let expired = check.take().map(|c| c.id);
+                    *due = None;
+                    // a suspicion with no refusal left within the window
+                    // lapses rather than pausing on nothing
+                    if suspected {
+                        let cause = gate.modal(&settings, now);
+                        effects.extend(gate.open(&settings, name, now, cause));
+                        // its answer, however late, still closes the pause
+                        if let (GateState::Open(open), Some(id)) = (&mut gate.state, expired) {
+                            open.expired.push_back(id);
+                        }
+                        self.keys = None;
+                    }
+                } else if check.is_none() && due.is_some() && !suspected {
+                    *due = None;
+                }
+            }
+            GateState::Open(open) => {
+                let mut ticked = open
+                    .refreshed
+                    .is_some_and(|at| now.saturating_duration_since(at) >= settings.tick.1);
+                if let Some(asked) = open.check.take_if(|c| c.deadline <= now) {
+                    open.expired.push_back(asked.id);
+                    if open.expired.len() > 8 {
+                        open.expired.pop_front();
+                    }
+                    gate.failed += 1;
+                    gate.schedule(&settings, now);
+                    ticked = true;
+                }
+                if ticked {
+                    effects.extend(gate.stall(&settings, name, now));
+                }
+            }
+        }
+        effects
+    }
+
+    /// A dependency's check, due: issued, its next tick scheduled.
+    fn try_check(&mut self, now: Instant, name: &str) -> Vec<Effect> {
+        let settings = self.settings;
+        let id = self.next + 1;
+        let Some(channel) = self.channels.get_mut(name) else {
+            return Vec::new();
+        };
+        let memo = &channel.memo;
+        let Some(gate) = channel.dependency.as_mut() else {
+            return Vec::new();
+        };
+        let served = gate.served_now();
+        let deadline = now + gate.bound + settings.tick.0;
+        let head = gate.head(memo);
+        match &mut gate.state {
+            GateState::Closed { due, check } => {
+                *due = None;
+                *check = Some(Checking {
+                    id,
+                    deadline,
+                    served,
+                    head: false,
+                    hastened: false,
+                });
+            }
+            GateState::Open(open) => {
+                if let Some((_, tenant)) = &head {
+                    open.tried.push(tenant.clone());
+                }
+                open.check = Some(Checking {
+                    id,
+                    deadline,
+                    served,
+                    head: head.is_some(),
+                    hastened: open.hastened,
+                });
+                open.haste_spent = open.hastened;
+                open.hastened = false;
+                open.last_check = Some(now);
+            }
+        }
+        self.next = id;
+        let mut effects = vec![Effect::Check {
+            id,
+            channel: name.to_owned(),
+            head: if matches!(gate.state, GateState::Open(_)) {
+                head
+            } else {
+                None
+            },
+            deadline,
+        }];
+        gate.schedule(&settings, now);
+        effects.extend(gate.stall(&settings, name, now));
+        effects
+    }
+
+    /// What the dependency's check `id` came to.
+    pub fn checked(&mut self, now: Instant, id: u64, check: Check) -> Vec<Effect> {
+        self.keys = None;
+        let settings = self.settings;
+        let found = self.channels.iter().find_map(|(name, channel)| {
+            let gate = channel.dependency.as_deref()?;
+            match &gate.state {
+                GateState::Closed {
+                    check: Some(asked), ..
+                } if asked.id == id => Some(name.clone()),
+                GateState::Open(open)
+                    if open.check.as_ref().is_some_and(|a| a.id == id)
+                        || open.expired.contains(&id) =>
+                {
+                    Some(name.clone())
                 }
                 _ => None,
-            })
-            .collect();
-        due.sort_unstable();
-        for (_, name) in due {
-            let (trial, more) = self.try_witness(now, name);
-            effects.extend(more);
-            if trial {
-                break;
+            }
+        });
+        let Some(name) = found else {
+            return Vec::new();
+        };
+        let Some(gate) = self
+            .channels
+            .get_mut(&name)
+            .and_then(|c| c.dependency.as_mut())
+        else {
+            return Vec::new();
+        };
+        let served_now = gate.served_now();
+        let mut effects = Vec::new();
+        match &mut gate.state {
+            GateState::Closed { due, check: asked } => {
+                let Some(asked) = asked.take() else {
+                    return effects;
+                };
+                // what the dependency served for the rows meanwhile refutes
+                // the suspicion as a check served does
+                let refuted = check == Check::Served || served_now > asked.served;
+                match check {
+                    _ if refuted => {
+                        *due = None;
+                        let cause = gate.modal(&settings, now);
+                        gate.failing.clear();
+                        gate.refuted_at = Some(now);
+                        gate.step = (gate.step * 2).min(settings.tick.1);
+                        effects.push(Effect::Refuted {
+                            channel: name.clone(),
+                            cause,
+                        });
+                    }
+                    Check::Unserved(cause) => {
+                        *due = None;
+                        effects.extend(gate.open(&settings, &name, now, cause));
+                    }
+                    Check::Unasked | Check::Served => {
+                        gate.step = (gate.step * 2).min(settings.tick.1);
+                        *due = Some(now + gate.step);
+                    }
+                }
+            }
+            GateState::Open(open) => {
+                let late = open.expired.contains(&id);
+                let asked = if late { None } else { open.check.take() };
+                if check == Check::Served {
+                    effects.extend(gate.close(&name, now, Resumption::Served));
+                    return effects;
+                }
+                let Some(asked) = asked else {
+                    return effects;
+                };
+                match check {
+                    Check::Unserved(cause) => {
+                        open.cause = cause;
+                        open.unasked_since = None;
+                        gate.failed += 1;
+                        gate.schedule(&settings, now);
+                        effects.extend(gate.stall(&settings, &name, now));
+                    }
+                    Check::Unasked => {
+                        if asked.hastened {
+                            open.haste_spent = false;
+                        }
+                        let nothing = !asked.head && gate.witnesses.is_empty();
+                        let since = if nothing {
+                            *open.unasked_since.get_or_insert(now)
+                        } else {
+                            open.unasked_since = None;
+                            now
+                        };
+                        if nothing && now.saturating_duration_since(since) >= settings.window {
+                            effects.extend(gate.close(&name, now, Resumption::NothingToHold));
+                        }
+                    }
+                    Check::Served => {}
+                }
             }
         }
         effects
@@ -846,6 +1506,27 @@ impl Breaker {
         let Some(c) = self.channels.get_mut(channel) else {
             return;
         };
+        if let Some(gate) = c.dependency.as_mut()
+            && let GateState::Open(open) = &mut gate.state
+        {
+            open.unasked_since = None;
+            for (slot, tenant) in heads {
+                if !gate.witnesses.iter().any(|(_, t)| t == tenant) {
+                    gate.witnesses.push_back((*slot, tenant.clone()));
+                    while gate.witnesses.len() > settings.witnesses {
+                        gate.witnesses.pop_front();
+                    }
+                }
+            }
+            let fresh = heads.iter().any(|(_, t)| !open.tried.contains(t));
+            let rested = open
+                .last_check
+                .is_none_or(|at| now.saturating_duration_since(at) >= settings.tick.0);
+            if fresh && open.check.is_none() && rested && !open.haste_spent {
+                open.next_tick = now;
+                open.hastened = true;
+            }
+        }
         if !matches!(c.state, State::Open(_)) {
             return;
         }
@@ -950,6 +1631,26 @@ impl Breaker {
                     });
                 }
             }
+            Trial::Told(
+                verdict @ Verdict::Unavailable {
+                    scope: Scope::Stage,
+                    source: Source::Dependency,
+                    ..
+                },
+            ) if channel.dependency.is_some() => {
+                // The stage refused before the handler ran: nothing learnt
+                // of the rows' own dependency, and a refusal of the stage's,
+                // its breaker's as any other
+                told.hold = channel.weigh(&settings, now, &asked.tenant, asked.slot, 0, verdict);
+                if let Some(gate) = channel.dependency.as_mut()
+                    && matches!(gate.state, GateState::Closed { .. })
+                    && gate.broad(&settings, now).is_some()
+                {
+                    gate.trip(&settings, now);
+                }
+                told.effects
+                    .extend(channel.inconclusive(&settings, now, &name, &asked.tenant));
+            }
             Trial::Told(Verdict::Unavailable {
                 scope: Scope::Stage,
                 retry_after,
@@ -998,24 +1699,8 @@ impl Breaker {
                     // an `Unavailable`.
                     channel.memo.remove(&asked.tenant);
                 }
-                let closes = if let State::Open(open) = &mut channel.state {
-                    if !open.inconclusive.contains(&asked.tenant) {
-                        open.inconclusive.push(asked.tenant.clone());
-                    }
-                    open.inconclusive.len() >= settings.inconclusive as usize
-                } else {
-                    false
-                };
-                if closes {
-                    if let Some((cause, stalled)) = channel.close(now, Resumption::Inconclusive) {
-                        told.effects.push(Effect::Resumed {
-                            channel: name.clone(),
-                            cause,
-                            stalled,
-                            by: Resumption::Inconclusive,
-                        });
-                    }
-                }
+                told.effects
+                    .extend(channel.inconclusive(&settings, now, &name, &asked.tenant));
             }
         }
         told
@@ -1023,6 +1708,33 @@ impl Breaker {
 }
 
 impl Channel {
+    /// A trial that learnt nothing of the rows: its witness counted
+    /// inconclusive, three distinct closing the channel.
+    fn inconclusive(
+        &mut self,
+        settings: &Breaking,
+        now: Instant,
+        name: &str,
+        tenant: &str,
+    ) -> Option<Effect> {
+        let State::Open(open) = &mut self.state else {
+            return None;
+        };
+        if !open.inconclusive.iter().any(|t| t == tenant) {
+            open.inconclusive.push(tenant.to_owned());
+        }
+        if open.inconclusive.len() < settings.inconclusive as usize {
+            return None;
+        }
+        let (cause, stalled) = self.close(now, Resumption::Inconclusive)?;
+        Some(Effect::Resumed {
+            channel: name.to_owned(),
+            cause,
+            stalled,
+            by: Resumption::Inconclusive,
+        })
+    }
+
     /// Weighs a verdict on `tenant`: the memo and the breadth. Returns the
     /// row's hold for an `Unavailable`.
     fn weigh(
@@ -1038,6 +1750,9 @@ impl Channel {
             Verdict::Processed => {
                 self.memo.remove(tenant);
                 self.failing.remove(tenant);
+                if let Some(gate) = self.dependency.as_mut() {
+                    gate.failing.remove(tenant);
+                }
                 self.probation = None;
                 self.processed(settings, now, tenant);
                 None
@@ -1045,6 +1760,9 @@ impl Channel {
             Verdict::Own => {
                 self.memo.remove(tenant);
                 self.failing.remove(tenant);
+                if let Some(gate) = self.dependency.as_mut() {
+                    gate.failing.remove(tenant);
+                }
                 self.healthy.remove(tenant);
                 None
             }
@@ -1052,6 +1770,7 @@ impl Channel {
                 cause,
                 scope,
                 retry_after,
+                source,
             } => {
                 let previous = self.memo.get(tenant).map_or(0, |e| e.unavailable);
                 // a run of refusals: one after a back-off that ended more than a
@@ -1088,11 +1807,22 @@ impl Channel {
                 match scope {
                     Scope::Stage => {
                         self.healthy.remove(tenant);
-                        self.failing.insert(tenant.to_owned(), (now, cause));
-                        if self.failing.len() > settings.healthy {
+                        let failing = match (source, self.dependency.as_mut()) {
+                            (Source::Dependency, Some(gate)) => {
+                                self.failing.remove(tenant);
+                                &mut gate.failing
+                            }
+                            _ => {
+                                if let Some(gate) = self.dependency.as_mut() {
+                                    gate.failing.remove(tenant);
+                                }
+                                &mut self.failing
+                            }
+                        };
+                        failing.insert(tenant.to_owned(), (now, cause));
+                        if failing.len() > settings.healthy {
                             let horizon = now.checked_sub(settings.window);
-                            self.failing
-                                .retain(|_, (at, _)| horizon.is_none_or(|h| *at >= h));
+                            failing.retain(|_, (at, _)| horizon.is_none_or(|h| *at >= h));
                         }
                         // A process cut off alone delays another's head by a
                         // tick at most: the longer clock stays here.
@@ -1101,6 +1831,9 @@ impl Channel {
                     Scope::Tenant => {
                         self.healthy.remove(tenant);
                         self.failing.remove(tenant);
+                        if let Some(gate) = self.dependency.as_mut() {
+                            gate.failing.remove(tenant);
+                        }
                         Some(step)
                     }
                 }
@@ -1153,28 +1886,13 @@ impl Channel {
             .filter(|(at, _)| within(at))
             .map(|(_, cause)| *cause)
             .collect();
-        let f = failing.len();
         let saturated = self.saturated.is_some_and(|until| until > now);
         let s = if saturated {
             settings.healthy
         } else {
             self.healthy.values().filter(|at| within(at)).count()
         };
-        let at_least = |(num, den): (usize, usize)| f * den >= num * (f + s);
-        let broad = f >= settings.fewest
-            && (at_least(settings.share)
-                || (f >= settings.broad && at_least(settings.broad_share)));
-        if !broad {
-            return None;
-        }
-        let mut tally: HashMap<Cause, usize> = HashMap::new();
-        for cause in failing {
-            *tally.entry(cause).or_default() += 1;
-        }
-        tally
-            .into_iter()
-            .max_by(|(a, n), (b, m)| n.cmp(m).then_with(|| b.cmp(a)))
-            .map(|(cause, _)| cause)
+        breadth(settings, &failing, s)
     }
 
     fn open(
@@ -1246,7 +1964,7 @@ impl Channel {
         self.closed_at = Some(now);
         self.witnesses.clear();
         self.probation = match by {
-            Resumption::Processed => None,
+            Resumption::Processed | Resumption::Served | Resumption::NothingToHold => None,
             Resumption::Inconclusive | Resumption::NoWitness => {
                 let mut probation = self.probation.unwrap_or(Probation {
                     since: open.since,

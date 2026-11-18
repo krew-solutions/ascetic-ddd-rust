@@ -209,6 +209,21 @@ pub(crate) fn wire_of(row: &InboxMessage) -> Message {
     }
 }
 
+/// The headers of a row, as a stage reads them on the way in, without its
+/// payload: what a check of the channel's dependency is given of a head
+/// (ADR-0042 decision 1).
+pub(crate) fn head_of(tenant: &str, uri: &str, metadata: Option<&Value>) -> Message {
+    let message = Message::new(Vec::new())
+        .with_header(TENANT_ID, tenant.as_bytes())
+        .with_header(DESTINATION, uri.as_bytes());
+    match metadata {
+        Some(Value::Object(fields)) => fields.iter().fold(message, |message, (name, value)| {
+            message.with_header(name.clone(), header_text(value))
+        }),
+        _ => message,
+    }
+}
+
 /// A metadata value as header text: a string as it is; a value held
 /// structured — by a message built in memory, or a row an older release
 /// wrote — as its JSON text, which the intake keeps as that string.

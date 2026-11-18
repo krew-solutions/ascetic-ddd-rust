@@ -45,6 +45,11 @@ pub enum Failure {
         scope: Scope,
         /// When to ask again, when the teller knows.
         retry_after: Option<Duration>,
+        /// Whether a stage told it on the message's way in
+        /// ([`bus::Unavailable::told_by_stage`]): weighed against that stage's
+        /// dependency, when one is registered for the channel (ADR-0042
+        /// decision 1).
+        by_stage: bool,
         /// The subscriber's error.
         error: BoxError,
     },
@@ -84,6 +89,7 @@ impl Failure {
                     cause: unavailable.cause(),
                     scope: unavailable.scope(),
                     retry_after: unavailable.retry_after(),
+                    by_stage: unavailable.told_by_stage(),
                     error: unavailable.into_inner(),
                 };
             }

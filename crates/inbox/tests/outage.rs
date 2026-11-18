@@ -21,7 +21,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use ascetic_ddd_bus::{Cause, Permanent, Scope, Transient, Unavailable, cause};
+use ascetic_ddd_bus::{
+    Cause, Check, Dependency, Dependent, Message, Permanent, Scope, Transient, Unavailable, cause,
+};
 use ascetic_ddd_inbox::breaker::{Effect, Resumption};
 use ascetic_ddd_inbox::observer::{
     BreakerChanged, Failed, InboxObserver, Operated, Operation, Withheld,
@@ -1311,6 +1313,328 @@ async fn a_witness_that_cannot_be_asked_is_inconclusive_not_gone() {
         );
     };
     assert_eq!(by, Resumption::Inconclusive, "{:?}", f.effects());
+}
+
+// The dependency's breaker in the dispatch (ADR-0042 decision 1).
+
+/// A dependency of the test's own: what it served and what its checks answer,
+/// set by the test; its checks hang while `hang` is set, and panic while
+/// `panic` is.
+struct Fake {
+    served: AtomicU64,
+    answer: Mutex<Check>,
+    hang: AtomicBool,
+    panic: AtomicBool,
+    checks: AtomicU32,
+}
+
+impl Fake {
+    fn new(answer: Check) -> Arc<Self> {
+        Arc::new(Fake {
+            served: AtomicU64::new(0),
+            answer: Mutex::new(answer),
+            hang: AtomicBool::new(false),
+            panic: AtomicBool::new(false),
+            checks: AtomicU32::new(0),
+        })
+    }
+}
+
+impl Dependency for Fake {
+    fn served(&self) -> u64 {
+        self.served.load(Ordering::SeqCst)
+    }
+
+    fn bound(&self) -> Duration {
+        Duration::from_secs(1)
+    }
+
+    fn answers_for(&self, cause: Cause) -> bool {
+        cause.as_str().starts_with("kms.")
+    }
+
+    fn check<'a>(&'a self, _: Option<&'a Message>) -> futures::future::BoxFuture<'a, Check> {
+        Box::pin(async move {
+            self.checks.fetch_add(1, Ordering::SeqCst);
+            if self.hang.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+            assert!(!self.panic.load(Ordering::SeqCst), "a check that panics");
+            *self.answer.lock().unwrap()
+        })
+    }
+}
+
+/// The orders channel's dependency, `fake`.
+struct Orders(Arc<Fake>);
+
+impl Dependent for Orders {
+    fn dependencies(&self) -> Vec<(String, Arc<dyn Dependency>)> {
+        vec![(
+            "kafka://orders".to_owned(),
+            Arc::clone(&self.0) as Arc<dyn Dependency>,
+        )]
+    }
+}
+
+/// The stage's refusal of the dependency's cause, as the bus marks it.
+fn dependency_down() -> Result<(), Failure> {
+    Err(Failure::Unavailable {
+        cause: KMS_UNAVAILABLE,
+        scope: Scope::Stage,
+        retry_after: None,
+        by_stage: true,
+        error: "the KMS is down".into(),
+    })
+}
+
+/// A fixture whose orders channel depends on `fake`, a tick of 50 ms to 200 ms.
+async fn depending(name: &str, fake: &Arc<Fake>) -> Fixture {
+    let f = fixture(name, Retries::up_to(3)).await;
+    Fixture {
+        inbox: f.inbox.depending_on(&Orders(Arc::clone(fake))),
+        ..f
+    }
+}
+
+/// Dispatches, the orders refused by the dependency, the payments served,
+/// until an effect matches, for at most `within`.
+async fn until_effect(f: &Fixture, within: Duration, matches: impl Fn(&Effect) -> bool) {
+    let began = std::time::Instant::now();
+    while !f.effects().iter().any(&matches) {
+        f.dispatch_on(|message| {
+            if message.uri.starts_with("kafka://orders") {
+                dependency_down()
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+        f.due().await;
+        assert!(began.elapsed() < within, "{:?}", f.effects());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// A check that panics is answered unasked, not left to its deadline: the
+/// dependency's refusals make the channel suspect, its checks panic, and the
+/// channel is never paused — checked again at the suspicion's step instead.
+/// Red when a check that cannot answer is left unanswered, its deadline then
+/// pausing the channel on no evidence.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_check_that_panics_is_unasked_not_unserved() {
+    let fake = Fake::new(Check::Unserved(KMS_UNAVAILABLE));
+    fake.panic.store(true, Ordering::SeqCst);
+    let f = depending("check_panics", &fake).await;
+    for tenant in ["t1", "t2", "t3"] {
+        f.publish(&[message_of(tenant, &format!("{tenant}-a"), 1)])
+            .await;
+    }
+    until_effect(&f, Duration::from_secs(20), |e| {
+        matches!(e, Effect::Check { .. })
+    })
+    .await;
+    // past the deadline of several checks: the bound, 1 s, and a first step
+    let began = std::time::Instant::now();
+    while began.elapsed() < Duration::from_secs(5) {
+        f.dispatch_on(|message| {
+            if message.uri.starts_with("kafka://orders") {
+                dependency_down()
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+        f.due().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let effects = f.effects();
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Paused { .. })),
+        "{effects:?}"
+    );
+    assert!(
+        fake.checks.load(Ordering::SeqCst) >= 2,
+        "the suspicion checked again"
+    );
+}
+
+/// A check runs beside the dispatch: while one hangs, the slot is another
+/// session's to lock, and the next dispatch serves another channel's row at
+/// once. Red when the dispatch runs the check itself.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_check_holds_no_slot_no_connection_and_no_loop() {
+    let fake = Fake::new(Check::Unserved(KMS_UNAVAILABLE));
+    fake.hang.store(true, Ordering::SeqCst);
+    let f = depending("check_beside", &fake).await;
+    for tenant in ["t1", "t2", "t3"] {
+        f.publish(&[message_of(tenant, &format!("{tenant}-a"), 1)])
+            .await;
+    }
+    let issued = std::time::Instant::now();
+    until_effect(&f, Duration::from_secs(20), |e| {
+        matches!(e, Effect::Check { .. })
+    })
+    .await;
+    assert!(
+        issued.elapsed() < Duration::from_secs(5),
+        "the dispatch that issued the check waited for it: {:?}",
+        issued.elapsed()
+    );
+    assert_eq!(fake.checks.load(Ordering::SeqCst), 1, "the check under way");
+    f.publish(&[message_on("payments", "p1", "p1-a", 1)]).await;
+    let began = std::time::Instant::now();
+    f.elapse("SELECT slot FROM {table}_slots FOR UPDATE NOWAIT")
+        .await;
+    let mut served = false;
+    for _ in 0..20 {
+        served |= f.dispatch(ok).await == Outcome::Processed;
+        f.wake().await;
+        if served {
+            break;
+        }
+    }
+    assert!(served, "another channel's row served beside the check");
+    assert!(
+        began.elapsed() < Duration::from_secs(5),
+        "the dispatch waited for the check: {:?}",
+        began.elapsed()
+    );
+}
+
+/// The dependency's refusals pause the channel only once a check confirms
+/// them; a check unserved under another cause reports the stall under it; a
+/// check served resumes the channel, and its rows go on. Red when the
+/// dependency's refusals are weighed as the rows', or the checks' answers
+/// never reach the breaker.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_dependency_s_pause_is_confirmed_reported_and_ended_by_its_checks() {
+    let fake = Fake::new(Check::Unserved(KMS_UNAVAILABLE));
+    let f = depending("dependency_pause", &fake).await;
+    for tenant in ["t1", "t2", "t3"] {
+        f.publish(&[message_of(tenant, &format!("{tenant}-a"), 1)])
+            .await;
+    }
+    until_effect(&f, Duration::from_secs(20), |e| {
+        matches!(e, Effect::Paused { .. })
+    })
+    .await;
+    let effects = f.effects();
+    let paused_at = effects
+        .iter()
+        .position(|e| matches!(e, Effect::Paused { .. }))
+        .unwrap();
+    assert!(
+        effects[..paused_at]
+            .iter()
+            .any(|e| matches!(e, Effect::Check { .. })),
+        "paused before a check: {effects:?}"
+    );
+    *fake.answer.lock().unwrap() = Check::Unserved(cause!("kms.unauthorized"));
+    until_effect(&f, Duration::from_secs(20), |e| {
+        matches!(e, Effect::Stalled { .. })
+    })
+    .await;
+    f.dispatch(ok).await;
+    let stalls = f.inbox.stalls(Duration::from_secs(5)).await.unwrap();
+    assert!(
+        stalls
+            .iter()
+            .any(|s| s.cause == "kms.unauthorized" && s.valid),
+        "{stalls:?}"
+    );
+    *fake.answer.lock().unwrap() = Check::Served;
+    let began = std::time::Instant::now();
+    while !f.row("t1-a").await.processed {
+        f.dispatch(ok).await;
+        f.due().await;
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "{:?}",
+            f.effects()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(f.effects().iter().any(|e| matches!(
+        e,
+        Effect::Resumed {
+            by: Resumption::Served,
+            ..
+        }
+    )));
+}
+
+/// One process paused by its dependency keeps its stall row while another,
+/// which never heard the dependency refuse, processes the channel and its
+/// own checks are unasked; served again, its row lapses within its ttl. Red
+/// when a pause that holds keeps no report.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn one_process_s_stall_holds_while_another_serves_the_channel() {
+    let fake = Fake::new(Check::Unserved(KMS_UNAVAILABLE));
+    let f = depending("one_reporter", &fake).await;
+    for tenant in ["t1", "t2", "t3"] {
+        f.publish(&[message_of(tenant, &format!("{tenant}-a"), 1)])
+            .await;
+    }
+    until_effect(&f, Duration::from_secs(20), |e| {
+        matches!(e, Effect::Stalled { .. })
+    })
+    .await;
+    // The other process serves the channel for longer than the stall row's
+    // ttl twice over (twice the tick's cap and the check's bound: 1.4 s),
+    // the paused one's checks unasked meanwhile — no failed tick to report —
+    // so that the row is valid at the end only if the paused process kept it
+    // while it held.
+    *fake.answer.lock().unwrap() = Check::Unasked;
+    let beside = f.beside(quick());
+    let (serving, mut served) = (std::time::Instant::now(), 0);
+    for n in 0.. {
+        if serving.elapsed() >= Duration::from_secs(3) {
+            break;
+        }
+        f.publish(&[message_of(&format!("o{n}"), &format!("o{n}-a"), 1)])
+            .await;
+        let outcome = beside
+            .dispatch(|_: &PgSession, _: &InboxMessage| std::future::ready(Ok::<(), Failure>(())))
+            .await
+            .unwrap();
+        served += usize::from(outcome == Outcome::Processed);
+        f.dispatch(ok).await;
+        f.wake().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(served > 10, "the other process served {served}");
+    let stalls = f.inbox.stalls(Duration::from_secs(5)).await.unwrap();
+    let mine: Vec<_> = stalls
+        .iter()
+        .filter(|s| s.reporter == f.inbox.reporter())
+        .collect();
+    assert!(mine.len() == 1 && mine[0].valid, "{stalls:?}");
+    *fake.answer.lock().unwrap() = Check::Served;
+    until_effect(&f, Duration::from_secs(20), |e| {
+        matches!(e, Effect::Resumed { .. })
+    })
+    .await;
+    let resumed = std::time::Instant::now();
+    loop {
+        f.dispatch(ok).await;
+        let stalls = f.inbox.stalls(Duration::from_secs(5)).await.unwrap();
+        if !stalls
+            .iter()
+            .any(|s| s.reporter == f.inbox.reporter() && s.valid)
+        {
+            break;
+        }
+        assert!(
+            resumed.elapsed() < Duration::from_secs(5),
+            "the row outlived its ttl"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// The slot's cursor, round, sleep and the guests' own cursor: what a walk

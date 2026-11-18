@@ -88,6 +88,8 @@
 //! vocabulary of the protocol model. The SQL lives in `store`, the loop in
 //! `dispatch`.
 
+#[cfg(test)]
+mod check_tests;
 mod dispatch;
 #[cfg(test)]
 mod exit_tests;
@@ -545,6 +547,11 @@ pub struct PgInbox<P, O = ()> {
     breaker: Arc<std::sync::Mutex<Breaker>>,
     /// The stalls this process reports (ADR-0042 decision 6).
     stalls: Arc<std::sync::Mutex<stalls::Stalls>>,
+    /// What each channel's stage depends on, by channel (ADR-0042 decision
+    /// 1): its stage's refusals weighed against it, and checked.
+    dependencies: Arc<HashMap<String, Arc<dyn ascetic_ddd_bus::Dependency>>>,
+    /// The dependencies' checks answered since the last dispatch's tick.
+    checked: Arc<std::sync::Mutex<Vec<(u64, ascetic_ddd_bus::Check)>>>,
     /// Per channel, the latest `processed_at` the sweep forgot: where its
     /// next statement starts, so that dead index entries a held vacuum
     /// horizon keeps are not walked again.
@@ -590,6 +597,8 @@ impl<P> PgInbox<P> {
             retention: InboxRetention::default(),
             breaker: Arc::new(std::sync::Mutex::new(Breaker::new(Breaking::default()))),
             stalls: Arc::new(std::sync::Mutex::new(stalls::Stalls::new())),
+            dependencies: Arc::new(HashMap::new()),
+            checked: Arc::new(std::sync::Mutex::new(Vec::new())),
             swept_to: Mutex::new(HashMap::new()),
             expired_to: expiry::Cursor::default(),
             admission: Arc::new(|_, _| true),
@@ -616,6 +625,8 @@ impl<P, O> PgInbox<P, O> {
             retention: self.retention,
             breaker: self.breaker,
             stalls: self.stalls,
+            dependencies: self.dependencies,
+            checked: self.checked,
             swept_to: self.swept_to,
             expired_to: self.expired_to,
             admission: self.admission,
@@ -728,10 +739,53 @@ impl<P, O> PgInbox<P, O> {
     /// (ADR-0042 decisions 1 and 2): a fresh breaker, every channel closed.
     #[must_use]
     pub fn with_breaking(self, breaking: Breaking) -> Self {
+        let mut breaker = Breaker::new(breaking);
+        for (channel, dependency) in self.dependencies.iter() {
+            breaker.register(channel, dependency.bound());
+        }
         PgInbox {
-            breaker: Arc::new(std::sync::Mutex::new(Breaker::new(breaking))),
+            breaker: Arc::new(std::sync::Mutex::new(breaker)),
             ..self
         }
+    }
+
+    /// The same inbox, given what its channels' stages depend on, by
+    /// destination (ADR-0042 decision 1): a composition root hands it the
+    /// dependencies of the stage it subscribes through — the DEK's
+    /// [`ByDestination`](https://docs.rs/ascetic-ddd-dek) is one. A stage's
+    /// `Stage`-scoped refusal of a cause its channel's dependency answers for
+    /// is then that dependency's evidence: its pause opens on breadth
+    /// confirmed by a check, and ends only on a check served — a row
+    /// processed from the stage's memory is none. A sealed channel left out
+    /// keeps the rows' breaker, whose trial a cached key closes.
+    #[must_use]
+    pub fn depending_on(self, dependent: &dyn ascetic_ddd_bus::Dependent) -> Self {
+        let mut dependencies = (*self.dependencies).clone();
+        {
+            let mut breaker = self.breaker();
+            for (destination, dependency) in dependent.dependencies() {
+                let channel = ascetic_ddd_bus::uri::without_key(&destination).to_owned();
+                breaker.register(&channel, dependency.bound());
+                dependencies.insert(channel, dependency);
+            }
+        }
+        let mut channels: Vec<&String> = dependencies.keys().collect();
+        channels.sort_unstable();
+        log::info!(
+            "inbox: the dependencies of {} channels checked: {channels:?}",
+            channels.len()
+        );
+        PgInbox {
+            dependencies: Arc::new(dependencies),
+            ..self
+        }
+    }
+
+    /// The dependency registered for `channel`.
+    pub(crate) fn dependency_of(&self, channel: &str) -> Option<&dyn ascetic_ddd_bus::Dependency> {
+        self.dependencies
+            .get(channel)
+            .map(|dependency| &**dependency)
     }
 
     /// What this process's memo keeps from its walk at the stage's scope, by

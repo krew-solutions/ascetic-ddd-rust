@@ -1,17 +1,58 @@
 //! The dispatcher: one message inside one transaction, and the loops of a
 //! process around it. The SQL is in `store`.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use ascetic_ddd_bus::uri;
+use ascetic_ddd_bus::{self as bus, Check, Dependency, uri};
 use ascetic_ddd_session::{PgAccess, Session, SessionError, SessionPool};
 use futures::future::join_all;
 use tokio::sync::watch;
 
 use super::store::read_committed;
 use super::{Ground, HeldCount, Hold, Loops, Outcome, Parked, ParkedCount, PgInbox, WaitingCount};
-use crate::breaker::{Before, Breaker, Effect, Flight, Told, Trial, Verdict};
+use crate::breaker::{Before, Breaker, Effect, Flight, Source, Told, Trial, Verdict};
+
+/// A dependency's check started and not yet answered: answered unasked when
+/// dropped unanswered — the dispatch that started it dropped first, or the
+/// check panicking — so that the breaker never reads its silence as the
+/// dependency's failure (ADR-0042 decision 1).
+struct Pending {
+    id: u64,
+    channel: String,
+    answers: Arc<std::sync::Mutex<Vec<(u64, Check)>>>,
+    answered: bool,
+}
+
+impl Pending {
+    fn answer(mut self, check: Check) {
+        self.push(check);
+        self.answered = true;
+    }
+
+    fn push(&self, check: Check) {
+        self.answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((self.id, check));
+    }
+}
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        if self.answered {
+            return;
+        }
+        if std::thread::panicking() {
+            log::error!(
+                "inbox: the check of the channel {}'s dependency panicked: read as unasked",
+                self.channel
+            );
+        }
+        self.push(Check::Unasked);
+    }
+}
 use crate::error::{Error, Failure};
 use crate::intake;
 use crate::message::InboxMessage;
@@ -83,18 +124,28 @@ pub(super) fn now() -> std::time::Instant {
 }
 
 /// A subscriber's verdict as the breaker weighs it.
-fn verdict_of(failure: Option<&Failure>) -> Verdict {
+/// The breaker's verdict on a subscriber's: a `Stage` refusal a stage told
+/// of a cause the channel's dependency answers for is that dependency's.
+fn verdict_of(failure: Option<&Failure>, dependency: Option<&dyn Dependency>) -> Verdict {
     match failure {
         None => Verdict::Processed,
         Some(Failure::Unavailable {
             cause,
             scope,
             retry_after,
+            by_stage,
             ..
         }) => Verdict::Unavailable {
             cause: *cause,
             scope: *scope,
             retry_after: *retry_after,
+            // a stage's refusal of a cause the channel's dependency answers
+            // for is that dependency's evidence; any other, the rows'
+            source: if *by_stage && dependency.is_some_and(|d| d.answers_for(*cause)) {
+                Source::Dependency
+            } else {
+                Source::Rows
+            },
         },
         Some(_) => Verdict::Own,
     }
@@ -151,13 +202,39 @@ where
         // channels paused and the Tenants the memo keeps to this process at
         // the stage's scope are the walk's (ADR-0042 decisions 1, 2 and 5).
         // Every dispatch ticks it, a host's own as well as `run`'s.
-        let (effects, paused, excluded) = {
+        // The answers of the dependencies' checks since the last, and what
+        // each dependency served, first (ADR-0042 decision 1).
+        let answers = std::mem::take(
+            &mut *self
+                .checked
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let (effects, paused, excluded, first_step) = {
             let mut breaker = self.breaker();
             let now = now();
-            let effects = breaker.tick(now);
-            (effects, breaker.paused(), breaker.excluded(now))
+            let mut effects = Vec::new();
+            for (id, check) in answers {
+                effects.extend(breaker.checked(now, id, check));
+            }
+            for (channel, dependency) in self.dependencies.iter() {
+                breaker.served(now, channel, dependency.served());
+            }
+            effects.extend(breaker.tick(now));
+            let first_step = breaker.settings().tick.0;
+            (effects, breaker.paused(), breaker.excluded(now), first_step)
         };
         self.tell(&effects);
+        // A check runs beside the dispatch: it holds no loop, no slot and
+        // no transaction, and the dispatch goes on with its own work. It is
+        // started first, so that its deadline, counted from this tick, is
+        // its own and not the report's.
+        if let Some(Effect::Check {
+            id, channel, head, ..
+        }) = effects.iter().find(|e| matches!(e, Effect::Check { .. }))
+        {
+            self.check(*id, channel, head.as_ref(), first_step).await;
+        }
         // The stalls told by this tick or by the trials and verdicts since
         // the last, on a session of their own, never failing the dispatch
         // (ADR-0042 decision 6).
@@ -399,7 +476,8 @@ where
         failure: Option<Failure>,
         asked: Asked<'_>,
     ) -> Result<Outcome, Error> {
-        let told = asked.told(verdict_of(failure.as_ref()));
+        let dependency = self.dependency_of(uri::without_key(&message.uri));
+        let told = asked.told(verdict_of(failure.as_ref(), dependency));
         self.tell(&told.effects);
         let Some(failure) = failure else {
             if self.slots > 1 {
@@ -591,7 +669,7 @@ where
                             Ok(Err(Error::Subscriber(failure))) => Some(failure),
                             Ok(Err(other)) => return Err(other),
                         };
-                        let verdict = verdict_of(failure.as_ref());
+                        let verdict = verdict_of(failure.as_ref(), self.dependency_of(channel));
                         let told = self.breaker().tried(now(), id, Trial::Told(verdict));
                         self.tell(&told.effects);
                         let outcome = match failure {
@@ -664,6 +742,79 @@ where
         }
     }
 
+    /// A check of `channel`'s dependency (ADR-0042 decision 1): the head's
+    /// headers read, outside the check's bound and on a session of their own,
+    /// then the dependency asked on a task of its own, its answer kept for
+    /// the next dispatch's tick. A head that cannot be read leaves the check
+    /// to what the dependency remembers.
+    /// Starts the check `id` of `channel`'s dependency beside the dispatch.
+    /// The head's headers are read first, within `within` — a tick's first
+    /// step, the margin its deadline leaves past the check's bound — and the
+    /// check asks without them when they cannot be read in time. A check that
+    /// cannot answer — no dependency, no runtime to run it on, the dispatch
+    /// dropped before it started, the check panicking — is answered unasked:
+    /// no evidence either way, where left unanswered its deadline would count
+    /// it as the dependency's failure.
+    pub(super) async fn check(
+        &self,
+        id: u64,
+        channel: &str,
+        head: Option<&(i16, String)>,
+        within: Duration,
+    ) {
+        let pending = Pending {
+            id,
+            channel: channel.to_owned(),
+            answers: Arc::clone(&self.checked),
+            answered: false,
+        };
+        let Some(dependency) = self.dependencies.get(channel).map(Arc::clone) else {
+            return;
+        };
+        let head = match head {
+            Some((slot, tenant)) => {
+                tokio::time::timeout(within, self.head_of(channel, *slot, tenant))
+                    .await
+                    .ok()
+                    .flatten()
+            }
+            None => None,
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let check = dependency.check(head.as_ref()).await;
+                pending.answer(check);
+            });
+        }
+    }
+
+    /// The headers of `tenant`'s oldest queued row of `channel` in `slot`, as
+    /// a stage reads them on the way in: no payload, no lock.
+    async fn head_of(&self, channel: &str, slot: i16, tenant: &str) -> Option<bus::Message> {
+        let sql = format!(
+            "SELECT uri, metadata FROM {table} WHERE slot = $1 AND tenant_id = $2 AND {queue} \
+             AND {channel_of} = $3 ORDER BY received_position LIMIT 1",
+            table = self.table.as_str(),
+            queue = super::store::QUEUE,
+            channel_of = super::store::CHANNEL_OF_ROW,
+        );
+        let row = self
+            .pool
+            .session(async |session| {
+                Ok::<_, Error>(
+                    session
+                        .connection()
+                        .query_opt(&sql, &[&slot, &tenant, &channel])
+                        .await?,
+                )
+            })
+            .await
+            .ok()
+            .flatten()?;
+        let (uri, metadata): (String, Option<serde_json::Value>) = (row.get(0), row.get(1));
+        Some(crate::channel::head_of(tenant, &uri, metadata.as_ref()))
+    }
+
     /// The breaker's effects told: to the observer, and to the log — a pause
     /// and a resume once each, a stall at its first tick and every
     /// [`crate::breaker::REMINDER`], by channel and cause and never a Tenant
@@ -698,12 +849,27 @@ where
                         crate::breaker::Resumption::Processed => "a trial processed",
                         crate::breaker::Resumption::Inconclusive => "three trials inconclusive",
                         crate::breaker::Resumption::NoWitness => "no witness left",
+                        crate::breaker::Resumption::Served => "a check of its dependency served",
+                        crate::breaker::Resumption::NothingToHold => "nothing left to hold",
                     };
-                    log::warn!(
-                        "inbox: the channel {channel} asked again in this process ({cause}): {by}"
+                    if self.breaker().is_paused(channel) {
+                        log::warn!(
+                            "inbox: the channel {channel} resumed by one breaker in this process \
+                             ({cause}): {by}; still paused by its other"
+                        );
+                    } else {
+                        log::warn!(
+                            "inbox: the channel {channel} asked again in this process ({cause}): {by}"
+                        );
+                    }
+                }
+                Effect::Refuted { channel, cause } => {
+                    log::info!(
+                        "inbox: the channel {channel}'s dependency checked and served: a suspicion \
+                         refuted ({cause})"
                     );
                 }
-                Effect::Trial { .. } => {}
+                Effect::Trial { .. } | Effect::Check { .. } => {}
             }
             self.observer.on_breaker(&BreakerChanged { effect });
         }
