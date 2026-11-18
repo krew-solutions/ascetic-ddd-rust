@@ -30,7 +30,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ascetic_ddd_bus::{BoxError, Message, Permanent, Stage, uri};
+use ascetic_ddd_bus::{BoxError, Dependency, Dependent, Message, Permanent, Stage, uri};
 use ascetic_ddd_kms::KeyManagementService;
 use ascetic_ddd_session::SessionPool;
 use futures::future::BoxFuture;
@@ -75,6 +75,9 @@ impl Default for SealingParameters {
 pub struct Sealing {
     stages: Arc<HashMap<String, Arc<dyn Stage>>>,
     holding: Arc<HashMap<String, Arc<dyn Holding>>>,
+    /// Each channel's opening end's dependency, the KMS (seedwork ADR-0042
+    /// decision 1).
+    dependencies: Arc<HashMap<String, Arc<dyn Dependency>>>,
 }
 
 /// A stage seen for what it holds.
@@ -182,6 +185,7 @@ impl Sealing {
         }
         let mut stages: HashMap<String, Arc<dyn Stage>> = HashMap::new();
         let mut holding: HashMap<String, Arc<dyn Holding>> = HashMap::new();
+        let mut dependencies: HashMap<String, Arc<dyn Dependency>> = HashMap::new();
         for channel in channels {
             let channel = channel.into();
             if stages.contains_key(&channel) {
@@ -196,11 +200,13 @@ impl Sealing {
                 None => stage,
             });
             holding.insert(channel.clone(), Arc::clone(&stage) as Arc<dyn Holding>);
+            dependencies.insert(channel.clone(), stage.dependency());
             stages.insert(channel, stage);
         }
         Ok(Sealing {
             stages: Arc::new(stages),
             holding: Arc::new(holding),
+            dependencies: Arc::new(dependencies),
         })
     }
 
@@ -227,7 +233,9 @@ impl Sealing {
     /// `(destination, channel)` of `map`, a row whose `destination` is the
     /// first, key or no key, opens with the stage of the second — the
     /// channel it was sealed under at the producer's end. Built up front,
-    /// like the sealing itself.
+    /// like the sealing itself. Its [`Dependent::dependencies`], by the same
+    /// destinations, are what the inbox's breaker is to be given (seedwork
+    /// ADR-0042 decision 1).
     ///
     /// # Errors
     /// [`UnsealedChannel`] for a channel the sealing was not built for: a
@@ -242,15 +250,27 @@ impl Sealing {
         C: Into<String>,
     {
         let mut stages: HashMap<String, Arc<dyn Stage>> = HashMap::new();
+        let mut dependencies: HashMap<String, Arc<dyn Dependency>> = HashMap::new();
         for (destination, channel) in map {
             let (destination, channel) = (destination.into(), channel.into());
-            let stage = self.of(&channel).ok_or_else(|| UnsealedChannel {
+            let unsealed = || UnsealedChannel {
                 destination: destination.clone(),
                 channel: channel.clone(),
-            })?;
-            stages.insert(uri::without_key(&destination).to_owned(), stage);
+            };
+            let stage = self.of(&channel).ok_or_else(unsealed)?;
+            let dependency = self
+                .dependencies
+                .get(&channel)
+                .cloned()
+                .ok_or_else(unsealed)?;
+            let destination = uri::without_key(&destination).to_owned();
+            dependencies.insert(destination.clone(), dependency);
+            stages.insert(destination, stage);
         }
-        Ok(ByDestination { stages })
+        Ok(ByDestination {
+            stages,
+            dependencies,
+        })
     }
 }
 
@@ -282,6 +302,7 @@ impl std::error::Error for UnsealedChannel {}
 /// without a call to any KMS: it is not opened under a guessed context.
 pub struct ByDestination {
     stages: HashMap<String, Arc<dyn Stage>>,
+    dependencies: HashMap<String, Arc<dyn Dependency>>,
 }
 
 impl fmt::Debug for ByDestination {
@@ -313,6 +334,19 @@ impl ByDestination {
 
 fn refused(what: String) -> BoxError {
     Permanent::because(causes::MALFORMED, what).into()
+}
+
+impl Dependent for ByDestination {
+    /// Each destination's dependency: the KMS of the channel it opens under.
+    fn dependencies(&self) -> Vec<(String, Arc<dyn Dependency>)> {
+        let mut dependencies: Vec<(String, Arc<dyn Dependency>)> = self
+            .dependencies
+            .iter()
+            .map(|(destination, dependency)| (destination.clone(), Arc::clone(dependency)))
+            .collect();
+        dependencies.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        dependencies
+    }
 }
 
 impl Stage for ByDestination {

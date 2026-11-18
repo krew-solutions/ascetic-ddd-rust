@@ -234,6 +234,7 @@ pub struct Unavailable {
     cause: Cause,
     scope: Scope,
     retry_after: Option<std::time::Duration>,
+    by_stage: bool,
     error: BoxError,
 }
 
@@ -250,8 +251,22 @@ impl Unavailable {
             cause,
             scope,
             retry_after,
+            by_stage: false,
             error: error.into(),
         }
+    }
+
+    /// Whether a stage told it, on a message's way in, rather than the
+    /// handler: the inbox weighs a stage's refusal against the stage's own
+    /// dependency (seedwork ADR-0042 decision 1).
+    #[must_use]
+    pub fn told_by_stage(&self) -> bool {
+        self.by_stage
+    }
+
+    /// Marks it told by a stage.
+    pub(crate) fn told_by_a_stage(&mut self) {
+        self.by_stage = true;
     }
 
     /// Why.

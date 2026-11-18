@@ -355,6 +355,24 @@ verb names.
   there. A wrapped key the KMS refused keeps its cause by the wrapped key, so the opening end's memory of it
   tells the same cause.
 - `last_error` keeps a text only for `Cause::UNEXPLAINED`. No Tenant identifier in a log line of the dek.
+- **The opening end's dependency** (slice 11; the breaker reads it from slice 12, § Owed 2): the KMS, as the bus's
+  `Dependency` names what a stage depends on, handed to the inbox by destination (`Dependent`, which
+  `ByDestination` is). It counts the keys the KMS opened for flights (`served`: never a key held, never a
+  check's); it answers for every `kms.*` cause; its bound is `draw`. A **check** asks the KMS now, past the
+  opening's memory and pacing, the head's key (or without a head the last key refused at the stage's scope) and the
+  **control** — the last key the KMS opened by a call, a flight's or a check's of a head, aged from that opening and
+  gone past `keep` or with its Tenant's key gone — concurrently, each judged by the code a flight's landing goes
+  through, the sentinel's read included, and cut at `draw`. Served as soon as one is opened; unserved, under the
+  control's cause first, when one is refused at the stage's scope or runs past the bound; unasked when nothing was
+  asked, no session was had within the bound, or every answer was about the key itself (refused, gone with the
+  sentinel there): only an opened key is evidence that the KMS serves — a KMS may answer a garbage ciphertext's
+  400 while it opens nothing. A check's keys are dropped and wiped, it lands nothing in the opening's core (a
+  failing Tenant's refusals still read the stage's scope after it), and it logs and keeps no error's text. A
+  Tenant's recently opened key is the canary because a consumer may not draw a sentinel's key: its decrypts show
+  in the KMS's audit, at most one a tick a channel a process while a channel is suspect or paused.
+- **The bus marks a stage's `Unavailable`** told on the way in (`Unavailable::told_by_stage`), so that the inbox
+  weighs only a stage's refusal against that stage's dependency, and a handler's own `Stage` refusal against the
+  rows.
 
 ### 10. Isolation, per transaction
 
@@ -503,6 +521,8 @@ histories with a manual clock; the shell's with a `Clock` and a paused runtime; 
 | C31 | paused, a memoised witness's head gone at a failed tick, then two inconclusive trials and a processed one | not closed by the two; the next witness at the tick's first step; the gone witness not tried again; its entry's renewed back-off keeps its Tenant from the walk after the close | a head gone counted as inconclusive; it waits the scheduled tick; its entry's back-off left as it was; it not tried for the pause (C7, C21) |
 | C32 | a handler waiting on a hanging dependency past `trial_wait`: pauses closed by three timeouts, each next refusal a window and a millisecond after the close | the third pause stalled at its opening; its report refreshed while closed; a processed row ends the probation | the failed ticks reset by the window's horizon; no refresh while closed; the probation not ended by a processed row |
 | U1 | the database (`tests/outage.rs`): a paused channel whose three witnesses' heads cannot be asked, their causal dependencies unreadable | closed by three inconclusive trials | the shell telling an unreadable or waiting head as gone (closed on no witness left) |
+| D2 | the dek's dependency (`crates/dek/tests/opens.rs`): a check of a head's key beside a cold open of its message, over opened, refused, gone × the sentinel there / gone / unread, out of reach, unexplained, past `draw`, and later than the wait within `draw`; the control on a fresh opening end, after a flight, asked again, past `keep`, a check's head, its Tenant's key gone; the last refused key asked without a head; `served` over a flight, a hit and a check; a failing Tenant's refusal after a served check; one key hanging and one answering, each way; no session within the bound; a check's lines with a Tenant's name in its errors; `ByDestination`'s dependencies by destination | as the cold open judges, the late one served; none, served, served, unasked, served, unasked; asked, then the control; 1, 1, 1; still the stage's scope; served at once; unasked; no line names the Tenant; keyed without the key, one channel's two destinations one dependency | a refusal read as the KMS's; the check cut at the wait; the control renewed by its check, never aged, not a head's, kept past its Tenant's gone; the refused key not asked; a check counted; a check's key landed in the core; asked one after the other; no session read as unserved; an error's text logged; keyed by channel, or with the key |
+| D3 | the bus (`crates/bus/tests/stage.rs`): a stage's and a handler's `Unavailable` | the stage's marked, the handler's not | marked none; marked all |
 | K1 | the database (`tests/outage.rs`): a process that heard a stage refuse a Tenant; a Tenant alone so refused; Tenants named with a slash, a space, a quote and a backslash | the first process takes no head of it, writes no row, walks a guest's walk (cursor, round, sleep untouched) and counts it in `excluded()`, and another process takes it at once; the lone one asked again once its back-off runs out; the odd one kept and `t/1` beside it taken, no head of it walked to | the walk not told the keys; the process not a guest; the keys outliving the back-off; a key unescaped, or of another separator than the walk's |
 | G1 | at S = 1, K = 4, a memo of 16, at 8 and 64 Tenants, driven until every slot is paused, then n more dispatches | calls ≤ trials; changed rows ≤ calls; no head held unasked; a guest's step ≤ K; only the pause and the stall logged, as many lines at 64 as at 8; onset calls = `fewest` | drop the walk's filter (a hold on each paused head met, the same observable); no K; a held row logged at `warn` |
 | E1 | the expiry (`tests/expiry.rs`, the expiry's plan in `pg/plan_tests.rs`): a present chain, an untried head, a row behind a held head, a missing and a parked dependency, 8 and 9 hops, a cycle under `statement_timeout`, 20,000 spared with one missing last, ties at one `waiting_since` with rows moved in the heap, a malformed `waiting_for`, parked-expired rows; the spared rows' `(ctid, xmin, xmax)` and no xid in one transaction; `run`'s timer, and no dispatch expiring; a defect stopping `run`; the CHECK of a time of wait; the function as the start check requires it, planned once a connection | spared or expired as stated, each with its reason; 201 statements for 20,000 spared; ≤ `batch` rows examined by `__waiting_since_idx`, a hop one probe of the key | drop `present`; drop `parked_at IS NULL`; bounds 7, 16 and none; the cursor on expired rows; `LIMIT` after the filter; a `ctid` tiebreak; the key `waiting_since` alone; a plain cast; renew by write; lock before the spare test; the dispatch expiring; `run` without the timer; a defect logged; `more` by the rows parked; the observer untold; the start check without the set or the function; the CHECK dropped; the index's old predicate or no tiebreak; the exit's fragment; the plan not forced generic |
@@ -765,6 +785,9 @@ false, does not hold: `passed` is what a batch examined and did not park, `more`
 10. The rows' path of decision 1 fixed: a head gone counts nothing and renews its entry's back-off, a head that
     cannot be asked is inconclusive, a close no processed trial made puts the channel on probation, the witnesses
     due ordered the same every run, the log saying what closed a pause (C31, C32, U1); M10 and its shapes.
+11. The stage's dependency: the bus's `Dependency`, `Check` and `Dependent`, and its mark on a stage's
+    `Unavailable`; the opening end's dependency — `served`, the control, the last refused key, the check — and
+    `ByDestination`'s dependencies by destination (decision 9; D2, D3).
 
 ## References
 
@@ -1116,3 +1139,16 @@ payloads), its generated Vault policies.
   - **The trials processed from the cache** (159–171 a run hanging, 517 of 537 refusing) and the late pause at
     5,000 Tenants are decision 1's evidence, not the rows' path: decided by the round, owed to slices 11–12.
   Seven mutations of the core and one of the shell, each red.
+- 2026-11-18: Slice 11, the stage's dependency (decision 9), which slice 12 gives the breaker. What building it
+  found:
+  - **A check judges as a flight lands**: the flight's unwrap and its judgement — a key gone the Tenant's only
+    while the sentinel says the KMS keeps its keys — are one function both call, so that a check cannot read a
+    wiped mount as served; D2 sets the two beside each other over every outcome.
+  - **Only an opened key is evidence**: the second check of the synthesis found that a refused answer as the
+    control vetoes every pause while a KMS answers its cheap paths, and that a control renewed by its own checks
+    never ages; the control is a key opened by a call, aged from that opening.
+  - **No session is no answer**: a check whose session did not come within the bound asked nothing; read as the
+    KMS unserved, a pool exhausted by hung flights would pause a channel whose healthy Tenants are served. The
+    no-session path ends at the judgement's own timeout, not the check's — the first mutation of it survived for
+    that, and the test now holds both.
+  Sixteen mutations, each red.

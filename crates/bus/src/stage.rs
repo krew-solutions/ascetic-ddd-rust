@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 
-use crate::error::BoxError;
+use crate::error::{BoxError, Unavailable};
 use crate::message::Message;
 
 /// One transformation of wire messages, out and back in.
@@ -53,7 +53,15 @@ pub(crate) async fn inbound(
 ) -> Result<Message, BoxError> {
     let mut message = message;
     for stage in stages.iter().rev() {
-        message = stage.inbound(message).await?;
+        message = stage.inbound(message).await.map_err(told_by_a_stage)?;
     }
     Ok(message)
+}
+
+/// A stage's refusal on the way in, an [`Unavailable`] marked as the stage's.
+fn told_by_a_stage(mut error: BoxError) -> BoxError {
+    if let Some(unavailable) = error.downcast_mut::<Unavailable>() {
+        unavailable.told_by_a_stage();
+    }
+    error
 }

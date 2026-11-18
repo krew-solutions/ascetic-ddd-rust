@@ -49,7 +49,9 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ascetic_ddd_bus::{BoxError, Message, Permanent, Scope, Stage, Unavailable};
+use ascetic_ddd_bus::{
+    self as bus, BoxError, Cause, Message, Permanent, Scope, Stage, Unavailable,
+};
 use ascetic_ddd_kms::{Algorithm, Class, Error as KmsError, KeyManagementService};
 use ascetic_ddd_session::SessionPool;
 use base64::Engine as _;
@@ -396,6 +398,18 @@ impl<P, K> EnvelopeStage<P, K> {
         Ok(EnvelopeStage { opener, ..self })
     }
 
+    /// What the opening end depends on, the KMS, as an inbox's breaker asks it
+    /// (seedwork ADR-0042 decision 1): the keys it opened by a call, and a
+    /// check of it past the opening's memory and pacing.
+    pub fn dependency(&self) -> Arc<dyn bus::Dependency>
+    where
+        P: SessionPool + Send + Sync + 'static,
+        P::Session: Sync,
+        K: KeyManagementService<P::Session> + 'static,
+    {
+        Arc::new(OpeningDependency(Arc::clone(&self.opener)))
+    }
+
     /// What the opening end holds now: its keys, its entries, its unwraps.
     pub fn opening_held(&self) -> OpeningHeld
     where
@@ -490,6 +504,41 @@ impl<P, K> fmt::Debug for EnvelopeStage<P, K> {
             .field("draws", &self.draws)
             .finish_non_exhaustive()
     }
+}
+
+/// The opening end's dependency: the KMS that opens its keys.
+struct OpeningDependency<P, K>(Arc<Opener<P, K>>);
+
+impl<P, K> bus::Dependency for OpeningDependency<P, K>
+where
+    P: SessionPool + Send + Sync + 'static,
+    P::Session: Sync,
+    K: KeyManagementService<P::Session> + 'static,
+{
+    fn served(&self) -> u64 {
+        self.0.served()
+    }
+
+    fn bound(&self) -> Duration {
+        self.0.opening().draw
+    }
+
+    /// Every cause the opening tells, the KMS's.
+    fn answers_for(&self, cause: Cause) -> bool {
+        cause.as_str().starts_with("kms.")
+    }
+
+    fn check<'a>(&'a self, head: Option<&'a Message>) -> BoxFuture<'a, bus::Check> {
+        Box::pin(async move { self.0.check(head.and_then(sealed_key)).await })
+    }
+}
+
+/// The Tenant and the wrapped key a sealed message names, when it names
+/// them readably: a head that does not is asked nothing.
+fn sealed_key(message: &Message) -> Option<(String, Arc<[u8]>)> {
+    let tenant = tenant_of(message).ok()?;
+    let wrapped = BASE64.decode(header(message, DEK).ok()?).ok()?;
+    Some((tenant, Arc::from(wrapped)))
 }
 
 /// The tenant the message names.
