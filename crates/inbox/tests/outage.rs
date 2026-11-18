@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use ascetic_ddd_bus::{Cause, Permanent, Scope, Transient, Unavailable, cause};
-use ascetic_ddd_inbox::breaker::Effect;
+use ascetic_ddd_inbox::breaker::{Effect, Resumption};
 use ascetic_ddd_inbox::observer::{
     BreakerChanged, Failed, InboxObserver, Operated, Operation, Withheld,
 };
@@ -1262,6 +1262,55 @@ async fn a_sparse_paused_channel_s_head_is_tried_by_its_witness() {
             f.effects()
         );
     }
+}
+
+/// A paused channel whose witnesses' heads cannot be asked — their causal
+/// dependencies unreadable, so that each waits on what no trial can tell —
+/// closes by three inconclusive trials, not as if their heads were gone: a
+/// head that cannot be asked is inconclusive, a head another process finished
+/// counts nothing (ADR-0042 decision 1). Red when the shell tells an
+/// unreadable or waiting head as gone: the channel then closes on no witness
+/// left.
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_witness_that_cannot_be_asked_is_inconclusive_not_gone() {
+    let tick = Duration::from_millis(200);
+    let mut breaking = quick().with_tick(tick, tick);
+    breaking.fewest = 3;
+    let f = fixture_cut("unaskable", Retries::up_to(3), 1, breaking).await;
+    for tenant in ["t1", "t2", "t3"] {
+        f.publish(&[message_of(tenant, &format!("{tenant}-a"), 1)])
+            .await;
+    }
+    let mut calls = 0;
+    while !f.paused() {
+        f.dispatch(|| stage_down(None)).await;
+        f.wake().await;
+        calls += 1;
+        assert!(calls < 100, "never paused");
+    }
+    f.execute(
+        "UPDATE {table} SET metadata = jsonb_set(coalesce(metadata, '{}'::jsonb), \
+         '{causal_dependencies}', '\"not a list\"')",
+    )
+    .await;
+    let began = std::time::Instant::now();
+    let by = loop {
+        f.dispatch(ok).await;
+        f.wake().await;
+        if let Some(by) = f.effects().iter().find_map(|effect| match effect {
+            Effect::Resumed { by, .. } => Some(*by),
+            _ => None,
+        }) {
+            break by;
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "never resumed: {:?}",
+            f.effects()
+        );
+    };
+    assert_eq!(by, Resumption::Inconclusive, "{:?}", f.effects());
 }
 
 /// The slot's cursor, round, sleep and the guests' own cursor: what a walk

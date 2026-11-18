@@ -137,7 +137,26 @@ struct Script {
     cut_tenant: Option<String>,
     /// Calls a second the KMS answers: [`QUOTA`] for M5, none for M8.
     quota: f64,
+    /// While down, a call hangs until the client's timeout, [`HUNG`], and is
+    /// then refused (M10), rather than refused at once.
+    hang: bool,
+    /// The percentage of Tenants whose unwraps alone the outage refuses, the
+    /// KMS answering every other call (M10's partial shape), if not every
+    /// call.
+    partial: Option<u64>,
 }
+
+/// Whether `tenant` is among the `percent` of Tenants a partial outage
+/// refuses: by a hash of its id, the same in every process.
+fn broken(tenant: &str, percent: u64) -> bool {
+    tenant.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    }) % 100
+        < percent
+}
+
+/// How long a call to a KMS that hangs waits before its client gives up (M10).
+const HUNG: Duration = Duration::from_secs(30);
 
 impl Script {
     fn new(started: Instant, down: (Duration, Duration), cut: Option<usize>) -> Self {
@@ -154,6 +173,8 @@ impl Script {
             cut,
             cut_tenant: None,
             quota: QUOTA,
+            hang: false,
+            partial: None,
         }
     }
 
@@ -162,10 +183,37 @@ impl Script {
         at >= self.down.0 && at < self.down.1
     }
 
+    /// Whether the outage refuses a call: every call, or under a partial
+    /// outage only an unwrap of a broken Tenant's key.
+    fn down_for(&self, tenant: Option<&str>) -> bool {
+        self.down()
+            && match (self.partial, tenant) {
+                (None, _) => true,
+                (Some(_), None) => false,
+                (Some(percent), Some(tenant)) => broken(tenant, percent),
+            }
+    }
+
+    /// A call of a KMS that hangs while down: it waits for the client's
+    /// timeout, or the outage's end if sooner, and is then refused.
+    async fn hung(&self, tenant: Option<&str>) -> Result<(), Error> {
+        if self.hang && self.down_for(tenant) {
+            let left = self.down.1.saturating_sub(self.started.elapsed());
+            tokio::time::sleep(left.min(HUNG)).await;
+            self.refused_down.fetch_add(1, Ordering::Relaxed);
+            return Err(Error::Session(SessionError::Acquire("timed out".into())));
+        }
+        self.call_for(tenant)
+    }
+
     /// A call answered, or refused as an unreachable or rate-limited KMS
     /// is: of the class `Unavailable`.
     fn call(&self) -> Result<(), Error> {
-        if self.down() {
+        self.call_for(None)
+    }
+
+    fn call_for(&self, tenant: Option<&str>) -> Result<(), Error> {
+        if self.down_for(tenant) {
             self.refused_down.fetch_add(1, Ordering::Relaxed);
             return Err(Error::Session(SessionError::Acquire("down".into())));
         }
@@ -207,10 +255,10 @@ impl KeyManagementService<MemorySession> for Kms {
             self.0.refused_down.fetch_add(1, Ordering::Relaxed);
             return Err(Error::Session(SessionError::Acquire("cut off".into())));
         }
-        if self.0.down() {
+        if self.0.down_for(Some(tenant)) {
             self.0.unwraps_down.fetch_add(1, Ordering::Relaxed);
         }
-        self.0.call()?;
+        self.0.hung(Some(tenant)).await?;
         self.0.unwraps.fetch_add(1, Ordering::Relaxed);
         if self.1 < PROCESSES {
             self.0
@@ -224,7 +272,7 @@ impl KeyManagementService<MemorySession> for Kms {
     }
 
     async fn generate_dek(&self, _: &MemorySession, _: &str) -> Result<(Key, Vec<u8>), Error> {
-        self.0.call()?;
+        self.0.hung(None).await?;
         let n = self.0.draws.fetch_add(1, Ordering::Relaxed) + 1;
         let mut key = vec![0u8; 32];
         key[..8].copy_from_slice(&n.to_be_bytes());
@@ -256,6 +304,13 @@ struct Told {
     guests: AtomicU64,
     /// Heads held without their subscriber called (M8).
     withheld: AtomicU64,
+    /// Resumes by what closed the channel (M10).
+    by_processed: AtomicU64,
+    by_inconclusive: AtomicU64,
+    by_no_witness: AtomicU64,
+    /// Stall effects, and when the first came, seconds into the run (M10).
+    stalled: AtomicU64,
+    first_stall: Mutex<Option<f64>>,
     lines: Mutex<Vec<String>>,
 }
 
@@ -284,8 +339,14 @@ impl InboxObserver for Told {
                     self.process, event.effect
                 ));
             }
-            Effect::Resumed { .. } => {
+            Effect::Resumed { by, .. } => {
                 self.resumed.fetch_add(1, Ordering::Relaxed);
+                match by {
+                    ascetic_ddd_inbox::breaker::Resumption::Processed => &self.by_processed,
+                    ascetic_ddd_inbox::breaker::Resumption::Inconclusive => &self.by_inconclusive,
+                    ascetic_ddd_inbox::breaker::Resumption::NoWitness => &self.by_no_witness,
+                }
+                .fetch_add(1, Ordering::Relaxed);
                 self.lines.lock().unwrap().push(format!(
                     "{at:7.1} s process {}: resumed {:?}",
                     self.process, event.effect
@@ -294,7 +355,10 @@ impl InboxObserver for Told {
             Effect::Trial { .. } => {
                 self.trials.fetch_add(1, Ordering::Relaxed);
             }
-            _ => {}
+            Effect::Stalled { .. } => {
+                self.stalled.fetch_add(1, Ordering::Relaxed);
+                self.first_stall.lock().unwrap().get_or_insert(at);
+            }
         }
     }
 
@@ -1049,6 +1113,312 @@ async fn a_replica_cut_off_alone_drilled() {
         told[1].processed.load(Ordering::Relaxed),
         told[cut].processed.load(Ordering::Relaxed),
         script.refused_down.load(Ordering::Relaxed),
+    );
+    inboxes[0].teardown().await.unwrap();
+}
+
+/// M10 of the inbox's ADR-0042 (§ Owed, 2): the KMS hanging rather than
+/// refusing — every call while it is down waits for its client's timeout,
+/// 30 s, and is then refused — for ten minutes, with a launch's backlog
+/// queued before it and steady traffic. What the processes report: when each
+/// first stalls, its stall row the page reads; how often each pauses and
+/// resumes; its trials. A trial that runs past its wait is inconclusive, and
+/// three close the channel: the run says whether a stage that hangs still
+/// stalls and pages. Run as M5 is, by hand, its table its own; `small` a
+/// tenth.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "a measurement (the inbox's ADR-0042 M10): run by hand"]
+async fn a_kms_hanging_drilled() {
+    const TABLE10: &str = "dek_drill_hang_inbox";
+    let Ok(asked) = std::env::var("ASCETIC_DDD_MEASURE") else {
+        eprintln!("a measurement: set ASCETIC_DDD_MEASURE to run it");
+        return;
+    };
+    let small = asked == "small";
+    let minute = if small {
+        Duration::from_secs(6)
+    } else {
+        Duration::from_secs(60)
+    };
+    let launch: u64 = if small { 2_000 } else { 20_000 };
+    let (steady, outage, recovery) = (minute * 2, minute * 10, minute * 3);
+    let end = steady + outage + recovery;
+    // ASCETIC_DDD_M10_TRIAL_WAIT=<s>: the trial's wait, the default otherwise
+    let breaking = std::env::var("ASCETIC_DDD_M10_TRIAL_WAIT")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map_or(ascetic_ddd_inbox::Breaking::default(), |s| {
+            ascetic_ddd_inbox::Breaking::default().with_trial_wait(Duration::from_secs(s))
+        });
+    println!("M10: the trial's wait {:?}", breaking.trial_wait);
+    let started = Instant::now();
+    // ASCETIC_DDD_M10_HANG=0: the same run, the KMS refusing at once while down
+    let hang = std::env::var("ASCETIC_DDD_M10_HANG").map_or(true, |v| v != "0");
+    println!(
+        "M10: the KMS {} while down",
+        if hang { "hangs" } else { "refuses at once" }
+    );
+    // ASCETIC_DDD_M10_PARTIAL=<percent>: only that share of Tenants' unwraps
+    // refused (or hung) while down, every other call answered
+    let partial = std::env::var("ASCETIC_DDD_M10_PARTIAL")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok());
+    // ASCETIC_DDD_M10_TENANTS / _RATE: the steady traffic's Tenants and
+    // messages a second, M10's 500 and 20 otherwise
+    let tenants: usize = std::env::var("ASCETIC_DDD_M10_TENANTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(TENANTS);
+    let rate: u64 = std::env::var("ASCETIC_DDD_M10_RATE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(RATE);
+    println!(
+        "M10: {tenants} Tenants at {rate} a second; {}",
+        partial.map_or("every call refused while down".to_owned(), |p| format!(
+            "{p} % of Tenants' unwraps refused while down"
+        ))
+    );
+    let script = Arc::new(Script {
+        hang,
+        quota: 1e9,
+        partial,
+        ..Script::new(started, (steady, steady + outage), None)
+    });
+    // The age at handling of the messages of Tenants the outage spares, made
+    // while down: how long a pause held what the stage could have opened.
+    let spared: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+    let window = (
+        millis_now() + steady.as_millis() as u64,
+        millis_now() + (steady + outage).as_millis() as u64,
+    );
+    let channels: Vec<String> = (0..CHANNELS).map(channel).collect();
+    let parameters = SealingParameters::default();
+    let sealing = |process: usize| {
+        Sealing::over(
+            Arc::new(MemorySessionPool::new()),
+            channels.clone(),
+            parameters,
+            |_: &str| Kms(Arc::clone(&script), process),
+        )
+    };
+    let producing: Sealing = sealing(PROCESSES);
+    let told: Vec<Arc<Told>> = (0..PROCESSES)
+        .map(|process| {
+            Arc::new(Told {
+                process,
+                started: Some(started),
+                ..Told::default()
+            })
+        })
+        .collect();
+    let inboxes: Vec<Arc<PgInbox<PgSessionPool, Arc<Told>>>> = told
+        .iter()
+        .map(|told| {
+            Arc::new(
+                PgInbox::new(PgSessionPool::new(pool(LOOPS as usize + 4)))
+                    .with_table(
+                        Identifier::new(TABLE10).unwrap(),
+                        Identifier::new(format!("{TABLE10}_seq")).unwrap(),
+                    )
+                    .with_slots(64)
+                    .partitioned_by(ascetic_ddd_inbox::ByStream)
+                    .with_loops(Loops {
+                        concurrency: LOOPS,
+                        poll_interval: POLL,
+                        max_error_wait: Duration::from_secs(1),
+                    })
+                    .with_breaking(breaking)
+                    .observed_by(Arc::clone(told)),
+            )
+        })
+        .collect();
+    inboxes[0].teardown().await.unwrap();
+    inboxes[0].migrate().await.unwrap();
+    let mut subscriptions = Vec::new();
+    for (process, inbox) in inboxes.iter().enumerate() {
+        let opening = sealing(process)
+            .by_destination(channels.iter().map(|c| (c.clone(), c.clone())))
+            .unwrap();
+        let spared = Arc::clone(&spared);
+        let subscription = inbox
+            .consumer(move |message: &Message| {
+                let made = std::str::from_utf8(message.payload())?.parse::<u64>()?;
+                let tenant = std::str::from_utf8(message.header(TENANT_ID).unwrap_or_default())?;
+                Ok((made, partial.is_none_or(|p| !broken(tenant, p))))
+            })
+            .through(Arc::new(opening) as Arc<dyn Stage>)
+            .subscribe(move |_tx, (made, spared_tenant): (u64, bool)| {
+                let spared = Arc::clone(&spared);
+                async move {
+                    tokio::time::sleep(HANDLER).await;
+                    if spared_tenant && made >= window.0 && made < window.1 {
+                        spared
+                            .lock()
+                            .unwrap()
+                            .push(millis_now().saturating_sub(made));
+                    }
+                }
+            })
+            .unwrap();
+        subscriptions.push(subscription);
+    }
+    // Steady traffic, sealed while the KMS answers: a seal that hangs waits.
+    let producer = {
+        let producing = producing.clone();
+        let intake = inboxes[0].channel();
+        async move {
+            let mut positions: HashMap<(usize, usize, usize), u64> = HashMap::new();
+            let mut made = 0u64;
+            let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+            let mut next = move |n: usize| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                (seed % n as u64) as usize
+            };
+            let mut tick = tokio::time::interval(Duration::from_micros(1_000_000 / rate));
+            while started.elapsed() < end {
+                tick.tick().await;
+                let (t, c, s) = (next(tenants), next(CHANNELS), next(STREAMS));
+                let position = positions.entry((t, c, s)).or_default();
+                *position += 1;
+                made += 1;
+                let message = Message::new(millis_now().to_string().into_bytes())
+                    .with_header(TENANT_ID, format!("t{t:03}"))
+                    .with_header(STREAM_TYPE, "orders.Order")
+                    .with_header(STREAM_ID, format!("c{c}-s{s}"))
+                    .with_header(STREAM_POSITION, position.to_string())
+                    .with_header(MESSAGE_ID, format!("00000000-0000-4000-8000-{made:012x}"));
+                let Ok(sealed) = producing.of(&channel(c)).unwrap().outbound(message).await else {
+                    // the KMS down: this message is not made
+                    *position -= 1;
+                    continue;
+                };
+                intake
+                    .producer(&format!("{}/{}", channel(c), "k"))
+                    .unwrap()
+                    .publish(sealed)
+                    .await
+                    .unwrap();
+            }
+        }
+    };
+    // The launch, in the minute before the outage, so that it meets a backlog.
+    let launchers = (0..LAUNCHERS).map(|l| {
+        let producing = producing.clone();
+        let intake = inboxes[0].channel();
+        async move {
+            tokio::time::sleep(steady.saturating_sub(minute)).await;
+            let each = launch / LAUNCHERS;
+            let begun = Instant::now();
+            for n in 0..each {
+                let due = minute.mul_f64(n as f64 / each as f64);
+                if let Some(rest) = due.checked_sub(begun.elapsed()) {
+                    tokio::time::sleep(rest).await;
+                }
+                let c = (n % CHANNELS as u64) as usize;
+                let stream = (n / CHANNELS as u64) % 50;
+                let position = n / (CHANNELS as u64 * 50) + 1;
+                let message = Message::new(millis_now().to_string().into_bytes())
+                    .with_header(TENANT_ID, format!("tl{}", n % 40))
+                    .with_header(STREAM_TYPE, "orders.Order")
+                    .with_header(STREAM_ID, format!("l{l}-c{c}-s{stream}"))
+                    .with_header(STREAM_POSITION, position.to_string())
+                    .with_header(MESSAGE_ID, format!("00000000-0000-4000-9{l:03x}-{n:012x}"));
+                let Ok(sealed) = producing.of(&channel(c)).unwrap().outbound(message).await else {
+                    break;
+                };
+                intake
+                    .producer(&format!("{}/{}", channel(c), "k"))
+                    .unwrap()
+                    .publish(sealed)
+                    .await
+                    .unwrap();
+            }
+        }
+    });
+    let launching = futures::future::join_all(launchers);
+    let client = pool(1).get().await.unwrap();
+    let sampler = async {
+        let mut tick = tokio::time::interval(minute / 6);
+        println!(
+            "{:>6} {:>7} {:>8} {:>6} {:>6} {:>6} {:>6} {:>8}",
+            "s", "queue", "done", "paused", "resume", "trials", "stalls", "refused"
+        );
+        while started.elapsed() < end {
+            tick.tick().await;
+            let queued: i64 = client
+                .query_one(
+                    &format!(
+                        "SELECT count(*) FROM {TABLE10} \
+                         WHERE processed_position IS NULL AND parked_at IS NULL"
+                    ),
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            println!(
+                "{:>6.0} {:>7} {:>8} {:>6} {:>6} {:>6} {:>6} {:>8}",
+                started.elapsed().as_secs_f64(),
+                queued,
+                sum(&told, |t| &t.processed),
+                sum(&told, |t| &t.paused),
+                sum(&told, |t| &t.resumed),
+                sum(&told, |t| &t.trials),
+                sum(&told, |t| &t.stalled),
+                script.refused_down.load(Ordering::Relaxed)
+            );
+        }
+    };
+    tokio::join!(producer, launching, sampler);
+    for subscription in subscriptions {
+        subscription.cancel().await;
+    }
+    for t in &told {
+        let first = *t.first_stall.lock().unwrap();
+        println!(
+            "M10, process {}: first stalled {} into the outage; {} stall effects, {} pauses, {} \
+             resumes ({} by a trial processed, {} by three inconclusive, {} with no witness), {} \
+             trials, {} parked, {} spent",
+            t.process,
+            first.map_or("never".to_owned(), |at| format!(
+                "{:.1} s",
+                at - steady.as_secs_f64()
+            )),
+            t.stalled.load(Ordering::Relaxed),
+            t.paused.load(Ordering::Relaxed),
+            t.resumed.load(Ordering::Relaxed),
+            t.by_processed.load(Ordering::Relaxed),
+            t.by_inconclusive.load(Ordering::Relaxed),
+            t.by_no_witness.load(Ordering::Relaxed),
+            t.trials.load(Ordering::Relaxed),
+            t.parked.load(Ordering::Relaxed),
+            t.spent.load(Ordering::Relaxed),
+        );
+        for line in t.lines.lock().unwrap().iter() {
+            println!("{line}");
+        }
+    }
+    println!(
+        "M10: the KMS hung {} calls while down, {} unwraps begun while down",
+        script.refused_down.load(Ordering::Relaxed),
+        script.unwraps_down.load(Ordering::Relaxed)
+    );
+    let mut ages = std::mem::take(&mut *spared.lock().unwrap());
+    ages.sort_unstable();
+    let at = |q: f64| {
+        ages.get(((ages.len() as f64 - 1.0) * q) as usize)
+            .copied()
+            .unwrap_or(0)
+    };
+    println!(
+        "M10: spared Tenants' messages made while down: {} handled, age p50 {} ms, p99 {} ms, max {} ms",
+        ages.len(),
+        at(0.5),
+        at(0.99),
+        ages.last().copied().unwrap_or(0)
     );
     inboxes[0].teardown().await.unwrap();
 }

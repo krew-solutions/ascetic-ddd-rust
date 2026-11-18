@@ -363,9 +363,10 @@ fn c5_a_hanging_tenant_is_asked_once_at_a_time() {
     assert!(matches!((first, second), (Before::Ask(_), Before::Ask(_))));
 }
 
-/// C6: recovered, every row now fails on its own: three inconclusive trials on
-/// distinct witnesses close the channel — two memoised Tenants and a third
-/// whose head a guest met. Red when only a processed trial closes.
+/// C6: recovered, every row now fails on its own or cannot be asked: three
+/// inconclusive trials on distinct witnesses close the channel — two memoised
+/// Tenants, the second's row unreadable, and a third whose head a guest met,
+/// timed out. Red when only a processed trial closes.
 #[test]
 fn c6_three_inconclusive_trials_close_the_channel() {
     let mut sim = Sim::new(Breaking::default());
@@ -377,7 +378,7 @@ fn c6_three_inconclusive_trials_close_the_channel() {
     sim.advance(Duration::from_secs(5));
     let (second, b) = sim.next_trial();
     assert_ne!(a, b, "a witness tried twice");
-    let told = sim.breaker.tried(sim.now, second, Trial::Gone);
+    let told = sim.breaker.tried(sim.now, second, Trial::Unreadable);
     assert!(!resumed(&told.effects));
     sim.advance(Duration::from_secs(5));
     sim.breaker.met(sim.now, CHANNEL, &[(9, "c".to_owned())]);
@@ -398,8 +399,8 @@ fn c6_three_inconclusive_trials_close_the_channel() {
 }
 
 /// C7: paused, the heads of both its memoised Tenants given up by a person: a
-/// trial of each finds its head gone, two inconclusive verdicts of the three
-/// that close a channel; the next tick finds no witness and none to wait for,
+/// trial of each finds its head gone, which counts nothing and tries the
+/// witness for the pause; the next tick finds no witness and none to wait for,
 /// and closes it — a process's guests cannot see a whole circle of a slot,
 /// their cursor shared — and no stall is refreshed after. Red when a tick
 /// without a witness only waits for the next.
@@ -413,7 +414,7 @@ fn c7_no_witness_left_closes_the_channel() {
         let (id, _) = sim.next_trial();
         effects.extend(sim.breaker.tried(sim.now, id, Trial::Gone).effects);
     }
-    assert!(!resumed(&effects), "two inconclusive trials closed it");
+    assert!(!resumed(&effects), "two heads gone closed it");
     sim.advance(Duration::from_secs(5));
     effects.extend(sim.tick());
     assert!(resumed(&effects), "no witness left: {effects:?}");
@@ -840,11 +841,12 @@ fn c19_a_stage_scoped_entry_passes_its_heads_a_tenant_scoped_one_holds_them() {
 /// C21: a Tenant asked twice at once, in two slots, before it had an entry;
 /// one ask refused at the stage's scope with another Tenant's pauses the
 /// channel, the other still in flight; both Tenants' trials find their heads
-/// gone; the late ask is refused after, renewing its Tenant's entry while the
-/// channel is paused; the next tick finds no witness and none to wait for, and
-/// closes the channel — whose renewed entry the walk must now leave out. Red
-/// when a tick's close does not rebuild the walk's keys: the Tenant's heads
-/// then met and passed, loop after loop, for its back-off.
+/// gone, renewing their entries' back-off; the late ask is refused after,
+/// renewing its Tenant's entry again while the channel is paused; the next
+/// tick finds no witness and none to wait for, and closes the channel — whose
+/// renewed entries the walk must now leave out. Red when a tick's close does
+/// not rebuild the walk's keys: the Tenants' heads then met and passed, loop
+/// after loop, for their back-off.
 #[test]
 fn c21_a_close_after_a_late_refusal_rebuilds_the_walk_s_keys() {
     let mut breaker = Breaker::new(Breaking::default());
@@ -873,7 +875,7 @@ fn c21_a_close_after_a_late_refusal_rebuilds_the_walk_s_keys() {
             .expect("a trial of a memoised witness");
         breaker.tried(now, trial, Trial::Gone);
     }
-    assert!(breaker.is_paused(CHANNEL), "two inconclusive of three");
+    assert!(breaker.is_paused(CHANNEL), "two heads gone close nothing");
     breaker.told(now, late, stage());
     assert_eq!(
         &*breaker.excluded(now),
@@ -885,9 +887,163 @@ fn c21_a_close_after_a_late_refusal_rebuilds_the_walk_s_keys() {
     assert!(resumed(&effects), "no witness left: {effects:?}");
     assert_eq!(
         keys_of(&breaker.excluded(now)),
-        [format!("{CHANNEL}/a")].into_iter().collect(),
-        "a's renewed entry keeps it from the walk"
+        [format!("{CHANNEL}/a"), format!("{CHANNEL}/b")]
+            .into_iter()
+            .collect(),
+        "the renewed entries keep their Tenants from the walk"
     );
+}
+
+/// C31: paused, a memoised witness's head gone — its row finished by another
+/// process — counts nothing: two inconclusive trials after it do not close the
+/// channel; the next witness is asked at the tick's first step, not the failed
+/// ticks' doubled one; and the entry's back-off is renewed, so that its Tenant
+/// stays out of this process's walk once the channel closes. Red when a head
+/// gone counts as inconclusive, waits the scheduled tick, or leaves the entry's
+/// back-off as it was.
+#[test]
+fn c31_a_head_gone_counts_nothing_and_renews_its_entry() {
+    // a Tenant's first step 20 s: the renewed back-off outlives the pause
+    let settings = Breaking::default().with_hold(Duration::from_secs(10), Duration::from_secs(300));
+    let mut breaker = Breaker::new(settings);
+    let mut now = Instant::now();
+    let flights: Vec<Flight> = ["a", "b", "c"]
+        .into_iter()
+        .enumerate()
+        .map(
+            |(slot, tenant)| match breaker.before(now, CHANNEL, tenant, slot as i16, 0) {
+                Before::Ask(flight) => flight,
+                other => panic!("{tenant} asked: {other:?}"),
+            },
+        )
+        .collect();
+    for flight in flights {
+        breaker.told(now, flight, stage());
+    }
+    assert!(breaker.is_paused(CHANNEL), "three Tenants failing pause it");
+    let trial = |breaker: &mut Breaker, now: Instant| {
+        breaker.tick(now).into_iter().find_map(|e| match e {
+            Effect::Trial { id, tenant, .. } => Some((id, tenant)),
+            _ => None,
+        })
+    };
+    now += Duration::from_secs(20);
+    let (id, a) = trial(&mut breaker, now).expect("a memoised witness, due");
+    assert_eq!(a, "a", "the earliest due, ties by the Tenant");
+    breaker.tried(now, id, Trial::Told(stage()));
+    now += Duration::from_secs(2);
+    let (id, b) = trial(&mut breaker, now).expect("the next at the doubled step");
+    breaker.tried(now, id, Trial::Gone);
+    now += Duration::from_secs(1);
+    let (id, third) = trial(&mut breaker, now).expect("after a head gone, the first step");
+    assert_ne!(third, b, "a witness whose head was gone tried again");
+    let told = breaker.tried(now, id, Trial::Told(Verdict::Own));
+    assert!(!resumed(&told.effects));
+    now += Duration::from_secs(1);
+    breaker.met(now, CHANNEL, &[(9, "m".to_owned())]);
+    let (id, m) = trial(&mut breaker, now).expect("the head met, hastened");
+    assert_eq!(m, "m");
+    let told = breaker.tried(now, id, Trial::Told(Verdict::Own));
+    assert!(
+        !resumed(&told.effects),
+        "a head gone counted as an inconclusive trial"
+    );
+    let mut closed = false;
+    for _ in 0..30 {
+        now += Duration::from_secs(1);
+        if let Some((id, tenant)) = trial(&mut breaker, now) {
+            assert!(
+                ![b.as_str(), third.as_str(), "m"].contains(&tenant.as_str()),
+                "the one witness left untried, not {tenant}"
+            );
+            closed = resumed(
+                &breaker
+                    .tried(now, id, Trial::Told(Verdict::Processed))
+                    .effects,
+            );
+            break;
+        }
+    }
+    assert!(closed, "a processed trial closes it");
+    assert_eq!(
+        keys_of(&breaker.excluded(now)),
+        [format!("{CHANNEL}/{b}")].into_iter().collect(),
+        "the gone witness's entry, renewed, keeps its Tenant from the walk"
+    );
+}
+
+/// Ticks a paused channel through three inconclusive trials — two memoised
+/// witnesses' and `met`'s, a head a guest met — until it closes.
+fn inconclusive_close(sim: &mut Sim, met: &str) {
+    for _ in 0..2 {
+        let (id, _) = sim.next_trial();
+        let told = sim.breaker.tried(sim.now, id, Trial::TimedOut);
+        assert!(!resumed(&told.effects));
+    }
+    sim.breaker.met(sim.now, CHANNEL, &[(9, met.to_owned())]);
+    let (id, tenant) = sim.next_trial();
+    assert_eq!(tenant, met, "the head met is tried");
+    let told = sim.breaker.tried(sim.now, id, Trial::TimedOut);
+    assert!(resumed(&told.effects), "three inconclusive trials close it");
+}
+
+/// C32: a handler that waits on a hanging dependency past the trial's wait:
+/// its pauses close by three trials timed out, and its next refusals come a
+/// client's timeout later, past the window. On probation, each pause counts a
+/// failed tick at its opening: the third is stalled, and its report is kept
+/// though closed — until a row of the channel is processed, which ends the
+/// probation. Red when the failed ticks are reset by the window's horizon
+/// rather than kept by probation, when a stall on probation is not refreshed
+/// while closed, or when a processed row does not end it.
+#[test]
+fn c32_a_handler_s_hanging_dependency_stalls_on_probation() {
+    let mut sim = Sim::new(Breaking::default());
+    sim.open();
+    inconclusive_close(&mut sim, "c");
+    let window = Breaking::default().window;
+    let mut stalled_at_opening = Vec::new();
+    for (pause, tenants) in [["d", "e"], ["g", "h"]].iter().enumerate() {
+        sim.advance(window + Duration::from_millis(1));
+        let mut effects = Vec::new();
+        for tenant in tenants {
+            effects.extend(sim.ask(tenant, 0, stage()).expect("asked").effects);
+        }
+        assert!(
+            paused(&effects),
+            "pause {} on probation: {effects:?}",
+            pause + 2
+        );
+        stalled_at_opening.push(effects.iter().any(|e| matches!(e, Effect::Stalled { .. })));
+        inconclusive_close(&mut sim, &format!("m{pause}"));
+    }
+    assert_eq!(
+        stalled_at_opening,
+        [false, true],
+        "the third pause on probation is stalled at its opening"
+    );
+    let mut refreshed = 0;
+    for _ in 0..20 {
+        sim.advance(Duration::from_secs(1));
+        refreshed += sim
+            .tick()
+            .iter()
+            .filter(|e| matches!(e, Effect::Stalled { .. }))
+            .count();
+    }
+    assert!(
+        refreshed > 0,
+        "a stall on probation not refreshed while closed"
+    );
+    sim.ask("z", 3, Verdict::Processed).expect("asked");
+    for _ in 0..60 {
+        sim.advance(Duration::from_secs(1));
+        assert!(
+            !sim.tick()
+                .iter()
+                .any(|e| matches!(e, Effect::Stalled { .. })),
+            "a processed row did not end the probation"
+        );
+    }
 }
 
 /// `breaker`'s channel paused: two Tenants failing at the stage's scope.

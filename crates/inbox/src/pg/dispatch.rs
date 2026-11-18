@@ -556,7 +556,9 @@ where
                             true,
                         )? {
                             Ok(Ok(message)) => message,
-                            Ok(Err(_)) | Err(_) => return Ok((Trial::Gone, Outcome::Nothing)),
+                            Ok(Err(_)) | Err(_) => {
+                                return Ok((Trial::Unreadable, Outcome::Nothing));
+                            }
                         };
                         let dependencies = message.checked_causal_dependencies().ok();
                         let waits = match &dependencies {
@@ -567,7 +569,7 @@ where
                             None => true,
                         };
                         if waits {
-                            return Ok((Trial::Gone, Outcome::Nothing));
+                            return Ok((Trial::Unreadable, Outcome::Nothing));
                         }
                         let attempt = tokio::time::timeout(
                             wait,
@@ -640,7 +642,7 @@ where
             })
             .await;
         match tried {
-            Ok((trial @ (Trial::Gone | Trial::Busy), outcome)) => {
+            Ok((trial @ (Trial::Gone | Trial::Unreadable | Trial::Busy), outcome)) => {
                 let told = self.breaker().tried(now(), id, trial);
                 self.tell(&told.effects);
                 Ok(outcome)
@@ -689,9 +691,16 @@ where
                     self.stall_state()
                         .stalled(channel, cause.as_str(), *since, *ttl);
                 }
-                Effect::Resumed { channel, cause, .. } => {
+                Effect::Resumed {
+                    channel, cause, by, ..
+                } => {
+                    let by = match by {
+                        crate::breaker::Resumption::Processed => "a trial processed",
+                        crate::breaker::Resumption::Inconclusive => "three trials inconclusive",
+                        crate::breaker::Resumption::NoWitness => "no witness left",
+                    };
                     log::warn!(
-                        "inbox: the channel {channel} asked again in this process ({cause})"
+                        "inbox: the channel {channel} asked again in this process ({cause}): {by}"
                     );
                 }
                 Effect::Trial { .. } => {}

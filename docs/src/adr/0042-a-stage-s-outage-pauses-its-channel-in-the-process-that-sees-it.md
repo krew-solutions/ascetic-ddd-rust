@@ -22,6 +22,14 @@ channel it does not pause: as built, 551 of 20,000 rows served in 20 minutes; wi
 tick on the rows, 8,894; with the memo's stage-scoped Tenants kept from the process's walk, its walk a guest's,
 all 20,000 in 160 s against 120 s with no replica cut off (§ Measured). Decisions 2, 3, 5 and 6 say so.
 
+Revised (2026-11-18), slice 10: § Owed 2's first risk, the hanging KMS, drilled (M10). The flapping it found is not
+the timeout's: a trial whose witness's head another process had finished counted as inconclusive, its memo entry
+kept and picked again at every pause; and a trial processed from the opening's cache closes a pause with the KMS
+down. Slice 10 fixes the first and the rows' own path of decision 1 (a head gone counts nothing; a close no
+processed trial made puts the channel on probation). The second — what evidence ends a stage's pause — was decided
+under the library's gate (a blind solver, a main position, two discriminators, six roles in two rounds, two checks
+of the synthesis) and is owed with its executors to slices 11–12 (§ Owed 2).
+
 It supersedes ADR-0040's decisions 4, 5, 7, 9 and its `park_held` (decision 8), and ADR-0041's decision 3 (the
 environment's verdict, its slice 2). It keeps ADR-0040's verdicts and causes (decisions 1–3, 6) and
 `unpark_all` (decision 8, widened here), and ADR-0041's rotation (decisions 1, 2, 5, 6).
@@ -110,7 +118,8 @@ number of failed ticks f is kept across a close shorter than W and reset after W
 1. a head of the channel whose Tenant has no memo, met by a guest walk (§ 5); meeting one brings the next trial
    forward to now — at most once a tick's first step, and not again after a hastened trial that left the channel
    open until a scheduled one has been issued: heads met add at most one trial a tick;
-2. else a memoised Tenant's head whose memo has run out: the trial honours the Tenant's back-off;
+2. else a memoised Tenant's head whose memo has run out, the earliest due first, ties by the Tenant: the trial
+   honours the Tenant's back-off;
 3. else none at this tick.
 
 **One trial a tick call.** A dispatch runs one trial, so a tick issues at most one: the channels due take their
@@ -125,15 +134,30 @@ Its verdict:
 - processed → closed;
 - a `Stage`-scoped `Unavailable` of the pause's cause → open, f + 1;
 - a `Tenant`-scoped `Unavailable` → that Tenant's memo, and the witness drops out;
-- the row's own verdict, a head gone, or the timeout → inconclusive; **three inconclusive verdicts in a row, on
-  distinct witnesses, close the channel**;
+- the row's own verdict, a head that cannot be asked (its row unreadable, or waiting on a dependency not yet
+  processed), or the timeout → inconclusive; **three inconclusive verdicts in a row, on distinct witnesses, close
+  the channel**;
+- **a head gone** — its row finished, by another process as like as not, or the Tenant's head in the slot another
+  channel's → nothing counted: the witness tried for this pause, its memo entry kept and its back-off renewed, not
+  grown (what it remembered is stale, and its exponent still paces the Tenant for the other processes), and the
+  next witness asked at the tick's first step. Until slice 10 it counted as inconclusive and its entry, kept, was
+  picked again at every pause: three such closed a channel in two or three seconds without asking a Tenant that
+  failed, 783 trials of M10's 1,888;
 - a busy slot — a dispatch holds it — or a transaction that failed before a verdict was told → nothing: no failed
   tick and no inconclusive verdict, the witness again at the tick's first step, a hastened trial's haste not
   spent;
 - **no witness left**: a tick that finds no witness and none to wait for — every head met and every memoised
-  Tenant tried inconclusively — closes the channel; a head still refused at the stage's scope opens it again, its
-  failing Tenants kept across the close. A process's guests cannot see a whole circle of a slot: their cursor is
-  shared by every replica's, and a walk covers K Tenants.
+  Tenant tried, inconclusively or gone — closes the channel; a head still refused at the stage's scope opens it
+  again, its failing Tenants kept across the close. A process's guests cannot see a whole circle of a slot: their
+  cursor is shared by every replica's, and a walk covers K Tenants.
+
+**Probation.** A close that no processed trial made — three inconclusive, or no witness left — puts the channel on
+probation until a row of it is processed: a pause while on probation counts a failed tick at its opening, whatever
+the time since the close, and a stalled channel on probation keeps its report though closed, refreshed once a
+tick's cap. A handler that waits on a hanging dependency past `trial_wait` closes its pauses inconclusively, and
+its next refusal comes a client's timeout later, past the window: probation, not the window, tells its pauses from
+a slow handler's, which never pause again. Such a handler stalls at its third pause, some 3 × (its timeout + three
+trials) into the outage, and its report holds until a row is processed. The log says what closed a pause.
 
 Every effect carries an id and a deadline: one unanswered by its deadline is a failed tick; an answer after it
 changes nothing but a close. At most 64 witnesses a channel, oldest out.
@@ -476,6 +500,9 @@ histories with a manual clock; the shell's with a `Clock` and a paused runtime; 
 | C19 | a stage-scoped and a Tenant-scoped entry, a head of each met; the keys left stale; a head of a channel paused after its walk began | the first passed, nothing written, its key in the walk's object; the second held; the stale keys rebuilt by the pass; the paused one passed | a stage-scoped entry holding its heads; a pass not rebuilding the keys; a paused channel's head held |
 | C20 | two Tenants kept at the stage's scope among processed ones, one at the Tenant's, a run renewed; a refusal after a quiet window | counted by channel and cause, the oldest run's start, no Tenant; none once the back-offs ran out; the late run's start its own | a Tenant-scoped entry counted; the latest verdict's time for the run's start; a run never begun anew |
 | C21 | a Tenant asked twice at once, paused with another, both tried inconclusively, its late ask refused after, the channel closed for want of a witness | its renewed entry's key in the walk's object | a tick's close not rebuilding the keys (C18's histories do not reach it) |
+| C31 | paused, a memoised witness's head gone at a failed tick, then two inconclusive trials and a processed one | not closed by the two; the next witness at the tick's first step; the gone witness not tried again; its entry's renewed back-off keeps its Tenant from the walk after the close | a head gone counted as inconclusive; it waits the scheduled tick; its entry's back-off left as it was; it not tried for the pause (C7, C21) |
+| C32 | a handler waiting on a hanging dependency past `trial_wait`: pauses closed by three timeouts, each next refusal a window and a millisecond after the close | the third pause stalled at its opening; its report refreshed while closed; a processed row ends the probation | the failed ticks reset by the window's horizon; no refresh while closed; the probation not ended by a processed row |
+| U1 | the database (`tests/outage.rs`): a paused channel whose three witnesses' heads cannot be asked, their causal dependencies unreadable | closed by three inconclusive trials | the shell telling an unreadable or waiting head as gone (closed on no witness left) |
 | K1 | the database (`tests/outage.rs`): a process that heard a stage refuse a Tenant; a Tenant alone so refused; Tenants named with a slash, a space, a quote and a backslash | the first process takes no head of it, writes no row, walks a guest's walk (cursor, round, sleep untouched) and counts it in `excluded()`, and another process takes it at once; the lone one asked again once its back-off runs out; the odd one kept and `t/1` beside it taken, no head of it walked to | the walk not told the keys; the process not a guest; the keys outliving the back-off; a key unescaped, or of another separator than the walk's |
 | G1 | at S = 1, K = 4, a memo of 16, at 8 and 64 Tenants, driven until every slot is paused, then n more dispatches | calls ≤ trials; changed rows ≤ calls; no head held unasked; a guest's step ≤ K; only the pause and the stall logged, as many lines at 64 as at 8; onset calls = `fewest` | drop the walk's filter (a hold on each paused head met, the same observable); no K; a held row logged at `warn` |
 | E1 | the expiry (`tests/expiry.rs`, the expiry's plan in `pg/plan_tests.rs`): a present chain, an untried head, a row behind a held head, a missing and a parked dependency, 8 and 9 hops, a cycle under `statement_timeout`, 20,000 spared with one missing last, ties at one `waiting_since` with rows moved in the heap, a malformed `waiting_for`, parked-expired rows; the spared rows' `(ctid, xmin, xmax)` and no xid in one transaction; `run`'s timer, and no dispatch expiring; a defect stopping `run`; the CHECK of a time of wait; the function as the start check requires it, planned once a connection | spared or expired as stated, each with its reason; 201 statements for 20,000 spared; ≤ `batch` rows examined by `__waiting_since_idx`, a hop one probe of the key | drop `present`; drop `parked_at IS NULL`; bounds 7, 16 and none; the cursor on expired rows; `LIMIT` after the filter; a `ctid` tiebreak; the key `waiting_since` alone; a plain cast; renew by write; lock before the spare test; the dispatch expiring; `run` without the timer; a defect logged; `more` by the rows parked; the observer untold; the start check without the set or the function; the CHECK dropped; the index's old predicate or no tiebreak; the exit's fragment; the plan not forced generic |
@@ -617,6 +644,39 @@ is the drain's own bound.
 keys, 423 KB; read kept built 0.033 µs a dispatch, rebuilt 1.3 ms (9.2 ms as first written, a string and a set's
 entry a key). M1 on the same machine with and without the keys read: 5.33 µs and 5.35 µs a happy message.
 
+**M10, an outage of the KMS hanging** (`crates/dek/tests/drill.rs`, `a_kms_hanging_drilled`; the round of
+2026-11-18). Three consuming processes of eight loops, a 50 ms handler, 64 slots, 500 Tenants at 20 messages a
+second over 7 channels, 40 launch Tenants' 20,000 messages in the minute before the outage; the KMS down 10 minutes
+— every call hanging 30 s (a client's timeout) and then refused, or refused at once — then up 3 minutes. Nothing
+parked and no attempt spent in any run. Runs of an arm differ by tens of percent. As built at slice 9:
+
+| KMS while down | `trial_wait` | First stall (3 processes) | Pauses = resumes | Closed by a trial processed | By three inconclusive |
+|---|---|---|---|---|---|
+| hanging | 2 s | 88–122 s | 322–463 | 159–171 | 252–292 |
+| hanging | 5 s | 90–125 s | 309–361 | 136–149 | 173–205 |
+| refusing | 2 s | 7–11 s | 537 | 517 | 20 |
+
+Trials by outcome (counters added for the runs only), hanging: at 2 s, 159 processed, 597 refused at the stage's
+scope, 783 heads gone, 253 slots busy, 96 timed out; at 5 s, 136, 716, 610, 152 and 0. The flapping is not the
+timeout's: heads gone counted as inconclusive, their witnesses' entries picked again at every pause (slice 10), and
+trials processed from the opening's cache with the KMS down (§ Owed 2).
+
+The same drill in other shapes (`ASCETIC_DDD_M10_PARTIAL`, `_TENANTS`, `_RATE`), as built at slice 9; "spared"
+are the messages of the Tenants the outage does not touch, made while down, aged from made to handled:
+
+| Shape | KMS while down | First stall | Pauses | Spared: p50 / p99 |
+|---|---|---|---|---|
+| no outage (the control) | — | — | 0 | 89 ms / 4.2 s |
+| 30 % of Tenants' unwraps refused | refusing | 27–36 s | 2,227 | 21 s / 240 s |
+| the same | hanging | never | 0 | 57 s / 297 s |
+| 5,000 Tenants at 240 a second | hanging | 279–292 s | 309 | — |
+| the same | refusing | 4.7–5.2 s | 426, every one closed by a trial processed | — |
+
+The partial outage, refusing, holds the healthy Tenants by the pause's flapping. Hanging, nothing pauses, and a
+failing Tenant's probe, trusted once another key landed, holds a loop for the opening's wait: 6,690 such waits of 2
+s in 600 s are some 22 of the 24 loops. At 5,000 Tenants a hang pauses late: S counts the Tenants processed from
+the cache, at its bound of 1,024 (§ Owed 2).
+
 **M4** is the host's: the expiry at its own count of spared waiters, on its machine. Here, 220,001 waiters took
 2.3 s a pass on the reference machine (§ 7).
 
@@ -646,10 +706,19 @@ false, does not hold: `passed` is what a batch examined and did not park, `more`
    second at most (M3 measured some 37 a process), against the rounds and the sleep the slots keep today; M8 had
    one guest of three. Owed: that shape's walks and slot-row writes a second, beside a healthy load.
 2. **The risks the round found, each with the measurement that decides it.**
-   - A trial that times out is inconclusive (§ 1), and three close the channel: with the KMS hanging —
-     black-holed, or the brownout's 2 % — a channel may close, hang its asks, pause again, and never stall or page.
-     Masked until slice 8 by the trials issued and not run, whose expiry counted failed ticks. A drill with the KMS
-     hanging decides whether `trial_wait` must exceed the stage's own wait, or a timeout count as a failed tick.
+   - *The hanging KMS*, drilled by M10. As built at slice 9 a channel flapped in either kind of outage — 322–463
+     pauses a run hanging, 537 refusing — closed by heads gone (slice 10 fixes them) and by trials processed from
+     the opening's cache with the KMS down; at 5,000 Tenants a hang paused 280 s in, S at its bound. Timeouts were
+     few (96 of 1,888 trials at a 2 s `trial_wait`, none at 5 s), and the question first owed here — whether
+     `trial_wait` must exceed the stage's own wait, or a timeout count as a failed tick — is not the one that
+     decides. Decided by the round of 2026-11-18 and owed to slices 11–12 with their executors: the stage's
+     dependency, registered by channel at the composition root, is the only witness of its own outage — a pause on
+     its causes opens on breadth confirmed by a check of it, beside the dispatch, and ends only on a key it opened
+     by a call; a row processed is no evidence of it, and S counts its keys opened, not the Tenants processed; the
+     other `Stage` causes keep this decision's breaker on the rows. Owed with it, each measured before it is
+     designed: a partial hang that eats the loops (M10's 57 s / 297 s: the opening's wait and trust, a round of the
+     DEK's own); the recovery under a quota or an overloaded KMS; a 95 % hang; a replica cut off alone, paged by a
+     host's rule on one reporter's stall row; a Tenant on a customer-managed key as a check's canary.
    - A `Tenant`-scoped hold of up to 300 s on a row rests on one process's evidence — the dek reads `Tenant` once a
      key landed in that process: a replica partly failing (a lossy link, a cold start under the quota) holds rows
      the others would serve. The drill's cut-off variant at 50 % failing calls decides it.
@@ -693,6 +762,9 @@ false, does not hold: `passed` is what a batch examined and did not park, `more`
 9. The memo's stage-scoped Tenants kept from the process's walk, the process a guest while it keeps any; a head
    met anyway passed; the keys kept built, rebuilt by change and by time; `excluded()` (decisions 2, 3, 5, 6;
    C18–C20, K1, M8, M9; the model's `UnaskedHoldIsTheTenants`).
+10. The rows' path of decision 1 fixed: a head gone counts nothing and renews its entry's back-off, a head that
+    cannot be asked is inconclusive, a close no processed trial made puts the channel on probation, the witnesses
+    due ordered the same every run, the log saying what closed a pause (C31, C32, U1); M10 and its shapes.
 
 ## References
 
@@ -1025,3 +1097,22 @@ payloads), its generated Vault policies.
   - *a paused channel's head met by a walk begun before the pause was held on the row*, under the pause's cause:
     one process's evidence on a shared row. It is passed (C19);
   - *with every process keeping a Tenant no slot sleeps*: owed with its measurement (§ Owed, 1).
+- 2026-11-18: Slice 10, § Owed 2's first risk drilled (M10) and the rows' path of decision 1 fixed. What the drill
+  and the round found:
+  - **The flapping was not the timeout's.** Counted by outcome, a hanging KMS's trials were mostly heads gone (783
+    of 1,888) and refusals (597); 96 timed out at a 2 s `trial_wait`, none at 5 s, and the flapping stayed. A trial
+    whose witness's head another process had finished counted as inconclusive, and the witness's memo entry, kept,
+    was picked again at every pause: three such closed a channel in two or three seconds. A head gone now counts
+    nothing, its entry's back-off renewed rather than dropped — the round's roles refuted the drop: a replica cut
+    off alone would then ask the healthy Tenants' heads anew, holding each a tick on the row (C31).
+  - **A head that cannot be asked is not a head gone.** The shell told an unreadable row and one waiting on a
+    dependency as gone; they are inconclusive (U1, C6 split).
+  - **A handler hanging on its dependency never stalled.** Its pauses closed by three timeouts and its next
+    refusal came a client's timeout later, past the window that keeps the failed ticks: probation keeps them, and
+    the stall's report, until a row is processed (C32; the first form, counting a reopening within the window, was
+    refuted by the second check — a 30 s timeout is never within a 30 s window).
+  - **C21 passed or failed by a map's order**: two memoised witnesses due at one instant were taken in the
+    `HashMap`'s order. The earliest due is taken first, ties by the Tenant, the same every run.
+  - **The trials processed from the cache** (159–171 a run hanging, 517 of 537 refusing) and the late pause at
+    5,000 Tenants are decision 1's evidence, not the rows' path: decided by the round, owed to slices 11–12.
+  Seven mutations of the core and one of the shell, each red.

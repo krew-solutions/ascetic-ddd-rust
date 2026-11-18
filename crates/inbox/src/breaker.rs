@@ -154,9 +154,17 @@ pub enum Verdict {
 pub enum Trial {
     /// The subscriber returned this verdict on the witness's head.
     Told(Verdict),
-    /// The witness's head was no longer a head of the channel: nothing was
-    /// asked.
+    /// The witness's head was no longer a head of the channel — its row
+    /// finished, by another process as like as not, or the Tenant's head in
+    /// the slot another channel's: nothing was asked, and nothing learnt of
+    /// the stage. The trial counts nothing; the witness is tried for this
+    /// pause, its memo entry kept and its back-off renewed (what it remembered
+    /// is stale, and its exponent still paces the Tenant), and the next
+    /// witness is asked at the tick's first step.
     Gone,
+    /// The witness's head could not be asked: its row unreadable, or waiting
+    /// on a dependency not yet processed. Inconclusive.
+    Unreadable,
     /// Nothing was asked, and nothing was learnt of the witness: its slot was
     /// taken by a dispatch, or the trial's transaction failed before a verdict
     /// was told. The trial counts nothing; the witness is tried again at the
@@ -254,7 +262,20 @@ pub enum Effect {
         cause: Cause,
         /// Whether it had stalled.
         stalled: bool,
+        /// What closed it.
+        by: Resumption,
     },
+}
+
+/// What closed a paused channel (ADR-0042 decision 1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Resumption {
+    /// A trial's witness was processed.
+    Processed,
+    /// Three trials in a row on distinct witnesses were inconclusive.
+    Inconclusive,
+    /// No witness was left, and none to wait for.
+    NoWitness,
 }
 
 /// How often a stall is said again in the log while it lasts.
@@ -340,6 +361,29 @@ struct Channel {
     failed: u32,
     /// When the channel last closed.
     closed_at: Option<Instant>,
+    /// Set by a close that no processed trial made, cleared by a row of the
+    /// channel processed.
+    probation: Option<Probation>,
+}
+
+/// A channel closed without a processed trial — three inconclusive, or no
+/// witness left — is on probation until a row of it is processed: a pause
+/// while on probation counts a failed tick at its opening, whatever the time
+/// since the close, and a stalled channel on probation keeps its report
+/// though closed. A handler that waits on a hanging dependency past the
+/// trial's wait closes its pauses inconclusively, and its next refusal comes
+/// a client's timeout later, perhaps past the window: probation, not the
+/// window, tells its pauses from a slow handler's, which never pause again.
+#[derive(Clone, Copy, Debug)]
+struct Probation {
+    /// When the first pause of the run began: the stall's `since`.
+    since: Instant,
+    /// Its cause.
+    cause: Cause,
+    /// When the stall was last reported while closed.
+    refreshed: Option<Instant>,
+    /// When the stall was last said in the log while closed.
+    reminded: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -394,6 +438,8 @@ struct Open {
     expired: VecDeque<u64>,
     last_trial: Option<Instant>,
     inconclusive: Vec<String>,
+    /// Witnesses whose heads were gone this pause: tried, not counted.
+    tried: Vec<String>,
     /// When the stall was last said in the log.
     reminded: Option<Instant>,
     /// When the stall was last reported: a stalled channel is reported at
@@ -705,7 +751,10 @@ impl Breaker {
             return Vec::new();
         };
         let State::Open(open) = &mut channel.state else {
-            return Vec::new();
+            return channel
+                .stall_on_probation(&settings, name, now)
+                .into_iter()
+                .collect();
         };
         let mut ticked = open
             .refreshed
@@ -742,11 +791,12 @@ impl Breaker {
             // inconclusively. Nothing proves the stage down, and the channel
             // closes; a head still refused at the stage's scope opens it
             // again, its failing Tenants kept across the close.
-            if let Some((cause, stalled)) = channel.close(now) {
+            if let Some((cause, stalled)) = channel.close(now, Resumption::NoWitness) {
                 effects.push(Effect::Resumed {
                     channel: name.to_owned(),
                     cause,
                     stalled,
+                    by: Resumption::NoWitness,
                 });
                 // its stage-scoped entries are the walk's again: one renewed
                 // by an ask begun before the pause and told after its trial
@@ -857,11 +907,12 @@ impl Breaker {
                 channel.schedule(&settings, now);
             }
             if trial == Trial::Told(Verdict::Processed) {
-                if let Some((cause, stalled)) = channel.close(now) {
+                if let Some((cause, stalled)) = channel.close(now, Resumption::Processed) {
                     told.effects.push(Effect::Resumed {
                         channel: name.clone(),
                         cause,
                         stalled,
+                        by: Resumption::Processed,
                     });
                 }
             }
@@ -890,11 +941,12 @@ impl Breaker {
             }
             Trial::Told(Verdict::Processed) => {
                 channel.memo.remove(&asked.tenant);
-                if let Some((cause, stalled)) = channel.close(now) {
+                if let Some((cause, stalled)) = channel.close(now, Resumption::Processed) {
                     told.effects.push(Effect::Resumed {
                         channel: name.clone(),
                         cause,
                         stalled,
+                        by: Resumption::Processed,
                     });
                 }
             }
@@ -923,7 +975,24 @@ impl Breaker {
             ) => {
                 told.hold = channel.weigh(&settings, now, &asked.tenant, asked.slot, 0, verdict);
             }
-            Trial::Told(Verdict::Own) | Trial::Gone | Trial::TimedOut => {
+            Trial::Gone => {
+                // Nothing asked, and what the memo kept of the Tenant is
+                // stale: its back-off renewed, not grown; the witness tried
+                // for this pause; the next one at the first step.
+                if let Some(entry) = channel.memo.get_mut(&asked.tenant) {
+                    entry.until = now + entry.step;
+                }
+                if let State::Open(open) = &mut channel.state {
+                    if !open.tried.contains(&asked.tenant) {
+                        open.tried.push(asked.tenant.clone());
+                    }
+                    open.next_tick = now + settings.tick.0;
+                    if asked.hastened {
+                        open.haste_spent = false;
+                    }
+                }
+            }
+            Trial::Told(Verdict::Own) | Trial::Unreadable | Trial::TimedOut => {
                 if trial == Trial::Told(Verdict::Own) {
                     // The row's own: its Tenant's latest verdict is no longer
                     // an `Unavailable`.
@@ -938,11 +1007,12 @@ impl Breaker {
                     false
                 };
                 if closes {
-                    if let Some((cause, stalled)) = channel.close(now) {
+                    if let Some((cause, stalled)) = channel.close(now, Resumption::Inconclusive) {
                         told.effects.push(Effect::Resumed {
                             channel: name.clone(),
                             cause,
                             stalled,
+                            by: Resumption::Inconclusive,
                         });
                     }
                 }
@@ -968,6 +1038,7 @@ impl Channel {
             Verdict::Processed => {
                 self.memo.remove(tenant);
                 self.failing.remove(tenant);
+                self.probation = None;
                 self.processed(settings, now, tenant);
                 None
             }
@@ -1113,22 +1184,34 @@ impl Channel {
         cause: Cause,
         told_after: Option<Duration>,
     ) {
-        if self
-            .closed_at
-            .is_none_or(|at| now.saturating_duration_since(at) >= settings.window)
-        {
-            self.failed = 0;
-        }
+        let since = match self.probation {
+            // a pause on probation counts a failed tick, whatever the time
+            // since the close, and keeps the run's beginning
+            Some(probation) => {
+                self.failed = self.failed.saturating_add(1);
+                probation.since
+            }
+            None => {
+                if self
+                    .closed_at
+                    .is_none_or(|at| now.saturating_duration_since(at) >= settings.window)
+                {
+                    self.failed = 0;
+                }
+                now
+            }
+        };
         self.state = State::Open(Box::new(Open {
             cause,
-            since: now,
+            since,
             next_tick: now,
             told_after,
             trial: None,
             expired: VecDeque::new(),
             last_trial: None,
             inconclusive: Vec::new(),
-            reminded: None,
+            tried: Vec::new(),
+            reminded: self.probation.and_then(|probation| probation.reminded),
             refreshed: None,
             hastened: false,
             haste_spent: false,
@@ -1155,13 +1238,28 @@ impl Channel {
         }
     }
 
-    fn close(&mut self, now: Instant) -> Option<(Cause, bool)> {
+    fn close(&mut self, now: Instant, by: Resumption) -> Option<(Cause, bool)> {
         let State::Open(open) = std::mem::take(&mut self.state) else {
             return None;
         };
         let stalled = self.failed >= 2;
         self.closed_at = Some(now);
         self.witnesses.clear();
+        self.probation = match by {
+            Resumption::Processed => None,
+            Resumption::Inconclusive | Resumption::NoWitness => {
+                let mut probation = self.probation.unwrap_or(Probation {
+                    since: open.since,
+                    cause: open.cause,
+                    refreshed: None,
+                    reminded: None,
+                });
+                // the report and the log carry on from the pause's
+                probation.refreshed = probation.refreshed.max(open.refreshed);
+                probation.reminded = probation.reminded.max(open.reminded);
+                Some(probation)
+            }
+        };
         Some((open.cause, stalled))
     }
 
@@ -1171,21 +1269,23 @@ impl Channel {
     /// A witness whose trial was inconclusive is not tried again while the
     /// channel stays open: the next inconclusive one must be another's.
     fn witness(&mut self, now: Instant) -> Option<(i16, String)> {
-        let tried: &[String] = match &self.state {
-            State::Open(open) => &open.inconclusive,
-            State::Closed => &[],
+        let (inconclusive, gone): (&[String], &[String]) = match &self.state {
+            State::Open(open) => (&open.inconclusive, &open.tried),
+            State::Closed => (&[], &[]),
         };
+        let tried = |t: &String| inconclusive.contains(t) || gone.contains(t);
         if let Some(index) = self
             .witnesses
             .iter()
-            .position(|(_, t)| !self.memo.contains_key(t) && !tried.contains(t))
+            .position(|(_, t)| !self.memo.contains_key(t) && !tried(t))
         {
             return self.witnesses.remove(index);
         }
         self.memo
             .iter()
-            .filter(|(t, e)| e.until <= now && e.flight.is_none() && !tried.contains(t))
-            .min_by_key(|(_, e)| e.until)
+            .filter(|(t, e)| e.until <= now && e.flight.is_none() && !tried(t))
+            // the earliest due first, ties by the Tenant: the same every run
+            .min_by(|(t, e), (u, f)| e.until.cmp(&f.until).then_with(|| t.cmp(u)))
             .map(|(t, e)| (e.slot, t.clone()))
     }
 
@@ -1193,12 +1293,46 @@ impl Channel {
     /// met, or a memoised Tenant, not yet tried inconclusively — a memoised
     /// one whether its back-off has run out or not.
     fn awaits_witness(&self) -> bool {
-        let tried: &[String] = match &self.state {
-            State::Open(open) => &open.inconclusive,
-            State::Closed => &[],
+        let (inconclusive, gone): (&[String], &[String]) = match &self.state {
+            State::Open(open) => (&open.inconclusive, &open.tried),
+            State::Closed => (&[], &[]),
         };
-        self.witnesses.iter().any(|(_, t)| !tried.contains(t))
-            || self.memo.keys().any(|t| !tried.contains(t))
+        let tried = |t: &String| inconclusive.contains(t) || gone.contains(t);
+        self.witnesses.iter().any(|(_, t)| !tried(t)) || self.memo.keys().any(|t| !tried(t))
+    }
+
+    /// A channel closed on probation and stalled keeps its report, refreshed
+    /// once a tick's cap, until a row of it is processed.
+    fn stall_on_probation(
+        &mut self,
+        settings: &Breaking,
+        name: &str,
+        now: Instant,
+    ) -> Option<Effect> {
+        if self.failed < 2 {
+            return None;
+        }
+        let probation = self.probation.as_mut()?;
+        if probation
+            .refreshed
+            .is_some_and(|at| now.saturating_duration_since(at) < settings.tick.1)
+        {
+            return None;
+        }
+        let remind = probation
+            .reminded
+            .is_none_or(|at| now.saturating_duration_since(at) >= REMINDER);
+        if remind {
+            probation.reminded = Some(now);
+        }
+        probation.refreshed = Some(now);
+        Some(Effect::Stalled {
+            channel: name.to_owned(),
+            cause: probation.cause,
+            since: probation.since,
+            ttl: settings.stall_ttl(),
+            remind,
+        })
     }
 
     fn stall(&mut self, settings: &Breaking, name: &str, now: Instant) -> Option<Effect> {
