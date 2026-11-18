@@ -5,9 +5,9 @@ use std::sync::{Arc, Mutex};
 
 use ascetic_ddd_bus::adapters::in_memory::InMemoryBroker;
 use ascetic_ddd_bus::{
-    BoxError, Bus, Error, Message, Permanent, Stage, Subscription, TransactionalConsumer,
+    BoxError, Bus, Error, Message, Permanent, Scope, Stage, Subscription, TransactionalConsumer,
     TransactionalHandler, TransactionalProducer, TransactionalWireConsumer,
-    TransactionalWireProducer,
+    TransactionalWireProducer, Unavailable, cause,
 };
 use futures::future::BoxFuture;
 use tokio::sync::mpsc;
@@ -222,4 +222,57 @@ async fn a_stage_that_refuses_on_the_way_in_fails_the_handling_and_keeps_its_ver
     let error = outcome.unwrap_err();
     assert!(error.is::<Permanent>(), "{error}");
     assert_eq!(handled.lock().unwrap().len(), 1);
+}
+
+/// Refuses every message on the way in as unavailable over the stage.
+struct Down;
+
+impl Stage for Down {
+    fn outbound(&self, message: Message) -> BoxFuture<'_, Result<Message, BoxError>> {
+        Box::pin(async move { Ok(message) })
+    }
+
+    fn inbound(&self, _: Message) -> BoxFuture<'_, Result<Message, BoxError>> {
+        Box::pin(async {
+            Err(Unavailable::new(cause!("kms.unavailable"), Scope::Stage, None, "down").into())
+        })
+    }
+}
+
+/// A stage's `Unavailable` on the way in comes out marked as the stage's, a
+/// handler's as not: the inbox weighs only a stage's refusal against that
+/// stage's dependency (seedwork ADR-0042 decision 1). Red when the bus marks
+/// none, or every one.
+#[tokio::test(flavor = "current_thread")]
+async fn a_stage_s_unavailable_is_marked_the_stage_s_and_a_handler_s_is_not() {
+    let told_by = |stages: bool| async move {
+        let slot = Arc::new(Mutex::new(None));
+        let consumer = TransactionalConsumer::new(
+            Box::new(Handing(Arc::clone(&slot))),
+            |message: &Message| Ok(String::from_utf8(message.payload().to_vec())?),
+        );
+        let consumer = if stages {
+            consumer.through(Arc::new(Down))
+        } else {
+            consumer
+        };
+        let _subscription = consumer
+            .subscribe(|_: Tx, _: String| async {
+                Err::<(), _>(Unavailable::new(
+                    cause!("crm.unavailable"),
+                    Scope::Stage,
+                    None,
+                    "the handler's own",
+                ))
+            })
+            .unwrap();
+        let handler = slot.lock().unwrap().clone().unwrap();
+        let error = handler(Tx("tx"), Message::new(b"m".to_vec()))
+            .await
+            .unwrap_err();
+        let unavailable = error.downcast_ref::<Unavailable>().expect("an Unavailable");
+        (unavailable.cause().as_str(), unavailable.told_by_stage())
+    };
+    assert_eq!(told_by(true).await, ("kms.unavailable", true));
+    assert_eq!(told_by(false).await, ("crm.unavailable", false));
 }

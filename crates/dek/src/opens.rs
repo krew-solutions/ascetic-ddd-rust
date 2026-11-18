@@ -41,6 +41,35 @@ struct State {
     /// core keeps the refusal, by wrapped key, not why. At most
     /// [`REFUSALS`], the oldest out.
     refusals: VecDeque<(Wrapped, Cause)>,
+    /// The last key the KMS opened by a call — a flight's, or a check's of a
+    /// head — when: what a check asks besides its head (seedwork ADR-0042
+    /// decision 1). Aged from that opening, never by being asked again.
+    control: Option<Known>,
+    /// The last key refused at the stage's scope: what a check asks without a
+    /// head.
+    refused: Option<Known>,
+}
+
+/// A Tenant's wrapped key the opening end knows, and since when.
+#[derive(Clone)]
+struct Known {
+    tenant: String,
+    wrapped: Wrapped,
+    at: Instant,
+}
+
+impl Known {
+    fn is(&self, tenant: &str, wrapped: &Wrapped) -> bool {
+        self.tenant == tenant && self.wrapped == *wrapped
+    }
+}
+
+/// One unwrap by a call, judged as a flight's landing is.
+enum Judged {
+    /// The key.
+    Opened(Key),
+    /// How it landed instead, and why.
+    Failed(Outcome<Key>, Landed, Option<KmsError>),
 }
 
 /// The most refused wrapped keys whose cause an opening end keeps.
@@ -71,6 +100,8 @@ pub(crate) struct Opener<P, K> {
     counter: AtomicU64,
     tick: Arc<Notify>,
     ticking: Arc<AtomicBool>,
+    /// Keys the KMS opened for flights: the dependency's `served`.
+    served: AtomicU64,
 }
 
 /// Its tick's flag, cleared however the tick ends.
@@ -152,12 +183,15 @@ where
                 flights: HashMap::new(),
                 sentinel: None,
                 refusals: VecDeque::new(),
+                control: None,
+                refused: None,
             }),
             sentinel,
             seed: RandomState::new(),
             counter: AtomicU64::new(0),
             tick: Arc::new(Notify::new()),
             ticking: Arc::new(AtomicBool::new(false)),
+            served: AtomicU64::new(0),
         }
     }
 
@@ -293,12 +327,17 @@ where
         scope: Option<Scope>,
     ) -> BoxError {
         let (scope, last) = {
-            let state = self.lock();
+            let mut state = self.lock();
             let key = tenant.to_owned();
-            (
-                scope.unwrap_or_else(|| state.core.scope(&key, wrapped, reason)),
-                state.core.noted(&key).cloned(),
-            )
+            let scope = scope.unwrap_or_else(|| state.core.scope(&key, wrapped, reason));
+            if scope == Scope::Stage {
+                state.refused = Some(Known {
+                    tenant: key.clone(),
+                    wrapped: Arc::clone(wrapped),
+                    at: now(),
+                });
+            }
+            (scope, state.core.noted(&key).cloned())
         };
         let bus_scope = match scope {
             Scope::Stage => bus::Scope::Stage,
@@ -338,19 +377,11 @@ where
         runtime.spawn(async move {
             let mut guard = guard;
             let (tenant, wrapped) = (guard.tenant.clone(), Arc::clone(&guard.wrapped));
-            let unwrapped = tokio::time::timeout(
-                opens.opening.draw,
-                opens.parts.sessions.session(async |session| {
-                    opens
-                        .parts
-                        .kms
-                        .decrypt_dek(&session, &tenant, &wrapped)
-                        .await
-                }),
-            )
-            .await;
-            match unwrapped {
-                Ok(Ok(key)) => guard.land(
+            match opens
+                .judged(&tenant, &wrapped, &AtomicBool::new(false))
+                .await
+            {
+                Judged::Opened(key) => guard.land(
                     Outcome::Drawn {
                         key,
                         started: guard.started,
@@ -358,27 +389,156 @@ where
                     Landed::Drawn,
                     None,
                 ),
-                Ok(Err(error)) => {
-                    let (outcome, landed) = match error.class() {
-                        Class::Gone => {
-                            if opens.sentinel_present().await == Some(true) {
-                                (Outcome::Gone, Landed::Gone)
-                            } else {
-                                // The sentinel gone too, or not to be read:
-                                // the environment's fault, not the tenant's.
-                                (Outcome::Unavailable, Landed::Unavailable)
-                            }
-                        }
-                        Class::Refused => (Outcome::Refused, Landed::Refused),
-                        Class::Unavailable => (Outcome::Unavailable, Landed::Unavailable),
-                        Class::Moment => (Outcome::Moment, Landed::Moment),
-                    };
-                    guard.land(outcome, landed, Some(&error));
+                Judged::Failed(outcome, landed, error) => {
+                    guard.land(outcome, landed, error.as_ref())
                 }
-                Err(_) => guard.land(Outcome::Abandoned, Landed::Abandoned, None),
             }
         });
         true
+    }
+
+    /// One unwrap of `tenant`'s `wrapped` by a call, cut at `draw`, judged as
+    /// a flight's landing: a key gone is the Tenant's only while the sentinel
+    /// says the KMS keeps its keys. `asked` is set once a session was had and
+    /// the call made. A flight and a check go through it alike, so that a
+    /// check judges as the rows' opening would (seedwork ADR-0042 decision 1).
+    async fn judged(&self, tenant: &str, wrapped: &Wrapped, asked: &AtomicBool) -> Judged {
+        let unwrapped = tokio::time::timeout(
+            self.opening.draw,
+            self.parts.sessions.session(async |session| {
+                asked.store(true, Ordering::Release);
+                self.parts.kms.decrypt_dek(&session, tenant, wrapped).await
+            }),
+        )
+        .await;
+        match unwrapped {
+            Ok(Ok(key)) => Judged::Opened(key),
+            Ok(Err(error)) => {
+                let (outcome, landed) = match error.class() {
+                    Class::Gone => {
+                        if self.sentinel_present().await == Some(true) {
+                            (Outcome::Gone, Landed::Gone)
+                        } else {
+                            // The sentinel gone too, or not to be read: the
+                            // environment's fault, not the tenant's.
+                            (Outcome::Unavailable, Landed::Unavailable)
+                        }
+                    }
+                    Class::Refused => (Outcome::Refused, Landed::Refused),
+                    Class::Unavailable => (Outcome::Unavailable, Landed::Unavailable),
+                    Class::Moment => (Outcome::Moment, Landed::Moment),
+                };
+                Judged::Failed(outcome, landed, Some(error))
+            }
+            Err(_) => Judged::Failed(Outcome::Abandoned, Landed::Abandoned, None),
+        }
+    }
+
+    /// Asks the KMS now, past the opening's memory and pacing (seedwork
+    /// ADR-0042 decision 1): `head`'s key, or without one the last key
+    /// refused at the stage's scope, and the control — the last key the KMS
+    /// opened by a call, younger than `keep` — concurrently, each judged as a
+    /// flight's landing and cut at `draw`. Served as soon as one is opened, a
+    /// head's then the control; unserved under the control's cause, else the
+    /// other's, when one was refused or ran past the bound; unasked when
+    /// nothing was asked, no session was had, or every answer was about the
+    /// key itself. Its keys are dropped, wiped, never kept; it marks no
+    /// landing in the core, and logs and keeps no error's text.
+    pub(crate) async fn check(&self, head: Option<(String, Wrapped)>) -> bus::Check {
+        let at = now();
+        let (control, other) = {
+            let mut state = self.lock();
+            if state
+                .control
+                .as_ref()
+                .is_some_and(|control| at >= control.at + self.opening.keep)
+            {
+                state.control = None;
+            }
+            let other = head
+                .map(|(tenant, wrapped)| Known {
+                    tenant,
+                    wrapped,
+                    at,
+                })
+                .or_else(|| state.refused.clone());
+            (state.control.clone(), other)
+        };
+        let other = other.filter(|other| {
+            control
+                .as_ref()
+                .is_none_or(|control| !control.is(&other.tenant, &other.wrapped))
+        });
+        let mut asks: futures::stream::FuturesUnordered<_> = control
+            .into_iter()
+            .map(|known| (true, known))
+            .chain(other.into_iter().map(|known| (false, known)))
+            .map(|(is_control, known)| async move {
+                let asked = AtomicBool::new(false);
+                let judged = tokio::time::timeout(
+                    self.opening.draw,
+                    self.judged(&known.tenant, &known.wrapped, &asked),
+                )
+                .await;
+                (is_control, known, asked.load(Ordering::Acquire), judged)
+            })
+            .collect();
+        let (mut control_cause, mut other_cause) = (None, None);
+        while let Some((is_control, known, asked, judged)) =
+            futures::StreamExt::next(&mut asks).await
+        {
+            let cause = match judged {
+                Ok(Judged::Opened(key)) => {
+                    drop(key);
+                    let mut state = self.lock();
+                    if !is_control {
+                        if state
+                            .refused
+                            .as_ref()
+                            .is_some_and(|refused| refused.is(&known.tenant, &known.wrapped))
+                        {
+                            state.refused = None;
+                        }
+                        state.control = Some(Known { at: now(), ..known });
+                    }
+                    return bus::Check::Served;
+                }
+                Ok(Judged::Failed(_, Landed::Gone | Landed::Refused, _)) => {
+                    // about the key itself: no evidence of the KMS, and the
+                    // key no longer worth asking
+                    let mut guard = self.lock();
+                    let state = &mut *guard;
+                    for slot in [&mut state.control, &mut state.refused] {
+                        if slot
+                            .as_ref()
+                            .is_some_and(|held| held.is(&known.tenant, &known.wrapped))
+                        {
+                            *slot = None;
+                        }
+                    }
+                    None
+                }
+                Ok(Judged::Failed(_, _, error)) if asked => {
+                    Some(error.as_ref().map_or(causes::UNAVAILABLE, causes::of))
+                }
+                Err(_) if asked => Some(causes::UNAVAILABLE),
+                // no session within the bound: nothing was asked
+                Ok(Judged::Failed(..)) | Err(_) => None,
+            };
+            if is_control {
+                control_cause = control_cause.or(cause);
+            } else {
+                other_cause = other_cause.or(cause);
+            }
+        }
+        control_cause
+            .or(other_cause)
+            .map_or(bus::Check::Unasked, bus::Check::Unserved)
+    }
+
+    /// The keys the KMS opened for flights so far.
+    pub(crate) fn served(&self) -> u64 {
+        self.served.load(Ordering::Relaxed)
     }
 
     /// Whether the sentinel's key is there, read at most once per `gone`:
@@ -446,6 +606,33 @@ where
             state
                 .core
                 .landed(&key, wrapped, generation, outcome, at, random);
+            match landed {
+                Landed::Drawn => {
+                    self.served.fetch_add(1, Ordering::Relaxed);
+                    if state
+                        .refused
+                        .as_ref()
+                        .is_some_and(|refused| refused.is(tenant, wrapped))
+                    {
+                        state.refused = None;
+                    }
+                    state.control = Some(Known {
+                        tenant: key.clone(),
+                        wrapped: Arc::clone(wrapped),
+                        at,
+                    });
+                }
+                // the Tenant's keys wiped: none of them a check's to ask
+                Landed::Gone => {
+                    let state = &mut *state;
+                    for slot in [&mut state.control, &mut state.refused] {
+                        if slot.as_ref().is_some_and(|held| held.tenant == tenant) {
+                            *slot = None;
+                        }
+                    }
+                }
+                _ => {}
+            }
             if landing.is_some() && landed != Landed::Drawn {
                 let last = Last {
                     landed,

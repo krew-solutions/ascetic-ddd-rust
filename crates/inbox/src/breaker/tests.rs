@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 use ascetic_ddd_bus::{Cause, Scope};
 use proptest::prelude::*;
 
-use super::{Before, Breaker, Breaking, Effect, Flight, Told, Trial, Verdict};
+use ascetic_ddd_bus::Check;
+
+use super::{Before, Breaker, Breaking, Effect, Flight, Source, Told, Trial, Verdict};
 
 const CHANNEL: &str = "kafka://device.lifecycle";
 
@@ -20,6 +22,7 @@ fn stage() -> Verdict {
         cause: cause("kms.unavailable"),
         scope: Scope::Stage,
         retry_after: None,
+        source: Source::Rows,
     }
 }
 
@@ -28,6 +31,7 @@ fn tenant_scope(retry_after: Option<Duration>) -> Verdict {
         cause: cause("kms.unavailable"),
         scope: Scope::Tenant,
         retry_after,
+        source: Source::Rows,
     }
 }
 
@@ -252,6 +256,7 @@ fn c3_one_tenant_throttled_on_a_quiet_channel_never_pauses_it() {
         cause: cause("kms.unavailable"),
         scope: Scope::Stage,
         retry_after: Some(Duration::from_secs(60)),
+        source: Source::Rows,
     };
     let mut asks = 0;
     for step in 0..6_000u32 {
@@ -363,9 +368,10 @@ fn c5_a_hanging_tenant_is_asked_once_at_a_time() {
     assert!(matches!((first, second), (Before::Ask(_), Before::Ask(_))));
 }
 
-/// C6: recovered, every row now fails on its own: three inconclusive trials on
-/// distinct witnesses close the channel — two memoised Tenants and a third
-/// whose head a guest met. Red when only a processed trial closes.
+/// C6: recovered, every row now fails on its own or cannot be asked: three
+/// inconclusive trials on distinct witnesses close the channel — two memoised
+/// Tenants, the second's row unreadable, and a third whose head a guest met,
+/// timed out. Red when only a processed trial closes.
 #[test]
 fn c6_three_inconclusive_trials_close_the_channel() {
     let mut sim = Sim::new(Breaking::default());
@@ -377,7 +383,7 @@ fn c6_three_inconclusive_trials_close_the_channel() {
     sim.advance(Duration::from_secs(5));
     let (second, b) = sim.next_trial();
     assert_ne!(a, b, "a witness tried twice");
-    let told = sim.breaker.tried(sim.now, second, Trial::Gone);
+    let told = sim.breaker.tried(sim.now, second, Trial::Unreadable);
     assert!(!resumed(&told.effects));
     sim.advance(Duration::from_secs(5));
     sim.breaker.met(sim.now, CHANNEL, &[(9, "c".to_owned())]);
@@ -398,8 +404,8 @@ fn c6_three_inconclusive_trials_close_the_channel() {
 }
 
 /// C7: paused, the heads of both its memoised Tenants given up by a person: a
-/// trial of each finds its head gone, two inconclusive verdicts of the three
-/// that close a channel; the next tick finds no witness and none to wait for,
+/// trial of each finds its head gone, which counts nothing and tries the
+/// witness for the pause; the next tick finds no witness and none to wait for,
 /// and closes it — a process's guests cannot see a whole circle of a slot,
 /// their cursor shared — and no stall is refreshed after. Red when a tick
 /// without a witness only waits for the next.
@@ -413,7 +419,7 @@ fn c7_no_witness_left_closes_the_channel() {
         let (id, _) = sim.next_trial();
         effects.extend(sim.breaker.tried(sim.now, id, Trial::Gone).effects);
     }
-    assert!(!resumed(&effects), "two inconclusive trials closed it");
+    assert!(!resumed(&effects), "two heads gone closed it");
     sim.advance(Duration::from_secs(5));
     effects.extend(sim.tick());
     assert!(resumed(&effects), "no witness left: {effects:?}");
@@ -523,6 +529,7 @@ fn c11_a_pause_keeps_its_modal_cause() {
         cause: cause("kms.unauthorized"),
         scope: Scope::Stage,
         retry_after: None,
+        source: Source::Rows,
     };
     sim.ask("p", 0, Verdict::Processed);
     sim.ask("q", 0, Verdict::Processed);
@@ -840,11 +847,12 @@ fn c19_a_stage_scoped_entry_passes_its_heads_a_tenant_scoped_one_holds_them() {
 /// C21: a Tenant asked twice at once, in two slots, before it had an entry;
 /// one ask refused at the stage's scope with another Tenant's pauses the
 /// channel, the other still in flight; both Tenants' trials find their heads
-/// gone; the late ask is refused after, renewing its Tenant's entry while the
-/// channel is paused; the next tick finds no witness and none to wait for, and
-/// closes the channel — whose renewed entry the walk must now leave out. Red
-/// when a tick's close does not rebuild the walk's keys: the Tenant's heads
-/// then met and passed, loop after loop, for its back-off.
+/// gone, renewing their entries' back-off; the late ask is refused after,
+/// renewing its Tenant's entry again while the channel is paused; the next
+/// tick finds no witness and none to wait for, and closes the channel — whose
+/// renewed entries the walk must now leave out. Red when a tick's close does
+/// not rebuild the walk's keys: the Tenants' heads then met and passed, loop
+/// after loop, for their back-off.
 #[test]
 fn c21_a_close_after_a_late_refusal_rebuilds_the_walk_s_keys() {
     let mut breaker = Breaker::new(Breaking::default());
@@ -873,7 +881,7 @@ fn c21_a_close_after_a_late_refusal_rebuilds_the_walk_s_keys() {
             .expect("a trial of a memoised witness");
         breaker.tried(now, trial, Trial::Gone);
     }
-    assert!(breaker.is_paused(CHANNEL), "two inconclusive of three");
+    assert!(breaker.is_paused(CHANNEL), "two heads gone close nothing");
     breaker.told(now, late, stage());
     assert_eq!(
         &*breaker.excluded(now),
@@ -885,9 +893,163 @@ fn c21_a_close_after_a_late_refusal_rebuilds_the_walk_s_keys() {
     assert!(resumed(&effects), "no witness left: {effects:?}");
     assert_eq!(
         keys_of(&breaker.excluded(now)),
-        [format!("{CHANNEL}/a")].into_iter().collect(),
-        "a's renewed entry keeps it from the walk"
+        [format!("{CHANNEL}/a"), format!("{CHANNEL}/b")]
+            .into_iter()
+            .collect(),
+        "the renewed entries keep their Tenants from the walk"
     );
+}
+
+/// C31: paused, a memoised witness's head gone — its row finished by another
+/// process — counts nothing: two inconclusive trials after it do not close the
+/// channel; the next witness is asked at the tick's first step, not the failed
+/// ticks' doubled one; and the entry's back-off is renewed, so that its Tenant
+/// stays out of this process's walk once the channel closes. Red when a head
+/// gone counts as inconclusive, waits the scheduled tick, or leaves the entry's
+/// back-off as it was.
+#[test]
+fn c31_a_head_gone_counts_nothing_and_renews_its_entry() {
+    // a Tenant's first step 20 s: the renewed back-off outlives the pause
+    let settings = Breaking::default().with_hold(Duration::from_secs(10), Duration::from_secs(300));
+    let mut breaker = Breaker::new(settings);
+    let mut now = Instant::now();
+    let flights: Vec<Flight> = ["a", "b", "c"]
+        .into_iter()
+        .enumerate()
+        .map(
+            |(slot, tenant)| match breaker.before(now, CHANNEL, tenant, slot as i16, 0) {
+                Before::Ask(flight) => flight,
+                other => panic!("{tenant} asked: {other:?}"),
+            },
+        )
+        .collect();
+    for flight in flights {
+        breaker.told(now, flight, stage());
+    }
+    assert!(breaker.is_paused(CHANNEL), "three Tenants failing pause it");
+    let trial = |breaker: &mut Breaker, now: Instant| {
+        breaker.tick(now).into_iter().find_map(|e| match e {
+            Effect::Trial { id, tenant, .. } => Some((id, tenant)),
+            _ => None,
+        })
+    };
+    now += Duration::from_secs(20);
+    let (id, a) = trial(&mut breaker, now).expect("a memoised witness, due");
+    assert_eq!(a, "a", "the earliest due, ties by the Tenant");
+    breaker.tried(now, id, Trial::Told(stage()));
+    now += Duration::from_secs(2);
+    let (id, b) = trial(&mut breaker, now).expect("the next at the doubled step");
+    breaker.tried(now, id, Trial::Gone);
+    now += Duration::from_secs(1);
+    let (id, third) = trial(&mut breaker, now).expect("after a head gone, the first step");
+    assert_ne!(third, b, "a witness whose head was gone tried again");
+    let told = breaker.tried(now, id, Trial::Told(Verdict::Own));
+    assert!(!resumed(&told.effects));
+    now += Duration::from_secs(1);
+    breaker.met(now, CHANNEL, &[(9, "m".to_owned())]);
+    let (id, m) = trial(&mut breaker, now).expect("the head met, hastened");
+    assert_eq!(m, "m");
+    let told = breaker.tried(now, id, Trial::Told(Verdict::Own));
+    assert!(
+        !resumed(&told.effects),
+        "a head gone counted as an inconclusive trial"
+    );
+    let mut closed = false;
+    for _ in 0..30 {
+        now += Duration::from_secs(1);
+        if let Some((id, tenant)) = trial(&mut breaker, now) {
+            assert!(
+                ![b.as_str(), third.as_str(), "m"].contains(&tenant.as_str()),
+                "the one witness left untried, not {tenant}"
+            );
+            closed = resumed(
+                &breaker
+                    .tried(now, id, Trial::Told(Verdict::Processed))
+                    .effects,
+            );
+            break;
+        }
+    }
+    assert!(closed, "a processed trial closes it");
+    assert_eq!(
+        keys_of(&breaker.excluded(now)),
+        [format!("{CHANNEL}/{b}")].into_iter().collect(),
+        "the gone witness's entry, renewed, keeps its Tenant from the walk"
+    );
+}
+
+/// Ticks a paused channel through three inconclusive trials — two memoised
+/// witnesses' and `met`'s, a head a guest met — until it closes.
+fn inconclusive_close(sim: &mut Sim, met: &str) {
+    for _ in 0..2 {
+        let (id, _) = sim.next_trial();
+        let told = sim.breaker.tried(sim.now, id, Trial::TimedOut);
+        assert!(!resumed(&told.effects));
+    }
+    sim.breaker.met(sim.now, CHANNEL, &[(9, met.to_owned())]);
+    let (id, tenant) = sim.next_trial();
+    assert_eq!(tenant, met, "the head met is tried");
+    let told = sim.breaker.tried(sim.now, id, Trial::TimedOut);
+    assert!(resumed(&told.effects), "three inconclusive trials close it");
+}
+
+/// C32: a handler that waits on a hanging dependency past the trial's wait:
+/// its pauses close by three trials timed out, and its next refusals come a
+/// client's timeout later, past the window. On probation, each pause counts a
+/// failed tick at its opening: the third is stalled, and its report is kept
+/// though closed — until a row of the channel is processed, which ends the
+/// probation. Red when the failed ticks are reset by the window's horizon
+/// rather than kept by probation, when a stall on probation is not refreshed
+/// while closed, or when a processed row does not end it.
+#[test]
+fn c32_a_handler_s_hanging_dependency_stalls_on_probation() {
+    let mut sim = Sim::new(Breaking::default());
+    sim.open();
+    inconclusive_close(&mut sim, "c");
+    let window = Breaking::default().window;
+    let mut stalled_at_opening = Vec::new();
+    for (pause, tenants) in [["d", "e"], ["g", "h"]].iter().enumerate() {
+        sim.advance(window + Duration::from_millis(1));
+        let mut effects = Vec::new();
+        for tenant in tenants {
+            effects.extend(sim.ask(tenant, 0, stage()).expect("asked").effects);
+        }
+        assert!(
+            paused(&effects),
+            "pause {} on probation: {effects:?}",
+            pause + 2
+        );
+        stalled_at_opening.push(effects.iter().any(|e| matches!(e, Effect::Stalled { .. })));
+        inconclusive_close(&mut sim, &format!("m{pause}"));
+    }
+    assert_eq!(
+        stalled_at_opening,
+        [false, true],
+        "the third pause on probation is stalled at its opening"
+    );
+    let mut refreshed = 0;
+    for _ in 0..20 {
+        sim.advance(Duration::from_secs(1));
+        refreshed += sim
+            .tick()
+            .iter()
+            .filter(|e| matches!(e, Effect::Stalled { .. }))
+            .count();
+    }
+    assert!(
+        refreshed > 0,
+        "a stall on probation not refreshed while closed"
+    );
+    sim.ask("z", 3, Verdict::Processed).expect("asked");
+    for _ in 0..60 {
+        sim.advance(Duration::from_secs(1));
+        assert!(
+            !sim.tick()
+                .iter()
+                .any(|e| matches!(e, Effect::Stalled { .. })),
+            "a processed row did not end the probation"
+        );
+    }
 }
 
 /// `breaker`'s channel paused: two Tenants failing at the stage's scope.
@@ -955,6 +1117,876 @@ fn c20_the_excluded_are_counted_without_their_tenants() {
         counts[0].since, later,
         "a run after a quiet window begins anew"
     );
+}
+
+// The dependency's breaker (ADR-0042 decision 1): a channel whose stage
+// declares what it depends on.
+
+/// A refusal of the dependency's: a stage's, of its cause.
+fn dependency_down() -> Verdict {
+    Verdict::Unavailable {
+        cause: cause("kms.unavailable"),
+        scope: Scope::Stage,
+        retry_after: None,
+        source: Source::Dependency,
+    }
+}
+
+/// A process's breaker with the dependency of `CHANNEL` registered, a check
+/// of it bound at 5 s.
+struct Dep {
+    breaker: Breaker,
+    now: Instant,
+    /// Tenants refused so far: each trip refuses fresh ones, a refused one
+    /// kept from the process's walk for its back-off.
+    refused: u32,
+}
+
+impl Dep {
+    fn new() -> Self {
+        Dep::with(Breaking::default())
+    }
+
+    fn with(settings: Breaking) -> Self {
+        let mut breaker = Breaker::new(settings);
+        breaker.register(CHANNEL, Duration::from_secs(5));
+        Dep {
+            breaker,
+            now: Instant::now(),
+            refused: 0,
+        }
+    }
+
+    fn advance(&mut self, by: Duration) {
+        self.now += by;
+    }
+
+    fn flight(&mut self, tenant: &str) -> Flight {
+        match self.breaker.before(self.now, CHANNEL, tenant, 0, 0) {
+            Before::Ask(flight) => flight,
+            other => panic!("{tenant} asked: {other:?}"),
+        }
+    }
+
+    fn ask(&mut self, tenant: &str, verdict: Verdict) -> Vec<Effect> {
+        let flight = self.flight(tenant);
+        self.breaker.told(self.now, flight, verdict).effects
+    }
+
+    fn served(&mut self, value: u64) {
+        self.breaker.served(self.now, CHANNEL, value);
+    }
+
+    fn tick(&mut self) -> Vec<Effect> {
+        self.breaker.tick(self.now)
+    }
+
+    /// The check a tick issues now, if any: its id and head.
+    fn check(&mut self) -> Option<(u64, Option<(i16, String)>)> {
+        self.tick().into_iter().find_map(|e| match e {
+            Effect::Check { id, head, .. } => Some((id, head)),
+            _ => None,
+        })
+    }
+
+    /// Ticks until a check is issued, for at most a minute.
+    fn next_check(&mut self) -> (u64, Option<(i16, String)>) {
+        for _ in 0..600 {
+            if let Some(check) = self.check() {
+                return check;
+            }
+            self.advance(Duration::from_millis(100));
+        }
+        panic!("no check within a minute");
+    }
+
+    /// Trips the breadth rule: two Tenants refused by the dependency, nothing
+    /// served.
+    fn trip(&mut self) {
+        for _ in 0..2 {
+            self.refused += 1;
+            let tenant = format!("f{}", self.refused);
+            let effects = self.ask(&tenant, dependency_down());
+            assert!(!paused(&effects), "a trip pauses nothing: {effects:?}");
+        }
+    }
+
+    /// Paused: a trip confirmed by a check unserved.
+    fn pause(&mut self) {
+        self.trip();
+        let (id, _) = self.next_check();
+        let effects = self
+            .breaker
+            .checked(self.now, id, Check::Unserved(cause("kms.unavailable")));
+        assert!(paused(&effects), "{effects:?}");
+    }
+}
+
+fn refuted(effects: &[Effect]) -> bool {
+    effects.iter().any(|e| matches!(e, Effect::Refuted { .. }))
+}
+
+fn stalled(effects: &[Effect]) -> bool {
+    effects.iter().any(|e| matches!(e, Effect::Stalled { .. }))
+}
+
+/// C33: the dependency's refusals broad enough make the channel suspect, not
+/// paused: a check is issued, and the channel still asked; served, the
+/// suspicion is refuted under the refusals' modal cause, its failing Tenants
+/// forgotten — one refusal after cannot trip — and two fresh ones right after
+/// bring no check within the suspicion's step, doubled. Red when a trip
+/// pauses the channel, a refutation keeps the failing Tenants or names
+/// another cause, or the step is not kept.
+#[test]
+fn c33_a_trip_is_a_suspicion_a_check_confirms_or_refutes() {
+    let refute = |dep: &mut Dep| {
+        dep.trip();
+        let effects = dep.ask(
+            "o",
+            Verdict::Unavailable {
+                cause: cause("kms.unauthorized"),
+                scope: Scope::Stage,
+                retry_after: None,
+                source: Source::Dependency,
+            },
+        );
+        assert!(!paused(&effects));
+        assert!(!dep.breaker.is_paused(CHANNEL), "a trip pauses nothing");
+        let (id, head) = dep.check().expect("a check at once");
+        assert_eq!(
+            head, None,
+            "a suspect channel's check asks what the stage remembers"
+        );
+        let effects = dep.breaker.checked(dep.now, id, Check::Served);
+        assert!(!paused(&effects), "{effects:?}");
+        let refuted_under: Vec<Cause> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Refuted { cause, .. } => Some(*cause),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            refuted_under,
+            [cause("kms.unavailable")],
+            "refuted under the modal cause"
+        );
+    };
+    let mut dep = Dep::new();
+    refute(&mut dep);
+    dep.advance(Duration::from_millis(500));
+    dep.ask("c", dependency_down());
+    dep.advance(Duration::from_secs(5));
+    assert!(
+        dep.check().is_none(),
+        "one refusal checked: the refuted Tenants kept"
+    );
+    let mut dep = Dep::new();
+    refute(&mut dep);
+    dep.advance(Duration::from_millis(500));
+    dep.trip();
+    for _ in 0..14 {
+        assert!(dep.check().is_none(), "within the suspicion's step");
+        dep.advance(Duration::from_millis(100));
+    }
+    dep.advance(Duration::from_millis(100));
+    assert!(dep.check().is_some(), "at the step's end, doubled to 2 s");
+    assert!(!dep.breaker.is_paused(CHANNEL));
+}
+
+/// C34: a check unserved confirms the suspicion: paused, a failed tick; the
+/// next check unserved stalls it, its report valid twice the tick's cap and
+/// the check's bound. Red when the opening counts no failed tick, or the
+/// report's ttl is the rows'.
+#[test]
+fn c34_an_unserved_check_pauses_and_the_next_stalls() {
+    let mut dep = Dep::new();
+    dep.pause();
+    assert!(dep.breaker.is_paused(CHANNEL));
+    let (id, _) = dep.next_check();
+    let effects = dep
+        .breaker
+        .checked(dep.now, id, Check::Unserved(cause("kms.unavailable")));
+    let ttl = effects.iter().find_map(|e| match e {
+        Effect::Stalled { ttl, .. } => Some(*ttl),
+        _ => None,
+    });
+    assert_eq!(
+        ttl,
+        Some(Duration::from_secs(35)),
+        "the second failed tick stalls, valid 2 × 15 s + 5 s: {effects:?}"
+    );
+}
+
+/// C35: paused by the dependency, a thousand rows processed — asks begun
+/// before the pause, their keys the stage's memory's — close nothing. Red when
+/// a row processed closes the dependency's pause.
+#[test]
+fn c35_rows_processed_from_the_stage_s_memory_close_no_dependency_pause() {
+    let mut dep = Dep::new();
+    let flights: Vec<Flight> = (0..1_000).map(|n| dep.flight(&format!("c{n}"))).collect();
+    dep.pause();
+    for flight in flights {
+        let effects = dep
+            .breaker
+            .told(dep.now, flight, Verdict::Processed)
+            .effects;
+        assert!(!resumed(&effects));
+    }
+    assert!(
+        dep.breaker.is_paused(CHANNEL),
+        "a cached row closed the pause"
+    );
+}
+
+/// C36: paused and stalled, a hundred checks of a head answered unasked hold
+/// the pause, and its report is refreshed as each is issued. Red when an
+/// unasked check closes it, or a pause that holds reports nothing.
+#[test]
+fn c36_an_unasked_check_holds_the_pause() {
+    let mut dep = Dep::new();
+    dep.pause();
+    let (id, _) = dep.next_check();
+    dep.breaker
+        .checked(dep.now, id, Check::Unserved(cause("kms.unavailable")));
+    for n in 0..100 {
+        dep.breaker.met(dep.now, CHANNEL, &[(1, format!("h{n}"))]);
+        let mut issued = None;
+        let mut reported = false;
+        for _ in 0..600 {
+            for effect in dep.tick() {
+                match effect {
+                    Effect::Check { id, head, .. } => issued = Some((id, head)),
+                    Effect::Stalled { .. } => reported = true,
+                    _ => {}
+                }
+            }
+            if issued.is_some() {
+                break;
+            }
+            dep.advance(Duration::from_millis(100));
+        }
+        let (id, head) = issued.expect("a check");
+        assert!(head.is_some(), "the head met");
+        assert!(reported, "the report refreshed with check {n}");
+        let effects = dep.breaker.checked(dep.now, id, Check::Unasked);
+        assert!(!resumed(&effects), "an unasked check closed it");
+    }
+    assert!(dep.breaker.is_paused(CHANNEL));
+}
+
+/// C37: paused, its checks with nothing to ask — no head met — for a window:
+/// nothing held, closed; a head met meanwhile keeps it. Red when it never
+/// closes, or closes with a head met.
+#[test]
+fn c37_a_pause_with_nothing_to_ask_for_a_window_closes() {
+    let mut dep = Dep::new();
+    dep.pause();
+    let mut by = None;
+    for _ in 0..200 {
+        let (id, head) = dep.next_check();
+        assert_eq!(head, None);
+        for effect in dep.breaker.checked(dep.now, id, Check::Unasked) {
+            if let Effect::Resumed { by: b, .. } = effect {
+                by = Some(b);
+            }
+        }
+        if by.is_some() {
+            break;
+        }
+    }
+    assert_eq!(by, Some(super::Resumption::NothingToHold));
+    let mut dep = Dep::new();
+    dep.pause();
+    for n in 0..60 {
+        let (id, _) = dep.next_check();
+        dep.breaker.met(dep.now, CHANNEL, &[(1, format!("h{n}"))]);
+        let effects = dep.breaker.checked(dep.now, id, Check::Unasked);
+        assert!(!resumed(&effects), "closed though heads were met");
+    }
+}
+
+/// C38: a trip within the suspicion's step after a refutation is kept
+/// pending: its check comes at the step's end though no further verdict
+/// comes. Red when the pending trip is dropped.
+#[test]
+fn c38_a_trip_within_the_step_is_checked_at_its_end() {
+    let mut dep = Dep::new();
+    dep.trip();
+    let (id, _) = dep.check().expect("a check");
+    dep.breaker.checked(dep.now, id, Check::Served);
+    dep.advance(Duration::from_millis(100));
+    dep.trip();
+    assert!(dep.check().is_none(), "within the step");
+    for _ in 0..30 {
+        dep.advance(Duration::from_millis(100));
+        if dep.check().is_some() {
+            return;
+        }
+    }
+    panic!("the pending trip was never checked");
+}
+
+/// C39: S in what the dependency served by a call: on a quiet channel with
+/// one sample, S is none and two refusals trip; with the dependency serving
+/// thirty keys within the window, eight refusals do not (the arms' shares);
+/// rows processed count nothing for it. Red when S comes from the rows
+/// processed, or is ignored.
+#[test]
+fn c39_s_is_what_the_dependency_served_by_a_call() {
+    let mut dep = Dep::new();
+    dep.served(100);
+    dep.trip();
+    assert!(dep.check().is_some(), "one sample: S is none");
+    let mut dep = Dep::new();
+    for n in 0..30 {
+        dep.served(100 + n);
+        dep.advance(Duration::from_millis(500));
+    }
+    for n in 0..8 {
+        dep.ask(&format!("g{n}"), dependency_down());
+    }
+    assert!(
+        dep.check().is_none(),
+        "eight refusals against thirty served"
+    );
+    let mut dep = Dep::new();
+    dep.served(100);
+    for n in 0..100 {
+        dep.ask(&format!("p{n}"), Verdict::Processed);
+    }
+    dep.trip();
+    assert!(
+        dep.check().is_some(),
+        "rows processed are no S of the dependency"
+    );
+}
+
+/// C40: paused, its checks ask the heads met, each once a round, the first met
+/// first, a Tenant the memo does not hold before one it does; once every head
+/// met was asked a round begins anew: four checks ask m0, m1, then f1 (which
+/// the memo holds), then m0 again, though m0 is met again before each. Red
+/// when the newest is taken, the memo's Tenant before a fresh one, a head
+/// twice a round, or none once each was asked.
+#[test]
+fn c40_checks_ask_the_heads_met_each_once_the_first_first() {
+    let mut dep = Dep::new();
+    dep.pause();
+    let met = ["f1", "m0", "m1"];
+    dep.breaker
+        .met(dep.now, CHANNEL, &met.map(|t| (1, t.to_owned())));
+    let mut asked = Vec::new();
+    for _ in 0..4 {
+        dep.breaker.met(dep.now, CHANNEL, &[(1, "m0".to_owned())]);
+        let (id, head) = dep.next_check();
+        asked.push(head.map(|(_, tenant)| tenant));
+        dep.breaker
+            .checked(dep.now, id, Check::Unserved(cause("kms.unavailable")));
+    }
+    assert_eq!(
+        asked,
+        ["m0", "m1", "f1", "m0"].map(|t| Some(t.to_owned())),
+        "the first met first, the memo's last, each once a round"
+    );
+}
+
+/// C41: the stall's cause follows the latest check unserved: a credential
+/// refused after an outage reports under its own cause. Red when the cause is
+/// fixed at the opening.
+#[test]
+fn c41_the_stall_s_cause_follows_the_latest_unserved_check() {
+    let mut dep = Dep::new();
+    dep.pause();
+    let (id, _) = dep.next_check();
+    let effects = dep
+        .breaker
+        .checked(dep.now, id, Check::Unserved(cause("kms.unauthorized")));
+    let cause_of = effects.iter().find_map(|e| match e {
+        Effect::Stalled { cause, .. } => Some(cause.as_str()),
+        _ => None,
+    });
+    assert_eq!(cause_of, Some("kms.unauthorized"));
+}
+
+/// C42: a suspicion's check unserved while the dependency served the rows by a
+/// call meanwhile is refuted, not confirmed: the shard's healthy keys landed.
+/// Red when it opens regardless.
+#[test]
+fn c42_an_unserved_check_with_keys_served_meanwhile_refutes() {
+    let mut dep = Dep::new();
+    dep.served(10);
+    dep.advance(Duration::from_secs(31));
+    dep.served(10);
+    dep.trip();
+    let (id, _) = dep.check().expect("a check");
+    dep.advance(Duration::from_secs(2));
+    dep.served(11);
+    let effects = dep
+        .breaker
+        .checked(dep.now, id, Check::Unserved(cause("kms.unavailable")));
+    assert!(refuted(&effects) && !paused(&effects), "{effects:?}");
+}
+
+/// C43: a check unanswered by its deadline — its issue, the check's bound and
+/// a tick's first step, 6 s — at a suspicion pauses the channel, and its
+/// answer served after still closes the pause; paused, it is a failed tick
+/// that stalls, an answer unserved after counts nothing, and one served
+/// after closes; one check at a time. Red when an expired check counts
+/// nothing, the deadline is another, a late answer of the suspicion's is
+/// dropped, a stale one counts, or two are issued at once.
+#[test]
+fn c43_an_unanswered_check_is_a_failed_tick() {
+    let mut dep = Dep::new();
+    dep.trip();
+    let (first, _) = dep.check().expect("a check");
+    assert!(dep.check().is_none(), "one check at a time");
+    dep.advance(Duration::from_millis(5_999));
+    assert!(!paused(&dep.tick()), "before its deadline");
+    assert!(dep.check().is_none(), "one check at a time");
+    dep.advance(Duration::from_millis(1));
+    assert!(
+        paused(&dep.tick()),
+        "the suspicion's check unanswered pauses it"
+    );
+    assert!(
+        resumed(&dep.breaker.checked(dep.now, first, Check::Served)),
+        "its late answer served closes the pause"
+    );
+    assert!(
+        dep.breaker
+            .checked(dep.now, first, Check::Served)
+            .is_empty(),
+        "a stale answer"
+    );
+    // a window on, the failed ticks forgotten
+    dep.advance(Duration::from_secs(31));
+    dep.pause();
+    let (second, _) = dep.next_check();
+    dep.advance(Duration::from_secs(6));
+    assert!(
+        stalled(&dep.tick()),
+        "the pause's check unanswered stalls it"
+    );
+    assert!(
+        dep.breaker
+            .checked(dep.now, second, Check::Unserved(cause("kms.unavailable")))
+            .is_empty(),
+        "an unserved answer after counts nothing"
+    );
+    assert!(
+        resumed(&dep.breaker.checked(dep.now, second, Check::Served)),
+        "a late served closes"
+    );
+}
+
+/// C44: the suspicion's step doubles at each refutation and starts over after
+/// a window without a trip. Red when it never starts over, or never grows.
+#[test]
+fn c44_the_suspicion_s_step_doubles_and_starts_over_after_a_quiet_window() {
+    let mut dep = Dep::new();
+    let mut gaps = Vec::new();
+    for _ in 0..4 {
+        dep.trip();
+        let issued = dep.now;
+        let (id, _) = dep.next_check();
+        gaps.push(dep.now - issued);
+        dep.breaker.checked(dep.now, id, Check::Served);
+    }
+    assert!(
+        gaps.windows(2).all(|w| w[1] >= w[0]) && gaps[3] > gaps[1],
+        "{gaps:?}"
+    );
+    dep.advance(Duration::from_secs(31));
+    dep.trip();
+    let (id, _) = dep
+        .check()
+        .expect("a trip after a quiet window checks at once");
+    dep.breaker.checked(dep.now, id, Check::Served);
+    dep.trip();
+    let issued = dep.now;
+    dep.next_check();
+    assert!(
+        dep.now - issued <= gaps[1],
+        "the step started over: {:?} against {gaps:?}",
+        dep.now - issued
+    );
+}
+
+/// C45: one channel, two breakers: the dependency's paused, a handler's own
+/// `Stage` refusals pause the rows' too; the dependency's check served closes
+/// only its own, the rows' trial processed only the rows'. Red when one
+/// source's evidence closes the other's pause.
+#[test]
+fn c45_the_dependency_s_and_the_rows_breakers_close_by_their_own_evidence() {
+    let handler = Verdict::Unavailable {
+        cause: cause("crm.unavailable"),
+        scope: Scope::Stage,
+        retry_after: None,
+        source: Source::Rows,
+    };
+    // the rows' pause, from asks begun before the dependency's
+    let mut both = Dep::new();
+    let early: Vec<Flight> = ["x", "y"].iter().map(|t| both.flight(t)).collect();
+    both.pause();
+    let mut opened = false;
+    for flight in early {
+        opened |= paused(&both.breaker.told(both.now, flight, handler).effects);
+    }
+    assert!(opened, "the rows' breaker opens on the handler's refusals");
+    let mut dependency_check = None;
+    let mut row_trial = None;
+    for _ in 0..600 {
+        for effect in both.tick() {
+            match effect {
+                Effect::Check { id, .. } if dependency_check.is_none() => {
+                    dependency_check = Some(id)
+                }
+                Effect::Trial { id, .. } if row_trial.is_none() => row_trial = Some(id),
+                _ => {}
+            }
+        }
+        if dependency_check.is_some() && row_trial.is_some() {
+            break;
+        }
+        both.advance(Duration::from_millis(100));
+    }
+    let check = dependency_check.expect("the dependency's check");
+    let trial = row_trial.expect("the rows' trial");
+    assert!(resumed(&both.breaker.checked(
+        both.now,
+        check,
+        Check::Served
+    )));
+    assert!(
+        both.breaker.is_paused(CHANNEL),
+        "the rows' pause closed by the dependency's check"
+    );
+    assert!(resumed(
+        &both
+            .breaker
+            .tried(both.now, trial, Trial::Told(Verdict::Processed))
+            .effects
+    ));
+    assert!(!both.breaker.is_paused(CHANNEL));
+}
+
+/// C47: the two breakers count apart: a handler's one `Stage` refusal beside
+/// the dependency's two is one Tenant failing for the rows, which pauses
+/// nothing. Red when the dependency's refusals count for the rows too.
+#[test]
+fn c47_the_dependency_s_refusals_count_nothing_for_the_rows() {
+    let mut dep = Dep::new();
+    dep.trip();
+    let handler = Verdict::Unavailable {
+        cause: cause("crm.unavailable"),
+        scope: Scope::Stage,
+        retry_after: None,
+        source: Source::Rows,
+    };
+    let effects = dep.ask("x", handler);
+    assert!(!paused(&effects), "{effects:?}");
+    assert!(!dep.breaker.is_paused(CHANNEL));
+}
+
+/// C48: paused through a long outage, every head met asked once, the
+/// dependency's own keys gone — its checks without a head unasked — and the
+/// heads met again as the guests walk on: the next check asks them anew,
+/// and the first served closes. Red when a head asked once is not asked
+/// again in the pause, which then never closes.
+#[test]
+fn c48_the_heads_met_are_asked_round_after_round() {
+    let mut dep = Dep::new();
+    dep.pause();
+    let met = ["m0", "m1"].map(|t| (1, t.to_owned()));
+    dep.breaker.met(dep.now, CHANNEL, &met);
+    for expected in ["m0", "m1"] {
+        let (id, head) = dep.next_check();
+        assert_eq!(head.map(|(_, t)| t), Some(expected.to_owned()));
+        dep.breaker
+            .checked(dep.now, id, Check::Unserved(cause("kms.unavailable")));
+    }
+    let (id, head) = dep.next_check();
+    assert_eq!(head, None, "no head left this round, none met");
+    dep.breaker.checked(dep.now, id, Check::Unasked);
+    dep.breaker.met(dep.now, CHANNEL, &met);
+    let (id, head) = dep.next_check();
+    assert_eq!(head.map(|(_, t)| t), Some("m0".to_owned()), "a new round");
+    assert!(resumed(&dep.breaker.checked(dep.now, id, Check::Served)));
+}
+
+/// C49: the rows' breaker open on a handler's own refusals, its trials
+/// refused by the stage's dependency: those refusals are the dependency's
+/// breaker's — two Tenants trip it, and a check follows — and tell the rows
+/// nothing: three close the rows' pause as inconclusive, no failed tick
+/// counted, no stall. Red when a trial's refusal by the dependency counts as
+/// the rows' failed tick and is never weighed by the dependency's breaker.
+#[test]
+fn c49_a_trial_refused_by_the_dependency_is_the_dependency_s() {
+    let handler = Verdict::Unavailable {
+        cause: cause("crm.unavailable"),
+        scope: Scope::Stage,
+        retry_after: None,
+        source: Source::Rows,
+    };
+    let mut dep = Dep::new();
+    for tenant in ["x", "y"] {
+        dep.ask(tenant, handler);
+    }
+    assert!(dep.breaker.is_paused(CHANNEL), "the rows' pause");
+    dep.breaker.met(
+        dep.now,
+        CHANNEL,
+        &["w1", "w2", "w3"].map(|t| (1, t.to_owned())),
+    );
+    let mut checks = 0;
+    let mut effects = Vec::new();
+    for _ in 0..3 {
+        let mut trial = None;
+        for _ in 0..600 {
+            for effect in dep.tick() {
+                match effect {
+                    Effect::Trial { id, .. } => trial = Some(id),
+                    Effect::Check { .. } => checks += 1,
+                    other => effects.push(other),
+                }
+            }
+            if trial.is_some() {
+                break;
+            }
+            dep.advance(Duration::from_millis(100));
+        }
+        let told = dep.breaker.tried(
+            dep.now,
+            trial.expect("a trial"),
+            Trial::Told(dependency_down()),
+        );
+        effects.extend(told.effects);
+    }
+    for _ in 0..30 {
+        checks += dep
+            .tick()
+            .iter()
+            .filter(|e| matches!(e, Effect::Check { .. }))
+            .count();
+        dep.advance(Duration::from_millis(100));
+    }
+    assert!(checks > 0, "the dependency's breaker tripped");
+    assert!(
+        !stalled(&effects),
+        "no failed tick of the rows': {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::Resumed {
+                by: super::Resumption::Inconclusive,
+                ..
+            }
+        )),
+        "the rows' pause closed as inconclusive: {effects:?}"
+    );
+}
+
+/// C50: a suspicion whose checks are unasked is checked again at a step that
+/// doubles — 2 s, 4 s, 8 s — and lapses once no refusal of the dependency's
+/// is left within the window: no check after, no pause; and one whose check
+/// is in flight when the last refusal leaves the window lapses at its
+/// deadline rather than pausing on nothing. Red when an unasked check leaves
+/// the step as it was, or a suspicion never lapses — checked for ever, or
+/// paused under no cause.
+#[test]
+fn c50_a_suspicion_with_no_refusal_left_lapses() {
+    let mut dep = Dep::new();
+    dep.trip();
+    let began = dep.now;
+    let mut at = Vec::new();
+    for _ in 0..20 {
+        let mut issued = None;
+        for _ in 0..600 {
+            if let Some(check) = dep.check() {
+                issued = Some(check);
+                break;
+            }
+            dep.advance(Duration::from_millis(100));
+        }
+        let Some((id, _)) = issued else { break };
+        at.push(dep.now.duration_since(began).as_secs());
+        let effects = dep.breaker.checked(dep.now, id, Check::Unasked);
+        assert!(!paused(&effects));
+    }
+    assert_eq!(at, [0, 2, 6, 14, 29], "the step doubling, then lapsed");
+    assert!(!dep.breaker.is_paused(CHANNEL));
+    // a check in flight when the last refusal leaves the window
+    let mut dep = Dep::new();
+    dep.trip();
+    dep.advance(Duration::from_secs(25));
+    let (id, _) = dep.check().expect("a check");
+    dep.breaker.checked(dep.now, id, Check::Unasked);
+    let (_, _) = dep.next_check();
+    dep.advance(Duration::from_secs(6));
+    assert!(!paused(&dep.tick()), "lapsed, not paused on nothing");
+    assert!(!dep.breaker.is_paused(CHANNEL));
+}
+
+/// C51: one tick call issues a dependency's check and another channel's
+/// trial both, the check due first: the check runs beside the dispatch and
+/// takes nothing from the call's trial. Red when the call ends at its check.
+#[test]
+fn c51_a_check_takes_nothing_from_the_call_s_trial() {
+    const OTHER: &str = "kafka://payments";
+    let mut dep = Dep::new();
+    dep.trip();
+    dep.advance(Duration::from_millis(500));
+    for tenant in ["x", "y"] {
+        let Before::Ask(flight) = dep.breaker.before(dep.now, OTHER, tenant, 0, 0) else {
+            panic!("asked");
+        };
+        dep.breaker.told(dep.now, flight, stage());
+    }
+    assert!(dep.breaker.is_paused(OTHER));
+    dep.breaker.met(dep.now, OTHER, &[(1, "w".to_owned())]);
+    dep.advance(Duration::from_secs(2));
+    let effects = dep.tick();
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Check { .. }))
+            && effects.iter().any(|e| matches!(e, Effect::Trial { .. })),
+        "{effects:?}"
+    );
+}
+
+/// C52: the dependency's failed ticks are kept across a close shorter than the
+/// window — opened again, it stalls at its opening — and forgotten after a
+/// window closed. Red when they are never kept, or never forgotten.
+#[test]
+fn c52_failed_ticks_kept_across_a_short_close() {
+    let mut dep = Dep::new();
+    dep.pause();
+    let (id, _) = dep.next_check();
+    assert!(resumed(&dep.breaker.checked(dep.now, id, Check::Served)));
+    dep.advance(Duration::from_secs(10));
+    dep.trip();
+    let (id, _) = dep.next_check();
+    let effects = dep
+        .breaker
+        .checked(dep.now, id, Check::Unserved(cause("kms.unavailable")));
+    assert!(
+        paused(&effects) && stalled(&effects),
+        "opened within the window: stalled at once: {effects:?}"
+    );
+    let (id, _) = dep.next_check();
+    assert!(resumed(&dep.breaker.checked(dep.now, id, Check::Served)));
+    dep.advance(Duration::from_secs(31));
+    dep.trip();
+    let (id, _) = dep.next_check();
+    let effects = dep
+        .breaker
+        .checked(dep.now, id, Check::Unserved(cause("kms.unavailable")));
+    assert!(
+        paused(&effects) && !stalled(&effects),
+        "opened a window after: one failed tick: {effects:?}"
+    );
+}
+
+proptest! {
+    /// C46: over random histories of the dependency's refusals, rows
+    /// processed and of their own, what it served, heads met, steps of time
+    /// and checks answered every way or left unanswered: a pause of the
+    /// dependency's comes only of a check — unserved, or unanswered by its
+    /// deadline — never of a verdict; a close only of a check — served, or
+    /// with nothing to hold — never of a verdict or a tick alone; a check
+    /// served of the pause's own, in time or late, closes it; and a check is
+    /// issued only once the one before was answered or its deadline passed.
+    /// Red when a verdict pauses or closes the dependency's channel, a tick
+    /// closes it, a served check of its own leaves it paused, or two checks
+    /// are in flight at once.
+    #[test]
+    fn c46_the_dependency_s_pauses_and_closes_come_of_checks(
+        seed in any::<u64>(),
+        steps in 100usize..400,
+    ) {
+        let mut rng = Rng(seed | 1);
+        let mut dep = Dep::new();
+        let mut served = 0u64;
+        let mut issued: Vec<u64> = Vec::new();
+        // in flight: issued, neither answered nor past its deadline, nor of a
+        // pause closed since
+        let mut flying: Vec<(u64, Instant)> = Vec::new();
+        // the checks of the pause: the one that opened it and those since
+        let mut own: Vec<u64> = Vec::new();
+        let mut last_closed: Option<u64> = None;
+        for step in 0..steps {
+            match rng.below(8) {
+                0 | 1 => {
+                    let tenant = format!("t{}", rng.below(12));
+                    if let Before::Ask(flight) = dep.breaker.before(dep.now, CHANNEL, &tenant, 0, 0) {
+                        let verdict = match rng.below(3) {
+                            0 => dependency_down(),
+                            1 => Verdict::Processed,
+                            _ => Verdict::Own,
+                        };
+                        let effects = dep.breaker.told(dep.now, flight, verdict).effects;
+                        prop_assert!(!paused(&effects) && !resumed(&effects), "a verdict at {step}: {effects:?}");
+                    }
+                }
+                2 => {
+                    served += rng.below(3);
+                    dep.served(served);
+                }
+                3 => dep.breaker.met(dep.now, CHANNEL, &[(1, format!("h{}", rng.below(6)))]),
+                4 => dep.advance(Duration::from_millis(rng.below(4_000))),
+                5 if !issued.is_empty() => {
+                    let id = issued.remove(rng.below(issued.len() as u64) as usize);
+                    let check = match rng.below(3) {
+                        0 => Check::Served,
+                        1 => Check::Unserved(cause("kms.unavailable")),
+                        _ => Check::Unasked,
+                    };
+                    let was_paused = dep.breaker.is_paused(CHANNEL);
+                    flying.retain(|(f, _)| *f != id);
+                    let effects = dep.breaker.checked(dep.now, id, check);
+                    if paused(&effects) {
+                        prop_assert!(matches!(check, Check::Unserved(_)), "{check:?} paused it");
+                        own = vec![id];
+                    }
+                    if resumed(&effects) {
+                        prop_assert!(check != Check::Unserved(cause("kms.unavailable")), "an unserved check closed it");
+                        own.clear();
+                        // a check of the pause still in flight is stale now:
+                        // its answer finds no check, and a suspicion after
+                        // asks its own
+                        flying.clear();
+                    }
+                    let recent = own.iter().rev().take(8).any(|o| *o == id);
+                    if was_paused && check == Check::Served && recent {
+                        prop_assert!(resumed(&effects), "check {id} of its pause served, still paused: {effects:?}");
+                    }
+                }
+                _ => {
+                    let now = dep.now;
+                    flying.retain(|(_, deadline)| *deadline > now);
+                    let was_paused = dep.breaker.is_paused(CHANNEL);
+                    let effects = dep.tick();
+                    prop_assert!(!resumed(&effects), "a tick closed it: {effects:?}");
+                    if paused(&effects) {
+                        // the suspicion's check expired
+                        own = last_closed.into_iter().collect();
+                    }
+                    for effect in &effects {
+                        if let Effect::Check { id, deadline, .. } = effect {
+                            prop_assert!(flying.is_empty(), "check {id} issued beside {flying:?}");
+                            issued.push(*id);
+                            flying.push((*id, *deadline));
+                            if was_paused || paused(&effects) {
+                                own.push(*id);
+                            } else {
+                                last_closed = Some(*id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 proptest! {

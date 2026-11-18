@@ -389,7 +389,8 @@ group_inbox_pg_rotation_deps() {
 # InboxOutage.tla is ADR-0042's: (slot, Tenant) heads, processes with
 # workers, a breaker and a memo each, an ask split into its start and its
 # verdict with a rollback between, a process cut off and keys cached; the
-# expiry's spare and the operator's verbs.
+# expiry's spare and the operator's verbs; and, with a dependency registered,
+# its gate, opened and closed by checks of the dependency.
 group_inbox_outage() {
   echo "== inbox outage (ADR-0042): the stage down once and back, a process cut off once, a Tenant's keys cached, a row failing once, a rollback: an Unavailable spends nothing and never parks, holds stay queued, causes current, keys in order, every row processed"
   must_hold InboxOutage MCInboxOutage.tla 191126
@@ -401,6 +402,10 @@ group_inbox_outage() {
   must_hold InboxOutageDeps MCInboxOutage.tla 36
   echo "== inbox outage: the operator re-arming with a canary, giving heads and a queue up: the canary exact, what is given up the end of each key"
   must_hold InboxOutageOperators MCInboxOutage.tla 830194
+  echo "== inbox outage, the stage's dependency registered: the stage down once and back, a process cut off once, a Tenant's keys cached, a rollback: the gate closes on its own evidence, and once the stage is up; every row processed"
+  must_hold InboxOutageDependency MCInboxOutage.tla 275296
+  echo "== inbox outage, the stage's dependency registered: a process cut off for good: its gate stays open, and the other processes every row"
+  must_hold InboxOutageDependencyCutOff MCInboxOutage.tla 4484
   for case in \
     "InboxOutageUnavailableSpends:Action property UnavailableNeverSpends is violated:55966" \
     "InboxOutageNoFlightMark:Action property OneAskPerReach is violated:1936" \
@@ -410,7 +415,9 @@ group_inbox_outage() {
     "InboxOutageCanaryKeeps:Invariant CanaryExact is violated:830194" \
     "InboxOutageQueueOldest:Invariant GivenUpIsTheEnd is violated:228" \
     "InboxOutageRearmBesideAnAsk:Invariant KeyOrder is violated:830194" \
-    "InboxOutageStageHeldUnasked:Invariant UnaskedHoldIsTheTenants is violated:2336"; do
+    "InboxOutageStageHeldUnasked:Invariant UnaskedHoldIsTheTenants is violated:2336" \
+    "InboxOutageCachedCheckCloses:Action property GateClosesOnItsEvidence is violated:42674" \
+    "InboxOutageCheckNeedsAHead:Temporal properties were violated:120959"; do
     name=${case%%:*}; rest=${case#*:}; property=${rest%:*}; twin=${rest##*:}
     echo "== inbox outage: $name, a refuted design, must fail, and its twin hold"
     must_fail_with_twin "$name" MCInboxOutage.tla "$property" "$twin"

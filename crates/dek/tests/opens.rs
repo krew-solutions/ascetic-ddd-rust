@@ -11,16 +11,19 @@
     reason = "tests"
 )]
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ascetic_ddd_bus::{BoxError, Message, Permanent, Scope as BusScope, Stage, Unavailable};
+use ascetic_ddd_bus::{
+    BoxError, Check, Dependent, Message, Permanent, Scope as BusScope, Stage, Unavailable,
+};
 use ascetic_ddd_dek::stage::{MESSAGE_ID, TENANT_ID};
-use ascetic_ddd_dek::{EnvelopeStage, Opening, causes};
+use ascetic_ddd_dek::{EnvelopeStage, Opening, Sealing, SealingParameters, causes};
 use ascetic_ddd_kms::{Error, Key, KeyManagementService};
 use ascetic_ddd_session::testing::{MemorySession, MemorySessionPool};
+use ascetic_ddd_session::{SessionError, SessionPool};
 use tokio::time::{advance, sleep};
 
 const SENTINEL: &str = "sentinel";
@@ -44,8 +47,12 @@ struct Scripted {
     latency: Mutex<Duration>,
     counted: Mutex<HashMap<Vec<u8>, u32>>,
     sentinel_there: AtomicBool,
+    /// The sentinel's read fails: whether it is there cannot be told.
+    sentinel_unreadable: AtomicBool,
     sentinel_reads: AtomicU32,
     drawn: AtomicU32,
+    /// Wrapped keys whose unwrap never answers.
+    hung: Mutex<HashSet<Vec<u8>>>,
 }
 
 impl Scripted {
@@ -55,8 +62,10 @@ impl Scripted {
             latency: Mutex::new(Duration::from_millis(10)),
             counted: Mutex::new(HashMap::new()),
             sentinel_there: AtomicBool::new(true),
+            sentinel_unreadable: AtomicBool::new(false),
             sentinel_reads: AtomicU32::new(0),
             drawn: AtomicU32::new(0),
+            hung: Mutex::new(HashSet::new()),
         })
     }
 
@@ -77,6 +86,9 @@ impl KeyManagementService<MemorySession> for Kms {
     async fn key_exists(&self, _: &MemorySession, tenant_id: &str) -> Result<bool, Error> {
         if tenant_id == SENTINEL {
             self.0.sentinel_reads.fetch_add(1, Ordering::SeqCst);
+            if self.0.sentinel_unreadable.load(Ordering::SeqCst) {
+                return Err(Error::Session(SessionError::Acquire("down".into())));
+            }
             return Ok(self.0.sentinel_there.load(Ordering::SeqCst));
         }
         Ok(true)
@@ -95,6 +107,9 @@ impl KeyManagementService<MemorySession> for Kms {
             .unwrap()
             .entry(wrapped.to_vec())
             .or_default() += 1;
+        if self.0.hung.lock().unwrap().contains(wrapped) {
+            sleep(Duration::from_secs(3_600)).await;
+        }
         let latency = *self.0.latency.lock().unwrap();
         sleep(latency).await;
         let answer = self
@@ -387,4 +402,409 @@ async fn an_unwrap_that_never_answers_is_given_up_past_its_bound() {
             .is_some_and(|after| after > Duration::ZERO),
         "given up, it backs off: {backing:?}"
     );
+}
+
+// What the opening end depends on, as the inbox's breaker asks it (seedwork
+// ADR-0042 decision 1).
+
+/// The headers of `message` alone: what the inbox hands a check of its head.
+fn head_of(message: &Message) -> Message {
+    message
+        .headers()
+        .iter()
+        .fold(Message::new(Vec::new()), |head, (name, value)| {
+            head.with_header(name.clone(), value.clone())
+        })
+}
+
+/// A check of `stage`'s dependency, of `head` if given.
+async fn check(stage: &Tested, head: Option<&Message>) -> Check {
+    stage.dependency().check(head.map(head_of).as_ref()).await
+}
+
+/// A check judges a head's key as a cold open of its message does: opened is
+/// served; refused, or gone with the sentinel there, is about the key and
+/// asked nothing of the KMS; unavailable at the stage's scope — the KMS out of
+/// reach, a failure unexplained, a key gone with the sentinel gone too or not
+/// to be read, an answer past `draw` — is unserved under the same cause. An
+/// answer later than the opening's wait and within `draw` is the one designed
+/// difference: an open is refused, as the rows' wait says, and a check, bound
+/// by `draw`, is served. Red when a check judges otherwise than a flight's
+/// landing — the sentinel skipped, a refusal read as the KMS's, a late answer
+/// read as down.
+#[tokio::test(start_paused = true)]
+async fn a_check_judges_a_head_s_key_as_a_cold_open_does() {
+    struct Case {
+        name: &'static str,
+        unwrap: Unwrap,
+        latency: Duration,
+        sentinel: Option<bool>,
+    }
+    let ms = Duration::from_millis;
+    let cases = [
+        Case {
+            name: "opened",
+            unwrap: Unwrap::Key,
+            latency: ms(10),
+            sentinel: Some(true),
+        },
+        Case {
+            name: "refused",
+            unwrap: Unwrap::Forbidden,
+            latency: ms(10),
+            sentinel: Some(true),
+        },
+        Case {
+            name: "gone, the sentinel there",
+            unwrap: Unwrap::Gone,
+            latency: ms(10),
+            sentinel: Some(true),
+        },
+        Case {
+            name: "gone, the sentinel gone",
+            unwrap: Unwrap::Gone,
+            latency: ms(10),
+            sentinel: Some(false),
+        },
+        Case {
+            name: "gone, the sentinel unread",
+            unwrap: Unwrap::Gone,
+            latency: ms(10),
+            sentinel: None,
+        },
+        Case {
+            name: "out of reach",
+            unwrap: Unwrap::Unreachable,
+            latency: ms(10),
+            sentinel: Some(true),
+        },
+        Case {
+            name: "unexplained",
+            unwrap: Unwrap::Unexplained,
+            latency: ms(10),
+            sentinel: Some(true),
+        },
+        Case {
+            name: "past the bound",
+            unwrap: Unwrap::Key,
+            latency: ms(6_000),
+            sentinel: Some(true),
+        },
+    ];
+    for case in cases {
+        let script = || {
+            let kms = Scripted::new([case.unwrap]);
+            *kms.latency.lock().unwrap() = case.latency;
+            kms.sentinel_there
+                .store(case.sentinel == Some(true), Ordering::SeqCst);
+            kms.sentinel_unreadable
+                .store(case.sentinel.is_none(), Ordering::SeqCst);
+            kms
+        };
+        let (cold, checked) = (
+            stage(&script(), Duration::from_secs(2)),
+            stage(&script(), Duration::from_secs(2)),
+        );
+        let message = sealed(&cold, "a", 1).await;
+        let opened = cold.inbound(message.clone()).await;
+        let expected = match &opened {
+            Ok(_) => Check::Served,
+            Err(error) if error.is::<Permanent>() => Check::Unasked,
+            Err(error) => {
+                let unavailable = error.downcast_ref::<Unavailable>().expect("an Unavailable");
+                assert_eq!(unavailable.scope(), BusScope::Stage, "{}", case.name);
+                Check::Unserved(unavailable.cause())
+            }
+        };
+        assert_eq!(
+            check(&checked, Some(&message)).await,
+            expected,
+            "{}",
+            case.name
+        );
+    }
+    // later than the wait, within `draw`
+    let late = || {
+        let kms = Scripted::new([Unwrap::Key]);
+        *kms.latency.lock().unwrap() = Duration::from_secs(3);
+        kms
+    };
+    let (cold, checked) = (
+        stage(&late(), Duration::from_secs(2)),
+        stage(&late(), Duration::from_secs(2)),
+    );
+    let message = sealed(&cold, "a", 1).await;
+    assert_eq!(
+        unavailable(&cold.inbound(message.clone()).await).scope(),
+        BusScope::Stage
+    );
+    assert_eq!(check(&checked, Some(&message)).await, Check::Served);
+}
+
+/// The control: the last key the KMS opened by a call. A fresh opening end has
+/// none, and a check with no head asks nothing; a flight's key opened is it;
+/// it ages from that opening, asked again or not, and goes past `keep`; a
+/// head's key a check opened becomes it. Red when the control is aged from its
+/// last check, when it never ages, or when a check's head does not become it.
+#[tokio::test(start_paused = true)]
+async fn the_control_is_the_last_key_opened_by_a_call_aged_from_its_opening() {
+    let kms = Scripted::new([]);
+    let stage = stage(&kms, Duration::from_secs(2));
+    assert_eq!(check(&stage, None).await, Check::Unasked, "no control yet");
+    let message = sealed(&stage, "a", 1).await;
+    stage.inbound(message).await.unwrap();
+    assert_eq!(check(&stage, None).await, Check::Served, "the flight's key");
+    advance(Duration::from_secs(50)).await;
+    assert_eq!(check(&stage, None).await, Check::Served, "asked again");
+    advance(Duration::from_secs(11)).await;
+    assert_eq!(
+        check(&stage, None).await,
+        Check::Unasked,
+        "past `keep` from its opening, its asking notwithstanding"
+    );
+    let other = sealed(&stage, "b", 2).await;
+    assert_eq!(check(&stage, Some(&other)).await, Check::Served);
+    assert_eq!(
+        check(&stage, None).await,
+        Check::Served,
+        "the head's key, opened"
+    );
+}
+
+/// A Tenant's key gone takes the control with it; and a key refused at the
+/// stage's scope is what a check without a head asks, once opened no longer.
+/// Red when a gone Tenant's key stays the control, or the refused key is not
+/// asked.
+#[tokio::test(start_paused = true)]
+async fn the_control_goes_with_its_tenant_and_a_refused_key_is_asked_without_a_head() {
+    let kms = Scripted::new([Unwrap::Key, Unwrap::Gone]);
+    let stage = stage(&kms, Duration::from_secs(2));
+    let (first, second) = (sealed(&stage, "a", 1).await, sealed(&stage, "a", 2).await);
+    stage.inbound(first).await.unwrap();
+    assert_eq!(
+        cause_of_permanent(&stage.inbound(second).await),
+        Some("kms.gone")
+    );
+    assert_eq!(
+        check(&stage, None).await,
+        Check::Unasked,
+        "the control went with a"
+    );
+    let kms = Scripted::new([Unwrap::Unreachable]);
+    let stage = self::stage(&kms, Duration::from_secs(2));
+    let refused = sealed(&stage, "b", 1).await;
+    assert_eq!(
+        unavailable(&stage.inbound(refused).await).scope(),
+        BusScope::Stage
+    );
+    let asked = kms.unwraps();
+    assert_eq!(
+        check(&stage, None).await,
+        Check::Served,
+        "the refused key, asked"
+    );
+    assert_eq!(kms.unwraps(), asked + 1);
+    assert_eq!(check(&stage, None).await, Check::Served, "now the control");
+}
+
+/// `served` counts the keys the KMS opened for the rows by a call: a flight's,
+/// not a key held, not a check's. Red when a hit or a check counts.
+#[tokio::test(start_paused = true)]
+async fn served_counts_the_keys_opened_for_the_rows_by_a_call() {
+    let kms = Scripted::new([]);
+    let stage = stage(&kms, Duration::from_secs(2));
+    let dependency = stage.dependency();
+    let message = sealed(&stage, "a", 1).await;
+    stage.inbound(message.clone()).await.unwrap();
+    stage.inbound(message.clone()).await.unwrap();
+    assert_eq!(dependency.served(), 1, "one flight, one key held");
+    assert_eq!(check(&stage, Some(&message)).await, Check::Served);
+    assert_eq!(dependency.served(), 1, "a check is no row");
+    assert_eq!(
+        dependency.bound(),
+        Duration::from_secs(5),
+        "the opening's draw"
+    );
+    assert!(dependency.answers_for(causes::UNAVAILABLE));
+    assert!(!dependency.answers_for(ascetic_ddd_bus::cause!("crm.unavailable")));
+}
+
+/// A check served hands no landing to a failing Tenant: its next open, in its
+/// back-off, still reads the stage's scope, as nothing landed for the rows.
+/// Red when a check's key lands in the opening's core.
+#[tokio::test(start_paused = true)]
+async fn a_check_hands_a_failing_tenant_no_landing() {
+    let kms = Scripted::new([Unwrap::Unreachable]);
+    let stage = stage(&kms, Duration::from_secs(2));
+    let failing = sealed(&stage, "a", 1).await;
+    assert_eq!(
+        unavailable(&stage.inbound(failing.clone()).await).scope(),
+        BusScope::Stage
+    );
+    let healthy = sealed(&stage, "b", 2).await;
+    assert_eq!(check(&stage, Some(&healthy)).await, Check::Served);
+    assert_eq!(
+        unavailable(&stage.inbound(failing).await).scope(),
+        BusScope::Stage,
+        "a landing handed over by the check"
+    );
+}
+
+/// A check asks its keys at once: one that never answers does not hold the
+/// other's answer, whichever it is. Red when they are asked one after the
+/// other.
+#[tokio::test(start_paused = true)]
+async fn a_check_is_served_by_whichever_key_opens_first() {
+    for control_hangs in [true, false] {
+        let kms = Scripted::new([]);
+        let stage = stage(&kms, Duration::from_secs(2));
+        let control = sealed(&stage, "a", 1).await;
+        stage.inbound(control.clone()).await.unwrap();
+        let head = sealed(&stage, "b", 2).await;
+        // the scripted KMS wraps the nth key drawn as itself, n in its first
+        // bytes: the control's the first, the head's the second
+        let mut wrapped = vec![0u8; 32];
+        wrapped[..4].copy_from_slice(&(if control_hangs { 1u32 } else { 2 }).to_be_bytes());
+        kms.hung.lock().unwrap().insert(wrapped);
+        let _ = &control;
+        let began = tokio::time::Instant::now();
+        assert_eq!(check(&stage, Some(&head)).await, Check::Served);
+        assert!(
+            began.elapsed() < Duration::from_secs(1),
+            "the control hanging: {control_hangs}; served after {:?}",
+            began.elapsed()
+        );
+    }
+}
+
+/// A pool that hands no session while it is starved.
+struct Starvable(MemorySessionPool, Arc<AtomicBool>);
+
+impl SessionPool for Starvable {
+    type Session = MemorySession;
+
+    async fn acquire(&self) -> Result<MemorySession, SessionError> {
+        if self.1.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        self.0.acquire().await
+    }
+}
+
+/// A check that had no session within its bound asked nothing: no evidence,
+/// though the KMS is down. Red when a session never had reads as the KMS
+/// unserved.
+#[tokio::test(start_paused = true)]
+async fn a_check_without_a_session_asks_nothing() {
+    let kms = Scripted::new([]);
+    let starved = Arc::new(AtomicBool::new(false));
+    let stage = Arc::new(
+        EnvelopeStage::new(
+            Starvable(MemorySessionPool::new(), Arc::clone(&starved)),
+            Kms(Arc::clone(&kms)),
+        )
+        .with_sentinel(SENTINEL)
+        .opened(Opening::fitted(Duration::from_secs(60), 64))
+        .unwrap(),
+    );
+    let message = stage
+        .outbound(
+            Message::new(b"payload".to_vec())
+                .with_header(TENANT_ID, "a")
+                .with_header(MESSAGE_ID, "m-1"),
+        )
+        .await
+        .unwrap();
+    stage.inbound(message).await.unwrap();
+    kms.unwraps.lock().unwrap().extend([Unwrap::Unreachable; 4]);
+    starved.store(true, Ordering::SeqCst);
+    assert_eq!(stage.dependency().check(None).await, Check::Unasked);
+    starved.store(false, Ordering::SeqCst);
+    assert_eq!(
+        stage.dependency().check(None).await,
+        Check::Unserved(causes::UNAVAILABLE),
+        "with a session, the KMS down is unserved"
+    );
+}
+
+/// The log lines a test binary wrote, by the thread that wrote each.
+static LOGGED: Mutex<Vec<(std::thread::ThreadId, String)>> = Mutex::new(Vec::new());
+
+struct Logged;
+
+impl log::Log for Logged {
+    fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+        true
+    }
+    fn log(&self, record: &log::Record<'_>) {
+        LOGGED
+            .lock()
+            .unwrap()
+            .push((std::thread::current().id(), record.args().to_string()));
+    }
+    fn flush(&self) {}
+}
+
+/// A check's outcomes name no Tenant in a log line: the KMS's errors name
+/// one, and a check keeps and logs none of their text (R11). Red when a check
+/// logs an error it met.
+#[tokio::test(start_paused = true)]
+async fn a_check_names_no_tenant_in_the_log() {
+    static LOGGER: Logged = Logged;
+    let _ = log::set_logger(&LOGGER);
+    log::set_max_level(log::LevelFilter::Trace);
+    const TENANT: &str = "tenant-whose-name-is-private";
+    for unwrap in [
+        Unwrap::Gone,
+        Unwrap::Forbidden,
+        Unwrap::Unreachable,
+        Unwrap::Unexplained,
+    ] {
+        for sentinel in [true, false] {
+            let kms = Scripted::new([unwrap]);
+            kms.sentinel_there.store(sentinel, Ordering::SeqCst);
+            let stage = stage(&kms, Duration::from_secs(2));
+            let message = sealed(&stage, TENANT, 1).await;
+            let _ = check(&stage, Some(&message)).await;
+        }
+    }
+    let this = std::thread::current().id();
+    let named: Vec<String> = LOGGED
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(thread, line)| *thread == this && line.contains(TENANT))
+        .map(|(_, line)| line.clone())
+        .collect();
+    assert!(named.is_empty(), "{named:?}");
+}
+
+/// The dependencies an inbox is given, by destination, its key left aside:
+/// destinations named apart from their channels, two sharing one channel's
+/// stage sharing its dependency. Red when they are keyed by the channel, or
+/// with the destination's key.
+#[test]
+fn the_dependencies_are_by_destination_without_its_key() {
+    let kms = Scripted::new([]);
+    let sealing = Sealing::over(
+        Arc::new(MemorySessionPool::new()),
+        ["chan-a", "chan-b"],
+        SealingParameters::default(),
+        |_: &str| Kms(Arc::clone(&kms)),
+    );
+    let opening = sealing
+        .by_destination([
+            ("inbox://in-a/the-key", "chan-a"),
+            ("inbox://in-a2", "chan-a"),
+            ("inbox://in-b", "chan-b"),
+        ])
+        .unwrap();
+    let dependencies = opening.dependencies();
+    let names: Vec<&str> = dependencies.iter().map(|(d, _)| d.as_str()).collect();
+    assert_eq!(names, ["inbox://in-a", "inbox://in-a2", "inbox://in-b"]);
+    assert!(
+        Arc::ptr_eq(&dependencies[0].1, &dependencies[1].1),
+        "one channel, one dependency"
+    );
+    assert!(!Arc::ptr_eq(&dependencies[0].1, &dependencies[2].1));
 }

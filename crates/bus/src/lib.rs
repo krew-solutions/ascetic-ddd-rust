@@ -71,6 +71,7 @@
 mod adapter;
 pub mod adapters;
 mod bridge;
+mod dependency;
 mod error;
 pub mod handling;
 pub mod identity;
@@ -86,6 +87,7 @@ pub use crate::adapter::{
     TransactionalWireProducer, WireConsumer, WireProducer,
 };
 pub use crate::bridge::{Bridge, Target};
+pub use crate::dependency::{Check, Dependency, Dependent};
 pub use crate::error::{BoxError, Cause, Error, Permanent, Scope, Transient, Unavailable};
 pub use crate::message::Message;
 pub use crate::stage::Stage;
