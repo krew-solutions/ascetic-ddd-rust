@@ -132,7 +132,10 @@ pub(crate) enum Failure {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Evidence {
     Trusted,
-    Late,
+    /// Its last flight did not land in time: since `at`.
+    Late {
+        at: Instant,
+    },
     Failed {
         failure: Failure,
         until: Instant,
@@ -141,12 +144,30 @@ pub(crate) enum Evidence {
     },
 }
 
-/// A flight in flight: its number, what it is for, when it started.
+/// A flight in flight: its number, what it is for, when it started, and
+/// whether it is waited on — started on trust, its trust not yet given up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Flying {
     pub(crate) generation: Generation,
     pub(crate) kind: Kind,
     pub(crate) started: Instant,
+    pub(crate) trusted: bool,
+}
+
+/// Since when a refusal of a Tenant whose evidence is trusted or late reads
+/// the stage's landings: its flight's start, or a wait before `now` if that
+/// is earlier or there is no flight — another's landing in time within the
+/// last wait is the stage serving, whatever the open waited.
+pub(crate) fn trouble_since(
+    flight: Option<Instant>,
+    now: Instant,
+    wait: Duration,
+) -> Option<Instant> {
+    let horizon = now.checked_sub(wait);
+    match (flight, horizon) {
+        (Some(started), Some(horizon)) => Some(started.min(horizon)),
+        (started, horizon) => started.or(horizon),
+    }
 }
 
 /// `at` plus `span`. Every span of a supply is at most [`LONGEST`], which

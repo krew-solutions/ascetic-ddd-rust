@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
-use crate::pace::{Evidence, Failure, Flying, Held, failed, later, part, scope_by};
+use crate::pace::{Evidence, Failure, Flying, Held, failed, later, part, scope_by, trouble_since};
 pub use crate::pace::{Generation, Kind, LONGEST, Outcome, Reason, Scope, Start};
 
 /// Why a supply's parameters were refused.
@@ -184,11 +184,14 @@ impl Supply {
     }
 }
 
-/// When a slot's trouble began: its failure, or its flight's start.
-fn trouble_since<K, N>(slot: &Slot<K, N>) -> Option<Instant> {
+/// When a slot's trouble began: its failure; otherwise its flight's start,
+/// or a wait before `now` if that is earlier or there is no flight.
+fn slot_trouble_since<K, N>(slot: &Slot<K, N>, now: Instant, wait: Duration) -> Option<Instant> {
     match slot.evidence {
         Evidence::Failed { at, .. } => Some(at),
-        Evidence::Trusted | Evidence::Late => slot.flight.map(|flying| flying.started),
+        Evidence::Trusted | Evidence::Late { .. } => {
+            trouble_since(slot.flight.map(|flying| flying.started), now, wait)
+        }
     }
 }
 
@@ -256,7 +259,7 @@ impl<K, N> Slot<K, N> {
         let ends = self.key.as_ref().map(|serving| serving.ends);
         let forgets = match self.evidence {
             Evidence::Failed { until, .. } => Some(later(until, memory)),
-            Evidence::Trusted | Evidence::Late => None,
+            Evidence::Trusted | Evidence::Late { .. } => None,
         };
         [ends, forgets]
             .into_iter()
@@ -273,7 +276,7 @@ impl<K, N> Slot<K, N> {
             && self.waiters == 0
             && match self.evidence {
                 Evidence::Failed { until, .. } => later(until, memory) <= now,
-                Evidence::Trusted | Evidence::Late => true,
+                Evidence::Trusted | Evidence::Late { .. } => true,
             }
     }
 }
@@ -329,11 +332,13 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
     /// stage's for a stage that is full or has no runtime; otherwise as the
     /// evidence says.
     #[must_use]
-    pub fn scope(&self, tenant: &T, reason: Reason) -> Scope {
+    pub fn scope(&self, tenant: &T, reason: Reason, now: Instant) -> Scope {
         match reason {
             Reason::FlightsFull | Reason::Unspawned => Scope::Stage,
             Reason::Waited | Reason::BackingOff | Reason::Late => scope_by(
-                self.slots.get(tenant).and_then(trouble_since),
+                self.slots
+                    .get(tenant)
+                    .and_then(|slot| slot_trouble_since(slot, now, self.supply.wait)),
                 self.landed_in_time,
             ),
         }
@@ -363,7 +368,8 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
             return None;
         }
         self.slots.entry(sentinel.clone()).or_insert_with(Slot::new);
-        let start = self.start(&sentinel, Kind::Probe, now);
+        // the sentinel's draw is no caller's: nobody waits on it
+        let start = self.start(&sentinel, Kind::Probe, now, false);
         self.probed = Some(now);
         self.settle(&sentinel, now);
         Some((sentinel, start))
@@ -396,7 +402,7 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
         }
     }
 
-    fn start(&mut self, tenant: &T, kind: Kind, now: Instant) -> Start {
+    fn start(&mut self, tenant: &T, kind: Kind, now: Instant, trusted: bool) -> Start {
         let generation = self.generation();
         let held = self.held.of(kind);
         *held = held.saturating_add(1);
@@ -406,6 +412,7 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
                 generation,
                 kind,
                 started: now,
+                trusted,
             });
         }
         Start { generation, kind }
@@ -483,8 +490,10 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
                     || supply.messages.saturating_sub(serving.used) <= supply.renew_uses();
                 let quiet = slot.flight.is_none()
                     && !matches!(slot.evidence, Evidence::Failed { until, .. } if now < until);
+                // a renewal of a trusted slot is joined at the key's end
+                let trusted = slot.evidence == Evidence::Trusted;
                 let start = (due && quiet && self.place(Kind::Renew))
-                    .then(|| self.start(tenant, Kind::Renew, now));
+                    .then(|| self.start(tenant, Kind::Renew, now, trusted));
                 return (Answer::Hit(key), start);
             }
             // Ended, or its uses spent: it serves no more.
@@ -496,7 +505,10 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
         let Some(slot) = self.slots.get_mut(tenant) else {
             return refused(Reason::Late, None, Scope::Stage);
         };
-        let scope = scope_by(trouble_since(slot), landed_in_time);
+        let scope = scope_by(
+            slot_trouble_since(slot, now, self.supply.wait),
+            landed_in_time,
+        );
         // A key gone: told to every seal that asks until its memory ends,
         // none of them drawing (ADR-0039 decision 8). A standby of Vault
         // Community forwards to the leader and never answers a key it holds
@@ -520,9 +532,9 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
                 scope,
             );
         }
-        // A flight in flight: joined only when trusted.
+        // A flight in flight: joined only when it is waited on.
         if let Some(flying) = slot.flight {
-            return if slot.evidence == Evidence::Trusted {
+            return if flying.trusted {
                 slot.waiters = slot.waiters.saturating_add(1);
                 (Answer::Join(flying.generation, deadline), None)
             } else {
@@ -532,7 +544,7 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
         // No flight: start one, and wait for it only on evidence.
         let (kind, trusted) = match slot.evidence {
             Evidence::Trusted => (Kind::Miss, true),
-            Evidence::Late => (Kind::Miss, false),
+            Evidence::Late { .. } => (Kind::Miss, false),
             Evidence::Failed { at, .. } => (
                 Kind::Probe,
                 landed_in_time.is_some_and(|landed| landed > at),
@@ -541,10 +553,13 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
         if !self.place(kind) {
             return refused(Reason::FlightsFull, None, Scope::Stage);
         }
-        let start = self.start(tenant, kind, now);
+        let start = self.start(tenant, kind, now, trusted);
         if trusted {
+            // A trusted probe is waited on, and the slot's failure stands:
+            // only its own draw landed in time ends it, so that the back-off
+            // doubles while its draws keep failing. The flight carries the
+            // trust: its joiners wait on it too.
             if let Some(slot) = self.slots.get_mut(tenant) {
-                slot.evidence = Evidence::Trusted;
                 slot.waiters = slot.waiters.saturating_add(1);
             }
             (Answer::Join(start.generation, deadline), Some(start))
@@ -599,12 +614,14 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
     pub fn gave_up(&mut self, tenant: &T, generation: Generation, now: Instant) {
         let wait = self.supply.wait;
         if let Some(slot) = self.slots.get_mut(tenant)
-            && let Some(flying) = slot.flight
+            && let Some(flying) = slot.flight.as_mut()
             && flying.generation == generation
             && now.saturating_duration_since(flying.started) >= wait
-            && slot.evidence == Evidence::Trusted
         {
-            slot.evidence = Evidence::Late;
+            flying.trusted = false;
+            if slot.evidence == Evidence::Trusted {
+                slot.evidence = Evidence::Late { at: now };
+            }
         }
     }
 
@@ -663,9 +680,13 @@ impl<T: Clone + Eq + Hash, K: Clone, N> Core<T, K, N> {
                     }
                     _ => retired = Some(key),
                 }
-                slot.evidence = Evidence::Trusted;
+                // a landing past the wait is no evidence that the slot's
+                // draws land in time: it stays late
                 if now.saturating_duration_since(started) <= supply.wait {
+                    slot.evidence = Evidence::Trusted;
                     self.landed_in_time = Some(now);
+                } else {
+                    slot.evidence = Evidence::Late { at: now };
                 }
             }
             Outcome::Gone => {
@@ -995,6 +1016,104 @@ mod tests {
         );
     }
 
+    /// A slot whose draws keep failing while other Tenants' land keeps its
+    /// failure through a trusted probe: the probe is waited on, its failure
+    /// counted on top, the back-off doubled (seedwork ADR-0042 § Owed 2, the
+    /// partial hang). Red when the trusted probe sets the slot trusted.
+    #[test]
+    fn a_trusted_probe_that_fails_doubles_the_slot_s_back_off() {
+        let (mut core, t0) = (core(), Instant::now());
+        let (_, start) = core.seal(&"a", t0, deadline(t0));
+        core.landed(&"a", start.unwrap().generation, Outcome::Unavailable, t0, 0);
+        assert_eq!(core.failures(&"a"), 1);
+        // another Tenant lands in time after the failure: the probe is trusted
+        drawn(&mut core, "b", t0 + Duration::from_millis(100), 9);
+        let back = t0 + S;
+        let (answer, start) = core.seal(&"a", back, deadline(back));
+        let start = start.unwrap();
+        assert_eq!(start.kind, Kind::Probe);
+        assert_eq!(answer, Answer::Join(start.generation, deadline(back)));
+        assert_eq!(
+            core.failures(&"a"),
+            1,
+            "the trusted probe keeps the failure"
+        );
+        core.gave_up(&"a", start.generation, deadline(back));
+        core.left(&"a", deadline(back));
+        let failed = back + 5 * S;
+        core.landed(&"a", start.generation, Outcome::Unavailable, failed, 0);
+        assert_eq!(core.failures(&"a"), 2, "and counts its own");
+        // the step doubled, 2 s: half of it at the least jitter
+        let early = failed + Duration::from_millis(750);
+        assert!(matches!(
+            core.seal(&"a", early, deadline(early)).0,
+            Answer::Refused {
+                reason: Reason::BackingOff,
+                ..
+            }
+        ));
+    }
+
+    /// A slot's draw that lands past the wait is no evidence that its draws
+    /// land in time: the key it brought serves, and once it is spent the
+    /// slot's miss is refused at once, its draw run on, not waited on. Red
+    /// when any landing trusts the slot.
+    #[test]
+    fn a_slot_whose_draw_lands_past_the_wait_stays_late() {
+        let (mut core, t0) = (core(), Instant::now());
+        let (_, start) = core.seal(&"a", t0, deadline(t0));
+        let start = start.unwrap();
+        core.gave_up(&"a", start.generation, deadline(t0));
+        core.left(&"a", deadline(t0));
+        core.landed(
+            &"a",
+            start.generation,
+            Outcome::Drawn {
+                key: 1,
+                started: t0,
+            },
+            t0 + S,
+            0,
+        );
+        let at = t0 + 2 * S;
+        let mut answer = core.seal(&"a", at, deadline(at)).0;
+        assert_eq!(answer, Answer::Hit(1), "the late key serves");
+        // another Tenant's draw lands in time: the refusal is the slot's own
+        drawn(&mut core, "b", at, 9);
+        while answer == Answer::Hit(1) {
+            answer = core.seal(&"a", at, deadline(at)).0;
+        }
+        assert!(
+            matches!(
+                answer,
+                Answer::Refused {
+                    reason: Reason::Late,
+                    scope: Scope::Tenant,
+                    ..
+                }
+            ),
+            "{answer:?}"
+        );
+    }
+
+    /// The joiners of a trusted probe wait on it, as on any trusted flight:
+    /// a command sealing beside it right after an outage's return is not
+    /// refused. Red when a join reads the slot's evidence instead of the
+    /// flight's trust.
+    #[test]
+    fn a_trusted_probe_is_joined_at_the_sealing_end() {
+        let (mut core, t0) = (core(), Instant::now());
+        let (_, start) = core.seal(&"a", t0, deadline(t0));
+        core.landed(&"a", start.unwrap().generation, Outcome::Unavailable, t0, 0);
+        drawn(&mut core, "b", t0 + Duration::from_millis(100), 9);
+        let back = t0 + S;
+        let (first, start) = core.seal(&"a", back, deadline(back));
+        assert!(matches!(first, Answer::Join(..)) && start.is_some());
+        let (second, again) = core.seal(&"a", back, deadline(back));
+        assert!(matches!(second, Answer::Join(..)), "{second:?}");
+        assert_eq!(again, None, "one flight");
+    }
+
     #[test]
     fn a_landing_slower_than_the_wait_is_no_evidence_that_the_kms_answers() {
         let (mut core, t0) = (core(), Instant::now());
@@ -1068,9 +1187,9 @@ mod tests {
             }
         ));
         assert_eq!(scope_of(&refused), Scope::Tenant, "b landed in time since");
-        assert_eq!(core.scope(&"a", Reason::BackingOff), Scope::Tenant);
-        assert_eq!(core.scope(&"a", Reason::FlightsFull), Scope::Stage);
-        assert_eq!(core.scope(&"a", Reason::Unspawned), Scope::Stage);
+        assert_eq!(core.scope(&"a", Reason::BackingOff, after), Scope::Tenant);
+        assert_eq!(core.scope(&"a", Reason::FlightsFull, after), Scope::Stage);
+        assert_eq!(core.scope(&"a", Reason::Unspawned, after), Scope::Stage);
 
         // A landing before the tenant's trouble began is no evidence of it.
         let mut core = self::core();
@@ -1849,12 +1968,18 @@ mod property {
     /// the behaviour — moving the pacing and the flights into modules the
     /// opening end shares (ADR-0039 slice 4, S4b) — keeps the digest; one
     /// that changes the behaviour pins the new digest with its reason.
+    ///
+    /// Re-pinned for seedwork ADR-0043: a trusted probe keeps the slot's
+    /// failure; a flight carries its trust for its joiners; a draw landing
+    /// past the wait leaves the slot late; a refusal's scope reads the
+    /// stage's landings over the last wait. The changes are held by their
+    /// own tests, not by this digest, which accepts whatever it pins.
     #[test]
     fn the_core_s_behaviour_is_pinned() {
         assert_eq!(fingerprint(), PINNED);
     }
 
-    const PINNED: u64 = 5_305_874_238_329_810_116;
+    const PINNED: u64 = 8_812_330_262_278_217_155;
 
     #[test]
     fn the_histories_exercise_every_path() {

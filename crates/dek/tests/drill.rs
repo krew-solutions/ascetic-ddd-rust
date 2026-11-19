@@ -147,6 +147,17 @@ struct Script {
     /// While down, every call answered after this long rather than refused
     /// (M10's slow shape: a brownout, not an outage).
     slow: Option<Duration>,
+    /// While down, the unwraps of the `partial` share of Tenants answered
+    /// after this long rather than refused or hung (M10's slow shard).
+    partial_slow: Option<Duration>,
+    /// Every unwrap answered after this long, and a share of them (percent)
+    /// after a tail's (M10's healthy latency).
+    latency: Option<(Duration, Duration, u64)>,
+    /// For a minute after the outage, every unwrap answered after this long
+    /// (M10's slow return).
+    return_slow: Option<Duration>,
+    /// The unwraps asked, for the latency's tail.
+    asked: AtomicU64,
 }
 
 /// Whether `tenant` is among the `percent` of Tenants a partial outage
@@ -179,6 +190,10 @@ impl Script {
             hang: false,
             partial: None,
             slow: None,
+            partial_slow: None,
+            latency: None,
+            return_slow: None,
+            asked: AtomicU64::new(0),
         }
     }
 
@@ -191,6 +206,7 @@ impl Script {
     /// outage only an unwrap of a broken Tenant's key.
     fn down_for(&self, tenant: Option<&str>) -> bool {
         self.slow.is_none()
+            && self.partial_slow.is_none()
             && self.down()
             && match (self.partial, tenant) {
                 (None, _) => true,
@@ -202,7 +218,26 @@ impl Script {
     /// A call of a KMS that hangs while down: it waits for the client's
     /// timeout, or the outage's end if sooner, and is then refused.
     async fn hung(&self, tenant: Option<&str>) -> Result<(), Error> {
+        if let (Some((base, tail, percent)), Some(_)) = (self.latency, tenant) {
+            let n = self.asked.fetch_add(1, Ordering::Relaxed);
+            let draw = n.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32;
+            tokio::time::sleep(if draw % 100 < percent { tail } else { base }).await;
+        }
+        if let Some(slow) = self.return_slow
+            && tenant.is_some()
+        {
+            let at = self.started.elapsed();
+            if at >= self.down.1 && at < self.down.1 + Duration::from_secs(60) {
+                tokio::time::sleep(slow).await;
+            }
+        }
         if let Some(slow) = self.slow.filter(|_| self.down()) {
+            tokio::time::sleep(slow).await;
+        }
+        if let (Some(slow), Some(percent), Some(tenant)) = (self.partial_slow, self.partial, tenant)
+            && self.down()
+            && broken(tenant, percent)
+        {
             tokio::time::sleep(slow).await;
         }
         if self.hang && self.down_for(tenant) {
@@ -1147,6 +1182,238 @@ async fn a_replica_cut_off_alone_drilled() {
     inboxes[0].teardown().await.unwrap();
 }
 
+/// The stage's calls on a message's way in, tallied as the loops spend them
+/// (M10, § Owed 2's partial hang): a loop awaits the stage's inbound before
+/// its handler, so a call's time is a loop's. Calls begun while the KMS is
+/// down are classed by whose Tenant (broken or spared) and how they ended:
+/// opened, or refused under the dek's reason and scope, after a failure of
+/// the Tenant's noted or none, beside another call of the same Tenant on the
+/// same channel in the process or alone.
+#[derive(Default)]
+struct Waits {
+    /// Calls in the stage now, and of broken Tenants.
+    now: AtomicU64,
+    now_broken: AtomicU64,
+    /// Calls begun while down, by class: how many, and their microseconds.
+    classes: Mutex<HashMap<String, (u64, u64)>>,
+    /// Calls in the stage now, by process, destination and Tenant.
+    flying: Mutex<HashMap<(usize, String, String), u32>>,
+    /// When each (process, destination, Tenant)'s last refused call ended.
+    refused: Mutex<HashMap<(usize, String, String), Instant>>,
+    /// The broken Tenants' calls of 100 ms or more begun while down, by
+    /// the gap since the same key's last refused call: how many, and their
+    /// microseconds.
+    gaps: Mutex<HashMap<&'static str, (u64, u64)>>,
+    /// The most calls in the stage at a sample while down.
+    most: AtomicU64,
+    /// The stage's refusals of each message so far, by its id: whether a
+    /// call asks a row for the first time or again after a refusal.
+    refusals: Mutex<HashMap<String, u32>>,
+    /// The broken Tenants' calls of 100 ms or more begun while down, by
+    /// whether the stage had refused their message before: how many, and
+    /// their microseconds.
+    asked: Mutex<HashMap<&'static str, (u64, u64)>>,
+}
+
+impl Waits {
+    fn print(&self, loops: u64, outage: Duration) {
+        let classes = self.classes.lock().unwrap();
+        let mut rows: Vec<_> = classes.iter().collect();
+        rows.sort_by_key(|row| std::cmp::Reverse(row.1.1));
+        let capacity = loops as f64 * outage.as_secs_f64();
+        println!(
+            "M10: the most calls in the stage at a sample while down: {} of {loops}",
+            self.most.load(Ordering::Relaxed)
+        );
+        println!(
+            "M10: the stage's calls begun while down, by class (loop-seconds of {capacity:.0}):"
+        );
+        for (class, (count, micros)) in rows {
+            let seconds = *micros as f64 / 1e6;
+            println!(
+                "M10:   {class}: {count} calls, {seconds:.0} loop-s ({:.1} %), mean {:.0} ms",
+                100.0 * seconds / capacity,
+                seconds * 1e3 / (*count).max(1) as f64
+            );
+        }
+        println!(
+            "M10: the broken Tenants' calls of 100 ms or more begun while down, by the gap since \
+             the same (process, channel, Tenant)'s last refused call:"
+        );
+        let gaps = self.gaps.lock().unwrap();
+        for gap in GAPS {
+            let (count, micros) = gaps.get(gap).copied().unwrap_or_default();
+            let seconds = micros as f64 / 1e6;
+            println!(
+                "M10:   {gap}: {count} calls, {seconds:.0} loop-s ({:.1} %)",
+                100.0 * seconds / capacity
+            );
+        }
+        let asked = self.asked.lock().unwrap();
+        println!("M10: the same calls by whether the stage had refused their message before:");
+        for how in ["the message's first ask", "the message asked again"] {
+            let (count, micros) = asked.get(how).copied().unwrap_or_default();
+            let seconds = micros as f64 / 1e6;
+            println!(
+                "M10:   {how}: {count} calls, {seconds:.0} loop-s ({:.1} %)",
+                100.0 * seconds / capacity
+            );
+        }
+    }
+}
+
+/// The gaps [`Waits`] buckets a broken Tenant's long call by.
+const GAPS: [&str; 6] = [
+    "none refused before",
+    "under 10 s",
+    "10-40 s",
+    "40-120 s",
+    "120-300 s",
+    "300 s or more",
+];
+
+fn gap_of(gap: Option<Duration>) -> &'static str {
+    match gap.map(|g| g.as_secs()) {
+        None => GAPS[0],
+        Some(0..10) => GAPS[1],
+        Some(10..40) => GAPS[2],
+        Some(40..120) => GAPS[3],
+        Some(120..300) => GAPS[4],
+        Some(_) => GAPS[5],
+    }
+}
+
+/// A stage timed as [`Waits`] tallies it.
+struct Timed {
+    inner: Arc<dyn Stage>,
+    process: usize,
+    partial: Option<u64>,
+    started: Instant,
+    down: (Duration, Duration),
+    waits: Arc<Waits>,
+}
+
+impl Stage for Timed {
+    fn outbound(
+        &self,
+        message: Message,
+    ) -> futures::future::BoxFuture<'_, Result<Message, ascetic_ddd_bus::BoxError>> {
+        self.inner.outbound(message)
+    }
+
+    fn inbound(
+        &self,
+        message: Message,
+    ) -> futures::future::BoxFuture<'_, Result<Message, ascetic_ddd_bus::BoxError>> {
+        Box::pin(async move {
+            let text = |name: &str| {
+                String::from_utf8_lossy(message.header(name).unwrap_or_default()).into_owned()
+            };
+            let tenant = text(TENANT_ID);
+            let id = text(MESSAGE_ID);
+            let before = self
+                .waits
+                .refusals
+                .lock()
+                .unwrap()
+                .get(&id)
+                .copied()
+                .unwrap_or(0);
+            let key = (self.process, text("destination"), tenant.clone());
+            let broken = self.partial.is_none_or(|p| broken(&tenant, p));
+            let begun = Instant::now();
+            let at = begun.duration_since(self.started);
+            let down = at >= self.down.0 && at < self.down.1;
+            let beside = {
+                let mut flying = self.waits.flying.lock().unwrap();
+                let n = flying.entry(key.clone()).or_default();
+                *n += 1;
+                *n > 1
+            };
+            self.waits.now.fetch_add(1, Ordering::Relaxed);
+            if broken {
+                self.waits.now_broken.fetch_add(1, Ordering::Relaxed);
+            }
+            let result = self.inner.inbound(message).await;
+            let took = begun.elapsed();
+            self.waits.now.fetch_sub(1, Ordering::Relaxed);
+            if broken {
+                self.waits.now_broken.fetch_sub(1, Ordering::Relaxed);
+            }
+            {
+                let mut flying = self.waits.flying.lock().unwrap();
+                if let Some(n) = flying.get_mut(&key) {
+                    *n -= 1;
+                    if *n == 0 {
+                        flying.remove(&key);
+                    }
+                }
+            }
+            let gap = {
+                let mut refused = self.waits.refused.lock().unwrap();
+                let gap = refused.get(&key).map(|at| begun.duration_since(*at));
+                if result.is_err() {
+                    refused.insert(key.clone(), Instant::now());
+                }
+                gap
+            };
+            if result.is_err() {
+                *self.waits.refusals.lock().unwrap().entry(id).or_default() += 1;
+            }
+            if down && broken && took >= Duration::from_millis(100) {
+                let how = if before == 0 {
+                    "the message's first ask"
+                } else {
+                    "the message asked again"
+                };
+                let mut asked = self.waits.asked.lock().unwrap();
+                let entry = asked.entry(how).or_default();
+                entry.0 += 1;
+                entry.1 += took.as_micros() as u64;
+                drop(asked);
+                let mut gaps = self.waits.gaps.lock().unwrap();
+                let entry = gaps.entry(gap_of(gap)).or_default();
+                entry.0 += 1;
+                entry.1 += took.as_micros() as u64;
+            }
+            if down {
+                let how = match &result {
+                    Ok(_) => "opened".to_owned(),
+                    Err(error) => error
+                        .downcast_ref::<ascetic_ddd_bus::Unavailable>()
+                        .and_then(|u| std::error::Error::source(u))
+                        .and_then(|e| e.downcast_ref::<ascetic_ddd_dek::Unavailable>())
+                        .map_or_else(
+                            || "failed otherwise".to_owned(),
+                            |u| {
+                                format!(
+                                    "refused {:?} at the {:?} scope, {}",
+                                    u.reason,
+                                    u.scope,
+                                    if u.last.is_some() {
+                                        "after a failure"
+                                    } else {
+                                        "no failure noted"
+                                    }
+                                )
+                            },
+                        ),
+                };
+                let class = format!(
+                    "{} {how}{}",
+                    if broken { "broken" } else { "spared" },
+                    if beside { ", beside another" } else { "" }
+                );
+                let mut classes = self.waits.classes.lock().unwrap();
+                let entry = classes.entry(class).or_default();
+                entry.0 += 1;
+                entry.1 += took.as_micros() as u64;
+            }
+            result
+        })
+    }
+}
+
 /// M10 of the inbox's ADR-0042 (decision 1, § Measured): the KMS hanging
 /// rather than refusing — every call while it is down waits for its client's
 /// timeout, 30 s, and is then refused — for ten minutes, with a launch's
@@ -1172,7 +1439,13 @@ async fn a_kms_hanging_drilled() {
     } else {
         Duration::from_secs(60)
     };
-    let launch: u64 = if small { 2_000 } else { 20_000 };
+    // ASCETIC_DDD_M10_LAUNCH=<n>: the launch's backlog, M10's 20,000
+    // otherwise (a tenth when small); 0 for none
+    let launch: u64 = std::env::var("ASCETIC_DDD_M10_LAUNCH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(if small { 2_000 } else { 20_000 });
+    println!("M10: a launch of {launch} messages");
     let (steady, outage, recovery) = (minute * 2, minute * 10, minute * 3);
     let end = steady + outage + recovery;
     // ASCETIC_DDD_M10_TRIAL_WAIT=<s>: the trial's wait, the default otherwise
@@ -1207,6 +1480,37 @@ async fn a_kms_hanging_drilled() {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .map(Duration::from_millis);
+    // ASCETIC_DDD_M10_PARTIAL_SLOW=<ms>: while down, the partial share's
+    // unwraps answered after that long rather than hung (a slow shard)
+    let partial_slow = std::env::var("ASCETIC_DDD_M10_PARTIAL_SLOW")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_millis);
+    if let Some(partial_slow) = partial_slow {
+        println!("M10: the partial share's unwraps answered after {partial_slow:?} while down");
+    }
+    // ASCETIC_DDD_M10_LATENCY=<ms>[,<tail ms>,<tail %>]: every unwrap
+    // answered after that long, a share of them after the tail's
+    let latency = std::env::var("ASCETIC_DDD_M10_LATENCY").ok().map(|v| {
+        let parts: Vec<u64> = v.split(',').map(|p| p.parse().unwrap()).collect();
+        let base = Duration::from_millis(parts[0]);
+        match parts[..] {
+            [_, tail, percent] => (base, Duration::from_millis(tail), percent),
+            _ => (base, base, 0),
+        }
+    });
+    if let Some((base, tail, percent)) = latency {
+        println!("M10: every unwrap answered after {base:?}, {percent} % after {tail:?}");
+    }
+    // ASCETIC_DDD_M10_RETURN_SLOW=<ms>: for a minute after the outage, every
+    // unwrap answered after that long
+    let return_slow = std::env::var("ASCETIC_DDD_M10_RETURN_SLOW")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_millis);
+    if let Some(return_slow) = return_slow {
+        println!("M10: unwraps answered after {return_slow:?} for a minute after the return");
+    }
     // ASCETIC_DDD_M10_TENANTS / _RATE: the steady traffic's Tenants and
     // messages a second, M10's 500 and 20 otherwise
     let tenants: usize = std::env::var("ASCETIC_DDD_M10_TENANTS")
@@ -1232,11 +1536,16 @@ async fn a_kms_hanging_drilled() {
         quota: 1e9,
         partial,
         slow,
+        partial_slow,
+        latency,
+        return_slow,
         ..Script::new(started, (steady, steady + outage), None)
     });
     // The age at handling of the messages of Tenants the outage spares, made
     // while down: how long a pause held what the stage could have opened.
     let spared: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+    // and of the Tenants it breaks
+    let hit: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
     let window = (
         millis_now() + steady.as_millis() as u64,
         millis_now() + (steady + outage).as_millis() as u64,
@@ -1304,22 +1613,33 @@ async fn a_kms_hanging_drilled() {
         .collect();
     inboxes[0].teardown().await.unwrap();
     inboxes[0].migrate().await.unwrap();
+    let waits = Arc::new(Waits::default());
     let mut subscriptions = Vec::new();
-    for (opening, inbox) in openings.into_iter().zip(&inboxes) {
+    for (process, (opening, inbox)) in openings.into_iter().zip(&inboxes).enumerate() {
         let spared = Arc::clone(&spared);
+        let hit = Arc::clone(&hit);
+        let timed = Timed {
+            inner: Arc::new(opening),
+            process,
+            partial,
+            started,
+            down: (steady, steady + outage),
+            waits: Arc::clone(&waits),
+        };
         let subscription = inbox
             .consumer(move |message: &Message| {
                 let made = std::str::from_utf8(message.payload())?.parse::<u64>()?;
                 let tenant = std::str::from_utf8(message.header(TENANT_ID).unwrap_or_default())?;
                 Ok((made, partial.is_none_or(|p| !broken(tenant, p))))
             })
-            .through(Arc::new(opening) as Arc<dyn Stage>)
+            .through(Arc::new(timed) as Arc<dyn Stage>)
             .subscribe(move |_tx, (made, spared_tenant): (u64, bool)| {
                 let spared = Arc::clone(&spared);
+                let hit = Arc::clone(&hit);
                 async move {
                     tokio::time::sleep(HANDLER).await;
-                    if spared_tenant && made >= window.0 && made < window.1 {
-                        spared
+                    if made >= window.0 && made < window.1 {
+                        if spared_tenant { &spared } else { &hit }
                             .lock()
                             .unwrap()
                             .push(millis_now().saturating_sub(made));
@@ -1412,8 +1732,17 @@ async fn a_kms_hanging_drilled() {
     let sampler = async {
         let mut tick = tokio::time::interval(minute / 6);
         println!(
-            "{:>6} {:>7} {:>8} {:>6} {:>6} {:>6} {:>6} {:>8}",
-            "s", "queue", "done", "paused", "resume", "trials", "stalls", "refused"
+            "{:>6} {:>7} {:>8} {:>6} {:>6} {:>6} {:>6} {:>8} {:>6} {:>6}",
+            "s",
+            "queue",
+            "done",
+            "paused",
+            "resume",
+            "trials",
+            "stalls",
+            "refused",
+            "stage",
+            "broken"
         );
         while started.elapsed() < end {
             tick.tick().await;
@@ -1448,7 +1777,7 @@ async fn a_kms_hanging_drilled() {
                 }
             }
             println!(
-                "{:>6.0} {:>7} {:>8} {:>6} {:>6} {:>6} {:>6} {:>8}",
+                "{:>6.0} {:>7} {:>8} {:>6} {:>6} {:>6} {:>6} {:>8} {:>6} {:>6}",
                 started.elapsed().as_secs_f64(),
                 queued,
                 sum(&told, |t| &t.processed),
@@ -1456,8 +1785,15 @@ async fn a_kms_hanging_drilled() {
                 sum(&told, |t| &t.resumed),
                 sum(&told, |t| &t.trials),
                 sum(&told, |t| &t.stalled),
-                script.refused_down.load(Ordering::Relaxed)
+                script.refused_down.load(Ordering::Relaxed),
+                waits.now.load(Ordering::Relaxed),
+                waits.now_broken.load(Ordering::Relaxed)
             );
+            if at >= steady.as_secs_f64() && at < (steady + outage).as_secs_f64() {
+                waits
+                    .most
+                    .fetch_max(waits.now.load(Ordering::Relaxed), Ordering::Relaxed);
+            }
         }
     };
     tokio::join!(producer, launching, sampler);
@@ -1470,7 +1806,7 @@ async fn a_kms_hanging_drilled() {
             "M10, process {}: first stalled {} into the outage; {} stall effects, {} pauses, {} \
              resumes ({} by a trial processed, {} by three inconclusive, {} with no witness, {} by \
              a check served, {} with nothing to hold; {} while down, the last {}), {} trials, {} \
-             checks, {} refuted, {} parked, {} spent",
+             checks, {} refuted, {} parked, {} spent, {} guest walks",
             t.process,
             first.map_or("never".to_owned(), |at| format!(
                 "{:.1} s",
@@ -1497,6 +1833,7 @@ async fn a_kms_hanging_drilled() {
             t.refuted.load(Ordering::Relaxed),
             t.parked.load(Ordering::Relaxed),
             t.spent.load(Ordering::Relaxed),
+            t.guests.load(Ordering::Relaxed),
         );
         for line in t.lines.lock().unwrap().iter() {
             println!("{line}");
@@ -1507,6 +1844,23 @@ async fn a_kms_hanging_drilled() {
         script.refused_down.load(Ordering::Relaxed),
         script.unwraps_down.load(Ordering::Relaxed)
     );
+    waits.print(u64::from(LOOPS) * PROCESSES as u64, outage);
+    if partial.is_some() {
+        let mut ages = std::mem::take(&mut *hit.lock().unwrap());
+        ages.sort_unstable();
+        let at = |q: f64| {
+            ages.get(((ages.len() as f64 - 1.0) * q) as usize)
+                .copied()
+                .unwrap_or(0)
+        };
+        println!(
+            "M10: broken Tenants' messages made while down: {} handled, age p50 {} ms, p99 {} ms, max {} ms",
+            ages.len(),
+            at(0.5),
+            at(0.99),
+            ages.last().copied().unwrap_or(0)
+        );
+    }
     let mut ages = std::mem::take(&mut *spared.lock().unwrap());
     ages.sort_unstable();
     let at = |q: f64| {
@@ -1556,9 +1910,13 @@ async fn a_kms_hanging_drilled() {
     }
     // Under a partial outage the spared Tenants wait no longer than twice
     // the control run's p99 on the reference machine, 4.2 s, if it refuses;
-    // if it hangs, no longer than a quarter above the round's baseline,
-    // 297 s (§ Owed: a partial hang eats the loops, the DEK's).
-    if let (false, None, Some(_)) = (small, slow, partial) {
+    // if it hangs, no longer than a quarter above the baseline, 297 s: the
+    // loops a partial hang holds are owed (ADR-0042 § Owed 2; the tally above
+    // splits them by path and by the row's history, ADR-0043). The bounds are
+    // M10's own shape's: at 5,000 Tenants the baseline's spared p99 is 719 s,
+    // longer than the outage, so the arm there is a measurement, not a guard.
+    let shape = tenants == TENANTS && rate == RATE;
+    if let (false, None, Some(_), true) = (small, slow, partial, shape) {
         let bound = if hang { 371_000 } else { 8_500 };
         assert!(at(0.99) <= bound, "the spared waited p99 {} ms", at(0.99));
     }

@@ -695,7 +695,7 @@ where
         let (scope, last, probe) = {
             let mut state = self.lock();
             let key = tenant.to_owned();
-            let scope = scope.unwrap_or_else(|| state.core.scope(&key, reason));
+            let scope = scope.unwrap_or_else(|| state.core.scope(&key, reason, now()));
             let last = state.core.noted(&key).cloned();
             let on_evidence = matches!(reason, Reason::Waited | Reason::BackingOff | Reason::Late);
             let probe = (scope == Scope::Stage && on_evidence)

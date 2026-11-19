@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use crate::pace::{
     Evidence, Failure, Flying, Generation, Held, Kind, LONGEST, Outcome, Reason, Scope, Start,
-    failed, later, scope_by,
+    failed, later, scope_by, trouble_since,
 };
 use crate::supply::InvalidParameters;
 
@@ -60,10 +60,11 @@ pub struct Opening {
 
 impl Opening {
     /// An opening keeping each key `keep`, holding `keys` entries, waiting
-    /// near an unwrap's bound: an open refused costs the inbox an attempt and
-    /// a slot held for a while, and no unwrap ahead hides its latency, so
-    /// the open waits as long as an unwrap usually takes, not a seal's
-    /// quarter of a second.
+    /// near an unwrap's bound: an open refused costs the inbox no attempt
+    /// (seedwork ADR-0040) but a hold of at least 2 s, a row written and a
+    /// second dispatch, often in another process that holds no key, and no
+    /// unwrap ahead hides its latency, so the open waits as long as an unwrap
+    /// usually takes, not a seal's quarter of a second.
     #[must_use]
     pub const fn fitted(keep: Duration, keys: usize) -> Self {
         Opening {
@@ -315,15 +316,23 @@ impl<T: Clone + Eq + Hash, W: Clone + Eq + Hash, K, N> Unwraps<T, W, K, N> {
     }
 
     /// The scope of a refusal of `tenant`'s open for `reason`.
-    fn scope_of(&self, tenant: &T, entry: Option<&Entry<K>>, reason: Reason) -> Scope {
+    fn scope_of(
+        &self,
+        tenant: &T,
+        entry: Option<&Entry<K>>,
+        reason: Reason,
+        now: Instant,
+    ) -> Scope {
         match reason {
             Reason::FlightsFull | Reason::Unspawned => Scope::Stage,
             Reason::Waited | Reason::BackingOff | Reason::Late => {
                 let since = match self.evidence(tenant) {
                     Evidence::Failed { at, .. } => Some(at),
-                    Evidence::Trusted | Evidence::Late => {
-                        entry.and_then(|entry| entry.flight.map(|flying| flying.started))
-                    }
+                    Evidence::Trusted | Evidence::Late { .. } => trouble_since(
+                        entry.and_then(|entry| entry.flight.map(|flying| flying.started)),
+                        now,
+                        self.opening.wait,
+                    ),
                 };
                 scope_by(since, self.landed_in_time)
             }
@@ -333,13 +342,13 @@ impl<T: Clone + Eq + Hash, W: Clone + Eq + Hash, K, N> Unwraps<T, W, K, N> {
     /// The scope of a refusal of `tenant`'s open of `wrapped` for `reason`,
     /// as of now: for the shell's own refusals.
     #[must_use]
-    pub fn scope(&self, tenant: &T, wrapped: &W, reason: Reason) -> Scope {
+    pub fn scope(&self, tenant: &T, wrapped: &W, reason: Reason, now: Instant) -> Scope {
         let entry = self.entries.get(&(tenant.clone(), wrapped.clone()));
-        self.scope_of(tenant, entry, reason)
+        self.scope_of(tenant, entry, reason, now)
     }
 
     /// What an open of `wrapped` for `tenant` at `now` is answered, its wait
-    /// ending at `deadline`, and the unwrap to start, if any.
+    /// ending at `deadline` at the latest, and the unwrap to start, if any.
     pub fn open(
         &mut self,
         tenant: &T,
@@ -391,7 +400,7 @@ impl<T: Clone + Eq + Hash, W: Clone + Eq + Hash, K, N> Unwraps<T, W, K, N> {
         if let Evidence::Failed { until, .. } = evidence
             && now < until
         {
-            let scope = self.scope_of(tenant, self.entries.get(&pair), Reason::BackingOff);
+            let scope = self.scope_of(tenant, self.entries.get(&pair), Reason::BackingOff, now);
             return refused(
                 Reason::BackingOff,
                 Some(until.saturating_duration_since(now)),
@@ -399,18 +408,18 @@ impl<T: Clone + Eq + Hash, W: Clone + Eq + Hash, K, N> Unwraps<T, W, K, N> {
             );
         }
         if let Some(flying) = self.entries.get(&pair).and_then(|entry| entry.flight) {
-            if evidence == Evidence::Trusted {
+            if flying.trusted {
                 if let Some(entry) = self.entries.get_mut(&pair) {
                     entry.waiters = entry.waiters.saturating_add(1);
                 }
                 return (Opened::Join(flying.generation, deadline), None);
             }
-            let scope = self.scope_of(tenant, self.entries.get(&pair), Reason::Late);
+            let scope = self.scope_of(tenant, self.entries.get(&pair), Reason::Late, now);
             return refused(Reason::Late, None, scope);
         }
         let (kind, trusted) = match evidence {
             Evidence::Trusted => (Kind::Miss, true),
-            Evidence::Late => (Kind::Miss, false),
+            Evidence::Late { .. } => (Kind::Miss, false),
             Evidence::Failed { at, .. } => (
                 Kind::Probe,
                 self.landed_in_time.is_some_and(|landed| landed > at),
@@ -422,12 +431,13 @@ impl<T: Clone + Eq + Hash, W: Clone + Eq + Hash, K, N> Unwraps<T, W, K, N> {
         if !self.entries.contains_key(&pair) && !self.room(now) {
             return refused(Reason::FlightsFull, None, Scope::Stage);
         }
-        let scope = self.scope_of(tenant, self.entries.get(&pair), Reason::Late);
-        let start = self.start(&pair, kind, now);
+        let scope = self.scope_of(tenant, self.entries.get(&pair), Reason::Late, now);
+        let start = self.start(&pair, kind, now, trusted);
         if trusted {
-            if let Some(held) = self.tenants.get_mut(tenant) {
-                held.evidence = Evidence::Trusted;
-            }
+            // A trusted probe is waited on, and its Tenant's failure stands:
+            // only the Tenant's own landing in time ends it, so that the
+            // back-off doubles while its unwraps keep failing. The flight
+            // carries the trust: its joiners wait on it too.
             if let Some(entry) = self.entries.get_mut(&pair) {
                 entry.waiters = entry.waiters.saturating_add(1);
             }
@@ -472,7 +482,7 @@ impl<T: Clone + Eq + Hash, W: Clone + Eq + Hash, K, N> Unwraps<T, W, K, N> {
         true
     }
 
-    fn start(&mut self, pair: &(T, W), kind: Kind, now: Instant) -> Start {
+    fn start(&mut self, pair: &(T, W), kind: Kind, now: Instant, trusted: bool) -> Start {
         let generation = self.generation();
         let held = self.held.of(kind);
         *held = held.saturating_add(1);
@@ -483,6 +493,7 @@ impl<T: Clone + Eq + Hash, W: Clone + Eq + Hash, K, N> Unwraps<T, W, K, N> {
             generation,
             kind,
             started: now,
+            trusted,
         });
         Start { generation, kind }
     }
@@ -496,35 +507,22 @@ impl<T: Clone + Eq + Hash, W: Clone + Eq + Hash, K, N> Unwraps<T, W, K, N> {
     }
 
     /// A waiter of flight `generation` gave up at `now`, the flight still
-    /// out: the tenant's unwraps are late once the flight has flown a whole
-    /// wait, and no evidence before.
+    /// out: once the flight has flown a whole wait it is waited on no more,
+    /// and a trusted Tenant turns late; no evidence before. A failure, a key
+    /// gone above all, is not forgotten for a slow unwrap.
     pub fn gave_up(&mut self, tenant: &T, wrapped: &W, generation: Generation, now: Instant) {
         let wait = self.opening.wait;
-        let flown = self
-            .entries
-            .get(&(tenant.clone(), wrapped.clone()))
-            .and_then(|entry| entry.flight)
-            .filter(|flying| flying.generation == generation)
-            .is_some_and(|flying| now.saturating_duration_since(flying.started) >= wait);
-        if flown {
-            // Only a trusted tenant turns late: a failure, a key gone above
-            // all, is not forgotten for a slow unwrap.
-            match self.tenants.get_mut(tenant) {
-                Some(held) if held.evidence == Evidence::Trusted => {
-                    held.evidence = Evidence::Late;
-                }
-                Some(_) => {}
-                None => {
-                    self.tenants.insert(
-                        tenant.clone(),
-                        Tenant {
-                            evidence: Evidence::Late,
-                            note: None,
-                            due: None,
-                        },
-                    );
-                }
-            }
+        let mut flown = false;
+        if let Some(entry) = self.entries.get_mut(&(tenant.clone(), wrapped.clone()))
+            && let Some(flying) = entry.flight.as_mut()
+            && flying.generation == generation
+            && now.saturating_duration_since(flying.started) >= wait
+        {
+            flying.trusted = false;
+            flown = true;
+        }
+        if flown && self.evidence(tenant) == Evidence::Trusted {
+            self.late(tenant, now);
         }
         self.settle_tenant(tenant, now);
     }
@@ -547,7 +545,7 @@ impl<T: Clone + Eq + Hash, W: Clone + Eq + Hash, K, N> Unwraps<T, W, K, N> {
     pub fn failures(&self, tenant: &T) -> u32 {
         match self.evidence(tenant) {
             Evidence::Failed { failures, .. } => failures,
-            Evidence::Trusted | Evidence::Late => 0,
+            Evidence::Trusted | Evidence::Late { .. } => 0,
         }
     }
 
@@ -607,11 +605,16 @@ impl<T: Clone + Eq + Hash, W: Clone + Eq + Hash, K, N> Unwraps<T, W, K, N> {
                 } else {
                     self.retired.push(key);
                 }
-                if !gone_now {
-                    self.trust(tenant);
-                }
                 if now.saturating_duration_since(started) <= self.opening.wait {
+                    if !gone_now {
+                        self.trust(tenant);
+                    }
                     self.landed_in_time = Some(now);
+                } else if !gone_now {
+                    // a landing past the wait is no evidence that the
+                    // Tenant's unwraps land in time: it is late, its run of
+                    // failures ended, for the KMS answered
+                    self.late(tenant, now);
                 }
             }
             Outcome::Gone => {
@@ -651,6 +654,17 @@ impl<T: Clone + Eq + Hash, W: Clone + Eq + Hash, K, N> Unwraps<T, W, K, N> {
         }
         self.settle_entry(tenant, wrapped, now);
         self.settle_tenant(tenant, now);
+    }
+
+    fn late(&mut self, tenant: &T, at: Instant) {
+        self.tenants
+            .entry(tenant.clone())
+            .or_insert(Tenant {
+                evidence: Evidence::Late { at },
+                note: None,
+                due: None,
+            })
+            .evidence = Evidence::Late { at };
     }
 
     fn trust(&mut self, tenant: &T) {
@@ -742,7 +756,9 @@ impl<T: Clone + Eq + Hash, W: Clone + Eq + Hash, K, N> Unwraps<T, W, K, N> {
         };
         let forgets = match held.evidence {
             Evidence::Failed { until, .. } => Some(later(until, memory)),
-            Evidence::Trusted | Evidence::Late => None,
+            // late evidence is forgotten a back-off cap after it was set
+            Evidence::Late { at } => Some(later(at, memory)),
+            Evidence::Trusted => None,
         };
         let idle = match forgets {
             Some(at) => at <= now,
@@ -971,6 +987,191 @@ mod tests {
         core.sweep(t0 + 60 * S);
         assert_eq!(core.take_retired(), vec![1], "retired at its end, idle");
         assert_eq!((core.keys_held(), core.entries()), (0, 0));
+    }
+
+    const MS: Duration = Duration::from_millis(1);
+
+    /// The opening as fitted.
+    fn fitted() -> Unwraps<&'static str, &'static str, u32> {
+        core_with(Opening::fitted(60 * S, 16))
+    }
+
+    /// `wrapped` of `tenant` unwrapped at `at`, its unwrap taking `took`.
+    fn landed_after(
+        core: &mut Unwraps<&'static str, &'static str, u32>,
+        tenant: &'static str,
+        wrapped: &'static str,
+        at: Instant,
+        took: Duration,
+    ) {
+        let (_, start) = core.open(&tenant, &wrapped, at, deadline(at));
+        core.left(&tenant, &wrapped, at);
+        core.landed(
+            &tenant,
+            &wrapped,
+            start.expect("an unwrap").generation,
+            Outcome::Drawn {
+                key: 7,
+                started: at,
+            },
+            at + took,
+            0,
+        );
+    }
+
+    /// A Tenant whose unwraps hang while another's land keeps its failure
+    /// through a trusted probe: the probe is waited on, its failure counted
+    /// on top, the back-off doubled (seedwork ADR-0042 § Owed 2, the partial
+    /// hang). Red when the trusted probe sets the Tenant trusted.
+    #[test]
+    fn a_trusted_probe_that_fails_doubles_the_tenant_s_back_off() {
+        let (mut core, t0) = (fitted(), Instant::now());
+        let (_, start) = core.open(&"a", &"w", t0, deadline(t0));
+        let start = start.unwrap();
+        core.left(&"a", &"w", t0);
+        let failed = t0 + 5 * S;
+        core.landed(&"a", &"w", start.generation, Outcome::Abandoned, failed, 0);
+        assert_eq!(core.failures(&"a"), 1);
+        // another Tenant lands in time after the failure: the probe is trusted
+        landed_after(&mut core, "b", "v", failed + MS, MS);
+        let back = failed + 2 * S;
+        let (answer, start) = core.open(&"a", &"w", back, deadline(back));
+        let start = start.unwrap();
+        assert_eq!(start.kind, Kind::Probe);
+        assert!(matches!(answer, Opened::Join(..)), "{answer:?}");
+        assert_eq!(
+            core.failures(&"a"),
+            1,
+            "the trusted probe keeps the failure"
+        );
+        core.left(&"a", &"w", back);
+        let again = back + 5 * S;
+        core.landed(&"a", &"w", start.generation, Outcome::Abandoned, again, 0);
+        assert_eq!(core.failures(&"a"), 2, "and counts its own");
+        // the step doubled, 8 s: half of it at the least jitter
+        let early = again + 3 * S;
+        assert!(matches!(
+            core.open(&"a", &"w", early, deadline(early)).0,
+            Opened::Refused {
+                reason: Reason::BackingOff,
+                ..
+            }
+        ));
+    }
+
+    /// An unwrap that lands past the wait is no evidence that the Tenant's
+    /// unwraps land in time: its key serves its wrapped key, and the
+    /// Tenant's next wrapped key is unwrapped on its own, the open refused
+    /// at once. Red when any landing trusts the Tenant.
+    #[test]
+    fn a_tenant_whose_unwrap_lands_past_the_wait_stays_late() {
+        let (mut core, t0) = (fitted(), Instant::now());
+        let (_, start) = core.open(&"a", &"w", t0, deadline(t0));
+        let start = start.unwrap();
+        core.left(&"a", &"w", t0);
+        core.landed(
+            &"a",
+            &"w",
+            start.generation,
+            Outcome::Drawn {
+                key: 1,
+                started: t0,
+            },
+            t0 + 2 * S + MS,
+            0,
+        );
+        let at = t0 + 3 * S;
+        assert_eq!(core.open(&"a", &"w", at, deadline(at)).0, Opened::Hit(1));
+        let (answer, start) = core.open(&"a", &"v", at, deadline(at));
+        assert!(start.is_some(), "its next key is unwrapped");
+        assert!(
+            matches!(
+                answer,
+                Opened::Refused {
+                    reason: Reason::Late,
+                    ..
+                }
+            ),
+            "and not waited on: {answer:?}"
+        );
+        // late evidence is forgotten a back-off cap after it was set, at the
+        // sweep its deadline brings
+        let forgotten = t0 + 2 * S + MS + 30 * S;
+        assert_eq!(core.next_deadline(), Some(forgotten));
+        core.sweep(forgotten);
+        assert!(matches!(
+            core.open(&"a", &"t", forgotten, deadline(forgotten)).0,
+            Opened::Join(..)
+        ));
+    }
+
+    /// A refusal of a late Tenant with no flight yet is the Tenant's when
+    /// another Tenant's unwrap landed in time within the last wait: its scope
+    /// reads the stage's landings over the last wait, as a waiter's did over
+    /// its whole wait. With no landing within the last wait, the stage's.
+    /// Red when a refusal with no flight reads no window, the stage's always.
+    #[test]
+    fn a_late_tenant_s_refusal_reads_the_stage_s_landings_over_the_last_wait() {
+        let (mut core, t0) = (fitted(), Instant::now());
+        let (answer, start) = core.open(&"a", &"w", t0, deadline(t0));
+        assert!(matches!(answer, Opened::Join(..)), "{answer:?}");
+        let gave_up = deadline(t0);
+        core.gave_up(&"a", &"w", start.unwrap().generation, gave_up);
+        core.left(&"a", &"w", gave_up);
+        landed_after(&mut core, "b", "v", gave_up, MS);
+        // the late Tenant's next key: no flight yet, another landed just now
+        let (answer, _) = core.open(&"a", &"u", gave_up + MS, deadline(gave_up + MS));
+        assert!(
+            matches!(
+                answer,
+                Opened::Refused {
+                    reason: Reason::Late,
+                    scope: Scope::Tenant,
+                    ..
+                }
+            ),
+            "{answer:?}"
+        );
+        // with no landing within the last wait, the stage's
+        let later = gave_up + 3 * S;
+        let (answer, _) = core.open(&"a", &"t", later, deadline(later));
+        assert!(
+            matches!(
+                answer,
+                Opened::Refused {
+                    reason: Reason::Late,
+                    scope: Scope::Stage,
+                    ..
+                }
+            ),
+            "{answer:?}"
+        );
+    }
+
+    /// The joiners of a trusted probe wait on it, as on any trusted flight:
+    /// keeping the Tenant's failure does not refuse them. Red when a join
+    /// reads the Tenant's evidence instead of the flight's trust.
+    #[test]
+    fn a_trusted_probe_is_joined() {
+        let (mut core, t0) = (fitted(), Instant::now());
+        let (_, start) = core.open(&"a", &"w", t0, deadline(t0));
+        core.left(&"a", &"w", t0);
+        let failed = t0 + 5 * S;
+        core.landed(
+            &"a",
+            &"w",
+            start.unwrap().generation,
+            Outcome::Abandoned,
+            failed,
+            0,
+        );
+        landed_after(&mut core, "b", "v", failed + MS, MS);
+        let back = failed + 2 * S;
+        let (first, start) = core.open(&"a", &"w", back, deadline(back));
+        assert!(matches!(first, Opened::Join(..)) && start.is_some());
+        let (second, again) = core.open(&"a", &"w", back, deadline(back));
+        assert!(matches!(second, Opened::Join(..)), "{second:?}");
+        assert_eq!(again, None, "one flight");
     }
 
     /// A key gone answers every open of its tenant within its memory,
@@ -1385,6 +1586,10 @@ mod property {
         evicted: u64,
         wiped_after_gone: u32,
         gone_retiring: u32,
+        /// Landings past the wait.
+        late: u32,
+        /// Trusted probes whose flight then failed.
+        probes_failed: u32,
     }
 
     fn run(steps: &[Step], random: u64) -> Result<Activity, TestCaseError> {
@@ -1400,8 +1605,16 @@ mod property {
         let mut retired: HashSet<u32> = HashSet::new();
         let mut next_id = 0;
         let mut activity = Activity::default();
+        // the Tenants whose last landing was past the wait, and when
+        let mut late: HashMap<&'static str, Instant> = HashMap::new();
+        // the flights started as trusted probes
+        let mut probes: HashSet<Generation> = HashSet::new();
+        // when each Tenant's last failure landed: its memory ends no sooner
+        // than a back-off cap after
+        let mut failed_at: HashMap<&'static str, Instant> = HashMap::new();
         for (n, step) in steps.iter().enumerate() {
             let random = random.rotate_left(u32::try_from(n % 64).unwrap());
+            let failures: Vec<u32> = TENANTS.iter().map(|t| core.failures(t)).collect();
             match *step {
                 Step::Open(t, w) => {
                     let pair = (TENANTS[t], WRAPPED[w]);
@@ -1416,6 +1629,20 @@ mod property {
                     if let Some(start) = start {
                         prop_assert!(!flying.contains_key(&pair), "two flights for {pair:?}");
                         flying.insert(pair, (start.generation, now));
+                        if start.kind == Kind::Probe && matches!(answer, Opened::Join(..)) {
+                            probes.insert(start.generation);
+                        }
+                        // P3: an open that starts a late Tenant's unwrap
+                        // does not wait on it
+                        if late
+                            .get(pair.0)
+                            .is_some_and(|at| now < *at + opening.backoff.1)
+                        {
+                            prop_assert!(
+                                !matches!(answer, Opened::Join(..)),
+                                "a late Tenant's new unwrap waited on"
+                            );
+                        }
                     }
                     match answer {
                         Opened::Hit(key) => {
@@ -1536,6 +1763,26 @@ mod property {
                         _ => None,
                     };
                     let is_gone = matches!(outcome, Outcome::Gone);
+                    match &outcome {
+                        Outcome::Drawn { started, .. }
+                            if now.saturating_duration_since(*started) > opening.wait =>
+                        {
+                            activity.late += 1;
+                            if !within_gone {
+                                late.insert(pair.0, now);
+                            }
+                        }
+                        Outcome::Drawn { .. } | Outcome::Refused => {
+                            late.remove(pair.0);
+                        }
+                        _ => {
+                            late.remove(pair.0);
+                            failed_at.insert(pair.0, now);
+                            if probes.contains(&generation) {
+                                activity.probes_failed += 1;
+                            }
+                        }
+                    }
                     core.landed(&pair.0, &pair.1, generation, outcome, now, random);
                     let wiped: Vec<u32> = core.take_retired().iter().map(|key| key.id).collect();
                     if within_gone && let Some(id) = drawn_id {
@@ -1563,6 +1810,28 @@ mod property {
             }
             for key in core.take_retired() {
                 prop_assert!(retired.insert(key.id), "a key retired twice");
+            }
+            // P2: a Tenant's failures change only at a landing of its own
+            // flight, or as its memory ends — a back-off cap at least after
+            // the last: never at an open, a give-up or a waiter leaving
+            for (i, tenant) in TENANTS.iter().enumerate() {
+                let own_landing =
+                    matches!(*step, Step::Land(t, _, _, false) if TENANTS[t] == *tenant);
+                let now_failures = core.failures(tenant);
+                if !own_landing && now_failures != failures[i] {
+                    let forgotten = now_failures == 0
+                        && failed_at
+                            .get(tenant)
+                            .is_none_or(|at| now >= *at + opening.backoff.1);
+                    prop_assert!(
+                        forgotten,
+                        "{}'s failures {} → {} at {:?}",
+                        tenant,
+                        failures[i],
+                        now_failures,
+                        step
+                    );
+                }
             }
             prop_assert!(core.flights() <= 2, "more unwraps than the cap");
             prop_assert_eq!(core.flights(), flying.len(), "a flight lost");
@@ -1608,6 +1877,8 @@ mod property {
             total.evicted += activity.evicted;
             total.wiped_after_gone += activity.wiped_after_gone;
             total.gone_retiring += activity.gone_retiring;
+            total.late += activity.late;
+            total.probes_failed += activity.probes_failed;
             for (k, v) in activity.refused {
                 *total.refused.entry(k).or_default() += v;
             }
@@ -1622,6 +1893,8 @@ mod property {
                 "landings wiped after gone",
                 u64::from(total.wiped_after_gone),
             ),
+            ("landings past the wait", u64::from(total.late)),
+            ("trusted probes failed", u64::from(total.probes_failed)),
         ] {
             assert!(count > 0, "never {what}: {total:?}");
         }

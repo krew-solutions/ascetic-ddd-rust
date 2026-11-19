@@ -216,12 +216,13 @@ where
         let deadline = now() + self.opening.wait;
         let mut gave_up = false;
         loop {
+            let opened = now();
             let (answer, start, retired, landing) = {
                 let mut state = self.lock();
                 let (answer, start) =
                     state
                         .core
-                        .open(&tenant.to_owned(), &wrapped, now(), deadline);
+                        .open(&tenant.to_owned(), &wrapped, opened, deadline);
                 if let Some(start) = start {
                     state.flights.insert(start.generation, watch::channel(()).0);
                 }
@@ -251,7 +252,7 @@ where
                     Some(Scope::Stage),
                 ));
             }
-            let generation = match answer {
+            let (generation, until) = match answer {
                 Opened::Hit(key) => return Ok(key),
                 Opened::Gone => return Err(gone(tenant)),
                 Opened::Rejected => {
@@ -281,7 +282,7 @@ where
                         Some(scope),
                     ));
                 }
-                Opened::Join(generation, _) => generation,
+                Opened::Join(generation, until) => (generation, until),
             };
             let mut joined = Joined {
                 opens: self,
@@ -297,7 +298,7 @@ where
             }
             let landed = matches!(
                 tokio::time::timeout_at(
-                    tokio::time::Instant::from_std(deadline),
+                    tokio::time::Instant::from_std(until),
                     joined.landing.changed(),
                 )
                 .await,
@@ -329,7 +330,7 @@ where
         let (scope, last) = {
             let mut state = self.lock();
             let key = tenant.to_owned();
-            let scope = scope.unwrap_or_else(|| state.core.scope(&key, wrapped, reason));
+            let scope = scope.unwrap_or_else(|| state.core.scope(&key, wrapped, reason, now()));
             if scope == Scope::Stage {
                 state.refused = Some(Known {
                     tenant: key.clone(),

@@ -143,7 +143,11 @@ what a stage does is counted and told.**
    ended is trusted for its first draw when a slot of the same stage
    landed a draw in time (≤ `wait`) after this slot's failure: Vault
    demonstrably answers. No breaker spans Tenants: one Tenant's 429 or 5xx
-   never stops another's draws.
+   never stops another's draws. Revised by ADR-0043 (2026-11-19): the
+   trusted probe keeps the slot's failure and its count, its flight
+   carrying the trust for its joiners; only the slot's own draw landed in
+   time trusts it, and one landed past `wait` leaves it late; a refusal's
+   scope reads the stage's landings over the last `wait`.
 8. **The class table** is `kms`'s (`Error::class()`), total over every
    variant and the fields that tell them apart:
    - **Gone**: `KekNotFound` at no version (a 400 whose read answered 404
@@ -229,6 +233,11 @@ what a stage does is counted and told.**
 
 - A Vault that stalls holds a caller for `wait` at most, once per slot,
   and then nothing: later seals are refused at once with `retry_after`.
+  Refuted for a Vault that stalls for some Tenants only (ADR-0043): the
+  trusted probe reset the slot's count, and a caller waited `wait` at
+  every back-off's end; it holds again since ADR-0043, once per run of a
+  slot's failures. The inbox's loops a partial outage holds are ADR-0042
+  § Owed 2's.
 - One draw serves its waiters; a slow Vault converges instead of being
   hammered.
 - A key serves exactly its lifetime from its draw, and leaves memory then.
@@ -527,3 +536,10 @@ ADR-0017 (amended: decision 8 above replaces its point 5's reading of a
     on a paused clock. That a draw making a KEK can outlast the fitted
     250 ms is a deployment's to weigh when it sets the wait
     (`Sealing::over_paced`).
+- 2026-11-19 — Decision 7 and the Consequences revised by ADR-0043: a
+  partial outage of the KMS (M10's partial shape) held the inbox's loops
+  in the opening end's waits. The trusted probe erased the slot's failure
+  count, so its back-off never doubled; any landing, however late,
+  trusted the slot; a late slot's refusal with no flight read the stage's
+  scope. The rule, its reason and the measured paths of the waits are in
+  ADR-0043.
