@@ -1,0 +1,22 @@
+[package]
+name = "ascetic-ddd-faker"
+description = "Generated data for load tests: every value drawn from the key of its identity, by stated laws, on any number of threads."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[dependencies]
+# Pinned exactly: the PRF is part of every generated value, so a host's lock
+# must not move it (ADR-0045 decision 2).
+siphasher = { version = "=1.0.3", default-features = false }
+uuid = { version = "1", default-features = false }
+
+[dev-dependencies]
+proptest = "1.11.0"

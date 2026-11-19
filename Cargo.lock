@@ -94,6 +94,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ascetic-ddd-faker"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "siphasher",
+ "uuid",
+]
+
+[[package]]
 name = "ascetic-ddd-inbox"
 version = "0.1.0"
 dependencies = [
