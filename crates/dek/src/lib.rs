@@ -32,7 +32,7 @@ pub use crate::opens::OpeningHeld;
 pub use crate::pg::PgDekStore;
 pub use crate::port::DekStore;
 #[cfg(feature = "bus")]
-pub use crate::sealing::{ByDestination, Sealing, SealingParameters, UnsealedChannel};
+pub use crate::sealing::{ByDestination, Sealing, SealingParameters, Unroutable, UnsealedChannel};
 #[cfg(feature = "bus")]
 pub use crate::stage::{EnvelopeStage, Pacing, Reuse};
 pub use crate::unwraps::Opening;

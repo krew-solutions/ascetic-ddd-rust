@@ -243,10 +243,10 @@ fn by_the_indexes(plan: &Value, table: &str, indexes: &[String], sorted: f64) {
         }
         // the inbox table's own indexes: its key and the `{table}__` ones;
         // `{table}_slots_pkey` is the slots' and may be read
-        if let Some(index) = node["Index Name"].as_str() {
-            if index == format!("{table}_pk") || index.starts_with(&format!("{table}__")) {
-                assert!(indexes.iter().any(|i| i == index), "{index}: {node}");
-            }
+        if let Some(index) = node["Index Name"].as_str()
+            && (index == format!("{table}_pk") || index.starts_with(&format!("{table}__")))
+        {
+            assert!(indexes.iter().any(|i| i == index), "{index}: {node}");
         }
         if kind == "Sort" {
             let rows = node["Actual Rows"].as_f64().unwrap_or_default();

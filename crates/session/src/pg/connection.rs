@@ -46,10 +46,10 @@ impl Drop for Shared {
         // A poisoned connection is taken out of the pool for good; the server
         // ends whatever transaction it was in when the socket closes. A
         // healthy one returns to the pool as usual.
-        if self.poisoned.load(Ordering::SeqCst) {
-            if let Some(client) = self.client.take() {
-                drop(Object::take(client));
-            }
+        if self.poisoned.load(Ordering::SeqCst)
+            && let Some(client) = self.client.take()
+        {
+            drop(Object::take(client));
         }
     }
 }

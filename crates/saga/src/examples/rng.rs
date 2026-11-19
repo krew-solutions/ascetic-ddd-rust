@@ -19,7 +19,7 @@ impl SeededRng {
     pub(super) fn next_reservation_id(&self) -> i64 {
         let previous = self
             .0
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |state| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |state| {
                 Some(Self::step(state))
             })
             .expect("the update never fails");

@@ -46,9 +46,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
         run: |
-          rustup toolchain install 1.97.0 --profile minimal \
+          rustup toolchain install 1.100.0 --profile minimal \
             --component rustfmt --component clippy
-          rustup default 1.97.0
+          rustup default 1.100.0
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -86,8 +86,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
         run: |
-          rustup toolchain install 1.97.0 --profile minimal
-          rustup default 1.97.0
+          rustup toolchain install 1.100.0 --profile minimal
+          rustup default 1.100.0
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:

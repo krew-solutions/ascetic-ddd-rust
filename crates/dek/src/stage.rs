@@ -239,6 +239,10 @@ fn bounded(lifetime: Duration) -> Duration {
 pub struct EnvelopeStage<P, K> {
     draws: Arc<Draws<P, K>>,
     opener: Arc<Opener<P, K>>,
+    /// The opening end's dependency, made with the opener: one object for
+    /// the opener's life, which an inbox tells from another by identity
+    /// (seedwork ADR-0044).
+    dependency: Arc<dyn bus::Dependency>,
     sentinel: Option<String>,
     algorithm: Algorithm,
     bound_to: Vec<String>,
@@ -276,6 +280,7 @@ impl<P, K> EnvelopeStage<P, K> {
         ));
         EnvelopeStage {
             draws,
+            dependency: Arc::new(OpeningDependency(Arc::clone(&opener))),
             opener,
             sentinel: None,
             algorithm: Algorithm::Aes256Gcm,
@@ -371,6 +376,7 @@ impl<P, K> EnvelopeStage<P, K> {
             Some(sentinel.clone()),
         ));
         EnvelopeStage {
+            dependency: Arc::new(OpeningDependency(Arc::clone(&opener))),
             opener,
             sentinel: Some(sentinel),
             ..stage
@@ -395,19 +401,24 @@ impl<P, K> EnvelopeStage<P, K> {
             opening,
             self.sentinel.clone(),
         ));
-        Ok(EnvelopeStage { opener, ..self })
+        Ok(EnvelopeStage {
+            dependency: Arc::new(OpeningDependency(Arc::clone(&opener))),
+            opener,
+            ..self
+        })
     }
 
     /// What the opening end depends on, the KMS, as an inbox's breaker asks it
     /// (seedwork ADR-0042 decision 1): the keys it opened by a call, and a
-    /// check of it past the opening's memory and pacing.
-    pub fn dependency(&self) -> Arc<dyn bus::Dependency>
-    where
-        P: SessionPool + Send + Sync + 'static,
-        P::Session: Sync,
-        K: KeyManagementService<P::Session> + 'static,
-    {
-        Arc::new(OpeningDependency(Arc::clone(&self.opener)))
+    /// check of it past the opening's memory and pacing. The same object on
+    /// every call, for the opener's life (seedwork ADR-0044).
+    ///
+    /// The stage itself states no dependency: it does not know the
+    /// destinations an inbox receives it under. An inbox opens through a
+    /// [`ByDestination`](crate::ByDestination), which does.
+    #[must_use]
+    pub fn dependency(&self) -> Arc<dyn bus::Dependency> {
+        Arc::clone(&self.dependency)
     }
 
     /// What the opening end holds now: its keys, its entries, its unwraps.

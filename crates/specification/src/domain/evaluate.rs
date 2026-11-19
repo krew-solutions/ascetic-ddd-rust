@@ -339,15 +339,15 @@ fn read_constants<V: Operand>(
     left: V,
     right: V,
 ) -> Result<(V, V), OperandError> {
-    if matches!(left_expr, Expr::Value(_)) {
-        if let Some(read) = left.read_beside(&right)? {
-            return Ok((read, right));
-        }
+    if matches!(left_expr, Expr::Value(_))
+        && let Some(read) = left.read_beside(&right)?
+    {
+        return Ok((read, right));
     }
-    if matches!(right_expr, Expr::Value(_)) {
-        if let Some(read) = right.read_beside(&left)? {
-            return Ok((left, read));
-        }
+    if matches!(right_expr, Expr::Value(_))
+        && let Some(read) = right.read_beside(&left)?
+    {
+        return Ok((left, read));
     }
     Ok((left, right))
 }

@@ -702,14 +702,14 @@ fn c16_one_trial_a_tick_call_and_every_stall_refreshed() {
         now += Duration::from_secs(2);
         let effects = breaker.tick(now);
         for effect in &effects {
-            if let Effect::Stalled { channel, .. } = effect {
-                if let Some(at) = last.insert(channel.clone(), now) {
-                    assert!(
-                        now - at <= ttl,
-                        "{channel}'s stall unreported for {:?}, past its ttl {ttl:?}",
-                        now - at
-                    );
-                }
+            if let Effect::Stalled { channel, .. } = effect
+                && let Some(at) = last.insert(channel.clone(), now)
+            {
+                assert!(
+                    now - at <= ttl,
+                    "{channel}'s stall unreported for {:?}, past its ttl {ttl:?}",
+                    now - at
+                );
             }
         }
         for effect in effects {
@@ -2096,11 +2096,11 @@ proptest! {
             now += Duration::from_millis(millis);
             let tenant = format!("t{tenant}");
             let answer = breaker.before(now, CHANNEL, &tenant, 0, 0);
-            if let Some(until) = held_until.get(&tenant) {
-                if now < *until {
-                    prop_assert!(matches!(answer, Before::Hold { .. }), "{tenant} evicted before {until:?}");
-                    continue;
-                }
+            if let Some(until) = held_until.get(&tenant)
+                && now < *until
+            {
+                prop_assert!(matches!(answer, Before::Hold { .. }), "{tenant} evicted before {until:?}");
+                continue;
             }
             match answer {
                 Before::Hold { wait, .. } => {

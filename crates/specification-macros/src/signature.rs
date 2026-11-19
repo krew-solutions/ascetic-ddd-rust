@@ -70,13 +70,13 @@ impl<'f> Predicate<'f> {
                 ));
             }
         };
-        if receiver.is_some() {
-            if let Some(extra) = inputs.next() {
-                return Err(Error::new_spanned(
-                    extra,
-                    "a method of a specification takes the candidate alone: its constants are its fields",
-                ));
-            }
+        if receiver.is_some()
+            && let Some(extra) = inputs.next()
+        {
+            return Err(Error::new_spanned(
+                extra,
+                "a method of a specification takes the candidate alone: its constants are its fields",
+            ));
         }
         let parameters = inputs
             .map(|input| match input {

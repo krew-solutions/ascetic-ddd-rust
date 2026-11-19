@@ -303,10 +303,10 @@ impl<'s> Compiler<'s> {
         next: Next,
         stand: Stand,
     ) -> Result<(Fragment<V>, Next), CompileError> {
-        if let (Stand::Truth, Infix::Comparison(Comparison::Eq)) = (stand, op) {
-            if let Some(contained) = self.containment(left, right, item, next)? {
-                return Ok(contained);
-            }
+        if let (Stand::Truth, Infix::Comparison(Comparison::Eq)) = (stand, op)
+            && let Some(contained) = self.containment(left, right, item, next)?
+        {
+            return Ok(contained);
         }
         let (precedence, associativity) = precedence::infix(op);
         let apart = |side| associativity != side && !precedence::regroups(op);

@@ -5,11 +5,10 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.100"
 license = "MIT"
 authors = ["Ivan Zakrevsky <emacsway@gmail.com>"]
 repository = "https://github.com/krew-solutions/ascetic-ddd-rust"
-homepage = "https://github.com/krew-solutions/ascetic-ddd-rust"
 documentation = "https://krew-solutions.github.io/ascetic-ddd-rust/"
 keywords = ["ddd", "saga", "domain-driven-design"]
 categories = ["asynchronous", "data-structures"]

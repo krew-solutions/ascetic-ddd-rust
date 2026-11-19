@@ -22,7 +22,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use ascetic_ddd_bus::{
-    Cause, Check, Dependency, Dependent, Message, Permanent, Scope, Transient, Unavailable, cause,
+    Cause, Check, Dependencies, Dependency, Message, Permanent, Scope, Transient, Unavailable,
+    cause,
 };
 use ascetic_ddd_inbox::breaker::{Effect, Resumption};
 use ascetic_ddd_inbox::observer::{
@@ -1366,15 +1367,12 @@ impl Dependency for Fake {
 }
 
 /// The orders channel's dependency, `fake`.
-struct Orders(Arc<Fake>);
-
-impl Dependent for Orders {
-    fn dependencies(&self) -> Vec<(String, Arc<dyn Dependency>)> {
-        vec![(
-            "kafka://orders".to_owned(),
-            Arc::clone(&self.0) as Arc<dyn Dependency>,
-        )]
-    }
+fn orders(dependency: &Arc<Fake>) -> Dependencies {
+    Dependencies::by_destination([(
+        "kafka://orders",
+        Arc::clone(dependency) as Arc<dyn Dependency>,
+    )])
+    .expect("one dependency")
 }
 
 /// The stage's refusal of the dependency's cause, as the bus marks it.
@@ -1392,7 +1390,7 @@ fn dependency_down() -> Result<(), Failure> {
 async fn depending(name: &str, fake: &Arc<Fake>) -> Fixture {
     let f = fixture(name, Retries::up_to(3)).await;
     Fixture {
-        inbox: f.inbox.depending_on(&Orders(Arc::clone(fake))),
+        inbox: f.inbox.depending_on(&orders(fake)).expect("registered"),
         ..f
     }
 }
@@ -3298,14 +3296,13 @@ async fn a_stall_is_reported_while_it_lasts_and_lapses_after() {
                 .filter(|(_, effect)| matches!(effect, Effect::Paused { .. }))
                 .nth(nth - 1)
                 .map(|(at, _)| at);
-            if let Some(at) = paused {
-                if effects[at..]
+            if let Some(at) = paused
+                && effects[at..]
                     .iter()
                     .any(|effect| matches!(effect, Effect::Stalled { .. }))
-                {
-                    f.dispatch(|| stage_down(None)).await;
-                    return f.inbox.stalls(Duration::from_secs(5)).await.unwrap();
-                }
+            {
+                f.dispatch(|| stage_down(None)).await;
+                return f.inbox.stalls(Duration::from_secs(5)).await.unwrap();
             }
             assert!(started.elapsed() < Duration::from_secs(20), "never stalled");
             tokio::time::sleep(Duration::from_millis(30)).await;

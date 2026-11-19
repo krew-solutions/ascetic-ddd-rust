@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 
+use crate::dependency::Dependent;
 use crate::error::{BoxError, Unavailable};
 use crate::message::Message;
 
@@ -30,6 +31,17 @@ pub trait Stage: Send + Sync {
     /// The message as it came in, transformed back.
     fn inbound(&self, message: Message) -> BoxFuture<'_, Result<Message, BoxError>>;
 }
+
+/// A stage a transactional consumer goes in through: one that states what it
+/// depends on, so that the inbox it reads weighs its outage by it (seedwork
+/// ADR-0044). Every [`Stage`] that is [`Dependent`] is one.
+///
+/// A stage that answers from a memory and cannot say by which destinations —
+/// the DEK's envelope stage of one channel — is not one, and does not go in
+/// on an inbox; the DEK's `ByDestination` does.
+pub trait InboundStage: Stage + Dependent {}
+
+impl<S: Stage + Dependent> InboundStage for S {}
 
 /// The stages of a producer or a consumer, in the order they are passed.
 pub(crate) type Stages = Vec<Arc<dyn Stage>>;
@@ -47,8 +59,8 @@ pub(crate) async fn outbound(
 }
 
 /// Back through every stage, last to first.
-pub(crate) async fn inbound(
-    stages: &[Arc<dyn Stage>],
+pub(crate) async fn inbound<S: Stage + ?Sized>(
+    stages: &[Arc<S>],
     message: Message,
 ) -> Result<Message, BoxError> {
     let mut message = message;

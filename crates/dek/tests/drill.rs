@@ -44,9 +44,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ascetic_ddd_bus::identity::{STREAM_ID, STREAM_POSITION, STREAM_TYPE, TENANT_ID};
-use ascetic_ddd_bus::{Adapter, Message, Stage};
+use ascetic_ddd_bus::{Adapter, BoxError, Dependencies, Dependent, InboundStage, Message, Stage};
 use ascetic_ddd_dek::stage::MESSAGE_ID;
-use ascetic_ddd_dek::{Sealing, SealingParameters};
+use ascetic_ddd_dek::{ByDestination, Sealing, SealingParameters};
 use ascetic_ddd_inbox::breaker::Effect;
 use ascetic_ddd_inbox::observer::{BreakerChanged, Dispatched, Failed, InboxObserver, Withheld};
 use ascetic_ddd_inbox::{Loops, Outcome, PgInbox};
@@ -56,6 +56,7 @@ use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, R
 use ascetic_ddd_session::pg::tokio_postgres::{Config, NoTls};
 use ascetic_ddd_session::testing::{MemorySession, MemorySessionPool};
 use ascetic_ddd_session::{PgSessionPool, SessionError};
+use futures::future::BoxFuture;
 use tokio::time::Instant;
 
 const DEFAULT_URL: &str = "postgresql://devel:devel@localhost:5432/devel_karmabot_test";
@@ -78,6 +79,27 @@ const HANDLER: Duration = Duration::from_millis(50);
 const QUOTA: f64 = 60.0;
 const TABLE: &str = "dek_drill_inbox";
 
+/// The opening stage with its dependencies left undeclared: M10's reference
+/// arm, the stage's refusals the rows' breaker's, which a registered run is
+/// read against (ADR-0042 slice 12). The one composition the library keeps
+/// a host from making by mistake, made here on purpose (seedwork ADR-0044).
+struct Undeclared(ByDestination);
+
+impl Dependent for Undeclared {
+    fn dependencies(&self) -> Dependencies {
+        Dependencies::none()
+    }
+}
+
+impl Stage for Undeclared {
+    fn outbound(&self, message: Message) -> BoxFuture<'_, Result<Message, BoxError>> {
+        self.0.outbound(message)
+    }
+
+    fn inbound(&self, message: Message) -> BoxFuture<'_, Result<Message, BoxError>> {
+        self.0.inbound(message)
+    }
+}
 fn pool(size: usize) -> Pool {
     let url = std::env::var("ASCETIC_DDD_TEST_PG_URL").unwrap_or_else(|_| DEFAULT_URL.to_owned());
     let manager = Manager::from_config(
@@ -492,7 +514,7 @@ async fn an_outage_of_the_kms_drilled_for_an_hour() {
             .consumer(|message: &Message| {
                 Ok(std::str::from_utf8(message.payload())?.parse::<u64>()?)
             })
-            .through(Arc::new(opening) as Arc<dyn Stage>)
+            .through(Arc::new(opening))
             .subscribe(move |_tx, sent: u64| {
                 let latencies = Arc::clone(&latencies);
                 async move {
@@ -505,6 +527,11 @@ async fn an_outage_of_the_kms_drilled_for_an_hour() {
             })
             .unwrap();
         subscriptions.push(subscription);
+        assert_eq!(
+            inbox.dependent_channels().len(),
+            channels.len(),
+            "the subscription registers its stage's destinations"
+        );
     }
     // The producer: one queue in order, as an outbox is, sealing its head
     // and storing it; a head that cannot be sealed waits a second.
@@ -881,7 +908,7 @@ async fn a_replica_cut_off_alone_drilled() {
                     std::str::from_utf8(message.payload())?.parse::<u64>()?,
                 ))
             })
-            .through(Arc::new(opening) as Arc<dyn Stage>)
+            .through(Arc::new(opening))
             .subscribe(move |_tx, (kind, sent): (u8, u64)| {
                 let (latencies, crowd_latencies) =
                     (Arc::clone(&latencies), Arc::clone(&crowd_latencies));
@@ -897,6 +924,11 @@ async fn a_replica_cut_off_alone_drilled() {
             })
             .unwrap();
         subscriptions.push(subscription);
+        assert_eq!(
+            inbox.dependent_channels().len(),
+            channels.len(),
+            "the subscription registers its stage's destinations"
+        );
     }
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Steady traffic on the six other channels, until the drill ends.
@@ -1262,10 +1294,11 @@ async fn a_kms_hanging_drilled() {
             })
         })
         .collect();
-    // the opening ends by destination, their dependencies handed to each
-    // process's inbox, as a host composes them (ADR-0042 decision 1);
-    // ASCETIC_DDD_M10_UNREGISTERED=1: not handed, the stage's refusals the
-    // rows' breaker's (the reference a registered run is read against)
+    // the opening ends by destination, their dependencies registered by each
+    // process's subscription through them, as a host composes them (ADR-0042
+    // decision 1, seedwork ADR-0044); ASCETIC_DDD_M10_UNREGISTERED=1: the
+    // stage wrapped to declare none, the stage's refusals the rows'
+    // breaker's (the reference a registered run is read against)
     let registered = std::env::var("ASCETIC_DDD_M10_UNREGISTERED").map_or(true, |v| v != "1");
     if !registered {
         println!("M10: the dependencies not registered");
@@ -1279,8 +1312,7 @@ async fn a_kms_hanging_drilled() {
         .collect();
     let inboxes: Vec<Arc<PgInbox<PgSessionPool, Arc<Told>>>> = told
         .iter()
-        .zip(&openings)
-        .map(|(told, opening)| {
+        .map(|told| {
             let inbox = PgInbox::new(PgSessionPool::new(pool(LOOPS as usize + 4)))
                 .with_table(
                     Identifier::new(TABLE10).unwrap(),
@@ -1294,11 +1326,6 @@ async fn a_kms_hanging_drilled() {
                     max_error_wait: Duration::from_secs(1),
                 })
                 .with_breaking(breaking);
-            let inbox = if registered {
-                inbox.depending_on(opening)
-            } else {
-                inbox
-            };
             Arc::new(inbox.observed_by(Arc::clone(told)))
         })
         .collect();
@@ -1306,6 +1333,12 @@ async fn a_kms_hanging_drilled() {
     inboxes[0].migrate().await.unwrap();
     let mut subscriptions = Vec::new();
     for (opening, inbox) in openings.into_iter().zip(&inboxes) {
+        let declared = opening.destinations().count();
+        let opening: Arc<dyn InboundStage> = if registered {
+            Arc::new(opening)
+        } else {
+            Arc::new(Undeclared(opening))
+        };
         let spared = Arc::clone(&spared);
         let subscription = inbox
             .consumer(move |message: &Message| {
@@ -1313,7 +1346,7 @@ async fn a_kms_hanging_drilled() {
                 let tenant = std::str::from_utf8(message.header(TENANT_ID).unwrap_or_default())?;
                 Ok((made, partial.is_none_or(|p| !broken(tenant, p))))
             })
-            .through(Arc::new(opening) as Arc<dyn Stage>)
+            .through(opening)
             .subscribe(move |_tx, (made, spared_tenant): (u64, bool)| {
                 let spared = Arc::clone(&spared);
                 async move {
@@ -1328,6 +1361,11 @@ async fn a_kms_hanging_drilled() {
             })
             .unwrap();
         subscriptions.push(subscription);
+        assert_eq!(
+            inbox.dependent_channels().len(),
+            if registered { declared } else { 0 },
+            "the subscription registers what its stage declares"
+        );
     }
     // Steady traffic, sealed while the KMS answers: a seal that hangs waits.
     let producer = {

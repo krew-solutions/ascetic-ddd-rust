@@ -110,8 +110,8 @@ subscriber verdict and driven by every `dispatch`, a host's own as well as `run`
 that a stage's dependency serves: the opening end opens a key it holds with the KMS down (Context), and M10 found
 pauses closed by such trials while the KMS was down. So a channel has a breaker for each source of evidence, and is
 paused in a process while either is open:
-- the **dependency's**, on a channel whose dependency the composition root registered (`PgInbox::depending_on`,
-  from a bus `Dependent`; decision 9): it weighs the `Stage`-scoped `Unavailable`s the inbound stages told — the
+- the **dependency's**, on a channel whose dependency is registered — by the subscription through the stage that
+  declares it since ADR-0044, or by `PgInbox::depending_on` on the raw path; decision 9: it weighs the `Stage`-scoped `Unavailable`s the inbound stages told — the
   bus marks them — of a cause the dependency answers for, and its positive evidence is a key the dependency opened
   by a call: what it `served`, and a check served;
 - the **rows'**, for every other `Stage`-scoped `Unavailable` — a handler's own, a stage's of a cause its dependency
@@ -119,7 +119,9 @@ paused in a process while either is open:
   The rules below, to the probation, are its.
 
 Each closes by its own evidence alone. A channel whose dependency is not registered falls back to the rows'
-breaker, so the library's composition test (W1) and the host's (§ 12) hold the registration.
+breaker. Since ADR-0044 the registration is the subscription's: an inbox's consumer goes in only through stages
+that declare their dependencies, and hands them to the inbox with the handler; the library's composition test (W1)
+holds it.
 
 **Closed → open.** Over a window W = 30 s, F is the number of distinct Tenants whose latest verdict on the
 channel was a `Stage`-scoped `Unavailable`, and S the number whose latest was processed (a bounded set of 1,024,
@@ -470,9 +472,10 @@ inbox's and the outbox's both, since a host reads the two together.
    held 30 minutes.
 5. An operator's command per service for the verbs of § 8; the renamed fields of both `Loops` (§ 11).
 6. A KMS quota sized for the drain's rate of unwraps.
-7. The opening stage's dependencies registered with each inbox it opens for — `PgInbox::depending_on(&opening)`
-   beside `consumer.through(opening)` — and a composition test of the host's own as W1 is the library's: without
-   the registration a sealed channel's pauses are the rows', and a row its cache serves closes them (§ Owed 2).
+7. The opening stage's dependencies registered with each inbox it opens for: since ADR-0044 by the subscription
+   through `by_destination` itself, with no step of the host's; the host's composition test checks that
+   `dependent_channels()` covers every sealed destination of its intake. Without the registration a sealed
+   channel's pauses are the rows', and a row its cache serves closes them.
 
 ## Consequences
 
@@ -528,8 +531,9 @@ At 2,000 Tenants in each of 64 slots, 3 replicas of 8 loops, K = 32:
    (C1–C13); M5 decides them at scale. On a window nearly empty — a process just started, a quiet channel — two
    Tenants failing at `Stage` scope pause it: the cost is a tick, since a trial then asks a head a guest meets.
 5. **A dependency left unregistered** falls back to the rows' breaker, and a row the stage's memory serves closes
-   its pauses again. Checked: the library's composition test (W1) is red without `depending_on` and with the
-   dependencies keyed by the producers' channel; the host repeats it in its own (§ 12).
+   its pauses again. Checked: the library's composition test (W1) is red without the registration and with the
+   dependencies keyed by the producers' channel. Since ADR-0044 the registration is the subscription's, and W1 is
+   red when the inbox ignores what it is subscribed with.
 6. **The canary is a Tenant's key.** The control is the last key the dependency opened, a Tenant's, so a Tenant
    whose own key is the trouble — a customer-managed key revoked — makes a check unserved while the KMS serves the
    others. Bounded: a check asks the control and the head's key together and is served by either, and the control
@@ -655,7 +659,7 @@ histories with a manual clock; the shell's with a `Clock` and a paused runtime; 
 | C51 | a dependency's check and another channel's trial due at one tick call, the check first | both issued | the call ending at its check |
 | C52 | paused, closed, paused again within W; then a window later | stalled at the reopening; one failed tick after a window | failed ticks never kept; never forgotten |
 | H1 | the database (`tests/outage.rs`): a check hanging beside dispatches; the dependency refusing, its checks unserved under two causes, then served; two processes, one paused by its dependency, its checks unasked while the other serves the channel past the report's ttl twice over; the checks panicking; inside the crate (`pg/check_tests.rs`), a check started with the inbox's one session held, and one of a channel with no dependency | the slot another session's at once and another channel's row served by the next dispatch; paused only once a check confirms, the stall reported under the second cause, resumed by a check served, the rows going on; the first's stall row valid throughout, lapsing within its ttl after the resume; never paused, checked again; answered served, asked without the head's headers, and unasked | the dispatch running the check itself; the dependency's refusals weighed as the rows'; the checks' answers never applied; a pause that holds keeping no report (refreshed only at a failed tick); a check that cannot answer left unanswered; the head's read unbounded |
-| W1 | the composition (`crates/dek/tests/composition.rs`): the opening stage by destination, two destinations under one sealed channel, one with a key; `depending_on`; the consumer through the stage; three Tenants' keys held, the KMS down, new Tenants' rows refused | both channels paused, none resumed while the KMS is down, the held keys' rows processed meanwhile; resumed once it is up | no `depending_on`; the dependencies keyed by the producers' channel |
+| W1 | the composition (`crates/dek/tests/composition.rs`): the opening stage by destination, two destinations under one sealed channel, one with a key; the consumer through the stage, which registers its dependencies (ADR-0044, which strengthens W1); three Tenants' keys held, the KMS down, new Tenants' rows refused | both channels paused, none resumed while the KMS is down, the held keys' rows processed meanwhile; resumed once it is up | no `depending_on`; the dependencies keyed by the producers' channel |
 | M10 | the drill (`crates/dek/tests/drill.rs`), asserted under `ASCETIC_DDD_MEASURE`, run by hand on the reference machine | no attempt spent, nothing parked (read from the table); in a full outage a stall row valid at every sample from the first stall to the return, the first stall within a minute, no resume while down and the last within 30 s of the return; no stall row valid three minutes after; under a brownout no pause; the spared Tenants' p99 within 8.5 s under a refusing shard, within 371 s under a hanging one (§ Owed 2's guard) | — |
 | U1 | the database (`tests/outage.rs`): a paused channel whose three witnesses' heads cannot be asked, their causal dependencies unreadable | closed by three inconclusive trials | the shell telling an unreadable or waiting head as gone (closed on no witness left) |
 | D2 | the dek's dependency (`crates/dek/tests/opens.rs`): a check of a head's key beside a cold open of its message, over opened, refused, gone × the sentinel there / gone / unread, out of reach, unexplained, past `draw`, and later than the wait within `draw`; the control on a fresh opening end, after a flight, asked again, past `keep`, a check's head, its Tenant's key gone; the last refused key asked without a head; `served` over a flight, a hit and a check; a failing Tenant's refusal after a served check; one key hanging and one answering, each way; no session within the bound; a check's lines with a Tenant's name in its errors; `ByDestination`'s dependencies by destination | as the cold open judges, the late one served; none, served, served, unasked, served, unasked; asked, then the control; 1, 1, 1; still the stage's scope; served at once; unasked; no line names the Tenant; keyed without the key, one channel's two destinations one dependency | a refusal read as the KMS's; the check cut at the wait; the control renewed by its check, never aged, not a head's, kept past its Tenant's gone; the refused key not asked; a check counted; a check's key landed in the core; asked one after the other; no session read as unserved; an error's text logged; keyed by channel, or with the key |
@@ -908,9 +912,13 @@ false, does not hold: `passed` is what a batch examined and did not park, `more`
      pauses a run hanging, 537 refusing — closed by heads gone and by trials processed from the opening's cache with
      the KMS down; at slice 12 none resumes while it is down, and the first stall comes 36–39 s in, at 500 and at
      5,000 Tenants (§ Measured). Owed with it, each measured before it is designed:
-     - *a partial hang eats the loops*: a failing Tenant's probe, trusted once another key landed, holds a loop for
-       the opening's wait — M10's spared p50 59 s, p99 293 s at slice 12 as at slice 9; no breaker sees it, the
-       refusals reading the Tenant's scope. A round of the DEK's own; M10's shape is its arm, its bound its guard;
+     - *a partial hang eats the loops*: M10's spared p50 59 s, p99 293 s at slice 12 as at slice 9. The attribution
+       first written here — a failing Tenant's probe, trusted once another key landed — was wrong in proportion: a
+       tally of the stage's calls (2026-11-19) put the trusted probe at a tenth of the waits' loop-seconds at most,
+       and Tenants the opening end holds no evidence of at the rest — at 5,000 Tenants first contacts alone, 82 %.
+       That work, its record (ADR-0043) and its first step are on the branch `dek-partial-hang`, not merged: the
+       owner judged a partial outage of the KMS an emergency that needs engineers anyway, and unlikely, and set the
+       remedy aside (2026-11-19). M10's shape stays its arm, its bound its guard;
      - *the recovery under a quota or an overloaded KMS*: decision 1's close is stated for a KMS that returns
        unthrottled; a close then lets the asks of every held Tenant through at once. A recovery arm before any ramp
        is designed;
@@ -922,7 +930,8 @@ false, does not hold: `passed` is what a batch examined and did not park, `more`
        shard hanging, whether checks starve flights or the reverse. Measured under M10's partial hanging shape at
        the host's supply;
      - *the host's composition test and a start-time check* that every sealed channel of an inbox has its
-       dependency registered (§ 12, 7);
+       dependency registered (§ 12, 7): decided by ADR-0044 — the registration is the subscription's, and the
+       host's check narrows to `dependent_channels()` after it subscribes;
      - *a Tenant on a customer-managed key as the canary* (Rule of Three, 6): whether a host keeps such Tenants out
        of the control.
    - A `Tenant`-scoped hold of up to 300 s on a row rests on one process's evidence — the dek reads `Tenant` once a
@@ -1391,3 +1400,6 @@ payloads), its generated Vault policies.
   refuted designs. A seed C46 kept from a mutation's run failed on the built code once the property learnt to
   count checks in flight: a check still running when its pause closed on a late answer is stale, and the property
   had counted it in flight; it no longer does.
+- 2026-11-19: ADR-0044 makes the registration of a stage's dependencies the subscription's: decision 1's
+  "registered", § 12 item 7, the Rule of Three's item 5, W1's row and § Owed 2's composition test revised. § Owed 2's
+  partial hang: its attribution corrected by the tally of the stage's calls, its remedy set aside by the owner.

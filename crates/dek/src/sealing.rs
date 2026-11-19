@@ -30,7 +30,9 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ascetic_ddd_bus::{BoxError, Dependency, Dependent, Message, Permanent, Stage, uri};
+use ascetic_ddd_bus::{
+    BoxError, Dependencies, Dependency, Dependent, Message, Permanent, Stage, uri,
+};
 use ascetic_ddd_kms::KeyManagementService;
 use ascetic_ddd_session::SessionPool;
 use futures::future::BoxFuture;
@@ -234,23 +236,25 @@ impl Sealing {
     /// first, key or no key, opens with the stage of the second — the
     /// channel it was sealed under at the producer's end. Built up front,
     /// like the sealing itself. Its [`Dependent::dependencies`], by the same
-    /// destinations, are what the inbox's breaker is to be given (seedwork
-    /// ADR-0042 decision 1).
+    /// destinations, go with the inbox's subscription through it: the
+    /// inbox's breaker weighs each destination's refusals by its channel's
+    /// KMS (seedwork ADR-0042 decision 1, ADR-0044).
     ///
     /// # Errors
-    /// [`UnsealedChannel`] for a channel the sealing was not built for: a
-    /// composition root refuses to start rather than route a destination to
-    /// nothing.
+    /// [`Unroutable`]: a channel the sealing was not built for, or two
+    /// destinations that differ by their key only, mapped to two channels —
+    /// a composition root refuses to start rather than route a destination
+    /// to nothing, or to either of two.
     pub fn by_destination<D, C>(
         &self,
         map: impl IntoIterator<Item = (D, C)>,
-    ) -> Result<ByDestination, UnsealedChannel>
+    ) -> Result<ByDestination, Unroutable>
     where
         D: Into<String>,
         C: Into<String>,
     {
         let mut stages: HashMap<String, Arc<dyn Stage>> = HashMap::new();
-        let mut dependencies: HashMap<String, Arc<dyn Dependency>> = HashMap::new();
+        let mut dependencies = Dependencies::none();
         for (destination, channel) in map {
             let (destination, channel) = (destination.into(), channel.into());
             let unsealed = || UnsealedChannel {
@@ -263,8 +267,17 @@ impl Sealing {
                 .get(&channel)
                 .cloned()
                 .ok_or_else(unsealed)?;
+            // One channel's stage and dependency a destination, its key
+            // aside: two channels for one destination are a conflict of
+            // their dependencies, which are the channels' own.
             let destination = uri::without_key(&destination).to_owned();
-            dependencies.insert(destination.clone(), dependency);
+            dependencies = dependencies
+                .merge(
+                    Dependencies::by_destination([(&destination, dependency)]).expect("one entry"),
+                )
+                .map_err(|_| Unroutable::Ambiguous {
+                    destination: destination.clone(),
+                })?;
             stages.insert(destination, stage);
         }
         Ok(ByDestination {
@@ -273,6 +286,41 @@ impl Sealing {
         })
     }
 }
+
+/// A destination map [`Sealing::by_destination`] cannot route (seedwork
+/// ADR-0044).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Unroutable {
+    /// A channel the sealing was not built for.
+    Unsealed(UnsealedChannel),
+    /// Two destinations that differ by their key only, mapped to two
+    /// channels: a row of either would open under one of them.
+    Ambiguous {
+        /// The destination, without its key.
+        destination: String,
+    },
+}
+
+impl From<UnsealedChannel> for Unroutable {
+    fn from(unsealed: UnsealedChannel) -> Self {
+        Unroutable::Unsealed(unsealed)
+    }
+}
+
+impl fmt::Display for Unroutable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Unroutable::Unsealed(unsealed) => unsealed.fmt(f),
+            Unroutable::Ambiguous { destination } => write!(
+                f,
+                "the destination `{destination}`, key aside, is mapped to two channels"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Unroutable {}
 
 /// A channel the sealing was not built for, named by a destination.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -302,7 +350,7 @@ impl std::error::Error for UnsealedChannel {}
 /// without a call to any KMS: it is not opened under a guessed context.
 pub struct ByDestination {
     stages: HashMap<String, Arc<dyn Stage>>,
-    dependencies: HashMap<String, Arc<dyn Dependency>>,
+    dependencies: Dependencies,
 }
 
 impl fmt::Debug for ByDestination {
@@ -314,6 +362,38 @@ impl fmt::Debug for ByDestination {
 }
 
 impl ByDestination {
+    /// The stage of an inbox whose rows of `destinations`, key or no key,
+    /// all open with `stage` — one channel's envelope stage — its one
+    /// dependency declared for each (seedwork ADR-0044). A row of another
+    /// destination is refused for good, as [`Sealing::by_destination`]'s.
+    pub fn over<P, K>(
+        stage: Arc<EnvelopeStage<P, K>>,
+        destinations: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self
+    where
+        P: SessionPool + Send + Sync + 'static,
+        P::Session: Sync,
+        K: KeyManagementService<P::Session> + 'static,
+    {
+        let dependency = stage.dependency();
+        let destinations: Vec<String> = destinations
+            .into_iter()
+            .map(|destination| uri::without_key(&destination.into()).to_owned())
+            .collect();
+        ByDestination {
+            dependencies: Dependencies::by_destination(
+                destinations
+                    .iter()
+                    .map(|destination| (destination, Arc::clone(&dependency))),
+            )
+            .expect("one dependency for every destination"),
+            stages: destinations
+                .into_iter()
+                .map(|destination| (destination, Arc::clone(&stage) as Arc<dyn Stage>))
+                .collect(),
+        }
+    }
+
     /// The destinations the stage was built for, keys left aside.
     pub fn destinations(&self) -> impl Iterator<Item = &str> {
         self.stages.keys().map(String::as_str)
@@ -337,15 +417,10 @@ fn refused(what: String) -> BoxError {
 }
 
 impl Dependent for ByDestination {
-    /// Each destination's dependency: the KMS of the channel it opens under.
-    fn dependencies(&self) -> Vec<(String, Arc<dyn Dependency>)> {
-        let mut dependencies: Vec<(String, Arc<dyn Dependency>)> = self
-            .dependencies
-            .iter()
-            .map(|(destination, dependency)| (destination.clone(), Arc::clone(dependency)))
-            .collect();
-        dependencies.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        dependencies
+    /// Each destination's dependency: the KMS of the channel it opens under,
+    /// the same objects on every call.
+    fn dependencies(&self) -> Dependencies {
+        self.dependencies.clone()
     }
 }
 

@@ -679,11 +679,10 @@ impl<T: Clone + Eq + Hash, W: Clone + Eq + Hash, K, N> Unwraps<T, W, K, N> {
             .cloned()
             .collect();
         for pair in pairs {
-            if let Some(entry) = self.entries.get_mut(&pair) {
-                if let State::Opened { key, .. } = std::mem::replace(&mut entry.state, State::Empty)
-                {
-                    self.retired.push(key);
-                }
+            if let Some(entry) = self.entries.get_mut(&pair)
+                && let State::Opened { key, .. } = std::mem::replace(&mut entry.state, State::Empty)
+            {
+                self.retired.push(key);
             }
             self.settle_entry(&pair.0, &pair.1, now);
         }

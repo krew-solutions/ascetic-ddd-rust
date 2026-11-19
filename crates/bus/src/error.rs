@@ -6,7 +6,11 @@ use std::fmt;
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Errors of the bus and its adapters.
+///
+/// Non-exhaustive: an adapter or a composition rule may add a refusal of its
+/// own (seedwork ADR-0044), and a host matches with a fallback arm.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// The URI's scheme has no registered adapter, or the URI has no scheme.
     UnknownScheme(String),
@@ -24,6 +28,48 @@ pub enum Error {
     Transport(BoxError),
     /// A stage of the wire refused the message on its way out.
     Stage(BoxError),
+    /// A composition the bus or an adapter refuses where it is made: a
+    /// configuration bug, never a failure of the moment (seedwork ADR-0044).
+    Composition(Composition),
+}
+
+/// What a composition root put together wrongly, refused where it is made
+/// (seedwork ADR-0044).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Composition {
+    /// Two different dependencies declared for one destination, its key
+    /// left aside — by two stages of one consumer, or by a stage against
+    /// what its inbox already weighs that destination by.
+    Conflict {
+        /// The destination, without its key.
+        destination: String,
+    },
+    /// The transactional consumer has a live subscription: it runs one
+    /// handler at a time, over all its rows.
+    AlreadySubscribed,
+}
+
+impl fmt::Display for Composition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Composition::Conflict { destination } => write!(
+                f,
+                "two different dependencies are declared for the destination `{destination}`"
+            ),
+            Composition::AlreadySubscribed => {
+                write!(f, "the consumer has a live subscription already")
+            }
+        }
+    }
+}
+
+impl std::error::Error for Composition {}
+
+impl From<Composition> for Error {
+    fn from(composition: Composition) -> Self {
+        Error::Composition(composition)
+    }
 }
 
 impl fmt::Display for Error {
@@ -40,6 +86,7 @@ impl fmt::Display for Error {
             }
             Error::Transport(error) => write!(f, "transport: {error}"),
             Error::Stage(error) => write!(f, "stage: {error}"),
+            Error::Composition(composition) => write!(f, "composition: {composition}"),
         }
     }
 }
@@ -48,6 +95,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Error::Transport(error) | Error::Stage(error) => Some(error.as_ref()),
+            Error::Composition(composition) => Some(composition),
             _ => None,
         }
     }
