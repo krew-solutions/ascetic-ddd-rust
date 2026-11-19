@@ -262,15 +262,18 @@ impl std::error::Error for Transient {
     }
 }
 
-/// Whose messages an [`Unavailable`] stops (ADR-0040 decision 3).
+/// Whose messages an [`Unavailable`] stops (ADR-0040 decision 3). At either
+/// scope the inbox holds the message and spends no attempt (ADR-0042, which
+/// superseded ADR-0040 decisions 4 and 5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Scope {
-    /// No message of the channel can be handled now: the stage is down. The
-    /// inbox holds the message without spending an attempt.
+    /// No message of the channel can be handled now: the stage is down. Its
+    /// channel pauses in the process that sees it, by the breaker of the
+    /// dependency that answers for it or by the rows' (ADR-0042 decision 1).
     Stage,
-    /// Only the messages of this message's Tenant cannot: the inbox spends an
-    /// attempt, as on a failure of the moment, never sooner than
-    /// `retry_after`.
+    /// Only the messages of this message's Tenant cannot: its (channel,
+    /// Tenant) is held by the process's memo, asked again past the memo's
+    /// interval and never sooner than `retry_after` (ADR-0042 decision 2).
     Tenant,
 }
 
