@@ -27,7 +27,10 @@
 //! whole inbox is one channel with one subscriber, which routes by the
 //! row's `destination` and `stream_type` — a consumer that saw one address
 //! would wait for ever on a causal dependency published under another
-//! (ADR-0006, ADR-0018).
+//! (ADR-0006, ADR-0018). One subscriber is a rule, not a habit: a second
+//! subscription while one is live is refused (seedwork ADR-0044), since
+//! each would run over every row, and one going in without the other's
+//! stages would hand its handler what it cannot read.
 //!
 //! The consumer's loop is a task on the current tokio runtime; cancel the
 //! subscription to stop it. Both it and the producer are ordinary `Send`
@@ -37,8 +40,9 @@ use std::sync::Arc;
 
 use ascetic_ddd_bus::identity::{self, STREAM_ID, STREAM_POSITION, STREAM_TYPE, TENANT_ID};
 use ascetic_ddd_bus::{
-    Adapter, BoxError, Error as BusError, Message, Subscription, TransactionalConsumer,
-    TransactionalHandler, TransactionalWireConsumer, WireConsumer, WireProducer, handling, uri,
+    Adapter, BoxError, Composition, Dependencies, Error as BusError, Message, Subscription,
+    TransactionalConsumer, TransactionalHandler, TransactionalWireConsumer, WireConsumer,
+    WireProducer, handling, uri,
 };
 use ascetic_ddd_session::{PgAccess, SessionPool};
 use futures::future::BoxFuture;
@@ -67,6 +71,15 @@ where
 {
     /// A consumer whose handler runs inside the transaction that marks each
     /// message processed, reading values with `decode`.
+    ///
+    /// It goes in through [`InboundStage`](ascetic_ddd_bus::InboundStage)s
+    /// only, and its subscription registers what they depend on (seedwork
+    /// ADR-0044): the channels they declare are weighed by their dependency
+    /// from then on, for the inbox's life. One subscription is live at a
+    /// time; another is refused [`Composition::AlreadySubscribed`] until the
+    /// first's task has ended. A cancel from inside a handler returns at once
+    /// ([`Subscription::cancel`]), so a subscription made right after it, in
+    /// that handler, is refused.
     pub fn consumer<T: 'static>(
         self: &Arc<Self>,
         decode: impl Fn(&Message) -> Result<T, BoxError> + Send + Sync + 'static,
@@ -150,16 +163,30 @@ where
     O: InboxObserver + 'static,
 {
     /// Runs the processing loop as a task on the current runtime until
-    /// cancelled. A message whose handler fails is left unprocessed and
-    /// retried after the poll interval. Outside a runtime this is an error.
+    /// cancelled, its stages' refusals weighed by `dependencies`. A message
+    /// whose handler fails is left unprocessed and retried after the poll
+    /// interval.
+    ///
+    /// In this order, so that a refusal keeps nothing of the call (seedwork
+    /// ADR-0044): the runtime — outside one this is an error —, the inbox's
+    /// one live subscription, the dependencies, all of them or none, and
+    /// only then the task, which holds the subscription to its end.
     fn subscribe(
         &self,
         handler: TransactionalHandler<P::Session>,
+        dependencies: Dependencies,
     ) -> Result<Subscription, BusError> {
+        let runtime = Handle::try_current().map_err(transport)?;
+        let live = self
+            .0
+            .subscription()
+            .ok_or(Composition::AlreadySubscribed)?;
+        self.0.register(&dependencies)?;
         let stop = Arc::new(Notify::new());
         let (inbox, stopped) = (Arc::clone(&self.0), Arc::clone(&stop));
-        let runtime = Handle::try_current().map_err(transport)?;
         let task = async move {
+            // Let go when the task ends, however it ends.
+            let _live = live;
             let loops = inbox.loops();
             // A handler's error is a failure of the moment, unless the bus
             // carries a verdict from a stage or a handler that can tell:

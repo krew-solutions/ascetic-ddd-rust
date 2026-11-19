@@ -17,10 +17,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ascetic_ddd_bus::{
-    BoxError, Check, Dependent, Message, Permanent, Scope as BusScope, Stage, Unavailable,
+    BoxError, Check, Dependencies, Dependency, Dependent, Message, Permanent, Scope as BusScope,
+    Stage, Unavailable,
 };
 use ascetic_ddd_dek::stage::{MESSAGE_ID, TENANT_ID};
-use ascetic_ddd_dek::{EnvelopeStage, Opening, Sealing, SealingParameters, causes};
+use ascetic_ddd_dek::{
+    ByDestination, EnvelopeStage, Opening, Sealing, SealingParameters, Unroutable, causes,
+};
 use ascetic_ddd_kms::{Error, Key, KeyManagementService};
 use ascetic_ddd_session::testing::{MemorySession, MemorySessionPool};
 use ascetic_ddd_session::{SessionError, SessionPool};
@@ -800,11 +803,127 @@ fn the_dependencies_are_by_destination_without_its_key() {
         ])
         .unwrap();
     let dependencies = opening.dependencies();
-    let names: Vec<&str> = dependencies.iter().map(|(d, _)| d.as_str()).collect();
+    let each: Vec<(&str, &Arc<dyn Dependency>)> = dependencies.iter().collect();
+    let names: Vec<&str> = each.iter().map(|(d, _)| *d).collect();
     assert_eq!(names, ["inbox://in-a", "inbox://in-a2", "inbox://in-b"]);
     assert!(
-        Arc::ptr_eq(&dependencies[0].1, &dependencies[1].1),
+        Arc::ptr_eq(each[0].1, each[1].1),
         "one channel, one dependency"
     );
-    assert!(!Arc::ptr_eq(&dependencies[0].1, &dependencies[2].1));
+    assert!(!Arc::ptr_eq(each[0].1, each[2].1));
+}
+
+/// A stage's dependency is one object for its opener's life, whichever way
+/// it is reached — the stage itself, a sealing's map built twice, a stage
+/// over it built twice — so that a subscription through any of them is no
+/// conflict with another, and a subscription made again is none (seedwork
+/// ADR-0044, S6). Red when the dependency is made anew at each call.
+#[test]
+fn a_stage_s_dependency_is_one_object_however_it_is_reached() {
+    let kms = Scripted::new([]);
+    let one = stage(&kms, Duration::from_secs(2));
+    assert!(Arc::ptr_eq(&one.dependency(), &one.dependency()));
+    let over = |destinations: [&str; 2]| ByDestination::over(Arc::clone(&one), destinations);
+    let (first, second) = (
+        over(["inbox://in-a/k1", "inbox://in-b"]),
+        over(["inbox://in-a", "inbox://in-c"]),
+    );
+    let merged = first
+        .dependencies()
+        .merge(second.dependencies())
+        .expect("one dependency, however reached");
+    assert_eq!(
+        merged.destinations().collect::<Vec<_>>(),
+        ["inbox://in-a", "inbox://in-b", "inbox://in-c"]
+    );
+    assert!(
+        merged
+            .iter()
+            .all(|(_, dependency)| Arc::ptr_eq(dependency, &one.dependency()))
+    );
+
+    let sealing = Sealing::over(
+        Arc::new(MemorySessionPool::new()),
+        ["chan-a"],
+        SealingParameters::default(),
+        |_: &str| Kms(Arc::clone(&kms)),
+    );
+    let map = || {
+        sealing
+            .by_destination([("inbox://in-a", "chan-a")])
+            .unwrap()
+    };
+    map()
+        .dependencies()
+        .merge(map().dependencies())
+        .expect("the sealing's map built twice declares one dependency");
+}
+
+/// The dependency is the opener's that opens, whichever builder made the
+/// opener last: a sealing builds its stages opened, then with the sentinel
+/// (seedwork ADR-0044). Red when a builder that makes a new opener keeps the
+/// old one's dependency: its `served` would stay at none.
+#[tokio::test(start_paused = true)]
+async fn the_dependency_is_the_opener_s_that_opens() {
+    let kms = Scripted::new([]);
+    let stage: Tested = Arc::new(
+        EnvelopeStage::new(MemorySessionPool::new(), Kms(Arc::clone(&kms)))
+            .opened(Opening::fitted(Duration::from_secs(60), 64))
+            .unwrap()
+            .with_sentinel(SENTINEL),
+    );
+    let message = sealed(&stage, "a", 1).await;
+    stage.inbound(message).await.unwrap();
+    assert_eq!(stage.dependency().served(), 1);
+}
+
+/// Two destinations that differ by their key only, mapped to two channels,
+/// are refused at construction: a row of either would open under one of
+/// them; mapped to one channel they are one destination (seedwork ADR-0044,
+/// S6). Red when the map keeps the last.
+#[test]
+fn two_destinations_differing_by_their_key_under_two_channels_are_refused() {
+    let kms = Scripted::new([]);
+    let sealing = Sealing::over(
+        Arc::new(MemorySessionPool::new()),
+        ["chan-a", "chan-b"],
+        SealingParameters::default(),
+        |_: &str| Kms(Arc::clone(&kms)),
+    );
+    let refused = sealing
+        .by_destination([("inbox://in-a/k1", "chan-a"), ("inbox://in-a/k2", "chan-b")])
+        .expect_err("refused");
+    assert_eq!(
+        refused,
+        Unroutable::Ambiguous {
+            destination: "inbox://in-a".to_owned()
+        }
+    );
+    let one = sealing
+        .by_destination([("inbox://in-a/k1", "chan-a"), ("inbox://in-a/k2", "chan-a")])
+        .unwrap();
+    assert_eq!(one.destinations().collect::<Vec<_>>(), ["inbox://in-a"]);
+}
+
+/// Whether a type states its dependencies, told by an ambiguity: a type that
+/// is `Dependent` has two impls below, and the call in the test cannot pick.
+trait Declaring<Which> {
+    fn told() {}
+}
+
+impl<T: ?Sized> Declaring<()> for T {}
+
+struct Declared;
+
+impl<T: ?Sized + Dependent> Declaring<Declared> for T {}
+
+/// The envelope stage of one channel states no dependency: it does not know
+/// the destinations an inbox receives it under, and so cannot go in on an
+/// inbox (seedwork ADR-0044, S5b). Red at compile time when it is given one.
+#[test]
+fn an_envelope_stage_states_no_dependency_of_its_own() {
+    <EnvelopeStage<MemorySessionPool, Kms> as Declaring<_>>::told();
+    // its twin, which does state them, is ambiguous and is not written here:
+    // `<ByDestination as Declaring<_>>::told()` does not compile
+    let _ = Dependencies::none();
 }

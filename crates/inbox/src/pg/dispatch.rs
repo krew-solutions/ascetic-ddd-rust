@@ -210,6 +210,9 @@ where
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
+        // The store's snapshot, taken before the breaker's lock: no reader
+        // holds the store's while it takes the breaker's (seedwork ADR-0044).
+        let dependencies = self.dependencies();
         let (effects, paused, excluded, first_step) = {
             let mut breaker = self.breaker();
             let now = now();
@@ -217,7 +220,7 @@ where
             for (id, check) in answers {
                 effects.extend(breaker.checked(now, id, check));
             }
-            for (channel, dependency) in self.dependencies.iter() {
+            for (channel, dependency) in dependencies.iter() {
                 breaker.served(now, channel, dependency.served());
             }
             effects.extend(breaker.tick(now));
@@ -477,7 +480,7 @@ where
         asked: Asked<'_>,
     ) -> Result<Outcome, Error> {
         let dependency = self.dependency_of(uri::without_key(&message.uri));
-        let told = asked.told(verdict_of(failure.as_ref(), dependency));
+        let told = asked.told(verdict_of(failure.as_ref(), dependency.as_deref()));
         self.tell(&told.effects);
         let Some(failure) = failure else {
             if self.slots > 1 {
@@ -669,7 +672,8 @@ where
                             Ok(Err(Error::Subscriber(failure))) => Some(failure),
                             Ok(Err(other)) => return Err(other),
                         };
-                        let verdict = verdict_of(failure.as_ref(), self.dependency_of(channel));
+                        let dependency = self.dependency_of(channel);
+                        let verdict = verdict_of(failure.as_ref(), dependency.as_deref());
                         let told = self.breaker().tried(now(), id, Trial::Told(verdict));
                         self.tell(&told.effects);
                         let outcome = match failure {
@@ -768,7 +772,7 @@ where
             answers: Arc::clone(&self.checked),
             answered: false,
         };
-        let Some(dependency) = self.dependencies.get(channel).map(Arc::clone) else {
+        let Some(dependency) = self.dependency_of(channel) else {
             return;
         };
         let head = match head {

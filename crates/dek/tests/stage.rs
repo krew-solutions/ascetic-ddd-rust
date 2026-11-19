@@ -16,7 +16,10 @@ use std::time::Duration;
 
 use ascetic_ddd_bus::{Bridge, Bus, Message, Permanent, Stage, Target};
 use ascetic_ddd_dek::stage::{DEK, DEK_ALGORITHM, DEK_BOUND_TO, MESSAGE_ID, TENANT_ID};
-use ascetic_ddd_dek::{EnvelopeStage, Opening, Pacing, Reuse, Sealing, SealingParameters};
+use ascetic_ddd_dek::{
+    ByDestination, EnvelopeStage, Opening, Pacing, Reuse, Sealing, SealingParameters, Unroutable,
+    UnsealedChannel,
+};
 use ascetic_ddd_inbox::{INBOX_SCHEME, Loops as InboxLoops, PgInbox};
 use ascetic_ddd_kms::{Algorithm, KeyCustody, PgKeyManagementService};
 use ascetic_ddd_outbox::{Loops as OutboxLoops, OUTBOX_SCHEME, PgOutbox};
@@ -393,7 +396,10 @@ async fn the_outbox_and_the_inbox_hold_nothing_but_ciphertext() {
     let (received, mut inbound) = mpsc::unbounded_channel();
     let processing = inbox
         .consumer(|message: &Message| Ok(text(message.payload()).to_owned()))
-        .through(Arc::clone(&sealing) as Arc<dyn Stage>)
+        .through(Arc::new(ByDestination::over(
+            Arc::clone(&sealing),
+            ["inbox://orders"],
+        )))
         .subscribe(move |_tx, payload: String| {
             let received = received.clone();
             async move {
@@ -819,6 +825,11 @@ async fn a_map_naming_a_channel_the_sealing_lacks_is_refused_up_front() {
     let error = sealing
         .by_destination([("inbox://telemetry.semantic", "telemetry.semantic")])
         .expect_err("refused");
-    assert_eq!(error.channel, "telemetry.semantic");
-    assert_eq!(error.destination, "inbox://telemetry.semantic");
+    assert_eq!(
+        error,
+        Unroutable::Unsealed(UnsealedChannel {
+            destination: "inbox://telemetry.semantic".to_owned(),
+            channel: "telemetry.semantic".to_owned(),
+        })
+    );
 }

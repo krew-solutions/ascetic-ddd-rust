@@ -261,7 +261,7 @@ pub(crate) fn is_uuid(text: &str) -> bool {
             digits += 1;
             previous_hyphen = false;
         } else if c == '-' {
-            if previous_hyphen || digits % 4 != 0 {
+            if previous_hyphen || !digits.is_multiple_of(4) {
                 return false;
             }
             previous_hyphen = true;

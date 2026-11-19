@@ -4,8 +4,9 @@
 use std::sync::{Arc, Mutex};
 
 use ascetic_ddd_bus::{
-    Error, Message, Permanent, Subscription, TransactionalConsumer, TransactionalHandler,
-    TransactionalProducer, TransactionalWireConsumer, TransactionalWireProducer,
+    Dependencies, Error, Message, Permanent, Subscription, TransactionalConsumer,
+    TransactionalHandler, TransactionalProducer, TransactionalWireConsumer,
+    TransactionalWireProducer,
 };
 use futures::future::BoxFuture;
 
@@ -38,7 +39,11 @@ impl TransactionalWireProducer<Tx> for Recording {
 struct Handing(Arc<Mutex<Option<TransactionalHandler<Tx>>>>);
 
 impl TransactionalWireConsumer<Tx> for Handing {
-    fn subscribe(&self, handler: TransactionalHandler<Tx>) -> Result<Subscription, Error> {
+    fn subscribe(
+        &self,
+        handler: TransactionalHandler<Tx>,
+        _: Dependencies,
+    ) -> Result<Subscription, Error> {
         *self.0.lock().unwrap() = Some(handler);
         Ok(Subscription::new(|| {}))
     }

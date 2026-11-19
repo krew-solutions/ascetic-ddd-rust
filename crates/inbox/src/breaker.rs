@@ -895,10 +895,10 @@ impl Breaker {
     /// channel's heads are not due already. Built once while nothing changes
     /// and no excluded entry's back-off or flight ends.
     pub fn excluded(&mut self, now: Instant) -> std::sync::Arc<str> {
-        if let Some(keys) = &self.keys {
-            if keys.until.is_none_or(|until| now < until) {
-                return std::sync::Arc::clone(&keys.json);
-            }
+        if let Some(keys) = &self.keys
+            && keys.until.is_none_or(|until| now < until)
+        {
+            return std::sync::Arc::clone(&keys.json);
         }
         // in the memo's order: a `jsonb` object orders its own keys
         let mut until: Option<Instant> = None;
@@ -1038,12 +1038,11 @@ impl Breaker {
             .channels
             .get_mut(&flight.channel)
             .and_then(|c| c.memo.get_mut(&flight.tenant))
+            && entry.flight.is_some_and(|(id, _)| id == flight.id)
         {
-            if entry.flight.is_some_and(|(id, _)| id == flight.id) {
-                entry.flight = None;
-                if entry.scope == Scope::Stage {
-                    self.keys = None;
-                }
+            entry.flight = None;
+            if entry.scope == Scope::Stage {
+                self.keys = None;
             }
         }
     }
@@ -1085,19 +1084,18 @@ impl Breaker {
                 ..
             }
         ) && matches!(channel.state, State::Closed)
+            && let Some(cause) = channel.broad(&settings, now)
         {
-            if let Some(cause) = channel.broad(&settings, now) {
-                channel.open(&settings, now, cause, None);
-                effects.push(Effect::Paused {
-                    channel: flight.channel.clone(),
-                    cause,
-                });
-                // Opened again within the window of a stall: still stalled,
-                // and reported now, not at the first tick, which its failed
-                // ticks put up to a cap away — the gap a flapping stage's
-                // report must not lapse in (ADR-0042 decision 6).
-                effects.extend(channel.stall(&settings, &flight.channel, now));
-            }
+            channel.open(&settings, now, cause, None);
+            effects.push(Effect::Paused {
+                channel: flight.channel.clone(),
+                cause,
+            });
+            // Opened again within the window of a stall: still stalled,
+            // and reported now, not at the first tick, which its failed
+            // ticks put up to a cap away — the gap a flapping stage's
+            // report must not lapse in (ADR-0042 decision 6).
+            effects.extend(channel.stall(&settings, &flight.channel, now));
         }
         if changes {
             self.keys = None;
@@ -1587,15 +1585,15 @@ impl Breaker {
                 channel.failed += 1;
                 channel.schedule(&settings, now);
             }
-            if trial == Trial::Told(Verdict::Processed) {
-                if let Some((cause, stalled)) = channel.close(now, Resumption::Processed) {
-                    told.effects.push(Effect::Resumed {
-                        channel: name.clone(),
-                        cause,
-                        stalled,
-                        by: Resumption::Processed,
-                    });
-                }
+            if trial == Trial::Told(Verdict::Processed)
+                && let Some((cause, stalled)) = channel.close(now, Resumption::Processed)
+            {
+                told.effects.push(Effect::Resumed {
+                    channel: name.clone(),
+                    cause,
+                    stalled,
+                    by: Resumption::Processed,
+                });
             }
             return told;
         }

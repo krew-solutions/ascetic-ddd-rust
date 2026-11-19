@@ -1,9 +1,10 @@
 //! The envelope stage and the inbox composed as a host composes them (seedwork
-//! ADR-0042 decision 1): the opening stage by destination, its dependencies
-//! handed to the inbox, the consumer through the stage. With the KMS down and
-//! keys of some Tenants still held, a channel the stage's refusals paused stays
-//! paused — its rows served from the stage's memory are no evidence of the KMS
-//! — and resumes once the KMS opens a key again. It needs a live database:
+//! ADR-0042 decision 1, ADR-0044): the opening stage by destination, the
+//! consumer through it — and nothing else: the subscription registers the
+//! stage's dependencies. With the KMS down and keys of some Tenants still
+//! held, a channel the stage's refusals paused stays paused — its rows served
+//! from the stage's memory are no evidence of the KMS — and resumes once a
+//! check finds the KMS opening a key again. It needs a live database:
 //!
 //! ```text
 //! ASCETIC_DDD_TEST_PG_URL=postgresql://user:pass@localhost/db \
@@ -23,10 +24,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ascetic_ddd_bus::identity::{STREAM_ID, STREAM_POSITION, STREAM_TYPE, TENANT_ID};
-use ascetic_ddd_bus::{Adapter, Message, Stage};
+use ascetic_ddd_bus::{Adapter, Message};
 use ascetic_ddd_dek::stage::MESSAGE_ID;
 use ascetic_ddd_dek::{Sealing, SealingParameters};
-use ascetic_ddd_inbox::breaker::Effect;
+use ascetic_ddd_inbox::breaker::{Effect, Resumption};
 use ascetic_ddd_inbox::observer::{BreakerChanged, InboxObserver};
 use ascetic_ddd_inbox::{Breaking, ByStream, Loops, PgInbox};
 use ascetic_ddd_kms::{Error, Key, KeyManagementService};
@@ -144,17 +145,17 @@ async fn a_channel_paused_by_its_stage_s_kms_stays_paused_on_the_keys_held() {
                     .with_hold(Duration::from_millis(40), Duration::from_millis(200))
                     .with_tick(Duration::from_millis(50), Duration::from_millis(200)),
             )
-            .depending_on(&opening)
             .observed_by(Arc::clone(&effects)),
     );
     inbox.teardown().await.unwrap();
     inbox.migrate().await.unwrap();
+    assert!(inbox.dependent_channels().is_empty());
     let processed = Arc::new(AtomicU64::new(0));
     let subscription = {
         let processed = Arc::clone(&processed);
         inbox
             .consumer(|message: &Message| Ok(message.payload().to_vec()))
-            .through(Arc::new(opening) as Arc<dyn Stage>)
+            .through(Arc::new(opening))
             .subscribe(move |_tx, _payload: Vec<u8>| {
                 let processed = Arc::clone(&processed);
                 async move {
@@ -163,6 +164,11 @@ async fn a_channel_paused_by_its_stage_s_kms_stays_paused_on_the_keys_held() {
             })
             .unwrap()
     };
+    // both destinations, keys aside, registered by the subscription
+    assert_eq!(
+        inbox.dependent_channels(),
+        ["inbox://orders", "inbox://orders-b"]
+    );
     let stage = sealing.of(SEALED).unwrap();
     let intake = inbox.channel();
     let made = AtomicU64::new(0);
@@ -209,9 +215,12 @@ async fn a_channel_paused_by_its_stage_s_kms_stays_paused_on_the_keys_held() {
             fresh.push((destination, seal(&format!("n{n}")).await));
         }
     }
+    // the warm Tenants' keys held, on both destinations
     let mut warm = Vec::new();
-    for tenant in ["w0", "w1", "w2"] {
-        warm.push(seal(tenant).await);
+    for destination in DESTINATIONS {
+        for tenant in ["w0", "w1", "w2"] {
+            warm.push((destination, seal(tenant).await));
+        }
     }
     down.store(true, Ordering::SeqCst);
     for (destination, message) in fresh {
@@ -227,8 +236,8 @@ async fn a_channel_paused_by_its_stage_s_kms_stays_paused_on_the_keys_held() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    for message in warm {
-        publish(DESTINATIONS[0], message).await;
+    for (destination, message) in warm {
+        publish(destination, message).await;
     }
     tokio::time::sleep(Duration::from_secs(3)).await;
     let resumed = |e: &Effect| matches!(e, Effect::Resumed { .. });
@@ -240,7 +249,7 @@ async fn a_channel_paused_by_its_stage_s_kms_stays_paused_on_the_keys_held() {
     );
     down.store(false, Ordering::SeqCst);
     let began = tokio::time::Instant::now();
-    while effects.count(resumed) < 2 || processed.load(Ordering::SeqCst) < 3 + 24 + 3 {
+    while effects.count(resumed) < 2 || processed.load(Ordering::SeqCst) < 3 + 24 + 6 {
         assert!(
             began.elapsed() < Duration::from_secs(30),
             "not resumed with the KMS back: {} processed, {:?}",
@@ -249,6 +258,16 @@ async fn a_channel_paused_by_its_stage_s_kms_stays_paused_on_the_keys_held() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    // each pause ended by a check of the KMS, none by a row the stage's
+    // memory served
+    let by_a_row =
+        |e: &Effect| matches!(e, Effect::Resumed { by, .. } if *by != Resumption::Served);
+    assert_eq!(
+        effects.count(by_a_row),
+        0,
+        "resumed by other than a check: {:?}",
+        effects.0.lock().unwrap()
+    );
     subscription.cancel().await;
     inbox.teardown().await.unwrap();
 }

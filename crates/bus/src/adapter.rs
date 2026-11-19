@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::future::BoxFuture;
 
+use crate::dependency::Dependencies;
 use crate::error::{BoxError, Error};
 use crate::message::Message;
 
@@ -58,8 +59,20 @@ pub type TransactionalHandler<S> =
 /// of its own — the inbox. The handler's writes through the session it is
 /// given commit with the acknowledgement of the message, or not at all.
 pub trait TransactionalWireConsumer<S>: Send + Sync {
-    /// Starts delivering messages, each with its transaction, to `handler`.
-    fn subscribe(&self, handler: TransactionalHandler<S>) -> Result<Subscription, Error>;
+    /// Starts delivering messages, each with its transaction, to `handler`,
+    /// whose stages depend on `dependencies` by destination: the consumer
+    /// weighs the stages' refusals by them (seedwork ADR-0044).
+    ///
+    /// # Errors
+    /// [`Error::Composition`] for a composition the consumer refuses — a
+    /// live subscription, or a dependency other than the one it weighs a
+    /// destination by — with nothing subscribed and nothing kept of the
+    /// call; the transport's own errors.
+    fn subscribe(
+        &self,
+        handler: TransactionalHandler<S>,
+        dependencies: Dependencies,
+    ) -> Result<Subscription, Error>;
 }
 
 /// A handle on a subscription. [`cancel`][Subscription::cancel] detaches the

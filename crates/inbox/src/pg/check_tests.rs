@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use ascetic_ddd_bus::{Cause, Check, Dependency, Dependent, Message};
+use ascetic_ddd_bus::{Cause, Check, Dependencies, Dependency, Message};
 use ascetic_ddd_session::PgSessionPool;
 use ascetic_ddd_session::pg::Identifier;
 use ascetic_ddd_session::pg::deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
@@ -59,15 +59,12 @@ impl Dependency for Serving {
     }
 }
 
-struct Orders(Arc<Serving>);
-
-impl Dependent for Orders {
-    fn dependencies(&self) -> Vec<(String, Arc<dyn Dependency>)> {
-        vec![(
-            "kafka://orders".to_owned(),
-            Arc::clone(&self.0) as Arc<dyn Dependency>,
-        )]
-    }
+fn orders(dependency: &Arc<Serving>) -> Dependencies {
+    Dependencies::by_destination([(
+        "kafka://orders",
+        Arc::clone(dependency) as Arc<dyn Dependency>,
+    )])
+    .expect("one dependency")
 }
 
 /// The inbox's one session held — its pool exhausted, as by hung statements —
@@ -87,7 +84,9 @@ async fn a_check_is_answered_whatever_the_pool_does() {
             Identifier::new("inbox_check_bound_seq").unwrap(),
         )
         .partitioned_by(ByStream)
-        .depending_on(&Orders(Arc::clone(&serving)));
+        .depending_on(&orders(&serving))
+        .expect("registered");
+    assert_eq!(inbox.dependent_channels(), ["kafka://orders"]);
     inbox.teardown().await.unwrap();
     inbox.migrate().await.unwrap();
     let held = pool.get().await.unwrap();

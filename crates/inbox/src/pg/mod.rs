@@ -122,6 +122,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use ascetic_ddd_bus::{Composition, Dependencies, Dependency};
 use ascetic_ddd_session::pg::Identifier;
 
 use crate::breaker::{Breaker, Breaking};
@@ -548,8 +549,15 @@ pub struct PgInbox<P, O = ()> {
     /// The stalls this process reports (ADR-0042 decision 6).
     stalls: Arc<std::sync::Mutex<stalls::Stalls>>,
     /// What each channel's stage depends on, by channel (ADR-0042 decision
-    /// 1): its stage's refusals weighed against it, and checked.
-    dependencies: Arc<HashMap<String, Arc<dyn ascetic_ddd_bus::Dependency>>>,
+    /// 1): its stage's refusals weighed against it, and checked. Written at
+    /// a subscription, or by [`PgInbox::depending_on`], never emptied: a
+    /// channel's gate outlives the subscription that registered it
+    /// (seedwork ADR-0044). A reader clones the map's `Arc` and lets the
+    /// lock go at once.
+    dependencies: std::sync::RwLock<Arc<Registered>>,
+    /// Whether a subscription of this inbox is live: one handler at a time
+    /// runs over its rows (ADR-0018 decision 3, seedwork ADR-0044).
+    subscribed: Arc<std::sync::atomic::AtomicBool>,
     /// The dependencies' checks answered since the last dispatch's tick.
     checked: Arc<std::sync::Mutex<Vec<(u64, ascetic_ddd_bus::Check)>>>,
     /// Per channel, the latest `processed_at` the sweep forgot: where its
@@ -576,6 +584,21 @@ type Admits = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
 /// The rule [`PgInbox::readmitting`] holds a channel to.
 type Readmits = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+/// The dependencies an inbox weighs its channels' stages' refusals by, by
+/// channel.
+type Registered = HashMap<String, Arc<dyn Dependency>>;
+
+/// An inbox's one live subscription, held by the subscription's task: let
+/// go when the task ends — returned, unwound by a panic, or dropped with its
+/// runtime — and before its cancel is told it ended (seedwork ADR-0044).
+pub(crate) struct Live(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 impl<P> PgInbox<P> {
     /// An inbox in table `inbox`, one slot partitioned by URI, observed by
     /// nobody, retrying a failed message for ever and parking a message that
@@ -597,7 +620,8 @@ impl<P> PgInbox<P> {
             retention: InboxRetention::default(),
             breaker: Arc::new(std::sync::Mutex::new(Breaker::new(Breaking::default()))),
             stalls: Arc::new(std::sync::Mutex::new(stalls::Stalls::new())),
-            dependencies: Arc::new(HashMap::new()),
+            dependencies: std::sync::RwLock::new(Arc::new(HashMap::new())),
+            subscribed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             checked: Arc::new(std::sync::Mutex::new(Vec::new())),
             swept_to: Mutex::new(HashMap::new()),
             expired_to: expiry::Cursor::default(),
@@ -626,6 +650,7 @@ impl<P, O> PgInbox<P, O> {
             breaker: self.breaker,
             stalls: self.stalls,
             dependencies: self.dependencies,
+            subscribed: self.subscribed,
             checked: self.checked,
             swept_to: self.swept_to,
             expired_to: self.expired_to,
@@ -740,7 +765,7 @@ impl<P, O> PgInbox<P, O> {
     #[must_use]
     pub fn with_breaking(self, breaking: Breaking) -> Self {
         let mut breaker = Breaker::new(breaking);
-        for (channel, dependency) in self.dependencies.iter() {
+        for (channel, dependency) in self.dependencies().iter() {
             breaker.register(channel, dependency.bound());
         }
         PgInbox {
@@ -749,43 +774,102 @@ impl<P, O> PgInbox<P, O> {
         }
     }
 
-    /// The same inbox, given what its channels' stages depend on, by
-    /// destination (ADR-0042 decision 1): a composition root hands it the
-    /// dependencies of the stage it subscribes through — the DEK's
-    /// [`ByDestination`](https://docs.rs/ascetic-ddd-dek) is one. A stage's
-    /// `Stage`-scoped refusal of a cause its channel's dependency answers for
-    /// is then that dependency's evidence: its pause opens on breadth
-    /// confirmed by a check, and ends only on a check served — a row
-    /// processed from the stage's memory is none. A sealed channel left out
-    /// keeps the rows' breaker, whose trial a cached key closes.
-    #[must_use]
-    pub fn depending_on(self, dependent: &dyn ascetic_ddd_bus::Dependent) -> Self {
-        let mut dependencies = (*self.dependencies).clone();
-        {
-            let mut breaker = self.breaker();
-            for (destination, dependency) in dependent.dependencies() {
-                let channel = ascetic_ddd_bus::uri::without_key(&destination).to_owned();
-                breaker.register(&channel, dependency.bound());
-                dependencies.insert(channel, dependency);
+    /// The same inbox, weighing its channels' stages' refusals by
+    /// `dependencies`, by destination (ADR-0042 decision 1), for the rows it
+    /// is driven over by [`PgInbox::run`] or [`PgInbox::dispatch`] without a
+    /// subscription. A subscription registers its stages' own: a consumer
+    /// goes in only through stages that declare them (seedwork ADR-0044).
+    ///
+    /// A stage's `Stage`-scoped refusal of a cause its channel's dependency
+    /// answers for is then that dependency's evidence: its pause opens on
+    /// breadth confirmed by a check, and ends only on a check served — a row
+    /// processed from the stage's memory is none.
+    ///
+    /// # Errors
+    /// [`Composition::Conflict`] when a destination is weighed by another
+    /// dependency already; nothing is registered.
+    pub fn depending_on(self, dependencies: &Dependencies) -> Result<Self, Composition> {
+        self.register(dependencies)?;
+        Ok(self)
+    }
+
+    /// Registers `dependencies`: each destination's gate in the breaker and
+    /// its dependency in the store, all of them or, on a conflict, none.
+    pub(crate) fn register(&self, dependencies: &Dependencies) -> Result<(), Composition> {
+        // The store's lock, then the breaker's: the one order, and no reader
+        // holds the store's while it takes the breaker's.
+        let mut store = self
+            .dependencies
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (channel, dependency) in dependencies.iter() {
+            if let Some(held) = store.get(channel)
+                && !Arc::ptr_eq(held, dependency)
+            {
+                return Err(Composition::Conflict {
+                    destination: channel.to_owned(),
+                });
             }
         }
-        let mut channels: Vec<&String> = dependencies.keys().collect();
-        channels.sort_unstable();
-        log::info!(
-            "inbox: the dependencies of {} channels checked: {channels:?}",
-            channels.len()
-        );
-        PgInbox {
-            dependencies: Arc::new(dependencies),
-            ..self
+        let mut registered = (**store).clone();
+        {
+            let mut breaker = self.breaker();
+            for (channel, dependency) in dependencies.iter() {
+                breaker.register(channel, dependency.bound());
+                registered.insert(channel.to_owned(), Arc::clone(dependency));
+            }
         }
+        if registered.len() > store.len() {
+            let mut channels: Vec<&String> = registered.keys().collect();
+            channels.sort_unstable();
+            log::info!(
+                "inbox: the dependencies of {} channels checked: {channels:?}",
+                channels.len()
+            );
+        }
+        *store = Arc::new(registered);
+        Ok(())
+    }
+
+    /// What the store holds now: an `Arc` cloned under the read lock.
+    pub(crate) fn dependencies(&self) -> Arc<Registered> {
+        Arc::clone(
+            &self
+                .dependencies
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 
     /// The dependency registered for `channel`.
-    pub(crate) fn dependency_of(&self, channel: &str) -> Option<&dyn ascetic_ddd_bus::Dependency> {
-        self.dependencies
-            .get(channel)
-            .map(|dependency| &**dependency)
+    pub(crate) fn dependency_of(&self, channel: &str) -> Option<Arc<dyn Dependency>> {
+        self.dependencies().get(channel).map(Arc::clone)
+    }
+
+    /// The channels whose stage's refusals this inbox weighs by a dependency,
+    /// keys left aside, in order: every one registered over the inbox's
+    /// life, by a subscription or by [`PgInbox::depending_on`] — a channel's
+    /// gate outlives the subscription that registered it (seedwork
+    /// ADR-0044). What a host checks its sealed channels against.
+    #[must_use]
+    pub fn dependent_channels(&self) -> Vec<String> {
+        let mut channels: Vec<String> = self.dependencies().keys().cloned().collect();
+        channels.sort_unstable();
+        channels
+    }
+
+    /// Takes the inbox's one live subscription, or `None` while another is
+    /// live; released when the returned guard is dropped.
+    pub(crate) fn subscription(&self) -> Option<Live> {
+        self.subscribed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .ok()
+            .map(|_| Live(Arc::clone(&self.subscribed)))
     }
 
     /// What this process's memo keeps from its walk at the stage's scope, by

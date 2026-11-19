@@ -87,10 +87,12 @@ pub use crate::adapter::{
     TransactionalWireProducer, WireConsumer, WireProducer,
 };
 pub use crate::bridge::{Bridge, Target};
-pub use crate::dependency::{Check, Dependency, Dependent};
-pub use crate::error::{BoxError, Cause, Error, Permanent, Scope, Transient, Unavailable};
+pub use crate::dependency::{Check, Dependencies, Dependency, Dependent};
+pub use crate::error::{
+    BoxError, Cause, Composition, Error, Permanent, Scope, Transient, Unavailable,
+};
 pub use crate::message::Message;
-pub use crate::stage::Stage;
+pub use crate::stage::{InboundStage, Stage};
 
 /// A registry of transports by URI scheme.
 ///
@@ -332,7 +334,7 @@ impl<T, S> TransactionalProducer<T, S> {
 pub struct TransactionalConsumer<T, S> {
     wire: Box<dyn TransactionalWireConsumer<S>>,
     decode: Decoder<T>,
-    stages: stage::Stages,
+    stages: Vec<Arc<dyn InboundStage>>,
 }
 
 // The session crosses the stages' awaits on its way to the handler, so it
@@ -350,26 +352,40 @@ impl<T: 'static, S: Send + 'static> TransactionalConsumer<T, S> {
         }
     }
 
-    /// The same consumer with one more [`Stage`] on the way in, as
-    /// [`Consumer::through`].
-    pub fn through(mut self, stage: Arc<dyn Stage>) -> Self {
+    /// The same consumer with one more stage on the way in, as
+    /// [`Consumer::through`]: an [`InboundStage`], which states what it
+    /// depends on, so that the inbox weighs its outage by it (seedwork
+    /// ADR-0044).
+    pub fn through(mut self, stage: Arc<dyn InboundStage>) -> Self {
         self.stages.push(stage);
         self
     }
 
     /// Runs `handler` for every message, with the transaction the message is
-    /// acknowledged in, until the subscription is cancelled.
+    /// acknowledged in, until the subscription is cancelled. The stages'
+    /// [`Dependencies`] go with it: the inbox weighs their refusals by them.
     ///
     /// A message that `decode` rejects will not be read on a retry either:
     /// its verdict is permanent, and the inbox parks it where an operator
     /// sees it. A stage that fails on the way in fails the handling instead,
     /// with the stage's own verdict.
+    ///
+    /// # Errors
+    /// [`Error::Composition`] when two stages declare different dependencies
+    /// for one destination — nothing is subscribed — or when the wire
+    /// consumer refuses the composition; the wire consumer's own errors.
     pub fn subscribe<F, Fut, O>(&self, handler: F) -> Result<Subscription, Error>
     where
         F: Fn(S, T) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = O> + Send + 'static,
         O: Outcome,
     {
+        let dependencies = self
+            .stages
+            .iter()
+            .try_fold(Dependencies::none(), |all, stage| {
+                all.merge(stage.dependencies())
+            })?;
         let decode = Arc::clone(&self.decode);
         let stages = self.stages.clone();
         let handler = Arc::new(handler);
@@ -396,7 +412,7 @@ impl<T: 'static, S: Send + 'static> TransactionalConsumer<T, S> {
                 handling.await.into_result()
             })
         });
-        self.wire.subscribe(handler)
+        self.wire.subscribe(handler, dependencies)
     }
 }
 

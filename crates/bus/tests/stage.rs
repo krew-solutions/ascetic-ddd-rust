@@ -2,10 +2,12 @@
 //! through them, and a stage's failure is the message's.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use ascetic_ddd_bus::adapters::in_memory::InMemoryBroker;
 use ascetic_ddd_bus::{
-    BoxError, Bus, Error, Message, Permanent, Scope, Stage, Subscription, TransactionalConsumer,
+    BoxError, Bus, Cause, Check, Composition, Dependencies, Dependency, Dependent, Error,
+    InboundStage, Message, Permanent, Scope, Stage, Subscription, TransactionalConsumer,
     TransactionalHandler, TransactionalProducer, TransactionalWireConsumer,
     TransactionalWireProducer, Unavailable, cause,
 };
@@ -15,6 +17,12 @@ use tokio::sync::mpsc;
 /// Reverses the payload on the way out and back on the way in, and marks
 /// the message with a header while it is reversed.
 struct Reversing;
+
+impl Dependent for Reversing {
+    fn dependencies(&self) -> Dependencies {
+        Dependencies::none()
+    }
+}
 
 impl Stage for Reversing {
     fn outbound(&self, message: Message) -> BoxFuture<'_, Result<Message, BoxError>> {
@@ -39,6 +47,12 @@ impl Stage for Reversing {
 
 /// Appends a byte on the way out and strips it on the way in.
 struct Tagging(u8);
+
+impl Dependent for Tagging {
+    fn dependencies(&self) -> Dependencies {
+        Dependencies::none()
+    }
+}
 
 impl Stage for Tagging {
     fn outbound(&self, message: Message) -> BoxFuture<'_, Result<Message, BoxError>> {
@@ -164,10 +178,150 @@ impl TransactionalWireProducer<Tx> for Recording {
 struct Handing(Arc<Mutex<Option<TransactionalHandler<Tx>>>>);
 
 impl TransactionalWireConsumer<Tx> for Handing {
-    fn subscribe(&self, handler: TransactionalHandler<Tx>) -> Result<Subscription, Error> {
+    fn subscribe(
+        &self,
+        handler: TransactionalHandler<Tx>,
+        _: Dependencies,
+    ) -> Result<Subscription, Error> {
         *self.0.lock().unwrap() = Some(handler);
         Ok(Subscription::new(|| {}))
     }
+}
+
+/// Keeps the dependencies it is subscribed with, as an inbox registers them.
+struct Registering(Arc<Mutex<Option<Dependencies>>>);
+
+impl TransactionalWireConsumer<Tx> for Registering {
+    fn subscribe(
+        &self,
+        _: TransactionalHandler<Tx>,
+        dependencies: Dependencies,
+    ) -> Result<Subscription, Error> {
+        *self.0.lock().unwrap() = Some(dependencies);
+        Ok(Subscription::new(|| {}))
+    }
+}
+
+/// A dependency that is never asked: told from another only by identity.
+struct Kms;
+
+impl Dependency for Kms {
+    fn served(&self) -> u64 {
+        0
+    }
+
+    fn bound(&self) -> Duration {
+        Duration::from_secs(1)
+    }
+
+    fn answers_for(&self, _: Cause) -> bool {
+        true
+    }
+
+    fn check<'a>(&'a self, _: Option<&'a Message>) -> BoxFuture<'a, Check> {
+        Box::pin(async { Check::Unasked })
+    }
+}
+
+/// Passes every message through, and declares a dependency for each of its
+/// destinations.
+struct Opening(Vec<(&'static str, Arc<dyn Dependency>)>);
+
+impl Dependent for Opening {
+    fn dependencies(&self) -> Dependencies {
+        Dependencies::by_destination(self.0.iter().map(|(d, k)| (*d, Arc::clone(k))))
+            .expect("one dependency a destination")
+    }
+}
+
+impl Stage for Opening {
+    fn outbound(&self, message: Message) -> BoxFuture<'_, Result<Message, BoxError>> {
+        Box::pin(async move { Ok(message) })
+    }
+
+    fn inbound(&self, message: Message) -> BoxFuture<'_, Result<Message, BoxError>> {
+        Box::pin(async move { Ok(message) })
+    }
+}
+
+fn registering(
+    stages: Vec<Arc<dyn InboundStage>>,
+) -> (Result<Subscription, Error>, Option<Dependencies>) {
+    let registered = Arc::new(Mutex::new(None));
+    let consumer = stages.into_iter().fold(
+        TransactionalConsumer::new(
+            Box::new(Registering(Arc::clone(&registered))),
+            |message: &Message| Ok(message.payload().to_vec()),
+        ),
+        TransactionalConsumer::through,
+    );
+    let subscribed = consumer.subscribe(|_: Tx, _: Vec<u8>| async {});
+    let registered = registered.lock().unwrap().take();
+    (subscribed, registered)
+}
+
+/// A consumer hands the wire consumer what every stage it goes in through
+/// declares, keys left aside (seedwork ADR-0044, S1): the inbox learns its
+/// stages' dependencies from the subscription, not from a composition
+/// root. Red when the consumer hands none, or one stage's only.
+#[test]
+fn a_consumer_hands_the_inbox_what_its_stages_depend_on() {
+    let (orders, invoices) = (
+        Arc::new(Kms) as Arc<dyn Dependency>,
+        Arc::new(Kms) as Arc<dyn Dependency>,
+    );
+    let (subscribed, registered) = registering(vec![
+        Arc::new(Opening(vec![("inbox://orders/k1", Arc::clone(&orders))])),
+        Arc::new(Reversing),
+        Arc::new(Opening(vec![("inbox://invoices", Arc::clone(&invoices))])),
+    ]);
+    subscribed.unwrap();
+    let registered = registered.expect("subscribed with its dependencies");
+    let each: Vec<_> = registered.iter().collect();
+    assert_eq!(
+        each.iter().map(|(d, _)| *d).collect::<Vec<_>>(),
+        ["inbox://invoices", "inbox://orders"]
+    );
+    assert!(Arc::ptr_eq(each[0].1, &invoices) && Arc::ptr_eq(each[1].1, &orders));
+}
+
+/// Two stages that declare different dependencies for one destination are a
+/// composition refused before the wire consumer is asked (seedwork ADR-0044,
+/// S2b): nothing is subscribed. The same dependency twice is one.
+#[test]
+fn two_stages_declaring_two_dependencies_for_one_destination_subscribe_nothing() {
+    let kms = Arc::new(Kms) as Arc<dyn Dependency>;
+    let (subscribed, registered) = registering(vec![
+        Arc::new(Opening(vec![("inbox://orders/k1", Arc::clone(&kms))])),
+        Arc::new(Opening(vec![("inbox://orders/k2", Arc::new(Kms))])),
+    ]);
+    assert!(
+        matches!(
+            subscribed,
+            Err(Error::Composition(Composition::Conflict { ref destination })) if destination == "inbox://orders"
+        ),
+        "{subscribed:?}"
+    );
+    assert!(registered.is_none(), "the wire consumer was asked");
+    let (subscribed, registered) = registering(vec![
+        Arc::new(Opening(vec![("inbox://orders/k1", Arc::clone(&kms))])),
+        Arc::new(Opening(vec![("inbox://orders", kms)])),
+    ]);
+    subscribed.unwrap();
+    assert_eq!(registered.unwrap().iter().count(), 1);
+}
+
+/// A transactional consumer goes in only through a stage that states what it
+/// depends on (seedwork ADR-0044, S5a): `through` takes an `InboundStage`,
+/// and a plain `Stage` does not compile there. Red at compile time when
+/// `through` takes any `Stage` again.
+#[test]
+fn a_transactional_consumer_goes_in_only_through_a_stage_that_declares() {
+    type Consumer = TransactionalConsumer<Vec<u8>, Tx>;
+    let through: fn(Consumer, Arc<dyn InboundStage>) -> Consumer = Consumer::through;
+    let (subscribed, _) = registering(vec![]);
+    subscribed.unwrap();
+    let _ = through;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -226,6 +380,12 @@ async fn a_stage_that_refuses_on_the_way_in_fails_the_handling_and_keeps_its_ver
 
 /// Refuses every message on the way in as unavailable over the stage.
 struct Down;
+
+impl Dependent for Down {
+    fn dependencies(&self) -> Dependencies {
+        Dependencies::none()
+    }
+}
 
 impl Stage for Down {
     fn outbound(&self, message: Message) -> BoxFuture<'_, Result<Message, BoxError>> {
