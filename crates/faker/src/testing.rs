@@ -5,6 +5,15 @@ use std::fmt;
 use crate::key::{Encoder, KeyPart, Unit};
 use crate::math;
 
+pub use crate::golden::GoldenMismatch;
+
+/// Runs the library's golden tables in the caller's build: a host test, run in
+/// release, sees what the host's lock resolves (`libm`, `siphasher`), which the
+/// library's own CI never does (ADR-0045 decision 8).
+pub fn check_golden() -> Result<(), GoldenMismatch> {
+    crate::golden::check()
+}
+
 /// The canonical bytes a scope is written as: for a host's test that its own
 /// [`KeyPart`] is injective, as the crate's are.
 ///

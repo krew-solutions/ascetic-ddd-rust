@@ -56,6 +56,7 @@ mod tag {
     pub(super) const PART: u8 = 0x03;
     pub(super) const INTERNAL: u8 = 0x04;
     pub(super) const ID: u8 = 0x05;
+    pub(super) const DIGEST: u8 = 0x06;
 }
 
 /// The seed of a Plan: the root of every key.
@@ -248,6 +249,20 @@ pub(crate) mod audit {
         let result = f();
         let ledger = LEDGER.with_borrow_mut(|l| std::mem::replace(l, outer));
         (result, ledger.unwrap_or_default())
+    }
+}
+
+/// The SipHash-2-4-128 of `bytes` under zero keys and the digest tag: the
+/// golden tables' fingerprint.
+pub(crate) fn digest(bytes: &[u8]) -> (u64, u64) {
+    let key = derive(0, 0, tag::DIGEST, |out| out.write(bytes));
+    (key.k0, key.k1)
+}
+
+impl Key {
+    /// The key's two words, for the golden tables.
+    pub(crate) fn words(&self) -> (u64, u64) {
+        (self.k0, self.k1)
     }
 }
 

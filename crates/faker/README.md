@@ -3,8 +3,9 @@
 Generated data for load tests. A port of ascetic-ddd-python's `faker/domain/fp`,
 adapted to Rust rather than transliterated (ADR-0045).
 
-**Status: in progress.** Done: the key (slice S1); the laws, `apportion` and
-`Permutation` (slice S2); the generators (slice S3). To come: the populations.
+**Status:** stage 1 of ADR-0045 built — the key, the laws, the generators, the
+populations. Stage 2 (the Command Log and its writer) and stage 3 (the
+scheduler) are their own ADRs.
 
 ## Principle
 
@@ -108,3 +109,44 @@ the two never meet: wrapping a generator in `optional` or `map` leaves its
 values unchanged. The `audit` feature lets a test check it of its own
 generators: `testing::audit` reports a member's derivations, draws, and draws
 from a key already drawn from.
+
+## Populations
+
+A population holds identities, not values: a member is a `Ref` — kind, scope,
+index — and its value is regenerated from its key wherever it is needed. A
+population of 10⁹ holds nothing, and the parent a reference names is the same
+whoever reaches it.
+
+```
+use ascetic_ddd_faker::generator::{constant, draw};
+use ascetic_ddd_faker::law::{Categorical, Skew};
+use ascetic_ddd_faker::{Key, Plan, Seed};
+
+let mut plan = Plan::new(Seed(42));
+let os = Categorical::from_weights(&[0.6, 0.3, 0.1]).unwrap();
+let devices = plan.population::<u64, _, _>("device", constant(1_000_000u64), draw(os)).unwrap();
+let groups = plan.population::<u64, _, _>("group", constant(100u64), constant(())).unwrap();
+
+let tenant = 2;
+let (devices, groups) = (devices.scope(tenant).unwrap(), groups.scope(tenant).unwrap());
+let os_of_7 = devices.value(7).unwrap();
+let group_of_7 = groups.pick(devices.key_of(7).child("group"), &Skew::new(2.0).unwrap()).unwrap();
+# assert!(os_of_7 < 3 && group_of_7.index < 100 && group_of_7.scope == tenant);
+```
+
+- `pick_below` picks among the first `upto` of an order: "a parent that exists
+  by now", and Python's growing pool as a pure function (`Pool`).
+- `Ranges` (`Table`, or an `Apportionment` with no table) is one-to-many: a
+  parent's children are a range, its members known before any of them exists.
+- `permutation()` is a scope's own order, independent of identity: arrivals,
+  samples without replacement.
+
+Everything is a pure function with random access, so a Plan's output can be cut
+into units and computed on any number of threads with the same bytes.
+
+## Versions
+
+`ALGORITHM` is the digest of the crate's golden tables (`golden/tables.txt`):
+what this version generates, row by row. A changed value changes the tables and
+the version in one edit. A host calls `testing::check_golden()` in its own
+build, in release, where its lock resolves the pinned dependencies.

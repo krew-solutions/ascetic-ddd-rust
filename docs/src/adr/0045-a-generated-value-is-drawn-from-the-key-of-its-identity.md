@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-20); slices S1 to S3 built. Stage 1 of three toward the host's fitness functions:
+Proposed (2026-11-20); slices S1 to S4 built, S4's mutation run and M6 measured after it (§ Measured). Stage 1 of three toward the host's fitness functions:
 1. **This decision:** the faker — a port of ascetic-ddd-python's `faker/domain/fp` and what it needs.
 2. **A later ADR:** the scenario file, its writer and its validator.
 3. **A later ADR:** the scheduler that runs a scenario file against a stand.
@@ -310,17 +310,21 @@ A member's key is `root.child(kind).part(&scope).at(index)`. The scope is in the
 is not one value. A Plan refuses two populations of one `Kind`. **Time never enters the path:** a member's identity
 and attributes do not change when an arrival rate does, so an experiment on arrivals keeps common random numbers.
 
-**`Population<K, G>`** declares its size per scope: a count, or a `Gen` of the count from the scope's key.
-`scope(&self, &scope) -> ScopeView` evaluates the scope once — its size, its key, its law — so a unit of 10⁶ picks
-does not redraw a Poisson size 10⁶ times. Everything it answers is a pure function with random access:
-- `size()`.
-- `pick(key, &law) -> Ref<K>` (many-to-one): index `j` drawn by the law over `0..size`.
-- `pick_below(key, &law, upto) -> Option<Ref<K>>`: over the first `upto` positions of a declared order (the
-  identity, or a `Permutation`); `None` when `upto` is 0. "A parent that exists at `t`" is
-  `pick_below(.., A(t))` with `A` the parent's arrival count, and nesting "below the member's own index" is its
-  special case.
-- `value(&Ref<K>) -> Result<T, Refusal>` regenerates the member from its key; a refusal names the `Ref`.
-  Populations are virtual: they hold no member.
+**`Plan::population(kind, size, members)`** makes a `Population<K, S, G>`: `size` is a `Gen` of a scope's member
+count from the scope's key (`constant(n)` for a fixed one), `members` the `Gen` of a member from its own. A Plan
+refuses a kind twice (`DuplicateKind`). `scope(&self, scope) -> ScopeView` evaluates a scope once — its size, its
+key — so a unit of 10⁶ picks does not redraw a Poisson size 10⁶ times. Everything a view answers is a pure function
+with random access:
+- `size()`, `reference(i) -> Ref<K>`, `key_of(i) -> Key`;
+- `value(i)`, and `Population::value(&Ref<K>)`: the member regenerated from its key; refused past the size, or for
+  a `Ref` of another kind. Populations are virtual: they hold no member;
+- `pick(key, &law) -> Option<Ref<K>>` (many-to-one): index `j` drawn by the law over `0..size`; `None` in an empty
+  scope;
+- `pick_below(key, &law, upto, order) -> Option<Ref<K>>`: over the first `upto` positions of `order` — the
+  identity, or a `Permutation` — and `None` while `upto` is 0. "A parent that exists at `t`" is
+  `pick_below(.., A(t), ..)` with `A` the parents' arrival count; nesting "below the member's own index" is its
+  special case;
+- `permutation()`: the scope's own order of its members, from its key — an arrival order independent of identity.
 
 **What a reference requires of order is the reference's, not the population's.** A step that needs its referent
 created first — a Device managed into a group that must exist — is an edge, which stage 2 places and its validator
@@ -330,21 +334,23 @@ host's import order (`cohort_drill.rs`: groups with their members before the wav
 so its wrong slot (defect 4) has nowhere to happen, and over a fixed size the realised law is the stated one
 (defect 3).
 
-**`Ranges`** (one-to-many, for few parents: groups, waves, time chunks): a prefix-sum table over the parents of
-one scope, built from their child counts (drawn by a law, or by `apportion` for an exact total), 8 bytes a parent.
+**`Ranges`** (one-to-many, for few parents: groups, waves, time chunks), a trait with two forms: `Table`, a
+prefix-sum table built from the parents' child counts, 8 bytes a parent; and `Apportionment` itself, whose starts
+are O(1) with no table, for an exact total split by weights.
 - The children of parent `p` are the indices `start(p)..end(p)` of the child population.
-- `parent_of(child)` is a binary search, O(log parents).
+- `parent_of(child)` is a binary search, O(log parents), and never lands on an empty parent: its invariant is
+  `start(low) ≤ child < start(high)`.
 - A group's members are a range, listed in O(1) memory, mapped through a `Permutation` when identity order must
   not follow the group.
 
 Children of many parents (a Device's reports, its apps) take no table: they are scoped by the parent's `Ref`, so
 `parent_of` is in the key path. Memory grows with the parents of each `Ranges`, and with nothing else.
 
-**Python's growing pool, as a pure function.** Its "a new value with probability `1/mean`" is a prefix pick over
-parents that grow with the children: before child `n`, `A(n) = 1 + ⌊n / mean + u⌋` parents exist (`u` from the
-scope's key; parent 0 before child 0), parent `p ≥ 1` is emitted just before child `⌈(p − u) · mean⌉`, and child
-`n` picks below `A(n)`. An open
-stream keeps persistent parents, with no record and no total known in advance.
+**Python's growing pool, as a pure function: `Pool`.** Its "a new value with probability `1/mean`" is a prefix pick
+over parents that grow with the children: before child `n`, `A(n) = 1 + ⌊n / mean + u⌋` parents exist
+(`Pool::parents_before`; `u` from a key, parent 0 before child 0), parent `p ≥ 1` arrives just before child
+`⌈(p − u) · mean⌉` (`Pool::arrives_before`), and child `n` picks below `A(n)`. An open stream keeps persistent
+parents, with no record and no total known in advance.
 
 **The sequencer** is the member's index in its scope, `Ref::index`. The scope is typed, so `None` and `"None"`
 cannot collide (Python's `str(scope)` let them).
@@ -386,6 +392,12 @@ There are two versions, never one.
 
 `testing::check_golden()` lets the host run the library's tables in its own build, in release. That build resolves
 `libm` through the host's lock, which the library's CI never sees.
+
+Built: the tables are `crates/faker/golden/tables.txt`, rows `layer subject: values` (floats as their bits, never
+formatted); `ascetic_ddd_faker::ALGORITHM` is their SipHash-2-4-128 digest, and a test ties the two. An ignored
+test, `golden::tests::regenerate`, rewrites the file and prints the digest; setting `ALGORITHM` to it is the
+deliberate second step. Coverage is counted from the source: the number of `impl … Law for` and `IndexLaw for`
+blocks must equal the laws the tables cover.
 
 ### 9. Not ported
 
@@ -563,16 +575,16 @@ the scheduled start; the observer counts service time.
 | C2 | S3 | `optional(½, draw(U))`'s present values pass KS against `U` at α = 10⁻⁴, a coin drawn from the value's own key failing it; `optional(1)` and `map` leave the inner values unchanged; `replicate`'s first items do not depend on the count | the coin ignored; the coin from the inner key |
 | M2 | S3 | a drill-shaped Device: exactly `8 +` its facets derivations (at most 15), and its draws exactly; a placement by `Permutation` between 4 and 5 derivations on average where the domain is 1.05 n, at most 17 where it is 4 n | derivations or draws not counted; an accidental quadratic derivation |
 | Cap1 | S3 | `replicate` refuses a count above its cap, and names it; the cap is an argument, so an uncapped list cannot be written | the cap check dropped |
-| Pop1 | S4 | `value(ref) == gen.generate(ref.key())` for every member; a pick lies in `0..size`; picks by two consumers of one member give one value | the consumer's key passed on; `size` off by one |
-| Pop2 | S4 | two populations of one `Kind` refused; member `i` of two scopes are different values, and independent by χ² | the scope omitted from the path |
-| Rng1 | S4 | `Ranges`: the children of the parents tile `0..total` without gap or overlap; `parent_of(c)` is the `p` with `c` in `start(p)..end(p)`, at every boundary; with `apportion` the total is exact | an off-by-one at `end(p)`; a linear search |
-| Par1 | S4 | the acceptance test's values are identical on 1, 2 and 7 threads, and under two decompositions: by scope in index order, and by positions of a `Permutation` across scopes | a shared counter; a value depending on finish order |
-| PP1 | S4 | `pick_below(.., upto)` lies in the first `upto` positions of its order, is `None` at 0, and its law over a fixed `upto` is the stated one; the growing pool: before child `n` exactly `A(n)` parents exist, parent `p` precedes the first child that can pick it, and uses per parent average `mean` (defect 1's regression) | `upto` off by one; the pool's parents emitted after their first pick |
-| R1 | S4 | same Plan twice; members generated in permuted order; adding a field leaves the others unchanged | a counter-derived key; a `HashMap` |
-| R2 | S4 | layered golden tables; the fingerprint is their digest; a failure names its layer and first differing row; coverage by an exhaustive `match` over the law enums | a law missing from the tables |
-| R4 | S4 | `testing::check_golden()` passes in the host's build, in release | a `libm` patch arriving through the host's lock |
-| D1 | S4 | a drill-shaped acceptance test, written in the library: Tenants; branches apportioned to an exact total and nested under `all`; Devices by a skewed law; Policies on drawn groups; contexts by categorical laws; a sample of 5,000 without replacement; groups created with the ids of Devices not yet placed. It compiles, the totals are exact, every foreign key resolves inside its scope. The time-major Command Log over it is stage 2's first acceptance test | — (the API's expressiveness: Software Design's acceptance gate) |
-| PY | S4 | the Python regressions carried: the analytic skew values, uniformity at skew 1, monotonicity in skew; weighted-range bounds and validation; the null fraction within a binomial bound; uses per member at a mean of 10 (defect 1, now ⌈total / mean⌉ members); scope filtering | — |
+| Pop1 | S4 | a member is the value of `root.child(kind).part(scope).at(i)`, by its view and by its `Ref`; 10⁴ uniform picks reach the last member and never pass it; two consumers of one member see one value; past the size refused | the scope out of the path; a pick over `size + 1`; a value depending on call order |
+| Pop2 | S4 | a kind twice refused; member `i` of two Tenants independent by a 3×3 χ² (4 degrees), a path without the scope as the negative control; a `Ref` of another kind refused | a kind allowed twice; the kind check dropped |
+| Rng1 | S4 | a `Table` tiles its children with empty parents between, `parent_of` at every child, nothing past the last parent; an `Apportionment`'s ranges exact in total and never naming its empty part | a start past the end as 0 |
+| Par1 | S4 | D1's log (3 Tenants × 10⁴ Devices, units of 10³ fixed by the Plan) byte-identical on 1, 2 and 7 threads and with the units computed in reverse | a value depending on call order |
+| PP1 | S4 | `pick_below`: `None` at 0, inside the first `upto` of its order (identity or permutation), uniform over them by χ², `upto` past the size clamped; `Pool`: at means 1, 2.5, 10, 37 a parent arrives before the first child that can pick it and not before; at a mean of 10, 10 uses a parent over 10⁵ children (defect 1) | the order ignored; `upto` unclamped; an arrival a child late; no parent 0 |
+| R1 | S4 | same Plan twice gives the same values (D1, Par1, the golden plan); a law's key is its path (Pop1); adding a field or a combinator leaves others unchanged (C2, M2) | a counter-derived key; a `HashMap` |
+| R2 | S4 | `golden/tables.txt` (keys, units, 15 laws at 7 units, combinators at 4 members, permutations, `apportion`, `Pool`, a reference plan's digest) equals what the crate computes; a mismatch names its layer and row, a missing or extra row its count; `ALGORITHM` is the tables' digest; every law type has rows | a law changed by one ulp; a shorter table accepted |
+| R4 | S4 | `testing::check_golden()` passes through the public path (`tests/golden.rs`); in the host's build, in release, is the host's (§ For the consumer) | a `libm` patch arriving through the host's lock |
+| D1 | S4 | `tests/drill.rs`: 3 Tenants; 100 branches nested under `all`, their 10⁴ Devices apportioned exactly by a power law; Devices with OS, platform, an OEM present nine times in ten, a management mode and up to three facets; 10 Policies on branches drawn by a skew; a branch's members rendered as ids before any Device is placed; a sample of 500 without replacement; the OS mix within 5σ; two Tenants not copies | — (the API's expressiveness: Software Design's acceptance gate) |
+| PY | S2–S4 | the Python regressions carried: the analytic skew values and monotonicity (L5); bounds and validation (L2, L8); the null fraction (C2); uses per parent at a mean of 10 (PP1, defect 1); scope filtering (Pop1, Pop2) | — |
 | MUT | S4 | one `cargo mutants -p ascetic-ddd-faker` run; every survivor either killed by a new test or argued equivalent, in § Measured | — |
 
 Not carried from Python: tests that encode a defect (`mean = 50` in the weighted distributor's tests; the triple
@@ -677,6 +689,29 @@ independent ones overlap, so these figures are upper bounds.
 | a unit's draw not recorded by the audit | C1, M2, the audit's own doctest |
 | derivations not counted by the audit | M2 |
 | the audit's repeats counted after deduplication | C1's negative control, the doctest |
+
+**S4** (2026-11-20, this laptop):
+- **What the round found.** `parent_of` carried a loop skipping empty parents that its binary search's invariant
+  makes dead: removed. Three executors were too weak for their mutants: a pick over `size + 1` lands on the extra
+  index rarely under a skew, so Pop1 now picks 10⁴ times uniformly; a table's start past the end and the golden
+  check's row count had no test: both have one.
+- **The mutations**, each applied alone, `cargo test -p ascetic-ddd-faker --all-features --no-fail-fast`; every one
+  red:
+
+| Mutation | Red |
+|---|---|
+| the scope left out of a member's path | Pop1, Pop2, D1, R2 |
+| a pick over `size + 1` | Pop1, D1, R2 |
+| `pick_below` not clamped to the size | PP1 |
+| `pick_below` ignoring its order | PP1 |
+| the pool's parent arriving a child late | PP1, R2 |
+| the pool without parent 0 | PP1, R2 |
+| a table's start past the end as 0 | Rng1 |
+| `value` without its kind check | Pop2 |
+| a Plan allowing a kind twice | Pop2 |
+| a member's value depending on call order | Par1, Pop1, R2 |
+| a law changed by one ulp | R2 |
+| the golden check accepting a shorter table | R2 |
 
 To be filled per slice:
 - **M6, scale:** 10⁹ members of the acceptance test's Devices, values computed and discarded, on 1 thread and on

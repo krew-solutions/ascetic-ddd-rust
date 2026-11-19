@@ -13,13 +13,22 @@
 
 pub mod apportion;
 pub mod generator;
+mod golden;
 pub mod key;
 pub mod law;
 pub mod math;
 pub mod permutation;
+pub mod population;
 pub mod testing;
 
 pub use crate::apportion::{Apportionment, apportion};
 pub use crate::key::{Encoder, Key, KeyPart, Namespace, Seed, Unit};
 pub use crate::law::{IndexLaw, InvalidLaw, Law};
 pub use crate::permutation::Permutation;
+pub use crate::population::{Plan, Population, Ref};
+
+/// The algorithm's version: the digest of the golden tables, the crate's
+/// record of what it generates (ADR-0045 decision 8). A change to any generated
+/// value changes the tables, and so this, in the same edit; a scenario's header
+/// carries it, and a reader refuses another.
+pub const ALGORITHM: &str = "ef4077eedd17cf26cf1fb4158ea9f242";
