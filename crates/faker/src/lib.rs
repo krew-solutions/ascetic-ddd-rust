@@ -11,7 +11,14 @@
 #![deny(clippy::arithmetic_side_effects)]
 #![warn(missing_docs)]
 
+pub mod apportion;
 pub mod key;
+pub mod law;
+pub mod math;
+pub mod permutation;
 pub mod testing;
 
+pub use crate::apportion::{Apportionment, apportion};
 pub use crate::key::{Encoder, Key, KeyPart, Namespace, Seed, Unit};
+pub use crate::law::{IndexLaw, InvalidLaw, Law};
+pub use crate::permutation::Permutation;

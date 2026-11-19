@@ -3,14 +3,14 @@
 Generated data for load tests. A port of ascetic-ddd-python's `faker/domain/fp`,
 adapted to Rust rather than transliterated (ADR-0045).
 
-**Status: in progress.** Done: the key (slice S1). To come: the laws, the
-generators, the populations.
+**Status: in progress.** Done: the key (slice S1); the laws, `apportion` and
+`Permutation` (slice S2). To come: the generators, the populations.
 
 ## Principle
 
-A generated value is a pure function of the key of its identity. Nothing in
-generation is shared or mutable, so any thread can compute any part of the
-output, and the thread count changes the time, never a byte.
+A generated value is a pure function of the key of its identity. Nothing in this
+crate's primitives is shared or mutable, so any thread can compute any value,
+in any order, and the thread count changes the time, never a byte.
 
 ## The key
 
@@ -47,3 +47,31 @@ cannot be correlated by accident.
 
 **Ids are rendered under a `Namespace`**, kept apart from the `Seed`. Two runs
 of one Plan on one stand get fresh ids and the same attributes.
+
+## Laws
+
+A law turns one unit into one value by its quantile function, so one draw is
+one key, whatever the value:
+
+```
+# use ascetic_ddd_faker::law::{Law, Poisson, Skew, IndexLaw};
+# use ascetic_ddd_faker::{Key, Seed};
+let branch = Key::root(Seed(42)).child("branch").at(17);
+let devices = Poisson::new(10_000.0).unwrap().quantile(branch.child("devices").unit());
+let group = Skew::new(2.0).unwrap().index(branch.child("group").unit(), 100);
+# assert!(group < 100 && devices > 9_000);
+```
+
+- **Values:** uniform, exponential, Pareto, log-normal, Weibull, and any of
+  them truncated — rescaled into the interval, not clamped onto its bounds.
+- **Counts:** uniform integers, categorical (integer thresholds: no floating
+  point in the choice), empirical histograms, Poisson and binomial (walked from
+  the mode, exact in both tails).
+- **Indices of a population:** uniform, a power-law skew, weighted parts.
+- **`apportion`** splits a fixed total by weights exactly, with no item
+  favoured across scopes; **`Permutation`** orders `0..n` by a key, both ways,
+  with no table.
+
+Every transcendental function goes through `math`, over `libm` pinned
+exactly: the standard library leaves the precision of `f64::ln` and its
+relatives unspecified, and a generated value must not depend on the platform.

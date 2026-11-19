@@ -58,6 +58,18 @@ fn derivations_match_the_independent_vectors() {
     );
 }
 
+/// K2: the crate's own derivations sit under a tag a host's label cannot reach:
+/// `internal("os")` is the oracle's, and not `child("os")`.
+#[test]
+fn an_internal_derivation_is_not_a_label() {
+    let root = Key::root(Seed(42));
+    assert_eq!(
+        words(&root.internal("os")),
+        (0xa41bc8978989abfe, 0x30aca86daf390d54)
+    );
+    assert_ne!(root.internal("os"), root.child("os"));
+}
+
 #[test]
 fn bits_are_the_first_word() {
     let key = Key::root(Seed(42));

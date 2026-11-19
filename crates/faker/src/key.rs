@@ -54,8 +54,7 @@ mod tag {
     pub(super) const LABEL: u8 = 0x01;
     pub(super) const INDEX: u8 = 0x02;
     pub(super) const PART: u8 = 0x03;
-    // 0x04 is the crate's own derivations (a coin, a count, a sampler's extra
-    // uniform), which come with the combinators of slice S3.
+    pub(super) const INTERNAL: u8 = 0x04;
     pub(super) const ID: u8 = 0x05;
 }
 
@@ -113,6 +112,12 @@ impl Key {
         derive(self.k0, self.k1, tag::PART, |out| {
             part.encode(&mut Encoder::new(out))
         })
+    }
+
+    /// A key the crate derives for itself — a permutation's rounds, a coin, a
+    /// count — under a tag a host's label cannot reach.
+    pub(crate) fn internal(&self, label: &'static str) -> Key {
+        self.labelled(tag::INTERNAL, label)
     }
 
     /// 64 bits drawn from this key.
@@ -184,6 +189,13 @@ impl Unit {
         // Exact: `k` has 52 bits, `k + ½` has 53, and the scale is a power
         // of two.
         (self.0 as f64 + 0.5) * Unit::SCALE
+    }
+
+    /// `1 − value()`: `(2⁵² − 1 − k + ½) / 2⁵²`. Exact, as `1.0 - value()` is
+    /// too — a unit is an odd multiple of 2⁻⁵³ — but written as what a quantile
+    /// of the upper tail means.
+    pub fn complement(self) -> f64 {
+        (Unit::MAX_RAW.saturating_sub(self.0) as f64 + 0.5) * Unit::SCALE // k ≤ MAX_RAW
     }
 }
 

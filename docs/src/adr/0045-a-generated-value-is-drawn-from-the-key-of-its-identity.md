@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-20); slice S1 built. Stage 1 of three toward the host's fitness functions:
+Proposed (2026-11-20); slices S1 and S2 built. Stage 1 of three toward the host's fitness functions:
 1. **This decision:** the faker — a port of ascetic-ddd-python's `faker/domain/fp` and what it needs.
 2. **A later ADR:** the scenario file, its writer and its validator.
 3. **A later ADR:** the scheduler that runs a scenario file against a stand.
@@ -142,7 +142,13 @@ and the second run does not silently measure the inbox's duplicate path.
 ### 3. Pinned math
 
 - Quantile functions go through `math`, which uses `libm` pinned exactly (`=0.2.16`, the version the host's lock
-  already holds) and the crate's own inverse normal (AS241) and regularized incomplete gamma.
+  already holds), without its `arch` feature. On x86_64 that feature replaces only `sqrt` and `fma`
+  (`src/math/arch/x86.rs` of the crate, read), both correctly rounded, so a host whose lock enables it changes no
+  value. What `libm` lacks is written in `math` from `+ − × ÷`: the regularized incomplete gamma and beta functions
+  (series and Lentz's continued fractions, their common factors in Loader's form, decision 4), and the inverse
+  normal — a rational start (Abramowitz and Stegun 26.2.23) refined by three Halley steps, on `Φ` from `erfc` in
+  the tail and on `½ erf(x/√2) − (p − ½)` in the centre, where `Φ(x) − p` would be a difference of two numbers
+  near ½. They reach `erf`'s precision with nothing but six well-known constants to get wrong.
 - `f64::powf`, `ln`, `exp` and their relatives are never called directly: per the standard library's documentation
   their precision is unspecified, so a result may differ across platforms and Rust releases.
 - Discrete choices compare the 52-bit integer `k` against integer thresholds fixed at construction. Construction uses
@@ -161,12 +167,20 @@ and the second run does not silently measure the inbox's duplicate path.
 ### 4. A law is a value
 
 ```rust
-pub trait Law {
+pub trait Law: Display {
     type Value;
     fn quantile(&self, u: Unit) -> Self::Value;
     fn cdf(&self, x: &Self::Value) -> f64;
+    fn cdf_below(&self, x: &Self::Value) -> f64; // P(X < x): what truncation needs at its lower bound
+}
+pub trait IndexLaw: Display {                    // over the members of a population of n
+    fn index(&self, u: Unit, n: u64) -> u64;
+    fn cdf(&self, i: u64, n: u64) -> f64;
 }
 ```
+
+A quantile reads the unit as `p` or as `1 − p` (`Unit::value`, `Unit::complement`), whichever its formula is
+written in; both are exact, a unit being an odd multiple of 2⁻⁵³.
 
 - Each law is validated at construction: negative, NaN or empty weights and out-of-range parameters are refused.
 - Each has a canonical `Display`, for the scenario file's header.
@@ -174,18 +188,37 @@ pub trait Law {
   exhaustive `match`.
 
 **Ported from Python, adapted:**
-- the power-law skew index;
-- weighted partitions with a local skew (m2o);
+- the power-law skew index (`Skew`, an `IndexLaw`);
+- weighted partitions (`Partitioned`, an `IndexLaw`): the part by weight and the member uniformly, both from one
+  unit — the part by `Categorical`'s thresholds, the member by the unit's position inside the part's interval.
+  Python bent each part towards its end to make up for a pool that grew while it was drawn from (defect 3); over a
+  fixed size there is nothing to make up for, and the bend goes;
 - categorical over integer thresholds, looked up by `partition_point`: O(log B), never Python's O(B) per draw;
-- the o2m mixtures, as a composition of two laws under two derived keys;
+- uniform integers, refused over more than 2⁵² of them: one unit cannot tell more apart (64 random bits are
+  `Key::bits`);
 - uniform, exponential, Pareto, log-normal and Weibull.
+
+**The o2m mixtures** (a Poisson whose mean is itself drawn) take two uniforms, so they are not a `Law` but a
+composition of two under two derived keys: slice S3's, with the combinators.
 
 **Truncation is by the inverse CDF on [F(a), F(b)]**: one uniform, O(1). It is mandatory for a heavy tail.
 
-**Poisson** is inverted from one uniform:
-- the walk starts at the mode, with the pmf from `lgamma` and F(mode) from the incomplete gamma;
-- it walks outward, with a stop rule for the tail, so a draw costs O(√λ);
+**Poisson** (λ ≤ 10⁹) and **Binomial** (n ≤ 2⁵³) are inverted from one uniform by a walk:
+- it starts at the mode, with the mass from `lgamma` and the distribution function from the incomplete gamma or
+  beta function;
+- below it, it steps down on `F` against `p`; above, it steps up on `S = 1 − F` against `1 − p`, so neither tail
+  rounds to `1 − F`;
+- a running sum keeps its absolute precision, about 10⁻¹⁶ of where it started, so each time it falls a million-fold
+  it is computed again from the incomplete function, whose precision is relative. Without this, Poisson(30) at
+  `1 − p = 5·10⁻¹⁶` gave 114 for the law's 84 (S2's own test, before the fix);
+- a draw costs O(σ) steps and, in the far tails only, a few evaluations of the incomplete function;
 - the naive walk from `e^(−λ)` would never end above λ ≈ 745, and the host's branch sizes reach λ = 10⁴.
+
+Every mass, and the common factors of the incomplete gamma and beta functions, is computed in Loader's form:
+Stirling's formula with its large terms cancelled exactly, leaving `x(ln(1 + t) − t)` and Stirling's remainder.
+Written as `x ln λ − λ − ln Γ(x + 1)`, the terms are of the order of `x ln x` and their rounding is a relative
+10⁻¹⁰ at 10⁵ and 10⁻⁶ at 10⁹ (S2's L1 measured the first, `gamma_p(10⁵ + 1, 10⁵)` off by 1.4·10⁻¹⁰); in Loader's
+form the error grows as `ε√x`.
 
 **New:**
 - `Empirical::from_histogram`: the legacy system's own counts, the one law that answers "reflect real data";
@@ -494,16 +527,16 @@ the scheduled start; the observer counts service time.
 | K3 | S1 | a `compile_fail` doctest: a key drawn from and then passed on; its twin, which derives first and draws last, compiles. Stable rustdoc does not check the error code (§ Measured), so the twin is what keeps the first from passing for another reason, such as a rename | `Key: Copy` |
 | K4 | S1 | `Unit` at `k ∈ {0, 1, 2^52−2, 2^52−1}` lies strictly inside (0, 1) | the 53-bit form |
 | R3 | S1 | the forbidden lints; measured once that clippy 1.100 resolves `f64::powf` in `disallowed-methods` and that `arithmetic_side_effects` fires | an inner `allow`; a direct `powf` |
-| L1 | S2 | quantiles against literal reference values from an independent implementation (mpmath, its command recorded; Python's analytic skew table), with a point in every branch of a piecewise approximation | a coefficient typo; a parameter as rate instead of scale |
+| L1 | S2 | quantiles against mpmath at 50 digits (`vectors/law_vectors.py`, the command in its docstring), at both extreme units, the tails and the middle: continuous within 10⁻¹³ relative, discrete exactly, the incomplete gamma and beta functions within 10⁻¹² up to `a = 10⁵` | a coefficient typo; Halley's steps dropped; the walk without re-anchoring; Stirling's remainder dropped; `ln(1 + t) − t` from `ln(1 + t)`; the gamma factor from `lgamma` |
 | L2 | S2 | discrete: `cdf(q(u)) ≥ u > cdf(q(u) − 1)`; continuous: `abs(cdf(q(u)) − u) ≤ c·ulp` | `q(u) + 1`; a cdf that returns 1.0 |
 | L3 | S2 | a stratified grid `uᵢ = (i + ½)/N`, KS distance ≤ 1/N + c·ulp; no α, no seed | a clamp instead of a truncation |
-| L4 | S2 | each law over a parameter grid with extremes (Poisson λ ∈ {0, 10⁻³, 1, 30, 700, 745, 800, 10⁴, 3·10⁴, 10⁶}; skew ≤ 0.5), at boundary `k`; Poisson terminates in ≤ 20√λ + 20 steps (M4) | the naive walk from `e^(−λ)`; the index clamp removed |
+| L4 | S2 | each law over a parameter grid with extremes (Poisson λ ∈ {0, 10⁻³, 1, 30, 700, 745, 800, 10⁴, 3·10⁴, 10⁶, 10⁹}; Binomial up to n = 2⁴⁰; skew from ¼ to 40 over n up to 2⁶⁴ − 1), at boundary `k`; a walk ends in ≤ 20σ + 20 steps and ≤ 3 exact evaluations of a tail (M4) | the naive walk from `e^(−λ)`; the index clamp removed; a running mass wrong by a factor (which the re-anchoring would hide as cost, not as a value) |
 | L5 | S2 | monotonicity in each parameter | an exponent inverted consistently in `quantile` and `cdf` |
 | L6 | S2 | `Display` golden strings; distinct laws, distinct strings | a parameter rounded or a cap omitted |
 | L7 | S2 | mixture moments against the analytic variance; truncated laws against their own analytic mean | the untruncated mean as the oracle |
-| L8 | S2 | categorical thresholds exact at boundaries ±1; a zero weight never drawn; bad weights refused; ≤ ⌈log₂ B⌉ + 1 comparisons a draw (M5) | `<` for `<=`; a linear scan |
+| L8 | S2 | categorical thresholds exact at boundaries ±1; a zero weight never drawn; bad weights refused (and counts summing to 2⁷⁶ or more); a draw over 10⁶ items in ≤ 21 comparisons, counted by a probe the search calls (M5) | `<` for `<=`; a linear scan |
 | A1 | S2 | `apportion` against an exact u128 oracle; expectation exact over a `u` grid; no item favoured across scopes | remainders to the first items |
-| P1 | S2 | `Permutation` is a bijection with an inverse for `n ∈ {1, 2, 3, 7, 2^k, primes, 10⁶}` | cycle-walking dropped |
+| P1 | S2 | `Permutation` is a bijection with an inverse for `n ∈ {0, 1, 2, 3, 4, 5, 7, 8, 63, 64, 65, 1000, 4099, 2¹⁶, 10⁵}`, and at `n = 2⁶⁴ − 1` both ways; over 20,000 keys the first value is uniform (χ², with the identity as the negative control) | cycle-walking dropped |
 | T1 | S2 | the statistical helpers against reference values (χ² = 3.841 at df 1, p = 0.05; the KS critical value at n = 100); they refuse NaN statistics and zero expected counts; every statistical test carries a negative control, a mutant law that must be rejected; α from a family-wise budget | a helper returning p = 1 |
 | C1 | S3 | per combinator, the keys it draws and passes on are pairwise distinct (the key audit, test-only and scoped to one member's tree: over a whole generation it would hold every derivation) | a combinator passing its own key on |
 | C2 | S3 | conditional laws: `optional(p, draw(U))`'s present values pass KS against `U`; `replicate`'s items are independent of the count | the coin drawn from the inner key |
@@ -569,6 +602,37 @@ independent ones overlap, so these figures are upper bounds.
 | a sequence without its length | K2's vectors and property |
 | LEB128 without its continuation bit | K1, LEB128 |
 | `compile_fail,E0382` as `E0499` | — (green: not checked on stable) |
+
+**S2** (2026-11-20, this laptop):
+- **What L1 found before it passed.** The incomplete gamma at `a = 10⁵` was off by 1.4·10⁻¹⁰ (its common factor
+  from `lgamma`); the inverse normal at `p = ½ + 2⁻⁵³` by 0.7 % relative (`Φ(x) − p` near the centre). Both fixed
+  (decisions 3 and 4). The walk's far upper tail, before re-anchoring, gave Poisson(30) 114 for the law's 84 at
+  `1 − p = 5·10⁻¹⁶`.
+- **What the mutations found.** A running mass wrong by a factor (the binomial's odds inverted) stayed green: the
+  re-anchoring corrected the value, one exact evaluation a step. M4 now counts exact evaluations, at most three a
+  draw. A partitioned member drawn from the same unit as its part stayed green: the test summed parts only. It now
+  checks the members of a part alike.
+- **The mutations**, each applied alone, `cargo test -p ascetic-ddd-faker`; every one red:
+
+| Mutation | Red |
+|---|---|
+| truncation as a clamp | L2, L3 |
+| categorical `<=` as `<` | L8 |
+| the skew index without its clamp | L4 |
+| a partitioned member from the part's own unit | the partitioned law |
+| `apportion` without its unit | A1, twice |
+| the permutation without cycle-walking | P1 |
+| uniform integers by modulo | L2, uniform integers |
+| `complement` as `value` | L1, L2, L3 |
+| the inverse normal without Halley's steps | L1, L2, L3 |
+| the inverse normal without its central form | L1 |
+| the walk without re-anchoring | L1 |
+| the binomial's odds inverted upward | M4 (exact evaluations) |
+| Stirling's remainder dropped | L1, L2 |
+| `ln(1 + t) − t` from `ln(1 + t)` | L1 |
+| the gamma factor from `lgamma` | L1 |
+| the chi-square p-value from the lower tail | P1's χ² |
+| the categorical searched linearly | L8 (comparisons) |
 
 To be filled per slice:
 - **M6, scale:** 10⁹ members of the acceptance test's Devices, values computed and discarded, on 1 thread and on

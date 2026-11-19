@@ -16,6 +16,11 @@ readme = "README.md"
 # Pinned exactly: the PRF is part of every generated value, so a host's lock
 # must not move it (ADR-0045 decision 2).
 siphasher = { version = "=1.0.3", default-features = false }
+# Pinned exactly, for the same reason: every quantile goes through it
+# (ADR-0045 decision 3). Without `arch`; on x86_64 that feature replaces only
+# `sqrt` and `fma`, both correctly rounded, so a host that enables it changes
+# no value.
+libm = { version = "=0.2.16", default-features = false }
 uuid = { version = "1", default-features = false }
 
 [dev-dependencies]
