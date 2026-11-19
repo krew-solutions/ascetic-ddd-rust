@@ -637,6 +637,56 @@ async fn a_tenant_s_heads_are_held_unasked_while_its_unavailable_is_remembered()
     );
 }
 
+/// A head's trouble is timed from its first hold, whatever comes after it
+/// while it lasts: held again when asked, held unasked while its Tenant's
+/// `Unavailable` is remembered, and a failure of the moment spending an
+/// attempt. `held_counts`'s oldest, the age a host pages on (ADR-0042
+/// decision 6), stays that first hold. Red with `held_since` set afresh by
+/// any of the three statements (seedwork ADR-0046, L3).
+#[tokio::test]
+#[ignore = "requires PostgreSQL; run with --ignored"]
+async fn a_head_s_trouble_is_timed_from_its_first_hold_whatever_holds_it_after() {
+    let f = fixture_unrecorded("held_since", Retries::up_to(9)).await;
+    f.publish(&[message_of("throttled", "a", 1)]).await;
+    let since =
+        || f.count("SELECT (EXTRACT(EPOCH FROM held_since) * 1000000)::bigint FROM {table}");
+    let due = async || {
+        // the memo's hold (quick: 40 ms to 200 ms) runs out, the row is due
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        f.elapse("UPDATE {table} SET next_attempt_at = now()").await;
+        f.wake().await;
+    };
+    f.dispatch_on(|_| tenant_down(None)).await;
+    let first = since().await;
+    // asked again, and held again
+    due().await;
+    f.dispatch_on(|_| tenant_down(None)).await;
+    assert_eq!(since().await, first, "held again when asked");
+    // due at once, its Tenant still remembered: held unasked
+    f.elapse("UPDATE {table} SET next_attempt_at = now()").await;
+    f.wake().await;
+    assert_eq!(f.dispatch_on(|_| tenant_down(None)).await, Outcome::Held);
+    assert_eq!(since().await, first, "held unasked");
+    // a failure of the moment spends an attempt, the trouble goes on
+    due().await;
+    let spent = f
+        .dispatch_on(|_| Err(Transient::because(DB_TIMEOUT, "a moment").into()))
+        .await;
+    assert!(
+        matches!(spent, Outcome::Failed { held: false, .. }),
+        "{spent:?}"
+    );
+    assert_eq!(since().await, first, "a spend");
+    // and the oldest a host pages on is that first hold
+    let oldest = f
+        .count(
+            "SELECT (EXTRACT(EPOCH FROM min(held_since)) * 1000000)::bigint \
+             FROM {table} WHERE processed_position IS NULL AND parked_at IS NULL",
+        )
+        .await;
+    assert_eq!(oldest, first);
+}
+
 /// A `Stage` hold on a row runs at most the tick's cap, whatever the row has
 /// counted, so that a process cut off alone delays another's head a tick at
 /// most; a `Tenant` hold runs to the Tenant's back-off. Red with the memo's

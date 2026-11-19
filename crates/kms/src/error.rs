@@ -214,19 +214,21 @@ impl Error {
     }
 }
 
+/// An error's text names no tenant and no address (seedwork ADR-0046): it
+/// reaches logs, stored failures and, through a host, a client's answer. The
+/// tenant stays a field, for code that matches on it.
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::KekNotFound {
-                tenant_id,
-                key_version: None,
-            } => write!(f, "tenant `{tenant_id}` has no key-encryption key"),
+                key_version: None, ..
+            } => write!(f, "the tenant has no key-encryption key"),
             Error::KekNotFound {
-                tenant_id,
                 key_version: Some(version),
+                ..
             } => write!(
                 f,
-                "tenant `{tenant_id}` has no key-encryption key of version {version}"
+                "the tenant has no key-encryption key of version {version}"
             ),
             Error::Decrypt => write!(
                 f,
@@ -237,26 +239,22 @@ impl fmt::Display for Error {
                 "the ciphertext was sealed under key version {found}, this key is version {expected}"
             ),
             Error::NoKeyOfVersion(version) => write!(f, "no key of version {version} at hand"),
-            Error::SigningKeyNotFound {
-                tenant_id,
-                algorithm,
-            } => write!(f, "tenant `{tenant_id}` has no {algorithm} signing key"),
-            Error::MacKeyNotFound { tenant_id, purpose } => {
-                write!(f, "tenant `{tenant_id}` has no MAC key for `{purpose}`")
+            Error::SigningKeyNotFound { algorithm, .. } => {
+                write!(f, "the tenant has no {algorithm} signing key")
+            }
+            Error::MacKeyNotFound { purpose, .. } => {
+                write!(f, "the tenant has no MAC key for `{purpose}`")
             }
             Error::InvalidSignature => {
                 write!(f, "the signature is not the key's over these bytes")
             }
             Error::UnsupportedAlgorithm(name) => write!(f, "unsupported algorithm `{name}`"),
-            Error::Conflict { tenant_id, detail } => {
-                write!(f, "tenant `{tenant_id}`'s key exists otherwise: {detail}")
+            Error::Conflict { detail, .. } => {
+                write!(f, "the tenant's key exists otherwise: {detail}")
             }
-            Error::Forbidden {
-                tenant_id,
-                operation,
-            } => write!(
+            Error::Forbidden { operation, .. } => write!(
                 f,
-                "the KMS refused {operation} on tenant `{tenant_id}`'s key under this identity or context"
+                "the KMS refused {operation} on the tenant's key under this identity or context"
             ),
             Error::Unsupported(what) => write!(f, "unsupported here: {what}"),
             Error::Malformed(what) => write!(f, "malformed: {what}"),
@@ -313,6 +311,83 @@ impl From<tokio_postgres::Error> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The variant an error is, by an exhaustive match: a variant added
+    /// without a case below fails to compile here first, then fails the
+    /// test's count.
+    fn variant(error: &Error) -> usize {
+        match error {
+            Error::KekNotFound { .. } => 0,
+            Error::Decrypt => 1,
+            Error::WrongKeyVersion { .. } => 2,
+            Error::NoKeyOfVersion(_) => 3,
+            Error::SigningKeyNotFound { .. } => 4,
+            Error::MacKeyNotFound { .. } => 5,
+            Error::InvalidSignature => 6,
+            Error::UnsupportedAlgorithm(_) => 7,
+            Error::Malformed(_) => 8,
+            Error::Conflict { .. } => 9,
+            Error::Forbidden { .. } => 10,
+            Error::Unsupported(_) => 11,
+            Error::Entropy(_) => 12,
+            Error::Session(_) => 13,
+            #[cfg(feature = "pg")]
+            Error::Database(_) => 14,
+            #[cfg(feature = "pg")]
+            Error::Migration(_) => 15,
+            #[cfg(feature = "vault")]
+            Error::Transport(_) => 16,
+            #[cfg(feature = "vault")]
+            Error::Vault { .. } => 17,
+        }
+    }
+
+    /// No error's text names its tenant (seedwork ADR-0046). The variants
+    /// that wrap another library's error — `Entropy`, `Session`, `Database`,
+    /// `Migration`, `Transport` — carry no tenant of this crate's; `Vault`'s
+    /// words are written over where Transit answers (`vault::without_key_name`,
+    /// tested there and through `vault_mapping`). Every variant with a tenant
+    /// field is built here.
+    #[test]
+    fn no_error_s_text_names_its_tenant() {
+        const TENANT: &str = "0190a01a-7e5b-7d80-a000-00000000e001";
+        let tenant = || TENANT.to_owned();
+        let named: Vec<Error> = vec![
+            Error::KekNotFound {
+                tenant_id: tenant(),
+                key_version: None,
+            },
+            Error::KekNotFound {
+                tenant_id: tenant(),
+                key_version: Some(2),
+            },
+            Error::SigningKeyNotFound {
+                tenant_id: tenant(),
+                algorithm: SignatureAlgorithm::Ed25519,
+            },
+            Error::MacKeyNotFound {
+                tenant_id: tenant(),
+                purpose: "p".to_owned(),
+            },
+            Error::Conflict {
+                tenant_id: tenant(),
+                detail: "x".to_owned(),
+            },
+            Error::Forbidden {
+                tenant_id: tenant(),
+                operation: "datakey",
+            },
+        ];
+        for error in &named {
+            assert!(!error.to_string().contains(TENANT), "{error}");
+        }
+        let with_a_tenant: std::collections::BTreeSet<usize> = named.iter().map(variant).collect();
+        assert_eq!(
+            with_a_tenant,
+            [0, 4, 5, 9, 10].into_iter().collect(),
+            "every variant that carries a tenant is built above"
+        );
+    }
 
     #[test]
     fn the_class_of_every_error() {

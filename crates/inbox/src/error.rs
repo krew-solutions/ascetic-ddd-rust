@@ -19,11 +19,11 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// verdict that no retry will ever succeed — a payload it cannot read, an
 /// invariant the message breaks — and the message is parked at once,
 /// whatever attempts it had left (ADR-0010). `Unavailable` is the verdict
-/// that the message cannot be handled now for a cause not its own: of the
-/// stage, it holds its Tenant's rows of its slot without spending an attempt
-/// (ADR-0041 decision 2: the slot's other Tenants go on); of the Tenant, it
-/// spends one, never sooner than its `retry_after` (ADR-0040 decisions 4
-/// and 5).
+/// that the message cannot be handled now for a cause not its own: it holds
+/// its Tenant's rows of its slot without spending an attempt, at either scope
+/// (ADR-0041 decision 2: the slot's other Tenants go on; ADR-0042 decisions 1
+/// and 2: of the stage, its channel pauses; of the Tenant, its (channel,
+/// Tenant) is held by the memo, never sooner than its `retry_after`).
 ///
 /// An error converts by what it is at its top, never by its sources: a
 /// [`bus::Permanent`], [`bus::Unavailable`] or [`bus::Transient`] keeps its

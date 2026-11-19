@@ -235,7 +235,7 @@ impl VaultTransitService {
                     status,
                     method,
                     path: path.to_owned(),
-                    message: errors_of(response.body.as_ref()),
+                    message: without_key_name(&errors_of(response.body.as_ref()), path),
                 }),
             }
         })
@@ -643,6 +643,46 @@ impl VaultTransitService {
             Ok(Some(_)) | Err(_) => error,
         }
     }
+}
+
+/// The key's name a Transit `path` names: `/datakey/plaintext/{name}`,
+/// `/keys/{name}[/…]`, or `/{operation}/{name}`.
+fn key_name_in(path: &str) -> Option<&str> {
+    let mut parts = path.trim_start_matches('/').split('/');
+    let name = match parts.next()? {
+        "datakey" => parts.nth(1),
+        _ => parts.next(),
+    }?;
+    (!name.is_empty()).then_some(name)
+}
+
+/// `message` with the name of the key `path` names written as `<key>`: a
+/// key's name is its tenant's (seedwork ADR-0042 decision 9), and Vault quotes
+/// the request's path in some answers — a rate limit's, a route's — where it
+/// would reach a log, a stored failure and a host's answer to a client
+/// (seedwork ADR-0046). Only whole names are written over: a name is matched
+/// where it stands apart from the characters a name is made of, so that a
+/// short one never cuts into another word.
+fn without_key_name(message: &str, path: &str) -> String {
+    let Some(name) = key_name_in(path) else {
+        return message.to_owned();
+    };
+    let in_name = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '%');
+    let mut written = String::with_capacity(message.len());
+    let mut rest = message;
+    while let Some(at) = rest.find(name) {
+        let before = rest[..at].chars().next_back();
+        let after = rest[at + name.len()..].chars().next();
+        written.push_str(&rest[..at]);
+        if before.is_some_and(in_name) || after.is_some_and(in_name) {
+            written.push_str(name);
+        } else {
+            written.push_str("<key>");
+        }
+        rest = &rest[at + name.len()..];
+    }
+    written.push_str(rest);
+    written
 }
 
 /// What Vault said in `{"errors": [...]}`, joined.
@@ -1492,6 +1532,45 @@ mod tests {
         assert!(signs(&raised, 3));
         // Verifies, no longer signs.
         assert!(serves(&raised, 2));
+    }
+
+    #[test]
+    fn a_transit_path_names_its_key_in_each_of_its_shapes() {
+        assert_eq!(key_name_in("/datakey/plaintext/k-1"), Some("k-1"));
+        assert_eq!(key_name_in("/keys/k-1"), Some("k-1"));
+        assert_eq!(key_name_in("/keys/k-1/config"), Some("k-1"));
+        assert_eq!(key_name_in("/keys/k-1/rotate"), Some("k-1"));
+        assert_eq!(key_name_in("/decrypt/k-1"), Some("k-1"));
+        assert_eq!(key_name_in("/sign/t.sign.ed25519"), Some("t.sign.ed25519"));
+        assert_eq!(key_name_in("/datakey"), None);
+        assert_eq!(key_name_in("/keys/"), None);
+    }
+
+    /// Vault's own words, as it answers a quota and a route it has no
+    /// handler for (seedwork ADR-0039's table, measured): the key's name,
+    /// its tenant's, is written over wherever it stands whole.
+    #[test]
+    fn vault_s_words_name_no_key() {
+        const TENANT: &str = "0190a01a-7e5b-7d80-a000-00000000e001";
+        let path = format!("/datakey/plaintext/{TENANT}");
+        let quota = format!(
+            "request path \"transit-bus/datakey/plaintext/{TENANT}\": rate limit quota exceeded"
+        );
+        assert_eq!(
+            without_key_name(&quota, &path),
+            "request path \"transit-bus/datakey/plaintext/<key>\": rate limit quota exceeded"
+        );
+        let route = format!("no handler for route \"transit/keys/{TENANT}\"");
+        assert_eq!(
+            without_key_name(&route, &format!("/keys/{TENANT}")),
+            "no handler for route \"transit/keys/<key>\""
+        );
+        // A short name never cuts into a word it is part of.
+        assert_eq!(
+            without_key_name("the transit key \"t\" has no version 2", "/decrypt/t"),
+            "the transit key \"<key>\" has no version 2"
+        );
+        assert_eq!(without_key_name("no key", "/datakey"), "no key");
     }
 
     #[test]

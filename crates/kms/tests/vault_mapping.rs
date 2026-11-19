@@ -1311,3 +1311,30 @@ async fn an_unexplained_refusal_names_no_path_and_a_403_is_unauthorized() {
     assert!(text.contains("403") && text.contains("GET"), "{text}");
     assert!(error.unauthorized(), "{error:?}");
 }
+
+/// A rate limit's answer quotes the request's path, whose last part is the
+/// key's name, its tenant's: the error's text names it nowhere (seedwork
+/// ADR-0046).
+#[tokio::test]
+async fn a_quota_s_answer_names_no_tenant() {
+    const TENANT: &str = "0190a01a-7e5b-7d80-a000-00000000e001";
+    let path: &'static str = Box::leak(format!("/datakey/plaintext/{TENANT}").into_boxed_str());
+    let transport = Scripted::answering(vec![(
+        "POST",
+        path,
+        429,
+        json!({ "errors": [format!(
+            "request path \"transit-bus/datakey/plaintext/{TENANT}\": rate limit quota exceeded"
+        )] }),
+    )]);
+    let refused = with_service(
+        &transport,
+        VaultTransitService::new("http://vault", "t").managed_keys(),
+        |tx, kms| async move { kms.generate_dek(&tx, TENANT).await.map(|_| ()) },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refused.class(), Class::Unavailable, "{refused}");
+    assert!(!refused.to_string().contains(TENANT), "{refused}");
+    assert!(refused.to_string().contains("<key>"), "{refused}");
+}
