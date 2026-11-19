@@ -122,17 +122,26 @@ impl Key {
 
     /// 64 bits drawn from this key.
     pub fn bits(self) -> u64 {
+        self.drawn();
         self.k0
     }
 
     /// A uniform number drawn from this key, strictly inside (0, 1).
     pub fn unit(self) -> Unit {
+        self.drawn();
         Unit(self.k0 >> (u64::BITS - Unit::BITS))
+    }
+
+    /// Records the draw in the audit's ledger, when one is open.
+    fn drawn(&self) {
+        #[cfg(feature = "audit")]
+        audit::drawn(self.k0, self.k1);
     }
 
     /// An id rendered from this key under `namespace`: a version 4 UUID whose
     /// random bits are drawn from the key.
     pub fn uuid(self, namespace: &Namespace) -> Uuid {
+        self.drawn();
         let rendered = derive(self.k0, self.k1, tag::ID, |out| {
             out.write(&namespace.0.to_le_bytes())
         });
@@ -199,6 +208,49 @@ impl Unit {
     }
 }
 
+/// The key audit's ledger (feature `audit`): a test's record of every derivation
+/// and draw on its thread, while `testing::audit` runs.
+#[cfg(feature = "audit")]
+pub(crate) mod audit {
+    use std::cell::RefCell;
+
+    /// What one audited run did.
+    #[derive(Default)]
+    pub(crate) struct Ledger {
+        pub(crate) derivations: u64,
+        pub(crate) drawn: Vec<(u64, u64)>,
+    }
+
+    thread_local! {
+        static LEDGER: RefCell<Option<Ledger>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn derived() {
+        LEDGER.with_borrow_mut(|ledger| {
+            if let Some(l) = ledger.as_mut() {
+                l.derivations = l.derivations.saturating_add(1);
+            }
+        });
+    }
+
+    pub(crate) fn drawn(k0: u64, k1: u64) {
+        LEDGER.with_borrow_mut(|ledger| {
+            if let Some(l) = ledger.as_mut() {
+                l.drawn.push((k0, k1));
+            }
+        });
+    }
+
+    /// Runs `f` with a fresh ledger open, and returns it; an outer audit's
+    /// ledger is set aside meanwhile and restored.
+    pub(crate) fn record<R>(f: impl FnOnce() -> R) -> (R, Ledger) {
+        let outer = LEDGER.with_borrow_mut(|l| l.replace(Ledger::default()));
+        let result = f();
+        let ledger = LEDGER.with_borrow_mut(|l| std::mem::replace(l, outer));
+        (result, ledger.unwrap_or_default())
+    }
+}
+
 /// Where a derivation writes its message: a hasher, or bytes for a test.
 pub(crate) trait Out {
     fn write(&mut self, bytes: &[u8]);
@@ -217,6 +269,8 @@ impl Out for Vec<u8> {
 }
 
 fn derive(k0: u64, k1: u64, tag: u8, message: impl FnOnce(&mut dyn Out)) -> Key {
+    #[cfg(feature = "audit")]
+    audit::derived();
     let mut hasher = SipHasher24::new_with_keys(k0, k1);
     Out::write(&mut hasher, &[tag]);
     message(&mut hasher);

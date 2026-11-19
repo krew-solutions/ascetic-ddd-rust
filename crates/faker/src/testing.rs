@@ -20,6 +20,50 @@ pub fn encoding<P: KeyPart + ?Sized>(part: &P) -> Vec<u8> {
     bytes
 }
 
+/// What [`audit`] saw.
+#[cfg(feature = "audit")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Audit {
+    /// Keys derived: `child`, `at`, `part`, and the crate's own.
+    pub derivations: u64,
+    /// Draws: `unit`, `bits`, `uuid`.
+    pub draws: u64,
+    /// Draws from a key already drawn from in the same run: values that move
+    /// together. Zero for a sound generator (ADR-0045, C1).
+    pub repeated: u64,
+}
+
+/// Runs `f` and reports the keys it derived and drew on this thread (feature
+/// `audit`). Scoped to one run — one member's tree — because a whole
+/// generation's draws would not fit in memory.
+///
+/// ```
+/// # #[cfg(feature = "audit")] {
+/// use ascetic_ddd_faker::testing::audit;
+/// use ascetic_ddd_faker::{Key, Seed};
+///
+/// let (_, twice) = audit(|| {
+///     let k = Key::root(Seed(1));
+///     (k.child("os").unit(), k.child("os").unit()) // one key drawn twice
+/// });
+/// assert_eq!(twice.repeated, 1);
+/// # }
+/// ```
+#[cfg(feature = "audit")]
+pub fn audit<R>(f: impl FnOnce() -> R) -> (R, Audit) {
+    let (result, ledger) = crate::key::audit::record(f);
+    let mut drawn = ledger.drawn;
+    let draws = drawn.len() as u64;
+    drawn.sort_unstable();
+    drawn.dedup();
+    let audit = Audit {
+        derivations: ledger.derivations,
+        draws,
+        repeated: draws.saturating_sub(drawn.len() as u64),
+    };
+    (result, audit)
+}
+
 /// `n` units spread evenly over (0, 1): the `i`th at `(i + ½) / n`.
 ///
 /// A law's quantiles at these points are its `n`-quantiles. Their empirical

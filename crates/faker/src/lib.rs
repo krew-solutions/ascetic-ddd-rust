@@ -12,6 +12,7 @@
 #![warn(missing_docs)]
 
 pub mod apportion;
+pub mod generator;
 pub mod key;
 pub mod law;
 pub mod math;

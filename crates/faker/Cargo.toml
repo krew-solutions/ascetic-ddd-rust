@@ -12,6 +12,12 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
+[features]
+# The key audit (ADR-0045, C1 and M2): every derivation and draw counted in a
+# thread-local ledger while `testing::audit` runs. For tests, the crate's and a
+# host's; off, it compiles to nothing.
+audit = []
+
 [dependencies]
 # Pinned exactly: the PRF is part of every generated value, so a host's lock
 # must not move it (ADR-0045 decision 2).

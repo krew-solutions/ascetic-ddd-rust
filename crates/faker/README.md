@@ -4,7 +4,7 @@ Generated data for load tests. A port of ascetic-ddd-python's `faker/domain/fp`,
 adapted to Rust rather than transliterated (ADR-0045).
 
 **Status: in progress.** Done: the key (slice S1); the laws, `apportion` and
-`Permutation` (slice S2). To come: the generators, the populations.
+`Permutation` (slice S2); the generators (slice S3). To come: the populations.
 
 ## Principle
 
@@ -75,3 +75,36 @@ let group = Skew::new(2.0).unwrap().index(branch.child("group").unit(), 100);
 Every transcendental function goes through `math`, over `libm` pinned
 exactly: the standard library leaves the precision of `f64::ln` and its
 relatives unspecified, and a generated value must not depend on the platform.
+
+## Generators
+
+A `Gen` is a pure arrow from a key to a value: `&self` and a key, so one
+generator serves every thread at once. A struct is a function of its key, a
+label per field:
+
+```
+use ascetic_ddd_faker::generator::{Gen, GenExt, draw, from_fn, replicate};
+use ascetic_ddd_faker::law::{Categorical, Poisson, UniformInt};
+use ascetic_ddd_faker::{Key, Seed};
+
+struct Device { os: u64, oem: Option<u64>, apps: Vec<u64> }
+
+let os = draw(Categorical::from_weights(&[0.6, 0.3, 0.1]).unwrap());
+let oem = draw(Categorical::from_counts(&[5, 3, 2]).unwrap()).optional(0.8).unwrap();
+let apps = replicate(draw(Poisson::new(20.0).unwrap()), draw(UniformInt::new(0, 999).unwrap()), 200);
+let device = from_fn(move |key: Key| {
+    Ok(Device {
+        os: os.generate(key.child("os"))?,
+        oem: oem.generate(key.child("oem"))?,
+        apps: apps.generate(key.child("apps"))?,
+    })
+});
+let d = device.generate(Key::root(Seed(42)).child("device").part(&2u64).at(12345)).unwrap();
+# assert!(d.os < 3 && d.apps.len() <= 200 && d.oem.map_or(true, |o| o < 3));
+```
+
+Each combinator states the keys it draws from and the keys it passes on, and
+the two never meet: wrapping a generator in `optional` or `map` leaves its
+values unchanged. The `audit` feature lets a test check it of its own
+generators: `testing::audit` reports a member's derivations, draws, and draws
+from a key already drawn from.

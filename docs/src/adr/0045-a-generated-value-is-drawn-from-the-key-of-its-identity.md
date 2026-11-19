@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-20); slices S1 and S2 built. Stage 1 of three toward the host's fitness functions:
+Proposed (2026-11-20); slices S1 to S3 built. Stage 1 of three toward the host's fitness functions:
 1. **This decision:** the faker — a port of ascetic-ddd-python's `faker/domain/fp` and what it needs.
 2. **A later ADR:** the scenario file, its writer and its validator.
 3. **A later ADR:** the scheduler that runs a scenario file against a stand.
@@ -89,7 +89,7 @@ members. Nothing the system answers enters it. State that a scenario needs — a
 One new crate, `crates/faker` (`ascetic-ddd-faker`):
 - a functional core: no IO, no async, no clock, no ambient randomness;
 - `#![forbid(unsafe_code)]`;
-- modules `key`, `math`, `law`, `gen`, `population`, `permutation`, and `testing` (statistical helpers, the key
+- modules `key`, `math`, `law`, `generator`, `population`, `permutation`, and `testing` (statistical helpers, the key
   audit and the golden check — for its own tests and for the host's).
 
 It departs from the README's rule of one module per Python module. The Python modules transliterate a design this
@@ -253,17 +253,37 @@ No session, no criteria, no world: `&self` and a key, so one `Gen` serves every 
 create a member of a population, only name one, so it cannot re-enter one: self-referencing creation is refused by
 construction.
 
-| Combinator | Key passed on |
-|---|---|
-| `constant` | key unused |
-| `draw(law)` | consumes the key |
-| `from_fn(\|key\| …)` | the host derives `key.child("field")` per field of a struct literal — the main idiom |
-| `map`, `try_map` (smart constructors, ROP) | same key |
-| `and_then(label, f)` | the continuation under `label` |
-| `optional(p, inner)` | the coin under an internal tag, `inner` under another |
-| `replicate(count: impl Gen<Output = u64>, item)` | the count under an internal tag, item `i` under `at(i)`; a count above the count law's cap is refused |
+The module is `generator` (`gen` is reserved in Rust 2024).
 
-`apportion` is offered as a `Gen` of counts.
+| Combinator | Draws from | Passes on |
+|---|---|---|
+| `constant` | nothing | — |
+| `draw(law)` | the key | — |
+| `from_fn(\|key\| …)` | as the host writes it: a `key.child("field")` per field of a struct literal, the main idiom | — |
+| `map`, `try_map` (smart constructors, ROP) | nothing | the key |
+| `and_then(label, f)` | nothing | the key to the first, `child(label)` to the second |
+| `optional(p)` | an internal `present` | the key |
+| `replicate(count, item, cap)` | nothing | an internal `count` to the count, `at(i)` to item `i` |
+| `skewed_count`, `weighted_count` | an internal `position` and `count` | — |
+| `apportioned(total, weights)` | the key | — |
+
+So wrapping a generator in `optional` or `map` leaves its values unchanged: what the wrapper adds draws from a key
+the generator never sees. Two nested `and_then` under one label would hand both continuations one key; the key
+audit reports it (C1).
+
+`replicate` takes its cap as an argument: a list's length without a bound cannot be written. A count above the cap
+is a `Refusal`, not an allocation. A `Refusal` carries the labels of the `and_then`s it passed.
+
+**The o2m mixtures** are generators, not laws: an owner's position, uniform, sets its mean, and its count is a
+Poisson of that mean, under two internal keys. `skewed_count(mean, s)` is Python's o2m `SkewDistributor` (the
+mean `mean·(s + 1)·(1 − x)^s`); `weighted_count(mean, weights)` its `WeightedDistributor`, with equal parts of
+owners at means `mean·m·wⱼ / Σw` and without Python's bend inside a part.
+
+**The key audit** (feature `audit`, off by default; `make test` runs `--all-features`): while `testing::audit`
+runs, every derivation and draw on the thread is recorded in a thread-local ledger, and the run reports its
+derivations, draws, and draws from a key already drawn from. Scoped to one run, one member's tree: a whole
+generation's draws would not fit in memory. Off, it compiles to nothing; it is the one mutable state in the crate,
+and only a test opens it.
 
 Python's mapping:
 - `ValueFactory` → `constant`, `draw`, `from_fn`;
@@ -271,7 +291,8 @@ Python's mapping:
 - `ModeledFactory` → `map`, `try_map`;
 - `Pipe` → `and_then`;
 - `ReplicatedFactory` → `replicate`;
-- `NullableDistributor` → `optional`.
+- `NullableDistributor` → `optional`;
+- o2m `SkewDistributor`, `WeightedDistributor` → `skewed_count`, `weighted_count`.
 
 The labelled tuple zip is not offered: with a positional `map` after it, two same-typed fields swap silently.
 
@@ -533,15 +554,15 @@ the scheduled start; the observer counts service time.
 | L4 | S2 | each law over a parameter grid with extremes (Poisson λ ∈ {0, 10⁻³, 1, 30, 700, 745, 800, 10⁴, 3·10⁴, 10⁶, 10⁹}; Binomial up to n = 2⁴⁰; skew from ¼ to 40 over n up to 2⁶⁴ − 1), at boundary `k`; a walk ends in ≤ 20σ + 20 steps and ≤ 3 exact evaluations of a tail (M4) | the naive walk from `e^(−λ)`; the index clamp removed; a running mass wrong by a factor (which the re-anchoring would hide as cost, not as a value) |
 | L5 | S2 | monotonicity in each parameter | an exponent inverted consistently in `quantile` and `cdf` |
 | L6 | S2 | `Display` golden strings; distinct laws, distinct strings | a parameter rounded or a cap omitted |
-| L7 | S2 | mixture moments against the analytic variance; truncated laws against their own analytic mean | the untruncated mean as the oracle |
+| L7 | S3 | the o2m mixtures' mean and variance against the analytic ones (2050 for `skewed_count(50, 2)`, 2908 for `weighted_count(50, [0.7, 0.2, 0.07, 0.03])`) over 2·10⁵ keys, a plain Poisson of the same mean as the negative control; truncated laws by their own distribution function (L2, L3) | the owner's mean not normalised; the parts' means not scaled; position and count from one key |
 | L8 | S2 | categorical thresholds exact at boundaries ±1; a zero weight never drawn; bad weights refused (and counts summing to 2⁷⁶ or more); a draw over 10⁶ items in ≤ 21 comparisons, counted by a probe the search calls (M5) | `<` for `<=`; a linear scan |
 | A1 | S2 | `apportion` against an exact u128 oracle; expectation exact over a `u` grid; no item favoured across scopes | remainders to the first items |
 | P1 | S2 | `Permutation` is a bijection with an inverse for `n ∈ {0, 1, 2, 3, 4, 5, 7, 8, 63, 64, 65, 1000, 4099, 2¹⁶, 10⁵}`, and at `n = 2⁶⁴ − 1` both ways; over 20,000 keys the first value is uniform (χ², with the identity as the negative control) | cycle-walking dropped |
 | T1 | S2 | the statistical helpers against reference values (χ² = 3.841 at df 1, p = 0.05; the KS critical value at n = 100); they refuse NaN statistics and zero expected counts; every statistical test carries a negative control, a mutant law that must be rejected; α from a family-wise budget | a helper returning p = 1 |
-| C1 | S3 | per combinator, the keys it draws and passes on are pairwise distinct (the key audit, test-only and scoped to one member's tree: over a whole generation it would hold every derivation) | a combinator passing its own key on |
-| C2 | S3 | conditional laws: `optional(p, draw(U))`'s present values pass KS against `U`; `replicate`'s items are independent of the count | the coin drawn from the inner key |
-| M2 | S3 | derivations per member of the acceptance test's Device ≤ 15, and per member placed by a `Permutation` ≤ 12, counted by the audit | an accidental quadratic derivation; a Feistel round function heavier than one derivation |
-| Cap1 | S3 | `replicate` refuses a count above its law's cap; a count law that sizes a list without a cap is refused at construction | an uncapped tail |
+| C1 | S3 | per combinator, under the key audit, the number of draws its table states and none from a key already drawn from; the negative controls — one key drawn twice, two `and_then` under one label — reported | the value under the coin's key; every item under `at(0)`; the first under the continuation's key; the audit counting after deduplication |
+| C2 | S3 | `optional(½, draw(U))`'s present values pass KS against `U` at α = 10⁻⁴, a coin drawn from the value's own key failing it; `optional(1)` and `map` leave the inner values unchanged; `replicate`'s first items do not depend on the count | the coin ignored; the coin from the inner key |
+| M2 | S3 | a drill-shaped Device: exactly `8 +` its facets derivations (at most 15), and its draws exactly; a placement by `Permutation` between 4 and 5 derivations on average where the domain is 1.05 n, at most 17 where it is 4 n | derivations or draws not counted; an accidental quadratic derivation |
+| Cap1 | S3 | `replicate` refuses a count above its cap, and names it; the cap is an argument, so an uncapped list cannot be written | the cap check dropped |
 | Pop1 | S4 | `value(ref) == gen.generate(ref.key())` for every member; a pick lies in `0..size`; picks by two consumers of one member give one value | the consumer's key passed on; `size` off by one |
 | Pop2 | S4 | two populations of one `Kind` refused; member `i` of two scopes are different values, and independent by χ² | the scope omitted from the path |
 | Rng1 | S4 | `Ranges`: the children of the parents tile `0..total` without gap or overlap; `parent_of(c)` is the `p` with `c` in `start(p)..end(p)`, at every boundary; with `apportion` the total is exact | an off-by-one at `end(p)`; a linear search |
@@ -633,6 +654,29 @@ independent ones overlap, so these figures are upper bounds.
 | the gamma factor from `lgamma` | L1 |
 | the chi-square p-value from the lower tail | P1's χ² |
 | the categorical searched linearly | L8 (comparisons) |
+
+**S3** (2026-11-20, this laptop):
+- **What the round found.** `gen` is a reserved word in Rust 2024: the module is `generator`. M2's first form checked
+  an upper bound only, which a ledger that counts nothing passes; it now checks the exact count. The refusal test
+  checked the path only, which a `try_map` that drops its error's text passes; it now checks the reason.
+- **The mutations**, each applied alone, `cargo test -p ascetic-ddd-faker --all-features --no-fail-fast`; every one
+  red:
+
+| Mutation | Red |
+|---|---|
+| `optional`'s value under the coin's key | C1, M2 |
+| `optional`'s coin ignored | C1 |
+| every replicated item under `at(0)` | C1, M2 |
+| `replicate` without its cap | Cap1 |
+| `and_then`'s first under the continuation's key | C1 |
+| `and_then`'s refusal without its label | the refusal's path |
+| `try_map` dropping its error's text | the refusal's reason |
+| `skewed_count`'s position and count from one key | C1, L7 |
+| `skewed_count`'s owner mean not normalised | L7 |
+| `weighted_count`'s means not scaled by the parts | L7 |
+| a unit's draw not recorded by the audit | C1, M2, the audit's own doctest |
+| derivations not counted by the audit | M2 |
+| the audit's repeats counted after deduplication | C1's negative control, the doctest |
 
 To be filled per slice:
 - **M6, scale:** 10⁹ members of the acceptance test's Devices, values computed and discarded, on 1 thread and on
