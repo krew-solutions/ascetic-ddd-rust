@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-20); slice C1 built. Stage 2 of three toward the host's fitness functions (ADR-0045 § Status): the Command Log —
+Proposed (2026-11-20); slices C1 and C2 built. Stage 2 of three toward the host's fitness functions (ADR-0045 § Status): the Command Log —
 what a generation writes and a load run replays — its model, byte form, validator and generation engine. Stage 3,
 the scheduler that replays it, is a later ADR; § 12 states what it inherits.
 
@@ -120,8 +120,9 @@ pub enum Hole {
 ```
 
 - **Rendered** values are a function of (the run's namespace, the subject or step, a role): an id a client chooses,
-  a per-run-unique attribute, a message id, key material. The function is the crate's: SipHash-2-4-128 keyed by the
-  namespace over the canonical encoding of (of, role), pinned by golden vectors. The subject → id map is therefore a
+  a per-run-unique attribute, a message id, key material. The function is the crate's: faker's public derivations
+  (SipHash-2-4-128) from a root keyed by the namespace, over the canonical encoding of (of, role), pinned by golden
+  vectors computed outside the crate. The subject → id map is therefore a
   function by construction, and the validator can read which kind a hole renders (§ 9).
 - **Captured** values come from a response (header, JSON pointer, `Location`) or an observed fact: server-assigned
   ids, ETags, server secrets, values a fact carries.
@@ -132,6 +133,19 @@ through the builder (C2), which hands out sentinels for the holes, finds them in
 the spans with their field paths. Sentinels never reach the log. A JSON span replaces a whole token; a protobuf span
 is fixed-length raw bytes. A varint field (`occurred_at`, `observed_at`) cannot be spliced; the host's decorator
 stamps it at replay.
+
+- **A sentinel is a valid value of its field**, or the host's typed message cannot hold it: a version 4 UUID for a
+  field typed `Uuid`; for a time, an RFC 3339 time in 2999 in whole seconds, which a typed time writes back as it
+  read it; hex digits for hex; ASCII for bytes, so a protobuf `string` takes them. Each carries a tag a host's own
+  content would have to spell, and the builder refuses a sentinel found other than once — a number only between
+  JSON delimiters — rather than guess. (Found in building C2: raw sentinels of arbitrary bytes, and UUID-shaped
+  sentinels for times, could not be put into the fields they stood in.)
+- **A form takes what it can write.** A JSON token takes text, an integer (a time in epoch milliseconds) or a
+  captured JSON value; a UUID's bytes and key material go raw, at their fixed length, and the builder refuses them
+  as JSON tokens.
+- **Renderings by family.** A UUID is the rendering key's id under the namespace: one id as text and as bytes. Hex
+  and key material are the first words of `key / hex` and `key / secret32`, so a public value rendered under a role
+  never shows the bytes of a secret rendered under the same role.
 
 ### 4. Ids are rendered from the subject, in this crate (amends ADR-0045 decision 7)
 
@@ -367,6 +381,28 @@ The scheduler:
   the reader's re-encoding check covers twice but a host decoding one line with `serde_json` does not, and
   `LogError`'s text. Each now has a test of its own.
 
+**C2** (2026-11-20, this laptop):
+- **H1.** A JSON DTO serialised through the template — three ids, a time as RFC 3339, a time in epoch milliseconds,
+  and a free text drawn by a property over quotes, backslashes, non-ASCII and a look-alike of a number sentinel — and
+  spliced, is byte for byte the DTO serialised with its real values. A protobuf message with a UUID's bytes, a UUID's
+  text in a `string` field and a fixed64 time, spliced and then passed through a decorator that rewrites a varint
+  before them, is the message encoded with its real values. Filling every span with its own bytes gives the template
+  back.
+- **H2.** `golden/render.txt` (512 lines) is written by `vectors/render.py` from faker's independent SipHash and
+  Python's `datetime`: three renderings at two namespaces, two subjects and a step, two roles; 476 times at the
+  calendar's edges — the epoch, every year's turn and end of February in every hundredth year, 0000-01-01 to
+  9999-12-31. `make vectors` checks the script against the file, the crate checks itself against it.
+- **What building it found.** The first sentinels could not stand in their fields: raw ones held bytes that are not
+  UTF-8, so a protobuf `string` would not take them, and times got UUID-shaped text, which a typed time would refuse.
+  Each sentinel is now a valid value of its field (decision 3). Hex and key material drawn from the same words would
+  have let a public value show a secret's first bytes under a reused role: they are drawn by family (decision 3).
+- **The mutation run** (cargo-mutants 27.1.0, `cargo mutants -p ascetic-ddd-command-log`): 180 mutants, 160 caught,
+  20 unviable, after one round. The first run missed 14: the century corrections of the calendar (`+ doe/36524`,
+  `− doe/146096`), which act only within days of 1 March in a century year, where the first vectors had no date;
+  the raw sentinels of a UUID's text, of hex and of a time, which fell back to bytes unseen; a seven-bit mask, which
+  only a 129th hole shows; spans overlapping; the errors' texts. A second run over the survivors' descriptions: 30
+  mutants, 30 caught.
+
 Owed:
 - **M7:** bytes a record by kind, generation time and peak RSS at 10⁷ and 10⁹ records on the laptop, peak disk with
   spills; the measurement that would bring compression or chunks back.
@@ -403,3 +439,7 @@ condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
     arrival acceptance, an independent reference checker, rate limits by token bucket; Software Design and
     Evolution — rendering from the subject instead of `IdKey`, end-to-end fixtures in Rust, the log's identity as its
     digest with regeneration, scopes as bytes, `On::Sent`, one predicate type, deviations, a host tool package.
+- 2026-11-20: Slice C1 built (§ Measured).
+- 2026-11-20: Slice C2 built (§ Measured). Decision 3 refined from what building it found: a sentinel is a valid value
+  of the field it stands in; a form takes only what it can write; hex and key material are drawn by family, apart
+  from each other.

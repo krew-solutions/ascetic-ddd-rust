@@ -4,8 +4,8 @@ The planned steps of a load, in the order of their planned time (ADR-0046): what
 a generation writes and a load run replays.
 
 **Status: in progress.** Done: the record model and the canonical byte form
-(slice C1). To come: templates and holes, the validator, the generation engine,
-the offered-load rules.
+(slice C1); templates, the rendering of holes and the splice (C2). To come: the
+validator, the generation engine, the offered-load rules.
 
 ## A log
 
@@ -22,3 +22,12 @@ A log is JSON Lines: a header, one line a planned step, a trailer.
   and refuses one that differs.
 - **A trailer** carries the number of steps and the SHA-256 of every line before
   it: a truncated log is refused, never replayed as a shorter run.
+
+## A template
+
+A host serialises its typed message — a DTO from its OpenAPI, a prost message —
+as it always does, with a sentinel from `template::Template` in each field a
+hole fills: a valid value of that field's type, so the message holds it. The
+template finds each sentinel once in the bytes and records its span. At replay,
+`render::fill` splices each span's value: an id rendered from the run's
+namespace and the subject, a time, a captured value.

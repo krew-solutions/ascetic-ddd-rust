@@ -13,6 +13,7 @@ categories.workspace = true
 readme = "README.md"
 
 [dependencies]
+ascetic-ddd-faker = { path = "../faker" }
 base64 = "0.22"
 serde = { workspace = true }
 serde_json = { workspace = true }

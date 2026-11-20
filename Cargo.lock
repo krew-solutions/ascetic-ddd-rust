@@ -61,6 +61,7 @@ dependencies = [
 name = "ascetic-ddd-command-log"
 version = "0.1.0"
 dependencies = [
+ "ascetic-ddd-faker",
  "base64 0.22.1",
  "proptest",
  "serde",
