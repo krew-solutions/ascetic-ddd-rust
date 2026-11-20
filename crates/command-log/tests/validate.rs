@@ -682,3 +682,184 @@ fn a_file_is_validated_as_its_bytes() {
     assert_eq!(rules(&report), vec![Rule::Duplicate]);
     assert_eq!(report.records, 2);
 }
+
+/// The pairs a report names, in its order.
+fn pairs(report: &ascetic_ddd_command_log::validate::Report) -> Vec<(u64, Rule)> {
+    report.violations.iter().map(|v| (v.line, v.rule)).collect()
+}
+
+/// Decision 16: W is measured behind the read cursor. A line planned ahead
+/// takes the cursor with it; a later line awaiting a step more than W behind
+/// the cursor breaks `edge` even where its own time is near — a run that has
+/// read the line ahead has dropped the completion.
+#[test]
+fn w_is_behind_the_read_cursor() {
+    let (s, x, y) = (
+        id("device", 1, "seen", 0),
+        id("device", 2, "seen", 0),
+        id("device", 3, "seen", 0),
+    );
+    let y_after = |at| deviating(after(step(y.clone(), at), &s, On::Expected), "order");
+    // X within W of S: the cursor at X leaves S in reach.
+    let near = run(&[step(s.clone(), 50), step(x.clone(), 50 + W), y_after(150)]);
+    assert!(near.violations.is_empty(), "{:?}", near.violations);
+    // X past W of S: S is behind the cursor by more than W.
+    let ahead = run(&[step(s.clone(), 50), step(x.clone(), 51 + W), y_after(150)]);
+    assert_eq!(pairs(&ahead), vec![(4, Rule::Edge)]);
+    // Undeclared, the order is broken too.
+    let undeclared = run(&[
+        step(s.clone(), 50),
+        step(x.clone(), 51 + W),
+        after(step(y.clone(), 150), &s, On::Expected),
+    ]);
+    assert_eq!(rules(&undeclared), vec![Rule::Order, Rule::Edge]);
+}
+
+/// A step dead on arrival — more than W behind the cursor — answers for no
+/// later edge, and an older occurrence of its id does not answer for it.
+#[test]
+fn a_step_dead_on_arrival_answers_for_nothing() {
+    let (s, x, z) = (
+        id("device", 1, "seen", 0),
+        id("device", 2, "seen", 0),
+        id("device", 3, "seen", 0),
+    );
+    let records = |again: u64| {
+        vec![
+            step(x.clone(), 20_000),
+            step(s.clone(), 19_500),
+            // S again: within W of the cursor, or more than W behind it.
+            step(s.clone(), again),
+            after(step(z.clone(), 20_100), &s, On::Expected),
+        ]
+    };
+    let alive = run(&records(19_400));
+    assert_eq!(
+        pairs(&alive),
+        vec![(3, Rule::Order), (4, Rule::Order), (4, Rule::Duplicate)]
+    );
+    let dead = run(&records(18_000));
+    assert_eq!(
+        pairs(&dead),
+        vec![
+            (3, Rule::Order),
+            (4, Rule::Order),
+            (4, Rule::Duplicate),
+            (5, Rule::Edge)
+        ]
+    );
+}
+
+/// The window is evicted by planned time, not by line: steps planned behind a
+/// line ahead leave it as the cursor passes them, though the line ahead stays.
+#[test]
+fn the_window_holds_only_what_is_within_w() {
+    let mut records = vec![step(id("device", 0, "seen", 0), 100_000)];
+    // Ten steps a little behind it, each within W on arrival; the first breaks
+    // the order, and says so.
+    for i in 1..=10u64 {
+        let r = step(id("device", i, "seen", 0), 99_000 + i * 10);
+        records.push(if i == 1 { deviating(r, "order") } else { r });
+    }
+    // The cursor moves on, the line ahead still within W of it: the ten fall
+    // more than W behind it while twenty more arrive.
+    for i in 1..=20u64 {
+        records.push(step(id("device", 100 + i, "seen", 0), 100_500 + i));
+    }
+    let report = run(&records);
+    assert!(report.violations.is_empty(), "{:?}", report.violations);
+    // The line ahead and the twenty; the ten would be held behind it by an
+    // eviction in line order.
+    assert_eq!(report.peaks.completions, 21);
+}
+
+/// No deviation exempts `deviation`: one declared against it is unused.
+#[test]
+fn a_deviation_does_not_exempt_itself() {
+    let a = id("device", 1, "seen", 0);
+    let report = run(&[deviating(step(a.clone(), 10), "deviation")]);
+    assert_eq!(pairs(&report), vec![(2, Rule::Deviation)]);
+}
+
+/// The report keeps the least violations by line, whenever each is found: a
+/// duplicate decided at the end on line 3 before an edge found on line 4.
+#[test]
+fn the_report_keeps_the_first_lines_whenever_found() {
+    let (a, u) = (id("device", 1, "seen", 0), id("device", 9, "seen", 0));
+    let records = [
+        step(a.clone(), 10),
+        step(a.clone(), 20),
+        after(step(id("device", 2, "seen", 0), 30), &u, On::Expected),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let limits = ascetic_ddd_command_log::validate::Limits {
+        ids_in_memory: 100,
+        spill: dir.path().to_owned(),
+        kept: 1,
+        fan_in: 0,
+        memory_spill: true,
+    };
+    let reader =
+        ascetic_ddd_command_log::Reader::new(std::io::Cursor::new(bytes(header(), &records)))
+            .unwrap();
+    let report = ascetic_ddd_command_log::validate::validate(reader, &NoHost, &limits).unwrap();
+    assert_eq!(
+        (pairs(&report), report.violated),
+        (vec![(3, Rule::Duplicate)], 2)
+    );
+}
+
+/// Live captures: a slot whose writer left W behind the cursor is not live.
+#[test]
+fn captures_are_counted_while_live() {
+    let near = run(&[writer(1, 0, 10), writer(2, 0, 10 + W)]);
+    assert_eq!(near.peaks.captures, 2);
+    let apart = run(&[writer(1, 0, 10), writer(2, 0, 11 + W)]);
+    assert_eq!(apart.peaks.captures, 1);
+}
+
+/// What a stream or a slot remembers is not forgotten with the window
+/// (decision 16): a message more than W after its predecessor, not awaiting
+/// it; a writer more than W after the last; a gapless stream begun again.
+#[test]
+fn streams_and_slots_outlive_the_window() {
+    let m = |name: &str, n: u32, at: u64, position: u32| {
+        message(step(id("device", 1, "fact", n), at), name, position)
+    };
+    let late = run(&[m("telemetry", 0, 10, 1), m("telemetry", 1, 11 + W, 2)]);
+    assert_eq!(pairs(&late), vec![(3, Rule::Stream)]);
+    let rewritten = run(&[writer(1, 0, 10), writer(1, 1, 11 + W)]);
+    assert_eq!(pairs(&rewritten), vec![(3, Rule::Writers)]);
+    let again = run(&[m("lifecycle", 0, 10, 1), m("lifecycle", 1, 11 + W, 1)]);
+    assert_eq!(rules(&again), vec![Rule::Stream, Rule::Gap]);
+}
+
+/// What the rules mean, pinned beside their revision: the SHA-256 of the
+/// corpus's logs, verdicts and peaks. A rule whose meaning changes changes it;
+/// then `RULES_REVISION` is bumped and the new digest appended. A corpus that
+/// changes alone is re-pinned under the same revision.
+#[test]
+fn the_rules_meaning_is_pinned_to_its_revision() {
+    use sha2::{Digest, Sha256};
+    const MEANINGS: &[(u32, &str)] = &[(
+        3,
+        "69bd4acce175434db2532d3cffba497cc33b8d841bb46adcac314884008e205a",
+    )];
+    let mut digest = Sha256::new();
+    for line in fixture::corpus::lines() {
+        digest.update(line.as_bytes());
+        digest.update(b"\n");
+    }
+    let hex: String = digest
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let revisions: Vec<u32> = MEANINGS.iter().map(|m| m.0).collect();
+    assert!(revisions.windows(2).all(|w| w[0] < w[1]));
+    assert_eq!(
+        MEANINGS.last().copied(),
+        Some((ascetic_ddd_command_log::live::RULES_REVISION, hex.as_str())),
+        "a rule's meaning changed: bump RULES_REVISION and append its digest"
+    );
+}

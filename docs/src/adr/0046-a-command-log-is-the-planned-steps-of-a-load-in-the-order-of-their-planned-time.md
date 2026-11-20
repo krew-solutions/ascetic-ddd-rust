@@ -16,6 +16,8 @@ To be built in slices, each a commit of its own:
 - **C5:** offered-load rules: planned rates against declared limits, the polls an observation implies.
 - **C6** (decision 15): a log at 10⁹ steps — a generation that fails halfway cleans up and says why; compressed logs and
   spills; a bounded merge; a live run with no log, checked chunk by chunk against a validated dry run.
+- **C7–C9** (decision 16): the validator within a memory bound — C7 the rules and the report on one clock, C8 streams
+  to sorted runs, C9 the window by digest under an early refusal; each followed by its measurement (M10).
 
 Amends ADR-0045 decisions 7 and 8 (§ 4, § 8).
 
@@ -215,7 +217,7 @@ Plan misses a change in emission code, and one over the output is the digest its
 
 ### 9. The validator
 
-One streaming pass, in memory bounded by the window:
+One streaming pass, on the read cursor's clock (decision 16; what it holds and for how long, there):
 - **framing**: the header, canonical lines, the trailer's count and digest, the format version;
 - **order**: `(at, StepId)` strictly increasing; StepIds unique (in a set up to a budget, by external sort past it);
 - **edges**: every `Dep::Step` refers to an earlier step within W or a retained label; a barrier's `count`, when
@@ -237,9 +239,11 @@ small random logs and on their one-edit mutants, and every rule has a minimal vi
 What the rules mean where the list above leaves it open (settled in building C3, each decided by both the validator
 and the reference):
 - **Awaiting has a strength**, `Sent` < `Settled` < `Expected`: a stronger wait meets a weaker requirement.
-- **An edge** is to the latest earlier step of that id, planned strictly before the holder, within W of it or of a
-  retained label. The distance is checked edge by edge, not left to the window's eviction, which an out-of-order
-  line defeats.
+- **An edge** is to the latest earlier step of that id, planned strictly before the holder, within W behind the read
+  cursor or of a retained label (revised by decision 16, which first read "within W of it": a run that has read a
+  line ahead has dropped what lies more than W behind it). The window is evicted exactly by planned time, so a step
+  in it is within reach; a step more than W behind the cursor on arrival is not kept and takes an older occurrence of
+  its id with it.
 - **Captures (§ 5).** A writer of a slot is a step that captures it, or a REST call whose operation writes it on the
   step's subject. A reader awaits its producer as expected, and the producer is the slot's latest earlier writer.
   A writer awaits the previous writer as at least settled — its value must be stored before the next — and each
@@ -411,6 +415,76 @@ makes the 4.50 GB log of M7 162 MB, level 3 176 MB; SHA-256 runs at 79 MB/s here
   and a window invites a unit to prune and lose a step; a `Sink` beside `W: Write` — a pipe and the reader serve; a
   hashing thread — M9 decides.
 
+### 16. The validator's memory: a hot part by the read cursor, a cold part in sorted runs (M9)
+
+M9 measured the validator at 1.97 GB for 10⁷ steps, growing through the pass: § 9's "in memory bounded by the window"
+holds for the window alone. Per rule the validator keeps a map from a key to that key's history, and every such map
+is one structure: a **hot part** in memory, evicted by one clock, and a **cold part** in sorted runs on disk, decided
+by a per-key merge at the end. A lookup is decided by the hot part where it is authoritative and deferred to the merge
+otherwise. The report is a function of the log alone, never of a budget. Uniqueness (§ 9, `Ids`) is already this
+structure with a budgeted hot part; the rest follows it.
+
+- **One clock: the read cursor.** `c` is the running maximum of `at` up to the line, updated before its rules. An
+  edge from a line to step `D` holds iff `D`'s latest earlier occurrence `E` exists, `E.at` is before the line's `at`,
+  and `E` is retained or `c − E.at ≤ W`; the window evicts by `c − W`, exact because `c` only grows. This revises
+  § 9's "within W of it" to decision 7's "behind the read cursor" and decision 14's arrival at the cursor: a run that
+  has read a line at 10 000 has dropped a completion at 50, so a later line at 150 awaiting it cannot be honoured. On
+  a log in order nothing changes — every generated log is in order (§ 11) — and the reference takes the same rule.
+- **Nothing leaves memory by being dropped.** Forgetting a stream or a slot whose latest step left the window keeps
+  clean logs clean and passes violating ones: a stream's message more than W after its predecessor, which it does not
+  await, would read as the stream's beginning (refuted in review with three logs, now twins). Whatever leaves the hot
+  part is written out.
+- **Streams first, as runs with an empty hot part.** One event a stream message — its (subject, stream) digest, line,
+  position, step digest, its `Expected` dependencies' digests, the line's deviation — to sorted runs; each key
+  replayed in line order at the end, which is the reference's definition. A hot table with snapshots at eviction is
+  the same structure with a non-empty hot part; held back until a measurement shows the stream merge above about a
+  tenth of the pass.
+- **Identities as 16-byte digests** (SipHash-1-3-128, the engine's) in the hot parts and the runs. In a lookup a
+  collision is fail-open (a dependency on a step never planned passes), in uniqueness fail-closed; about 2⁻⁶⁹ at 10⁹
+  for logs not crafted to collide. The validator is not a security boundary. Details name lines, not ids from maps.
+- **The window by digest**, under the cursor; a budget with edges deferred to the id merge only if a measurement shows
+  the window, at its measured bytes an entry, past what the laptop leaves beside the generation.
+- **The report:** `kept` keeps the least violations by (line, rule, detail), whatever decides them when; no deviation
+  exempts `deviation`; `Peaks.captures` counts live captures (§ 9's meaning), and `Peaks.polls` is documented as the
+  sum it is. `RULES_REVISION` goes to 3.
+- **The room check counts each run type** before the first line, in both directions (the id runs' cascade group is
+  asked for only when there is a cascade, and for every level of it), and `validate_file` checks it too.
+- **Named unbounded until measured on a host scenario:** slots and their readers, barrier counts (a `Dep::Each`
+  counts the whole history), buckets, declared deviations, retained steps (multi-life subjects whose messages lie more
+  than W apart need their predecessor retained), a line's length and a detail's. § 9 names them; their runs or caps
+  wait for a host scenario at 10⁸ with captures, per-key limits and barriers.
+
+- **The bound is the plan's own:** the window holds about W times the peak planned rate, which the run must hold
+  too (decision 7, `Peaks.completions`). A plan past what the validator's machine holds is refused early and by name —
+  in a dry run from the steps a cell counted while emitting, on both paths by a cap on hot entries that fails the pass
+  naming the structure and its count — not killed by oomd hours in. A step dead on arrival (`c − at > W`, not
+  retained) is not kept and removes its id from the window: no later edge may accept it, and an out-of-order line
+  cannot pin the window behind it.
+- **Streams' events carry what their rules read:** the stream's name, and only the `Expected` dependencies of the same
+  subject, the only ones that can be its predecessor. Run buffers are budgeted in bytes under one budget shared by the
+  run types; a run is read through an explicit buffer counted in memory; hot parts are dropped before the end merges.
+- **Room:** a dry run's need is exact, from what the emit phase counted per record; a persisted validation, whose
+  counts are known only at its trailer, checks before each run it writes against a reserve. Each is executed against
+  the bytes the runs actually occupy, not against the formula.
+
+**C7** (first): the cursor in the validator and the reference; a step dead on arrival not kept; no deviation exempting
+`deviation`; `kept` the least by (line, rule, detail), ranked before a detail is formatted; live captures (slots whose
+latest writer is within W of the cursor or retained, counted as the window evicts); the reference computing the peaks
+from their definitions; `RULES_REVISION` 3, with the corpus's verdicts digested beside it. The corpus gains a line
+moved forward past 2W and deviations of every rule's name and an unknown one, and counts the logs whose reference
+verdict differs between the two clocks — above zero, or V2 does not execute the cursor. **C8:** streams to sorted
+runs, the run machinery generalised from `Ids`, duplicates fed straight into the report, room per run type; V2 at run
+budgets of 1 and 2 and a fan-in of 2, a long clean stream through small runs, every run type cut at every byte; then
+M10 at 10⁸. **C9:** the window, order and retained by digest, the early refusal; a counting allocator asserting the
+peak heap flat across eight times the subjects at one planned rate; then M10: a dense 10⁸, and 10⁹ at M9's planned
+rate on both paths. **A window budget with edges deferred to the id merge** waits for a host plan whose W times rate
+the run's machine holds and the validator's does not.
+
+M10 records, beside wall time by phase and peak RSS: the planned rate and W, `Peaks.completions` and the retained
+count, the hot tables' capacities and resident memory at each resize, bytes an entry, stream events and their bytes,
+same-subject dependencies an event, time writing, sorting and merging runs, the spill disk's kind and read-ahead,
+available memory, swap and pressure — under `MemorySwapMax=0`, so that a blown bound is a kill and not a thrash.
+
 ## Consequences
 
 - A load is a value: a digest names exactly what was offered, and two runs of one log offered the same commands.
@@ -443,6 +517,14 @@ makes the 4.50 GB log of M7 162 MB, level 3 176 MB; SHA-256 runs at 79 MB/s here
 
 ## Alternatives Considered
 
+- **For decision 16, streams and slots evicted with the window** (the main position): memory by W, not subjects; it
+  passes a stream's message more than W after its predecessor that does not await it, a writer more than W after the
+  last, a gapless stream restarted at 1 — each now a V1 twin. **Every structure decided by runs, the window included**
+  (a window budget of 0): no window memory for 31 GB more disk at 10⁹; waits for its trigger. **A hot stream table
+  with snapshots at eviction**: exact, a twentieth of the stream runs on long streams, but every stream's first message
+  misses it; waits for a measurement of the whole stream path above a tenth of the pass. **Interned names** instead of
+  digests: exact and invertible, but the table grows with the names a log uses. **Partitioning by subject and
+  re-reading the log**: 3.7 h a read at 10⁹.
 - **For C5, arrivals as intervals** (the Distributed Systems role): each arrival `[lo, hi]` from its dependencies'
   declared bounds, the curve checked against every placement. It would prove conformance under latency, but needs a
   bound for every dependency in the header, and, counting an observation's polls as independent intervals, refuses
@@ -495,6 +577,8 @@ makes the 4.50 GB log of M7 162 MB, level 3 176 MB; SHA-256 runs at 79 MB/s here
 | R1 | C5 | minimal twins (`tests/rate.rs`): with `R = 2` a second and `B = 3`, three at 0 admitted and a fourth refused, the fourth at `T − 1 µs` refused and at `T` admitted, four at 0 then an hour idle refused (an average far under the rate), three at 0 then one every `1.2 T` admitted; `R = 3` a second, `B = 1` at 333,333 µs refused and 333,334 admitted; `R = 3`, `B = 2` at 0, 0, 333,334, 666,667 admitted; two operations in one bucket each under and together over; two values in one bucket each under and together over, admitted; one subject through a rendered and a captured value together over; polls alone over, beside `every` doubled; 5 s / 2 s polls at burst 2 refused and at burst 3 admitted, 4 s / 2 s at burst 2 refused; 2²⁰ and 2²⁰ + 1 polls; the drain of polls before an action at the same time, at the log's end, and before the deviation check; `J`: `B` arrivals within `J` admitted and `B + 1` refused, the `readEnrollmentNotice` shape (`B = 400`, 200 a second, `J = 3 s`) at one a second admitted; the reserve: 99 % of `R` admitted without and refused at 5 %; a source past `sources`, each unevaluable place, a `key` deviation still `key`; a deliberate 429 the system would admit reported unused (both the forced spend and `J` cases); a refused limit not evaluated; the clamp for an action and for an observation | the average instead of the bucket; `<` for `≤`; T rounded either way; polls counted as `timeout/every`, `div_ceil` or a strict bound; a bucket per operation or per name instead of per value; the clamp dropped; a deviated arrival that does not spend; use decided on the admission model; `key` deviable; the burst reduced for windows under `J` |
 | R2 | C5 | the reference decides `rate` and `key` window by window from the definitions, its deviated arrivals spending; the corpus carries limits of every `By` and `Place`, sources, callers, observations with REST probes, rates whose interval is comparable to the gaps, jitter whose `R · J / P` is not an integer; mutants squeeze an `at`, a source past `sources`, `every` halved, a key made a `Time` hole, a caller's names dropped, a deviation naming `rate` or `key`; measured: arrivals whose verdict differs from a plain count, by mutant kind | the reference sharing a mistake with the validator |
 | R3 | C5 | a property: the streaming curve equals the window definition on random arrivals in one bucket with small parameters, ties and deviations included | the streaming algorithm diverging from the definition |
+| V3 | C7 | twins: a line planned past W ahead puts a step out of reach of a later line near it (`edge`), within W it does not; a step dead on arrival answers for no edge and an older occurrence of its id does not answer for it; the window holds only what is within W behind the cursor (21, not the 31 an eviction in line order holds); a deviation against `deviation` is unused; with `kept = 1` a duplicate on line 3 decided at the end is kept before an edge found on line 4; captures counted while live; a stream's late message, a slot's late writer and a gapless stream begun again still break their rules | a step dead on arrival kept; an older occurrence answering for a dead one; the window evicted in line order; captures counted ever written; live captures not evicted; a deviation exempting itself; `kept` by discovery |
+| V4 | C7 | the reference decides on the cursor and computes the peaks from their definitions; the corpus moves a line past 2W ahead and declares deviations of every rule's name and one naming none; the reference fails unless some log's verdict differs between the cursor and the line's own time (47 of 1,642); the corpus's logs, verdicts and peaks are digested beside `RULES_REVISION` | the reference on the line's own time; its captures ever written; any Rust mutation above that V2 sees |
 | Z1 | C6 | compressed and plain logs give the same records and trailer; `make vectors` decodes a crate-written log with the zstd CLI and `cmp`s it with the plain one | a digest over compressed bytes; compression in the header |
 | Z2 | C6 | a two-frame `golden/c1.jsonl.zst` made by the CLI decodes to the golden log | single-frame decoding |
 | Z3 | C6 | a compressed log named `.jsonl` and a plain one named `.zst` both read; anything else refused | detection by extension |
@@ -779,11 +863,30 @@ makes the 4.50 GB log of M7 162 MB, level 3 176 MB; SHA-256 runs at 79 MB/s here
     (ENOENT): the dry run now creates it first (executor `a_dry_run_claims_the_validator_s_directory_first`, mutation —
     the directory not created first — red).
 
+**C7 — the rules and the report on one clock** (decision 16, 2026-11-21):
+- **Built:** the read cursor (the running maximum of `at`, updated first) is the one clock: the window is a map and a
+  set ordered by planned time, evicted exactly behind the cursor, and a line's calls arrive at it; a step dead on
+  arrival is not kept and removes its id; the edge rule's own distance check is gone, eviction being exact; a
+  deviation never exempts `deviation`; the report keeps the least `kept` violations by (line, rule, detail), a detail
+  written only when it could be kept; `Peaks.captures` counts the slots whose latest writer is within W behind the
+  cursor or retained, as the window evicts; `Peaks` and the report documented as they are; `RULES_REVISION` 3. The
+  reference measures W behind the cursor, computes the three peaks from their definitions, compares them, and counts
+  the logs only the cursor decides. The corpus gains `jump` and every rule's deviation: 1,642 logs agree, 47 only on
+  the cursor's clock.
+- **Executors:** V3, V4. Mutations, each alone, red: as in V3 and V4. One is equivalent: the window evicted by the
+  line's own time instead of the cursor — the cursor rises only on a line whose time it is, and eviction runs on
+  every line, so both evict the same steps; the cursor lives on in the edge rule, through a step dead on arrival.
+
 Owed:
+- **Stage 3's dependency machine against the edge rule** (decision 16): whether the scheduler binds a dependency when
+  it reads a line or when it releases it, with read-ahead, decides what the cursor must be; both oracles derive the
+  rule from one sentence of decision 7, so their agreement proves nothing about it.
+- **One SHA-256 a pass** (M9, decision 16's review): `commit_file` hashes a log twice on the validator's thread (the
+  tally and the reader), the dry run twice on the generator's (the writer and the tally) — about 4.7 µs a step each
+  here, 1.3 h at 10⁹ — beside the hashing thread M9 left owed.
 - **M9's rest** (C6): the host scenario's bytes a step and its ratio at levels 1 and 3 — the host has no scenario yet;
   validation at 10⁸ on both paths and 10⁹ persisted, after decision 16.
-- **Decision 16** (M9): the validator's memory bounded independently of the plan's subjects and steps, with the same
-  verdicts; under the gate (a blind solver, a discriminator, roles).
+- **Decision 16's slices** C7, C8, C9 and their M10 (§ Decision 16).
 - **10⁹ steps** (M7): a log of 450 B a step and a peak of twice it do not fit a laptop. The owner's direction
   (2026-11-20): the persisted log is compressed with zstd, its digest over the canonical lines, not the compressed
   bytes (M3); and, as an alternative, a generation streamed straight into the run with no log (decision 1 allows it;
@@ -867,3 +970,12 @@ condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
   check reworked into it), built (§ Measured).
 - 2026-11-21: M9 measured at 10⁷ on both paths and at 10⁸ persisted without validation (§ Measured); the dry run's
   missing validator directory fixed; decision 16 (the validator's memory) owed.
+- 2026-11-21: Decision 16 (the validator's memory), under the gate: a blind solver found every growing term
+  (streams, the window, ids, and those empty in M9: slots, barriers, buckets, deviations, duplicates, a line's length)
+  and three verdict-level defects (a deviation naming `deviation` exempting itself; a line planned ahead evicting
+  steps later lines reach; `kept` by discovery, not line); the main position — evict streams and slots with the
+  window — was refuted by the discriminator with three logs it would pass; the synthesis read both as one structure, a
+  hot part by the read cursor and a cold part in sorted runs; Verifiability added the executors the corpus could not
+  give (a line moved forward, every rule's deviation, the verdict digest, room against the disk); Performance the
+  plan-own bound, the early refusal, the dead-on-arrival step and M10's record.
+- 2026-11-21: Slice C7 built (§ Measured); § 9's edge revised to the read cursor, `RULES_REVISION` 3.

@@ -27,8 +27,9 @@ use crate::record::{Header, Line, Trailer};
 use crate::validate::{Host, Limits, Report, Rule, spill_need, validate_on};
 
 /// Bumped when a rule's meaning changes, beside its name: a commitment from
-/// another validator is stale (C5 added `rate` and `key`).
-pub const RULES_REVISION: u32 = 2;
+/// another validator is stale (2: C5 added `rate` and `key`; 3: decision 16
+/// measured W behind the read cursor and stopped `deviation` exempting itself).
+pub const RULES_REVISION: u32 = 3;
 
 /// The validator's identity: its revision and its rules' names.
 pub fn validator() -> String {

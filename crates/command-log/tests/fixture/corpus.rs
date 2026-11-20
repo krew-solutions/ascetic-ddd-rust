@@ -205,6 +205,13 @@ fn mutant(records: &[Record], which: &str, k: &Key) -> Option<Vec<Record>> {
             let i = pick("i", &all[1..])?;
             m[i].at = m[draw(k, "to", i as u64) as usize].at;
         }
+        // A line planned ahead, past twice the window: every line after it is
+        // behind the cursor, where the read cursor and the line's own time part
+        // (decision 16).
+        "jump" => {
+            let i = pick("i", &all[..all.len().saturating_sub(1)])?;
+            m[i].at += 2 * W + 1 + draw(k, "by", W);
+        }
         "duplicate" => {
             let i = pick("i", &all[1..])?;
             m[i].step = m[draw(k, "of", i as u64) as usize].step.clone();
@@ -303,16 +310,13 @@ fn mutant(records: &[Record], which: &str, k: &Key) -> Option<Vec<Record>> {
         }
         "deviation" => {
             let i = pick("i", &all)?;
-            let rule = [
-                "gap",
-                "edge",
-                "order",
-                "stale",
-                "duplicate",
-                "rate",
-                "key",
-                "nothing",
-            ][draw(k, "rule", 8) as usize];
+            // Every rule's name, a rule added later included, and one naming none.
+            let names: Vec<&str> = ascetic_ddd_command_log::validate::Rule::ALL
+                .iter()
+                .map(|r| r.name())
+                .chain(["nothing"])
+                .collect();
+            let rule = names[draw(k, "rule", names.len() as u64) as usize];
             m[i] = deviating(m[i].clone(), rule);
         }
         "squeeze" => {
@@ -386,6 +390,7 @@ pub fn lines() -> Vec<String> {
     let kinds = [
         "drop-edge",
         "move-at",
+        "jump",
         "duplicate",
         "renumber",
         "barrier",
@@ -420,7 +425,13 @@ pub fn lines() -> Vec<String> {
             verdict.sort();
             verdict.dedup();
             let log = String::from_utf8(bytes(corpus_header(), &records)).unwrap();
-            let line = serde_json::json!({ "name": name, "log": log, "verdict": verdict });
+            let peaks = [
+                report.peaks.completions,
+                report.peaks.captures,
+                report.peaks.polls,
+            ];
+            let line =
+                serde_json::json!({ "name": name, "log": log, "verdict": verdict, "peaks": peaks });
             out.push(line.to_string());
         }
     }

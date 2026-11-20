@@ -1,6 +1,9 @@
-//! The validator (ADR-0046 decision 9): one streaming pass over a log, in
-//! memory bounded by the window, the live captures and streams, and a budget of
-//! step ids past which uniqueness is decided by an external sort.
+//! The validator (ADR-0046 decisions 9 and 16): one streaming pass over a log
+//! on one clock, the read cursor — the running maximum of `at` — behind which
+//! the window is measured and evicted exactly, and a budget of step ids past
+//! which uniqueness is decided by an external sort. Streams, slots, barrier
+//! counts, buckets and declared deviations are held whole, unbounded until
+//! decision 16's later slices.
 //!
 //! Framing — the header, canonical lines, the trailer — is the [`Reader`]'s,
 //! and fails the pass. Every other rule is collected as a [`Violation`], so one
@@ -8,7 +11,7 @@
 //! their definitions, quadratically, and is compared with this on a corpus.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
@@ -145,16 +148,18 @@ impl fmt::Display for Violation {
     }
 }
 
-/// The most a run must hold at once, as the log plans it.
+/// What a run must hold, as the log plans it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Peaks {
-    /// Steps whose completion must be kept for a later dependency: those within
-    /// `W` of the latest, and the retained.
+    /// The most completions kept at once for later dependencies: the steps
+    /// whose latest occurrence is within `W` behind the cursor, and the
+    /// retained.
     pub completions: u64,
-    /// Captured slots live at once.
+    /// The most captured slots live at once: those whose latest writer is
+    /// within `W` behind the cursor, or retained.
     pub captures: u64,
-    /// Polls the observations imply, at most: each one's timeout over its
-    /// interval, summed.
+    /// The polls the observations imply, summed over the log (not at once):
+    /// each one's timeout over its interval, and one.
     pub polls: u64,
 }
 
@@ -163,7 +168,8 @@ pub struct Peaks {
 pub struct Report {
     /// The steps read.
     pub records: u64,
-    /// The violations, in line order, at most [`Limits::kept`] of them.
+    /// The least [`Limits::kept`] violations by (line, rule, detail), in that
+    /// order.
     pub violations: Vec<Violation>,
     /// How many there were, kept or not.
     pub violated: u64,
@@ -543,16 +549,26 @@ struct Pass<'h, H: Host> {
     report: Report,
     previous: Option<(u64, StepId)>,
     window: BTreeMap<StepId, u64>,
-    order: VecDeque<(u64, StepId)>,
+    /// The window's steps by planned time: evicted exactly, whatever the
+    /// lines' order.
+    order: BTreeSet<(u64, StepId)>,
     retained: BTreeMap<StepId, u64>,
     barriers: BTreeMap<(String, Vec<u8>, String, u32), u64>,
     slots: BTreeMap<(Subject, String), Slot>,
+    /// Live captures: slots whose latest writer is within W of the cursor
+    /// (its `at`) or retained (`None`).
+    live: BTreeMap<(Subject, String), Option<u64>>,
+    /// The live captures by their writer's planned time, for eviction.
+    live_order: BTreeSet<(u64, (Subject, String))>,
+    /// The least violations found, at most `kept`: a max-heap.
+    least: BinaryHeap<Violation>,
     streams: BTreeMap<(Subject, String), (u32, StepId)>,
     ids: Ids,
     /// Lines that declared a deviation, its rule, and whether it was used.
     deviations: BTreeMap<u64, (Rule, bool)>,
-    /// The running maximum of `at`: when a line's calls arrive.
-    clamp: u64,
+    /// The read cursor: the running maximum of `at` up to the line in hand
+    /// (decision 16). W is measured behind it; a line's calls arrive at it.
+    cursor: u64,
     /// The header's refused limits, by operation and index: never evaluated.
     refused: BTreeSet<(String, usize)>,
     /// Each bucket's curve and lower model, by its name and value.
@@ -606,22 +622,47 @@ struct Count {
 const MAX_POLLS: u64 = 1 << 20;
 
 impl<H: Host> Pass<'_, H> {
-    /// A violation of `rule` at `line`, unless the line declared it.
-    fn violate(&mut self, line: u64, rule: Rule, detail: String) {
-        // No deviation exempts a key: an arrival left out of its bucket would be
-        // an under-count.
+    /// A violation of `rule` at `line`, unless the line declared it. The
+    /// report keeps the least `kept` by (line, rule, detail), whenever each is
+    /// found; a detail is written only if it could be kept.
+    fn violate(&mut self, line: u64, rule: Rule, detail: impl FnOnce() -> String) {
+        // No deviation exempts a key — an arrival left out of its bucket would
+        // be an under-count — nor itself: a deviation declared against
+        // `deviation` is unused, and says so.
         if let Some((declared, used)) = self.deviations.get_mut(&line)
             && *declared == rule
             && rule != Rule::Key
+            && rule != Rule::Deviation
         {
             *used = true;
             return;
         }
         self.report.violated = self.report.violated.saturating_add(1);
-        if self.report.violations.len() < self.kept {
-            self.report
-                .violations
-                .push(Violation { line, rule, detail });
+        if self.kept == 0 {
+            return;
+        }
+        if self.least.len() < self.kept {
+            self.least.push(Violation {
+                line,
+                rule,
+                detail: detail(),
+            });
+            return;
+        }
+        let Some(most) = self.least.peek() else {
+            return;
+        };
+        if (line, rule) > (most.line, most.rule) {
+            return;
+        }
+        let v = Violation {
+            line,
+            rule,
+            detail: detail(),
+        };
+        if &v < most {
+            self.least.pop();
+            self.least.push(v);
         }
     }
 
@@ -642,19 +683,17 @@ impl<H: Host> Pass<'_, H> {
             .map(|o| o.name.clone())
             .collect();
         for k in both {
-            self.violate(
-                1,
-                Rule::Header,
-                format!("kind {k:?} both rendered and captured"),
-            );
+            self.violate(1, Rule::Header, || {
+                format!("kind {k:?} both rendered and captured")
+            });
         }
         for o in twice {
-            self.violate(1, Rule::Header, format!("operation {o:?} twice"));
+            self.violate(1, Rule::Header, || format!("operation {o:?} twice"));
         }
         let (found, refused) = self.limits();
         self.refused = refused;
         for detail in found {
-            self.violate(1, Rule::Header, detail);
+            self.violate(1, Rule::Header, || detail);
         }
     }
 
@@ -739,7 +778,7 @@ impl<H: Host> Pass<'_, H> {
             }
         }
         for detail in missing {
-            self.violate(line, Rule::Key, detail);
+            self.violate(line, Rule::Key, || detail);
         }
         out
     }
@@ -770,7 +809,7 @@ impl<H: Host> Pass<'_, H> {
                 }
             } else if !admitted {
                 let detail = format!("{} {} at {t}: past its curve", c.bucket, c.limit.key);
-                self.violate(line, Rule::Rate, detail);
+                self.violate(line, Rule::Rate, || detail);
             }
         }
     }
@@ -794,11 +833,10 @@ impl<H: Host> Pass<'_, H> {
         }
     }
 
-    /// The line's calls: a REST action at the clamped time, an observation's
-    /// polls from it, every `every` to its timeout.
+    /// The line's calls: a REST action at the cursor, an observation's polls
+    /// from it, every `every` to its timeout.
     fn offered(&mut self, line: u64, r: &Record) {
-        self.clamp = self.clamp.max(r.at);
-        let t = self.clamp;
+        let t = self.cursor;
         self.drain(t);
         let forced = matches!(self.deviations.get(&line), Some((Rule::Rate, _)));
         match &r.action {
@@ -833,17 +871,20 @@ impl<H: Host> Pass<'_, H> {
 
     fn record(&mut self, line: u64, r: &Record) -> Result<(), LogError> {
         self.report.records = self.report.records.saturating_add(1);
+        self.cursor = self.cursor.max(r.at);
         if let Some(d) = &r.deviation {
             match Rule::named(&d.rule) {
                 Some(rule) => {
                     self.deviations.insert(line, (rule, false));
                 }
-                None => self.violate(line, Rule::Deviation, format!("{:?} names no rule", d.rule)),
+                None => self.violate(line, Rule::Deviation, || {
+                    format!("{:?} names no rule", d.rule)
+                }),
             }
         }
         self.order(line, r);
         self.ids.push(&r.step, line)?;
-        self.evict(r.at);
+        self.evict();
         self.edges(line, r);
         self.captures(line, r);
         self.stream(line, r);
@@ -852,11 +893,9 @@ impl<H: Host> Pass<'_, H> {
         self.operations(line, r);
         for (step, on) in self.host.required(r) {
             if !awaits(r, &step, on) {
-                self.violate(
-                    line,
-                    Rule::Required,
-                    format!("{step:?} not awaited as {on:?}"),
-                );
+                self.violate(line, Rule::Required, || {
+                    format!("{step:?} not awaited as {on:?}")
+                });
             }
         }
         self.offered(line, r);
@@ -869,11 +908,9 @@ impl<H: Host> Pass<'_, H> {
         if let Some(previous) = &self.previous
             && &key <= previous
         {
-            self.violate(
-                line,
-                Rule::Order,
-                format!("({}, {:?}) not above the line before", r.at, r.step),
-            );
+            self.violate(line, Rule::Order, || {
+                format!("({}, {:?}) not above the line before", r.at, r.step)
+            });
         }
         self.previous = Some(key);
     }
@@ -882,29 +919,22 @@ impl<H: Host> Pass<'_, H> {
         for d in &r.after {
             match d {
                 Dep::Step { step, .. } => {
-                    // The distance is checked here, not left to eviction: a line out
-                    // of order keeps an old step in the window.
-                    let w = self.header.window;
-                    let found = match (self.retained.get(step), self.window.get(step)) {
-                        (Some(at), _) => Some((*at, true)),
-                        (None, Some(at)) => Some((*at, false)),
-                        (None, None) => None,
-                    };
-                    let problem = match found {
-                        Some((at, _)) if at >= r.at => {
-                            Some(format!("{step:?} planned at {at}, not before {}", r.at))
-                        }
-                        Some((at, false)) if r.at.saturating_sub(at) > w => Some(format!(
-                            "{step:?} planned at {at}, more than W = {w} before {}",
-                            r.at
-                        )),
-                        Some(_) => None,
-                        None => Some(format!(
-                            "{step:?} is no step planned within the window, nor retained"
-                        )),
-                    };
-                    if let Some(detail) = problem {
-                        self.violate(line, Rule::Edge, detail);
+                    // Eviction behind the cursor is exact (decision 16): a step
+                    // in the window is within W of it.
+                    let at_l = r.at;
+                    let found = self
+                        .retained
+                        .get(step)
+                        .or_else(|| self.window.get(step))
+                        .copied();
+                    match found {
+                        Some(at) if at >= at_l => self.violate(line, Rule::Edge, || {
+                            format!("{step:?} planned at {at}, not before {at_l}")
+                        }),
+                        Some(_) => {}
+                        None => self.violate(line, Rule::Edge, || {
+                            format!("{step:?} is no step planned within W behind the cursor, nor retained")
+                        }),
                     }
                 }
                 Dep::Each {
@@ -923,11 +953,9 @@ impl<H: Host> Pass<'_, H> {
                     if let Some(c) = count
                         && *c != planned
                     {
-                        self.violate(
-                            line,
-                            Rule::Barrier,
-                            format!("{kind} {label}#{n}: {c} counted, {planned} planned before"),
-                        );
+                        self.violate(line, Rule::Barrier, || {
+                            format!("{kind} {label}#{n}: {c} counted, {planned} planned before")
+                        });
                     }
                 }
             }
@@ -949,21 +977,17 @@ impl<H: Host> Pass<'_, H> {
             .collect();
         for (subject, slot, from) in reads {
             if !awaits(r, &from, On::Expected) {
-                self.violate(
-                    line,
-                    Rule::Producer,
-                    format!("{slot} of {subject:?}: {from:?} not awaited as expected"),
-                );
+                self.violate(line, Rule::Producer, || {
+                    format!("{slot} of {subject:?}: {from:?} not awaited as expected")
+                });
             }
             match self.slots.get_mut(&(subject.clone(), slot.clone())) {
                 Some(s) if s.writer == from => {
                     s.readers.insert(r.step.clone());
                 }
-                _ => self.violate(
-                    line,
-                    Rule::Stale,
-                    format!("{slot} of {subject:?}: {from:?} is not its latest writer"),
-                ),
+                _ => self.violate(line, Rule::Stale, || {
+                    format!("{slot} of {subject:?}: {from:?} is not its latest writer")
+                }),
             }
         }
         let mut writes: BTreeSet<(Subject, String)> = r
@@ -998,8 +1022,18 @@ impl<H: Host> Pass<'_, H> {
                         key.0,
                         missing.join(", ")
                     );
-                    self.violate(line, Rule::Writers, detail);
+                    self.violate(line, Rule::Writers, || detail);
                 }
+            }
+            // Live while its writer may still be awaited: within W of the
+            // cursor, or retained.
+            if self.header.retained.contains(&r.step.label) {
+                self.live.insert(key.clone(), None);
+            } else if self.cursor.saturating_sub(r.at) <= self.header.window {
+                self.live_order.insert((r.at, key.clone()));
+                self.live.insert(key.clone(), Some(r.at));
+            } else {
+                self.live.remove(&key);
             }
             self.slots.insert(
                 key,
@@ -1009,7 +1043,7 @@ impl<H: Host> Pass<'_, H> {
                 },
             );
         }
-        self.report.peaks.captures = self.report.peaks.captures.max(self.slots.len() as u64);
+        self.report.peaks.captures = self.report.peaks.captures.max(self.live.len() as u64);
     }
 
     fn stream(&mut self, line: u64, r: &Record) {
@@ -1020,48 +1054,38 @@ impl<H: Host> Pass<'_, H> {
             return;
         };
         if !(1..=i32::MAX as u32).contains(&s.position) {
-            self.violate(
-                line,
-                Rule::Stream,
-                format!("{} at {}: out of [1, 2³¹ − 1]", s.name, s.position),
-            );
+            self.violate(line, Rule::Stream, || {
+                format!("{} at {}: out of [1, 2³¹ − 1]", s.name, s.position)
+            });
         }
         let gapless = self.header.profile.gapless.contains(&s.name);
         let key = (r.step.subject.clone(), s.name.clone());
         match self.streams.get(&key).cloned() {
             Some((position, step)) => {
                 if s.position <= position {
-                    self.violate(
-                        line,
-                        Rule::Stream,
-                        format!("{} at {}: not above {position}", s.name, s.position),
-                    );
+                    self.violate(line, Rule::Stream, || {
+                        format!("{} at {}: not above {position}", s.name, s.position)
+                    });
                 }
                 if !awaits(r, &step, On::Expected) {
-                    self.violate(
-                        line,
-                        Rule::Stream,
+                    self.violate(line, Rule::Stream, || {
                         format!(
                             "{}: the message before, {step:?}, not awaited as expected",
                             s.name
-                        ),
-                    );
+                        )
+                    });
                 }
                 if gapless && s.position != position.saturating_add(1) {
-                    self.violate(
-                        line,
-                        Rule::Gap,
-                        format!("{} at {} after {position}", s.name, s.position),
-                    );
+                    self.violate(line, Rule::Gap, || {
+                        format!("{} at {} after {position}", s.name, s.position)
+                    });
                 }
             }
             None => {
                 if gapless && s.position != 1 {
-                    self.violate(
-                        line,
-                        Rule::Gap,
-                        format!("{} begins at {}", s.name, s.position),
-                    );
+                    self.violate(line, Rule::Gap, || {
+                        format!("{} begins at {}", s.name, s.position)
+                    });
                 }
             }
         }
@@ -1104,7 +1128,7 @@ impl<H: Host> Pass<'_, H> {
             }
         }
         for detail in found {
-            self.violate(line, Rule::Span, detail);
+            self.violate(line, Rule::Span, || detail);
         }
     }
 
@@ -1135,7 +1159,7 @@ impl<H: Host> Pass<'_, H> {
             }
         }
         for detail in found {
-            self.violate(line, Rule::Profile, detail);
+            self.violate(line, Rule::Profile, || detail);
         }
     }
 
@@ -1177,22 +1201,33 @@ impl<H: Host> Pass<'_, H> {
             }
         }
         for detail in found {
-            self.violate(line, Rule::Operation, detail);
+            self.violate(line, Rule::Operation, || detail);
         }
     }
 
-    /// The steps planned more than `W` before `at` dropped: no later step may
-    /// depend on them. A step id kept again later stays.
-    fn evict(&mut self, at: u64) {
-        let w = self.header.window;
-        while let Some((planned, _)) = self.order.front() {
-            if at.saturating_sub(*planned) <= w {
+    /// The steps planned more than `W` behind the cursor dropped, and the
+    /// captures their writers made: no later step may depend on them, the
+    /// cursor never going back. A step id kept again later stays.
+    fn evict(&mut self) {
+        let (w, c) = (self.header.window, self.cursor);
+        while let Some((planned, _)) = self.order.first() {
+            if c.saturating_sub(*planned) <= w {
                 break;
             }
-            if let Some((planned, step)) = self.order.pop_front()
+            if let Some((planned, step)) = self.order.pop_first()
                 && self.window.get(&step) == Some(&planned)
             {
                 self.window.remove(&step);
+            }
+        }
+        while let Some((written, _)) = self.live_order.first() {
+            if c.saturating_sub(*written) <= w {
+                break;
+            }
+            if let Some((written, key)) = self.live_order.pop_first()
+                && self.live.get(&key) == Some(&Some(written))
+            {
+                self.live.remove(&key);
             }
         }
     }
@@ -1201,9 +1236,13 @@ impl<H: Host> Pass<'_, H> {
     fn keep(&mut self, r: &Record) {
         if self.header.retained.contains(&r.step.label) {
             self.retained.insert(r.step.clone(), r.at);
+        } else if self.cursor.saturating_sub(r.at) > self.header.window {
+            // Dead on arrival: no later edge may accept it, and an older
+            // occurrence must not answer for it.
+            self.window.remove(&r.step);
         } else {
             self.window.insert(r.step.clone(), r.at);
-            self.order.push_back((r.at, r.step.clone()));
+            self.order.insert((r.at, r.step.clone()));
         }
         let held = (self.window.len() as u64).saturating_add(self.retained.len() as u64);
         self.report.peaks.completions = self.report.peaks.completions.max(held);
@@ -1234,11 +1273,9 @@ impl<H: Host> Pass<'_, H> {
             },
         );
         for line in ids.duplicates()? {
-            self.violate(
-                line,
-                Rule::Duplicate,
-                "a step id an earlier line has".to_owned(),
-            );
+            self.violate(line, Rule::Duplicate, || {
+                "a step id an earlier line has".to_owned()
+            });
         }
         let unused: Vec<(u64, Rule)> = self
             .deviations
@@ -1247,13 +1284,11 @@ impl<H: Host> Pass<'_, H> {
             .map(|(line, (rule, _))| (*line, *rule))
             .collect();
         for (line, rule) in unused {
-            self.violate(
-                line,
-                Rule::Deviation,
-                format!("declared against {rule}, which the line keeps"),
-            );
+            self.violate(line, Rule::Deviation, || {
+                format!("declared against {rule}, which the line keeps")
+            });
         }
-        self.report.violations.sort();
+        self.report.violations = std::mem::take(&mut self.least).into_sorted_vec();
         Ok(self.report)
     }
 }
@@ -1294,10 +1329,13 @@ pub fn validate_on<R: BufRead>(
         report: Report::default(),
         previous: None,
         window: BTreeMap::new(),
-        order: VecDeque::new(),
+        order: BTreeSet::new(),
         retained: BTreeMap::new(),
         barriers: BTreeMap::new(),
         slots: BTreeMap::new(),
+        live: BTreeMap::new(),
+        live_order: BTreeSet::new(),
+        least: BinaryHeap::new(),
         streams: BTreeMap::new(),
         ids: Ids {
             budget: limits.ids_in_memory.max(1),
@@ -1307,7 +1345,7 @@ pub fn validate_on<R: BufRead>(
             fan_in,
         },
         deviations: BTreeMap::new(),
-        clamp: 0,
+        cursor: 0,
         refused: BTreeSet::new(),
         buckets: BTreeMap::new(),
         polls: BinaryHeap::new(),

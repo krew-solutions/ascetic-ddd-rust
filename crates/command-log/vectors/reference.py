@@ -272,7 +272,11 @@ def offered_load(header, steps, raw):
     return used
 
 
-def verdict(text):
+def verdict(text, clock="cursor"):
+    """The (line, rule) pairs a log breaks. W is measured behind the read cursor,
+    the running maximum of `at` up to the line (decision 16); `clock="line"` is the
+    rule before it, from the line's own `at`, kept to show the corpus tells them
+    apart."""
     lines = text.split("\n")[:-1]
     header = json.loads(lines[0])["header"]
     steps = [json.loads(line)["step"] for line in lines[1:-1]]
@@ -289,6 +293,8 @@ def verdict(text):
     raw = {}
     for i, r in enumerate(steps):
         line, at, earlier = i + 2, int(r["at"]), steps[:i]
+        cursor = max(int(e["at"]) for e in steps[: i + 1])
+        behind = cursor if clock == "cursor" else at
         v = raw.setdefault(line, set())
         if earlier and (at, key(r["step"])) <= (int(earlier[-1]["at"]), key(earlier[-1]["step"])):
             v.add("order")
@@ -298,7 +304,7 @@ def verdict(text):
             if "step" in d:
                 match = [e for e in earlier if e["step"] == d["step"]["step"]]
                 e = match[-1] if match else None
-                near = e is not None and (at - int(e["at"]) <= w or e["step"]["label"] in header["retained"])
+                near = e is not None and (behind - int(e["at"]) <= w or e["step"]["label"] in header["retained"])
                 if e is None or not int(e["at"]) < at or not near:
                     v.add("edge")
             else:
@@ -399,20 +405,55 @@ def verdict(text):
     return sorted(found)
 
 
+def peaks(text):
+    """What a run must hold, from the definitions: the most completions kept at
+    once (steps whose latest occurrence is within W behind the cursor, or
+    retained), the most live captures (slots whose latest writer is), and the
+    polls the observations imply, summed."""
+    lines = text.split("\n")[:-1]
+    header = json.loads(lines[0])["header"]
+    steps = [json.loads(line)["step"] for line in lines[1:-1]]
+    w, retained = int(header["window"]), header["retained"]
+    completions = captures = polls = 0
+    for i in range(len(steps)):
+        cursor = max(int(e["at"]) for e in steps[: i + 1])
+        latest, writer = {}, {}
+        for e in steps[: i + 1]:
+            latest[key(e["step"])] = e
+            for slot in writes(header, e):
+                writer[slot] = e
+        live = lambda e: e["step"]["label"] in retained or cursor - int(e["at"]) <= w
+        completions = max(completions, sum(1 for e in latest.values() if live(e)))
+        captures = max(captures, sum(1 for e in writer.values() if live(e)))
+    for r in steps:
+        o = r["action"].get("observe")
+        if o is not None:
+            every, timeout = int(o["every"]), int(o["timeout"])
+            polls += timeout // every + 1 if every > 0 and timeout // every < MAX_POLLS else 1
+    return [completions, captures, polls]
+
+
 def main():
-    count, rules = 0, {}
+    count, apart, rules = 0, 0, {}
     for entry in sys.stdin:
         entry = json.loads(entry)
         mine = verdict(entry["log"])
         theirs = sorted((line, rule) for line, rule in entry["verdict"])
         if mine != theirs:
             raise SystemExit(f"{entry['name']}: the reference finds {mine}, the validator {theirs}")
+        held = peaks(entry["log"])
+        if held != entry["peaks"]:
+            raise SystemExit(f"{entry['name']}: the reference's peaks are {held}, the validator's {entry['peaks']}")
+        if verdict(entry["log"], clock="line") != mine:
+            apart += 1
         count += 1
         for _, rule in mine:
             rules[rule] = rules.get(rule, 0) + 1
     if count == 0:
         raise SystemExit("no corpus on stdin")
-    print(f"{count} logs agree; violations by rule: {dict(sorted(rules.items()))}")
+    if apart == 0:
+        raise SystemExit("no log tells the cursor from the line's own time: the corpus does not execute decision 16's clock")
+    print(f"{count} logs agree, {apart} of them only on the cursor's clock; violations by rule: {dict(sorted(rules.items()))}")
 
 
 if __name__ == "__main__":
