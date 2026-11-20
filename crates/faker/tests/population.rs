@@ -80,10 +80,13 @@ fn scopes_are_independent_and_kinds_unique() {
     let devices = plan
         .population::<u64, _, _>("device", constant(30_000u64), draw(os()))
         .unwrap();
-    assert!(matches!(
-        plan.population::<u64, _, _>("device", constant(1u64), constant(())),
-        Err(DuplicateKind("device"))
-    ));
+    assert_eq!(devices.kind(), "device");
+    let duplicate = plan.population::<u64, _, _>("device", constant(1u64), constant(()));
+    assert!(matches!(duplicate, Err(DuplicateKind("device"))));
+    assert_eq!(
+        DuplicateKind("device").to_string(),
+        "the plan already has a population of kind \"device\""
+    );
 
     let contingency = |pairs: &dyn Fn(u64) -> (u64, u64)| {
         let mut table = [[0u64; 3]; 3];

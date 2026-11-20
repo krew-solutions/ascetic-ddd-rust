@@ -50,7 +50,12 @@ fn on_average_each_item_gets_its_share() {
     let total = 10;
     let mut sums = [0u64; 4];
     for u in stratified(M) {
-        for (i, c) in apportion(total, law.clone(), u).counts().enumerate() {
+        let split = apportion(total, law.clone(), u);
+        assert_eq!(
+            (split.total(), split.len(), split.is_empty()),
+            (total, 4, false)
+        );
+        for (i, c) in split.counts().enumerate() {
             sums[i] += c;
         }
     }

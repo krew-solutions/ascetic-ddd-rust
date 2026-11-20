@@ -49,13 +49,16 @@ fn a_continuous_quantile_inverts_its_distribution_function() {
     for (name, law) in continuous_laws() {
         for u in units(2_000) {
             let (p, q) = (u.value(), u.complement());
-            let f = law.cdf(&law.quantile(u));
+            let x = law.quantile(u);
+            let f = law.cdf(&x);
             let tolerance = 1e-12 * p.min(q) + 4.0 * f64::EPSILON;
             assert!(
                 (f - p).abs() <= tolerance,
                 "{name} at k = {}: cdf(quantile) = {f:e}, p = {p:e}",
                 u.raw()
             );
+            // No atoms: P(X < x) is P(X ≤ x).
+            assert_eq!(law.cdf_below(&x), f, "{name} at k = {}", u.raw());
         }
     }
 }
@@ -94,9 +97,13 @@ fn discrete_laws() -> Vec<(Box<dyn Law<Value = u64>>, f64)> {
 }
 
 /// L2, discrete: the quantile is the least value whose distribution function
-/// reaches `p` — on both sides, so neither `q + 1` nor `q − 1` passes.
+/// reaches `p` — on both sides, so neither `q + 1` nor `q − 1` passes. And
+/// `cdf_below` is `P(X ≤ x − 1)` itself, for values the law takes and values
+/// below them: a bound alone (`cdf_below < p`) is met by a constant 0.
 #[test]
 fn a_discrete_quantile_is_the_generalised_inverse() {
+    let at_most_below =
+        |law: &dyn Law<Value = u64>, x: u64| x.checked_sub(1).map_or(0.0, |b| law.cdf(&b));
     for (law, tolerance) in discrete_laws() {
         for u in units(2_000) {
             let p = u.value();
@@ -107,14 +114,90 @@ fn a_discrete_quantile_is_the_generalised_inverse() {
                 u.raw(),
                 law.cdf(&x)
             );
+            let below = at_most_below(law.as_ref(), x);
             assert!(
-                law.cdf_below(&x) < p + tolerance,
-                "{law} at k = {}: cdf({x} - 1) = {} >= p = {p}",
+                below < p + tolerance,
+                "{law} at k = {}: cdf({x} - 1) = {below} >= p = {p}",
                 u.raw(),
-                law.cdf_below(&x)
+            );
+            for y in [x, x.saturating_add(1)] {
+                assert_eq!(
+                    law.cdf_below(&y),
+                    at_most_below(law.as_ref(), y),
+                    "{law} at {y}"
+                );
+            }
+        }
+        for y in [0, 1, 2, 3] {
+            assert_eq!(
+                law.cdf_below(&y),
+                at_most_below(law.as_ref(), y),
+                "{law} at {y}"
+            );
+        }
+        assert_eq!(law.cdf_below(&0), 0.0, "{law}");
+    }
+}
+
+/// L2 for index laws: the index is the least `i` whose distribution function
+/// reaches the unit, to the unit's half-width — an index is `⌊k·n/2⁵²⌋`, the
+/// cell of `k`, and `p` is the cell's middle.
+#[test]
+fn an_index_is_the_generalised_inverse_of_its_distribution_function() {
+    let laws: Vec<(&str, Box<dyn IndexLaw>)> = vec![
+        ("uniform", Box::new(UniformIndex)),
+        ("skew 2", Box::new(Skew::new(2.0).unwrap())),
+        (
+            "partitioned",
+            Box::new(Partitioned::new(&[0.7, 0.2, 0.0, 0.1]).unwrap()),
+        ),
+    ];
+    let tolerance = 1.0 / UNITS_F + 1e-12;
+    for (name, law) in &laws {
+        for n in [1, 3, 7, 100, 1 << 40] {
+            for u in units(500) {
+                let p = u.value();
+                let i = law.index(u, n);
+                assert!(i < n, "{name}, n = {n}: {i}");
+                assert!(
+                    law.cdf(i, n) >= p - tolerance,
+                    "{name}, n = {n}, k = {}: cdf({i})",
+                    u.raw()
+                );
+                if let Some(below) = i.checked_sub(1) {
+                    assert!(
+                        law.cdf(below, n) < p + tolerance,
+                        "{name}, n = {n}, k = {}: cdf({below})",
+                        u.raw()
+                    );
+                }
+            }
+            assert_eq!(law.cdf(n, n), 1.0, "{name}, n = {n}");
+            assert!((law.cdf(n - 1, n) - 1.0).abs() < 1e-12, "{name}, n = {n}");
+        }
+    }
+}
+
+/// L2, truncated: a draw never leaves its interval, though the base law's
+/// quantile, rounded, can pass `high` by a bit where the density is high (found
+/// by search: these four intervals, at units within 64 of the top).
+#[test]
+fn a_truncated_draw_stays_inside() {
+    fn inside<L: Law<Value = f64> + Clone + fmt::Display>(law: L, high: f64) {
+        let low = high / 2.0;
+        let truncated = Truncated::new(law.clone(), low, high).unwrap();
+        for raw in (Unit::MAX_RAW - (1 << 20)..=Unit::MAX_RAW).chain(0..1 << 20) {
+            let x = truncated.quantile(Unit::from_raw(raw).unwrap());
+            assert!(
+                (low..=high).contains(&x),
+                "{law} on [{low}, {high}] at {raw}: {x}"
             );
         }
     }
+    inside(Pareto::new(1.0, 1.16).unwrap(), 3.1147510676116132);
+    inside(LogNormal::new(0.0, 1.0).unwrap(), 2.743137230401915);
+    inside(LogNormal::new(0.0, 1.0).unwrap(), 2.821079367858099);
+    inside(Weibull::new(2.0, 0.5).unwrap(), 2.189417317315176);
 }
 
 /// L3: over a stratified grid of N, a correct quantile's empirical law is
@@ -355,6 +438,7 @@ fn laws_display_canonically() {
 #[test]
 fn a_categorical_draws_exactly_by_its_thresholds() {
     let law = Categorical::from_weights(&[1.0, 0.0, 3.0]).unwrap();
+    assert!(!law.is_empty());
     let t = UNITS / 4;
     let at = |k: u64| law.quantile(Unit::from_raw(k).unwrap());
     assert_eq!(at(0), 0);
@@ -471,6 +555,9 @@ fn uniform_integers_reach_both_ends() {
 
 #[test]
 fn bad_parameters_are_refused() {
+    let refused = Poisson::new(-1.0).unwrap_err();
+    assert_eq!(refused.law, "poisson");
+    assert_eq!(refused.to_string(), format!("poisson: {}", refused.reason));
     assert!(Uniform::new(1.0, 1.0).is_err());
     assert!(Uniform::new(f64::NAN, 1.0).is_err());
     assert!(Exponential::new(0.0).is_err());

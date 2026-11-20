@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-20); slices S1 to S4 built, S4's mutation run and M6 measured after it (§ Measured). Stage 1 of three toward the host's fitness functions:
+Proposed (2026-11-20); slices S1 to S4 built; M6 and the mutation run measured (§ Measured). Stage 1 of three toward the host's fitness functions:
 1. **This decision:** the faker — a port of ascetic-ddd-python's `faker/domain/fp` and what it needs.
 2. **A later ADR:** the scenario file, its writer and its validator.
 3. **A later ADR:** the scheduler that runs a scenario file against a stand.
@@ -117,7 +117,7 @@ seed → kind → scope → index → label
 - Internal derivations ("present", "count", the extra uniforms of a sampler) go under a tag of their own, so a host
   label with the same text derives a different key.
 
-**The key is affine.** `Key` is `Clone`, not `Copy`, and the draws consume it: `unit(self)`, `bits(self)`,
+**The key is affine.** `Key` is neither `Copy` nor `Clone`, and the draws consume it: `unit(self)`, `bits(self)`,
 `uuid(self, &Namespace)`. Drawing from a key and then passing it on is a use-after-move. A sampler that needs
 several uniforms takes them as `at(i)` under the internal tag; there is no stream object.
 
@@ -299,15 +299,14 @@ The labelled tuple zip is not offered: with a positional `map` after it, two sam
 ### 6. Populations hold identities, not values
 
 ```rust
-pub struct Kind(&'static str);
-pub struct Ref<K> { pub kind: Kind, pub scope: K, pub index: u64 }
+pub struct Ref<K> { pub kind: &'static str, pub scope: K, pub index: u64 }
 ```
 
-A population owns three things: its `Kind`, its scope encoding and the `Gen` that creates its members. The creating
+A population owns three things: its kind, its scope encoding and the `Gen` that creates its members. The creating
 factory is bound to the population, never to a reference's call site, so a parent is the same whoever reaches it.
 
 A member's key is `root.child(kind).part(&scope).at(index)`. The scope is in the path, so member `i` of two Tenants
-is not one value. A Plan refuses two populations of one `Kind`. **Time never enters the path:** a member's identity
+is not one value. A Plan refuses two populations of one kind. **Time never enters the path:** a member's identity
 and attributes do not change when an arrival rate does, so an experiment on arrivals keeps common random numbers.
 
 **`Plan::population(kind, size, members)`** makes a `Population<K, S, G>`: `size` is a `Gen` of a scope's member
@@ -366,13 +365,14 @@ move: infeasible at 3M Devices moved four times.
 
 ### 7. What the generator never holds
 
-The generator never sees a response. A value known only at run time is stage 2's: a typed hole, the producer table,
-the captures with their use counts. Stage 1 guarantees what stage 2 needs:
+The generator never sees a response. A value known only at run time is stage 2's: a typed hole, the captures by
+subject. Stage 1 guarantees what stage 2 needs:
 - a stable identity per member, its `Ref`;
-- `Key::uuid(&Namespace)`, the rendering of an id — **called at replay, not at generation**: the Command Log carries
-  the `Ref` (or its key) in an id slot, and the executor renders it under the run's namespace for about 85 ns. One
-  log then serves every run of an A/B pair, and a regeneration is owed only to a change of the SUT's interface;
 - no state derived from anything outside the Plan.
+
+*Amended by ADR-0046 § 4:* ids rendered at replay are a function of the run's namespace, the subject and a role,
+computed by the command log's crate from the `Ref` the log carries — not `Key::uuid` of a key the log cannot carry
+(`Key` has no public byte form, by design). `Key::uuid` stays for ids a generation renders itself.
 
 ### 8. Versions
 
@@ -387,8 +387,10 @@ There are two versions, never one.
 
   Changing a value changes the table, so it changes the fingerprint: the bump and the change are one edit, and no
   discipline is asked for. A failing table names its first differing row per layer.
-- **The host's scenario fingerprint** is computed by `testing::fingerprint` over the host's own generation. The
-  header (stage 2) carries both, and a reader refuses a mismatch.
+- **The host's scenario** is identified by its log's digest, not by a fingerprint of its own (*amended by ADR-0046
+  § 8*): a fingerprint over the Plan misses a change in emission code, and one over the output is the digest. A log is
+  regenerated before a run, or reused only when the generator's build inputs are unchanged; `ALGORITHM` in a log's
+  header is provenance, and a reader does not refuse on it.
 
 `testing::check_golden()` lets the host run the library's tables in its own build, in release. That build resolves
 `libm` through the host's lock, which the library's CI never sees.
@@ -467,7 +469,7 @@ the scheduled start; the observer counts service time.
   - no shared mutable state that two tasks could interleave.
 
   It covers the offered load only. Measured latencies need tolerance bands from A/A runs on one machine.
-- A renamed field label changes that field's values; a renamed `Kind` changes its population's. Both change the
+- A renamed field label changes that field's values; a renamed kind changes its population's. Both change the
   host's scenario fingerprint, which is the point.
 - Time grows linearly with the members and divides by the threads; this stage's memory grows only with the parents
   of each `Ranges`. The derivations cost about 17 core-minutes for 10⁹ members on the host's laptop (M1, at about
@@ -490,7 +492,7 @@ the scheduled start; the observer counts service time.
    that a reader refuses.
 4. **Identity lost or duplicated.**
    - A population without its scope in the path makes three Tenants copies of one.
-   - Two populations of one `Kind` correlate.
+   - Two populations of one kind correlate.
    - A parent keyed by its first consumer differs by who reached it first.
 
    Decided by decision 6, and checked by Pop1 and Pop2.
@@ -713,10 +715,68 @@ independent ones overlap, so these figures are upper bounds.
 | a law changed by one ulp | R2 |
 | the golden check accepting a shorter table | R2 |
 
-To be filled per slice:
-- **M6, scale:** 10⁹ members of the acceptance test's Devices, values computed and discarded, on 1 thread and on
-  every thread of the machine: time, and peak RSS independent of the member count (compared against 10⁷). Hand-run,
-  not on CI. It measures this stage's primitives only; the writer's bytes, window and disk are stage 2's (M7 there).
+**MUT, the mutation run** (2026-11-20, this laptop; cargo-mutants 27.1.0, `cargo mutants -p ascetic-ddd-faker
+--all-features`, 3 h): 1,262 mutants — 1,025 caught, 91 unviable, 20 timed out, 126 missed. A timeout is a loop that
+no longer ends (a cycle-walk over the wrong mask, a binary search that stops halving, a walk on a negative mass): the
+run fails, so the mutant is caught. The 126 survivors: 69 killed by tests that were missing, 10 gone with code that
+was redundant, 47 equivalent. A second run over the survivors' descriptions (164 mutants, 20 min) and two mutations
+applied by hand confirm the split.
+
+- **A defect.** `stirling_error`'s series stopped at `z⁻⁷`: 8·10⁻¹³ off at `z = 10`, where its comment claimed
+  10⁻¹⁷. The survivors in `ln_poisson_mass` and `ln_binomial_mass` — their `x = 0`, `k = 0` and `k = n` branches,
+  the difference form below 10 — had no test; the reference values written for them (mpmath at 50 digits) found
+  it. The series now runs to `z⁻¹³`: what it leaves out is below 3·10⁻¹⁷ at `z = 10`, a tenth of the last bit of a
+  log mass, and a further term would change nothing a test can see. The reference test holds the masses to two
+  units in the last place wherever every argument is in the series (measured: within one), so flipping the last
+  term's sign turns it red. A draw differs from S4's only where a unit lies within about 10⁻¹² of a Poisson's or
+  binomial's step that a walk evaluated with the series at `10 ≤ z < 15`; the golden tables hold none, so
+  `ALGORITHM` stands.
+- **A clamp no test reached.** A truncated law clamps its draw to `[low, high]`, "but for the last bit of a rounded
+  `F`". The clamp's upper branch survived as `x == high`: no test drew past `high`. A search over 6 laws × 6,000
+  intervals found four where the base law's rounded quantile passes `high` by one ulp, at a unit within 64 of the
+  top (Pareto(1, 1.16) on `[q/2, q]` at `q = 3.1147510676116132`, two log-normals, a Weibull); L2 now draws the top
+  and bottom 2²⁰ units of each.
+- **Killed by tests that were missing** (the rest of the 69): `cdf_below` is `P(X ≤ x − 1)` for a discrete law and
+  `cdf` for a continuous one, at the values a law takes and below them — the old check, `cdf_below < p`, was a bound
+  a constant 0 met; an index law's index is the generalised inverse of its `cdf`, at five sizes; every fixed width a
+  `KeyPart` writes, and a UUID's bytes, against the Python vectors; the coin present exactly below
+  `⌈present · 2⁵²⌉`; a refusal naming its generator; a weighted count's weights relative (doubled exactly, the same
+  counts); the largest skewed mean refused; the KS distance's definition; the `Display` texts; `len`, `total`,
+  `is_empty` and `kind`. `check_golden` returns the rows it checked, so a host can tell a check that ran from one
+  that did nothing.
+- **Gone with redundant code** (10): the binomial's degenerate branch — at `p = 0`, `p = 1` and no trials the walk
+  stops at the mode, which holds all the mass, and `beta_i` returns its ends exactly; `UniformInt::cdf_below`'s
+  guard — `cdf` is 0 below the support already; `Partitioned::cdf`'s branch before a part — the saturating
+  difference is 0 there.
+- **Equivalent** (47), by class:
+  - `|` for `^` on disjoint bits: LEB128's continuation bit, the Feistel halves joined (3);
+  - a comparison made inclusive where equality needs a unit's midpoint `(k + ½)/2⁵²` to be ½ or ¼, which it never
+    is (`p > q`, `p > ¼` in the inverse normal), a walk's running sum to equal its stop or re-anchoring threshold
+    exactly, or a draw to equal a truncation's bound, which the clamp returns either way (10);
+  - which side of its switch an incomplete gamma or beta runs its series or continued fraction (`x < a + 1`,
+    `x < (a + 1)/(a + b + 2)`, their operands mutated): both converge to the same value, in more terms or fewer
+    (8);
+  - the convergence tests and Lentz's guards against a vanishing denominator (`|d| < TINY` as `==` or `<=`, `TINY`'s
+    value): a converged step is exactly 1, and no argument this crate passes makes a denominator vanish (20);
+  - Halley's correction degraded towards Newton's: three steps from a start within 4.5·10⁻⁴ reach the last bit
+    either way (2);
+  - the binomial's mode moved by less than one (`(n − 1)p`, `n·p`): a walk from any start is the generalised
+    inverse, a step longer (2);
+  - `Apportionment::is_empty` and `Categorical::is_empty` as `false`: neither is ever empty, a categorical without
+    items being refused; the methods are the ones `len` requires (2).
+
+**M6, scale** (2026-11-20, this laptop: Intel Core i3-4005U, 2 cores, 4 threads; release; `tests/scale.rs` under
+`/usr/bin/time -v`): Devices of ten Tenants — an OS, an OEM present nine times in ten, up to three facets, and a
+branch picked by a skew among 1,000 — computed and discarded on 4 threads.
+
+| Members | Wall | CPU | CPU a member | Peak RSS |
+|---|---|---|---|---|
+| 10⁷ | 4.5 s | 16.6 s | 1.66 µs | 48.2 MB |
+| 10⁹ | 6 min 59 s | 27 min 36 s | 1.66 µs | 48.3 MB |
+
+Time is linear in the members and divides by the threads (395 % of 4); memory does not grow with them. The 12-core
+box was not measured. This measures this stage's primitives only; the writer's bytes, window and disk are stage
+2's.
 
 ## For the consumer
 
@@ -728,7 +788,8 @@ The host pins the library by git revision. At the pin that carries slice S4:
 2. **Bring measured laws.** Histograms of the legacy fleet (devices per group, OS and OEM mix, policies per
    Tenant), checked into the host, become `Empirical` laws. A host gate fails a Plan whose law names no measured
    source (Rule of Three, item 5). The data is the owner's to obtain.
-3. **Call `testing::check_golden()` in a host test run in release.** The host's lock resolves `libm`.
+3. **Call `testing::check_golden()` in a host test run in release,** and assert the rows it returns are the
+   table's. The host's lock resolves `libm`.
 4. Nothing of the host's sessions changes. The scenario file and its writer are stage 2.
 
 ## Owed
@@ -791,3 +852,13 @@ ADR-0004 (the scope receives its session by value), ADR-0011 and ADR-0012 (the s
     by law, the byte-bounded writer, unit-aligned files and their Merkle fingerprint, identity-derived step ids,
     refusals collected per unit.
   - **For the host:** the device-group contract (§ Owed).
+- 2026-11-20: Amended by ADR-0046 (the Command Log): decision 7's rendering of ids moves to the log's crate, from the
+  subject the log carries; decision 8's scenario fingerprint and its refusing reader give way to the log's digest and
+  regeneration. The text of decisions 2 and 6 corrected to the code: `Key` is neither `Copy` nor `Clone`; a `Ref`'s
+  kind is a `&'static str`.
+- 2026-11-20: The mutation run (executor MUT; § Measured). Found and fixed: `stirling_error` 8·10⁻¹³ off at its
+  series' boundary, now below the last bit; a truncation's clamp no test reached, now L2's. Removed as redundant:
+  the binomial's degenerate branch, a guard in `UniformInt::cdf_below`, a branch in `Partitioned::cdf`.
+  `testing::check_golden` returns the number of rows it checked (`Result<usize, _>`), before any host pins the
+  crate. Draws are S4's but for units within about 10⁻¹² of a step near the series' boundary; `ALGORITHM`
+  unchanged.

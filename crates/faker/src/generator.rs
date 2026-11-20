@@ -444,3 +444,25 @@ impl Gen for WeightedCount {
         Ok(law.quantile(key.internal("count").unit()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::key::Seed;
+    use crate::law::UNITS_F;
+
+    /// The coin is present exactly when its `k` is below `⌈present · 2⁵²⌉`: at
+    /// `present = k / 2⁵²` the key whose coin is `k` is absent, at the next
+    /// unit it is present.
+    #[test]
+    fn the_coin_s_threshold_is_exact() {
+        let key = || Key::root(Seed(5)).child("coin");
+        let k = key().internal("present").unit().raw();
+        let at = |raw: u64| {
+            let coin = constant(1u8).optional(raw as f64 / UNITS_F).unwrap();
+            coin.generate(key()).unwrap()
+        };
+        assert_eq!(at(k), None);
+        assert_eq!(at(k + 1), Some(1));
+    }
+}

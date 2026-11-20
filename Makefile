@@ -72,9 +72,9 @@ done
 done
 endef
 
-.PHONY: all stand check clippy doc test test-pg host-features test-vault test-kafka proofs proofs-groups traces fmt help
+.PHONY: all stand check clippy doc test test-pg host-features vectors test-vault test-kafka proofs proofs-groups traces fmt help
 
-all: check clippy doc test test-pg host-features ## everything CI runs on a push: a PostgreSQL beside it
+all: check clippy doc test test-pg host-features vectors ## everything CI runs on a push: a PostgreSQL beside it
 
 stand: all test-vault test-kafka ## every tier a full stand serves: PostgreSQL, Vault and Kafka
 
@@ -100,11 +100,15 @@ test-pg: ## the tests ignored for want of PostgreSQL, at ASCETIC_DDD_TEST_PG_URL
 # of its own, since this one tests with `--all-features`.
 HOST_FEATURES := --manifest-path verify/inbox-features/Cargo.toml
 
-host-features: ## the stream id's golden table and properties under serde_json's arbitrary_precision and preserve_order, then raw_value too (verify/inbox-features)
+host-features: ## the stream id's golden table and properties, and the command log's golden log, under serde_json's arbitrary_precision and preserve_order, then raw_value too (verify/inbox-features)
 	$(CARGO) fmt $(HOST_FEATURES) -- --check
 	$(CARGO) clippy $(HOST_FEATURES) --all-targets --all-features -- -D warnings
 	$(CARGO) test $(HOST_FEATURES)
 	$(CARGO) test $(HOST_FEATURES) --features raw_value
+
+vectors: ## byte forms checked outside the crates, python3's standard library only: faker's SipHash against the reference implementation's published vector, the command log's golden log against its normative schema and its trailer
+	python3 -I crates/faker/vectors/key_vectors.py > /dev/null
+	python3 -I crates/command-log/vectors/format.py crates/command-log/golden/c1.jsonl
 
 test-vault: ## the tests ignored for want of a Vault dev server, at ASCETIC_DDD_TEST_VAULT_ADDR
 	$(call run_ignored,$(NEEDS_VAULT))

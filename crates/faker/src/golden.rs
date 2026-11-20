@@ -266,7 +266,7 @@ impl std::fmt::Display for GoldenMismatch {
 impl std::error::Error for GoldenMismatch {}
 
 /// Compares the computed rows with the checked-in ones, layer by layer.
-pub(crate) fn check() -> Result<(), GoldenMismatch> {
+pub(crate) fn check() -> Result<usize, GoldenMismatch> {
     let computed = rows().map_err(|refusal| GoldenMismatch {
         layer: "refusal".to_owned(),
         expected: "rows".to_owned(),
@@ -276,7 +276,7 @@ pub(crate) fn check() -> Result<(), GoldenMismatch> {
 }
 
 /// The first row where `tables` and `computed` differ, or their counts.
-fn compare(tables: &str, computed: &[String]) -> Result<(), GoldenMismatch> {
+fn compare(tables: &str, computed: &[String]) -> Result<usize, GoldenMismatch> {
     let expected: Vec<&str> = tables.lines().collect();
     for (e, c) in expected.iter().zip(computed) {
         if *e != c {
@@ -294,7 +294,7 @@ fn compare(tables: &str, computed: &[String]) -> Result<(), GoldenMismatch> {
             computed: format!("{} rows", computed.len()),
         });
     }
-    Ok(())
+    Ok(computed.len())
 }
 
 #[cfg(test)]
@@ -315,7 +315,7 @@ mod tests {
     #[test]
     fn a_mismatch_names_what_differs() {
         let computed: Vec<String> = ["law a: 1", "plan: x"].map(String::from).to_vec();
-        assert_eq!(compare("law a: 1\nplan: x\n", &computed), Ok(()));
+        assert_eq!(compare("law a: 1\nplan: x\n", &computed), Ok(2));
         assert_eq!(compare("law a: 1\n", &computed).unwrap_err().layer, "count");
         assert_eq!(
             compare("law a: 1\nplan: x\nmore\n", &computed)

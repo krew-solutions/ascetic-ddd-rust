@@ -3,8 +3,9 @@
 
 #[test]
 fn the_golden_tables_hold_here() {
-    if let Err(mismatch) = ascetic_ddd_faker::testing::check_golden() {
-        panic!("{mismatch}");
+    match ascetic_ddd_faker::testing::check_golden() {
+        Ok(rows) => assert_eq!(rows, include_str!("../golden/tables.txt").lines().count()),
+        Err(mismatch) => panic!("{mismatch}"),
     }
     assert_eq!(ascetic_ddd_faker::ALGORITHM.len(), 32);
 }

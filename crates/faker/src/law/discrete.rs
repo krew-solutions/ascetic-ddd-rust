@@ -61,10 +61,7 @@ impl Law for UniformInt {
     }
 
     fn cdf_below(&self, x: &u64) -> f64 {
-        match x.checked_sub(1) {
-            Some(below) if *x > self.low => self.cdf(&below),
-            _ => 0.0,
-        }
+        x.checked_sub(1).map_or(0.0, |below| self.cdf(&below))
     }
 }
 
@@ -482,22 +479,11 @@ impl Binomial {
         Ok(Binomial { trials, p })
     }
 
-    fn degenerate(&self) -> Option<u64> {
-        if self.trials == 0 || self.p == 0.0 {
-            Some(0)
-        } else if self.p == 1.0 {
-            Some(self.trials)
-        } else {
-            None
-        }
-    }
-
-    /// The quantile and what its walk cost.
+    /// The quantile and what its walk cost. No case is special: at `p = 0`,
+    /// `p = 1` or no trials the mode carries all the mass, and the walk stops
+    /// where it starts.
     pub(crate) fn walk_from(&self, u: Unit) -> (u64, Cost) {
-        match self.degenerate() {
-            Some(x) => (x, Cost::default()),
-            None => walk(self, u),
-        }
+        walk(self, u)
     }
 
     fn odds(&self) -> f64 {
@@ -558,16 +544,7 @@ impl Law for Binomial {
     }
 
     fn cdf(&self, x: &u64) -> f64 {
-        match self.degenerate() {
-            Some(d) => {
-                if *x >= d {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
-            None => self.at_most(*x),
-        }
+        self.at_most(*x)
     }
 
     fn cdf_below(&self, x: &u64) -> f64 {

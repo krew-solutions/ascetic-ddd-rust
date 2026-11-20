@@ -1,7 +1,9 @@
 //! T1 of ADR-0045: the statistical helpers against known values, and the
 //! key's units against the uniform law, with a negative control.
 
-use ascetic_ddd_faker::testing::{ChiSquareRefused, chi_square, ks_critical, stratified};
+use ascetic_ddd_faker::testing::{
+    ChiSquareRefused, chi_square, ks_critical, ks_distance, stratified,
+};
 use ascetic_ddd_faker::{Key, Seed, Unit};
 
 #[test]
@@ -34,6 +36,19 @@ fn chi_square_refuses_what_would_pass_anything() {
     );
     assert_eq!(chi_square(&[1, 2], &[1.0]), Err(ChiSquareRefused::Shape));
     assert_eq!(chi_square(&[1], &[1.0]), Err(ChiSquareRefused::Shape));
+    assert_eq!(
+        ChiSquareRefused::Expected.to_string(),
+        "an expected count is not positive and finite"
+    );
+}
+
+/// The KS distance is the largest gap between the points' empirical function,
+/// a step of 1/n at each, and the law's, on either side of each step.
+#[test]
+fn the_ks_distance_is_the_largest_gap_either_side_of_a_step() {
+    assert_eq!(ks_distance(&[0.25, 0.75]), 0.25);
+    assert_eq!(ks_distance(&[0.0, 0.0]), 1.0);
+    assert_eq!(ks_distance(&[1.0, 1.0]), 1.0);
 }
 
 #[test]

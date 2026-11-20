@@ -10,7 +10,10 @@ pub use crate::golden::GoldenMismatch;
 /// Runs the library's golden tables in the caller's build: a host test, run in
 /// release, sees what the host's lock resolves (`libm`, `siphasher`), which the
 /// library's own CI never does (ADR-0045 decision 8).
-pub fn check_golden() -> Result<(), GoldenMismatch> {
+///
+/// Returns the number of rows it checked, so that a host can tell a check that
+/// ran from one that did nothing.
+pub fn check_golden() -> Result<usize, GoldenMismatch> {
     crate::golden::check()
 }
 

@@ -59,13 +59,23 @@ fn ln_1p_minus(t: f64) -> f64 {
 }
 
 /// `ln Γ(z) − ((z − ½) ln z − z + ½ ln 2π)`: what Stirling's formula leaves out.
-/// Its series for `z ≥ 10`, accurate below 10⁻¹⁷; below, by difference, where the
-/// terms are small.
+///
+/// For `z ≥ 10`, Stirling's series `Σ B₂ₖ / (2k(2k − 1) z²ᵏ⁻¹)` to its seventh
+/// term, `z⁻¹³`. The series is asymptotic and alternating, so what it leaves out
+/// is less than its first omitted term, `3617/122400 · z⁻¹⁵`: 3·10⁻¹⁷ at
+/// `z = 10`, a tenth of the last bit of a log mass, so a further term would
+/// change nothing a test could see. (Four terms left 8·10⁻¹³ there, which the
+/// masses' reference values found.) Below 10, by difference: `ln Γ(z)` is below
+/// 13 there, so the difference is good to a few 10⁻¹⁵.
 fn stirling_error(z: f64) -> f64 {
     if z >= 10.0 {
         let r = 1.0 / z;
         let r2 = r * r;
-        r * (1.0 / 12.0 - r2 * (1.0 / 360.0 - r2 * (1.0 / 1260.0 - r2 / 1680.0)))
+        r * (1.0 / 12.0
+            - r2 * (1.0 / 360.0
+                - r2 * (1.0 / 1260.0
+                    - r2 * (1.0 / 1680.0
+                        - r2 * (1.0 / 1188.0 - r2 * (691.0 / 360360.0 - r2 * (1.0 / 156.0)))))))
     } else {
         ln_gamma(z) - ((z - 0.5) * ln(z) - z + 0.5 * ln(2.0 * std::f64::consts::PI))
     }
@@ -294,4 +304,68 @@ fn beta_fraction(a: f64, b: f64, x: f64) -> f64 {
         }
     }
     h
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Within two units in the last place where every argument of Stirling's
+    /// error is in its series and below 50 — so a term of the series above the
+    /// last bit is seen — and within 10⁻¹⁴ elsewhere: the difference form below
+    /// 10 is good to a few 10⁻¹⁵, and beyond 50 the error grows as `ε√x`.
+    fn close(got: f64, expected: f64, near: bool) -> bool {
+        if near {
+            got.signum() == expected.signum() && got.to_bits().abs_diff(expected.to_bits()) <= 2
+        } else {
+            (got - expected).abs() <= 1e-14 * expected.abs().max(1.0)
+        }
+    }
+
+    /// The masses in Loader's form against mpmath at 50 digits, the edges (x
+    /// or k at 0, k at n) and Stirling's series at its boundary (x = 10)
+    /// included.
+    #[test]
+    fn the_log_masses_match_the_reference() {
+        let poisson: &[(f64, f64, f64)] = &[
+            (0.0, 0.5, -0.5),
+            (0.0, 30.0, -30.0),
+            (1.0, 2.5, -1.583709268125845),
+            (3.0, 2.5, -1.5428872736055899),
+            (9.0, 9.5, -2.040201292623013),
+            (10.0, 10.0, -2.0785616431350586),
+            (12.0, 11.0, -2.2124712220814398),
+            (15.0, 15.0, -2.2785183673077407),
+            (20.0, 21.0, -2.445167706285025),
+            (40.0, 38.0, -2.8171933257019646),
+            (30.0, 30.0, -2.622314898965503),
+            (1000.0, 990.0, -4.423235359527738),
+            (100000.0, 100007.0, -6.675647087590387),
+        ];
+        for &(x, lambda, expected) in poisson {
+            let got = ln_poisson_mass(x, lambda);
+            assert!(
+                close(got, expected, (10.0..50.0).contains(&x)),
+                "poisson ({x}, {lambda}): {got} vs {expected}"
+            );
+        }
+        let binomial: &[(f64, f64, f64, f64)] = &[
+            (0.0, 100.0, 0.3, -35.66749439387324),
+            (100.0, 100.0, 0.3, -120.3972804325936),
+            (1.0, 10.0, 0.5, -4.628886712605407),
+            (10.0, 20.0, 0.5, -1.7361522965964518),
+            (30.0, 100.0, 0.3, -2.444334564532973),
+            (11.0, 25.0, 0.4, -1.9206805889716227),
+            (50.0, 120.0, 0.4, -2.6767527935989044),
+            (4990.0, 10000.0, 0.5, -4.850984552095466),
+            (10000.0, 1000000.0, 0.01, -5.519091885441095),
+        ];
+        for &(k, n, p, expected) in binomial {
+            let got = ln_binomial_mass(k, n, p);
+            assert!(
+                close(got, expected, k >= 10.0 && n - k >= 10.0 && n < 150.0),
+                "binomial ({k}, {n}, {p}): {got} vs {expected}"
+            );
+        }
+    }
 }

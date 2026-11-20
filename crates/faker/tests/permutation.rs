@@ -47,6 +47,8 @@ fn it_is_a_bijection_with_an_inverse() {
 /// The largest domain: a 64-bit population still permutes, both ways.
 #[test]
 fn it_reaches_the_largest_sizes() {
+    assert!(permutation(0, 2).is_empty());
+    assert!(!permutation(1, 2).is_empty());
     let p = permutation(u64::MAX, 2);
     for position in [0, 1, u64::MAX / 2, u64::MAX - 1] {
         let value = p.at(position).unwrap();

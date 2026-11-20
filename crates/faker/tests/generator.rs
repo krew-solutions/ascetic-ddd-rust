@@ -170,6 +170,10 @@ fn a_skewed_count_has_the_mixture_s_moments() {
     let (_, plain) = moments(&draw(Poisson::new(50.0).unwrap()));
     assert!((plain - 2050.0).abs() > 0.05 * 2050.0);
     assert!(skewed_count(50.0, 0.5).is_err());
+    assert_eq!(skewed_count(-1.0, 2.0).unwrap_err().law, "skewed_count");
+    // The largest owner's mean, (s + 1) · mean, is a Poisson's: 9·10⁸ is, 1.2·10⁹ not.
+    assert!(skewed_count(3e8, 2.0).is_ok());
+    assert!(skewed_count(4e8, 2.0).is_err());
     assert!(
         skewed_count(1e9, 2.0).is_err(),
         "an owner's mean past the Poisson's limit"
@@ -190,6 +194,22 @@ fn a_weighted_count_has_the_mixture_s_moments() {
     assert!((mean - 50.0).abs() < 0.5, "{mean}");
     assert!((var - 2908.0).abs() < 0.05 * 2908.0, "{var}");
     assert!(weighted_count(50.0, &[]).is_err());
+    assert_eq!(
+        weighted_count(-1.0, &[1.0]).unwrap_err().law,
+        "weighted_count"
+    );
+}
+
+/// The weights are relative: doubled (exactly, in binary), the same counts.
+#[test]
+fn a_weighted_count_s_weights_are_relative() {
+    let (a, b) = (
+        weighted_count(50.0, &[0.5, 0.25, 0.25]).unwrap(),
+        weighted_count(50.0, &[2.0, 1.0, 1.0]).unwrap(),
+    );
+    for (ka, kb) in keys("relative", 2_000).zip(keys("relative", 2_000)) {
+        assert_eq!(a.generate(ka).unwrap(), b.generate(kb).unwrap());
+    }
 }
 
 #[test]

@@ -4,6 +4,7 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::testing::encoding;
+use uuid::Uuid;
 
 fn words(key: &Key) -> (u64, u64) {
     (key.k0, key.k1)
@@ -47,6 +48,38 @@ fn derivations_match_the_independent_vectors() {
         words(&root.part(&(7u64, "ab"))),
         (0xdf29b9dcc5c03955, 0x97a6e02e6690dbff)
     );
+    // Every fixed width, and a UUID's bytes: a method that wrote nothing, or
+    // another width, would be another key.
+    let uuid = Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").unwrap();
+    let fixed = [
+        (
+            words(&root.part(&0x1234u16)),
+            (0x2cc04f22c1ac80d3, 0xe213081de95190da),
+        ),
+        (
+            words(&root.part(&0xdeadbeefu32)),
+            (0x14deca7f8e0686b1, 0x7198d8fa721cbdcc),
+        ),
+        (
+            words(&root.part(&((1u128 << 127) + 5))),
+            (0x9686cb1bf84bb3e2, 0x2715034a9af5d115),
+        ),
+        (
+            words(&root.part(&-2i64)),
+            (0xb8a07fc0f8bfd31c, 0x77c6fd813cac426e),
+        ),
+        (
+            words(&root.part(&true)),
+            (0x0cd7be65f621d616, 0x0af906c7ca0104ec),
+        ),
+        (
+            words(&root.part(&uuid)),
+            (0x4b70ff4b3189cbec, 0x60eca94fb3bf0de7),
+        ),
+    ];
+    for (i, (got, expected)) in fixed.into_iter().enumerate() {
+        assert_eq!(got, expected, "fixed width {i}");
+    }
 
     let device = root.child("device").part(&2u64).at(12345);
     let os = device.child("os");

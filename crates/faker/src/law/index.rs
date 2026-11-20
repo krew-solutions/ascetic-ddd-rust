@@ -148,13 +148,11 @@ impl IndexLaw for Partitioned {
                     .threshold(part.saturating_add(1))
                     .saturating_sub(self.parts.threshold(part)) as f64
                     / super::UNITS_F;
+                // A part is never empty (`bounds`); its share up to `i` is 0
+                // before it, 1 past it.
                 let (start, end) = self.bounds(part, n);
-                let covered = if i < start {
-                    0.0
-                } else {
-                    (i.saturating_add(1)).min(end).saturating_sub(start) as f64
-                        / end.saturating_sub(start) as f64
-                };
+                let covered = (i.saturating_add(1)).min(end).saturating_sub(start) as f64
+                    / end.saturating_sub(start) as f64;
                 weight * covered
             })
             .sum::<f64>()

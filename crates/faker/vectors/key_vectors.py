@@ -134,6 +134,17 @@ def main():
     # A scope of (u64 7, "ab"): 7 little-endian, then leb128(2) "ab".
     k = part(r, struct.pack("<Q", 7) + leb128(2) + b"ab")
     print(f"root(42).part((7u64, \"ab\"))      = {k[0]:#018x} {k[1]:#018x}")
+    # Every fixed width an Encoder writes, and a UUID's sixteen bytes as they are.
+    for name, encoding in [
+        ("u16 0x1234", struct.pack("<H", 0x1234)),
+        ("u32 0xdeadbeef", struct.pack("<I", 0xDEADBEEF)),
+        ("u128 2^127 + 5", (2**127 + 5).to_bytes(16, "little")),
+        ("i64 -2", struct.pack("<q", -2)),
+        ("bool true", bytes([1])),
+        ("uuid 00112233-...", uuid.UUID("00112233-4455-6677-8899-aabbccddeeff").bytes),
+    ]:
+        k = part(r, encoding)
+        print(f"root(42).part({name:>17})      = {k[0]:#018x} {k[1]:#018x}")
     path = at(part(child(r, "device"), struct.pack("<Q", 2)), 12345)
     os_key = child(path, "os")
     print(f"device(2, 12345).child('os')     = {os_key[0]:#018x} {os_key[1]:#018x}")
