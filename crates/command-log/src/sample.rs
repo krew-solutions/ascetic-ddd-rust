@@ -27,6 +27,17 @@ fn field(name: &str, value: Value) -> Field {
     }
 }
 
+fn limit(key: &str, bucket: &str, by: By, requests: u32, per_seconds: u32, burst: u32) -> Limit {
+    Limit {
+        key: key.to_owned(),
+        bucket: bucket.to_owned(),
+        by,
+        requests,
+        per_seconds,
+        burst,
+    }
+}
+
 /// The golden log's header.
 pub fn header() -> Header {
     Header {
@@ -39,6 +50,9 @@ pub fn header() -> Header {
             rendered: vec!["device".to_owned()],
             captured: vec!["group".to_owned(), "policy".to_owned()],
             gapless: vec!["lifecycle".to_owned()],
+            sources: 3,
+            jitter: 2_000,
+            reserve: 50,
         },
         window: 600_000_000,
         read_ahead: 60_000_000,
@@ -55,6 +69,65 @@ pub fn header() -> Header {
             decorated: vec!["Authorization".to_owned()],
             writes: vec!["etag".to_owned()],
             retry: Retry::Never,
+            // Every kind of limit and place.
+            limits: vec![
+                limit(
+                    "client-address",
+                    "createDeviceGroup client-address",
+                    By::Source,
+                    120,
+                    60,
+                    240,
+                ),
+                limit(
+                    "operation",
+                    "createDeviceGroup operation",
+                    By::All,
+                    200,
+                    1,
+                    400,
+                ),
+                limit(
+                    "tenant",
+                    "tenant",
+                    By::At(Place::Credential("tenant".to_owned())),
+                    50,
+                    1,
+                    200,
+                ),
+                limit(
+                    "group",
+                    "group",
+                    By::At(Place::Path("group".to_owned())),
+                    10,
+                    1,
+                    10,
+                ),
+                limit(
+                    "dry",
+                    "dry",
+                    By::At(Place::Query("dry".to_owned())),
+                    10,
+                    1,
+                    10,
+                ),
+                limit(
+                    "request",
+                    "request",
+                    By::At(Place::Header("X-Request-Id".to_owned())),
+                    10,
+                    1,
+                    10,
+                ),
+                limit(
+                    "member",
+                    "member",
+                    By::At(Place::Body("/members/0".to_owned())),
+                    10,
+                    1,
+                    10,
+                ),
+            ],
         }],
     }
 }
@@ -95,7 +168,11 @@ pub fn records() -> Vec<Record> {
             }],
             action: Action::Rest(Rest {
                 op: "createDeviceGroup".to_owned(),
-                caller: Some(subject("principal", tenant, 0)),
+                caller: Some(Caller {
+                    principal: subject("principal", tenant, 0),
+                    names: vec![subject("tenant", &[], 0)],
+                }),
+                source: 2,
                 path: vec![],
                 query: vec![field("dry", Value::Literal("false".to_owned()))],
                 headers: vec![field(
@@ -226,6 +303,7 @@ pub fn records() -> Vec<Record> {
                 probe: Probe::Rest(Rest {
                     op: "getDeviceEffectiveBundle".to_owned(),
                     caller: None,
+                    source: 0,
                     path: vec![Value::Hole(Hole::Rendered {
                         of: Of::Subject(device.clone()),
                         role: "id".to_owned(),

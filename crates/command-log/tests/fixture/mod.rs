@@ -40,9 +40,10 @@ pub fn header() -> Header {
         decorated: vec![],
         writes: writes.iter().map(|s| (*s).to_owned()).collect(),
         retry: Retry::Never,
+        limits: vec![],
     };
     Header {
-        format: 1,
+        format: ascetic_ddd_command_log::FORMAT_VERSION,
         algorithm: "test".into(),
         scenario: "fixture".into(),
         revision: "0".into(),
@@ -51,6 +52,9 @@ pub fn header() -> Header {
             rendered: vec!["device".into()],
             captured: vec!["group".into()],
             gapless: vec!["lifecycle".into()],
+            sources: 1,
+            jitter: 0,
+            reserve: 0,
         },
         window: W,
         read_ahead: W,
@@ -98,6 +102,7 @@ pub fn rest(op: &str, path: Vec<Value>) -> Action {
     Action::Rest(Rest {
         op: op.into(),
         caller: None,
+        source: 0,
         path,
         query: vec![],
         headers: vec![],
@@ -111,6 +116,7 @@ pub fn read_etag(op: &str, g: u64, from: &StepId) -> Action {
     Action::Rest(Rest {
         op: op.into(),
         caller: None,
+        source: 0,
         path: vec![Value::Literal(g.to_string())],
         query: vec![],
         headers: vec![Field {
@@ -247,5 +253,78 @@ pub fn rules(report: &Report) -> Vec<Rule> {
     r.dedup();
     r.sort();
     r.dedup();
+    r
+}
+
+/// A header whose operations on a group (`/groups/{group}`) carry `limits`,
+/// with `sources`, `jitter` and `reserve` in the profile.
+pub fn limited(
+    limits: Vec<ascetic_ddd_command_log::record::Limit>,
+    sources: u32,
+    jitter: u64,
+    reserve: u32,
+) -> Header {
+    let mut h = header();
+    h.profile.sources = sources;
+    h.profile.jitter = jitter;
+    h.profile.reserve = reserve;
+    for op in h
+        .operations
+        .iter_mut()
+        .filter(|o| o.path.contains("{group}"))
+    {
+        op.limits = limits.clone();
+    }
+    h
+}
+
+pub fn limit(
+    bucket: &str,
+    by: ascetic_ddd_command_log::record::By,
+    requests: u32,
+    per_seconds: u32,
+    burst: u32,
+) -> ascetic_ddd_command_log::record::Limit {
+    ascetic_ddd_command_log::record::Limit {
+        key: bucket.into(),
+        bucket: bucket.into(),
+        by,
+        requests,
+        per_seconds,
+        burst,
+    }
+}
+
+/// A REST call of `op` on group `g` from `source`, its line's `n`th.
+pub fn call(op: &str, g: u64, n: u32, at: u64, source: u32) -> Record {
+    let mut r = step(id("device", g, op, n), at);
+    r.action = Action::Rest(Rest {
+        op: op.into(),
+        caller: None,
+        source,
+        path: if op == "list" {
+            vec![]
+        } else {
+            vec![Value::Literal(g.to_string())]
+        },
+        query: vec![],
+        headers: vec![],
+        body: None,
+    });
+    r
+}
+
+/// An observation polling `read` on group `g` every `every` to `timeout`.
+pub fn polling(g: u64, n: u32, at: u64, every: u64, timeout: u64) -> Record {
+    let mut r = step(id("device", g, "watched", n), at);
+    let Action::Rest(rest) = call("read", g, 0, at, 0).action else {
+        unreachable!()
+    };
+    r.action = Action::Observe(Observe {
+        probe: Probe::Rest(rest),
+        until: vec![],
+        every,
+        timeout,
+    });
     r
 }

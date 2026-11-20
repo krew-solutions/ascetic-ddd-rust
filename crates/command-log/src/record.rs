@@ -75,6 +75,16 @@ pub struct Profile {
     pub captured: Vec<Name>,
     /// Streams a producer keeps without gaps.
     pub gapless: Vec<Name>,
+    /// The distinct source addresses the generator sends from (an IPv6 source
+    /// a /64 of its own); at least 1 (decision 14).
+    pub sources: u32,
+    /// How much the client side — network, timer, send loop — can delay a
+    /// send, in microseconds.
+    #[serde(with = "crate::wire::u64s")]
+    pub jitter: u64,
+    /// Parts per thousand of every rate left unplanned: room for retries after
+    /// a stall, and for clock-rate offset.
+    pub reserve: u32,
 }
 
 /// An operation a step calls, from the host's contracts.
@@ -95,6 +105,67 @@ pub struct Operation {
     pub writes: Vec<Name>,
     /// Whether, and when, it may be sent again.
     pub retry: Retry,
+    /// Its rate limits, as the stand applies them (decision 14).
+    pub limits: Vec<Limit>,
+}
+
+/// A rate limit, as the stand applies it: a token bucket of `burst` refilled
+/// with `requests` every `per_seconds` (decision 14).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Limit {
+    /// The host's word for whose budget it counts: for reports only.
+    pub key: Name,
+    /// The counter: limits with one name share one counter per value, as the
+    /// host's counters live.
+    pub bucket: Name,
+    /// What it counts by.
+    pub by: By,
+    /// Requests a period.
+    pub requests: u32,
+    /// The period, in seconds.
+    pub per_seconds: u32,
+    /// The bucket's size.
+    pub burst: u32,
+}
+
+/// What a limit counts by.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum By {
+    /// Every call together.
+    All,
+    /// The source a call is sent from.
+    Source,
+    /// The value at a place of the call.
+    At(Place),
+}
+
+/// A place of a call where the server reads a limit's value.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Place {
+    /// The path parameter `{name}`.
+    Path(Name),
+    /// The query parameter of that name.
+    Query(Name),
+    /// The header of that name.
+    Header(Name),
+    /// The body's span for that field.
+    Body(String),
+    /// The caller's credential's name of that kind.
+    Credential(Name),
+}
+
+/// Who calls: the principal, and the subjects its credential names (its
+/// Tenant, its channel).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Caller {
+    /// The principal.
+    pub principal: Subject,
+    /// The subjects its credential names.
+    pub names: Vec<Subject>,
 }
 
 /// When an operation may be sent again (decision 12).
@@ -249,8 +320,10 @@ pub enum Action {
 pub struct Rest {
     /// The operation, from the header's table.
     pub op: Name,
-    /// The principal who calls, when not the stand's default.
-    pub caller: Option<Subject>,
+    /// Who calls, when not the stand's default.
+    pub caller: Option<Caller>,
+    /// The source it is sent from, below the profile's `sources`.
+    pub source: u32,
     /// The path's parameters, in order.
     pub path: Vec<Value>,
     /// Query parameters.

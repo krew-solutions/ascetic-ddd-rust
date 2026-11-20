@@ -428,7 +428,8 @@ fn peaks() {
     assert!(report.violations.is_empty(), "{:?}", report.violations);
     assert_eq!(report.records, 4);
     assert_eq!(report.peaks.captures, 1);
-    assert_eq!(report.peaks.polls, 9);
+    // Polls at 0, 10, …, 90: ⌊95 / 10⌋ + 1.
+    assert_eq!(report.peaks.polls, 10);
     // At the observation: w0 and it in the window, `created` retained. At the
     // last step w0 is out of the window, and `created` stays.
     assert_eq!(report.peaks.completions, 3);

@@ -18,13 +18,13 @@ use sha2::{Digest, Sha256};
 use crate::record::{Header, Line, Record, Trailer};
 
 /// The format a reader accepts, and a writer writes: exactly this one.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 /// The byte form's identity: the SHA-256 of the golden log
 /// (`golden/c1.jsonl`), which holds every record and hole variant. A change to
 /// how any line is written changes the golden log, and so this, in the same
 /// edit (ADR-0046 decision 6, F2).
-pub const FORMAT: &str = "8ffd12b73eeb944e71cbdd16e332918bfab536ce5198175242505c143f387e4b";
+pub const FORMAT: &str = "ea30b014f18e99586c2605a208cdef92d331b01e41431926b7dc351b1e7f5ce8";
 
 /// The canonical bytes of a line, `\n` included.
 pub fn encode(line: &Line) -> Result<Vec<u8>, LogError> {

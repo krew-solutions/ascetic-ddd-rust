@@ -6,7 +6,8 @@ use std::collections::BTreeMap;
 
 use super::*;
 use ascetic_ddd_command_log::record::{
-    Action, Codec, Dep, Form, Hole, Of, On, Record, Rendering, StepId, Subject, Value,
+    Action, Caller, Codec, Dep, Form, Header, Hole, Of, On, Record, Rendering, StepId, Subject,
+    Value,
 };
 use ascetic_ddd_command_log::validate::NoHost;
 use ascetic_ddd_faker::{Key, Seed};
@@ -31,7 +32,7 @@ fn base(k: &Key) -> Vec<Record> {
     for j in 0..n {
         let kj = k.at(j);
         at += [0, 1, 5, 300, 700][draw(&kj, "gap", 5) as usize];
-        let what = draw(&kj, "what", 7);
+        let what = draw(&kj, "what", 8);
         let (kind, index, label) = match what {
             0 => ("device", draw(&kj, "d", 3), "seen"),
             1 => ("group", draw(&kj, "g", 2), "update"),
@@ -39,6 +40,7 @@ fn base(k: &Key) -> Vec<Record> {
             3 => ("device", draw(&kj, "d", 3), "fact"),
             4 => ("group", draw(&kj, "g", 2), "created"),
             5 => ("device", draw(&kj, "d", 3), "managed"),
+            6 => ("group", draw(&kj, "g", 2), "watched"),
             _ => ("tenant", 1, "report"),
         };
         let s = subject(kind, index);
@@ -89,6 +91,10 @@ fn base(k: &Key) -> Vec<Record> {
                 streams.insert(index, (position, step_id.clone()));
             }
             "managed" => managed += 1,
+            "watched" => {
+                r = polling(index, step_id.n, at, 300, 1_500);
+                r.step = step_id.clone();
+            }
             "report" => r.after.push(Dep::Each {
                 kind: "device".into(),
                 scope: vec![7],
@@ -113,6 +119,15 @@ fn base(k: &Key) -> Vec<Record> {
                 r = after(r, &e.step.clone(), On::Sent);
             }
         }
+        // Every call from a source and a caller whose credential names a Tenant.
+        let (source, tenant) = (draw(&kj, "source", 2) as u32, draw(&kj, "tenant", 2));
+        if let Some(rest) = call_of(&mut r) {
+            rest.source = source;
+            rest.caller = Some(Caller {
+                principal: subject("principal", tenant),
+                names: vec![subject("tenant", tenant)],
+            });
+        }
         records.push(r);
     }
     // The barrier counts the managed of index 0 to 2 per occurrence 0: count them.
@@ -128,6 +143,42 @@ fn base(k: &Key) -> Vec<Record> {
         }
     }
     records
+}
+
+/// A step's REST call: its action's, or its observation's probe.
+fn call_of(r: &mut Record) -> Option<&mut ascetic_ddd_command_log::record::Rest> {
+    match &mut r.action {
+        Action::Rest(rest) => Some(rest),
+        Action::Observe(o) => match &mut o.probe {
+            ascetic_ddd_command_log::record::Probe::Rest(rest) => Some(rest),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The corpus's header: limits of every kind on the group operations, at rates
+/// whose intervals are comparable to the plan's gaps, with jitter whose
+/// `R · J / P` is no integer and a reserve.
+pub fn corpus_header() -> Header {
+    use ascetic_ddd_command_log::record::{By, Place};
+    limited(
+        vec![
+            limit("address", By::Source, 4_000, 1, 6),
+            limit("all", By::All, 6_000, 1, 10),
+            limit("group", By::At(Place::Path("group".into())), 3_000, 1, 6),
+            limit(
+                "tenant",
+                By::At(Place::Credential("tenant".into())),
+                2_000,
+                1,
+                6,
+            ),
+        ],
+        2,
+        250,
+        100,
+    )
 }
 
 /// One edit, if the log has what it edits.
@@ -252,9 +303,76 @@ fn mutant(records: &[Record], which: &str, k: &Key) -> Option<Vec<Record>> {
         }
         "deviation" => {
             let i = pick("i", &all)?;
-            let rule = ["gap", "edge", "order", "stale", "duplicate", "nothing"]
-                [draw(k, "rule", 6) as usize];
+            let rule = [
+                "gap",
+                "edge",
+                "order",
+                "stale",
+                "duplicate",
+                "rate",
+                "key",
+                "nothing",
+            ][draw(k, "rule", 8) as usize];
             m[i] = deviating(m[i].clone(), rule);
+        }
+        "squeeze" => {
+            let calls: Vec<usize> = all[1..]
+                .iter()
+                .copied()
+                .filter(|&i| call_of(&mut m[i].clone()).is_some())
+                .collect();
+            let i = pick("i", &calls)?;
+            m[i].at = m[i - 1].at;
+        }
+        "source-past" => {
+            let calls: Vec<usize> = all
+                .iter()
+                .copied()
+                .filter(|&i| call_of(&mut m[i].clone()).is_some())
+                .collect();
+            let i = pick("i", &calls)?;
+            if let Some(rest) = call_of(&mut m[i]) {
+                rest.source = 2;
+            }
+        }
+        "every-halved" => {
+            let watched: Vec<usize> = all
+                .iter()
+                .copied()
+                .filter(|&i| matches!(&m[i].action, Action::Observe(_)))
+                .collect();
+            let i = pick("i", &watched)?;
+            if let Action::Observe(o) = &mut m[i].action {
+                o.every /= 2;
+            }
+        }
+        "key-time" => {
+            let calls: Vec<usize> = all
+                .iter()
+                .copied()
+                .filter(|&i| call_of(&mut m[i].clone()).is_some_and(|r| !r.path.is_empty()))
+                .collect();
+            let i = pick("i", &calls)?;
+            if let Some(rest) = call_of(&mut m[i]) {
+                rest.path[0] = Value::Hole(Hole::Time {
+                    base: ascetic_ddd_command_log::record::TimeBase::Sent,
+                    offset: 0,
+                    rendering: ascetic_ddd_command_log::record::TimeRendering::Rfc3339Micros,
+                });
+            }
+        }
+        "names-dropped" => {
+            let calls: Vec<usize> = all
+                .iter()
+                .copied()
+                .filter(|&i| call_of(&mut m[i].clone()).is_some())
+                .collect();
+            let i = pick("i", &calls)?;
+            if let Some(rest) = call_of(&mut m[i])
+                && let Some(c) = &mut rest.caller
+            {
+                c.names.clear();
+            }
         }
         _ => return None,
     }
@@ -276,6 +394,11 @@ pub fn lines() -> Vec<String> {
         "span",
         "profile",
         "deviation",
+        "squeeze",
+        "source-past",
+        "every-halved",
+        "key-time",
+        "names-dropped",
     ];
     for i in 0..LOGS {
         let k = root.at(i);
@@ -287,7 +410,7 @@ pub fn lines() -> Vec<String> {
             }
         }
         for (name, records) in entries {
-            let report = run_with(header(), &records, &NoHost, 3);
+            let report = run_with(corpus_header(), &records, &NoHost, 3);
             let mut verdict: Vec<(u64, &str)> = report
                 .violations
                 .iter()
@@ -296,7 +419,7 @@ pub fn lines() -> Vec<String> {
             verdict.dedup();
             verdict.sort();
             verdict.dedup();
-            let log = String::from_utf8(bytes(header(), &records)).unwrap();
+            let log = String::from_utf8(bytes(corpus_header(), &records)).unwrap();
             let line = serde_json::json!({ "name": name, "log": log, "verdict": verdict });
             out.push(line.to_string());
         }

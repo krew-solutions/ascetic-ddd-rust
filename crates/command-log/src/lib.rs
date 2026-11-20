@@ -10,6 +10,7 @@
 
 pub mod engine;
 pub mod log;
+pub mod rate;
 pub mod record;
 pub mod render;
 pub mod sample;

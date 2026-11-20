@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-20); slices C1 to C4 built. Stage 2 of three toward the host's fitness functions (ADR-0045 § Status): the Command Log —
+Proposed (2026-11-20); slices C1 to C5 built. Stage 2 of three toward the host's fitness functions (ADR-0045 § Status): the Command Log —
 what a generation writes and a load run replays — its model, byte form, validator and generation engine. Stage 3,
 the scheduler that replays it, is a later ADR; § 12 states what it inherits.
 
@@ -256,7 +256,9 @@ and the reference):
 ### 10. The stand profile
 
 The header names the stand a log is for: which kinds' ids are rendered and which captured, which streams are
-gapless, the emulated producers' sealing configuration, the egress model, the replica counts limits are per. On the
+gapless, the emulated producers' sealing configuration, the egress model (§ 14), the client-side jitter and the
+rate reserve (§ 14). (Replica counts are not in it: every limit is a floor per gateway instance and per replica, and a
+VIP does not balance per request — § 14.) On the
 policy stand a Device's id is rendered, so groups can name Devices before they arrive (ADR-0045 decision 6); on a
 full stand it is captured at enrollment, and the cohort scenario needs groups filled after enrollment — blocked on
 the device-group contract (ADR-0045 § Owed). A host chooses rendered or captured in one function per kind, never at
@@ -300,7 +302,13 @@ The scheduler:
 - counts failures in percentiles as censored at their timeout, never drops them; carries a correlation id per step
   so the host's inbox times join for the per-hop breakdown QAS-SCALE-0001 requires;
 - runs only on a stand of its log's profile, after a quiescence gate, with a namespace the stand has not seen; A/B
-  pairs ordered ABBA or from a snapshot.
+  pairs ordered ABBA or from a snapshot;
+- offers load by § 14: shapes every send against the log's buckets, keyed by actual bytes, and reports the lateness
+  shaping causes as its own cause; voids a run in which a step a `Measure` spans was shaped, in which a decorator sent
+  a request to a limited operation that is not a planned step, or whose egress collapsed; never retries a poll nor
+  sends one while the previous is outstanding; treats an outcome listed in `expect` as final, never retried; sends
+  from one connection pool per source index; waits, in quiescence, at least the longest `burst · per_seconds /
+  requests` of the log's limits since its sources and operations were last used.
 
 ### 13. Crates
 
@@ -312,6 +320,52 @@ The scheduler:
   scenarios, the operations table generated from its contracts by an `openapi-dto` generator, end-to-end fixtures
   written in Rust against its typed DTOs, stand profiles, and, for stage 3, decorators (auth and step-up, DPoP,
   sealing, envelope stamping).
+
+### 14. Offered load (C5)
+
+A load run must fail on the system and never on the generator's own excess: a planned load above a declared rate
+limit is refused before the run, and the scheduler never sends what the limit refuses.
+
+- **Limits in the header.** `Operation.limits: Vec<Limit { key, bucket, by, requests, per_seconds, burst }>`, the
+  values the stand applies (a configured quota's, else the declared). `key` is the host's word, for reports only;
+  `by: By { All, Source, At(Place) }` with `Place { Path(name), Query(name), Header(name), Body(field), Credential(kind)
+  }` gives the semantics, so the library holds no host vocabulary. `bucket` names the counter: limits with one name
+  share one counter per value, as the host's counters live — one `provisioning-channel` counter serves sixteen SCIM
+  operations, so a bucket is not per operation. One bucket name with two shapes (`by` included), a zero parameter or a
+  `Path` that names no parameter of its template is a `header` violation, and a refused limit is not evaluated.
+- **Egress and callers in the records.** The profile gains `sources` (distinct source addresses; an IPv6 source a /64
+  of its own), `jitter` (how much the client side — network, timer, send loop — can delay a send; not the service tier,
+  whose queueing before its counter is the system's) and `reserve` (parts per thousand of every rate left unplanned:
+  room for retries after a stall, and for clock-rate offset). `Rest` gains `source` (an index below `sources`; the
+  scenario decides it — a store's Devices behind one NAT share one) and its `caller` becomes `Caller { principal,
+  names }`, the subjects its credential names (its Tenant, its channel).
+- **A key's value** is derived where the server reads it: `All` one value; `Source` the source index; `At(place)` the
+  `Value` there reduced to its subject (a rendered or captured value of a subject is that subject, of a step that
+  step, a literal its text); `Credential(kind)` the caller's one name of that kind. A `Time` hole, an absent place, a
+  body field with no span, no caller, zero or two names of the kind, or a source past `sources` is a `key` violation,
+  which no deviation exempts: an exempt arrival left out of its bucket would be an under-count.
+- **Arrivals.** A REST action arrives at `c` — the running maximum of `at` up to its line, `at` itself in an ordered log
+  — and an observation with a REST probe polls at `c + k · every`, `k = 0 ..= ⌊timeout / every⌋`: to the timeout, since
+  the slow run is the one that matters, so polls are bounded above, never matched. `every = 0` or more than 2²⁰ polls is
+  an `operation` violation, its first poll alone counted. Arrivals are ordered by (time, line, poll) and a violation is
+  reported on the arrival's line.
+- **The bucket** is the arrival curve of a token bucket full at t = 0, at rate `R · (1 − reserve)` per `P`, for
+  arrivals each delayed by up to `J`: any window of planned width at most `J` holds at most `B` arrivals, and a wider
+  one of width `w` at most `B + R′ · (w − J) / P` — exact for delays in `[0, J]`, and with `J = 0` the plain token bucket.
+  Integers throughout (`R′ = R · (1000 − reserve)`, `P′ = 1000 · per_seconds · 10⁶`). A refused arrival spends nothing, as
+  the host's GCRA does. A `rate` violation is an arrival the curve refuses.
+- **Deliberate refusals.** A `rate`-deviated arrival spends in every bucket it counts in, refused or not: the host's
+  counters do not all spend nothing on a refusal (the enrollment open spends the token's budget before its repeat
+  check), and a model that spends no less than the system admits no more. It is used only if a lower model — burst
+  `B + ⌈R · J / P⌉`, refusals spending nothing — refuses it too, so that a planned 429 the system would admit is reported
+  as a deviation that breaks nothing.
+- **What the validator does not prove.** Dependency latency moves sends: a reader released when its producer answers
+  is sent later than planned, and readers of unequally late producers bunch. The validator proves the planned schedule
+  under client-side jitter; the scheduler absorbs the rest by shaping (§ 12), and a run whose measures it shaped is void,
+  not failed. The interval model that would prove it — each arrival an interval from its dependencies' declared bounds —
+  is § Alternatives', with the measurement that would bring it in.
+- **One module for both**, `command_log::rate`: arrivals, key values, the curve. The validator and the scheduler call
+  it; `vectors/reference.py` decides `rate` and `key` from the definitions, window by window.
 
 ## Consequences
 
@@ -344,6 +398,19 @@ The scheduler:
    by C5's token buckets over planned times.
 
 ## Alternatives Considered
+
+- **For C5, arrivals as intervals** (the Distributed Systems role): each arrival `[lo, hi]` from its dependencies'
+  declared bounds, the curve checked against every placement. It would prove conformance under latency, but needs a
+  bound for every dependency in the header, and, counting an observation's polls as independent intervals, refuses
+  plans whose readers float by a 15 s timeout though their polls are rigidly spaced. Not chosen while shaping at the
+  scheduler absorbs latency; the measurement that would bring it in is the shaped share of real runs.
+- **For C5, key values stated per call** (the main position): a copy the host writes beside the bytes it sends can
+  drift from them; derived from the place the server reads, it cannot. **An address list in the profile**: two IPv6
+  addresses of one /64 are one bucket at the gateway, and the list binds the digest to a stand's addresses; a count
+  and an index per call are the list's special case without either. **Limits folded with replica counts**: a VIP does
+  not balance per request, so a plan folded at two replicas lands on one. **The burst reduced by `⌈R · J / P⌉` for every
+  window** (the blind solver's): it refuses `readEnrollmentNotice` (burst 400, 200 a second) at any `J ≥ 2 s` even at
+  one request a second; the two-regime curve is exact.
 
 - **Protobuf records in zstd chunks with BLAKE3** (the solver). JSON Lines is enough at 10⁷ and needs no new
   dependency; the escaping objection fell to bytes with spans; the chunks' consumers (shards, resume, parallel
@@ -381,7 +448,9 @@ The scheduler:
 | V2 | C3 | the validator agrees with the reference checker (`vectors/reference.py`) on 120 random small logs and their one-edit mutants (an edge dropped, an `at` moved, a StepId duplicated, a position renumbered, a barrier count ±1, a capture's producer swapped, an unknown operation, spans, a profile's id, a deviation), every (line, rule) pair, with uniqueness spilled to disk; a test of the crate | a rule's condition weakened |
 | E1 | C4 | bytes identical across threads {1, 2, 7} × bucket budgets {unbounded, one record, a few} × cell caps {1, many}, units reversed | spills merged by `at` alone; spills in thread order; a last buffer unflushed |
 | E2 | C4 | the time-major acceptance: Tenants over a day, Devices over hours, reports, a publication's facts; validates; per-chunk dispersion ≈ 1 for an open total, the exact total for a fixed one, `apportion` as the negative control | arrivals by `apportion`; time in a key |
-| R1 | C5 | a token bucket per limit key over planned times: a burst at t = 0 accepted, burst + 1 refused, an average under the rate with a peak over the burst refused; an unevaluable key refused | the average instead of the bucket |
+| R1 | C5 | minimal twins (`tests/rate.rs`): with `R = 2` a second and `B = 3`, three at 0 admitted and a fourth refused, the fourth at `T − 1 µs` refused and at `T` admitted, four at 0 then an hour idle refused (an average far under the rate), three at 0 then one every `1.2 T` admitted; `R = 3` a second, `B = 1` at 333,333 µs refused and 333,334 admitted; `R = 3`, `B = 2` at 0, 0, 333,334, 666,667 admitted; two operations in one bucket each under and together over; two values in one bucket each under and together over, admitted; one subject through a rendered and a captured value together over; polls alone over, beside `every` doubled; 5 s / 2 s polls at burst 2 refused and at burst 3 admitted, 4 s / 2 s at burst 2 refused; 2²⁰ and 2²⁰ + 1 polls; the drain of polls before an action at the same time, at the log's end, and before the deviation check; `J`: `B` arrivals within `J` admitted and `B + 1` refused, the `readEnrollmentNotice` shape (`B = 400`, 200 a second, `J = 3 s`) at one a second admitted; the reserve: 99 % of `R` admitted without and refused at 5 %; a source past `sources`, each unevaluable place, a `key` deviation still `key`; a deliberate 429 the system would admit reported unused (both the forced spend and `J` cases); a refused limit not evaluated; the clamp for an action and for an observation | the average instead of the bucket; `<` for `≤`; T rounded either way; polls counted as `timeout/every`, `div_ceil` or a strict bound; a bucket per operation or per name instead of per value; the clamp dropped; a deviated arrival that does not spend; use decided on the admission model; `key` deviable; the burst reduced for windows under `J` |
+| R2 | C5 | the reference decides `rate` and `key` window by window from the definitions, its deviated arrivals spending; the corpus carries limits of every `By` and `Place`, sources, callers, observations with REST probes, rates whose interval is comparable to the gaps, jitter whose `R · J / P` is not an integer; mutants squeeze an `at`, a source past `sources`, `every` halved, a key made a `Time` hole, a caller's names dropped, a deviation naming `rate` or `key`; measured: arrivals whose verdict differs from a plain count, by mutant kind | the reference sharing a mistake with the validator |
+| R3 | C5 | a property: the streaming curve equals the window definition on random arrivals in one bucket with small parameters, ties and deviations included | the streaming algorithm diverging from the definition |
 | MUT | each | a `cargo mutants` run on the crate; survivors killed or argued equivalent in § Measured | — |
 
 ## Measured
@@ -491,6 +560,36 @@ The scheduler:
   texts. Equivalent (1): spilling at the budget rather than past it, one record's memory. A second run over the
   survivors' descriptions: 8 mutants, 7 caught.
 
+**C5** (2026-11-20, this laptop):
+- **The byte form.** Format 2: `Operation.limits`, `Profile.sources`, `jitter` and `reserve`, `Rest.source`, `Caller`;
+  the golden log carries a limit of every `By` and `Place`, a source above 0, a jitter and a reserve; `FORMAT`
+  `ea30b014…f5ce8`; `vectors/format.py` checks it against the schema, now of format 2.
+- **R1.** The curve's boundaries as unit twins (`src/rate.rs`) — the token bucket at no jitter (a burst of three, the
+  fourth at `T − 1 µs` and at `T`, an hour idle, a rate under its interval), the interval that is no whole microsecond
+  both ways, `B` and `B + 1` within `J`, `readEnrollmentNotice` at one a second under `J = 3 s`, 99 % of the rate with
+  and without the reserve, the lower model's certain and uncertain refusals — and twelve validator twins
+  (`tests/rate.rs`): one counter across operations, one per value, one subject through a rendered and a captured
+  value, sources, every unevaluable place, `key` not deviable, polls to the timeout (5 s / 2 s at bursts 2 and 3,
+  4 s / 2 s, `every` doubled), 2²⁰ and 2²⁰ + 1 polls, polls drained before a later line at their time and at the end,
+  deliberate refusals used only when certain and spending, the clamp for an action and an observation, jitter's
+  short windows, refused limits not evaluated.
+- **R3.** The streaming curve equals the window definition on random arrivals in one bucket — ties, forced spends,
+  `J ∈ {0, 1, 250,000, 600,000}`, reserves of 0, 250 and 500 per thousand.
+- **R2.** 1,522 logs, 120 random and 1,402 mutants, under limits whose intervals are comparable to the gaps (a source's
+  250 µs) and jitter whose `R · J / P` is no integer: the reference reaches every verdict. `rate` in 535 pairs, `key`
+  in 324. By kind: 23 of 120 random logs break `rate`; `every` halved breaks all 65; a squeezed `at` 19 of 86; a source
+  past the profile's, a key made a time and a caller's names dropped give `key` in every one.
+- **What building found.** A limit the header refused was still evaluated: a `Path` naming no parameter gave `key`
+  violations beside the `header` one. Refused limits — every limit of a bucket of two shapes among them — are now never
+  evaluated.
+- **The mutation run** (cargo-mutants 27.1.0, `rate.rs` whole and `validate.rs`'s offered-load functions, tests `--lib
+  --test rate --test validate`): 129 mutants, 108 caught, 11 unviable, 10 missed. Killed by twins that were missing
+  (6): a query and a body place that find their own field among others; a zero `requests` and a zero `burst`, not only
+  a zero period; the polls' cap with a limit present, so that polls past it would arrive; an observation whose timeout
+  is shorter than its interval polling once. Equivalent (4): `Polling`'s equality, which the heap never calls (it
+  orders by `Ord`); an arrival exactly `J` before aging one call later, where a window of width `J` has the bound `B`
+  in either regime. A second run over the survivors' descriptions: 12 mutants, 8 caught.
+
 Owed:
 - **10⁹ steps** (M7): a log of 450 B a step and a peak of twice it do not fit a laptop. To decide, under the gate,
   before stage 3: compressing the stream (the digest over the canonical lines, not the compressed bytes — M3),
@@ -500,6 +599,12 @@ Owed:
 - SHA-256 throughput on the laptop (no SHA-NI) for 3 GB.
 
 ## Owed
+
+- **C5's host side, the owner's:** declare where a counter is shared (the `provisioning-channel` scope is in no
+  contract, only in `scim/cap.rs`), so the generator's bucket names come from a contract; a live check that the gateway
+  refills continuously (spend the burst, send at 90 % of the rate for one `per_seconds`, expect no refusal); two SCIM
+  operations on one channel refused at 101 together; a measurement of whether an `X-Request-Id` survives the compose
+  gateway in `direct` mode, which decides the egress join's key.
 
 - **The device-group contract** (ADR-0045 § Owed): delta membership or `If-Match`. Until then folds are not built and
   the full-stand cohort scenario cannot be expressed.
@@ -541,3 +646,12 @@ condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
 - 2026-11-20: Slice C4 built (§ Measured). Decision 11's open details settled: the byte order key, a thread's
   buckets spilled whole past its budget, equal keys and refusals failing the generation. M7 measured at 10⁷; 10⁹ does
   not fit the laptop, and the choice it forces is owed.
+- 2026-11-20: Decision 14 (offered load, C5) under the gate: a blind solver (limits in the header with their place,
+  egress as a count and an index, a caller's names, a burst reduced by jitter, a shaping scheduler), the main position
+  (limits folded with quotas and replicas, key values stated per call, an address list); the discriminator refuted a
+  refusal spending nothing everywhere, buckets per operation (SCIM shares one) and the solver's "can only over-count",
+  and synthesised; two roles — Distributed Systems (arrivals float with their dependencies; the exact jitter curve;
+  retries of polls and of deliberate refusals; a reserve; decorators; the egress join's key) and Verifiability (the use
+  of a deliberate refusal decided on a lower model; executors for every boundary; the corpus reaching time). § 10's
+  replica counts dropped; § 12 gains the scheduler's obligations.
+- 2026-11-20: Slice C5 built (§ Measured), by decision 14.

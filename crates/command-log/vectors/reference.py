@@ -35,7 +35,25 @@ The rules (ADR-0046 decisions 5, 7, 9):
   not in the table, or with path values other than its parameters; an
   observation polling every 0.
 - deviation: a line's declared deviation exempts it from that rule; one naming
-  no rule, or a rule the line keeps, is itself a violation.
+  no rule, or a rule the line keeps, is itself a violation. A `key` violation
+  is never exempt. A `rate` deviation makes its line's arrivals spend, refused
+  or not, and is kept only if the lower model refuses one of them.
+- header (limits): a zero parameter, a `path` place naming no parameter of its
+  template, one bucket name of two shapes (by, requests, per_seconds, burst), no
+  source, a reserve of a thousand per thousand; a refused limit — every limit of
+  a bucket of two shapes among them — is never evaluated.
+- key: a REST call (an action, an observation's probe) gives no value for a
+  limit of its operation: a time, an absent place, a body field without a span,
+  no caller or not exactly one name of the kind, a source past the profile's.
+- rate: arrivals — a REST action at the running maximum of `at` up to its line,
+  an observation with a REST probe polling at that time plus k * every, k = 0
+  to timeout // every (fewer than 2^20 + 1 polls, else k = 0 alone) — taken per
+  bucket (its name, the call's value) in (time, line, poll) order; an arrival is
+  refused when, with the arrivals spent before it, some window of planned width
+  under J holds more than B, or a wider window from a spent arrival i holds more
+  than B + R(1 - reserve/1000)(t - t_i - J)/P; refused arrivals spend nothing.
+  The lower model: the same windows with J = 0, the full rate and a burst of
+  B + ceil(R * J / P) + 1.
 """
 
 import json
@@ -44,8 +62,9 @@ import sys
 AWAIT = {"sent": 0, "settled": 1, "expected": 2}
 RULES = {
     "header", "order", "duplicate", "edge", "barrier", "producer", "stale", "writers",
-    "stream", "gap", "span", "profile", "operation", "required", "deviation",
+    "stream", "gap", "span", "profile", "operation", "required", "deviation", "rate", "key",
 }
+MAX_POLLS = 2**20
 
 
 def key(step_id):
@@ -102,6 +121,157 @@ def reads(step):
     return out
 
 
+def place_value(limit, op, rest, sources):
+    """The value a call counts by, or None."""
+    by = limit["by"]
+    if by == "all":
+        return ("all",)
+    if by == "source":
+        return ("source", rest["source"]) if rest["source"] < sources else None
+    place = by["at"]
+    kind, name = next(iter(place.items()))
+    if kind == "path":
+        names = [part.split("}")[0] for part in op["path"].split("{")[1:] if "}" in part]
+        if name not in names or names.index(name) >= len(rest["path"]):
+            return None
+        return reduced(rest["path"][names.index(name)])
+    if kind in ("query", "header"):
+        same = (lambda a, b: a == b) if kind == "query" else (lambda a, b: a.lower() == b.lower())
+        found = [f for f in rest[kind if kind == "query" else "headers"] if same(f["name"], name)]
+        return reduced(found[0]["value"]) if found else None
+    if kind == "body":
+        spans = [sp for sp in (rest["body"] or {"holes": []})["holes"] if sp["field"] == name]
+        return named(spans[0]["hole"]) if spans else None
+    caller = rest["caller"]
+    if caller is None:
+        return None
+    of_kind = [n for n in caller["names"] if n["kind"] == name]
+    return ("subject", json.dumps(of_kind[0], sort_keys=True)) if len(of_kind) == 1 else None
+
+
+def reduced(value):
+    if "literal" in value:
+        return ("literal", value["literal"])
+    return named(value["hole"])
+
+
+def named(hole):
+    if "rendered" in hole:
+        of = hole["rendered"]["of"]
+        if "subject" in of:
+            return ("subject", json.dumps(of["subject"], sort_keys=True))
+        return ("step", json.dumps(of["step"], sort_keys=True))
+    if "captured" in hole:
+        return ("subject", json.dumps(hole["captured"]["subject"], sort_keys=True))
+    return None
+
+
+def refused_limits(header):
+    """The header's limit violations, and the limits never evaluated."""
+    profile, found, refused, shapes, misshapen = header["profile"], False, set(), {}, set()
+    if profile["sources"] == 0 or profile["reserve"] >= 1000:
+        found = True
+    for op in header["operations"]:
+        for i, l in enumerate(op["limits"]):
+            if min(l["requests"], l["per_seconds"], l["burst"]) == 0:
+                found = True
+                refused.add((op["name"], i))
+            by = l["by"]
+            if isinstance(by, dict) and "path" in by["at"]:
+                names = [part.split("}")[0] for part in op["path"].split("{")[1:] if "}" in part]
+                if by["at"]["path"] not in names:
+                    found = True
+                    refused.add((op["name"], i))
+            shape = (json.dumps(by, sort_keys=True), l["requests"], l["per_seconds"], l["burst"])
+            if shapes.setdefault(l["bucket"], shape) != shape:
+                found = True
+                misshapen.add(l["bucket"])
+    for op in header["operations"]:
+        for i, l in enumerate(op["limits"]):
+            if l["bucket"] in misshapen:
+                refused.add((op["name"], i))
+    return found, refused
+
+
+def under_curve(t, spent, l, jitter, reserve):
+    """Whether an arrival at t keeps every window from the spent ones under the curve."""
+    rate = l["requests"] * (1000 - reserve)
+    period = l["per_seconds"] * 10**9
+    burst = l["burst"]
+    if sum(1 for s in spent if t - s < jitter) + 1 > burst:
+        return False
+    for i, s in enumerate(spent):
+        if t - s >= jitter:
+            n = len(spent) - i + 1
+            if n * period > burst * period + rate * (t - s - jitter):
+                return False
+    return True
+
+
+def under_lower(t, spent, l, jitter):
+    rate, period = l["requests"], l["per_seconds"] * 10**6
+    burst = l["burst"] + -(-(rate * jitter) // period) + 1
+    for i, s in enumerate(spent):
+        n = len(spent) - i + 1
+        if n * period > burst * period + rate * (t - s):
+            return False
+    return True
+
+
+def offered_load(header, steps, raw):
+    """rate and key, into raw; the lines whose `rate` deviation a certain refusal used."""
+    profile = header["profile"]
+    sources, jitter, reserve = profile["sources"], int(profile["jitter"]), profile["reserve"]
+    _, refused = refused_limits(header)
+    ops = {op["name"]: op for op in header["operations"]}
+    buckets = {}
+    clamp = 0
+    for i, r in enumerate(steps):
+        line = i + 2
+        clamp = max(clamp, int(r["at"]))
+        action = r["action"]
+        if "rest" in action:
+            rest, times = action["rest"], [clamp]
+        elif "observe" in action and "rest" in action["observe"]["probe"]:
+            o = action["observe"]
+            rest, every, timeout = o["probe"]["rest"], int(o["every"]), int(o["timeout"])
+            last = timeout // every if every > 0 and timeout // every < MAX_POLLS else 0
+            times = [clamp + k * every for k in range(last + 1)]
+        else:
+            continue
+        op = ops.get(rest["op"])
+        if op is None:
+            continue
+        for n, l in enumerate(op["limits"]):
+            if (op["name"], n) in refused:
+                continue
+            value = place_value(l, op, rest, sources)
+            if value is None:
+                raw.setdefault(line, set()).add("key")
+                continue
+            for k, t in enumerate(times):
+                buckets.setdefault((l["bucket"], value), []).append((t, line, k, l))
+    forced = {i + 2 for i, r in enumerate(steps) if r["deviation"] is not None and r["deviation"]["rule"] == "rate"}
+    used = set()
+    for arrivals in buckets.values():
+        arrivals.sort(key=lambda a: a[:3])
+        spent, spent_low = [], []
+        for t, line, _, l in arrivals:
+            admitted = under_curve(t, spent, l, jitter, reserve)
+            low = under_lower(t, spent_low, l, jitter)
+            if low:
+                spent_low.append(t)
+            if line in forced:
+                spent.append(t)
+                if not low:
+                    used.add(line)
+            elif admitted:
+                spent.append(t)
+            else:
+                raw.setdefault(line, set()).add("rate")
+    return used
+
+
 def verdict(text):
     lines = text.split("\n")[:-1]
     header = json.loads(lines[0])["header"]
@@ -113,6 +283,8 @@ def verdict(text):
             found.add((1, "header"))
     names = [op["name"] for op in header["operations"]]
     if len(names) != len(set(names)):
+        found.add((1, "header"))
+    if refused_limits(header)[0]:
         found.add((1, "header"))
     raw = {}
     for i, r in enumerate(steps):
@@ -198,20 +370,30 @@ def verdict(text):
         if "observe" in action:
             if "rest" in action["observe"]["probe"]:
                 calls.append(action["observe"]["probe"]["rest"])
-            if int(action["observe"]["every"]) == 0:
+            every = int(action["observe"]["every"])
+            if every == 0 or int(action["observe"]["timeout"]) // every >= MAX_POLLS:
                 v.add("operation")
         for c in calls:
             ops = [op for op in header["operations"] if op["name"] == c["op"]]
             if not ops or ops[0]["path"].count("{") != len(c["path"]):
                 v.add("operation")
-        if r["deviation"] is not None:
-            rule = r["deviation"]["rule"]
-            if rule not in RULES:
+    used = offered_load(header, steps, raw)
+    for i, r in enumerate(steps):
+        if r["deviation"] is None:
+            continue
+        line, rule = i + 2, r["deviation"]["rule"]
+        v = raw.setdefault(line, set())
+        if rule not in RULES:
+            v.add("deviation")
+        elif rule == "rate":
+            if line not in used:
                 v.add("deviation")
-            elif rule in v:
-                v.discard(rule)
-            else:
-                v.add("deviation")
+        elif rule == "key":
+            v.add("deviation")
+        elif rule in v:
+            v.discard(rule)
+        else:
+            v.add("deviation")
     for line, rules in raw.items():
         found |= {(line, rule) for rule in rules}
     return sorted(found)

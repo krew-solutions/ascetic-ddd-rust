@@ -17,9 +17,10 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::log::{LogError, Reader};
+use crate::rate::{self, Curve, Lower};
 use crate::record::{
-    Action, Bus, Codec, Dep, Field, Form, Header, Hole, Of, On, Outcome, Payload, Predicate, Probe,
-    Record, Rest, Span, StepId, Subject, Test, Value,
+    Action, Bus, By, Codec, Dep, Field, Form, Header, Hole, Limit, Of, On, Outcome, Payload, Place,
+    Predicate, Probe, Record, Rest, Span, StepId, Subject, Test, Value,
 };
 
 /// A rule of decisions 5, 7 and 9.
@@ -62,11 +63,15 @@ pub enum Rule {
     Required,
     /// A deviation that names no rule, or breaks none.
     Deviation,
+    /// An arrival a bucket's curve refuses (decision 14).
+    Rate,
+    /// A limit's value a call does not give; no deviation exempts it.
+    Key,
 }
 
 impl Rule {
     /// Every rule, in order.
-    pub const ALL: [Rule; 15] = [
+    pub const ALL: [Rule; 17] = [
         Rule::Header,
         Rule::Order,
         Rule::Duplicate,
@@ -82,6 +87,8 @@ impl Rule {
         Rule::Operation,
         Rule::Required,
         Rule::Deviation,
+        Rule::Rate,
+        Rule::Key,
     ];
 
     /// The rule's name, as a deviation names it.
@@ -102,6 +109,8 @@ impl Rule {
             Rule::Operation => "operation",
             Rule::Required => "required",
             Rule::Deviation => "deviation",
+            Rule::Rate => "rate",
+            Rule::Key => "key",
         }
     }
 
@@ -443,13 +452,68 @@ struct Pass<'h, H: Host> {
     ids: Ids,
     /// Lines that declared a deviation, its rule, and whether it was used.
     deviations: BTreeMap<u64, (Rule, bool)>,
+    /// The running maximum of `at`: when a line's calls arrive.
+    clamp: u64,
+    /// The header's refused limits, by operation and index: never evaluated.
+    refused: BTreeSet<(String, usize)>,
+    /// Each bucket's curve and lower model, by its name and value.
+    buckets: BTreeMap<(String, Vec<u8>), (Curve, Lower)>,
+    /// Observations' polls still to arrive, in (time, line) order.
+    polls: BinaryHeap<Reverse<Polling>>,
 }
+
+/// An observation's polls still to arrive, ordered by their next poll's (time,
+/// line).
+#[derive(Clone, Debug)]
+struct Polling {
+    next: u64,
+    line: u64,
+    k: u64,
+    last: u64,
+    every: u64,
+    forced: bool,
+    counts: Vec<Count>,
+}
+
+impl PartialEq for Polling {
+    fn eq(&self, other: &Polling) -> bool {
+        (self.next, self.line, self.k) == (other.next, other.line, other.k)
+    }
+}
+
+impl Eq for Polling {}
+
+impl PartialOrd for Polling {
+    fn partial_cmp(&self, other: &Polling) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Polling {
+    fn cmp(&self, other: &Polling) -> std::cmp::Ordering {
+        (self.next, self.line, self.k).cmp(&(other.next, other.line, other.k))
+    }
+}
+
+/// A bucket a call counts against: its name and value, and its limit.
+#[derive(Clone, Debug)]
+struct Count {
+    bucket: String,
+    value: Vec<u8>,
+    limit: Limit,
+}
+
+/// The most polls an observation may imply.
+const MAX_POLLS: u64 = 1 << 20;
 
 impl<H: Host> Pass<'_, H> {
     /// A violation of `rule` at `line`, unless the line declared it.
     fn violate(&mut self, line: u64, rule: Rule, detail: String) {
+        // No deviation exempts a key: an arrival left out of its bucket would be
+        // an under-count.
         if let Some((declared, used)) = self.deviations.get_mut(&line)
             && *declared == rule
+            && rule != Rule::Key
         {
             *used = true;
             return;
@@ -488,6 +552,184 @@ impl<H: Host> Pass<'_, H> {
         for o in twice {
             self.violate(1, Rule::Header, format!("operation {o:?} twice"));
         }
+        let (found, refused) = self.limits();
+        self.refused = refused;
+        for detail in found {
+            self.violate(1, Rule::Header, detail);
+        }
+    }
+
+    /// What is wrong with the header's limits — a zero parameter, a `Path` that
+    /// names no parameter, one bucket of two shapes, no source, a reserve of all
+    /// — and the limits refused, which are never evaluated: by operation and
+    /// index, every limit of a bucket of two shapes among them.
+    fn limits(&self) -> (Vec<String>, BTreeSet<(String, usize)>) {
+        let mut found = Vec::new();
+        let mut refused = BTreeSet::new();
+        let mut misshapen = BTreeSet::new();
+        let profile = &self.header.profile;
+        if profile.sources == 0 {
+            found.push("no source".to_owned());
+        }
+        if profile.reserve >= 1000 {
+            found.push(format!("a reserve of {} per thousand", profile.reserve));
+        }
+        let mut shapes: BTreeMap<&str, &Limit> = BTreeMap::new();
+        let shape = |l: &Limit| (l.by.clone(), l.requests, l.per_seconds, l.burst);
+        for op in &self.header.operations {
+            for (i, l) in op.limits.iter().enumerate() {
+                if !rate::valid(l) {
+                    found.push(format!("{} {}: a zero parameter", op.name, l.key));
+                    refused.insert((op.name.clone(), i));
+                }
+                if let By::At(Place::Path(name)) = &l.by
+                    && !rate::parameters(&op.path).contains(name)
+                {
+                    found.push(format!(
+                        "{} {}: {{{name}}} is no parameter of {}",
+                        op.name, l.key, op.path
+                    ));
+                    refused.insert((op.name.clone(), i));
+                }
+                match shapes.get(l.bucket.as_str()) {
+                    Some(first) if shape(first) != shape(l) => {
+                        found.push(format!("bucket {:?} of two shapes", l.bucket));
+                        misshapen.insert(l.bucket.clone());
+                    }
+                    Some(_) => {}
+                    None => {
+                        shapes.insert(&l.bucket, l);
+                    }
+                }
+            }
+        }
+        for op in &self.header.operations {
+            for (i, l) in op.limits.iter().enumerate() {
+                if misshapen.contains(&l.bucket) {
+                    refused.insert((op.name.clone(), i));
+                }
+            }
+        }
+        (found, refused)
+    }
+
+    /// The buckets a call counts against; a limit it gives no value for is a
+    /// `key` violation, and counts nowhere.
+    fn counts(&mut self, line: u64, rest: &Rest) -> Vec<Count> {
+        let Some(op) = self.header.operations.iter().find(|o| o.name == rest.op) else {
+            return Vec::new();
+        };
+        let sources = self.header.profile.sources;
+        let mut out = Vec::new();
+        let mut missing = Vec::new();
+        let refused = &self.refused;
+        let limits = op
+            .limits
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !refused.contains(&(op.name.clone(), *i)))
+            .map(|(_, l)| l);
+        for l in limits {
+            match rate::value(l, op, rest, sources) {
+                Ok(value) => out.push(Count {
+                    bucket: l.bucket.clone(),
+                    value,
+                    limit: l.clone(),
+                }),
+                Err(reason) => missing.push(format!("{} {}: {reason}", op.name, l.key)),
+            }
+        }
+        for detail in missing {
+            self.violate(line, Rule::Key, detail);
+        }
+        out
+    }
+
+    /// An arrival at `t` from `line` in every bucket it counts against. A
+    /// deliberate refusal spends, and is used only if the lower model refuses it.
+    fn arrive(&mut self, t: u64, line: u64, forced: bool, counts: &[Count]) {
+        let (jitter, reserve) = (self.header.profile.jitter, self.header.profile.reserve);
+        for c in counts {
+            let key = (c.bucket.clone(), c.value.clone());
+            if !self.buckets.contains_key(&key) {
+                let (Some(curve), Some(lower)) = (
+                    Curve::new(&c.limit, jitter, reserve),
+                    Lower::new(&c.limit, jitter),
+                ) else {
+                    continue;
+                };
+                self.buckets.insert(key.clone(), (curve, lower));
+            }
+            let Some((curve, lower)) = self.buckets.get_mut(&key) else {
+                continue;
+            };
+            let admitted = curve.arrive(t, forced);
+            let certain = !lower.arrive(t);
+            if forced {
+                if certain && let Some((Rule::Rate, used)) = self.deviations.get_mut(&line) {
+                    *used = true;
+                }
+            } else if !admitted {
+                let detail = format!("{} {} at {t}: past its curve", c.bucket, c.limit.key);
+                self.violate(line, Rule::Rate, detail);
+            }
+        }
+    }
+
+    /// The polls due by `t`, in (time, line) order.
+    fn drain(&mut self, t: u64) {
+        while let Some(Reverse(p)) = self.polls.peek()
+            && p.next <= t
+        {
+            let Some(Reverse(mut p)) = self.polls.pop() else {
+                break;
+            };
+            let counts = std::mem::take(&mut p.counts);
+            self.arrive(p.next, p.line, p.forced, &counts);
+            p.counts = counts;
+            if p.k < p.last {
+                p.k = p.k.saturating_add(1);
+                p.next = p.next.saturating_add(p.every);
+                self.polls.push(Reverse(p));
+            }
+        }
+    }
+
+    /// The line's calls: a REST action at the clamped time, an observation's
+    /// polls from it, every `every` to its timeout.
+    fn offered(&mut self, line: u64, r: &Record) {
+        self.clamp = self.clamp.max(r.at);
+        let t = self.clamp;
+        self.drain(t);
+        let forced = matches!(self.deviations.get(&line), Some((Rule::Rate, _)));
+        match &r.action {
+            Action::Rest(rest) => {
+                let counts = self.counts(line, rest);
+                self.arrive(t, line, forced, &counts);
+            }
+            Action::Observe(o) => {
+                if let Probe::Rest(rest) = &o.probe {
+                    let counts = self.counts(line, rest);
+                    self.arrive(t, line, forced, &counts);
+                    let polls = o.timeout.checked_div(o.every).filter(|n| *n < MAX_POLLS);
+                    if let Some(last) = polls
+                        && last > 0
+                        && !counts.is_empty()
+                    {
+                        self.polls.push(Reverse(Polling {
+                            next: t.saturating_add(o.every),
+                            line,
+                            k: 1,
+                            last,
+                            every: o.every,
+                            forced,
+                            counts,
+                        }));
+                    }
+                }
+            }
+            Action::Bus(_) | Action::Host(_) => {}
+        }
     }
 
     fn record(&mut self, line: u64, r: &Record) -> Result<(), LogError> {
@@ -518,6 +760,7 @@ impl<H: Host> Pass<'_, H> {
                 );
             }
         }
+        self.offered(line, r);
         self.keep(r);
         Ok(())
     }
@@ -815,11 +1058,23 @@ impl<H: Host> Pass<'_, H> {
             }
         }
         if let Action::Observe(o) = &r.action {
+            // Polls at 0, every, … up to the timeout: ⌊timeout / every⌋ + 1.
             match o.timeout.checked_div(o.every) {
-                Some(polls) => {
-                    self.report.peaks.polls = self.report.peaks.polls.saturating_add(polls.max(1));
+                Some(n) if n < MAX_POLLS => {
+                    self.report.peaks.polls =
+                        self.report.peaks.polls.saturating_add(n.saturating_add(1));
                 }
-                None => found.push("an observation polling every 0".to_owned()),
+                Some(n) => {
+                    found.push(format!(
+                        "an observation implying {} polls",
+                        n.saturating_add(1)
+                    ));
+                    self.report.peaks.polls = self.report.peaks.polls.saturating_add(1);
+                }
+                None => {
+                    found.push("an observation polling every 0".to_owned());
+                    self.report.peaks.polls = self.report.peaks.polls.saturating_add(1);
+                }
             }
         }
         for detail in found {
@@ -867,6 +1122,8 @@ impl<H: Host> Pass<'_, H> {
     }
 
     fn finish(mut self) -> Result<Report, LogError> {
+        // The polls still due arrive before deviations are judged.
+        self.drain(u64::MAX);
         let ids = std::mem::replace(
             &mut self.ids,
             Ids {
@@ -926,6 +1183,10 @@ pub fn validate<R: BufRead>(
             runs: Vec::new(),
         },
         deviations: BTreeMap::new(),
+        clamp: 0,
+        refused: BTreeSet::new(),
+        buckets: BTreeMap::new(),
+        polls: BinaryHeap::new(),
     };
     pass.header();
     let mut line = 1u64;

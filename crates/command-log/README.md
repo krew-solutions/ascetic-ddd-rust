@@ -3,9 +3,9 @@
 The planned steps of a load, in the order of their planned time (ADR-0046): what
 a generation writes and a load run replays.
 
-**Status: in progress.** Done: the record model and the canonical byte form
+**Status: stage 2 built.** Done: the record model and the canonical byte form
 (slice C1); templates, the rendering of holes and the splice (C2); the
-validator (C3); the generation engine (C4). To come: the offered-load rules.
+validator (C3); the generation engine (C4); the offered-load rules (C5).
 
 ## A log
 
@@ -51,3 +51,14 @@ the engine buckets them by time cell, spills sorted runs past a byte budget,
 and merges each cell by `(at, StepId)` into the log. Neither the threads, the
 budget, the cells nor the units' order changes a byte; two steps with one
 `(at, StepId)` fail the generation.
+
+## Offered load
+
+An operation's limits are in the header: a token bucket, the counter it shares
+(`bucket`) and what it counts by — every call, the source a call is sent from,
+or the value at a place the server reads (a path parameter, a query parameter,
+a header, a body field, the caller's credential). The validator refuses a log
+whose planned arrivals — calls, and every poll an observation implies up to its
+timeout — would exceed a bucket under the client side's jitter and with a
+reserve left, and a call that gives no value for a limit (`rate::value`,
+`rate::Curve`).
