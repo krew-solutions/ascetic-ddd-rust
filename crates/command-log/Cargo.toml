@@ -15,9 +15,14 @@ readme = "README.md"
 [dependencies]
 ascetic-ddd-faker = { path = "../faker" }
 base64 = "0.22"
+# The machine's limits and filesystems, safely (ADR-0046 decision 15): free
+# space, a filesystem's kind, the open-file limit.
+rustix = { version = "=1.1.6", default-features = false, features = ["std", "fs", "process"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
+# libzstd, bundled and built by cc (ADR-0046 decision 15): logs and spills.
+zstd = { version = "=0.14.4", default-features = false }
 
 [dev-dependencies]
 proptest = "1.11.0"

@@ -62,3 +62,11 @@ whose planned arrivals — calls, and every poll an observation implies up to it
 timeout — would exceed a bucket under the client side's jitter and with a
 reserve left, and a call that gives no value for a limit (`rate::value`,
 `rate::Curve`).
+
+## At scale
+
+A log file may be one zstd stream of its lines (`Compression`, level 1 by
+default): its lines, trailer and digest are the same, and `open` tells it by
+its bytes. The engine spills compressed runs into a directory of its own,
+removed on every exit; merges stay within the open-file limit; a merge that
+would not fit the disk, or a spill in memory, is refused before the first line.

@@ -158,39 +158,158 @@ impl<W: Write> Writer<W> {
     }
 }
 
-/// Writes a log to `path` whole or not at all: into `path.partial`, synced,
-/// renamed only once the trailer is written.
-pub fn write_file(
-    path: &Path,
-    header: Header,
-    records: impl IntoIterator<Item = Record>,
-) -> Result<Trailer, LogError> {
-    let partial = PathBuf::from(format!("{}.partial", path.display()));
-    let result = (|| {
+/// How a log is written to a file (ADR-0046 decision 15). Neither changes a
+/// byte of its lines, its trailer or its digest: only the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Compression {
+    /// The lines as they are.
+    None,
+    /// One zstd stream of the lines, at a level.
+    Zstd {
+        /// The level: 1, the default, is both smaller and faster than 3 on a
+        /// log (M8).
+        level: i32,
+    },
+}
+
+impl Default for Compression {
+    fn default() -> Compression {
+        Compression::Zstd { level: 1 }
+    }
+}
+
+/// zstd's frame magic, little-endian: a compressed log's first four bytes.
+pub const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+
+/// A file being written whole or not at all: `path.partial`, synced and renamed
+/// by [`Partial::commit`], removed if dropped first.
+pub(crate) struct Partial {
+    partial: PathBuf,
+    path: PathBuf,
+    done: bool,
+}
+
+impl Partial {
+    pub(crate) fn create(path: &Path) -> io::Result<(Partial, fs::File)> {
+        let partial = PathBuf::from(format!("{}.partial", path.display()));
         let file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&partial)?;
-        let mut writer = Writer::new(io::BufWriter::new(file), header)?;
-        for record in records {
-            writer.step(record)?;
-        }
-        let (out, trailer) = writer.finish()?;
-        let file = out.into_inner().map_err(|e| LogError::Io(e.into_error()))?;
+        Ok((
+            Partial {
+                partial,
+                path: path.to_owned(),
+                done: false,
+            },
+            file,
+        ))
+    }
+
+    /// Syncs `file` and puts it at its path.
+    pub(crate) fn commit(mut self, file: fs::File) -> io::Result<()> {
         file.sync_all()?;
-        Ok(trailer)
-    })();
-    match result {
-        Ok(trailer) => {
-            fs::rename(&partial, path)?;
-            Ok(trailer)
-        }
-        Err(e) => {
-            // Best effort: the failure to report is the first one.
-            let _ = fs::remove_file(&partial);
-            Err(e)
+        drop(file);
+        fs::rename(&self.partial, &self.path)?;
+        self.done = true;
+        Ok(())
+    }
+}
+
+impl Drop for Partial {
+    fn drop(&mut self) {
+        if !self.done {
+            let _ = fs::remove_file(&self.partial);
         }
     }
+}
+
+/// The output a log file is written through: plain or a zstd stream.
+pub(crate) enum FileOut {
+    Plain(io::BufWriter<fs::File>),
+    Zstd(io::BufWriter<zstd::Encoder<'static, fs::File>>),
+}
+
+impl FileOut {
+    pub(crate) fn new(file: fs::File, compression: Compression) -> io::Result<FileOut> {
+        Ok(match compression {
+            Compression::None => FileOut::Plain(io::BufWriter::new(file)),
+            Compression::Zstd { level } => {
+                FileOut::Zstd(io::BufWriter::new(zstd::Encoder::new(file, level)?))
+            }
+        })
+    }
+
+    /// The file, every byte written: a zstd frame finished, its error kept.
+    pub(crate) fn finish(self) -> io::Result<fs::File> {
+        match self {
+            FileOut::Plain(out) => out.into_inner().map_err(io::IntoInnerError::into_error),
+            FileOut::Zstd(out) => out
+                .into_inner()
+                .map_err(io::IntoInnerError::into_error)?
+                .finish(),
+        }
+    }
+}
+
+impl Write for FileOut {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            FileOut::Plain(out) => out.write(buf),
+            FileOut::Zstd(out) => out.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            FileOut::Plain(out) => out.flush(),
+            FileOut::Zstd(out) => out.flush(),
+        }
+    }
+}
+
+/// Writes a log to `path` whole or not at all: into `path.partial`, the zstd
+/// frame finished, synced, renamed only once the trailer is written.
+pub fn write_file(
+    path: &Path,
+    header: Header,
+    records: impl IntoIterator<Item = Record>,
+    compression: Compression,
+) -> Result<Trailer, LogError> {
+    let (partial, file) = Partial::create(path)?;
+    let mut writer = Writer::new(FileOut::new(file, compression)?, header)?;
+    for record in records {
+        writer.step(record)?;
+    }
+    let (out, trailer) = writer.finish()?;
+    partial.commit(out.finish()?)?;
+    Ok(trailer)
+}
+
+/// A log's input, plain or compressed, told by its first bytes: a zstd
+/// frame's magic, or a line's `{`. Anything else is refused.
+pub fn open<R: BufRead + Send + 'static>(
+    mut input: R,
+) -> Result<Reader<Box<dyn BufRead + Send>>, LogError> {
+    let first = input.fill_buf()?;
+    let boxed: Box<dyn BufRead + Send> = if first.starts_with(&ZSTD_MAGIC) {
+        Box::new(io::BufReader::new(zstd::Decoder::with_buffer(input)?))
+    } else if first.first() == Some(&b'{') {
+        Box::new(input)
+    } else if first.is_empty() {
+        return Err(LogError::Truncated);
+    } else {
+        return Err(LogError::Malformed {
+            line: 1,
+            reason: "neither a log nor a zstd stream of one".to_owned(),
+        });
+    };
+    Reader::new(boxed)
+}
+
+/// Opens the log in `path`, plain or compressed.
+pub fn open_file(path: &Path) -> Result<Reader<Box<dyn BufRead + Send>>, LogError> {
+    open(io::BufReader::new(fs::File::open(path)?))
 }
 
 /// Reads a log: its header at once, its steps as an iterator, its trailer

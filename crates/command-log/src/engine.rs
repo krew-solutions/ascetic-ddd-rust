@@ -17,7 +17,8 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::log::{LogError, Writer, encode};
+use crate::disk::{Disk, LocalDisk};
+use crate::log::{Compression, FileOut, LogError, Partial, Writer, encode};
 use crate::record::{Header, Line, Record, StepId, Trailer};
 use crate::spill::{Counted, SpillDir};
 
@@ -48,6 +49,20 @@ pub enum EngineError {
         /// What failed.
         error: std::io::Error,
     },
+    /// Not enough free space for the merge, found before its first line.
+    Space {
+        /// The filesystem's path.
+        path: PathBuf,
+        /// What the merge needs there, in bytes.
+        needed: u64,
+        /// What is free.
+        free: u64,
+    },
+    /// A spill directory in memory, not allowed by the configuration.
+    InMemory {
+        /// The directory.
+        path: PathBuf,
+    },
     /// Two records with one `(at, StepId)`.
     Equal {
         /// Their planned time.
@@ -65,6 +80,16 @@ impl fmt::Display for EngineError {
             EngineError::Io { phase, path, error } => {
                 write!(f, "{phase} {}: {error}", path.display())
             }
+            EngineError::Space { path, needed, free } => write!(
+                f,
+                "{}: the merge needs {needed} bytes, {free} are free",
+                path.display()
+            ),
+            EngineError::InMemory { path } => write!(
+                f,
+                "{} is in memory: a spill there is refused unless allowed",
+                path.display()
+            ),
             EngineError::Equal { at, step } => write!(f, "two records at {at} of {step:?}"),
         }
     }
@@ -97,6 +122,12 @@ pub struct Config {
     pub cells: u64,
     /// Where spills go: a directory of the caller's, its files removed after.
     pub spill: PathBuf,
+    /// The most runs a merge holds open; 0 derives it from the open-file limit
+    /// ([`crate::disk::fan_in`]).
+    pub fan_in: usize,
+    /// Whether `spill` may be memory (tmpfs): refused unless allowed, since a
+    /// spill the size of a log in memory is what oomd kills.
+    pub memory_spill: bool,
 }
 
 /// The bytes a record sorts by: `at` big-endian, then the step id in an
@@ -172,20 +203,65 @@ impl Buckets {
                 .create_new(true)
                 .open(&path)
                 .map_err(at("spilling to", &path))?;
-            let mut out = BufWriter::new(file);
             let count = entries.len() as u64;
+            let mut out = RunOut::new(file, &path)?;
             for e in entries {
-                write_entry(&mut out, &e).map_err(|e| match e {
-                    EngineError::Log(LogError::Io(error)) => at("spilling to", &path)(error),
-                    other => other,
-                })?;
+                out.write(&e)?;
             }
-            out.flush().map_err(at("spilling to", &path))?;
+            out.finish()?;
             self.runs.entry(cell).or_default().push((path, count));
         }
         self.bytes = 0;
         Ok(())
     }
+}
+
+/// A run being written: a zstd stream at level 1 of its entries.
+struct RunOut {
+    out: BufWriter<zstd::Encoder<'static, File>>,
+    path: PathBuf,
+}
+
+impl RunOut {
+    fn new(file: File, path: &std::path::Path) -> Result<RunOut, EngineError> {
+        let encoder = zstd::Encoder::new(file, 1).map_err(at("spilling to", path))?;
+        Ok(RunOut {
+            out: BufWriter::new(encoder),
+            path: path.to_owned(),
+        })
+    }
+
+    fn write(&mut self, e: &Entry) -> Result<(), EngineError> {
+        write_entry(&mut self.out, e).map_err(|e| match e {
+            EngineError::Log(LogError::Io(error)) => at("spilling to", &self.path)(error),
+            other => other,
+        })
+    }
+
+    /// Every byte written and the frame finished, its error kept.
+    fn finish(self) -> Result<(), EngineError> {
+        let path = self.path;
+        let encoder = self
+            .out
+            .into_inner()
+            .map_err(|e| at("spilling to", &path)(e.into_error()))?;
+        encoder.finish().map_err(at("spilling to", &path))?;
+        Ok(())
+    }
+}
+
+/// A spilled run opened for a merge, held to its count.
+fn open_run(
+    path: &std::path::Path,
+    count: u64,
+) -> Result<Counted<Box<dyn Read + Send>>, EngineError> {
+    let file = File::open(path).map_err(at("merging", path))?;
+    let decoder = zstd::Decoder::new(file).map_err(at("merging", path))?;
+    Ok(Counted {
+        reader: Box::new(BufReader::new(decoder)),
+        left: count,
+        path: path.to_owned(),
+    })
 }
 
 fn write_entry(out: &mut impl Write, e: &Entry) -> Result<(), EngineError> {
@@ -218,7 +294,7 @@ fn read_entry<R: Read>(run: &mut Counted<R>) -> Result<Option<Entry>, EngineErro
 
 /// Where a cell's merge reads from: a spilled run, or what a thread still held.
 enum Source {
-    Run(Counted<BufReader<File>>),
+    Run(Counted<Box<dyn Read + Send>>),
     Held(std::vec::IntoIter<Entry>),
 }
 
@@ -239,6 +315,60 @@ pub fn generate<W: Write>(
     config: &Config,
     out: W,
 ) -> Result<(W, Trailer), EngineError> {
+    generate_on(header, units, config, &LocalDisk, out)
+}
+
+/// [`generate`] on a given machine: its free space, filesystems and limits.
+pub fn generate_on<W: Write>(
+    header: Header,
+    units: &[&dyn Unit],
+    config: &Config,
+    disk: &dyn Disk,
+    out: W,
+) -> Result<(W, Trailer), EngineError> {
+    pass(header, units, config, disk, out, None)
+}
+
+/// Generates a log into the file `path`, whole or not at all: `path.partial`,
+/// compressed as asked, synced and renamed once its trailer is written.
+pub fn generate_file(
+    path: &std::path::Path,
+    header: Header,
+    units: &[&dyn Unit],
+    config: &Config,
+    compression: Compression,
+) -> Result<Trailer, EngineError> {
+    let (partial, file) = Partial::create(path).map_err(at("creating", path))?;
+    let out = FileOut::new(file, compression).map_err(at("creating", path))?;
+    let (out, trailer) = pass(header, units, config, &LocalDisk, out, Some(path))?;
+    let file = out.finish().map_err(at("finishing", path))?;
+    partial.commit(file).map_err(at("finishing", path))?;
+    Ok(trailer)
+}
+
+fn pass<W: Write>(
+    header: Header,
+    units: &[&dyn Unit],
+    config: &Config,
+    disk: &dyn Disk,
+    out: W,
+    log: Option<&std::path::Path>,
+) -> Result<(W, Trailer), EngineError> {
+    std::fs::create_dir_all(&config.spill)
+        .map_err(at("claiming a spill directory in", &config.spill))?;
+    if !config.memory_spill
+        && disk
+            .in_memory(&config.spill)
+            .map_err(at("inspecting", &config.spill))?
+    {
+        return Err(EngineError::InMemory {
+            path: config.spill.clone(),
+        });
+    }
+    let fan_in = match config.fan_in {
+        0 => crate::disk::fan_in(disk.open_files().map_err(at("inspecting", &config.spill))?),
+        n => n.max(2),
+    };
     let threads = config.threads.max(1);
     let cell = config.cell.max(1);
     let last = config.cells.max(1).saturating_sub(1);
@@ -315,18 +445,72 @@ pub fn generate<W: Write>(
     let mut all = done.into_inner().unwrap_or_default();
     let result = match failed.into_inner().ok().flatten() {
         Some(e) => Err(e),
-        None => merge(header, &mut all, threads, out),
+        None => room(&all, config, disk, log)
+            .and_then(|()| merge(header, &mut all, threads, fan_in, dir.path(), out)),
     };
     drop(dir);
     result
 }
 
+/// Whether the merge has room, checked before its first line: on the spill
+/// directory's filesystem, the largest cell once more for the cascade's
+/// intermediate runs, and a margin; on the log's, if it is another, every
+/// spilled byte (the log is about as large compressed). On the same filesystem
+/// the log grows as each merged cell's runs are deleted.
+fn room(
+    all: &[Buckets],
+    config: &Config,
+    disk: &dyn Disk,
+    log: Option<&std::path::Path>,
+) -> Result<(), EngineError> {
+    const MARGIN: u64 = 64 << 20;
+    let mut cells: BTreeMap<u64, u64> = BTreeMap::new();
+    for b in all {
+        for (cell, runs) in &b.runs {
+            for (path, _) in runs {
+                let size = std::fs::metadata(path)
+                    .map_err(at("measuring", path))?
+                    .len();
+                let c = cells.entry(*cell).or_insert(0);
+                *c = c.saturating_add(size);
+            }
+        }
+    }
+    let largest = cells.values().copied().max().unwrap_or(0);
+    let total = cells.values().copied().fold(0u64, u64::saturating_add);
+    let mut needs: Vec<(PathBuf, u64)> =
+        vec![(config.spill.clone(), largest.saturating_add(MARGIN))];
+    if let Some(log) = log {
+        let parent = log
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        let same = disk.device(parent).map_err(at("inspecting", parent))?
+            == disk
+                .device(&config.spill)
+                .map_err(at("inspecting", &config.spill))?;
+        if !same {
+            needs.push((parent.to_owned(), total.saturating_add(MARGIN)));
+        }
+    }
+    for (path, needed) in needs {
+        let free = disk.free(&path).map_err(at("inspecting", &path))?;
+        if free < needed {
+            return Err(EngineError::Space { path, needed, free });
+        }
+    }
+    Ok(())
+}
+
 /// Each cell in turn: its held records sorted — on the threads, cell by cell —
-/// and merged with its runs into the log.
+/// and merged with its runs into the log; more runs than `fan_in` merged in a
+/// cascade first; a cell's runs deleted as soon as it is merged.
 fn merge<W: Write>(
     header: Header,
     all: &mut [Buckets],
     threads: usize,
+    fan_in: usize,
+    dir: &std::path::Path,
     out: W,
 ) -> Result<(W, Trailer), EngineError> {
     let mut writer = Writer::new(out, header)?;
@@ -351,51 +535,107 @@ fn merge<W: Write>(
                 });
             }
         });
+        let runs: Vec<(PathBuf, u64)> = all
+            .iter_mut()
+            .filter_map(|b| b.runs.remove(&cell))
+            .flatten()
+            .collect();
+        let runs = cascade(cell, runs, fan_in, dir)?;
         let mut sources: Vec<Source> = held
             .into_iter()
             .map(|v| Source::Held(v.into_iter()))
             .collect();
-        for b in all.iter() {
-            for (path, count) in b.runs.get(&cell).into_iter().flatten() {
-                let file = File::open(path).map_err(at("merging", path))?;
-                sources.push(Source::Run(Counted {
-                    reader: BufReader::new(file),
-                    left: *count,
-                    path: path.clone(),
-                }));
-            }
+        for (path, count) in &runs {
+            sources.push(Source::Run(open_run(path, *count)?));
         }
-        let mut heap = BinaryHeap::new();
-        let mut current: Vec<Option<Entry>> = Vec::with_capacity(sources.len());
-        for (i, s) in sources.iter_mut().enumerate() {
+        kway(sources, |e| Ok(writer.line(&e.line)?))?;
+        for (path, _) in &runs {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    Ok(writer.finish()?)
+}
+
+/// Merges groups of `fan_in` runs into one until no more than `fan_in` are
+/// left; each group's runs are deleted as soon as it is merged. Equal keys fail
+/// here as in the final merge.
+fn cascade(
+    cell: u64,
+    mut runs: Vec<(PathBuf, u64)>,
+    fan_in: usize,
+    dir: &std::path::Path,
+) -> Result<Vec<(PathBuf, u64)>, EngineError> {
+    let mut level = 0u32;
+    while runs.len() > fan_in {
+        let mut next = Vec::with_capacity(runs.len().div_ceil(fan_in));
+        for (g, group) in runs.chunks(fan_in).enumerate() {
+            if let [single] = group {
+                next.push(single.clone());
+                continue;
+            }
+            let path = dir.join(format!("c{cell}-l{level}-g{g}.run"));
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(at("merging into", &path))?;
+            let mut out = RunOut::new(file, &path)?;
+            let mut count = 0u64;
+            let sources = group
+                .iter()
+                .map(|(p, c)| open_run(p, *c).map(Source::Run))
+                .collect::<Result<Vec<_>, _>>()?;
+            kway(sources, |e| {
+                count = count.saturating_add(1);
+                out.write(&e)
+            })?;
+            out.finish()?;
+            for (p, _) in group {
+                let _ = std::fs::remove_file(p);
+            }
+            next.push((path, count));
+        }
+        runs = next;
+        level = level.saturating_add(1);
+    }
+    Ok(runs)
+}
+
+/// A k-way merge of `sources` by key into `emit`; two equal keys fail.
+fn kway(
+    mut sources: Vec<Source>,
+    mut emit: impl FnMut(Entry) -> Result<(), EngineError>,
+) -> Result<(), EngineError> {
+    let mut heap = BinaryHeap::new();
+    let mut current: Vec<Option<Entry>> = Vec::with_capacity(sources.len());
+    for (i, s) in sources.iter_mut().enumerate() {
+        let e = s.next()?;
+        if let Some(e) = &e {
+            heap.push(Reverse((e.key.clone(), i)));
+        }
+        current.push(e);
+    }
+    let mut last: Option<Vec<u8>> = None;
+    while let Some(Reverse((key, i))) = heap.pop() {
+        let Some(entry) = current.get_mut(i).and_then(Option::take) else {
+            continue;
+        };
+        if last.as_ref() == Some(&key) {
+            return Err(equal(&entry));
+        }
+        last = Some(key);
+        if let Some(s) = sources.get_mut(i) {
             let e = s.next()?;
             if let Some(e) = &e {
                 heap.push(Reverse((e.key.clone(), i)));
             }
-            current.push(e);
-        }
-        let mut last: Option<Vec<u8>> = None;
-        while let Some(Reverse((key, i))) = heap.pop() {
-            let Some(entry) = current.get_mut(i).and_then(Option::take) else {
-                continue;
-            };
-            if last.as_ref() == Some(&key) {
-                return Err(equal(&entry));
-            }
-            writer.line(&entry.line)?;
-            last = Some(key);
-            if let Some(s) = sources.get_mut(i) {
-                let e = s.next()?;
-                if let Some(e) = &e {
-                    heap.push(Reverse((e.key.clone(), i)));
-                }
-                if let Some(slot) = current.get_mut(i) {
-                    *slot = e;
-                }
+            if let Some(slot) = current.get_mut(i) {
+                *slot = e;
             }
         }
+        emit(entry)?;
     }
-    Ok(writer.finish()?)
+    Ok(())
 }
 
 /// The error for a record whose key another had: its time and step, read back

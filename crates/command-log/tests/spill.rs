@@ -21,6 +21,8 @@ fn config(spill: &Path, threads: usize, budget: usize) -> Config {
         cell: 1_000,
         cells: 4,
         spill: spill.to_owned(),
+        fan_in: 0,
+        memory_spill: true,
     }
 }
 
@@ -162,6 +164,8 @@ fn a_cut_id_run_fails_the_validation() {
             ids_in_memory: 1,
             spill: dir.path().to_owned(),
             kept: 10,
+            fan_in: 0,
+            memory_spill: true,
         };
         let result = validate(Reader::new(Cursor::new(&bytes)).unwrap(), &host, &limits);
         assert!(
@@ -208,6 +212,8 @@ fn a_failure_leaves_nothing_behind() {
         ids_in_memory: 1,
         spill: dir.path().to_owned(),
         kept: 10,
+        fan_in: 0,
+        memory_spill: true,
     };
     let result = validate(Reader::new(Cursor::new(&cut)).unwrap(), &NoHost, &limits);
     assert!(result.is_err());

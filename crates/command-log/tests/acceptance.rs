@@ -14,7 +14,7 @@ use std::io::Cursor;
 use ascetic_ddd_command_log::Reader;
 use ascetic_ddd_command_log::engine::{Config, EngineError, Unit, generate};
 use ascetic_ddd_command_log::record::{Action, Header, On, Record, StepId};
-use ascetic_ddd_command_log::validate::{Limits, NoHost, validate};
+use ascetic_ddd_command_log::validate::{NoHost, validate};
 use ascetic_ddd_faker::apportion::apportion;
 use ascetic_ddd_faker::law::{Categorical, Law, Poisson};
 use ascetic_ddd_faker::testing::chi_square;
@@ -167,12 +167,14 @@ fn run(plan: Day, threads: usize) -> Vec<Record> {
         cell: HOUR,
         cells: 48,
         spill: dir.path().to_owned(),
+        fan_in: 0,
+        memory_spill: true,
     };
     let (bytes, trailer) = generate(header_for_a_day(), &units, &config, Vec::new()).unwrap();
     let report = validate(
         Reader::new(Cursor::new(&bytes)).unwrap(),
         &NoHost,
-        &Limits::new(dir.path()),
+        &limits_in(dir.path()),
     )
     .unwrap();
     assert!(

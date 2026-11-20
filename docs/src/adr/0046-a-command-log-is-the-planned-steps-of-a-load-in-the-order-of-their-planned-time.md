@@ -387,8 +387,9 @@ makes the 4.50 GB log of M7 162 MB, level 3 176 MB; SHA-256 runs at 79 MB/s here
   cut record both read as `UnexpectedEof`, which both merges took for the end — a run cut at a record boundary dropped
   its steps and the trailer still matched).
 - **Bounded merges.** A cell's runs, and the validator's id runs, merge in a cascade of a bounded fan-in, derived from
-  the soft file limit (raised to the hard one at start); equal keys across groups still fail. A cell's runs are deleted
-  as soon as it is merged.
+  the soft open-file limit (a quarter of it, between 2 and 256); equal keys across groups still fail. The library does
+  not raise a process-wide limit behind its caller's back: a host that wants a wider merge raises it. A cell's runs are
+  deleted as soon as it is merged, a cascade group's as soon as the group is.
 - **Failure halfway.** Each pass owns a fresh subdirectory of the spill directory, locked; a guard removes it on every
   exit, unwinding included, and a pass sweeps unlocked siblings left by a kill and reports what it freed. A unit's
   refusal or panic stops the other threads before their next unit. After the emit phase, the free space of each
@@ -403,6 +404,9 @@ makes the 4.50 GB log of M7 162 MB, level 3 176 MB; SHA-256 runs at 79 MB/s here
   identities differ, before releasing anything if the step count or the multiset digest differ, and stops before
   releasing chunk `i` if `Pᵢ` differs. A persisted replay goes through the same verified reader. The dry pass is once a
   plan revision — the bytes do not depend on the namespace.
+- **Considered, not assessed:** `structured-zstd` (pure Rust, 0.4, claiming every level), found while building; libzstd
+  is the reference implementation a host's operators already run, and a young encoder would be a second thing to
+  trust.
 - **Not now:** passes over planned time (`Unit::emit(window)`) — their trigger is a compressed spill that does not fit,
   and a window invites a unit to prune and lose a step; a `Sink` beside `W: Write` — a pipe and the reader serve; a
   hashing thread — M9 decides.
@@ -655,6 +659,25 @@ makes the 4.50 GB log of M7 162 MB, level 3 176 MB; SHA-256 runs at 79 MB/s here
   unit, and at a record; the pass directory kept on exit; orphans never swept. A write failing partway is covered by
   the directory's guard; its own executor (a child under `RLIMIT_FSIZE`) comes with the free-space check.
 
+**C6, second part — compression and bounded merges** (2026-11-21, this laptop):
+- **Built:** `Compression { None, Zstd { level } }` for a log file (level 1 by default), `write_file` and
+  `engine::generate_file` writing whole or not at all, the zstd frame finished and its error kept; `open` and
+  `open_file` telling a compressed log by its magic, decoding concatenated frames, refusing anything else; spills as
+  zstd streams at level 1, read back held to their counts; a cascade of bounded fan-in for the engine's runs and the
+  validator's id runs, each group's runs deleted once merged, a cell's once it is; a `Disk` port (free space, a
+  filesystem's identity, memory filesystems, the open-file limit) and its `rustix` implementation; the room check after
+  the emit phase, before the first line; a spill directory on tmpfs refused unless allowed.
+- **Executors** (`tests/zstd.rs`, `tests/fd.rs`, `make vectors`): compressed and plain logs give the same records and
+  trailer, and the zstd CLI decodes the crate's compressed golden log to the plain one; a two-frame golden made by the
+  CLI reads as the golden log; a log is told by its bytes, garbage refused; a compressed log cut at every byte refused;
+  the bytes equal across fan-in 2, 3 and derived, a step twice across groups refused; the first cell's runs gone while
+  the second is written; short of one byte the generation is refused before a line is written, and the space needed
+  counts the spills; a spill in memory refused for the engine and the validator; three thousand runs merged, and three
+  thousand id runs, under a soft limit of 64 open files. Mutations, each alone, red: the log's zstd frame not finished;
+  a compressed log read as plain; single-frame decoding; the cascade dropping its last group; equal keys passing; a
+  cell's runs kept to the end; the room check without the spills; a spill in memory let through; the engine's fan-in
+  unbounded; the validator's fan-in unbounded.
+
 Owed:
 - **M9** (C6): the host scenario's bytes a step and its ratio at levels 1 and 3 in process; sha2's MB/s, soft and `asm`;
   the reader's and the validator's steps a second; the soft file limit; peak RSS, memory pressure, open files, disk by
@@ -734,3 +757,4 @@ condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
   early checks and identities, the free-space check with the validator's runs, tmpfs, the validator's bounded merge and
   its own short-read defect, progress and errors with their phase.
 - 2026-11-21: Slice C6, first part (failure halfway), built (§ Measured).
+- 2026-11-21: Slice C6, second part (compression, bounded merges, room), built (§ Measured).

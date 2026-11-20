@@ -4,7 +4,9 @@
 use std::io::Cursor;
 
 use ascetic_ddd_command_log::record::{Line, Trailer};
-use ascetic_ddd_command_log::{FORMAT, LogError, Reader, Writer, encode, sample, write_file};
+use ascetic_ddd_command_log::{
+    Compression, FORMAT, LogError, Reader, Writer, encode, sample, write_file,
+};
 use sha2::{Digest, Sha256};
 
 const GOLDEN: &[u8] = include_bytes!("../golden/c1.jsonl");
@@ -170,7 +172,13 @@ fn the_trailer_is_checked() {
 fn a_file_appears_only_when_complete() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("run.jsonl");
-    let trailer = write_file(&path, sample::header(), sample::records()).unwrap();
+    let trailer = write_file(
+        &path,
+        sample::header(),
+        sample::records(),
+        Compression::None,
+    )
+    .unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), GOLDEN);
     assert_eq!(trailer.records, sample::records().len() as u64);
     assert!(!dir.path().join("run.jsonl.partial").exists());
@@ -179,7 +187,7 @@ fn a_file_appears_only_when_complete() {
     wrong.format += 1;
     let failed = dir.path().join("failed.jsonl");
     assert!(matches!(
-        write_file(&failed, wrong, sample::records()),
+        write_file(&failed, wrong, sample::records(), Compression::None),
         Err(LogError::Format(_))
     ));
     assert!(!failed.exists());

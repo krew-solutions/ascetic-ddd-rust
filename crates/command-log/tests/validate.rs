@@ -624,6 +624,8 @@ fn ids_spill_past_their_budget_only() {
             ids_in_memory: budget,
             spill: dir.path().to_owned(),
             kept: 10,
+            fan_in: 0,
+            memory_spill: true,
         };
         let reader =
             ascetic_ddd_command_log::Reader::new(std::io::Cursor::new(bytes(header(), &records)))
@@ -650,6 +652,8 @@ fn a_report_keeps_what_it_may_and_counts_the_rest() {
         ids_in_memory: 100,
         spill: dir.path().to_owned(),
         kept: 2,
+        fan_in: 0,
+        memory_spill: true,
     };
     let reader =
         ascetic_ddd_command_log::Reader::new(std::io::Cursor::new(bytes(header(), &records)))
@@ -672,12 +676,9 @@ fn a_file_is_validated_as_its_bytes() {
     let records = [step(a.clone(), 10), step(a, 20)];
     std::fs::write(&path, bytes(header(), &records)).unwrap();
     let spill = tempfile::tempdir().unwrap();
-    let report = ascetic_ddd_command_log::validate::validate_file(
-        &path,
-        &NoHost,
-        &ascetic_ddd_command_log::validate::Limits::new(spill.path()),
-    )
-    .unwrap();
+    let report =
+        ascetic_ddd_command_log::validate::validate_file(&path, &NoHost, &limits_in(spill.path()))
+            .unwrap();
     assert_eq!(rules(&report), vec![Rule::Duplicate]);
     assert_eq!(report.records, 2);
 }

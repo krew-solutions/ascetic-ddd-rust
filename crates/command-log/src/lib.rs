@@ -8,6 +8,7 @@
 #![deny(clippy::arithmetic_side_effects)]
 #![warn(missing_docs)]
 
+pub mod disk;
 pub mod engine;
 pub mod log;
 pub mod rate;
@@ -19,5 +20,8 @@ pub mod template;
 pub mod validate;
 mod wire;
 
-pub use crate::log::{FORMAT, FORMAT_VERSION, LogError, Reader, Writer, encode, write_file};
+pub use crate::log::{
+    Compression, FORMAT, FORMAT_VERSION, LogError, Reader, Writer, encode, open, open_file,
+    write_file,
+};
 pub use crate::record::Line;

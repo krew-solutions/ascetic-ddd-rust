@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+use crate::disk::{Disk, LocalDisk};
 use crate::log::{LogError, Reader};
 use crate::rate::{self, Curve, Lower};
 use crate::record::{
@@ -203,15 +204,23 @@ pub struct Limits {
     pub spill: PathBuf,
     /// Violations kept in the report.
     pub kept: usize,
+    /// The most id runs a merge holds open; 0 derives it from the open-file
+    /// limit ([`crate::disk::fan_in`]).
+    pub fan_in: usize,
+    /// Whether `spill` may be memory (tmpfs): refused unless allowed.
+    pub memory_spill: bool,
 }
 
 impl Limits {
-    /// Ten million ids in memory (about 240 MB), spills under `spill`.
+    /// Ten million ids in memory (about 240 MB), spills under `spill`, a
+    /// merge as wide as the open-file limit allows, no spill in memory.
     pub fn new(spill: impl Into<PathBuf>) -> Limits {
         Limits {
             ids_in_memory: 10_000_000,
             spill: spill.into(),
             kept: 10_000,
+            fan_in: 0,
+            memory_spill: false,
         }
     }
 }
@@ -336,6 +345,7 @@ struct Ids {
     buffer: Vec<([u8; 16], u64)>,
     /// Each run and its record count.
     runs: Vec<(PathBuf, u64)>,
+    fan_in: usize,
 }
 
 const ENTRY: usize = 24;
@@ -389,7 +399,12 @@ impl Ids {
         if !self.buffer.is_empty() {
             self.spill()?;
         }
-        let result = merge(&self.runs, &mut found);
+        let result =
+            cascade(&self.dir, std::mem::take(&mut self.runs), self.fan_in).and_then(|runs| {
+                let found = merge(&runs, &mut found, None);
+                self.runs = runs;
+                found
+            });
         for (run, _) in &self.runs {
             let _ = fs::remove_file(run);
         }
@@ -415,7 +430,61 @@ fn read_entry<R: Read>(run: &mut Counted<R>) -> Result<Option<([u8; 16], u64)>, 
 
 /// A k-way merge of sorted runs: a line whose digest equals the one before it
 /// in the merged order is a duplicate.
-fn merge(runs: &[(PathBuf, u64)], found: &mut Vec<u64>) -> Result<(), LogError> {
+/// Merges groups of `fan_in` id runs into one until no more than `fan_in` are
+/// left, each group's runs deleted once merged; duplicates are left for the
+/// final merge, where every equal digest meets its neighbours.
+fn cascade(
+    dir: &std::path::Path,
+    mut runs: Vec<(PathBuf, u64)>,
+    fan_in: usize,
+) -> Result<Vec<(PathBuf, u64)>, LogError> {
+    let mut level = 0u32;
+    while runs.len() > fan_in {
+        let mut next = Vec::with_capacity(runs.len().div_ceil(fan_in));
+        for (g, group) in runs.chunks(fan_in).enumerate() {
+            if let [single] = group {
+                next.push(single.clone());
+                continue;
+            }
+            let path = dir.join(format!("ids-l{level}-g{g}.run"));
+            let mut out = BufWriter::new(
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)?,
+            );
+            let mut count = 0u64;
+            merge(
+                group,
+                &mut Vec::new(),
+                Some(&mut |(d, line): ([u8; 16], u64)| {
+                    count = count.saturating_add(1);
+                    out.write_all(&d)?;
+                    out.write_all(&line.to_le_bytes())
+                }),
+            )?;
+            out.flush()?;
+            for (p, _) in group {
+                let _ = fs::remove_file(p);
+            }
+            next.push((path, count));
+        }
+        runs = next;
+        level = level.saturating_add(1);
+    }
+    Ok(runs)
+}
+
+/// Where an intermediate merge writes the ids it merges.
+type IdSink<'a> = &'a mut dyn FnMut(([u8; 16], u64)) -> std::io::Result<()>;
+
+/// A k-way merge of sorted id runs: into `out` when given, else a line whose
+/// digest equals the one before it in the merged order is a duplicate.
+fn merge(
+    runs: &[(PathBuf, u64)],
+    found: &mut Vec<u64>,
+    mut out: Option<IdSink<'_>>,
+) -> Result<(), LogError> {
     let mut readers: Vec<Counted<BufReader<File>>> = runs
         .iter()
         .map(|(p, left)| {
@@ -434,10 +503,15 @@ fn merge(runs: &[(PathBuf, u64)], found: &mut Vec<u64>) -> Result<(), LogError> 
     }
     let mut last: Option<[u8; 16]> = None;
     while let Some(Reverse(((d, line), i))) = heap.pop() {
-        if last == Some(d) {
-            found.push(line);
+        match out.as_mut() {
+            Some(out) => out((d, line))?,
+            None => {
+                if last == Some(d) {
+                    found.push(line);
+                }
+                last = Some(d);
+            }
         }
-        last = Some(d);
         if let Some(r) = readers.get_mut(i)
             && let Some(e) = read_entry(r)?
         {
@@ -1141,6 +1215,7 @@ impl<H: Host> Pass<'_, H> {
                 dir: PathBuf::new(),
                 buffer: Vec::new(),
                 runs: Vec::new(),
+                fan_in: 2,
             },
         );
         for line in ids.duplicates()? {
@@ -1174,6 +1249,27 @@ pub fn validate<R: BufRead>(
     host: &impl Host,
     limits: &Limits,
 ) -> Result<Report, LogError> {
+    validate_on(reader, host, limits, &LocalDisk)
+}
+
+/// [`validate`] on a given machine: its filesystems and open-file limit.
+pub fn validate_on<R: BufRead>(
+    reader: Reader<R>,
+    host: &impl Host,
+    limits: &Limits,
+    disk: &dyn Disk,
+) -> Result<Report, LogError> {
+    fs::create_dir_all(&limits.spill)?;
+    if !limits.memory_spill && disk.in_memory(&limits.spill)? {
+        return Err(LogError::Io(std::io::Error::other(format!(
+            "{} is in memory: a spill there is refused unless allowed",
+            limits.spill.display()
+        ))));
+    }
+    let fan_in = match limits.fan_in {
+        0 => crate::disk::fan_in(disk.open_files()?),
+        n => n.max(2),
+    };
     // The pass's own directory for its id runs, removed on every exit below.
     let dir = SpillDir::new(&limits.spill)?;
     let mut pass = Pass {
@@ -1193,6 +1289,7 @@ pub fn validate<R: BufRead>(
             dir: dir.path().to_owned(),
             buffer: Vec::new(),
             runs: Vec::new(),
+            fan_in,
         },
         deviations: BTreeMap::new(),
         clamp: 0,
@@ -1213,8 +1310,7 @@ pub fn validate<R: BufRead>(
 
 /// Validates the log in `path`.
 pub fn validate_file(path: &Path, host: &impl Host, limits: &Limits) -> Result<Report, LogError> {
-    let reader = Reader::new(BufReader::new(File::open(path)?))?;
-    validate(reader, host, limits)
+    validate(crate::log::open_file(path)?, host, limits)
 }
 
 #[cfg(test)]

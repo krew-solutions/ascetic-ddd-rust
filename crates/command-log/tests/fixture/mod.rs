@@ -232,6 +232,8 @@ pub fn run_with(
         ids_in_memory,
         spill: dir.path().to_owned(),
         kept: 1_000,
+        fan_in: 0,
+        memory_spill: true,
     };
     let reader = Reader::new(Cursor::new(bytes(header, records))).unwrap();
     let report = validate(reader, host, &limits).unwrap();
@@ -343,4 +345,13 @@ pub fn runs(dir: &std::path::Path) -> usize {
         .flat_map(|d| std::fs::read_dir(d).unwrap().map(|e| e.unwrap().path()))
         .filter(|p| p.extension().is_some_and(|x| x == "run"))
         .count()
+}
+
+/// Limits for a test: the defaults, a spill in memory allowed (the tests' temp
+/// directories are on tmpfs).
+pub fn limits_in(spill: &std::path::Path) -> Limits {
+    Limits {
+        memory_spill: true,
+        ..Limits::new(spill)
+    }
 }

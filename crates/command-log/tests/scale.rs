@@ -75,6 +75,8 @@ fn m7_ten_million_steps() {
         cell: DAY / 64,
         cells: 128,
         spill,
+        fan_in: 0,
+        memory_spill: true,
     };
     let path = base.join("log.jsonl");
     let out = BufWriter::with_capacity(1 << 20, File::create(&path).unwrap());

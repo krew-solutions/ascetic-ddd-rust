@@ -85,6 +85,8 @@ fn run(threads: usize, budget: usize, cells: u64, reversed: bool) -> Result<Vec<
         cell: HORIZON / 32,
         cells,
         spill: dir.path().to_owned(),
+        fan_in: 0,
+        memory_spill: true,
     };
     let out = generate(header(), &units, &config, Vec::new()).map(|(bytes, _)| bytes);
     assert_eq!(leftover(dir.path()).len(), 0, "spills removed");
@@ -125,12 +127,7 @@ fn the_bytes_are_the_records_sorted() {
 fn run_bytes(bytes: &[u8]) -> ascetic_ddd_command_log::validate::Report {
     let dir = tempfile::tempdir().unwrap();
     let reader = ascetic_ddd_command_log::Reader::new(std::io::Cursor::new(bytes)).unwrap();
-    ascetic_ddd_command_log::validate::validate(
-        reader,
-        &NoHost,
-        &ascetic_ddd_command_log::validate::Limits::new(dir.path()),
-    )
-    .unwrap()
+    ascetic_ddd_command_log::validate::validate(reader, &NoHost, &limits_in(dir.path())).unwrap()
 }
 
 struct Twice;
@@ -169,6 +166,8 @@ fn equal_keys_and_refusals_fail_the_generation() {
             cell: 1,
             cells: 4,
             spill: dir.path().to_owned(),
+            fan_in: 0,
+            memory_spill: true,
         };
         let units: [&dyn Unit; 2] = [&Twice, &Twice];
         match generate(header(), &units, &config, Vec::new()) {
@@ -224,6 +223,8 @@ fn a_thread_spills_past_its_budget_only() {
             cell: 10,
             cells: 8,
             spill: dir.path().to_owned(),
+            fan_in: 0,
+            memory_spill: true,
         };
         generate(header(), &[&unit], &config, Vec::new()).unwrap();
         let most = unit.most.load(std::sync::atomic::Ordering::Relaxed);
