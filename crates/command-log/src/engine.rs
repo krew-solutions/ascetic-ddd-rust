@@ -206,7 +206,10 @@ struct Entry {
 }
 
 /// An I/O error of `phase` at `path`.
-fn at(phase: &'static str, path: &std::path::Path) -> impl FnOnce(std::io::Error) -> EngineError {
+pub(crate) fn at(
+    phase: &'static str,
+    path: &std::path::Path,
+) -> impl FnOnce(std::io::Error) -> EngineError {
     let path = path.to_owned();
     move |error| EngineError::Io { phase, path, error }
 }

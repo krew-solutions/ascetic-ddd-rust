@@ -750,10 +750,40 @@ makes the 4.50 GB log of M7 162 MB, level 3 176 MB; SHA-256 runs at 79 MB/s here
   committed; the generation's error before the reader's (green until the one-block executor); an unbounded pipe; a
   divergence read as an I/O error; a partial log kept.
 
+- **M9** (`tests/scale.rs` module `m9`, release, inside `systemd-run --user --scope -p MemoryMax=6G` under
+  `/usr/bin/time -v`, beside a sampler of resident memory, open files, disk used and memory pressure each second; this
+  laptop: i3-4005U, two cores and four threads, no SHA extensions, 11 GiB, one filesystem). M7's scenario — devices
+  managed once and telling three facts an hour apart on a gapless stream — with a header window of two hours; four
+  threads, 64 MiB budgets, 64 cells a day, the log and the spills at zstd level 1.
+
+| Path | Steps | Emit | Merge | Done | Read | Validated | Peak RSS | Open files | Peak disk |
+|---|---|---|---|---|---|---|---|---|---|
+| persisted | 10⁷ | 28 s | 74 s | 103 s, a 162.5 MB log | 132 s, 75.7·10³ steps/s | 305 s, 32.8·10³ steps/s | 1.97 GB | 77 | 0.29 GB |
+| dry | 10⁷ | 28 s | 308 s, paced by the validator | 336 s | — | inside | 2.23 GB | 77 | 0.29 GB |
+| live | 10⁷ | 28 s | 66 s, into a sink | 93 s | — | — | as the dry run | 77 | 0.29 GB |
+| persisted | 10⁸ | 289 s | 1,186 s | 1,475 s, a 1.62 GB log | 1,333 s, 75.0·10³ steps/s | not run | 644 MB | 262 | 2.94 GB |
+
+  - The compressed log is 27.7 times smaller than M7's plain 4.50 GB at 10⁷ (a synthetic scenario, far more repetitive
+    than a host's); emission is linear (28 s → 289 s); the merge per line slows from 135·10³ to 84·10³ lines/s, about
+    700 runs a cell at 10⁸ passing the fan-in of 256 through one cascade level.
+  - SHA-256 in process: `sha2` 95 MB/s soft, 110 MB/s with `asm` (+16 %): not taken. At 10⁷ the digest is about 47 s of
+    the merge's 74 s (4.5 GB at 95 MB/s), so the hashing thread decision 15 left to M9 is the larger lever; owed.
+  - The soft open-file limit here is 524,288; the fan-in clamps to 256.
+  - **The validator does not fit at 10⁸.** Its resident memory grows through the pass, linearly as sampled, to 1.97 GB
+    at 10⁷: state kept for every stream ever seen, never evicted, and the window, which grows with the planned rate
+    times W. Ten times that is past this laptop, so validation at 10⁸ (persisted, dry and live) was not run; decision 16
+    is owed under the gate.
+  - The first attempt found two defects, both fixed before the numbers above. The harness kept the fixture's window of
+    1 ms, so the validator rightly refused facts awaiting steps an hour back (`edge`). The dry run measured the
+    validator's spill directory before the validator, which starts only with the merge's first line, had created it
+    (ENOENT): the dry run now creates it first (executor `a_dry_run_claims_the_validator_s_directory_first`, mutation —
+    the directory not created first — red).
+
 Owed:
-- **M9** (C6): the host scenario's bytes a step and its ratio at levels 1 and 3 in process; sha2's MB/s, soft and `asm`;
-  the reader's and the validator's steps a second; the soft file limit; peak RSS, memory pressure, open files, disk by
-  filesystem and wall time by phase at 10⁸ on both paths, inside `systemd-run --user -p MemoryMax=…`; then 10⁹ persisted.
+- **M9's rest** (C6): the host scenario's bytes a step and its ratio at levels 1 and 3 — the host has no scenario yet;
+  validation at 10⁸ on both paths and 10⁹ persisted, after decision 16.
+- **Decision 16** (M9): the validator's memory bounded independently of the plan's subjects and steps, with the same
+  verdicts; under the gate (a blind solver, a discriminator, roles).
 - **10⁹ steps** (M7): a log of 450 B a step and a peak of twice it do not fit a laptop. The owner's direction
   (2026-11-20): the persisted log is compressed with zstd, its digest over the canonical lines, not the compressed
   bytes (M3); and, as an alternative, a generation streamed straight into the run with no log (decision 1 allows it;
@@ -835,3 +865,5 @@ condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
   part missed, and the validator's runs), built (§ Measured).
 - 2026-11-21: Slice C6, fifth part (one verified reader for a live run and a persisted replay; the third part's writer
   check reworked into it), built (§ Measured).
+- 2026-11-21: M9 measured at 10⁷ on both paths and at 10⁸ persisted without validation (§ Measured); the dry run's
+  missing validator directory fixed; decision 16 (the validator's memory) owed.

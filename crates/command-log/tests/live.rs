@@ -604,3 +604,27 @@ fn a_divergence_outranks_the_generation_it_stops() {
             )
     );
 }
+
+/// A dry run whose validator's directory does not exist yet creates it before
+/// the space check measures it.
+#[test]
+fn a_dry_run_claims_the_validator_s_directory_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = Devices::new(3);
+    let units: [&dyn Unit; 1] = [&plan];
+    let path = dir.path().join("plan.commitment");
+    let limits = limits_in(&dir.path().join("ids").join("deeper"));
+    let report = dry(
+        header(),
+        &units,
+        &config(dir.path()),
+        &NoHost,
+        &limits,
+        "build-1",
+        CHUNK,
+        &path,
+    )
+    .unwrap();
+    assert!(report.violations.is_empty());
+    assert!(path.exists());
+}

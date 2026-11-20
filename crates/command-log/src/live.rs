@@ -556,6 +556,12 @@ pub fn dry_on(
     commitment: &Path,
     disk: &dyn Disk,
 ) -> Result<Report, EngineError> {
+    // The validator's directory exists before the space check measures it:
+    // the validator itself starts only with the merge's first line.
+    std::fs::create_dir_all(&limits.spill).map_err(crate::engine::at(
+        "claiming a spill directory in",
+        &limits.spill,
+    ))?;
     let fan_in = match limits.fan_in {
         0 => crate::disk::fan_in(disk.open_files().map_err(LogError::Io)?),
         n => n.max(2),
