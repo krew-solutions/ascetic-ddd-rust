@@ -133,8 +133,14 @@ impl<W: Write> Writer<W> {
     /// Appends a step.
     pub fn step(&mut self, record: Record) -> Result<(), LogError> {
         let bytes = encode(&Line::Step(Box::new(record)))?;
-        self.out.write_all(&bytes)?;
-        self.digest.update(&bytes);
+        self.line(&bytes)
+    }
+
+    /// Appends a step already encoded by [`encode`]: the engine encodes a
+    /// record once, before it is bucketed.
+    pub(crate) fn line(&mut self, bytes: &[u8]) -> Result<(), LogError> {
+        self.out.write_all(bytes)?;
+        self.digest.update(bytes);
         self.records = self.records.saturating_add(1);
         Ok(())
     }

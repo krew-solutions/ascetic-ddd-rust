@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-20); slices C1 to C3 built. Stage 2 of three toward the host's fitness functions (ADR-0045 § Status): the Command Log —
+Proposed (2026-11-20); slices C1 to C4 built. Stage 2 of three toward the host's fitness functions (ADR-0045 § Status): the Command Log —
 what a generation writes and a load run replays — its model, byte form, validator and generation engine. Stage 3,
 the scheduler that replays it, is a later ADR; § 12 states what it inherits.
 
@@ -277,6 +277,16 @@ a call site.
 - **Two seams**: a unit's returned records (host → engine, unordered) and the `Sink` (engine → destination, the
   canonical stream). ADR-0045 decision 11 stands; it named the destination.
 
+Settled in building C4:
+- **The order key** is `at` big-endian, then the step id in an encoding whose byte order is the step id's order —
+  strings and bytes with each 0 written as `0 255` and ended by `0 0`, integers big-endian. Sorting and merging
+  compare bytes; no line is parsed again.
+- **A thread's buckets** spill every cell they hold, each as a sorted run, when the thread holds more than its
+  budget; a record past the last cell goes to the last one. Each cell is merged in turn from the runs and what the
+  threads still hold, which the threads sort first.
+- **Two records with one `(at, StepId)` fail the generation** (decision 7): they would let the spill order choose the
+  bytes. A unit's refusal fails it too, and the spills are removed either way.
+
 ### 12. What stage 3 inherits
 
 The scheduler:
@@ -445,9 +455,48 @@ The scheduler:
   methods, whose bodies are the mutants. A second run over the survivors' descriptions: 18 mutants, 16 caught, the
   two defaults missed.
 
+**C4** (2026-11-20, this laptop):
+- **E1.** One byte form across threads {1, 2, 7} × budgets {unbounded, one byte — every record spills — and 2,000
+  bytes} × cell caps {1, 64} × the units forward and reversed: 72 generations of 1,564 steps, 70 of them sharing an
+  instant, each equal to the steps sorted in memory and written; the log validates. Mutations, each applied alone,
+  red: the key by `at` alone (the ties fail as equal keys); runs read in their order instead of merged; the last
+  held buffer dropped; a cell not monotone in time. Equal keys fail the generation spilled or not, and a unit's
+  refusal fails it; no spill is left.
+- **What E1 found.** Its first plan put no two steps at one instant, and a key by `at` alone passed: it now has a
+  thousand instants for 391 Devices. The same plan first planned a fact before the fact it awaits, and the
+  validator refused the log.
+- **E2.** A day: Tenants arriving, each with a Poisson(3) number of Devices managed over the next six hours, three
+  facts each an hour apart on the gapless `lifecycle` stream, a publication three hours after the Tenant and the
+  facts of applying it; a unit per Tenant, three threads, 1 MiB budgets, an hour a cell; every log validates. An open
+  total (a Poisson(1,500) number of Tenants, 1,515 drawn): by quarter-hour, χ² against the mean p = 0.56. A fixed
+  total of 1,200: exact, p = 0.67. The negative control, so many a quarter-hour by `apportion`: p = 1.0, refused.
+  Common random numbers: a day half as long moves every arrival and changes no Device's attributes; the negative
+  control, attributes from a key of the arrival time, changes them.
+- **M7** (`tests/scale.rs`, release, `/usr/bin/time -v`, a disk sampler each second): 2.5·10⁶ Devices, each managed
+  once and telling three facts, on four threads with 64 MiB budgets and 64 cells a day.
+
+| Steps | Log | A step | Wall | CPU | Peak RSS | Peak disk |
+|---|---|---|---|---|---|---|
+| 10⁷ | 4.50 GB | managed 282 B, fact 506 B | 4 min 55 s | 139 s user, 15 s system (51 % of 4) | 381 MB | 9.41 GB |
+
+  The run is bound by the disk: it writes the log and a spill of every record (9.4 GB, `time`'s outputs). Peak disk
+  is 2.09 times the log; memory is the threads' budgets and does not grow with the steps. Extrapolated, 10⁹ steps
+  are a 450 GB log, about 940 GB at the peak and some eight hours: they do not fit this laptop (369 GB free), and
+  10⁹ was not run. This is the measurement § Consequences named: it brings compression or chunks back (§ Owed).
+- **The mutation run** (cargo-mutants 27.1.0, `--file crates/command-log/src/engine.rs`): 27 mutants, 11 caught, 8
+  unviable, 8 missed. Killed by tests that were missing (7): the key's encoding of strings and bytes and its escape of
+  0 — E1's ties differ by index only — now a property over step ids with zeros and prefixes in their strings and
+  scopes; a thread that never spills, or spills below its budget — the bytes are the same either way — watched by a
+  unit that counts the spill directory as it emits; an error reading a run failing the generation; the errors'
+  texts. Equivalent (1): spilling at the budget rather than past it, one record's memory. A second run over the
+  survivors' descriptions: 8 mutants, 7 caught.
+
 Owed:
-- **M7:** bytes a record by kind, generation time and peak RSS at 10⁷ and 10⁹ records on the laptop, peak disk with
-  spills; the measurement that would bring compression or chunks back.
+- **10⁹ steps** (M7): a log of 450 B a step and a peak of twice it do not fit a laptop. To decide, under the gate,
+  before stage 3: compressing the stream (the digest over the canonical lines, not the compressed bytes — M3),
+  streaming a generation into the run without persisting it (decision 1 allows it; the digest is then the run's
+  record), or a smaller step (interned names, payloads by reference). The measurement to bring: bytes a step of the
+  host's real scenarios, and a compressed pass's throughput.
 - SHA-256 throughput on the laptop (no SHA-NI) for 3 GB.
 
 ## Owed
@@ -489,3 +538,6 @@ condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
   latest earlier step within W checked per edge, the order of a slot's writers and readers, ids against the profile,
   deviations as exemptions, uniqueness by digests with an external sort, the host's hooks — and decided alike by the
   validator and the independent reference.
+- 2026-11-20: Slice C4 built (§ Measured). Decision 11's open details settled: the byte order key, a thread's
+  buckets spilled whole past its budget, equal keys and refusals failing the generation. M7 measured at 10⁷; 10⁹ does
+  not fit the laptop, and the choice it forces is owed.

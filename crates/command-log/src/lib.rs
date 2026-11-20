@@ -8,6 +8,7 @@
 #![deny(clippy::arithmetic_side_effects)]
 #![warn(missing_docs)]
 
+pub mod engine;
 pub mod log;
 pub mod record;
 pub mod render;

@@ -5,7 +5,7 @@ a generation writes and a load run replays.
 
 **Status: in progress.** Done: the record model and the canonical byte form
 (slice C1); templates, the rendering of holes and the splice (C2); the
-validator (C3). To come: the generation engine, the offered-load rules.
+validator (C3); the generation engine (C4). To come: the offered-load rules.
 
 ## A log
 
@@ -42,3 +42,12 @@ deviations. What only the host knows — whether a span is its field, which
 dependencies its domain requires — it asks through `validate::Host`. An
 independent reference, `vectors/reference.py`, decides the same rules from their
 definitions and agrees with it on a corpus of random logs and their mutants.
+
+## The engine
+
+`engine::generate` runs units of identity — a population family, a scope, an
+index range — on any number of threads. Each unit emits its steps in any order;
+the engine buckets them by time cell, spills sorted runs past a byte budget,
+and merges each cell by `(at, StepId)` into the log. Neither the threads, the
+budget, the cells nor the units' order changes a byte; two steps with one
+`(at, StepId)` fail the generation.
