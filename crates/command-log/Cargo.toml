@@ -21,6 +21,9 @@ rustix = { version = "=1.1.6", default-features = false, features = ["std", "fs"
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
+# The order-independent digest of a generation's lines (ADR-0046 decision 15):
+# the same pinned SipHash as faker's keys.
+siphasher = "=1.0.3"
 # libzstd, bundled and built by cc (ADR-0046 decision 15): logs and spills.
 zstd = { version = "=0.14.4", default-features = false }
 

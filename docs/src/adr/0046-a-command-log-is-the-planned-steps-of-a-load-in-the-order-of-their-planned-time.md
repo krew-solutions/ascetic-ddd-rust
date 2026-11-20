@@ -678,6 +678,28 @@ makes the 4.50 GB log of M7 162 MB, level 3 176 MB; SHA-256 runs at 79 MB/s here
   cell's runs kept to the end; the room check without the spills; a spill in memory let through; the engine's fan-in
   unbounded; the validator's fan-in unbounded.
 
+**C6, third part — the live run** (2026-11-21, this laptop):
+- **Built:** `engine::generate_checked`, a check between the emit phase and the merge, seeing `Emitted` — the step count
+  and the sum modulo 2¹²⁸ of a 128-bit SipHash of each line, computed on the emit threads; `live::dry`, the plan
+  generated into a bounded pipe and validated as it comes, writing a `Commitment` (`FORMAT`, the validator's identity,
+  the host's fingerprint, `P₀`, the chunk size, the prefixes, the emitted count and digest, the trailer's digest) only
+  for a clean report, and reporting a failed generation as itself; `live::live`, refusing before it emits on another
+  format, validator, fingerprint or header, before it writes a line on another emission, and releasing each chunk only
+  once its prefix digest matches, the last held back if the trailer's does not. The validator's identity is its rules'
+  revision (`RULES_REVISION`, 2 since C5) and names.
+- **Executors** (`tests/live.rs`): a live run delivers the very log a persisted generation writes; `P₀` and every `Pᵢ`
+  equal the SHA-256 of the log's first `1 + i · chunk` lines; a stale header, format, validator or fingerprint refused
+  with no unit run and nothing written; another emission refused with nothing written; a forged `Pᵢ` delivers exactly
+  the chunks before `i`, a forged trailer digest every whole chunk and not the rest; a dirty report leaves no
+  commitment; a failing generation reported as its own refusal; 19 steps in chunks of four make four prefixes, the
+  trailer counting for none; the validator's identity pinned. Mutations, each alone, red: a chunk released before its
+  comparison; comparison at the end only; an off-by-one boundary; `P₀` checked late; the emitted check skipped; the
+  validator's error reported before the generation's; a commitment for a dirty report; the trailer hashed into the
+  chain.
+- **Owed of decision 15:** the progress observer; the verified reader for a persisted replay (stage 3 consumes it); an
+  executor for a stalled consumer (the pipe is bounded: 64 blocks of up to 1 MiB) and for a write failing partway
+  (`RLIMIT_FSIZE`); M9.
+
 Owed:
 - **M9** (C6): the host scenario's bytes a step and its ratio at levels 1 and 3 in process; sha2's MB/s, soft and `asm`;
   the reader's and the validator's steps a second; the soft file limit; peak RSS, memory pressure, open files, disk by
@@ -758,3 +780,4 @@ condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
   its own short-read defect, progress and errors with their phase.
 - 2026-11-21: Slice C6, first part (failure halfway), built (§ Measured).
 - 2026-11-21: Slice C6, second part (compression, bounded merges, room), built (§ Measured).
+- 2026-11-21: Slice C6, third part (the live run), built (§ Measured).

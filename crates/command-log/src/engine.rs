@@ -63,6 +63,12 @@ pub enum EngineError {
         /// The directory.
         path: PathBuf,
     },
+    /// A live run that is not its commitment's: what differs.
+    Diverged {
+        /// The format, the validator, the fingerprint, the header, what was
+        /// emitted, or a chunk.
+        what: String,
+    },
     /// Two records with one `(at, StepId)`.
     Equal {
         /// Their planned time.
@@ -90,6 +96,7 @@ impl fmt::Display for EngineError {
                 "{} is in memory: a spill there is refused unless allowed",
                 path.display()
             ),
+            EngineError::Diverged { what } => write!(f, "{what} differs from the commitment"),
             EngineError::Equal { at, step } => write!(f, "two records at {at} of {step:?}"),
         }
     }
@@ -175,6 +182,38 @@ struct Buckets {
     bytes: usize,
     runs: BTreeMap<u64, Vec<(PathBuf, u64)>>,
     spilled: usize,
+    /// The thread's share of [`Emitted`].
+    emitted: Emitted,
+}
+
+/// What a generation emitted, known before its merge: the step count and an
+/// order-independent digest of its step lines — the sum, modulo 2¹²⁸, of a
+/// 128-bit SipHash of each line. Equal for two generations of one multiset of
+/// lines whatever the threads; the merge writes that multiset in order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Emitted {
+    /// Steps emitted.
+    pub records: u64,
+    /// The lines' order-independent digest.
+    pub multiset: u128,
+}
+
+impl Emitted {
+    fn add(&mut self, line: &[u8]) {
+        use std::hash::Hasher;
+        let mut h = siphasher::sip128::SipHasher13::new_with_keys(0, 0);
+        h.write(line);
+        let hash = siphasher::sip128::Hasher128::finish128(&h).as_u128();
+        self.records = self.records.saturating_add(1);
+        self.multiset = self.multiset.wrapping_add(hash);
+    }
+
+    fn merge(self, other: Emitted) -> Emitted {
+        Emitted {
+            records: self.records.saturating_add(other.records),
+            multiset: self.multiset.wrapping_add(other.multiset),
+        }
+    }
 }
 
 impl Buckets {
@@ -326,7 +365,7 @@ pub fn generate_on<W: Write>(
     disk: &dyn Disk,
     out: W,
 ) -> Result<(W, Trailer), EngineError> {
-    pass(header, units, config, disk, out, None)
+    pass(header, units, config, disk, out, None, &|_| Ok(()))
 }
 
 /// Generates a log into the file `path`, whole or not at all: `path.partial`,
@@ -340,10 +379,24 @@ pub fn generate_file(
 ) -> Result<Trailer, EngineError> {
     let (partial, file) = Partial::create(path).map_err(at("creating", path))?;
     let out = FileOut::new(file, compression).map_err(at("creating", path))?;
-    let (out, trailer) = pass(header, units, config, &LocalDisk, out, Some(path))?;
+    let (out, trailer) = pass(header, units, config, &LocalDisk, out, Some(path), &|_| {
+        Ok(())
+    })?;
     let file = out.finish().map_err(at("finishing", path))?;
     partial.commit(file).map_err(at("finishing", path))?;
     Ok(trailer)
+}
+
+/// [`generate`] with a check between the emit phase and the merge: `check`
+/// sees what was emitted and may refuse before a line is written.
+pub fn generate_checked<W: Write>(
+    header: Header,
+    units: &[&dyn Unit],
+    config: &Config,
+    out: W,
+    check: &dyn Fn(Emitted) -> Result<(), EngineError>,
+) -> Result<(W, Trailer), EngineError> {
+    pass(header, units, config, &LocalDisk, out, None, check)
 }
 
 fn pass<W: Write>(
@@ -353,6 +406,7 @@ fn pass<W: Write>(
     disk: &dyn Disk,
     out: W,
     log: Option<&std::path::Path>,
+    check: &dyn Fn(Emitted) -> Result<(), EngineError>,
 ) -> Result<(W, Trailer), EngineError> {
     std::fs::create_dir_all(&config.spill)
         .map_err(at("claiming a spill directory in", &config.spill))?;
@@ -391,6 +445,7 @@ fn pass<W: Write>(
                     bytes: 0,
                     runs: BTreeMap::new(),
                     spilled: 0,
+                    emitted: Emitted::default(),
                 };
                 let result = (|| -> Result<(), EngineError> {
                     while !stop.load(Ordering::Relaxed) {
@@ -410,6 +465,7 @@ fn pass<W: Write>(
                                     let at_cell =
                                         record.at.checked_div(cell).unwrap_or(0).min(last);
                                     let line = encode(&Line::Step(Box::new(record)))?;
+                                    buckets.emitted.add(&line);
                                     buckets.push(at_cell, Entry { key, line }, config)
                                 })
                             }));
@@ -445,8 +501,14 @@ fn pass<W: Write>(
     let mut all = done.into_inner().unwrap_or_default();
     let result = match failed.into_inner().ok().flatten() {
         Some(e) => Err(e),
-        None => room(&all, config, disk, log)
-            .and_then(|()| merge(header, &mut all, threads, fan_in, dir.path(), out)),
+        None => {
+            let emitted = all
+                .iter()
+                .fold(Emitted::default(), |e, b| e.merge(b.emitted));
+            check(emitted)
+                .and_then(|()| room(&all, config, disk, log))
+                .and_then(|()| merge(header, &mut all, threads, fan_in, dir.path(), out))
+        }
     };
     drop(dir);
     result

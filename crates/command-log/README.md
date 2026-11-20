@@ -70,3 +70,12 @@ default): its lines, trailer and digest are the same, and `open` tells it by
 its bytes. The engine spills compressed runs into a directory of its own,
 removed on every exit; merges stay within the open-file limit; a merge that
 would not fit the disk, or a spill in memory, is refused before the first line.
+
+## A run with no log
+
+`live::dry` generates the plan into a bounded pipe, validates it as it comes,
+and writes a `Commitment` — the header's digest, a SHA-256 prefix digest a
+chunk, the emitted count and digest, the trailer's digest — only for a clean
+report. `live::live` generates the plan again and releases it chunk by chunk,
+each only once its prefix digest matches: a stale commitment or a different
+emission is refused before a line is written.
