@@ -170,6 +170,7 @@ fn run(plan: Day, threads: usize) -> Vec<Record> {
         fan_in: 0,
         memory_spill: true,
         progress: None,
+        pipe_blocks: 64,
     };
     let (bytes, trailer) = generate(header_for_a_day(), &units, &config, Vec::new()).unwrap();
     let report = validate(

@@ -63,6 +63,7 @@ version = "0.1.0"
 dependencies = [
  "ascetic-ddd-faker",
  "base64 0.22.1",
+ "libc",
  "proptest",
  "rustix",
  "serde",

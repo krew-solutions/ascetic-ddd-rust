@@ -70,6 +70,12 @@ pub enum LogError {
     },
     /// A line follows the trailer.
     AfterTrailer,
+    /// A log read through a commitment is not what was validated: what
+    /// differs ([`crate::live`]).
+    Diverged {
+        /// The format, the validator, the header, or a chunk.
+        what: String,
+    },
 }
 
 impl fmt::Display for LogError {
@@ -93,6 +99,7 @@ impl fmt::Display for LogError {
                 expected.records, expected.sha256, read.records, read.sha256
             ),
             LogError::AfterTrailer => f.write_str("a line follows the trailer"),
+            LogError::Diverged { what } => write!(f, "{what} differs from the commitment"),
         }
     }
 }
@@ -101,7 +108,15 @@ impl std::error::Error for LogError {}
 
 impl From<io::Error> for LogError {
     fn from(e: io::Error) -> LogError {
-        LogError::Io(e)
+        match e
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<crate::live::Diverged>())
+        {
+            Some(d) => LogError::Diverged {
+                what: d.what.clone(),
+            },
+            None => LogError::Io(e),
+        }
     }
 }
 
@@ -289,8 +304,15 @@ pub fn write_file(
 /// A log's input, plain or compressed, told by its first bytes: a zstd
 /// frame's magic, or a line's `{`. Anything else is refused.
 pub fn open<R: BufRead + Send + 'static>(
-    mut input: R,
+    input: R,
 ) -> Result<Reader<Box<dyn BufRead + Send>>, LogError> {
+    Reader::new(decoded(input)?)
+}
+
+/// A log's lines from its input, plain or compressed, before any is read.
+pub fn decoded<R: BufRead + Send + 'static>(
+    mut input: R,
+) -> Result<Box<dyn BufRead + Send>, LogError> {
     let first = input.fill_buf()?;
     let boxed: Box<dyn BufRead + Send> = if first.starts_with(&ZSTD_MAGIC) {
         Box::new(io::BufReader::new(zstd::Decoder::with_buffer(input)?))
@@ -304,7 +326,7 @@ pub fn open<R: BufRead + Send + 'static>(
             reason: "neither a log nor a zstd stream of one".to_owned(),
         });
     };
-    Reader::new(boxed)
+    Ok(boxed)
 }
 
 /// Opens the log in `path`, plain or compressed.

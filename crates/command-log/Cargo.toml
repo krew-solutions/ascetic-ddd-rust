@@ -28,5 +28,8 @@ siphasher = "=1.0.3"
 zstd = { version = "=0.14.4", default-features = false }
 
 [dev-dependencies]
+# SIGXFSZ ignored in the partial-write executor, so a write past RLIMIT_FSIZE
+# fails with EFBIG instead of killing the test.
+libc = "=0.2.189"
 proptest = "1.11.0"
 tempfile = "3"

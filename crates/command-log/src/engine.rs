@@ -170,6 +170,9 @@ pub struct Config {
     pub memory_spill: bool,
     /// Who hears how the pass goes, if anyone.
     pub progress: Option<Observer>,
+    /// Blocks of up to 1 MiB a dry or live run holds between the generation
+    /// and its reader, the generation blocked past them; at least 1.
+    pub pipe_blocks: usize,
 }
 
 /// The bytes a record sorts by: `at` big-endian, then the step id in an
@@ -252,7 +255,7 @@ pub struct Emitted {
 }
 
 impl Emitted {
-    fn add(&mut self, line: &[u8]) {
+    pub(crate) fn add(&mut self, line: &[u8]) {
         use std::hash::Hasher;
         let mut h = siphasher::sip128::SipHasher13::new_with_keys(0, 0);
         h.write(line);

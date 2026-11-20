@@ -120,6 +120,7 @@ fn config(spill: &Path, fan_in: usize) -> Config {
         fan_in,
         memory_spill: true,
         progress: None,
+        pipe_blocks: 64,
     }
 }
 

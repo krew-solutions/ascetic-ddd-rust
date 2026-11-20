@@ -697,7 +697,8 @@ makes the 4.50 GB log of M7 162 MB, level 3 176 MB; SHA-256 runs at 79 MB/s here
   validator's error reported before the generation's; a commitment for a dirty report; the trailer hashed into the
   chain.
 - **Owed of decision 15:** the verified reader for a persisted replay (stage 3 consumes it); an executor for a stalled
-  consumer (the pipe is bounded: 64 blocks of up to 1 MiB) and for a write failing partway (`RLIMIT_FSIZE`); M9.
+  consumer (the pipe is bounded: 64 blocks of up to 1 MiB) and for a write failing partway (`RLIMIT_FSIZE`); M9. All
+  but M9 built in the fifth part.
 
 **C6, fourth part — the observer and the room check revisited** (2026-11-21, this laptop):
 - **Defect found in the second part's room check:** a log written on the spills' filesystem was not counted — the check
@@ -724,6 +725,30 @@ makes the 4.50 GB log of M7 162 MB, level 3 176 MB; SHA-256 runs at 79 MB/s here
   the one-unit executor); the sweep not reported; the log's share ignored beside the spills; a compressed log's share
   taken as its lines; a plain log elsewhere ignored; needs on one filesystem not added; the validator's need dropped;
   its cascade group dropped.
+
+**C6, fifth part — one verified reader for a live run and a persisted replay** (2026-11-21, this laptop):
+- **Reworked from the third part:** the live run checked its chunks in a writer wrapped around `out`, while the decision
+  names one verified reader for the live run and a persisted replay alike. The check is now `live::Verified<R:
+  BufRead>`: the header at once, each chunk released once its last line makes `Pᵢ`, the last lines with the trailer's
+  digest, a cut last line never released so the log reads as truncated. The live run generates into the bounded pipe
+  and copies through it; a divergence is `LogError::Diverged` through the reader and `EngineError::Diverged` from the
+  run, and outranks the broken pipe it leaves the generation. No state keeps the reader failed after a divergence:
+  each prefix digest chains every byte before it, so nothing after can match.
+- **Built:** `live::replay` (a persisted log, plain or compressed, read through its commitment); `live::commit_file`
+  (a persisted log validated, and the commitment written only for a clean report — the very commitment a dry run of its
+  plan leaves); `log::decoded` (a log's lines before any is read, plain or compressed); `Config::pipe_blocks` (blocks
+  of up to 1 MiB in flight between a generation and its reader).
+- **Executors** (`tests/live.rs`, `tests/fsize.rs`, the unit test of the pipe): a persisted log, plain and compressed,
+  commits what its dry run commits; a dirty one commits nothing; a replay reads every record a plain read does; a byte
+  changed in any step releases exactly the chunks before its own and names it, the last chunk named with the trailer,
+  a changed header opening nothing, another validator refused; a log cut at every byte releases only whole checked
+  chunks and reads as truncated; a divergence while the generation is blocked on a one-block pipe is what the run
+  reports; a stalled consumer blocks the writer past the pipe's blocks; a log written past `RLIMIT_FSIZE` (SIGXFSZ
+  ignored) fails with EFBIG and leaves no log, partial log or spill. Mutations, each alone, red: a cut line fed to the
+  verifier; a chunk released before its comparison; the last chunk released without the trailer's check; the header
+  released unchecked; the replay's validator unchecked; the trailer tallied as a step; a dirty persisted log
+  committed; the generation's error before the reader's (green until the one-block executor); an unbounded pipe; a
+  divergence read as an I/O error; a partial log kept.
 
 Owed:
 - **M9** (C6): the host scenario's bytes a step and its ratio at levels 1 and 3 in process; sha2's MB/s, soft and `asm`;
@@ -808,3 +833,5 @@ condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
 - 2026-11-21: Slice C6, third part (the live run), built (§ Measured).
 - 2026-11-21: Slice C6, fourth part (the observer; the room check counting a log beside its spills, which the second
   part missed, and the validator's runs), built (§ Measured).
+- 2026-11-21: Slice C6, fifth part (one verified reader for a live run and a persisted replay; the third part's writer
+  check reworked into it), built (§ Measured).

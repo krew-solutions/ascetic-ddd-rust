@@ -61,6 +61,7 @@ fn config(spill: &Path) -> Config {
         fan_in: 0,
         memory_spill: true,
         progress: None,
+        pipe_blocks: 64,
     }
 }
 
@@ -373,4 +374,233 @@ fn the_trailer_is_not_a_chunk_s_line() {
     assert_eq!(commitment.records, 19);
     assert_eq!(commitment.prefixes.len(), 4);
     assert_eq!(commitment.sha256, sha256_hex(head(&log, 20)));
+}
+
+mod replay {
+    use super::*;
+    use ascetic_ddd_command_log::disk::LocalDisk;
+    use ascetic_ddd_command_log::engine::generate_file;
+    use ascetic_ddd_command_log::live::{commit_file, replay};
+    use ascetic_ddd_command_log::{Compression, LogError, open_file};
+
+    fn persisted(dir: &Path, compression: Compression) -> (PathBuf, Commitment) {
+        let plan = Devices::new(9);
+        let units: [&dyn Unit; 1] = [&plan];
+        let log = dir.join(format!("plan-{compression:?}.jsonl"));
+        generate_file(&log, header(), &units, &config(dir), compression).unwrap();
+        let path = dir.join(format!("plan-{compression:?}.commitment"));
+        let report = commit_file(
+            &log,
+            &NoHost,
+            &limits_in(dir),
+            "build-1",
+            CHUNK,
+            &path,
+            &LocalDisk,
+        )
+        .unwrap();
+        assert!(report.violations.is_empty());
+        (log, Commitment::read(&path).unwrap())
+    }
+
+    use std::path::PathBuf;
+
+    /// A persisted log that breaks a rule commits nothing.
+    #[test]
+    fn a_persisted_log_that_breaks_a_rule_commits_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let seen = step(id("device", 1, "seen", 0), 1);
+        let mut later = seen.clone();
+        later.at += 1;
+        let log = dir.path().join("twice.jsonl");
+        ascetic_ddd_command_log::write_file(&log, header(), [seen, later], Compression::None)
+            .unwrap();
+        let path = dir.path().join("twice.commitment");
+        let report = commit_file(
+            &log,
+            &NoHost,
+            &limits_in(dir.path()),
+            "b",
+            CHUNK,
+            &path,
+            &LocalDisk,
+        )
+        .unwrap();
+        assert!(!report.violations.is_empty());
+        assert!(!path.exists());
+    }
+
+    /// A persisted log, plain or compressed, commits what the dry run of its
+    /// plan commits.
+    #[test]
+    fn a_persisted_log_commits_what_its_dry_run_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = Devices::new(9);
+        let (dry, _) = committed(dir.path(), &[&plan]);
+        for compression in [Compression::None, Compression::Zstd { level: 1 }] {
+            assert_eq!(persisted(dir.path(), compression).1, dry, "{compression:?}");
+        }
+    }
+
+    fn read_all(path: &Path, commitment: &Commitment) -> (u64, Option<LogError>) {
+        let mut reader = match replay(path, commitment) {
+            Ok(r) => r,
+            Err(e) => return (0, Some(e)),
+        };
+        let mut n = 0;
+        for record in &mut reader {
+            match record {
+                Ok(_) => n += 1,
+                Err(e) => return (n, Some(e)),
+            }
+        }
+        (n, None)
+    }
+
+    /// A replay reads every record a plain read does, compressed or not.
+    #[test]
+    fn a_replay_reads_the_log() {
+        let dir = tempfile::tempdir().unwrap();
+        for compression in [Compression::None, Compression::Zstd { level: 1 }] {
+            let (log, commitment) = persisted(dir.path(), compression);
+            let plain: Vec<_> = open_file(&log).unwrap().map(|r| r.unwrap()).collect();
+            // Each record unwrapped, the trailer's check included.
+            let replayed: Vec<_> = replay(&log, &commitment)
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            assert!(replayed == plain, "{compression:?}");
+        }
+    }
+
+    /// A changed byte stops the replay before its chunk: the chunks before it
+    /// are read, no line of it is; a changed header opens nothing; a commitment
+    /// of another validator is refused.
+    #[test]
+    fn a_changed_byte_stops_the_replay_before_its_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let (log, commitment) = persisted(dir.path(), Compression::None);
+        let bytes = std::fs::read(&log).unwrap();
+        let starts: Vec<usize> = std::iter::once(0)
+            .chain(
+                bytes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, b)| **b == b'\n')
+                    .map(|(i, _)| i + 1),
+            )
+            .collect();
+        // Lines: the header, 18 steps, the trailer.
+        for step in 1..=18usize {
+            let mut changed = bytes.clone();
+            // The step id's digits: a byte of the line that still parses.
+            let line = &bytes[starts[step]..starts[step + 1]];
+            let at = starts[step] + line.iter().position(|b| b.is_ascii_digit()).unwrap();
+            changed[at] = if changed[at] == b'9' {
+                b'8'
+            } else {
+                changed[at] + 1
+            };
+            let path = dir.path().join("changed.jsonl");
+            std::fs::write(&path, &changed).unwrap();
+            let chunk = (step as u64).div_ceil(CHUNK);
+            let (read, error) = read_all(&path, &commitment);
+            assert_eq!(read, (chunk - 1) * CHUNK, "step {step}");
+            let what = if chunk > 4 {
+                "chunk 5, the last".to_owned()
+            } else {
+                format!("chunk {chunk}")
+            };
+            assert!(
+                matches!(&error, Some(LogError::Diverged { what: w }) if *w == what),
+                "step {step}: {error:?}"
+            );
+        }
+        let mut changed = bytes.clone();
+        let at = changed.iter().position(|b| b.is_ascii_digit()).unwrap();
+        changed[at] = if changed[at] == b'9' {
+            b'8'
+        } else {
+            changed[at] + 1
+        };
+        let path = dir.path().join("changed.jsonl");
+        std::fs::write(&path, &changed).unwrap();
+        assert!(
+            matches!(read_all(&path, &commitment).1, Some(LogError::Diverged { what }) if what == "the header")
+        );
+        let stale = Commitment {
+            validator: "1: header".into(),
+            ..commitment.clone()
+        };
+        assert!(
+            matches!(read_all(&log, &stale).1, Some(LogError::Diverged { what }) if what == "the validator")
+        );
+    }
+
+    /// A log cut at any byte releases only whole checked chunks, then reads as
+    /// truncated.
+    #[test]
+    fn a_cut_log_releases_only_checked_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (log, commitment) = persisted(dir.path(), Compression::None);
+        let bytes = std::fs::read(&log).unwrap();
+        let header_end = bytes.iter().position(|b| *b == b'\n').unwrap() + 1;
+        let path = dir.path().join("cut.jsonl");
+        for cut in header_end..bytes.len() {
+            std::fs::write(&path, &bytes[..cut]).unwrap();
+            let whole = bytes[header_end..cut]
+                .iter()
+                .filter(|b| **b == b'\n')
+                .count() as u64;
+            let steps = whole.min(18);
+            let (read, error) = read_all(&path, &commitment);
+            assert_eq!(read, steps / CHUNK * CHUNK, "cut at {cut}");
+            assert!(
+                matches!(error, Some(LogError::Truncated)),
+                "cut at {cut}: {error:?}"
+            );
+        }
+    }
+}
+
+/// A reader that diverges while the generation is still blocked on a full
+/// pipe is what the run reports, not the generation's broken pipe.
+#[test]
+fn a_divergence_outranks_the_generation_it_stops() {
+    let dir = tempfile::tempdir().unwrap();
+    // 24,000 steps, some 3 MB of lines: past a pipe of one block.
+    let plan = Devices::new(12_000);
+    let units: [&dyn Unit; 1] = [&plan];
+    let path = dir.path().join("plan.commitment");
+    let config = Config {
+        pipe_blocks: 1,
+        budget: 1 << 20,
+        ..config(dir.path())
+    };
+    let report = dry(
+        header(),
+        &units,
+        &config,
+        &NoHost,
+        &limits_in(dir.path()),
+        "build-1",
+        CHUNK,
+        &path,
+    )
+    .unwrap();
+    assert!(report.violations.is_empty());
+    let mut forged = Commitment::read(&path).unwrap();
+    forged.prefixes[0] = "0".repeat(64);
+    let out = Shared::default();
+    match live(header(), &units, &config, &forged, "build-1", out.clone()) {
+        Err(EngineError::Diverged { what }) => assert_eq!(what, "chunk 1"),
+        other => panic!("{:?}", other.map(|_| ())),
+    }
+    assert!(
+        out.bytes()
+            == head(
+                &generate(header(), &units, &config, Vec::new()).unwrap().0,
+                1
+            )
+    );
 }

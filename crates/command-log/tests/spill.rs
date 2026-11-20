@@ -24,6 +24,7 @@ fn config(spill: &Path, threads: usize, budget: usize) -> Config {
         fan_in: 0,
         memory_spill: true,
         progress: None,
+        pipe_blocks: 64,
     }
 }
 

@@ -49,6 +49,7 @@ fn thousands_of_runs_merge_under_sixty_four_open_files() {
         fan_in: 0,
         memory_spill: true,
         progress: None,
+        pipe_blocks: 64,
     };
     let units: [&dyn Unit; 1] = [&Many];
     let (log, trailer) = generate(header(), &units, &config, Vec::new()).unwrap();

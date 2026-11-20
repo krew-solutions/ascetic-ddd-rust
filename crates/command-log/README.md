@@ -79,4 +79,6 @@ and writes a `Commitment` — the header's digest, a SHA-256 prefix digest a
 chunk, the emitted count and digest, the trailer's digest — only for a clean
 report. `live::live` generates the plan again and releases it chunk by chunk,
 each only once its prefix digest matches: a stale commitment or a different
-emission is refused before a line is written.
+emission is refused before a line is written. A persisted log validated by
+`live::commit_file` leaves the same commitment, and `live::replay` reads it
+through the same check, `live::Verified`.
