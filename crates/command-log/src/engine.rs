@@ -11,14 +11,15 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::log::{LogError, Writer, encode};
 use crate::record::{Header, Line, Record, StepId, Trailer};
+use crate::spill::{Counted, SpillDir};
 
 /// A partition of identity the Plan fixes: a population family, a scope, an
 /// index range. Its records' planned times are pure functions of identity and
@@ -38,6 +39,15 @@ pub enum EngineError {
     Log(LogError),
     /// A unit refused, with its reason.
     Unit(String),
+    /// Reading or writing a spill, with the phase and the path.
+    Io {
+        /// What the engine was doing.
+        phase: &'static str,
+        /// The file or directory.
+        path: PathBuf,
+        /// What failed.
+        error: std::io::Error,
+    },
     /// Two records with one `(at, StepId)`.
     Equal {
         /// Their planned time.
@@ -52,6 +62,9 @@ impl fmt::Display for EngineError {
         match self {
             EngineError::Log(e) => write!(f, "{e}"),
             EngineError::Unit(reason) => write!(f, "a unit refused: {reason}"),
+            EngineError::Io { phase, path, error } => {
+                write!(f, "{phase} {}: {error}", path.display())
+            }
             EngineError::Equal { at, step } => write!(f, "two records at {at} of {step:?}"),
         }
     }
@@ -116,12 +129,20 @@ struct Entry {
     line: Vec<u8>,
 }
 
-/// One thread's buckets: a cell's records in memory, and the runs it spilled.
+/// An I/O error of `phase` at `path`.
+fn at(phase: &'static str, path: &std::path::Path) -> impl FnOnce(std::io::Error) -> EngineError {
+    let path = path.to_owned();
+    move |error| EngineError::Io { phase, path, error }
+}
+
+/// One thread's buckets: a cell's records in memory, and the runs it spilled,
+/// each with its record count.
 struct Buckets {
     thread: usize,
+    dir: PathBuf,
     held: BTreeMap<u64, Vec<Entry>>,
     bytes: usize,
-    runs: BTreeMap<u64, Vec<PathBuf>>,
+    runs: BTreeMap<u64, Vec<(PathBuf, u64)>>,
     spilled: usize,
 }
 
@@ -133,30 +154,34 @@ impl Buckets {
             .saturating_add(entry.line.len());
         self.held.entry(cell).or_default().push(entry);
         if self.bytes > config.budget {
-            self.spill(config)?;
+            self.spill()?;
         }
         Ok(())
     }
 
     /// Every cell's records, sorted, to a run of its own.
-    fn spill(&mut self, config: &Config) -> Result<(), EngineError> {
+    fn spill(&mut self) -> Result<(), EngineError> {
         for (cell, mut entries) in std::mem::take(&mut self.held) {
             entries.sort_unstable_by(|a, b| a.key.cmp(&b.key));
-            let path = config
-                .spill
+            let path = self
+                .dir
                 .join(format!("t{}-c{cell}-{}.run", self.thread, self.spilled));
             self.spilled = self.spilled.saturating_add(1);
-            let mut out = BufWriter::new(
-                OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&path)?,
-            );
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(at("spilling to", &path))?;
+            let mut out = BufWriter::new(file);
+            let count = entries.len() as u64;
             for e in entries {
-                write_entry(&mut out, &e)?;
+                write_entry(&mut out, &e).map_err(|e| match e {
+                    EngineError::Log(LogError::Io(error)) => at("spilling to", &path)(error),
+                    other => other,
+                })?;
             }
-            out.flush()?;
-            self.runs.entry(cell).or_default().push(path);
+            out.flush().map_err(at("spilling to", &path))?;
+            self.runs.entry(cell).or_default().push((path, count));
         }
         self.bytes = 0;
         Ok(())
@@ -173,24 +198,27 @@ fn write_entry(out: &mut impl Write, e: &Entry) -> Result<(), EngineError> {
     Ok(())
 }
 
-fn read_entry(r: &mut impl Read) -> Result<Option<Entry>, EngineError> {
-    let mut len = [0u8; 4];
-    match r.read_exact(&mut len) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(e.into()),
+/// A run's next record, or `None` past its last: a run that ends early or goes
+/// on past its count is an error, never fewer or more records.
+fn read_entry<R: Read>(run: &mut Counted<R>) -> Result<Option<Entry>, EngineError> {
+    let path = run.path.clone();
+    if !run.due().map_err(at("merging", &path))? {
+        return Ok(None);
     }
+    run.left = run.left.saturating_sub(1);
+    let mut len = [0u8; 4];
+    run.exact(&mut len).map_err(at("merging", &path))?;
     let mut key = vec![0u8; u32::from_le_bytes(len) as usize];
-    r.read_exact(&mut key)?;
-    r.read_exact(&mut len)?;
+    run.exact(&mut key).map_err(at("merging", &path))?;
+    run.exact(&mut len).map_err(at("merging", &path))?;
     let mut line = vec![0u8; u32::from_le_bytes(len) as usize];
-    r.read_exact(&mut line)?;
+    run.exact(&mut line).map_err(at("merging", &path))?;
     Ok(Some(Entry { key, line }))
 }
 
 /// Where a cell's merge reads from: a spilled run, or what a thread still held.
 enum Source {
-    Run(BufReader<File>),
+    Run(Counted<BufReader<File>>),
     Held(std::vec::IntoIter<Entry>),
 }
 
@@ -214,38 +242,69 @@ pub fn generate<W: Write>(
     let threads = config.threads.max(1);
     let cell = config.cell.max(1);
     let last = config.cells.max(1).saturating_sub(1);
+    // The pass's own directory, removed on every exit below, unwinding too.
+    let dir =
+        SpillDir::new(&config.spill).map_err(at("claiming a spill directory in", &config.spill))?;
     let next = AtomicUsize::new(0);
+    // Set by the first failure: the other threads take no further unit.
+    let stop = AtomicBool::new(false);
     let done: Mutex<Vec<Buckets>> = Mutex::new(Vec::new());
     let failed: Mutex<Option<EngineError>> = Mutex::new(None);
     std::thread::scope(|scope| {
         for thread in 0..threads {
-            let (next, done, failed) = (&next, &done, &failed);
+            let (next, stop, done, failed, dir) = (&next, &stop, &done, &failed, dir.path());
             scope.spawn(move || {
                 let mut buckets = Buckets {
                     thread,
+                    dir: dir.to_owned(),
                     held: BTreeMap::new(),
                     bytes: 0,
                     runs: BTreeMap::new(),
                     spilled: 0,
                 };
                 let result = (|| -> Result<(), EngineError> {
-                    loop {
+                    while !stop.load(Ordering::Relaxed) {
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(unit) = units.get(i) else {
                             return Ok(());
                         };
-                        unit.emit(&mut |record: Record| {
-                            let key = order_key(record.at, &record.step);
-                            let at_cell = record.at.checked_div(cell).unwrap_or(0).min(last);
-                            let line = encode(&Line::Step(Box::new(record)))?;
-                            buckets.push(at_cell, Entry { key, line }, config)
-                        })?;
+                        let emitted =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                unit.emit(&mut |record: Record| {
+                                    if stop.load(Ordering::Relaxed) {
+                                        return Err(EngineError::Unit(
+                                            "stopped by another unit's failure".into(),
+                                        ));
+                                    }
+                                    let key = order_key(record.at, &record.step);
+                                    let at_cell =
+                                        record.at.checked_div(cell).unwrap_or(0).min(last);
+                                    let line = encode(&Line::Step(Box::new(record)))?;
+                                    buckets.push(at_cell, Entry { key, line }, config)
+                                })
+                            }));
+                        match emitted {
+                            Ok(result) => result?,
+                            Err(panic) => {
+                                let what = panic
+                                    .downcast_ref::<&str>()
+                                    .map(|s| (*s).to_owned())
+                                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                                    .unwrap_or_default();
+                                return Err(EngineError::Unit(format!(
+                                    "unit {i} panicked: {what}"
+                                )));
+                            }
+                        }
                     }
+                    Ok(())
                 })();
-                if let Err(e) = result
-                    && let Ok(mut f) = failed.lock()
-                {
-                    f.get_or_insert(e);
+                if let Err(e) = result {
+                    // The first failure is the one reported; then the others stop.
+                    if let Ok(mut f) = failed.lock() {
+                        f.get_or_insert(e);
+                    }
+                    stop.store(true, Ordering::Relaxed);
                 }
                 if let Ok(mut d) = done.lock() {
                     d.push(buckets);
@@ -258,11 +317,7 @@ pub fn generate<W: Write>(
         Some(e) => Err(e),
         None => merge(header, &mut all, threads, out),
     };
-    for b in &all {
-        for path in b.runs.values().flatten() {
-            let _ = fs::remove_file(path);
-        }
-    }
+    drop(dir);
     result
 }
 
@@ -301,8 +356,13 @@ fn merge<W: Write>(
             .map(|v| Source::Held(v.into_iter()))
             .collect();
         for b in all.iter() {
-            for path in b.runs.get(&cell).into_iter().flatten() {
-                sources.push(Source::Run(BufReader::new(File::open(path)?)));
+            for (path, count) in b.runs.get(&cell).into_iter().flatten() {
+                let file = File::open(path).map_err(at("merging", path))?;
+                sources.push(Source::Run(Counted {
+                    reader: BufReader::new(file),
+                    left: *count,
+                    path: path.clone(),
+                }));
             }
         }
         let mut heap = BinaryHeap::new();
@@ -394,11 +454,28 @@ mod tests {
         }
     }
 
-    /// An error reading a run fails the generation: a run cut short would drop
-    /// its steps from the log.
+    fn run<R: Read>(reader: R, left: u64) -> Counted<R> {
+        Counted {
+            reader,
+            left,
+            path: "test.run".into(),
+        }
+    }
+
+    /// A run's records are its count, no fewer and no more: an error reading
+    /// it, a run that ends early — a cut record or a cut frame — and a run that
+    /// goes on past its count all fail the generation.
     #[test]
-    fn a_failing_run_fails_the_generation() {
-        assert!(read_entry(&mut Failing).is_err());
-        assert!(matches!(read_entry(&mut std::io::empty()), Ok(None)));
+    fn a_run_holds_exactly_its_count() {
+        assert!(read_entry(&mut run(Failing, 1)).is_err());
+        assert!(matches!(
+            read_entry(&mut run(std::io::empty(), 0)),
+            Ok(None)
+        ));
+        assert!(read_entry(&mut run(std::io::empty(), 1)).is_err());
+        assert!(read_entry(&mut run(&[0u8, 0][..], 1)).is_err());
+        assert!(read_entry(&mut run(&[0u8][..], 0)).is_err());
+        let whole = [0u8, 0, 0, 0, 0, 0, 0, 0];
+        assert!(matches!(read_entry(&mut run(&whole[..], 1)), Ok(Some(_))));
     }
 }

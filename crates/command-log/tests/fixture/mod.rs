@@ -235,11 +235,7 @@ pub fn run_with(
     };
     let reader = Reader::new(Cursor::new(bytes(header, records))).unwrap();
     let report = validate(reader, host, &limits).unwrap();
-    assert_eq!(
-        std::fs::read_dir(dir.path()).unwrap().count(),
-        0,
-        "the runs are removed"
-    );
+    assert_eq!(leftover(dir.path()).len(), 0, "the runs are removed");
     report
 }
 
@@ -327,4 +323,24 @@ pub fn polling(g: u64, n: u32, at: u64, every: u64, timeout: u64) -> Record {
         timeout,
     });
     r
+}
+
+/// What a pass left under a spill directory: every entry but the directory's
+/// own sweep lock, which stays.
+pub fn leftover(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.file_name().is_some_and(|n| n != ".sweep.lock"))
+        .collect()
+}
+
+/// The runs under a spill directory, in every pass's directory.
+pub fn runs(dir: &std::path::Path) -> usize {
+    leftover(dir)
+        .iter()
+        .filter(|p| p.is_dir())
+        .flat_map(|d| std::fs::read_dir(d).unwrap().map(|e| e.unwrap().path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "run"))
+        .count()
 }

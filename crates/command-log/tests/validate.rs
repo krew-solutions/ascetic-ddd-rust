@@ -600,7 +600,7 @@ struct Watching {
 
 impl Host for Watching {
     fn required(&self, _: &Record) -> Vec<(StepId, On)> {
-        let files = std::fs::read_dir(&self.dir).unwrap().count();
+        let files = runs(&self.dir);
         self.most.set(self.most.get().max(files));
         vec![]
     }
@@ -636,7 +636,7 @@ fn ids_spill_past_their_budget_only() {
             "budget {budget}: {} files at most",
             host.most.get()
         );
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert_eq!(leftover(dir.path()).len(), 0);
     }
 }
 

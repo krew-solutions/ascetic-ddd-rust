@@ -22,6 +22,7 @@ use crate::record::{
     Action, Bus, By, Codec, Dep, Field, Form, Header, Hole, Limit, Of, On, Outcome, Payload, Place,
     Predicate, Probe, Record, Rest, Span, StepId, Subject, Test, Value,
 };
+use crate::spill::{Counted, SpillDir};
 
 /// A rule of decisions 5, 7 and 9.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -333,7 +334,8 @@ struct Ids {
     budget: usize,
     dir: PathBuf,
     buffer: Vec<([u8; 16], u64)>,
-    runs: Vec<PathBuf>,
+    /// Each run and its record count.
+    runs: Vec<(PathBuf, u64)>,
 }
 
 const ENTRY: usize = 24;
@@ -354,6 +356,7 @@ impl Ids {
     fn spill(&mut self) -> Result<(), LogError> {
         self.buffer.sort_unstable();
         let path = self.dir.join(format!("ids-{}.run", self.runs.len()));
+        let count = self.buffer.len() as u64;
         let mut out = BufWriter::new(
             OpenOptions::new()
                 .write(true)
@@ -365,7 +368,7 @@ impl Ids {
             out.write_all(&line.to_le_bytes())?;
         }
         out.flush()?;
-        self.runs.push(path);
+        self.runs.push((path, count));
         Ok(())
     }
 
@@ -387,34 +390,41 @@ impl Ids {
             self.spill()?;
         }
         let result = merge(&self.runs, &mut found);
-        for run in &self.runs {
+        for (run, _) in &self.runs {
             let _ = fs::remove_file(run);
         }
         result.map(|()| found)
     }
 }
 
-fn read_entry(r: &mut impl Read) -> Result<Option<([u8; 16], u64)>, LogError> {
-    let mut buf = [0u8; ENTRY];
-    match r.read_exact(&mut buf) {
-        Ok(()) => {
-            let mut d = [0u8; 16];
-            d.copy_from_slice(buf.get(..16).unwrap_or(&[0; 16]));
-            let mut l = [0u8; 8];
-            l.copy_from_slice(buf.get(16..).unwrap_or(&[0; 8]));
-            Ok(Some((d, u64::from_le_bytes(l))))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
-        Err(e) => Err(e.into()),
+/// A run's next entry, or `None` past its last: a run that ends early — a cut
+/// entry — or goes on past its count is an error, never fewer duplicates.
+fn read_entry<R: Read>(run: &mut Counted<R>) -> Result<Option<([u8; 16], u64)>, LogError> {
+    if !run.due()? {
+        return Ok(None);
     }
+    run.left = run.left.saturating_sub(1);
+    let mut buf = [0u8; ENTRY];
+    run.exact(&mut buf)?;
+    let mut d = [0u8; 16];
+    d.copy_from_slice(buf.get(..16).unwrap_or(&[0; 16]));
+    let mut l = [0u8; 8];
+    l.copy_from_slice(buf.get(16..).unwrap_or(&[0; 8]));
+    Ok(Some((d, u64::from_le_bytes(l))))
 }
 
 /// A k-way merge of sorted runs: a line whose digest equals the one before it
 /// in the merged order is a duplicate.
-fn merge(runs: &[PathBuf], found: &mut Vec<u64>) -> Result<(), LogError> {
-    let mut readers: Vec<BufReader<File>> = runs
+fn merge(runs: &[(PathBuf, u64)], found: &mut Vec<u64>) -> Result<(), LogError> {
+    let mut readers: Vec<Counted<BufReader<File>>> = runs
         .iter()
-        .map(|p| File::open(p).map(BufReader::new))
+        .map(|(p, left)| {
+            File::open(p).map(|f| Counted {
+                reader: BufReader::new(f),
+                left: *left,
+                path: p.clone(),
+            })
+        })
         .collect::<Result<_, _>>()?;
     let mut heap = BinaryHeap::new();
     for (i, r) in readers.iter_mut().enumerate() {
@@ -1164,6 +1174,8 @@ pub fn validate<R: BufRead>(
     host: &impl Host,
     limits: &Limits,
 ) -> Result<Report, LogError> {
+    // The pass's own directory for its id runs, removed on every exit below.
+    let dir = SpillDir::new(&limits.spill)?;
     let mut pass = Pass {
         host,
         header: reader.header().clone(),
@@ -1178,7 +1190,7 @@ pub fn validate<R: BufRead>(
         streams: BTreeMap::new(),
         ids: Ids {
             budget: limits.ids_in_memory.max(1),
-            dir: limits.spill.clone(),
+            dir: dir.path().to_owned(),
             buffer: Vec::new(),
             runs: Vec::new(),
         },
@@ -1194,7 +1206,9 @@ pub fn validate<R: BufRead>(
         line = line.saturating_add(1);
         pass.record(line, &record?)?;
     }
-    pass.finish()
+    let report = pass.finish();
+    drop(dir);
+    report
 }
 
 /// Validates the log in `path`.
@@ -1217,9 +1231,27 @@ mod tests {
         }
     }
 
+    fn run<R: Read>(reader: R, left: u64) -> Counted<R> {
+        Counted {
+            reader,
+            left,
+            path: "ids.run".into(),
+        }
+    }
+
+    /// An id run holds exactly its count: an error reading it, a run cut short
+    /// — at an entry's boundary too — or one going on past its count fail the
+    /// pass, never hide a duplicate.
     #[test]
-    fn a_failing_run_fails_the_pass() {
-        assert!(read_entry(&mut Failing).is_err());
-        assert_eq!(read_entry(&mut std::io::empty()).ok(), Some(None));
+    fn a_run_holds_exactly_its_count() {
+        assert!(read_entry(&mut run(Failing, 1)).is_err());
+        assert_eq!(read_entry(&mut run(std::io::empty(), 0)).ok(), Some(None));
+        assert!(read_entry(&mut run(std::io::empty(), 1)).is_err());
+        assert!(read_entry(&mut run(&[0u8; 23][..], 1)).is_err());
+        assert!(read_entry(&mut run(&[0u8; 1][..], 0)).is_err());
+        assert!(matches!(
+            read_entry(&mut run(&[0u8; 24][..], 1)),
+            Ok(Some(_))
+        ));
     }
 }

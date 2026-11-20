@@ -14,6 +14,8 @@ To be built in slices, each a commit of its own:
 - **C3:** the validator, and an independent reference checker.
 - **C4:** the engine: units, time-cell buckets, spills, the canonical merge; the time-major acceptance test; M7.
 - **C5:** offered-load rules: planned rates against declared limits, the polls an observation implies.
+- **C6** (decision 15): a log at 10⁹ steps — a generation that fails halfway cleans up and says why; compressed logs and
+  spills; a bounded merge; a live run with no log, checked chunk by chunk against a validated dry run.
 
 Amends ADR-0045 decisions 7 and 8 (§ 4, § 8).
 
@@ -367,6 +369,44 @@ limit is refused before the run, and the scheduler never sends what the limit re
 - **One module for both**, `command_log::rate`: arrivals, key values, the curve. The validator and the scheduler call
   it; `vectors/reference.py` decides `rate` and `key` from the definitions, window by window.
 
+### 15. 10⁹ steps: compression, a live run, failure halfway (C6)
+
+The owner's direction (§ Owed, 2026-11-20): the persisted log is compressed with zstd, its digest over the canonical
+lines; as an alternative, a generation streams straight into the run with no log. Measured first (M8): zstd level 1
+makes the 4.50 GB log of M7 162 MB, level 3 176 MB; SHA-256 runs at 79 MB/s here.
+
+- **One crate, no option.** `zstd` (libzstd bundled by zstd-sys through `cc`; the workspace builds C already), no
+  feature of ours and no `zstdmt`: a generation at 10⁹ spills on either path, and libzstd's streaming output does not
+  depend on its workers (since 1.4.7), SHA-256 being the serial bound. ruzstd encodes only its fastest level.
+- **The persisted log** is one zstd stream of the canonical lines, level 1 by default (an option of the writer);
+  `FORMAT`, the trailer and its SHA-256 over the uncompressed lines unchanged, the header silent on compression — one
+  plan, one digest. The reader tells a compressed log by its magic, decodes concatenated frames, refuses anything else.
+  `Encoder::finish` is called and its error kept, before `sync_all` and the rename.
+- **Spills** compressed at level 1, one encoder a thread. A run's end is a clean end of its file, never a short read: a
+  run's record count is checked at merge, in the engine and in the validator's id runs alike (a cut zstd frame and a
+  cut record both read as `UnexpectedEof`, which both merges took for the end — a run cut at a record boundary dropped
+  its steps and the trailer still matched).
+- **Bounded merges.** A cell's runs, and the validator's id runs, merge in a cascade of a bounded fan-in, derived from
+  the soft file limit (raised to the hard one at start); equal keys across groups still fail. A cell's runs are deleted
+  as soon as it is merged.
+- **Failure halfway.** Each pass owns a fresh subdirectory of the spill directory, locked; a guard removes it on every
+  exit, unwinding included, and a pass sweeps unlocked siblings left by a kill and reports what it freed. A unit's
+  refusal or panic stops the other threads before their next unit. After the emit phase, the free space of each
+  filesystem is checked against what the merge will need — the largest cell times the cascade's depth, the validator's
+  24 bytes a step, the log if it is elsewhere — and a shortfall fails before the first line, naming both. A spill
+  directory on tmpfs is refused unless the caller allows it. Errors carry their phase and path; a progress observer
+  reports the phase, units, records, spill bytes, cells merged and lines written.
+- **The live run.** A dry pass (the engine into a bounded pipe, the reader, the validator) writes a commitment only when
+  its report is clean: `FORMAT`, the validator's identity, the host's fingerprint, the trailer, an order-independent
+  digest of the step lines, and prefix digests `Pᵢ` — the one SHA-256 over the header and the first `i · 2¹⁶` step
+  lines, `zstd -dc | head | sha256sum`'s to check. The live pass refuses before emitting if `P₀` (the header) or the
+  identities differ, before releasing anything if the step count or the multiset digest differ, and stops before
+  releasing chunk `i` if `Pᵢ` differs. A persisted replay goes through the same verified reader. The dry pass is once a
+  plan revision — the bytes do not depend on the namespace.
+- **Not now:** passes over planned time (`Unit::emit(window)`) — their trigger is a compressed spill that does not fit,
+  and a window invites a unit to prune and lose a step; a `Sink` beside `W: Write` — a pipe and the reader serve; a
+  hashing thread — M9 decides.
+
 ## Consequences
 
 - A load is a value: a digest names exactly what was offered, and two runs of one log offered the same commands.
@@ -451,6 +491,15 @@ limit is refused before the run, and the scheduler never sends what the limit re
 | R1 | C5 | minimal twins (`tests/rate.rs`): with `R = 2` a second and `B = 3`, three at 0 admitted and a fourth refused, the fourth at `T − 1 µs` refused and at `T` admitted, four at 0 then an hour idle refused (an average far under the rate), three at 0 then one every `1.2 T` admitted; `R = 3` a second, `B = 1` at 333,333 µs refused and 333,334 admitted; `R = 3`, `B = 2` at 0, 0, 333,334, 666,667 admitted; two operations in one bucket each under and together over; two values in one bucket each under and together over, admitted; one subject through a rendered and a captured value together over; polls alone over, beside `every` doubled; 5 s / 2 s polls at burst 2 refused and at burst 3 admitted, 4 s / 2 s at burst 2 refused; 2²⁰ and 2²⁰ + 1 polls; the drain of polls before an action at the same time, at the log's end, and before the deviation check; `J`: `B` arrivals within `J` admitted and `B + 1` refused, the `readEnrollmentNotice` shape (`B = 400`, 200 a second, `J = 3 s`) at one a second admitted; the reserve: 99 % of `R` admitted without and refused at 5 %; a source past `sources`, each unevaluable place, a `key` deviation still `key`; a deliberate 429 the system would admit reported unused (both the forced spend and `J` cases); a refused limit not evaluated; the clamp for an action and for an observation | the average instead of the bucket; `<` for `≤`; T rounded either way; polls counted as `timeout/every`, `div_ceil` or a strict bound; a bucket per operation or per name instead of per value; the clamp dropped; a deviated arrival that does not spend; use decided on the admission model; `key` deviable; the burst reduced for windows under `J` |
 | R2 | C5 | the reference decides `rate` and `key` window by window from the definitions, its deviated arrivals spending; the corpus carries limits of every `By` and `Place`, sources, callers, observations with REST probes, rates whose interval is comparable to the gaps, jitter whose `R · J / P` is not an integer; mutants squeeze an `at`, a source past `sources`, `every` halved, a key made a `Time` hole, a caller's names dropped, a deviation naming `rate` or `key`; measured: arrivals whose verdict differs from a plain count, by mutant kind | the reference sharing a mistake with the validator |
 | R3 | C5 | a property: the streaming curve equals the window definition on random arrivals in one bucket with small parameters, ties and deviations included | the streaming algorithm diverging from the definition |
+| Z1 | C6 | compressed and plain logs give the same records and trailer; `make vectors` decodes a crate-written log with the zstd CLI and `cmp`s it with the plain one | a digest over compressed bytes; compression in the header |
+| Z2 | C6 | a two-frame `golden/c1.jsonl.zst` made by the CLI decodes to the golden log | single-frame decoding |
+| Z3 | C6 | a compressed log named `.jsonl` and a plain one named `.zst` both read; anything else refused | detection by extension |
+| Z4 | C6 | a compressed log cut at every byte refused; a failing last write leaves no file | `finish`'s error dropped; a rename after a failure |
+| E3 | C6 | a spill run cut at every byte, record boundaries included, fails the generation; the same for the validator's id runs | a short read taken for a run's end |
+| E4 | C6 | bytes identical across fan-in {2, 3, unbounded} × the E1 matrix, a duplicate split across groups refused; the FD test: 10⁶ steps under a soft limit of 64 files | a group dropped; an equal key across groups passing; an unbounded merge |
+| E5 | C6 | a disk watcher sees no run of a cell after it merges; the spill directory is empty after a refusal, an equal key, a panic, a truncated input and a write that fails partway | deletion at the end; removal on success only; no guard for unwinding |
+| E6 | C6 | after a refusal at most `threads` units start; a free-space port short by one byte refuses before the first line; a spill directory on tmpfs refused without the option; the observer reaches every unit and every line | the stop flag unchecked; the validator's term dropped from the space check; the tmpfs check removed; a counter never advanced |
+| L1 | C6 | a stale header emits no unit; a differing unit releases no chunk; chunk `i` differing delivers chunks `0..i` and an error naming `i`; `Pᵢ` equals `head | sha256sum`; a stalled consumer keeps memory flat | `P₀` checked late; the multiset check skipped; release before compare; an off-by-one boundary; an unbounded pipe |
 | MUT | each | a `cargo mutants` run on the crate; survivors killed or argued equivalent in § Measured | — |
 
 ## Measured
@@ -590,12 +639,33 @@ limit is refused before the run, and the scheduler never sends what the limit re
   orders by `Ord`); an arrival exactly `J` before aging one call later, where a window of width `J` has the bound `B`
   in either regime. A second run over the survivors' descriptions: 12 mutants, 8 caught.
 
+**C6, first part — failure halfway** (2026-11-21, this laptop):
+- **M8** (the zstd CLI 1.5.7 on M7's 4.50 GB log, read from disk): `-1` 65 s → 162 MB; `-3` 90 s → 176 MB; `-6` 87–107 s
+  → 155 MB; `-9` 83–105 s → 152 MB; decompression 4.7 s; `zstd -d | sha256sum` 57 s (SHA-256 79 MB/s); `sha256sum` 69 s.
+  Every compression ran at the disk's read speed; the synthetic log is far more repetitive than a real one.
+- **Built:** a pass's own spill directory (`pass-N` under the caller's, claimed under a lock, removed on every exit,
+  unwinding included; a killed pass's directory swept by the next, a live one's kept); every run counted, a run cut
+  short or longer than written an error with its path; the engine's units stopped after the first failure, a panic
+  caught and reported with its message; spill errors carrying their phase and path.
+- **Executors** (`tests/spill.rs`, the readers' unit tests): a spill cut at every byte of a run, record boundaries and
+  nothing included, fails the generation and leaves nothing; an id run cut at every byte fails the validation; a panic,
+  and a validation of a log cut short, leave nothing; a killed pass is swept, a locked one kept; after a refusal a
+  handful of a thousand units start, and a running unit stops before its hundred thousandth record. Mutations, each
+  alone, red: a short read taken for a run's end, in the engine and in the validator; the stop flag unchecked before a
+  unit, and at a record; the pass directory kept on exit; orphans never swept. A write failing partway is covered by
+  the directory's guard; its own executor (a child under `RLIMIT_FSIZE`) comes with the free-space check.
+
 Owed:
-- **10⁹ steps** (M7): a log of 450 B a step and a peak of twice it do not fit a laptop. To decide, under the gate,
-  before stage 3: compressing the stream (the digest over the canonical lines, not the compressed bytes — M3),
-  streaming a generation into the run without persisting it (decision 1 allows it; the digest is then the run's
-  record), or a smaller step (interned names, payloads by reference). The measurement to bring: bytes a step of the
-  host's real scenarios, and a compressed pass's throughput.
+- **M9** (C6): the host scenario's bytes a step and its ratio at levels 1 and 3 in process; sha2's MB/s, soft and `asm`;
+  the reader's and the validator's steps a second; the soft file limit; peak RSS, memory pressure, open files, disk by
+  filesystem and wall time by phase at 10⁸ on both paths, inside `systemd-run --user -p MemoryMax=…`; then 10⁹ persisted.
+- **10⁹ steps** (M7): a log of 450 B a step and a peak of twice it do not fit a laptop. The owner's direction
+  (2026-11-20): the persisted log is compressed with zstd, its digest over the canonical lines, not the compressed
+  bytes (M3); and, as an alternative, a generation streamed straight into the run with no log (decision 1 allows it;
+  the run records the digest). Owed, under the gate: the slice that builds both, with how the streamed path is
+  validated — a dry generation first and a live one whose digest must equal it, or validation as the steps go,
+  stopping at the first violation (duplicates and unused deviations are decided only at the end). The measurement to
+  bring: bytes a step of the host's real scenarios, and a compressed pass's throughput.
 - SHA-256 throughput on the laptop (no SHA-NI) for 3 GB.
 
 ## Owed
@@ -655,3 +725,12 @@ condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
   of a deliberate refusal decided on a lower model; executors for every boundary; the corpus reaching time). § 10's
   replica counts dropped; § 12 gains the scheduler's obligations.
 - 2026-11-20: Slice C5 built (§ Measured), by decision 14.
+- 2026-11-21: Decision 15 (C6) under the gate: the main position (compressed log and spills behind a feature, a `Sink`,
+  dry and live digests compared at the end), a blind solver (compressed log and spills, no feature, passes over time
+  windows, a bounded fan-in, chunk commitments, hashing on its own thread); the discriminator confirmed the crates' facts
+  (ruzstd's encoder, libzstd's worker-independent output, the CI runner's zstd), found the short-read defect in the
+  engine's spill reader, refuted `zstdmt`, level 3 and time windows for now, and synthesised prefix digests of the one
+  SHA-256 over a pipe and the existing reader; Operability added cleanup on every exit, an early stop, the commitment's
+  early checks and identities, the free-space check with the validator's runs, tmpfs, the validator's bounded merge and
+  its own short-read defect, progress and errors with their phase.
+- 2026-11-21: Slice C6, first part (failure halfway), built (§ Measured).

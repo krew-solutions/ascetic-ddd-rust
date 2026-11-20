@@ -87,11 +87,7 @@ fn run(threads: usize, budget: usize, cells: u64, reversed: bool) -> Result<Vec<
         spill: dir.path().to_owned(),
     };
     let out = generate(header(), &units, &config, Vec::new()).map(|(bytes, _)| bytes);
-    assert_eq!(
-        std::fs::read_dir(dir.path()).unwrap().count(),
-        0,
-        "spills removed"
-    );
+    assert_eq!(leftover(dir.path()).len(), 0, "spills removed");
     out
 }
 
@@ -187,7 +183,7 @@ fn equal_keys_and_refusals_fail_the_generation() {
             generate(header(), &units, &config, Vec::new()),
             Err(EngineError::Unit(_))
         ));
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert_eq!(leftover(dir.path()).len(), 0);
     }
 }
 
@@ -204,7 +200,7 @@ impl Unit for Watching {
     ) -> Result<(), EngineError> {
         for i in 0..50 {
             out(step(id("device", i, "seen", 0), i))?;
-            let files = std::fs::read_dir(&self.dir).unwrap().count();
+            let files = runs(&self.dir);
             self.most
                 .fetch_max(files, std::sync::atomic::Ordering::Relaxed);
         }

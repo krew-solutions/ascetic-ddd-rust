@@ -14,6 +14,7 @@ pub mod rate;
 pub mod record;
 pub mod render;
 pub mod sample;
+mod spill;
 pub mod template;
 pub mod validate;
 mod wire;
