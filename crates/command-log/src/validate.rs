@@ -225,6 +225,21 @@ impl Limits {
     }
 }
 
+/// The disk a validation of `records` steps needs for its id runs, `fan_in`
+/// wide: none while they fit in memory, else 24 bytes a step and a cascade
+/// group's worth more while the group is rewritten.
+pub(crate) fn spill_need(records: u64, limits: &Limits, fan_in: usize) -> u64 {
+    let held = limits.ids_in_memory.max(1) as u64;
+    if records <= held {
+        return 0;
+    }
+    let all = records.saturating_mul(ENTRY as u64);
+    let group = (fan_in as u64)
+        .saturating_mul(held)
+        .saturating_mul(ENTRY as u64);
+    all.saturating_add(group.min(all))
+}
+
 /// How strongly a step is awaited: an `Expected` wait is also a settled one,
 /// and either is also a start.
 fn strength(on: On) -> u8 {

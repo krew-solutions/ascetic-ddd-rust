@@ -22,6 +22,8 @@ pub(crate) struct SpillDir {
     lock: PathBuf,
     /// Held for the pass's life: the sweep of another pass leaves it alone.
     _held: File,
+    /// Bytes the sweep freed from passes killed before.
+    pub(crate) swept: u64,
 }
 
 impl SpillDir {
@@ -35,7 +37,7 @@ impl SpillDir {
             .write(true)
             .open(parent.join(SWEEP))?;
         sweep.lock()?;
-        sweep_orphans(parent)?;
+        let swept = sweep_orphans(parent)?;
         let mut n = 0u64;
         loop {
             let lock = parent.join(format!("pass-{n}.lock"));
@@ -48,6 +50,7 @@ impl SpillDir {
                         path,
                         lock,
                         _held: held,
+                        swept,
                     });
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => n = n.saturating_add(1),

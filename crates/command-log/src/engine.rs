@@ -15,7 +15,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::disk::{Disk, LocalDisk};
 use crate::log::{Compression, FileOut, LogError, Partial, Writer, encode};
@@ -116,6 +116,39 @@ impl From<std::io::Error> for EngineError {
     }
 }
 
+/// What a generation reports as it goes (ADR-0046 decision 15), so that a
+/// pass of hours says where it is and how far it has to go. Every method is
+/// called from the engine's threads and does nothing by default.
+pub trait Progress: Send + Sync {
+    /// The pass began, after sweeping `swept` bytes left by passes killed
+    /// before.
+    fn began(&self, swept: u64) {
+        let _ = swept;
+    }
+    /// A unit finished emitting: the units, steps and spilled bytes so far.
+    fn emitted(&self, units: u64, records: u64, spilled: u64) {
+        let _ = (units, records, spilled);
+    }
+    /// The merge began, over `cells` cells.
+    fn merging(&self, cells: u64) {
+        let _ = cells;
+    }
+    /// A cell merged: the cells and the lines written so far.
+    fn merged(&self, cells: u64, lines: u64) {
+        let _ = (cells, lines);
+    }
+}
+
+/// A [`Progress`] a [`Config`] carries.
+#[derive(Clone)]
+pub struct Observer(pub std::sync::Arc<dyn Progress>);
+
+impl fmt::Debug for Observer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Observer")
+    }
+}
+
 /// How a generation runs. None of it changes a byte of the log.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -135,6 +168,8 @@ pub struct Config {
     /// Whether `spill` may be memory (tmpfs): refused unless allowed, since a
     /// spill the size of a log in memory is what oomd kills.
     pub memory_spill: bool,
+    /// Who hears how the pass goes, if anyone.
+    pub progress: Option<Observer>,
 }
 
 /// The bytes a record sorts by: `at` big-endian, then the step id in an
@@ -184,6 +219,22 @@ struct Buckets {
     spilled: usize,
     /// The thread's share of [`Emitted`].
     emitted: Emitted,
+    /// Bytes of runs written, compressed.
+    spilled_bytes: u64,
+    /// Bytes of lines a cell, held or spilled.
+    lines: BTreeMap<u64, u64>,
+    /// Bytes of lines spilled, before compression.
+    spilled_lines: u64,
+}
+
+/// Free space a pass needs on the filesystem of `path`, beside the engine's
+/// own: the validator's id runs in a dry run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Need {
+    /// A directory on the filesystem.
+    pub path: PathBuf,
+    /// Bytes.
+    pub bytes: u64,
 }
 
 /// What a generation emitted, known before its merge: the step count and an
@@ -196,6 +247,8 @@ pub struct Emitted {
     pub records: u64,
     /// The lines' order-independent digest.
     pub multiset: u128,
+    /// The lines' bytes.
+    pub bytes: u64,
 }
 
 impl Emitted {
@@ -206,12 +259,14 @@ impl Emitted {
         let hash = siphasher::sip128::Hasher128::finish128(&h).as_u128();
         self.records = self.records.saturating_add(1);
         self.multiset = self.multiset.wrapping_add(hash);
+        self.bytes = self.bytes.saturating_add(line.len() as u64);
     }
 
     fn merge(self, other: Emitted) -> Emitted {
         Emitted {
             records: self.records.saturating_add(other.records),
             multiset: self.multiset.wrapping_add(other.multiset),
+            bytes: self.bytes.saturating_add(other.bytes),
         }
     }
 }
@@ -222,6 +277,8 @@ impl Buckets {
             .bytes
             .saturating_add(entry.key.len())
             .saturating_add(entry.line.len());
+        let lines = self.lines.entry(cell).or_insert(0);
+        *lines = lines.saturating_add(entry.line.len() as u64);
         self.held.entry(cell).or_default().push(entry);
         if self.bytes > config.budget {
             self.spill()?;
@@ -245,9 +302,14 @@ impl Buckets {
             let count = entries.len() as u64;
             let mut out = RunOut::new(file, &path)?;
             for e in entries {
+                self.spilled_lines = self.spilled_lines.saturating_add(e.line.len() as u64);
                 out.write(&e)?;
             }
             out.finish()?;
+            let size = std::fs::metadata(&path)
+                .map_err(at("spilling to", &path))?
+                .len();
+            self.spilled_bytes = self.spilled_bytes.saturating_add(size);
             self.runs.entry(cell).or_default().push((path, count));
         }
         self.bytes = 0;
@@ -365,7 +427,7 @@ pub fn generate_on<W: Write>(
     disk: &dyn Disk,
     out: W,
 ) -> Result<(W, Trailer), EngineError> {
-    pass(header, units, config, disk, out, None, &|_| Ok(()))
+    pass(header, units, config, disk, out, None, &|_| Ok(Vec::new()))
 }
 
 /// Generates a log into the file `path`, whole or not at all: `path.partial`,
@@ -377,26 +439,46 @@ pub fn generate_file(
     config: &Config,
     compression: Compression,
 ) -> Result<Trailer, EngineError> {
+    generate_file_on(path, header, units, config, compression, &LocalDisk)
+}
+
+/// [`generate_file`] on a given disk.
+pub fn generate_file_on(
+    path: &std::path::Path,
+    header: Header,
+    units: &[&dyn Unit],
+    config: &Config,
+    compression: Compression,
+    disk: &dyn Disk,
+) -> Result<Trailer, EngineError> {
     let (partial, file) = Partial::create(path).map_err(at("creating", path))?;
     let out = FileOut::new(file, compression).map_err(at("creating", path))?;
-    let (out, trailer) = pass(header, units, config, &LocalDisk, out, Some(path), &|_| {
-        Ok(())
-    })?;
+    let (out, trailer) = pass(
+        header,
+        units,
+        config,
+        disk,
+        out,
+        Some((path, compression)),
+        &|_| Ok(Vec::new()),
+    )?;
     let file = out.finish().map_err(at("finishing", path))?;
     partial.commit(file).map_err(at("finishing", path))?;
     Ok(trailer)
 }
 
-/// [`generate`] with a check between the emit phase and the merge: `check`
-/// sees what was emitted and may refuse before a line is written.
+/// [`generate_on`] with a check between the emit phase and the merge: `check`
+/// sees what was emitted and may refuse before a line is written, or name the
+/// space it will need besides the engine's.
 pub fn generate_checked<W: Write>(
     header: Header,
     units: &[&dyn Unit],
     config: &Config,
+    disk: &dyn Disk,
     out: W,
-    check: &dyn Fn(Emitted) -> Result<(), EngineError>,
+    check: &dyn Fn(Emitted) -> Result<Vec<Need>, EngineError>,
 ) -> Result<(W, Trailer), EngineError> {
-    pass(header, units, config, &LocalDisk, out, None, check)
+    pass(header, units, config, disk, out, None, check)
 }
 
 fn pass<W: Write>(
@@ -405,8 +487,8 @@ fn pass<W: Write>(
     config: &Config,
     disk: &dyn Disk,
     out: W,
-    log: Option<&std::path::Path>,
-    check: &dyn Fn(Emitted) -> Result<(), EngineError>,
+    log: Option<(&std::path::Path, Compression)>,
+    check: &dyn Fn(Emitted) -> Result<Vec<Need>, EngineError>,
 ) -> Result<(W, Trailer), EngineError> {
     std::fs::create_dir_all(&config.spill)
         .map_err(at("claiming a spill directory in", &config.spill))?;
@@ -429,7 +511,12 @@ fn pass<W: Write>(
     // The pass's own directory, removed on every exit below, unwinding too.
     let dir =
         SpillDir::new(&config.spill).map_err(at("claiming a spill directory in", &config.spill))?;
+    if let Some(Observer(p)) = &config.progress {
+        p.began(dir.swept);
+    }
     let next = AtomicUsize::new(0);
+    let (done_units, records_total, spilled_total) =
+        (AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0));
     // Set by the first failure: the other threads take no further unit.
     let stop = AtomicBool::new(false);
     let done: Mutex<Vec<Buckets>> = Mutex::new(Vec::new());
@@ -437,6 +524,8 @@ fn pass<W: Write>(
     std::thread::scope(|scope| {
         for thread in 0..threads {
             let (next, stop, done, failed, dir) = (&next, &stop, &done, &failed, dir.path());
+            let (done_units, records_total, spilled_total) =
+                (&done_units, &records_total, &spilled_total);
             scope.spawn(move || {
                 let mut buckets = Buckets {
                     thread,
@@ -446,8 +535,13 @@ fn pass<W: Write>(
                     runs: BTreeMap::new(),
                     spilled: 0,
                     emitted: Emitted::default(),
+                    spilled_bytes: 0,
+                    lines: BTreeMap::new(),
+                    spilled_lines: 0,
                 };
                 let result = (|| -> Result<(), EngineError> {
+                    // What this thread has added to the shared totals.
+                    let mut reported = (0u64, 0u64);
                     while !stop.load(Ordering::Relaxed) {
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(unit) = units.get(i) else {
@@ -470,7 +564,31 @@ fn pass<W: Write>(
                                 })
                             }));
                         match emitted {
-                            Ok(result) => result?,
+                            Ok(result) => {
+                                result?;
+                                let units =
+                                    done_units.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+                                let records = records_total
+                                    .fetch_add(
+                                        buckets.emitted.records.saturating_sub(reported.0),
+                                        Ordering::Relaxed,
+                                    )
+                                    .saturating_add(
+                                        buckets.emitted.records.saturating_sub(reported.0),
+                                    );
+                                let spilled = spilled_total
+                                    .fetch_add(
+                                        buckets.spilled_bytes.saturating_sub(reported.1),
+                                        Ordering::Relaxed,
+                                    )
+                                    .saturating_add(
+                                        buckets.spilled_bytes.saturating_sub(reported.1),
+                                    );
+                                reported = (buckets.emitted.records, buckets.spilled_bytes);
+                                if let Some(Observer(p)) = &config.progress {
+                                    p.emitted(units, records, spilled);
+                                }
+                            }
                             Err(panic) => {
                                 let what = panic
                                     .downcast_ref::<&str>()
@@ -506,56 +624,124 @@ fn pass<W: Write>(
                 .iter()
                 .fold(Emitted::default(), |e, b| e.merge(b.emitted));
             check(emitted)
-                .and_then(|()| room(&all, config, disk, log))
-                .and_then(|()| merge(header, &mut all, threads, fan_in, dir.path(), out))
+                .and_then(|extra| room(&all, config, disk, log, extra))
+                .and_then(|()| {
+                    merge(
+                        header,
+                        &mut all,
+                        threads,
+                        fan_in,
+                        dir.path(),
+                        config.progress.as_ref(),
+                        out,
+                    )
+                })
         }
     };
     drop(dir);
     result
 }
 
-/// Whether the merge has room, checked before its first line: on the spill
-/// directory's filesystem, the largest cell once more for the cascade's
-/// intermediate runs, and a margin; on the log's, if it is another, every
-/// spilled byte (the log is about as large compressed). On the same filesystem
-/// the log grows as each merged cell's runs are deleted.
+/// Whether the merge will fit, checked before its first line: per
+/// filesystem, the most it will hold at once beyond what is already there,
+/// with a margin. Cell by cell a merge writes a cascade of at most the cell's
+/// runs and then the cell's share of the log, and deletes the cell's runs;
+/// a log on the spills' filesystem gains its share and gives back the runs.
+/// A compressed log's share is estimated at the spills' measured ratio, a
+/// plain log's is the lines' bytes.
 fn room(
     all: &[Buckets],
     config: &Config,
     disk: &dyn Disk,
-    log: Option<&std::path::Path>,
+    log: Option<(&std::path::Path, Compression)>,
+    extra: Vec<Need>,
 ) -> Result<(), EngineError> {
     const MARGIN: u64 = 64 << 20;
-    let mut cells: BTreeMap<u64, u64> = BTreeMap::new();
+    // Per cell: its runs' bytes on disk, its lines' bytes.
+    let mut cells: BTreeMap<u64, (u64, u64)> = BTreeMap::new();
+    let (mut spilled, mut spilled_lines) = (0u64, 0u64);
     for b in all {
         for (cell, runs) in &b.runs {
             for (path, _) in runs {
                 let size = std::fs::metadata(path)
                     .map_err(at("measuring", path))?
                     .len();
-                let c = cells.entry(*cell).or_insert(0);
-                *c = c.saturating_add(size);
+                let c = cells.entry(*cell).or_insert((0, 0));
+                c.0 = c.0.saturating_add(size);
+                spilled = spilled.saturating_add(size);
+            }
+        }
+        for (cell, bytes) in &b.lines {
+            let c = cells.entry(*cell).or_insert((0, 0));
+            c.1 = c.1.saturating_add(*bytes);
+        }
+        spilled_lines = spilled_lines.saturating_add(b.spilled_lines);
+    }
+    let largest = cells.values().map(|c| c.0).max().unwrap_or(0);
+    let mut needs = extra;
+    match log {
+        None => needs.push(Need {
+            path: config.spill.clone(),
+            bytes: largest,
+        }),
+        Some((path, compression)) => {
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(std::path::Path::new("."))
+                .to_owned();
+            // A cell's share of the log.
+            let share = |lines: u64| -> u64 {
+                match compression {
+                    Compression::None => lines,
+                    Compression::Zstd { .. } if spilled_lines > 0 => {
+                        let estimate = u128::from(lines)
+                            .saturating_mul(u128::from(spilled))
+                            .div_ceil(u128::from(spilled_lines));
+                        u64::try_from(estimate).unwrap_or(u64::MAX).min(lines)
+                    }
+                    Compression::Zstd { .. } => lines,
+                }
+            };
+            let same = disk.device(&parent).map_err(at("inspecting", &parent))?
+                == disk
+                    .device(&config.spill)
+                    .map_err(at("inspecting", &config.spill))?;
+            if same {
+                let (mut held, mut peak) = (0i128, 0i128);
+                for &(runs, lines) in cells.values() {
+                    let (runs, share) = (i128::from(runs), i128::from(share(lines)));
+                    peak = peak.max(held.saturating_add(runs).saturating_add(share));
+                    held = held.saturating_add(share).saturating_sub(runs);
+                }
+                needs.push(Need {
+                    path: config.spill.clone(),
+                    bytes: u64::try_from(peak).unwrap_or(u64::MAX),
+                });
+            } else {
+                needs.push(Need {
+                    path: config.spill.clone(),
+                    bytes: largest,
+                });
+                let log_bytes = cells
+                    .values()
+                    .map(|c| share(c.1))
+                    .fold(0u64, u64::saturating_add);
+                needs.push(Need {
+                    path: parent,
+                    bytes: log_bytes,
+                });
             }
         }
     }
-    let largest = cells.values().copied().max().unwrap_or(0);
-    let total = cells.values().copied().fold(0u64, u64::saturating_add);
-    let mut needs: Vec<(PathBuf, u64)> =
-        vec![(config.spill.clone(), largest.saturating_add(MARGIN))];
-    if let Some(log) = log {
-        let parent = log
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(std::path::Path::new("."));
-        let same = disk.device(parent).map_err(at("inspecting", parent))?
-            == disk
-                .device(&config.spill)
-                .map_err(at("inspecting", &config.spill))?;
-        if !same {
-            needs.push((parent.to_owned(), total.saturating_add(MARGIN)));
-        }
+    // One sum a filesystem, the margin once.
+    let mut by_device: BTreeMap<u64, (PathBuf, u64)> = BTreeMap::new();
+    for Need { path, bytes } in needs {
+        let device = disk.device(&path).map_err(at("inspecting", &path))?;
+        let entry = by_device.entry(device).or_insert((path, MARGIN));
+        entry.1 = entry.1.saturating_add(bytes);
     }
-    for (path, needed) in needs {
+    for (path, needed) in by_device.into_values() {
         let free = disk.free(&path).map_err(at("inspecting", &path))?;
         if free < needed {
             return Err(EngineError::Space { path, needed, free });
@@ -573,6 +759,7 @@ fn merge<W: Write>(
     threads: usize,
     fan_in: usize,
     dir: &std::path::Path,
+    progress: Option<&Observer>,
     out: W,
 ) -> Result<(W, Trailer), EngineError> {
     let mut writer = Writer::new(out, header)?;
@@ -582,6 +769,10 @@ fn merge<W: Write>(
         .collect();
     cells.sort_unstable();
     cells.dedup();
+    if let Some(Observer(p)) = progress {
+        p.merging(cells.len() as u64);
+    }
+    let (mut merged, mut lines) = (0u64, 0u64);
     for cell in cells {
         let mut held: Vec<Vec<Entry>> = all
             .iter_mut()
@@ -610,7 +801,14 @@ fn merge<W: Write>(
         for (path, count) in &runs {
             sources.push(Source::Run(open_run(path, *count)?));
         }
-        kway(sources, |e| Ok(writer.line(&e.line)?))?;
+        kway(sources, |e| {
+            lines = lines.saturating_add(1);
+            Ok(writer.line(&e.line)?)
+        })?;
+        merged = merged.saturating_add(1);
+        if let Some(Observer(p)) = progress {
+            p.merged(merged, lines);
+        }
         for (path, _) in &runs {
             let _ = std::fs::remove_file(path);
         }

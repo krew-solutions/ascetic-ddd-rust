@@ -70,6 +70,7 @@ default): its lines, trailer and digest are the same, and `open` tells it by
 its bytes. The engine spills compressed runs into a directory of its own,
 removed on every exit; merges stay within the open-file limit; a merge that
 would not fit the disk, or a spill in memory, is refused before the first line.
+A `Progress` observer in `Config` hears each unit and each cell merged.
 
 ## A run with no log
 

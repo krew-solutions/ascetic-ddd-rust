@@ -169,6 +169,7 @@ fn run(plan: Day, threads: usize) -> Vec<Record> {
         spill: dir.path().to_owned(),
         fan_in: 0,
         memory_spill: true,
+        progress: None,
     };
     let (bytes, trailer) = generate(header_for_a_day(), &units, &config, Vec::new()).unwrap();
     let report = validate(

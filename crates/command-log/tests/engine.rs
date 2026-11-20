@@ -87,6 +87,7 @@ fn run(threads: usize, budget: usize, cells: u64, reversed: bool) -> Result<Vec<
         spill: dir.path().to_owned(),
         fan_in: 0,
         memory_spill: true,
+        progress: None,
     };
     let out = generate(header(), &units, &config, Vec::new()).map(|(bytes, _)| bytes);
     assert_eq!(leftover(dir.path()).len(), 0, "spills removed");
@@ -168,6 +169,7 @@ fn equal_keys_and_refusals_fail_the_generation() {
             spill: dir.path().to_owned(),
             fan_in: 0,
             memory_spill: true,
+            progress: None,
         };
         let units: [&dyn Unit; 2] = [&Twice, &Twice];
         match generate(header(), &units, &config, Vec::new()) {
@@ -225,6 +227,7 @@ fn a_thread_spills_past_its_budget_only() {
             spill: dir.path().to_owned(),
             fan_in: 0,
             memory_spill: true,
+            progress: None,
         };
         generate(header(), &[&unit], &config, Vec::new()).unwrap();
         let most = unit.most.load(std::sync::atomic::Ordering::Relaxed);

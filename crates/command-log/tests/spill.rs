@@ -23,6 +23,7 @@ fn config(spill: &Path, threads: usize, budget: usize) -> Config {
         spill: spill.to_owned(),
         fan_in: 0,
         memory_spill: true,
+        progress: None,
     }
 }
 

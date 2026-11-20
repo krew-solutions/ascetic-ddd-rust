@@ -696,9 +696,34 @@ makes the 4.50 GB log of M7 162 MB, level 3 176 MB; SHA-256 runs at 79 MB/s here
   comparison; comparison at the end only; an off-by-one boundary; `P₀` checked late; the emitted check skipped; the
   validator's error reported before the generation's; a commitment for a dirty report; the trailer hashed into the
   chain.
-- **Owed of decision 15:** the progress observer; the verified reader for a persisted replay (stage 3 consumes it); an
-  executor for a stalled consumer (the pipe is bounded: 64 blocks of up to 1 MiB) and for a write failing partway
-  (`RLIMIT_FSIZE`); M9.
+- **Owed of decision 15:** the verified reader for a persisted replay (stage 3 consumes it); an executor for a stalled
+  consumer (the pipe is bounded: 64 blocks of up to 1 MiB) and for a write failing partway (`RLIMIT_FSIZE`); M9.
+
+**C6, fourth part — the observer and the room check revisited** (2026-11-21, this laptop):
+- **Defect found in the second part's room check:** a log written on the spills' filesystem was not counted — the check
+  asked for the largest cell and the margin, and a plain log, several times the compressed spills, would have filled
+  the disk it had just been let onto. Found while adding the validator's term, not by an executor; the second part's
+  E6 used one fake filesystem and a compressed log, where the omission costs about one cell.
+- **Built:** the room check as a sum per filesystem with the margin once. Cell by cell, in merge order, a merge holds at
+  most the cell's runs again (the cascade deletes each group's inputs once merged, so its depth multiplies nothing — the
+  decision's "times the cascade's depth" was conservative past need) and then writes the cell's share of the log,
+  deleting the cell's runs after: a log beside the spills needs the peak of what it has gained less what it gave back,
+  plus that cell; a log elsewhere needs every share there and the largest cell beside the spills. A plain log's share is
+  its lines' bytes; a compressed one's is estimated at the spills' measured ratio, conservative since the runs carry
+  keys and lengths (M9 measures the log's ratio against the spills'). `engine::generate_checked`'s check names further
+  needs; `live::dry_on` names the validator's: 24 bytes a step and one cascade group more, none while the ids fit in
+  memory. A `Progress` observer in `Config` hears the sweep's bytes, every unit with the steps and spilled bytes so
+  far, the cells to merge, and every cell merged with the lines written so far. `generate_file_on` and `dry_on` take
+  the disk port, as `generate_on` and `validate_on` do.
+- **Executors** (`tests/room.rs`): a plain log on a filesystem of its own needs exactly its step lines and the margin
+  there, nothing written; beside its spills a plain log needs more than half its lines and a compressed one less; a dry
+  run refused one byte short of the validator's need and let through at it, no need while the ids fit, the engine's
+  and the validator's needs adding up on one filesystem; the observer hears the swept bytes, every unit, the cells
+  before any merge and every cell in order with the lines so far, and one unit's spills with it. Mutations, each
+  alone, red: the steps', spilled bytes' and lines' counters each never advanced (the spilled one lagging a unit, until
+  the one-unit executor); the sweep not reported; the log's share ignored beside the spills; a compressed log's share
+  taken as its lines; a plain log elsewhere ignored; needs on one filesystem not added; the validator's need dropped;
+  its cascade group dropped.
 
 Owed:
 - **M9** (C6): the host scenario's bytes a step and its ratio at levels 1 and 3 in process; sha2's MB/s, soft and `asm`;
@@ -781,3 +806,5 @@ condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
 - 2026-11-21: Slice C6, first part (failure halfway), built (§ Measured).
 - 2026-11-21: Slice C6, second part (compression, bounded merges, room), built (§ Measured).
 - 2026-11-21: Slice C6, third part (the live run), built (§ Measured).
+- 2026-11-21: Slice C6, fourth part (the observer; the room check counting a log beside its spills, which the second
+  part missed, and the validator's runs), built (§ Measured).

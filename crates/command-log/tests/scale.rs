@@ -77,6 +77,7 @@ fn m7_ten_million_steps() {
         spill,
         fan_in: 0,
         memory_spill: true,
+        progress: None,
     };
     let path = base.join("log.jsonl");
     let out = BufWriter::with_capacity(1 << 20, File::create(&path).unwrap());

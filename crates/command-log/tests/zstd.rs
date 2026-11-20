@@ -119,6 +119,7 @@ fn config(spill: &Path, fan_in: usize) -> Config {
         spill: spill.to_owned(),
         fan_in,
         memory_spill: true,
+        progress: None,
     }
 }
 

@@ -19,10 +19,11 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::engine::{Config, Emitted, EngineError, Unit, generate_checked};
+use crate::disk::{Disk, LocalDisk};
+use crate::engine::{Config, Emitted, EngineError, Need, Unit, generate_checked};
 use crate::log::{FORMAT, LogError, Partial, Reader, encode};
 use crate::record::{Header, Line, Trailer};
-use crate::validate::{Host, Limits, Report, Rule, validate};
+use crate::validate::{Host, Limits, Report, Rule, spill_need, validate_on};
 
 /// Bumped when a rule's meaning changes, beside its name: a commitment from
 /// another validator is stale (C5 added `rate` and `key`).
@@ -359,6 +360,37 @@ pub fn dry(
     chunk: u64,
     commitment: &Path,
 ) -> Result<Report, EngineError> {
+    dry_on(
+        header,
+        units,
+        config,
+        host,
+        limits,
+        fingerprint,
+        chunk,
+        commitment,
+        &LocalDisk,
+    )
+}
+
+/// [`dry`] on a given disk. The space checked before the merge's first line
+/// counts the validator's id runs, which grow while the merge runs.
+#[allow(clippy::too_many_arguments)]
+pub fn dry_on(
+    header: Header,
+    units: &[&dyn Unit],
+    config: &Config,
+    host: &(impl Host + Sync),
+    limits: &Limits,
+    fingerprint: &str,
+    chunk: u64,
+    commitment: &Path,
+    disk: &dyn Disk,
+) -> Result<Report, EngineError> {
+    let fan_in = match limits.fan_in {
+        0 => crate::disk::fan_in(disk.open_files().map_err(LogError::Io)?),
+        n => n.max(2),
+    };
     let (tx, rx) = pipe(64);
     let emitted: Mutex<Option<Emitted>> = Mutex::new(None);
     let out = Prefixing {
@@ -374,9 +406,12 @@ pub fn dry(
                 if let Ok(mut slot) = emitted.lock() {
                     *slot = Some(e);
                 }
-                Ok(())
+                Ok(vec![Need {
+                    path: limits.spill.clone(),
+                    bytes: spill_need(e.records, limits, fan_in),
+                }])
             };
-            let result = generate_checked(header, units, config, out, &record);
+            let result = generate_checked(header, units, config, disk, out, &record);
             match result {
                 Ok((out, trailer)) => {
                     let Prefixing {
@@ -392,7 +427,7 @@ pub fn dry(
                 Err(e) => Err(e),
             }
         });
-        let validated = Reader::new(rx).and_then(|reader| validate(reader, host, limits));
+        let validated = Reader::new(rx).and_then(|reader| validate_on(reader, host, limits, disk));
         let generated = generator
             .join()
             .unwrap_or_else(|_| Err(EngineError::Unit("the generation panicked".into())));
@@ -456,7 +491,7 @@ pub fn live<W: Write>(
     let expected = (commitment.records, commitment.multiset.clone());
     let check = |e: Emitted| {
         if (e.records, format!("{:032x}", e.multiset)) == expected {
-            Ok(())
+            Ok(Vec::new())
         } else {
             Err(diverged("what was emitted"))
         }
@@ -471,7 +506,7 @@ pub fn live<W: Write>(
         started: false,
         diverged: first.clone(),
     };
-    match generate_checked(header, units, config, verified, &check) {
+    match generate_checked(header, units, config, &LocalDisk, verified, &check) {
         Ok((verified, trailer)) => Ok((verified.inner, trailer)),
         Err(e) => match first.lock().ok().and_then(|d| d.clone()) {
             Some(what) => Err(EngineError::Diverged { what }),
