@@ -4,8 +4,8 @@ The planned steps of a load, in the order of their planned time (ADR-0046): what
 a generation writes and a load run replays.
 
 **Status: in progress.** Done: the record model and the canonical byte form
-(slice C1); templates, the rendering of holes and the splice (C2). To come: the
-validator, the generation engine, the offered-load rules.
+(slice C1); templates, the rendering of holes and the splice (C2); the
+validator (C3). To come: the generation engine, the offered-load rules.
 
 ## A log
 
@@ -31,3 +31,14 @@ hole fills: a valid value of that field's type, so the message holds it. The
 template finds each sentinel once in the bytes and records its span. At replay,
 `render::fill` splices each span's value: an id rendered from the run's
 namespace and the subject, a time, a captured value.
+
+## The validator
+
+`validate::validate` reads a log once, in memory bounded by the window, and
+reports every rule a line breaks: order, unique step ids, edges within the
+window, barrier counts, the order of a captured slot's writers and readers,
+streams and their gaps, spans, ids against the stand's profile, operations,
+deviations. What only the host knows — whether a span is its field, which
+dependencies its domain requires — it asks through `validate::Host`. An
+independent reference, `vectors/reference.py`, decides the same rules from their
+definitions and agrees with it on a corpus of random logs and their mutants.

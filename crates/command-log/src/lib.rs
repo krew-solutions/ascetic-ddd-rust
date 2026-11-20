@@ -13,6 +13,7 @@ pub mod record;
 pub mod render;
 pub mod sample;
 pub mod template;
+pub mod validate;
 mod wire;
 
 pub use crate::log::{FORMAT, FORMAT_VERSION, LogError, Reader, Writer, encode, write_file};

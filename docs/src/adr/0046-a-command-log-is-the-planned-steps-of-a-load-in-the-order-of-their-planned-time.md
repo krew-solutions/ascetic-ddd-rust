@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-20); slices C1 and C2 built. Stage 2 of three toward the host's fitness functions (ADR-0045 § Status): the Command Log —
+Proposed (2026-11-20); slices C1 to C3 built. Stage 2 of three toward the host's fitness functions (ADR-0045 § Status): the Command Log —
 what a generation writes and a load run replays — its model, byte form, validator and generation engine. Stage 3,
 the scheduler that replays it, is a later ADR; § 12 states what it inherits.
 
@@ -232,6 +232,27 @@ One streaming pass, in memory bounded by the window:
 Its oracle is not itself: an independent reference checker (Python, O(n²) by definition) is compared with it on
 small random logs and on their one-edit mutants, and every rule has a minimal violating log beside a passing twin.
 
+What the rules mean where the list above leaves it open (settled in building C3, each decided by both the validator
+and the reference):
+- **Awaiting has a strength**, `Sent` < `Settled` < `Expected`: a stronger wait meets a weaker requirement.
+- **An edge** is to the latest earlier step of that id, planned strictly before the holder, within W of it or of a
+  retained label. The distance is checked edge by edge, not left to the window's eviction, which an out-of-order
+  line defeats.
+- **Captures (§ 5).** A writer of a slot is a step that captures it, or a REST call whose operation writes it on the
+  step's subject. A reader awaits its producer as expected, and the producer is the slot's latest earlier writer.
+  A writer awaits the previous writer as at least settled — its value must be stored before the next — and each
+  reader of it as at least sent, which is when the reader takes the value.
+- **Ids and the profile.** A rendered `id` only of a kind the profile renders; a captured `id` only of one it
+  captures.
+- **A deviation** exempts its line from the rule it names; one naming no rule, or a rule its line keeps, is itself a
+  violation.
+- **Uniqueness** compares 16-byte digests of the step ids with their lines, sorted in runs past a budget and merged
+  at the end: two equal digests are one id but with probability 2⁻¹²⁸ a pair.
+- **The host** (`validate::Host`) decodes its spans and names the dependencies only its domain knows — the
+  `managed` that opened a Device's life before a fact of it, a message's declared causal dependency — and the
+  validator checks that they are awaited.
+- **Framing** fails the pass; every other rule is collected, so one pass reports every violation.
+
 ### 10. The stand profile
 
 The header names the stand a log is for: which kinds' ids are rendered and which captured, which streams are
@@ -347,7 +368,7 @@ The scheduler:
 | H1 | C2 | the builder's spans: bytes outside the holes equal the template's; splicing real values gives the bytes the typed message serialises to with them, end to end through a decorator | an offset off by one; a token half replaced |
 | H2 | C2 | rendering against golden vectors computed outside the crate (Python): each role and rendering, two namespaces, two subjects; secret halves differ | rendering without the namespace; a role ignored |
 | V1 | C3 | one minimal violating log per rule beside its passing twin | a rule disabled |
-| V2 | C3 | the validator agrees with the reference checker on random small logs and their one-edit mutants (an edge dropped, an `at` moved, a StepId duplicated, a position renumbered, a barrier count ±1, a capture's producer swapped) | a rule's condition weakened |
+| V2 | C3 | the validator agrees with the reference checker (`vectors/reference.py`) on 120 random small logs and their one-edit mutants (an edge dropped, an `at` moved, a StepId duplicated, a position renumbered, a barrier count ±1, a capture's producer swapped, an unknown operation, spans, a profile's id, a deviation), every (line, rule) pair, with uniqueness spilled to disk; a test of the crate | a rule's condition weakened |
 | E1 | C4 | bytes identical across threads {1, 2, 7} × bucket budgets {unbounded, one record, a few} × cell caps {1, many}, units reversed | spills merged by `at` alone; spills in thread order; a last buffer unflushed |
 | E2 | C4 | the time-major acceptance: Tenants over a day, Devices over hours, reports, a publication's facts; validates; per-chunk dispersion ≈ 1 for an open total, the exact total for a fixed one, `apportion` as the negative control | arrivals by `apportion`; time in a key |
 | R1 | C5 | a token bucket per limit key over planned times: a burst at t = 0 accepted, burst + 1 refused, an average under the rate with a peak over the burst refused; an unevaluable key refused | the average instead of the bucket |
@@ -403,6 +424,27 @@ The scheduler:
   only a 129th hole shows; spans overlapping; the errors' texts. A second run over the survivors' descriptions: 30
   mutants, 30 caught.
 
+**C3** (2026-11-20, this laptop):
+- **V1.** Every rule has a minimal violating log beside a passing twin (`tests/validate.rs`), boundaries included: an
+  edge at exactly W and at W + 1, a retained dependency past W, equal times ordered by the step id, a stream at
+  2³¹ − 1 and 2³¹, a capture that is a write though its operation writes nothing, a duplicate on purpose decided
+  only at the end. Uniqueness spilled with budgets 1, 2 and 7 gives what it gives in memory, line for line.
+- **V2.** 1,066 logs, 120 random and 946 mutants, each validated with three ids in memory so that every one spills:
+  the reference reaches every verdict, (line, rule) pair for pair. Violations by rule: barrier 85, deviation 120,
+  duplicate 120, edge 213, gap 85, operation 103, order 98, producer 18, profile 70, span 102, stale 20, stream 57,
+  writers 10 (header and required, which the corpus cannot reach, by V1).
+- **What V2 found.** The first validator relied on eviction for W: a line moved back in time stayed in the window, and
+  a later edge to it more than W away passed. The reference refused it. The distance is now checked per edge. (On
+  review: evicting a step id removed the entry a later duplicate had put back; eviction now removes only its own.)
+- **The mutation run** (cargo-mutants 27.1.0, `--file crates/command-log/src/validate.rs`): 126 mutants, 94 caught, 4
+  timed out (a merge that never reads its runs' end), 13 unviable, 15 missed. Killed by tests that were missing (13):
+  holes inside a payload's spans and an observation's predicates, which no rule's twin held; a captured `id` against
+  the profile; the spill — a budget not reached writing no run, and one passed writing runs during the pass, watched
+  through a host hook, since the verdicts are the same either way; an error reading a run failing the pass instead
+  of ending the run; the cap on kept violations; `validate_file`; the texts. Equivalent (2): `Host`'s default
+  methods, whose bodies are the mutants. A second run over the survivors' descriptions: 18 mutants, 16 caught, the
+  two defaults missed.
+
 Owed:
 - **M7:** bytes a record by kind, generation time and peak RSS at 10⁷ and 10⁹ records on the laptop, peak disk with
   spills; the measurement that would bring compression or chunks back.
@@ -443,3 +485,7 @@ condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
 - 2026-11-20: Slice C2 built (§ Measured). Decision 3 refined from what building it found: a sentinel is a valid value
   of the field it stands in; a form takes only what it can write; hex and key material are drawn by family, apart
   from each other.
+- 2026-11-20: Slice C3 built (§ Measured). Decision 9's open meanings settled — awaiting by strength, edges to the
+  latest earlier step within W checked per edge, the order of a slot's writers and readers, ids against the profile,
+  deviations as exemptions, uniqueness by digests with an external sort, the host's hooks — and decided alike by the
+  validator and the independent reference.
