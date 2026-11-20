@@ -55,7 +55,7 @@ fn thousands_of_runs_merge_under_sixty_four_open_files() {
     let (log, trailer) = generate(header(), &units, &config, Vec::new()).unwrap();
     assert_eq!(trailer.records, 3_000);
     let limits = ascetic_ddd_command_log::validate::Limits {
-        ids_in_memory: 1,
+        memory: 24,
         ..limits_in(dir.path())
     };
     let report = validate(Reader::new(Cursor::new(&log)).unwrap(), &NoHost, &limits).unwrap();

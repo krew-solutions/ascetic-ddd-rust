@@ -221,19 +221,16 @@ pub fn bytes(header: Header, records: &[Record]) -> Vec<u8> {
     w.finish().unwrap().0
 }
 
-pub fn run_with(
-    header: Header,
-    records: &[Record],
-    host: &impl Host,
-    ids_in_memory: usize,
-) -> Report {
+pub fn run_with(header: Header, records: &[Record], host: &impl Host, ids: usize) -> Report {
     let dir = tempfile::tempdir().unwrap();
+    // Memory for `ids` step ids of 24 bytes; stream messages share it.
     let limits = Limits {
-        ids_in_memory,
+        memory: ids * 24,
         spill: dir.path().to_owned(),
         kept: 1_000,
         fan_in: 0,
         memory_spill: true,
+        progress: None,
     };
     let reader = Reader::new(Cursor::new(bytes(header, records))).unwrap();
     let report = validate(reader, host, &limits).unwrap();

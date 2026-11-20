@@ -383,8 +383,8 @@ fn mutant(records: &[Record], which: &str, k: &Key) -> Option<Vec<Record>> {
     (m != records).then_some(m)
 }
 
-/// The corpus as JSON lines: a name, a log, the validator's verdict.
-pub fn lines() -> Vec<String> {
+/// The corpus's logs, by name.
+pub fn logs() -> Vec<(String, Vec<Record>)> {
     let root = Key::root(Seed(46)).child("corpus");
     let mut out = Vec::new();
     let kinds = [
@@ -414,26 +414,33 @@ pub fn lines() -> Vec<String> {
                 entries.push((format!("log-{i}-{which}"), m));
             }
         }
-        for (name, records) in entries {
-            let report = run_with(corpus_header(), &records, &NoHost, 3);
-            let mut verdict: Vec<(u64, &str)> = report
-                .violations
-                .iter()
-                .map(|v| (v.line, v.rule.name()))
-                .collect();
-            verdict.dedup();
-            verdict.sort();
-            verdict.dedup();
-            let log = String::from_utf8(bytes(corpus_header(), &records)).unwrap();
-            let peaks = [
-                report.peaks.completions,
-                report.peaks.captures,
-                report.peaks.polls,
-            ];
-            let line =
-                serde_json::json!({ "name": name, "log": log, "verdict": verdict, "peaks": peaks });
-            out.push(line.to_string());
-        }
+        out.extend(entries);
+    }
+    out
+}
+
+/// The corpus as JSON lines: a name, a log, the validator's verdict and peaks.
+pub fn lines() -> Vec<String> {
+    let mut out = Vec::new();
+    for (name, records) in logs() {
+        let report = run_with(corpus_header(), &records, &NoHost, 3);
+        let mut verdict: Vec<(u64, &str)> = report
+            .violations
+            .iter()
+            .map(|v| (v.line, v.rule.name()))
+            .collect();
+        verdict.dedup();
+        verdict.sort();
+        verdict.dedup();
+        let log = String::from_utf8(bytes(corpus_header(), &records)).unwrap();
+        let peaks = [
+            report.peaks.completions,
+            report.peaks.captures,
+            report.peaks.polls,
+        ];
+        let line =
+            serde_json::json!({ "name": name, "log": log, "verdict": verdict, "peaks": peaks });
+        out.push(line.to_string());
     }
     out
 }

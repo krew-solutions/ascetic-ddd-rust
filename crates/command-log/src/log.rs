@@ -70,6 +70,16 @@ pub enum LogError {
     },
     /// A line follows the trailer.
     AfterTrailer,
+    /// A pass's runs would not fit the disk, beside a reserve: refused before
+    /// the write.
+    Space {
+        /// The directory.
+        path: std::path::PathBuf,
+        /// What the write needs, the reserve included.
+        needed: u64,
+        /// What is free.
+        free: u64,
+    },
     /// A log read through a commitment is not what was validated: what
     /// differs ([`crate::live`]).
     Diverged {
@@ -99,6 +109,9 @@ impl fmt::Display for LogError {
                 expected.records, expected.sha256, read.records, read.sha256
             ),
             LogError::AfterTrailer => f.write_str("a line follows the trailer"),
+            LogError::Space { path, needed, free } => {
+                write!(f, "{}: {needed} bytes needed, {free} free", path.display())
+            }
             LogError::Diverged { what } => write!(f, "{what} differs from the commitment"),
         }
     }

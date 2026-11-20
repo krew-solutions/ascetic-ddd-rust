@@ -137,6 +137,11 @@ pub trait Progress: Send + Sync {
     fn merged(&self, cells: u64, lines: u64) {
         let _ = (cells, lines);
     }
+    /// A validation wrote a run of `kind` (decision 16): the bytes its runs of
+    /// that kind hold on disk now.
+    fn runs(&self, kind: &'static str, on_disk: u64) {
+        let _ = (kind, on_disk);
+    }
 }
 
 /// A [`Progress`] a [`Config`] carries.
@@ -255,6 +260,9 @@ pub struct Emitted {
     pub multiset: u128,
     /// The lines' bytes.
     pub bytes: u64,
+    /// The bytes of events the records make in a validator's runs
+    /// (decision 16): what a dry run's validator will need on disk.
+    pub run_bytes: u64,
 }
 
 impl Emitted {
@@ -273,6 +281,7 @@ impl Emitted {
             records: self.records.saturating_add(other.records),
             multiset: self.multiset.wrapping_add(other.multiset),
             bytes: self.bytes.saturating_add(other.bytes),
+            run_bytes: self.run_bytes.saturating_add(other.run_bytes),
         }
     }
 }
@@ -564,8 +573,11 @@ fn pass<W: Write>(
                                     let key = order_key(record.at, &record.step);
                                     let at_cell =
                                         record.at.checked_div(cell).unwrap_or(0).min(last);
+                                    let run_bytes = crate::validate::run_bytes(&record);
                                     let line = encode(&Line::Step(Box::new(record)))?;
                                     buckets.emitted.add(&line);
+                                    buckets.emitted.run_bytes =
+                                        buckets.emitted.run_bytes.saturating_add(run_bytes);
                                     buckets.push(at_cell, Entry { key, line }, config)
                                 })
                             }));

@@ -15,6 +15,7 @@ pub mod log;
 pub mod rate;
 pub mod record;
 pub mod render;
+mod runs;
 pub mod sample;
 mod spill;
 pub mod template;

@@ -621,11 +621,12 @@ fn ids_spill_past_their_budget_only() {
             most: std::cell::Cell::new(0),
         };
         let limits = Limits {
-            ids_in_memory: budget,
+            memory: budget * 24,
             spill: dir.path().to_owned(),
             kept: 10,
             fan_in: 0,
             memory_spill: true,
+            progress: None,
         };
         let reader =
             ascetic_ddd_command_log::Reader::new(std::io::Cursor::new(bytes(header(), &records)))
@@ -649,11 +650,12 @@ fn a_report_keeps_what_it_may_and_counts_the_rest() {
     let records: Vec<Record> = (0..6u64).map(|i| step(a.clone(), i)).collect();
     let dir = tempfile::tempdir().unwrap();
     let limits = ascetic_ddd_command_log::validate::Limits {
-        ids_in_memory: 100,
+        memory: 100 * 24,
         spill: dir.path().to_owned(),
         kept: 2,
         fan_in: 0,
         memory_spill: true,
+        progress: None,
     };
     let reader =
         ascetic_ddd_command_log::Reader::new(std::io::Cursor::new(bytes(header(), &records)))
@@ -793,11 +795,12 @@ fn the_report_keeps_the_first_lines_whenever_found() {
     ];
     let dir = tempfile::tempdir().unwrap();
     let limits = ascetic_ddd_command_log::validate::Limits {
-        ids_in_memory: 100,
+        memory: 100 * 24,
         spill: dir.path().to_owned(),
         kept: 1,
         fan_in: 0,
         memory_spill: true,
+        progress: None,
     };
     let reader =
         ascetic_ddd_command_log::Reader::new(std::io::Cursor::new(bytes(header(), &records)))
@@ -862,4 +865,103 @@ fn the_rules_meaning_is_pinned_to_its_revision() {
         Some((ascetic_ddd_command_log::live::RULES_REVISION, hex.as_str())),
         "a rule's meaning changed: bump RULES_REVISION and append its digest"
     );
+}
+
+/// Decision 16: a report is a function of the log alone — every corpus log
+/// validated with every event its own run through a fan-in of two, and with a
+/// few events a run through three, gives the very report it gives in memory.
+#[test]
+fn a_report_is_a_function_of_the_log_alone() {
+    let at = |records: &[Record], memory: usize, fan_in: usize| {
+        let dir = tempfile::tempdir().unwrap();
+        let limits = ascetic_ddd_command_log::validate::Limits {
+            memory,
+            spill: dir.path().to_owned(),
+            kept: 1_000,
+            fan_in,
+            memory_spill: true,
+            progress: None,
+        };
+        let reader = ascetic_ddd_command_log::Reader::new(std::io::Cursor::new(bytes(
+            fixture::corpus::corpus_header(),
+            records,
+        )))
+        .unwrap();
+        let report = ascetic_ddd_command_log::validate::validate(reader, &NoHost, &limits).unwrap();
+        assert!(leftover(dir.path()).is_empty());
+        report
+    };
+    for (name, records) in fixture::corpus::logs() {
+        let whole = at(&records, 1 << 30, 0);
+        for (memory, fan_in) in [(1, 2), (100, 3)] {
+            assert_eq!(
+                at(&records, memory, fan_in),
+                whole,
+                "{name} at {memory} bytes, a fan-in of {fan_in}"
+            );
+        }
+    }
+}
+
+/// A long gapless stream through runs of a few hundred messages, merged two
+/// and three at a time and all at once, is clean: no message is lost or
+/// reordered on its way through the runs.
+#[test]
+fn a_long_stream_through_small_runs_is_clean() {
+    let mut records = Vec::new();
+    let mut before: Option<StepId> = None;
+    for n in 0..10_000u32 {
+        let mut r = message(
+            step(id("device", 1, "fact", n), u64::from(n) * 10),
+            "lifecycle",
+            n + 1,
+        );
+        if let Some(b) = &before {
+            r = after(r, b, On::Expected);
+        }
+        before = Some(r.step.clone());
+        records.push(r);
+    }
+    for fan_in in [2, 3, 0] {
+        let dir = tempfile::tempdir().unwrap();
+        let limits = ascetic_ddd_command_log::validate::Limits {
+            memory: 40_000,
+            spill: dir.path().to_owned(),
+            kept: 10,
+            fan_in,
+            memory_spill: true,
+            progress: None,
+        };
+        let reader =
+            ascetic_ddd_command_log::Reader::new(std::io::Cursor::new(bytes(header(), &records)))
+                .unwrap();
+        let report = ascetic_ddd_command_log::validate::validate(reader, &NoHost, &limits).unwrap();
+        assert!(
+            report.violations.is_empty(),
+            "fan-in {fan_in}: {:?}",
+            report.violations
+        );
+        // Positions rising by one through the runs: a message dropped or two
+        // swapped would be a gap.
+        let mut broken = records.clone();
+        broken.remove(5_000);
+        let reader =
+            ascetic_ddd_command_log::Reader::new(std::io::Cursor::new(bytes(header(), &broken)))
+                .unwrap();
+        let report = ascetic_ddd_command_log::validate::validate(reader, &NoHost, &limits).unwrap();
+        assert_eq!(rules(&report), vec![Rule::Edge, Rule::Stream, Rule::Gap]);
+    }
+}
+
+/// A stream falling back is broken where it falls: the message whose position
+/// is not above the one before it, in line order — not where a sort by
+/// position would put the break.
+#[test]
+fn a_stream_falling_back_is_broken_where_it_falls() {
+    let m = |n: u32, at: u64, position: u32| {
+        message(step(id("device", 1, "fact", n), at), "telemetry", position)
+    };
+    let first = m(0, 10, 5);
+    let report = run(&[first.clone(), after(m(1, 20, 2), &first.step, On::Expected)]);
+    assert_eq!(pairs(&report), vec![(3, Rule::Stream)]);
 }

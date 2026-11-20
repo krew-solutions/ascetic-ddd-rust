@@ -13,7 +13,7 @@ use ascetic_ddd_command_log::engine::{
     Config, EngineError, Observer, Progress, Unit, generate, generate_file_on,
 };
 use ascetic_ddd_command_log::live::dry_on;
-use ascetic_ddd_command_log::record::Record;
+use ascetic_ddd_command_log::record::{On, Record};
 use ascetic_ddd_command_log::validate::{Limits, NoHost};
 use fixture::*;
 
@@ -182,22 +182,24 @@ impl Unit for Devices {
     }
 }
 
-/// A dry run counts the validator's id runs, which grow while the merge runs:
-/// 24 bytes a step and a cascade group more, refused short of one byte, let
-/// through at it; none while the ids fit in memory.
+/// A dry run counts the validator's runs, which grow while the merge runs:
+/// 24 bytes a step, twice that when they cascade, refused short of one byte,
+/// let through at it; none while the ids fit in memory.
 #[test]
 fn a_dry_run_counts_the_validator_s_runs() {
     let dir = tempfile::tempdir().unwrap();
     let (spill, ids) = (dir.path().join("spill"), dir.path().join("ids"));
     let path = dir.path().join("plan.commitment");
     let units: [&dyn Unit; 1] = [&Devices(9)];
-    // 18 steps: 432 bytes of ids, a group of two runs of four ids 192 more.
-    let limits = |held| Limits {
-        ids_in_memory: held,
+    // 18 steps: 432 bytes of ids in runs of at least 48 bytes (half of four
+    // ids' memory): nine runs past a fan-in of two cascade, so 864.
+    let limits = |held: usize| Limits {
+        memory: held * 24,
         spill: ids.clone(),
         kept: 100,
         fan_in: 2,
         memory_spill: true,
+        progress: None,
     };
     let run = |held, free| {
         let disk = Fake {
@@ -220,16 +222,16 @@ fn a_dry_run_counts_the_validator_s_runs() {
             &disk,
         )
     };
-    match run(4, MARGIN + 623) {
+    match run(4, MARGIN + 863) {
         Err(EngineError::Space {
             path: p, needed, ..
         }) => {
-            assert_eq!((p, needed), (ids.clone(), MARGIN + 624));
+            assert_eq!((p, needed), (ids.clone(), MARGIN + 864));
         }
         other => panic!("{:?}", other.map(|r| r.violations)),
     }
     assert!(!path.exists());
-    let report = run(4, MARGIN + 624).unwrap();
+    let report = run(4, MARGIN + 864).unwrap();
     assert!(report.violations.is_empty(), "{:?}", report.violations);
     assert!(path.exists());
     std::fs::remove_file(&path).unwrap();
@@ -262,7 +264,7 @@ fn a_dry_run_counts_the_validator_s_runs() {
     };
     let engine_alone = beside(18);
     assert!(engine_alone > MARGIN);
-    assert_eq!(beside(4), engine_alone + 624);
+    assert_eq!(beside(4), engine_alone + 864);
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -406,4 +408,199 @@ fn a_unit_s_spills_are_heard_with_it() {
     assert_eq!(emitted.len(), 1);
     assert_eq!((emitted[0].0, emitted[0].1), (1, 1_000));
     assert!(emitted[0].2 > 0, "{heard:?}");
+}
+
+/// A disk whose free space is a script, call by call, then plenty.
+struct Script {
+    free: std::sync::Mutex<std::collections::VecDeque<u64>>,
+}
+
+impl Disk for Script {
+    fn free(&self, _: &Path) -> std::io::Result<u64> {
+        Ok(self.free.lock().unwrap().pop_front().unwrap_or(u64::MAX))
+    }
+    fn device(&self, _: &Path) -> std::io::Result<u64> {
+        Ok(1)
+    }
+    fn in_memory(&self, _: &Path) -> std::io::Result<bool> {
+        Ok(false)
+    }
+    fn open_files(&self) -> std::io::Result<u64> {
+        Ok(1_024)
+    }
+}
+
+/// Ten steps, their ids a run of two each (48 bytes) at 24 bytes of memory.
+fn ten() -> Vec<u8> {
+    let records: Vec<Record> = (0..10)
+        .map(|i| step(id("device", i, "seen", 0), i))
+        .collect();
+    bytes(header(), &records)
+}
+
+fn validate_with(disk: &Script, dir: &Path) -> Result<(), ascetic_ddd_command_log::LogError> {
+    let limits = Limits {
+        memory: 24,
+        spill: dir.to_owned(),
+        kept: 10,
+        fan_in: 8,
+        memory_spill: true,
+        progress: None,
+    };
+    let reader = ascetic_ddd_command_log::Reader::new(std::io::Cursor::new(ten())).unwrap();
+    ascetic_ddd_command_log::validate::validate_on(reader, &NoHost, &limits, disk).map(|_| ())
+}
+
+/// A validation out of room stops at the run that would not fit, before
+/// writing it, by name: the third run one byte short; nothing is left.
+#[test]
+fn a_validation_out_of_room_stops_at_the_run() {
+    use ascetic_ddd_command_log::LogError;
+    let dir = tempfile::tempdir().unwrap();
+    // Two runs, then the third's look: short.
+    let short = Script {
+        free: std::sync::Mutex::new([u64::MAX, u64::MAX, MARGIN + 47].into()),
+    };
+    match validate_with(&short, dir.path()) {
+        Err(LogError::Space { needed, free, .. }) => {
+            assert_eq!((needed, free), (MARGIN + 48, MARGIN + 47))
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(leftover(dir.path()).is_empty());
+    let just = Script {
+        free: std::sync::Mutex::new([u64::MAX, u64::MAX, MARGIN + 48].into()),
+    };
+    validate_with(&just, dir.path()).unwrap();
+}
+
+/// The pass directory's bytes, wherever the validator puts it.
+fn bytes_under(dir: &Path) -> u64 {
+    let mut total = 0;
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        let p = e.path();
+        total += if p.is_dir() {
+            bytes_under(&p)
+        } else {
+            e.metadata().unwrap().len()
+        };
+    }
+    total
+}
+
+/// Hears the validator's runs: the bytes each kind holds, checked against the
+/// files the pass directory holds at that moment, and the most held at once.
+struct Held {
+    dir: PathBuf,
+    kinds: Mutex<std::collections::BTreeMap<&'static str, u64>>,
+    peak: std::sync::atomic::AtomicU64,
+}
+
+impl Progress for Held {
+    fn runs(&self, kind: &'static str, on_disk: u64) {
+        let mut kinds = self.kinds.lock().unwrap();
+        kinds.insert(kind, on_disk);
+        let total: u64 = kinds.values().sum();
+        assert_eq!(total, bytes_under(&self.dir), "the runs' bytes, as written");
+        self.peak
+            .fetch_max(total, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A gapless stream of `0..count` messages on one device, each awaiting the
+/// one before.
+struct Stream(u32);
+
+impl Unit for Stream {
+    fn emit(
+        &self,
+        out: &mut dyn FnMut(Record) -> Result<(), EngineError>,
+    ) -> Result<(), EngineError> {
+        let mut before: Option<ascetic_ddd_command_log::record::StepId> = None;
+        for n in 0..self.0 {
+            let mut r = message(
+                step(id("device", 1, "fact", n), u64::from(n) * 10),
+                "lifecycle",
+                n + 1,
+            );
+            if let Some(b) = &before {
+                r = after(r, b, On::Expected);
+            }
+            before = Some(r.step.clone());
+            out(r)?;
+        }
+        Ok(())
+    }
+}
+
+/// The space a dry run asks for its validator's runs is never less than what
+/// they occupy at their peak — heard after every write and checked against
+/// the files — across memories and fan-ins.
+#[test]
+fn the_validator_s_need_covers_what_its_runs_occupy() {
+    let dir = tempfile::tempdir().unwrap();
+    let (spill, ids) = (dir.path().join("spill"), dir.path().join("ids"));
+    let path = dir.path().join("plan.commitment");
+    let units: [&dyn Unit; 1] = [&Stream(2_000)];
+    for (memory, fan_in) in [(1_000, 2), (1_000, 3), (10_000, 8), (100_000, 2)] {
+        let limits = Limits {
+            memory,
+            spill: ids.clone(),
+            kept: 10,
+            fan_in,
+            memory_spill: true,
+            progress: None,
+        };
+        let refused = Fake {
+            apart: ids.clone(),
+            free: [u64::MAX, 0],
+        };
+        let need = match dry_on(
+            header(),
+            &units,
+            &config(&spill),
+            &NoHost,
+            &limits,
+            "b",
+            4,
+            &path,
+            &refused,
+        ) {
+            Err(EngineError::Space { needed, .. }) => needed - MARGIN,
+            other => panic!("{:?}", other.map(|r| r.violations)),
+        };
+        let held = Arc::new(Held {
+            dir: ids.clone(),
+            kinds: Mutex::new(std::collections::BTreeMap::new()),
+            peak: std::sync::atomic::AtomicU64::new(0),
+        });
+        let limits = Limits {
+            progress: Some(Observer(held.clone())),
+            ..limits
+        };
+        let plenty = Fake {
+            apart: ids.clone(),
+            free: [u64::MAX, u64::MAX],
+        };
+        let report = dry_on(
+            header(),
+            &units,
+            &config(&spill),
+            &NoHost,
+            &limits,
+            "b",
+            4,
+            &path,
+            &plenty,
+        )
+        .unwrap();
+        assert!(report.violations.is_empty(), "{:?}", report.violations);
+        let peak = held.peak.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(peak > 0, "memory {memory}: nothing spilled");
+        assert!(
+            peak <= need,
+            "memory {memory}, fan-in {fan_in}: {peak} occupied, {need} asked"
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
 }

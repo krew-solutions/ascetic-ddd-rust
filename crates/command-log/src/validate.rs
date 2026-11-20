@@ -13,11 +13,9 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::fs;
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
-
-use sha2::{Digest, Sha256};
 
 use crate::disk::{Disk, LocalDisk};
 use crate::log::{LogError, Reader};
@@ -26,6 +24,7 @@ use crate::record::{
     Action, Bus, By, Codec, Dep, Field, Form, Header, Hole, Limit, Of, On, Outcome, Payload, Place,
     Predicate, Probe, Record, Rest, Span, StepId, Subject, Test, Value,
 };
+use crate::runs::{Event, Sorter};
 use crate::spill::{Counted, SpillDir};
 
 /// A rule of decisions 5, 7 and 9.
@@ -204,46 +203,204 @@ impl Host for NoHost {}
 /// The memory a pass may use.
 #[derive(Clone, Debug)]
 pub struct Limits {
-    /// Step ids held in memory before a sorted run goes to disk; at least 1.
-    pub ids_in_memory: usize,
+    /// Bytes of events — step ids, stream messages — held in memory before the
+    /// larger buffer goes to disk as a sorted run (decision 16). At the end
+    /// the same memory reads the runs back, a block a run.
+    pub memory: usize,
     /// Where runs go: a directory of the caller's, its files removed after.
     pub spill: PathBuf,
     /// Violations kept in the report.
     pub kept: usize,
-    /// The most id runs a merge holds open; 0 derives it from the open-file
-    /// limit ([`crate::disk::fan_in`]).
+    /// The most runs a merge holds open; 0 derives it from the open-file
+    /// limit ([`crate::disk::fan_in`]). Never more than `memory` reads a block
+    /// of at a time.
     pub fan_in: usize,
     /// Whether `spill` may be memory (tmpfs): refused unless allowed.
     pub memory_spill: bool,
+    /// Who hears the pass's runs, if anyone.
+    pub progress: Option<crate::engine::Observer>,
 }
 
 impl Limits {
-    /// Ten million ids in memory (about 240 MB), spills under `spill`, a
-    /// merge as wide as the open-file limit allows, no spill in memory.
+    /// 256 MiB of events in memory, spills under `spill`, a merge as wide as
+    /// the open-file limit and the memory allow, no spill in memory.
     pub fn new(spill: impl Into<PathBuf>) -> Limits {
         Limits {
-            ids_in_memory: 10_000_000,
+            memory: 256 << 20,
             spill: spill.into(),
             kept: 10_000,
             fan_in: 0,
             memory_spill: false,
+            progress: None,
         }
     }
 }
 
-/// The disk a validation of `records` steps needs for its id runs, `fan_in`
-/// wide: none while they fit in memory, else 24 bytes a step and a cascade
-/// group's worth more while the group is rewritten.
-pub(crate) fn spill_need(records: u64, limits: &Limits, fan_in: usize) -> u64 {
-    let held = limits.ids_in_memory.max(1) as u64;
-    if records <= held {
+/// The disk a validation needs for its runs, given the bytes of events its
+/// records make ([`run_bytes`]), `fan_in` wide: none while they fit in memory.
+pub(crate) fn spill_need(bytes: u64, limits: &Limits, fan_in: usize) -> u64 {
+    let memory = limits.memory.max(1) as u64;
+    if bytes <= memory {
         return 0;
     }
-    let all = records.saturating_mul(ENTRY as u64);
-    let group = (fan_in as u64)
-        .saturating_mul(held)
-        .saturating_mul(ENTRY as u64);
-    all.saturating_add(group.min(all))
+    // A run holds at least half the memory: the larger buffer goes.
+    crate::runs::need(bytes, memory.div_ceil(2), fan_in)
+}
+
+/// The most runs a pass's merge holds open: as `limits` says or the open-file
+/// limit allows, and a block a run within the memory.
+pub(crate) fn fan_in(limits: &Limits, disk: &dyn Disk) -> std::io::Result<usize> {
+    let wide = match limits.fan_in {
+        0 => crate::disk::fan_in(disk.open_files()?),
+        n => n.max(2),
+    };
+    Ok(wide.min((limits.memory / crate::runs::READ_BUFFER).max(2)))
+}
+
+/// The bytes of events a record makes in the validator's runs: its id, and a
+/// stream message's event.
+pub(crate) fn run_bytes(r: &Record) -> u64 {
+    let id = IdEvent::SIZE as u64;
+    match stream_of(r) {
+        Some(_) => id.saturating_add(StreamEvent::size_of(predecessors(r).count()) as u64),
+        None => id,
+    }
+}
+
+/// The stream a message is on, if it is one.
+fn stream_of(r: &Record) -> Option<&crate::record::StreamPosition> {
+    match &r.action {
+        Action::Bus(Bus {
+            stream: Some(s), ..
+        }) => Some(s),
+        _ => None,
+    }
+}
+
+/// The steps a record awaits as expected on its own subject: the only ones
+/// that may be its stream's message before it.
+fn predecessors(r: &Record) -> impl Iterator<Item = &StepId> {
+    r.after.iter().filter_map(move |d| match d {
+        Dep::Step { step, on } if *on == On::Expected && step.subject == r.step.subject => {
+            Some(step)
+        }
+        _ => None,
+    })
+}
+
+/// A step id's digest in the validator's runs.
+fn id_digest(step: &StepId) -> Result<[u8; 16], LogError> {
+    let bytes = serde_json::to_vec(step).map_err(|e| LogError::Encode(e.to_string()))?;
+    Ok(crate::runs::digest(&bytes))
+}
+
+/// A step id seen, for uniqueness: its digest and line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct IdEvent {
+    digest: [u8; 16],
+    line: u64,
+}
+
+impl IdEvent {
+    const SIZE: usize = 24;
+}
+
+impl Event for IdEvent {
+    fn size(&self) -> usize {
+        IdEvent::SIZE
+    }
+
+    fn write(&self, out: &mut dyn Write) -> std::io::Result<()> {
+        out.write_all(&self.digest)?;
+        out.write_all(&self.line.to_le_bytes())
+    }
+
+    fn read<R: Read>(run: &mut Counted<R>) -> std::io::Result<IdEvent> {
+        let mut buf = [0u8; IdEvent::SIZE];
+        run.exact(&mut buf)?;
+        let (d, l) = buf.split_at(16);
+        let mut digest = [0u8; 16];
+        digest.copy_from_slice(d);
+        let mut line = [0u8; 8];
+        line.copy_from_slice(l);
+        Ok(IdEvent {
+            digest,
+            line: u64::from_le_bytes(line),
+        })
+    }
+}
+
+/// A stream's message, for the stream rules decided at the end: replayed per
+/// stream in line order, as the reference defines them.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct StreamEvent {
+    /// The digest of (subject, stream).
+    key: [u8; 16],
+    line: u64,
+    position: u32,
+    gapless: bool,
+    step: [u8; 16],
+    /// The digests of the steps it awaits as expected on its subject.
+    deps: Vec<[u8; 16]>,
+}
+
+impl StreamEvent {
+    const FIXED: usize = 16 + 8 + 4 + 1 + 16 + 4;
+
+    fn size_of(deps: usize) -> usize {
+        StreamEvent::FIXED.saturating_add(deps.saturating_mul(16))
+    }
+}
+
+impl Event for StreamEvent {
+    fn size(&self) -> usize {
+        StreamEvent::size_of(self.deps.len())
+    }
+
+    fn write(&self, out: &mut dyn Write) -> std::io::Result<()> {
+        out.write_all(&self.key)?;
+        out.write_all(&self.line.to_le_bytes())?;
+        out.write_all(&self.position.to_le_bytes())?;
+        out.write_all(&[u8::from(self.gapless)])?;
+        out.write_all(&self.step)?;
+        let n = u32::try_from(self.deps.len()).map_err(std::io::Error::other)?;
+        out.write_all(&n.to_le_bytes())?;
+        for d in &self.deps {
+            out.write_all(d)?;
+        }
+        Ok(())
+    }
+
+    fn read<R: Read>(run: &mut Counted<R>) -> std::io::Result<StreamEvent> {
+        let mut buf = [0u8; StreamEvent::FIXED];
+        run.exact(&mut buf)?;
+        let take = |at: usize, n: usize| buf.get(at..at.saturating_add(n)).unwrap_or(&[]);
+        let digest = |at: usize| {
+            let mut d = [0u8; 16];
+            d.copy_from_slice(take(at, 16));
+            d
+        };
+        let mut line = [0u8; 8];
+        line.copy_from_slice(take(16, 8));
+        let mut position = [0u8; 4];
+        position.copy_from_slice(take(24, 4));
+        let mut n = [0u8; 4];
+        n.copy_from_slice(take(45, 4));
+        let mut deps = Vec::new();
+        for _ in 0..u32::from_le_bytes(n) {
+            let mut d = [0u8; 16];
+            run.exact(&mut d)?;
+            deps.push(d);
+        }
+        Ok(StreamEvent {
+            key: digest(0),
+            line: u64::from_le_bytes(line),
+            position: u32::from_le_bytes(position),
+            gapless: take(28, 1) == [1],
+            step: digest(29),
+            deps,
+        })
+    }
 }
 
 /// How strongly a step is awaited: an `Expected` wait is also a settled one,
@@ -356,194 +513,11 @@ struct Slot {
     readers: BTreeSet<StepId>,
 }
 
-/// The step ids seen, for uniqueness: in memory up to a budget, in sorted runs
-/// on disk past it, merged at the end. Each entry is a 16-byte digest of the
-/// id and its line; equal digests are the same id but with probability 2⁻¹²⁸
-/// per pair.
-struct Ids {
-    budget: usize,
-    dir: PathBuf,
-    buffer: Vec<([u8; 16], u64)>,
-    /// Each run and its record count.
-    runs: Vec<(PathBuf, u64)>,
-    fan_in: usize,
-}
-
-const ENTRY: usize = 24;
-
-impl Ids {
-    fn push(&mut self, step: &StepId, line: u64) -> Result<(), LogError> {
-        let bytes = serde_json::to_vec(step).map_err(|e| LogError::Encode(e.to_string()))?;
-        let digest = Sha256::digest(&bytes);
-        let mut d = [0u8; 16];
-        d.copy_from_slice(digest.get(..16).unwrap_or(&[0; 16]));
-        self.buffer.push((d, line));
-        if self.buffer.len() >= self.budget {
-            self.spill()?;
-        }
-        Ok(())
-    }
-
-    fn spill(&mut self) -> Result<(), LogError> {
-        self.buffer.sort_unstable();
-        let path = self.dir.join(format!("ids-{}.run", self.runs.len()));
-        let count = self.buffer.len() as u64;
-        let mut out = BufWriter::new(
-            OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)?,
-        );
-        for (d, line) in self.buffer.drain(..) {
-            out.write_all(&d)?;
-            out.write_all(&line.to_le_bytes())?;
-        }
-        out.flush()?;
-        self.runs.push((path, count));
-        Ok(())
-    }
-
-    /// The lines whose id an earlier line has.
-    fn duplicates(mut self) -> Result<Vec<u64>, LogError> {
-        let mut found = Vec::new();
-        if self.runs.is_empty() {
-            self.buffer.sort_unstable();
-            for pair in self.buffer.windows(2) {
-                if let [(a, _), (b, line)] = pair
-                    && a == b
-                {
-                    found.push(*line);
-                }
-            }
-            return Ok(found);
-        }
-        if !self.buffer.is_empty() {
-            self.spill()?;
-        }
-        let result =
-            cascade(&self.dir, std::mem::take(&mut self.runs), self.fan_in).and_then(|runs| {
-                let found = merge(&runs, &mut found, None);
-                self.runs = runs;
-                found
-            });
-        for (run, _) in &self.runs {
-            let _ = fs::remove_file(run);
-        }
-        result.map(|()| found)
-    }
-}
-
-/// A run's next entry, or `None` past its last: a run that ends early — a cut
-/// entry — or goes on past its count is an error, never fewer duplicates.
-fn read_entry<R: Read>(run: &mut Counted<R>) -> Result<Option<([u8; 16], u64)>, LogError> {
-    if !run.due()? {
-        return Ok(None);
-    }
-    run.left = run.left.saturating_sub(1);
-    let mut buf = [0u8; ENTRY];
-    run.exact(&mut buf)?;
-    let mut d = [0u8; 16];
-    d.copy_from_slice(buf.get(..16).unwrap_or(&[0; 16]));
-    let mut l = [0u8; 8];
-    l.copy_from_slice(buf.get(16..).unwrap_or(&[0; 8]));
-    Ok(Some((d, u64::from_le_bytes(l))))
-}
-
-/// A k-way merge of sorted runs: a line whose digest equals the one before it
-/// in the merged order is a duplicate.
-/// Merges groups of `fan_in` id runs into one until no more than `fan_in` are
-/// left, each group's runs deleted once merged; duplicates are left for the
-/// final merge, where every equal digest meets its neighbours.
-fn cascade(
-    dir: &std::path::Path,
-    mut runs: Vec<(PathBuf, u64)>,
-    fan_in: usize,
-) -> Result<Vec<(PathBuf, u64)>, LogError> {
-    let mut level = 0u32;
-    while runs.len() > fan_in {
-        let mut next = Vec::with_capacity(runs.len().div_ceil(fan_in));
-        for (g, group) in runs.chunks(fan_in).enumerate() {
-            if let [single] = group {
-                next.push(single.clone());
-                continue;
-            }
-            let path = dir.join(format!("ids-l{level}-g{g}.run"));
-            let mut out = BufWriter::new(
-                OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&path)?,
-            );
-            let mut count = 0u64;
-            merge(
-                group,
-                &mut Vec::new(),
-                Some(&mut |(d, line): ([u8; 16], u64)| {
-                    count = count.saturating_add(1);
-                    out.write_all(&d)?;
-                    out.write_all(&line.to_le_bytes())
-                }),
-            )?;
-            out.flush()?;
-            for (p, _) in group {
-                let _ = fs::remove_file(p);
-            }
-            next.push((path, count));
-        }
-        runs = next;
-        level = level.saturating_add(1);
-    }
-    Ok(runs)
-}
-
-/// Where an intermediate merge writes the ids it merges.
-type IdSink<'a> = &'a mut dyn FnMut(([u8; 16], u64)) -> std::io::Result<()>;
-
-/// A k-way merge of sorted id runs: into `out` when given, else a line whose
-/// digest equals the one before it in the merged order is a duplicate.
-fn merge(
-    runs: &[(PathBuf, u64)],
-    found: &mut Vec<u64>,
-    mut out: Option<IdSink<'_>>,
-) -> Result<(), LogError> {
-    let mut readers: Vec<Counted<BufReader<File>>> = runs
-        .iter()
-        .map(|(p, left)| {
-            File::open(p).map(|f| Counted {
-                reader: BufReader::new(f),
-                left: *left,
-                path: p.clone(),
-            })
-        })
-        .collect::<Result<_, _>>()?;
-    let mut heap = BinaryHeap::new();
-    for (i, r) in readers.iter_mut().enumerate() {
-        if let Some(e) = read_entry(r)? {
-            heap.push(Reverse((e, i)));
-        }
-    }
-    let mut last: Option<[u8; 16]> = None;
-    while let Some(Reverse(((d, line), i))) = heap.pop() {
-        match out.as_mut() {
-            Some(out) => out((d, line))?,
-            None => {
-                if last == Some(d) {
-                    found.push(line);
-                }
-                last = Some(d);
-            }
-        }
-        if let Some(r) = readers.get_mut(i)
-            && let Some(e) = read_entry(r)?
-        {
-            heap.push(Reverse((e, i)));
-        }
-    }
-    Ok(())
-}
-
 struct Pass<'h, H: Host> {
     host: &'h H,
+    disk: &'h dyn Disk,
+    /// [`Limits::memory`].
+    memory: usize,
     header: Header,
     kept: usize,
     report: Report,
@@ -562,8 +536,10 @@ struct Pass<'h, H: Host> {
     live_order: BTreeSet<(u64, (Subject, String))>,
     /// The least violations found, at most `kept`: a max-heap.
     least: BinaryHeap<Violation>,
-    streams: BTreeMap<(Subject, String), (u32, StepId)>,
-    ids: Ids,
+    /// Stream messages, decided at the end by stream.
+    streams: Sorter<StreamEvent>,
+    /// Step ids, for uniqueness, decided at the end.
+    ids: Sorter<IdEvent>,
     /// Lines that declared a deviation, its rule, and whether it was used.
     deviations: BTreeMap<u64, (Rule, bool)>,
     /// The read cursor: the running maximum of `at` up to the line in hand
@@ -883,11 +859,15 @@ impl<H: Host> Pass<'_, H> {
             }
         }
         self.order(line, r);
-        self.ids.push(&r.step, line)?;
+        self.ids.push(IdEvent {
+            digest: id_digest(&r.step)?,
+            line,
+        });
+        self.hold()?;
         self.evict();
         self.edges(line, r);
         self.captures(line, r);
-        self.stream(line, r);
+        self.stream(line, r)?;
         self.spans(line, r);
         self.profile(line, r);
         self.operations(line, r);
@@ -1046,50 +1026,86 @@ impl<H: Host> Pass<'_, H> {
         self.report.peaks.captures = self.report.peaks.captures.max(self.live.len() as u64);
     }
 
-    fn stream(&mut self, line: u64, r: &Record) {
-        let Action::Bus(Bus {
-            stream: Some(s), ..
-        }) = &r.action
-        else {
-            return;
+    /// A message's position checked now; its stream's order, its predecessor
+    /// and its gaps at the end, by stream ([`Pass::streams_end`]).
+    fn stream(&mut self, line: u64, r: &Record) -> Result<(), LogError> {
+        let Some(s) = stream_of(r) else {
+            return Ok(());
         };
         if !(1..=i32::MAX as u32).contains(&s.position) {
             self.violate(line, Rule::Stream, || {
                 format!("{} at {}: out of [1, 2³¹ − 1]", s.name, s.position)
             });
         }
-        let gapless = self.header.profile.gapless.contains(&s.name);
-        let key = (r.step.subject.clone(), s.name.clone());
-        match self.streams.get(&key).cloned() {
-            Some((position, step)) => {
-                if s.position <= position {
-                    self.violate(line, Rule::Stream, || {
-                        format!("{} at {}: not above {position}", s.name, s.position)
-                    });
-                }
-                if !awaits(r, &step, On::Expected) {
-                    self.violate(line, Rule::Stream, || {
-                        format!(
-                            "{}: the message before, {step:?}, not awaited as expected",
-                            s.name
-                        )
-                    });
-                }
-                if gapless && s.position != position.saturating_add(1) {
-                    self.violate(line, Rule::Gap, || {
-                        format!("{} at {} after {position}", s.name, s.position)
-                    });
-                }
-            }
-            None => {
-                if gapless && s.position != 1 {
-                    self.violate(line, Rule::Gap, || {
-                        format!("{} begins at {}", s.name, s.position)
-                    });
-                }
-            }
+        let key = serde_json::to_vec(&(&r.step.subject, &s.name))
+            .map_err(|e| LogError::Encode(e.to_string()))?;
+        let deps = predecessors(r).map(id_digest).collect::<Result<_, _>>()?;
+        self.streams.push(StreamEvent {
+            key: crate::runs::digest(&key),
+            line,
+            position: s.position,
+            gapless: self.header.profile.gapless.contains(&s.name),
+            step: id_digest(&r.step)?,
+            deps,
+        });
+        self.hold()
+    }
+
+    /// The larger buffer to disk while both hold more than the memory.
+    fn hold(&mut self) -> Result<(), LogError> {
+        if self.ids.held().saturating_add(self.streams.held()) <= self.memory {
+            return Ok(());
         }
-        self.streams.insert(key, (s.position, r.step.clone()));
+        if self.ids.held() >= self.streams.held() {
+            self.ids.spill(self.disk)
+        } else {
+            self.streams.spill(self.disk)
+        }
+    }
+
+    /// Each stream's messages in line order: positions rising, each awaiting
+    /// the one before as expected, a gapless stream from 1 without a gap.
+    fn streams_end(&mut self) -> Result<(), LogError> {
+        let streams = std::mem::replace(
+            &mut self.streams,
+            Sorter::new("streams", Path::new(""), 2, None),
+        );
+        let disk = self.disk;
+        let mut before: Option<StreamEvent> = None;
+        streams.drain(disk, |e| {
+            match &before {
+                Some(p) if p.key == e.key => {
+                    if e.position <= p.position {
+                        self.violate(e.line, Rule::Stream, || {
+                            format!(
+                                "at {}: not above {}, on line {}",
+                                e.position, p.position, p.line
+                            )
+                        });
+                    }
+                    if !e.deps.contains(&p.step) {
+                        self.violate(e.line, Rule::Stream, || {
+                            format!(
+                                "the message before, on line {}, not awaited as expected",
+                                p.line
+                            )
+                        });
+                    }
+                    if e.gapless && e.position != p.position.saturating_add(1) {
+                        self.violate(e.line, Rule::Gap, || {
+                            format!("at {} after {}, on line {}", e.position, p.position, p.line)
+                        });
+                    }
+                }
+                _ => {
+                    if e.gapless && e.position != 1 {
+                        self.violate(e.line, Rule::Gap, || format!("begins at {}", e.position));
+                    }
+                }
+            }
+            before = Some(e);
+            Ok(())
+        })
     }
 
     fn spans(&mut self, line: u64, r: &Record) {
@@ -1262,21 +1278,28 @@ impl<H: Host> Pass<'_, H> {
     fn finish(mut self) -> Result<Report, LogError> {
         // The polls still due arrive before deviations are judged.
         self.drain(u64::MAX);
-        let ids = std::mem::replace(
-            &mut self.ids,
-            Ids {
-                budget: 1,
-                dir: PathBuf::new(),
-                buffer: Vec::new(),
-                runs: Vec::new(),
-                fan_in: 2,
-            },
-        );
-        for line in ids.duplicates()? {
-            self.violate(line, Rule::Duplicate, || {
-                "a step id an earlier line has".to_owned()
-            });
-        }
+        // The hot parts go before the runs are read back: their memory reads.
+        self.window = BTreeMap::new();
+        self.order = BTreeSet::new();
+        self.retained = BTreeMap::new();
+        self.barriers = BTreeMap::new();
+        self.slots = BTreeMap::new();
+        self.live = BTreeMap::new();
+        self.live_order = BTreeSet::new();
+        self.buckets = BTreeMap::new();
+        self.streams_end()?;
+        let ids = std::mem::replace(&mut self.ids, Sorter::new("ids", Path::new(""), 2, None));
+        let disk = self.disk;
+        let mut last: Option<[u8; 16]> = None;
+        ids.drain(disk, |e| {
+            if last == Some(e.digest) {
+                self.violate(e.line, Rule::Duplicate, || {
+                    "a step id an earlier line has".to_owned()
+                });
+            }
+            last = Some(e.digest);
+            Ok(())
+        })?;
         let unused: Vec<(u64, Rule)> = self
             .deviations
             .iter()
@@ -1316,14 +1339,13 @@ pub fn validate_on<R: BufRead>(
             limits.spill.display()
         ))));
     }
-    let fan_in = match limits.fan_in {
-        0 => crate::disk::fan_in(disk.open_files()?),
-        n => n.max(2),
-    };
-    // The pass's own directory for its id runs, removed on every exit below.
+    let fan_in = fan_in(limits, disk)?;
+    // The pass's own directory for its runs, removed on every exit below.
     let dir = SpillDir::new(&limits.spill)?;
     let mut pass = Pass {
         host,
+        disk,
+        memory: limits.memory.max(1),
         header: reader.header().clone(),
         kept: limits.kept,
         report: Report::default(),
@@ -1336,14 +1358,8 @@ pub fn validate_on<R: BufRead>(
         live: BTreeMap::new(),
         live_order: BTreeSet::new(),
         least: BinaryHeap::new(),
-        streams: BTreeMap::new(),
-        ids: Ids {
-            budget: limits.ids_in_memory.max(1),
-            dir: dir.path().to_owned(),
-            buffer: Vec::new(),
-            runs: Vec::new(),
-            fan_in,
-        },
+        streams: Sorter::new("streams", dir.path(), fan_in, limits.progress.clone()),
+        ids: Sorter::new("ids", dir.path(), fan_in, limits.progress.clone()),
         deviations: BTreeMap::new(),
         cursor: 0,
         refused: BTreeSet::new(),
@@ -1388,19 +1404,36 @@ mod tests {
         }
     }
 
-    /// An id run holds exactly its count: an error reading it, a run cut short
-    /// — at an entry's boundary too — or one going on past its count fail the
-    /// pass, never hide a duplicate.
+    /// A run holds exactly its count: an error reading it, a run cut short
+    /// — at an event's boundary too, or inside a stream event's dependencies —
+    /// or one going on past its count fail the pass, never hide a violation.
     #[test]
     fn a_run_holds_exactly_its_count() {
-        assert!(read_entry(&mut run(Failing, 1)).is_err());
-        assert_eq!(read_entry(&mut run(std::io::empty(), 0)).ok(), Some(None));
-        assert!(read_entry(&mut run(std::io::empty(), 1)).is_err());
-        assert!(read_entry(&mut run(&[0u8; 23][..], 1)).is_err());
-        assert!(read_entry(&mut run(&[0u8; 1][..], 0)).is_err());
-        assert!(matches!(
-            read_entry(&mut run(&[0u8; 24][..], 1)),
-            Ok(Some(_))
-        ));
+        use crate::runs::next;
+        fn id<R: Read>(r: &mut Counted<R>) -> Result<Option<IdEvent>, LogError> {
+            next(r)
+        }
+        assert!(id(&mut run(Failing, 1)).is_err());
+        assert_eq!(id(&mut run(std::io::empty(), 0)).ok(), Some(None));
+        assert!(id(&mut run(std::io::empty(), 1)).is_err());
+        assert!(id(&mut run(&[0u8; 23][..], 1)).is_err());
+        assert!(id(&mut run(&[0u8; 1][..], 0)).is_err());
+        assert!(matches!(id(&mut run(&[0u8; 24][..], 1)), Ok(Some(_))));
+        let event = StreamEvent {
+            key: [1; 16],
+            line: 7,
+            position: 3,
+            gapless: true,
+            step: [2; 16],
+            deps: vec![[3; 16], [4; 16]],
+        };
+        let mut bytes = Vec::new();
+        event.write(&mut bytes).unwrap();
+        assert_eq!(bytes.len(), event.size());
+        let stream = |b: &[u8], left| next::<StreamEvent, _>(&mut run(b, left));
+        assert_eq!(stream(&bytes, 1).ok(), Some(Some(event.clone())));
+        for cut in 0..bytes.len() {
+            assert!(stream(&bytes[..cut], 1).is_err(), "cut at {cut}");
+        }
     }
 }

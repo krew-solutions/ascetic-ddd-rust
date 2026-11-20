@@ -563,10 +563,7 @@ pub fn dry_on(
         "claiming a spill directory in",
         &limits.spill,
     ))?;
-    let fan_in = match limits.fan_in {
-        0 => crate::disk::fan_in(disk.open_files().map_err(LogError::Io)?),
-        n => n.max(2),
-    };
+    let fan_in = crate::validate::fan_in(limits, disk).map_err(LogError::Io)?;
     let (tx, rx) = pipe(config.pipe_blocks);
     let out = Prefixing {
         inner: tx,
@@ -575,7 +572,7 @@ pub fn dry_on(
     let need = |e: Emitted| {
         Ok(vec![Need {
             path: limits.spill.clone(),
-            bytes: spill_need(e.records, limits, fan_in),
+            bytes: spill_need(e.run_bytes, limits, fan_in),
         }])
     };
     let (generated, validated) = std::thread::scope(|scope| {

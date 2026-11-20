@@ -579,6 +579,7 @@ available memory, swap and pressure — under `MemorySwapMax=0`, so that a blown
 | R3 | C5 | a property: the streaming curve equals the window definition on random arrivals in one bucket with small parameters, ties and deviations included | the streaming algorithm diverging from the definition |
 | V3 | C7 | twins: a line planned past W ahead puts a step out of reach of a later line near it (`edge`), within W it does not; a step dead on arrival answers for no edge and an older occurrence of its id does not answer for it; the window holds only what is within W behind the cursor (21, not the 31 an eviction in line order holds); a deviation against `deviation` is unused; with `kept = 1` a duplicate on line 3 decided at the end is kept before an edge found on line 4; captures counted while live; a stream's late message, a slot's late writer and a gapless stream begun again still break their rules | a step dead on arrival kept; an older occurrence answering for a dead one; the window evicted in line order; captures counted ever written; live captures not evicted; a deviation exempting itself; `kept` by discovery |
 | V4 | C7 | the reference decides on the cursor and computes the peaks from their definitions; the corpus moves a line past 2W ahead and declares deviations of every rule's name and one naming none; the reference fails unless some log's verdict differs between the cursor and the line's own time (47 of 1,642); the corpus's logs, verdicts and peaks are digested beside `RULES_REVISION` | the reference on the line's own time; its captures ever written; any Rust mutation above that V2 sees |
+| V5 | C8 | every corpus log validated with each event its own run through a fan-in of 2, and a few events a run through 3, gives its whole in-memory report, details and peaks included; a gapless stream of 10⁴ messages through runs of a few hundred is clean at fan-ins 2, 3 and derived, and one message dropped breaks it; a stream falling back is broken where it falls; a stream run cut at every byte, and an event cut inside its dependencies, fail the pass; the third run one byte short of its look stops the pass before writing it; a dry run's asked space covers the runs' peak, heard after every write and checked against the files, across memories and fan-ins | stream events sorted without their line; a cascade group dropped; a run's end unchecked; no look before a write; the cascade's second copy not asked; runs asked for though they fit; a settled wait taken as expected; gaps, predecessors or duplicates unchecked at the end; a write not counted or the end not told |
 | Z1 | C6 | compressed and plain logs give the same records and trailer; `make vectors` decodes a crate-written log with the zstd CLI and `cmp`s it with the plain one | a digest over compressed bytes; compression in the header |
 | Z2 | C6 | a two-frame `golden/c1.jsonl.zst` made by the CLI decodes to the golden log | single-frame decoding |
 | Z3 | C6 | a compressed log named `.jsonl` and a plain one named `.zst` both read; anything else refused | detection by extension |
@@ -877,6 +878,26 @@ available memory, swap and pressure — under `MemorySwapMax=0`, so that a blown
   line's own time instead of the cursor — the cursor rises only on a line whose time it is, and eviction runs on
   every line, so both evict the same steps; the cursor lives on in the edge rule, through a step dead on arrival.
 
+**C8 — streams to sorted runs** (decision 16, 2026-11-21):
+- **Built:** `runs::Sorter<E: Event>`, the run machinery generalised from the id store: a buffer, sorted runs of
+  variable-length events, a cascade of a bounded fan-in, a k-way merge handing every event back in order, each run
+  read through a 1 MiB buffer, each write preceded by a look at the disk for its bytes and a 64 MiB reserve
+  (`LogError::Space`, by name, before the write). Step ids and stream messages are its two kinds, both digested with
+  SipHash-1-3-128 over their canonical JSON: an id event 24 bytes, a stream event 49 and 16 a dependency — its
+  (subject, stream) key, line, position, the stream's gaplessness, its step and the steps it awaits as expected on
+  its own subject. Streams are decided at the end, replayed per stream in line order; duplicates go straight into the
+  report. `Limits::memory` (bytes, 256 MiB by default) replaces the id count and is shared: past it the larger buffer
+  goes; a merge's fan-in is held to a 1 MiB block a run within it; the hot parts are dropped before the end merges.
+  The dry run's need is the bytes of events its records make, counted while emitting (`Emitted::run_bytes`): none
+  while they fit, the runs once, twice when they cascade. The engine's `Progress` hears a validation's runs
+  (`runs(kind, on_disk)`), at each write and when they are gone. The look after a write, first written beside the
+  look before, was dropped: it can fail only where the next look would, and served only to observe — the observer
+  does that.
+- **Executors:** V5; the unit test of the run reader covers both kinds. Mutations, each alone, red: as in V5. A
+  deletion inside a cascade is heard with the next write, not at once: a deletion never makes a peak.
+- **Owed of C8, to C9's counting allocator:** that the hot parts dropped before the end merges and the fan-in held to
+  the memory bound the heap; nothing executes them yet.
+
 Owed:
 - **Stage 3's dependency machine against the edge rule** (decision 16): whether the scheduler binds a dependency when
   it reads a line or when it releases it, with read-ahead, decides what the cursor must be; both oracles derive the
@@ -979,3 +1000,4 @@ condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
   give (a line moved forward, every rule's deviation, the verdict digest, room against the disk); Performance the
   plan-own bound, the early refusal, the dead-on-arrival step and M10's record.
 - 2026-11-21: Slice C7 built (§ Measured); § 9's edge revised to the read cursor, `RULES_REVISION` 3.
+- 2026-11-21: Slice C8 built (§ Measured): streams decided by sorted runs, `Limits::memory` in bytes.

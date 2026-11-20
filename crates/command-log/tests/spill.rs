@@ -124,17 +124,23 @@ fn a_cut_spill_fails_the_generation() {
     }
 }
 
-/// A host that cuts the validator's first id run at a given line.
+/// A host that cuts the validator's first run of a type at a given line.
 struct CutIds {
     spill: PathBuf,
     at: StepId,
     len: u64,
+    kind: &'static str,
 }
 
 impl Host for CutIds {
     fn required(&self, record: &Record) -> Vec<(StepId, On)> {
+        let first = run_files(&self.spill).into_iter().find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(self.kind))
+        });
         if record.step == self.at
-            && let Some(run) = run_files(&self.spill).first()
+            && let Some(run) = first
         {
             std::fs::OpenOptions::new()
                 .write(true)
@@ -161,13 +167,59 @@ fn a_cut_id_run_fails_the_validation() {
             spill: dir.path().to_owned(),
             at: records[3].step.clone(),
             len,
+            kind: "ids-",
         };
         let limits = Limits {
-            ids_in_memory: 1,
+            memory: 24,
             spill: dir.path().to_owned(),
             kept: 10,
             fan_in: 0,
             memory_spill: true,
+            progress: None,
+        };
+        let result = validate(Reader::new(Cursor::new(&bytes)).unwrap(), &host, &limits);
+        assert!(
+            matches!(result, Err(LogError::Io(_))),
+            "cut to {len}: {:?}",
+            result.map(|_| ())
+        );
+        assert_eq!(leftover(dir.path()), Vec::<PathBuf>::new(), "cut to {len}");
+    }
+}
+
+/// E3 for the stream runs (decision 16): a stream run cut at any byte fails the
+/// pass, never hides a stream's violation.
+#[test]
+fn a_cut_stream_run_fails_the_validation() {
+    let mut records: Vec<Record> = Vec::new();
+    for n in 0..4u32 {
+        let mut r = message(
+            step(id("device", 1, "fact", n), u64::from(n)),
+            "lifecycle",
+            n + 1,
+        );
+        if let Some(b) = records.last() {
+            r = after(r, &b.step, On::Expected);
+        }
+        records.push(r);
+    }
+    let bytes = bytes(header(), &records);
+    // The first message's event: no dependency, 49 bytes.
+    for len in 0..49 {
+        let dir = tempfile::tempdir().unwrap();
+        let host = CutIds {
+            spill: dir.path().to_owned(),
+            at: records[3].step.clone(),
+            len,
+            kind: "streams-",
+        };
+        let limits = Limits {
+            memory: 24,
+            spill: dir.path().to_owned(),
+            kept: 10,
+            fan_in: 0,
+            memory_spill: true,
+            progress: None,
         };
         let result = validate(Reader::new(Cursor::new(&bytes)).unwrap(), &host, &limits);
         assert!(
@@ -211,11 +263,12 @@ fn a_failure_leaves_nothing_behind() {
     let mut cut = bytes(header(), &records);
     cut.truncate(cut.len() - 20);
     let limits = Limits {
-        ids_in_memory: 1,
+        memory: 24,
         spill: dir.path().to_owned(),
         kept: 10,
         fan_in: 0,
         memory_spill: true,
+        progress: None,
     };
     let result = validate(Reader::new(Cursor::new(&cut)).unwrap(), &NoHost, &limits);
     assert!(result.is_err());
