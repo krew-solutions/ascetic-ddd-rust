@@ -24,7 +24,9 @@ fn draw(k: &Key, label: &str, m: u64) -> u64 {
 fn base(k: &Key) -> Vec<Record> {
     let mut records: Vec<Record> = Vec::new();
     let mut counts: BTreeMap<(Subject, String), u32> = BTreeMap::new();
-    let mut writers: BTreeMap<u64, (StepId, Vec<StepId>)> = BTreeMap::new();
+    // A group's latest writer, its readers since, and whether it captured the
+    // ETag they send.
+    let mut writers: BTreeMap<u64, (StepId, Vec<StepId>, bool)> = BTreeMap::new();
     let mut streams: BTreeMap<u64, (u32, StepId)> = BTreeMap::new();
     let mut managed = 0u64;
     let mut at = 0u64;
@@ -60,24 +62,26 @@ fn base(k: &Key) -> Vec<Record> {
         match label {
             "update" => {
                 r.action = rest("update", vec![Value::Literal(index.to_string())]);
-                if let Some((w, readers)) = writers.get(&index) {
+                if let Some((w, readers, _)) = writers.get(&index) {
                     r = after(r, w, On::Settled);
                     for reader in readers {
                         r = after(r, reader, On::Settled);
                     }
                 }
-                if draw(&kj, "capture", 2) == 0 {
+                let captured = draw(&kj, "capture", 2) == 0;
+                if captured {
                     r = captures_etag(r, index);
                 }
-                writers.insert(index, (step_id.clone(), vec![]));
+                writers.insert(index, (step_id.clone(), vec![], captured));
             }
             "read" => match writers.get_mut(&index) {
-                Some((w, readers)) => {
+                // An ETag only from a writer that captured it.
+                Some((w, readers, true)) => {
                     r = after(r, w, On::Expected);
                     r.action = read_etag("read", index, w);
                     readers.push(step_id.clone());
                 }
-                None => r.action = rest("read", vec![Value::Literal(index.to_string())]),
+                _ => r.action = rest("read", vec![Value::Literal(index.to_string())]),
             },
             "fact" => {
                 let (position, previous) = match streams.get(&index) {
@@ -104,7 +108,7 @@ fn base(k: &Key) -> Vec<Record> {
                         .is_some_and(|e| e.at < at && at - e.at <= W)
                 };
                 let cause = match writers.get(&index) {
-                    Some((w, _)) if reach(w) => {
+                    Some((w, _, _)) if reach(w) => {
                         r = after(r, w, On::Sent);
                         w.clone()
                     }
@@ -372,6 +376,24 @@ fn mutant(records: &[Record], which: &str, k: &Key) -> Option<Vec<Record>> {
             m[i].at = m[i - 1].at - 1;
             m[i] = deviating(m[i].clone(), "order");
         }
+        // A writer that no longer captures the ETag its readers send.
+        "uncaptured-writer" => {
+            let read: Vec<usize> = all
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    !m[i].capture.is_empty()
+                        && m.iter().any(|r| {
+                            r.after
+                                .iter()
+                                .any(|d| matches!(d, Dep::Step { step, on: On::Expected } if step == &m[i].step))
+                                && r.step.label == "read"
+                        })
+                })
+                .collect();
+            let i = pick("i", &read)?;
+            m[i].capture.clear();
+        }
         // A think past what the plan's times allow (ADR-0047 decision 3).
         "think" => {
             let i = pick(
@@ -533,6 +555,7 @@ pub fn logs() -> Vec<(String, Vec<Record>)> {
         "deviation",
         "squeeze",
         "order-deviated",
+        "uncaptured-writer",
         "think",
         "weaken-reader",
         "measure-dangling",

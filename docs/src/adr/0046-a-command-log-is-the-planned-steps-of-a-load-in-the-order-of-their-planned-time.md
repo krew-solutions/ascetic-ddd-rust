@@ -1048,3 +1048,5 @@ condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
 - 2026-11-21: ADR-0047 K0a, second part: § 9 revised — writers await readers `Settled`; `order`, `duplicate`, `edge` and
   `producer` join `key` and `deviation` as rules no deviation exempts; new rules `feasible`, `measure`, `cause`,
   `until`, `sent`; the header's deadlines and the channel and call tables (`RULES_REVISION` 4).
+- 2026-11-21: ADR-0047 K1c: § 9's producer rule also refuses a reader whose producer, the slot's latest writer,
+  captures no value of it — the plan could never pass (`RULES_REVISION` 5).

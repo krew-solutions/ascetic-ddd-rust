@@ -127,10 +127,11 @@ fn barrier() {
     twins(Rule::Barrier, &with(2), &with(3));
 }
 
+/// A group's update: it writes the group's ETag and captures it.
 fn writer(g: u64, n: u32, at: u64) -> Record {
     let mut r = step(id("group", g, "update", n), at);
     r.action = rest("update", vec![Value::Literal(g.to_string())]);
-    r
+    captures_etag(r, g)
 }
 
 fn reader(g: u64, n: u32, at: u64, from: &StepId, on: On) -> Record {
@@ -146,6 +147,15 @@ fn producer() {
         Rule::Producer,
         &[w.clone(), reader(1, 0, 20, &w.step, On::Expected)],
         &[w.clone(), reader(1, 0, 20, &w.step, On::Sent)],
+    );
+    // The slot's latest writer must capture the value its reader sends: one
+    // that only writes it gives the reader nothing (ADR-0047 decision 5).
+    let mut silent = writer(1, 0, 10);
+    silent.capture.clear();
+    twins(
+        Rule::Producer,
+        &[w.clone(), reader(1, 0, 20, &w.step, On::Expected)],
+        &[silent.clone(), reader(1, 0, 20, &silent.step, On::Expected)],
     );
 }
 
@@ -867,6 +877,10 @@ fn the_rules_meaning_is_pinned_to_its_revision() {
         (
             4,
             "8718e8bf5d7499618d255566f4d6a38f9111b7eb90a7d580904c34dce7168969",
+        ),
+        (
+            5,
+            "e513cbb1258ca9684b36c132ccea304c67b00a45617e811f6c4729bc29a93b8a",
         ),
     ];
     let mut digest = Sha256::new();

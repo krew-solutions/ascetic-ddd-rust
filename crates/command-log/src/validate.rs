@@ -42,7 +42,8 @@ pub enum Rule {
     Edge,
     /// A barrier's `count` other than the steps it names planned before it.
     Barrier,
-    /// A captured value whose producer is not awaited as expected.
+    /// A captured value whose producer is not awaited as expected, or, being
+    /// the slot's latest writer, captures no value of it.
     Producer,
     /// A captured value read from a step that is not the slot's latest writer.
     Stale,
@@ -558,6 +559,9 @@ fn calls(record: &Record) -> Vec<&Rest> {
 struct Slot {
     writer: StepId,
     readers: BTreeSet<StepId>,
+    /// Whether the writer captures the slot's value: a writer that only
+    /// writes it gives its readers nothing to send (ADR-0047 decision 5).
+    captured: bool,
 }
 
 /// A barrier's key: the kind, scope, label and occurrence its members share.
@@ -1093,6 +1097,11 @@ impl<H: Host> Pass<'_, H> {
             match self.slots.get_mut(&(subject.clone(), slot.clone())) {
                 Some(s) if s.writer == from => {
                     s.readers.insert(r.step.clone());
+                    if !s.captured {
+                        self.violate(line, Rule::Producer, || {
+                            format!("{slot} of {subject:?}: {from:?} captures no value of it")
+                        });
+                    }
                 }
                 _ => self.violate(line, Rule::Stale, || {
                     format!("{slot} of {subject:?}: {from:?} is not its latest writer")
@@ -1144,11 +1153,16 @@ impl<H: Host> Pass<'_, H> {
             } else {
                 self.live.remove(&key);
             }
+            let captured = r
+                .capture
+                .iter()
+                .any(|c| c.subject == key.0 && c.slot == key.1);
             self.slots.insert(
                 key,
                 Slot {
                     writer: r.step.clone(),
                     readers: BTreeSet::new(),
+                    captured,
                 },
             );
         }

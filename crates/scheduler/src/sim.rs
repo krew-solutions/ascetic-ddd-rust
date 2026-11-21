@@ -3,11 +3,11 @@
 //! when its answer comes and how it is judged. A handler that does not answer
 //! by the deadline reports unknown at it, as the shell's will.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use ascetic_ddd_command_log::LogError;
-use ascetic_ddd_command_log::record::{Header, Record};
+use ascetic_ddd_command_log::record::{Action, Dep, Header, Hole, Probe, Record, Subject, Value};
 
 use crate::machine::{Captured, Entry, Input, Judgement, Line, Machine, Output};
 use crate::order::Ordered;
@@ -69,6 +69,95 @@ pub fn run_reading(
     lag: &dyn Fn(Line) -> u64,
     script: &dyn Fn(Line, u32, &Record) -> Attempt,
 ) -> Result<Run, LogError> {
+    drive(header, records, read_ahead, lag, &mut Scripted { script })
+}
+
+/// What carries out the machine's dispatches: a script, or a model stand.
+trait Handler {
+    /// Attempt `attempt` of `record` dispatched at `at`, its captured holes
+    /// filled from `captured`, to end by `deadline`: its inputs, queued.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch(
+        &mut self,
+        at: u64,
+        line: Line,
+        attempt: u32,
+        record: &Record,
+        captured: &[Captured],
+        deadline: u64,
+        queue: &mut Ordered,
+    );
+    /// The handler's own next instant, if it has one.
+    fn next(&self) -> Option<u64> {
+        None
+    }
+    /// What it does up to `t`, its inputs queued.
+    fn advance(&mut self, t: u64, queue: &mut Ordered) {
+        let _ = (t, queue);
+    }
+}
+
+/// The ending of an attempt answered at `answered`, or unknown at its deadline.
+fn answer(
+    queue: &mut Ordered,
+    line: Line,
+    attempt: u32,
+    answered: Option<u64>,
+    deadline: u64,
+    judgement: Judgement,
+) {
+    match answered {
+        Some(t) if t <= deadline => queue.push(
+            t,
+            Input::Ended {
+                line,
+                attempt,
+                judgement,
+            },
+        ),
+        _ => queue.push(
+            deadline,
+            Input::Ended {
+                line,
+                attempt,
+                judgement: Judgement::Unknown,
+            },
+        ),
+    }
+}
+
+struct Scripted<'a> {
+    script: &'a dyn Fn(Line, u32, &Record) -> Attempt,
+}
+
+impl Handler for Scripted<'_> {
+    fn dispatch(
+        &mut self,
+        at: u64,
+        line: Line,
+        attempt: u32,
+        record: &Record,
+        _: &[Captured],
+        deadline: u64,
+        queue: &mut Ordered,
+    ) {
+        let a = (self.script)(line, attempt, record);
+        let sent = at.saturating_add(a.sent_after);
+        if sent < deadline {
+            queue.push(sent, Input::Sent { line, attempt });
+        }
+        let answered = a.answer_after.map(|d| sent.saturating_add(d));
+        answer(queue, line, attempt, answered, deadline, a.judgement);
+    }
+}
+
+fn drive(
+    header: Header,
+    records: &[Record],
+    read_ahead: u64,
+    lag: &dyn Fn(Line) -> u64,
+    handler: &mut dyn Handler,
+) -> Result<Run, LogError> {
     let records: Vec<Arc<Record>> = records.iter().cloned().map(Arc::new).collect();
     let mut machine = Machine::new(Arc::new(header), read_ahead);
     let mut queue = Ordered::new();
@@ -90,15 +179,21 @@ pub fn run_reading(
     };
     queue.push(0, Input::Wake);
     loop {
-        // The next instant: an input, a wake, or the next line's reading.
+        // The next instant: an input, a wake, the handler's own, or the next
+        // line's reading.
         let reading = reads.get(next).map(|t| (*t).max(machine.now()));
-        let Some(t) = [queue.first(), wakes.first().copied(), reading]
-            .into_iter()
-            .flatten()
-            .min()
-        else {
+        let Some(t) = [
+            queue.first(),
+            wakes.first().copied(),
+            handler.next(),
+            reading,
+        ]
+        .into_iter()
+        .flatten()
+        .min() else {
             break;
         };
+        handler.advance(t, &mut queue);
         while let (Some(r), Some(when)) = (records.get(next), reads.get(next)) {
             if (*when).max(machine.now()) > t {
                 break;
@@ -137,34 +232,13 @@ pub fn run_reading(
                         deadline,
                         captured,
                     } => {
-                        run.dispatches.push((at, line, attempt, captured));
                         let index = usize::try_from(line.saturating_sub(2)).unwrap_or(usize::MAX);
-                        let Some(record) = records.get(index) else {
-                            continue;
-                        };
-                        let a = script(line, attempt, record);
-                        let sent = at.saturating_add(a.sent_after);
-                        if sent < deadline {
-                            queue.push(sent, Input::Sent { line, attempt });
+                        if let Some(record) = records.get(index) {
+                            handler.dispatch(
+                                at, line, attempt, record, &captured, deadline, &mut queue,
+                            );
                         }
-                        match a.answer_after.map(|d| sent.saturating_add(d)) {
-                            Some(answered) if answered <= deadline => queue.push(
-                                answered,
-                                Input::Ended {
-                                    line,
-                                    attempt,
-                                    judgement: a.judgement,
-                                },
-                            ),
-                            _ => queue.push(
-                                deadline,
-                                Input::Ended {
-                                    line,
-                                    attempt,
-                                    judgement: Judgement::Unknown,
-                                },
-                            ),
-                        }
+                        run.dispatches.push((at, line, attempt, captured));
                     }
                     Output::Ended(e) => run.entries.push(*e),
                 }
@@ -174,4 +248,193 @@ pub fn run_reading(
     }
     run.entries.sort_by_key(|e| e.line);
     Ok(run)
+}
+
+/// A model stand from the host's contracts (ADR-0047 Rule of Three, 3): a
+/// resource's ETag a version that each write of it raises, a request whose
+/// `If-Match` names another version refused; a barrier's holder answered as
+/// expected only if every member read before it was processed first;
+/// requests processed in the order they arrive, which their delays choose. It
+/// knows nothing of the decision's sentences: a clean log must end with every
+/// step expected under every delay that fails nothing.
+pub fn run_stand(
+    header: Header,
+    records: &[Record],
+    read_ahead: u64,
+    delays: &dyn Fn(Line, u32) -> (u64, u64, u64),
+) -> Result<Run, LogError> {
+    let mut stand = Stand {
+        header: header.clone(),
+        delays,
+        records: records.to_vec(),
+        arriving: BTreeMap::new(),
+        versions: BTreeMap::new(),
+        processed: BTreeSet::new(),
+    };
+    drive(header, records, read_ahead, &|_| 0, &mut stand)
+}
+
+/// A request on its way: what it carries, the delay of its answer, its
+/// deadline.
+type Arriving = (Vec<Captured>, u64, u64);
+
+struct Stand<'a> {
+    header: Header,
+    delays: &'a dyn Fn(Line, u32) -> (u64, u64, u64),
+    records: Vec<Record>,
+    /// Requests on their way: when they arrive, which, with what, and the
+    /// delay of their answer and their deadline.
+    arriving: BTreeMap<(u64, Line, u32), Arriving>,
+    versions: BTreeMap<(Subject, String), u64>,
+    processed: BTreeSet<Line>,
+}
+
+impl Stand<'_> {
+    fn record(&self, line: Line) -> Option<&Record> {
+        self.records
+            .get(usize::try_from(line.saturating_sub(2)).unwrap_or(usize::MAX))
+    }
+
+    /// What the stand makes of a request: its state changed, its answer.
+    fn process(&mut self, line: Line, captured: &[Captured]) -> Judgement {
+        let Some(r) = self.record(line).cloned() else {
+            return Judgement::Unknown;
+        };
+        self.processed.insert(line);
+        let rest = match &r.action {
+            Action::Rest(rest) => Some(rest.clone()),
+            Action::Observe(o) => match &o.probe {
+                Probe::Rest(rest) => Some(rest.clone()),
+                Probe::Bus { .. } => None,
+            },
+            _ => None,
+        };
+        if let Some(rest) = rest {
+            // An If-Match names the version it was captured at.
+            for f in &rest.headers {
+                if let Value::Hole(Hole::Captured { subject, slot, .. }) = &f.value
+                    && f.name.eq_ignore_ascii_case("If-Match")
+                {
+                    let now = self
+                        .versions
+                        .get(&(subject.clone(), slot.clone()))
+                        .copied()
+                        .unwrap_or(0);
+                    let sent = captured
+                        .iter()
+                        .find(|c| &c.subject == subject && &c.slot == slot)
+                        .map(|c| c.value.clone());
+                    if sent != Some(now.to_string().into_bytes()) {
+                        return Judgement::Unexpected;
+                    }
+                }
+            }
+            if matches!(r.action, Action::Rest(_))
+                && let Some(op) = self.header.operations.iter().find(|o| o.name == rest.op)
+            {
+                for slot in &op.writes {
+                    let v = self
+                        .versions
+                        .entry((r.step.subject.clone(), slot.clone()))
+                        .or_insert(0);
+                    *v = v.saturating_add(1);
+                }
+            }
+        }
+        // A barrier's holder counts the members processed before it.
+        for d in &r.after {
+            if let Dep::Each {
+                kind,
+                scope,
+                label,
+                n,
+                ..
+            } = d
+            {
+                let member = |e: &Record| {
+                    &e.step.subject.kind == kind
+                        && &e.step.subject.scope == scope
+                        && &e.step.label == label
+                        && e.step.n == *n
+                };
+                let index = usize::try_from(line.saturating_sub(2)).unwrap_or(0);
+                let before: Vec<Line> = self
+                    .records
+                    .iter()
+                    .take(index)
+                    .enumerate()
+                    .filter(|(_, e)| member(e))
+                    .map(|(i, _)| (i as u64).saturating_add(2))
+                    .collect();
+                if before.iter().any(|m| !self.processed.contains(m)) {
+                    return Judgement::Unexpected;
+                }
+            }
+        }
+        let captures = r
+            .capture
+            .iter()
+            .map(|c| Captured {
+                subject: c.subject.clone(),
+                slot: c.slot.clone(),
+                value: self
+                    .versions
+                    .get(&(c.subject.clone(), c.slot.clone()))
+                    .copied()
+                    .unwrap_or(0)
+                    .to_string()
+                    .into_bytes(),
+            })
+            .collect();
+        Judgement::Expected(captures)
+    }
+}
+
+impl Handler for Stand<'_> {
+    fn dispatch(
+        &mut self,
+        at: u64,
+        line: Line,
+        attempt: u32,
+        _: &Record,
+        captured: &[Captured],
+        deadline: u64,
+        queue: &mut Ordered,
+    ) {
+        let (sent_after, there, back) = (self.delays)(line, attempt);
+        let sent = at.saturating_add(sent_after);
+        if sent >= deadline {
+            answer(queue, line, attempt, None, deadline, Judgement::Unknown);
+            return;
+        }
+        queue.push(sent, Input::Sent { line, attempt });
+        self.arriving.insert(
+            (sent.saturating_add(there), line, attempt),
+            (captured.to_vec(), back, deadline),
+        );
+    }
+
+    fn next(&self) -> Option<u64> {
+        self.arriving.first_key_value().map(|(k, _)| k.0)
+    }
+
+    fn advance(&mut self, t: u64, queue: &mut Ordered) {
+        while let Some((&(arrived, line, attempt), _)) = self.arriving.first_key_value() {
+            if arrived > t {
+                break;
+            }
+            let Some((_, (captured, back, deadline))) = self.arriving.pop_first() else {
+                break;
+            };
+            let judgement = self.process(line, &captured);
+            answer(
+                queue,
+                line,
+                attempt,
+                Some(arrived.saturating_add(back)),
+                deadline,
+                judgement,
+            );
+        }
+    }
 }

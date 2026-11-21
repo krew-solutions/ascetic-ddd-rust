@@ -16,7 +16,8 @@ The rules (ADR-0046 decisions 5, 7, 9):
   planned strictly before, or more than W before and of a label not retained.
 - barrier: a count other than the earlier steps of its kind, scope, label and
   occurrence.
-- producer: a captured value whose producer the line does not await as expected.
+- producer: a captured value whose producer the line does not await as expected,
+  or whose producer, the slot's latest earlier writer, captures no value of it.
 - stale: a captured value whose producer is not the latest earlier writer of its
   slot. A writer of a slot is a line that captures it, or a REST call whose
   operation writes it on the line's subject.
@@ -360,6 +361,9 @@ def verdict(text, clock="cursor"):
             writers = [e for e in earlier if (subject, slot) in writes(header, e)]
             if not writers or writers[-1]["step"] != producer:
                 v.add("stale")
+            elif not any(json.dumps(c["subject"], sort_keys=True) == subject and c["slot"] == slot
+                         for c in writers[-1]["capture"]):
+                v.add("producer")
         for subject, slot in writes(header, r):
             writers = [j for j, e in enumerate(earlier) if (subject, slot) in writes(header, e)]
             if writers:

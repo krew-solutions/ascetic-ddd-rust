@@ -345,6 +345,20 @@ the dependency that failed first, not the first in `after`; a step released past
   its twin); its observation's deadline from its own start; its think ignored; the definition's `Sent` met at the end;
   its release without the read (green until the reader lagged); its barrier by its last member.
 
+**K1c — the model stand** (2026-11-21): `sim::run_stand`, a stand built from the host's contracts rather than this
+decision's sentences — a resource's ETag a version each write of it raises, a request whose `If-Match` names another
+version refused, a barrier's holder answered as expected only if every member read before it was processed first,
+requests processed in the order their delays make them arrive. `sim`'s loop takes a handler: the script, or the stand.
+Building it found a hole in the validator: a reader whose producer, the slot's latest writer, only writes the slot and
+captures nothing has no value to send, and the plan can never pass — `producer` now refuses it (`RULES_REVISION` 5,
+the reference alike), and the corpus's base logs read an ETag only after a writer that captured it.
+- **Executors** (`tests/stand.rs`): every clean corpus log × eight delay scripts, requests overtaking one another,
+  round trips inside the corpus's shortest deadline: every step ends expected. Mutations, each alone, red — the stand
+  knowing nothing of them: the validator's writers back to awaiting readers `Sent` (a 412 under reordering, on a
+  `weaken-reader` log); the machine's barrier prefix past an unmet member (the holder before its members); the
+  validator's producer capture unchecked (a reader skipped for a missing value, on an `uncaptured-writer` log — green
+  until that corpus mutant). A twin in `command-log`: a writer that captures nothing is no producer.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -387,3 +401,4 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-21: K1 cut into K1a–K1e; K1a built (§ Measured): the window as a module, the machine, the ordering buffer and
   `sim`.
 - 2026-11-21: K1b built (§ Measured); decision 7 completed: a step released past its deadline ends unknown, unsent.
+- 2026-11-21: K1c built (§ Measured): the model stand; `producer` refuses a reader whose producer captures nothing.
