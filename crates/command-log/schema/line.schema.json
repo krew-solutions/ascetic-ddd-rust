@@ -82,7 +82,7 @@
       "type": "object",
       "properties": {
         "format": {
-          "const": 2
+          "const": 3
         },
         "algorithm": {
           "type": "string"
@@ -116,6 +116,18 @@
           "items": {
             "$ref": "#/$defs/operation"
           }
+        },
+        "channels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/channel"
+          }
+        },
+        "calls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/call"
+          }
         }
       },
       "required": [
@@ -128,7 +140,9 @@
         "read_ahead",
         "retained",
         "laws",
-        "operations"
+        "operations",
+        "channels",
+        "calls"
       ],
       "additionalProperties": false
     },
@@ -171,6 +185,9 @@
         },
         "reserve": {
           "$ref": "#/$defs/u32"
+        },
+        "route_timeout": {
+          "$ref": "#/$defs/u64"
         }
       },
       "required": [
@@ -180,7 +197,8 @@
         "gapless",
         "sources",
         "jitter",
-        "reserve"
+        "reserve",
+        "route_timeout"
       ],
       "additionalProperties": false
     },
@@ -205,12 +223,17 @@
         "writes": {
           "$ref": "#/$defs/names"
         },
-        "retry": {
-          "enum": [
-            "never",
-            "not_taken",
-            "idempotent"
-          ]
+        "safety": {
+          "$ref": "#/$defs/safety"
+        },
+        "client": {
+          "$ref": "#/$defs/client_retry"
+        },
+        "not_run": {
+          "$ref": "#/$defs/names"
+        },
+        "timeout": {
+          "$ref": "#/$defs/u64"
         },
         "limits": {
           "type": "array",
@@ -226,7 +249,10 @@
         "content_type",
         "decorated",
         "writes",
-        "retry",
+        "safety",
+        "client",
+        "not_run",
+        "timeout",
         "limits"
       ],
       "additionalProperties": false
@@ -297,8 +323,8 @@
         "at": {
           "$ref": "#/$defs/u64"
         },
-        "release": {
-          "$ref": "#/$defs/release"
+        "think": {
+          "$ref": "#/$defs/u64"
         },
         "after": {
           "type": "array",
@@ -341,7 +367,7 @@
       "required": [
         "step",
         "at",
-        "release",
+        "think",
         "after",
         "action",
         "expect",
@@ -350,34 +376,6 @@
         "deviation"
       ],
       "additionalProperties": false
-    },
-    "release": {
-      "oneOf": [
-        {
-          "const": "at"
-        },
-        {
-          "type": "object",
-          "properties": {
-            "ready": {
-              "type": "object",
-              "properties": {
-                "think": {
-                  "$ref": "#/$defs/u64"
-                }
-              },
-              "required": [
-                "think"
-              ],
-              "additionalProperties": false
-            }
-          },
-          "required": [
-            "ready"
-          ],
-          "additionalProperties": false
-        }
-      ]
     },
     "on": {
       "enum": [
@@ -647,6 +645,9 @@
     "observe": {
       "type": "object",
       "properties": {
+        "cause": {
+          "$ref": "#/$defs/step_id"
+        },
         "probe": {
           "$ref": "#/$defs/probe"
         },
@@ -664,6 +665,7 @@
         }
       },
       "required": [
+        "cause",
         "probe",
         "until",
         "every",
@@ -1292,6 +1294,76 @@
       "required": [
         "principal",
         "names"
+      ],
+      "additionalProperties": false
+    },
+    "safety": {
+      "enum": [
+        "never",
+        "not_taken",
+        "idempotent"
+      ]
+    },
+    "client_retry": {
+      "type": "object",
+      "properties": {
+        "attempts": {
+          "$ref": "#/$defs/u32"
+        },
+        "on": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/u16"
+          }
+        },
+        "backoff": {
+          "$ref": "#/$defs/u64"
+        },
+        "retry_after": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "attempts",
+        "on",
+        "backoff",
+        "retry_after"
+      ],
+      "additionalProperties": false
+    },
+    "channel": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "timeout": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "name",
+        "timeout"
+      ],
+      "additionalProperties": false
+    },
+    "call": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "timeout": {
+          "$ref": "#/$defs/u64"
+        },
+        "safety": {
+          "$ref": "#/$defs/safety"
+        }
+      },
+      "required": [
+        "name",
+        "timeout",
+        "safety"
       ],
       "additionalProperties": false
     }

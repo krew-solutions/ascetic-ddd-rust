@@ -53,6 +53,7 @@ pub fn header() -> Header {
             sources: 3,
             jitter: 2_000,
             reserve: 50,
+            route_timeout: 15_000_000,
         },
         window: 600_000_000,
         read_ahead: 60_000_000,
@@ -68,7 +69,15 @@ pub fn header() -> Header {
             content_type: "application/json".to_owned(),
             decorated: vec!["Authorization".to_owned()],
             writes: vec!["etag".to_owned()],
-            retry: Retry::Never,
+            safety: Safety::Never,
+            client: ClientRetry {
+                attempts: 3,
+                on: vec![503],
+                backoff: 500_000,
+                retry_after: true,
+            },
+            not_run: vec!["service.session_failed".to_owned()],
+            timeout: 10_000_000,
             // Every kind of limit and place.
             limits: vec![
                 limit(
@@ -129,6 +138,15 @@ pub fn header() -> Header {
                 ),
             ],
         }],
+        channels: vec![Channel {
+            name: "device.facts".to_owned(),
+            timeout: 30_000_000,
+        }],
+        calls: vec![Call {
+            name: "onboardTenant".to_owned(),
+            timeout: 60_000_000,
+            safety: Safety::Idempotent,
+        }],
     }
 }
 
@@ -143,7 +161,7 @@ pub fn records() -> Vec<Record> {
         Record {
             step: step(subject("tenant", &[], 0), "onboard", 0),
             at: 0,
-            release: Release::At,
+            think: 0,
             after: vec![],
             action: Action::Host(HostCall {
                 op: "onboard".to_owned(),
@@ -161,7 +179,7 @@ pub fn records() -> Vec<Record> {
         Record {
             step: created.clone(),
             at: 1_000,
-            release: Release::Ready { think: 50_000 },
+            think: 500,
             after: vec![Dep::Step {
                 step: step(subject("tenant", &[], 0), "onboard", 0),
                 on: On::Expected,
@@ -233,7 +251,7 @@ pub fn records() -> Vec<Record> {
         Record {
             step: step(device.clone(), "managed", 0),
             at: 2_000,
-            release: Release::At,
+            think: 0,
             after: vec![
                 Dep::Step {
                     step: created.clone(),
@@ -294,12 +312,13 @@ pub fn records() -> Vec<Record> {
         Record {
             step: step(device.clone(), "bundle", 0),
             at: 3_000,
-            release: Release::Ready { think: 0 },
+            think: 0,
             after: vec![Dep::Step {
                 step: step(device.clone(), "managed", 0),
                 on: On::Expected,
             }],
             action: Action::Observe(Observe {
+                cause: step(device.clone(), "managed", 0),
                 probe: Probe::Rest(Rest {
                     op: "getDeviceEffectiveBundle".to_owned(),
                     caller: None,
@@ -355,7 +374,7 @@ pub fn records() -> Vec<Record> {
         Record {
             step: step(device.clone(), "report", 0),
             at: u64::MAX,
-            release: Release::At,
+            think: 0,
             after: vec![Dep::Each {
                 kind: "device".to_owned(),
                 scope: vec![],
@@ -365,6 +384,7 @@ pub fn records() -> Vec<Record> {
                 count: None,
             }],
             action: Action::Observe(Observe {
+                cause: step(device.clone(), "managed", 0),
                 probe: Probe::Bus {
                     channel: "device.facts".to_owned(),
                     key: Value::Literal("ключ".to_owned()),
@@ -382,7 +402,7 @@ pub fn records() -> Vec<Record> {
         Record {
             step: step(device, "stamped", u32::MAX),
             at: u64::MAX,
-            release: Release::At,
+            think: 0,
             after: vec![],
             action: Action::Host(HostCall {
                 op: "stamp".to_owned(),
@@ -432,7 +452,7 @@ pub fn records() -> Vec<Record> {
         Record {
             step: step(subject("key", &[1], 1), "keys", 0),
             at: u64::MAX,
-            release: Release::At,
+            think: 0,
             after: vec![],
             action: Action::Host(HostCall {
                 op: "keys".to_owned(),

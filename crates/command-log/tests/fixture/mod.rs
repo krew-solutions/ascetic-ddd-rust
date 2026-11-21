@@ -6,14 +6,20 @@ pub mod corpus;
 use std::io::Cursor;
 
 use ascetic_ddd_command_log::record::{
-    Action, Bus, Capture, Codec, Dep, Deviation, Field, Form, Header, Hole, HostCall, Observe, On,
-    Operation, Payload, Probe, Profile, Record, Release, Rendering, Rest, Retry, Source, Span,
-    StepId, StreamPosition, Subject, Value,
+    Action, Bus, Call, Capture, Channel, ClientRetry, Codec, Dep, Deviation, Field, Form, Header,
+    Hole, HostCall, Observe, On, Operation, Payload, Probe, Profile, Record, Rendering, Rest,
+    Safety, Source, Span, StepId, StreamPosition, Subject, Value,
 };
 use ascetic_ddd_command_log::validate::{Host, Limits, NoHost, Report, Rule, validate};
 use ascetic_ddd_command_log::{Reader, Writer};
 
 pub const W: u64 = 1_000;
+
+/// An operation's, a channel's and a host call's timeout in the fixtures.
+pub const TIMEOUT: u64 = 10_000_000;
+
+/// The fixture stand's gateway timeout.
+pub const ROUTE_TIMEOUT: u64 = 15_000_000;
 
 pub fn subject(kind: &str, index: u64) -> Subject {
     Subject {
@@ -39,7 +45,15 @@ pub fn header() -> Header {
         content_type: "application/json".into(),
         decorated: vec![],
         writes: writes.iter().map(|s| (*s).to_owned()).collect(),
-        retry: Retry::Never,
+        safety: Safety::Never,
+        client: ClientRetry {
+            attempts: 1,
+            on: vec![],
+            backoff: 0,
+            retry_after: false,
+        },
+        not_run: vec![],
+        timeout: TIMEOUT,
         limits: vec![],
     };
     Header {
@@ -55,6 +69,7 @@ pub fn header() -> Header {
             sources: 1,
             jitter: 0,
             reserve: 0,
+            route_timeout: ROUTE_TIMEOUT,
         },
         window: W,
         read_ahead: W,
@@ -65,6 +80,21 @@ pub fn header() -> Header {
             op("read", "/groups/{group}", &[]),
             op("list", "/groups", &[]),
         ],
+        channels: vec![
+            Channel {
+                name: "c".into(),
+                timeout: TIMEOUT,
+            },
+            Channel {
+                name: "device.lifecycle".into(),
+                timeout: TIMEOUT,
+            },
+        ],
+        calls: vec![Call {
+            name: "noop".into(),
+            timeout: TIMEOUT,
+            safety: Safety::Idempotent,
+        }],
     }
 }
 
@@ -73,7 +103,7 @@ pub fn step(id: StepId, at: u64) -> Record {
     Record {
         step: id,
         at,
-        release: Release::At,
+        think: 0,
         after: vec![],
         action: Action::Host(HostCall {
             op: "noop".into(),
@@ -189,9 +219,22 @@ pub fn with_payload(r: Record, codec: Codec, bytes: usize, spans: Vec<(u32, u32,
     }
 }
 
+/// The step an observation of `r` awaits: its first step dependency, or `r`
+/// itself when it has none (a fixture's shorthand).
+fn cause_of(r: &Record) -> StepId {
+    r.after
+        .iter()
+        .find_map(|d| match d {
+            Dep::Step { step, .. } => Some(step.clone()),
+            Dep::Each { .. } => None,
+        })
+        .unwrap_or_else(|| r.step.clone())
+}
+
 pub fn observe(r: Record, every: u64, timeout: u64) -> Record {
     Record {
         action: Action::Observe(Observe {
+            cause: cause_of(&r),
             probe: Probe::Bus {
                 channel: "c".into(),
                 key: Value::Literal("k".into()),
@@ -317,6 +360,7 @@ pub fn polling(g: u64, n: u32, at: u64, every: u64, timeout: u64) -> Record {
         unreachable!()
     };
     r.action = Action::Observe(Observe {
+        cause: cause_of(&r),
         probe: Probe::Rest(rest),
         until: vec![],
         every,

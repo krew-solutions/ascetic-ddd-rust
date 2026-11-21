@@ -1042,3 +1042,6 @@ condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
 - 2026-11-21: ADR-0047 (the scheduler) proposes amendments to §§ 7, 9, 12 and 13 — one release rule with `feasible`,
   writers awaiting readers `Settled`, the scheduler's premises non-deviable, the window (not a machine) shared — to
   be made in its slice K0a with FORMAT 3.
+- 2026-11-21: FORMAT 3 (ADR-0047 K0a, first part): `think` replaces `Release` (§ 2, § 7), `Observe.cause`, an operation's
+  `safety`, `client`, `not_run` and `timeout` in place of `retry`, the profile's `route_timeout`, the header's channels
+  and calls. The rules are unchanged until K0a's second part.

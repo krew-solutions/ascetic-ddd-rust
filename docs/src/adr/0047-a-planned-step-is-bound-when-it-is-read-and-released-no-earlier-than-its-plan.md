@@ -270,7 +270,16 @@ budget lies inside its interval.
 
 ## Measured
 
-Nothing yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
+**K0a, first part — FORMAT 3's model** (2026-11-21): `Record.think` in place of `Release` (released at
+`max(at, ready + think)`); `Observe.cause`; `Profile.route_timeout`; `Operation.safety` (the former `Retry`, renamed
+`Safety`), `client` (`ClientRetry`: attempts, statuses, backoff, `Retry-After`), `not_run` (the problem codes that
+certify a refusal as not run) and `timeout`; `Header.channels` (`Channel`: name, timeout) and `Header.calls` (`Call`:
+name, timeout, safety). `FORMAT_VERSION` 3; the normative schema, the golden log, `FORMAT` (`34d0604f…149d`) and the
+two-frame compressed golden regenerated; `vectors/format.py` checks it. The rules are unchanged: the corpus's 1,642
+verdicts and peaks are those of FORMAT 2, the reference agrees, and the corpus digest is re-pinned under
+`RULES_REVISION` 3. The rules come in K0a's second part.
+
+Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
 only and measures move to the 12-core box.
@@ -306,3 +315,4 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   coverage, ties, the dependency allowlist, TLA+ properties and mutants that close, trace validation in K1, the
   failure-path heap, bunching, the verdict fold in K1, the fault matrix, hidden retries, void twins, the gateway's
   refill and the request id at the first host run).
+- 2026-11-21: K0a's first part built (§ Measured): FORMAT 3's model.

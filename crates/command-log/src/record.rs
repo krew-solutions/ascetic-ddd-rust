@@ -51,6 +51,35 @@ pub struct Header {
     pub laws: Vec<Law>,
     /// The operations the steps call.
     pub operations: Vec<Operation>,
+    /// The channels the steps publish to and observe (ADR-0047 decision 7).
+    pub channels: Vec<Channel>,
+    /// The host calls the steps make (ADR-0047 decision 13).
+    pub calls: Vec<Call>,
+}
+
+/// A bus channel a log publishes to or observes, and how long a send to it
+/// may take before the scheduler censors it (ADR-0047 decision 7).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Channel {
+    /// Its name, as steps refer to it.
+    pub name: Name,
+    /// Microseconds a send may take: the producer's delivery timeout at most.
+    #[serde(with = "u64s")]
+    pub timeout: u64,
+}
+
+/// A call of the stand's own that steps make (ADR-0047 decision 13).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Call {
+    /// Its name, as steps refer to it.
+    pub name: Name,
+    /// Microseconds it may take before it is censored.
+    #[serde(with = "u64s")]
+    pub timeout: u64,
+    /// Whether the harness may make it again.
+    pub safety: Safety,
 }
 
 /// A law of the scenario, by its canonical `Display`.
@@ -85,6 +114,11 @@ pub struct Profile {
     /// Parts per thousand of every rate left unplanned: room for retries after
     /// a stall, and for clock-rate offset.
     pub reserve: u32,
+    /// Microseconds after which the stand's gateway answers a call itself
+    /// (ADR-0047 decision 7): an operation's timeout lies below it by more
+    /// than `jitter`.
+    #[serde(with = "crate::wire::u64s")]
+    pub route_timeout: u64,
 }
 
 /// An operation a step calls, from the host's contracts.
@@ -103,10 +137,35 @@ pub struct Operation {
     pub decorated: Vec<String>,
     /// The slots of its subject it writes (an ETag), captured or not.
     pub writes: Vec<Name>,
-    /// Whether, and when, it may be sent again.
-    pub retry: Retry,
+    /// Whether the harness may send it again (ADR-0047 decision 11).
+    pub safety: Safety,
+    /// What the emulated client retries: load, measured.
+    pub client: ClientRetry,
+    /// The problem codes that certify a refusal as not run, the only ground
+    /// for a `not_taken` resend: never a status alone.
+    pub not_run: Vec<Name>,
+    /// Microseconds a call may take before it is censored.
+    #[serde(with = "u64s")]
+    pub timeout: u64,
     /// Its rate limits, as the stand applies them (decision 14).
     pub limits: Vec<Limit>,
+}
+
+/// What the emulated client retries, as the real one does: up to `attempts`
+/// sends, on these statuses, `backoff` microseconds apart or as `Retry-After`
+/// says when it is honoured.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientRetry {
+    /// Sends in all, the first included; 1 retries nothing.
+    pub attempts: u32,
+    /// The statuses it retries.
+    pub on: Vec<u16>,
+    /// Microseconds between attempts.
+    #[serde(with = "u64s")]
+    pub backoff: u64,
+    /// Whether a `Retry-After` replaces the backoff.
+    pub retry_after: bool,
 }
 
 /// A rate limit, as the stand applies it: a token bucket of `burst` refilled
@@ -168,14 +227,14 @@ pub struct Caller {
     pub names: Vec<Subject>,
 }
 
-/// When an operation may be sent again (decision 12).
+/// Whether the harness may send a call again (ADR-0047 decision 11).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Retry {
+pub enum Safety {
     /// Never: an unknown outcome fails the step.
     Never,
-    /// Only when the request was certainly not taken (429, 503 with
-    /// `Retry-After`).
+    /// Only when a problem code the operation lists as not run certifies the
+    /// refusal; a status alone never does.
     NotTaken,
     /// Always: sending it again changes nothing (a PUT of a whole value).
     Idempotent,
@@ -227,8 +286,10 @@ pub struct Record {
     /// Its planned time, in microseconds from the run's start.
     #[serde(with = "u64s")]
     pub at: u64,
-    /// When it may start.
-    pub release: Release,
+    /// Microseconds after its dependencies are met before it may start: it is
+    /// released at `max(at, ready + think)` (ADR-0047 decision 3).
+    #[serde(with = "u64s")]
+    pub think: u64,
     /// What must happen first.
     pub after: Vec<Dep>,
     /// What it does.
@@ -241,20 +302,6 @@ pub struct Record {
     pub measure: Vec<Measure>,
     /// A rule it breaks on purpose.
     pub deviation: Option<Deviation>,
-}
-
-/// When a step may start (decision 7).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum Release {
-    /// Not before its planned time, and not before its dependencies.
-    At,
-    /// After its dependencies, and `think` microseconds more.
-    Ready {
-        /// The pause after readiness.
-        #[serde(with = "u64s")]
-        think: u64,
-    },
 }
 
 /// A dependency.
@@ -374,6 +421,9 @@ pub struct StreamPosition {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Observe {
+    /// The step whose effect it awaits: its deadline runs from the cause's
+    /// intended start (ADR-0047 decision 7).
+    pub cause: StepId,
     /// How it is looked for.
     pub probe: Probe,
     /// What must hold.

@@ -849,7 +849,7 @@ fn the_rules_meaning_is_pinned_to_its_revision() {
     use sha2::{Digest, Sha256};
     const MEANINGS: &[(u32, &str)] = &[(
         3,
-        "69bd4acce175434db2532d3cffba497cc33b8d841bb46adcac314884008e205a",
+        "a0f4ebb2d85eb119d5b36d57c8efd5924b264d1236b7fbbbab118dc6f7389fdf",
     )];
     let mut digest = Sha256::new();
     for line in fixture::corpus::lines() {
