@@ -324,7 +324,7 @@ fn an_attempt_is_resent_by_its_safety() {
 #[test]
 fn a_silent_handler_is_the_harness_s_fault() {
     let r = Arc::new(call("read", 1, 0, 0, 0));
-    let mut m = Machine::new(Arc::new(header()), W);
+    let mut m = Machine::new(Arc::new(header()), W).unwrap();
     let out = m.step(0, Input::Line { line: 2, record: r }).unwrap();
     let deadline = out
         .iter()
@@ -394,7 +394,7 @@ fn inputs_of_one_instant_are_taken_in_one_order() {
 #[test]
 fn a_line_read_late_is_released_when_read() {
     let r = Arc::new(call("read", 1, 0, 10, 0));
-    let mut m = Machine::new(Arc::new(header()), W);
+    let mut m = Machine::new(Arc::new(header()), W).unwrap();
     m.step(0, Input::Wake).unwrap();
     let out = m.step(100, Input::Line { line: 2, record: r }).unwrap();
     assert!(out.iter().any(|o| matches!(

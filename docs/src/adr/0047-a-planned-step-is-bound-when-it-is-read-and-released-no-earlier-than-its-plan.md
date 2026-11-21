@@ -465,6 +465,30 @@ passed and was released at its think). `RULES_REVISION` 6.
   chain below their deadlines is held whole by a machine under a full stall, and the bound says so; whether host plans
   do is read off the first host plan's bound (Rule of Three 1, § Owed's barrier and fraction triggers).
 
+**K1e-2b — the bound in the scheduler** (2026-11-22): the machine takes the rules it shares with the validator from
+`command-log::plan` (a step's key, its intended start, its action's timeout and safety, its captured values and
+cause). A reader takes its captured values and decides its deadline when its release is decided, and lets go of its
+producers and cause then — so a wake taken late holds nothing (decision 5's value "taken at release"); a cell drops
+its record, bound lines, producers and values when its step ends; a holder of a key no member was read of keeps no
+barrier (the validator counts none); `Machine::new` refuses a read-ahead past the header's, the bound's assumption,
+`sim` building an unbounded one. `scheduler::fits` refuses a plan against one byte budget — `held · ENDED_CELL +
+pending · (LIVE_CELL − ENDED_CELL + line) + barriers · BARRIER` — or a read-ahead past the header's, naming the part.
+- **Executors**: `tests/costs.rs` measures, on the machine streaming three plans, 896 B an ended step held, 1,389 B a
+  step not ended beside its 270-byte line, 556 B a barrier key, and holds each plan's peak within what `fits` counts
+  of its own counts (`ENDED_CELL` 1,152, `LIVE_CELL` 1,792, `BARRIER` 768, some 30 % above); a cell keeping its record
+  at the end is red (1,542 B an ended step). The differential holds the machine to the validator's bound on every run
+  whose reads all lie within `[at − L, at]` — 822 of 3,780, 348 of them with a reader lagging, base logs also under
+  timeouts on W's scale, an at-deadline script beside the three: no step released past its `R̂` or ended past its
+  `Ê`, 1,290 ending exactly at it, no more held or pending than the bound; and the machine's barrier keys equal the
+  validator's on every run (and every trace). `tests/bound.rs`, K1-8's stalls on chains of depth six spaced below T on
+  distinct instants (45 of 60 steps held, 14 in the window, 37 by rate alone): a uniform stall of s ∈ {T/2, T − 1 µs,
+  T} holds and leaves pending exactly what the validator derives with every timeout s, its last end the derived
+  horizon; a stand that never answers ends every step of a settled chain unknown within the bound, its last end the
+  horizon; a reader late past a step's plan ends it past its `Ê` (A2); a reader decided before its release lets its
+  producer go at the decision (at most two held, not three); `fits` at, and a byte past, its budget. Mutations, each
+  alone, red: the bound by rate alone (the chain ignored); the window counted twice; the machine freeing no prefix;
+  pins kept past the decision; a holder of an empty key making a barrier; `fits` without the pending.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -524,3 +548,4 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-22: K1e cut into three parts; K1e-1 built (§ Measured): the machine frees its cells by the model's rule.
 - 2026-11-22: K1e-2 decided under the gate (solver, discriminator, three roles); decision 7 gains the bound as built;
   decision 13's peak rate deferred to M11; K1e-2a built (§ Measured).
+- 2026-11-22: K1e-2b built (§ Measured): the machine on the shared rules, `fits`, the bound's executors in `sim`.

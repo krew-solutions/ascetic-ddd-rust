@@ -57,6 +57,10 @@ pub struct Run {
     pub ends: [u64; 4],
     /// Attempts dispatched past each step's first.
     pub resent: u64,
+    /// The most steps read and not ended at once.
+    pub pending: usize,
+    /// The barrier keys the machine kept by the end.
+    pub barriers: usize,
 }
 
 /// Runs `records` (lines 2, 3, …) against the script, reading `read_ahead`
@@ -204,7 +208,7 @@ fn drive(
     handler: &mut dyn Handler,
     keep: bool,
 ) -> Result<Run, LogError> {
-    let mut machine = Machine::new(Arc::new(header), read_ahead);
+    let mut machine = Machine::unbounded(Arc::new(header), read_ahead);
     let mut queue = Ordered::new();
     let mut wakes: BTreeSet<u64> = BTreeSet::new();
     // The lines read and not ended, for their dispatches.
@@ -229,6 +233,8 @@ fn drive(
         kept: 0,
         ends: [0; 4],
         resent: 0,
+        pending: 0,
+        barriers: 0,
     };
     queue.push(0, Input::Wake);
     loop {
@@ -314,11 +320,13 @@ fn drive(
                 }
             }
             run.held = run.held.max(machine.held());
+            run.pending = run.pending.max(live.len());
         }
     }
     run.entries.sort_by_key(|e| e.line);
     run.left = machine.held();
     run.kept = machine.kept();
+    run.barriers = machine.barriers();
     Ok(run)
 }
 

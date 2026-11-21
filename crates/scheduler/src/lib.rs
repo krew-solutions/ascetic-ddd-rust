@@ -8,6 +8,7 @@
 #![deny(clippy::arithmetic_side_effects)]
 #![warn(missing_docs)]
 
+pub mod fits;
 pub mod machine;
 pub mod order;
 pub mod sim;

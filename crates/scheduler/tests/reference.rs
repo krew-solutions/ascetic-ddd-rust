@@ -8,7 +8,7 @@ mod fixture;
 
 use std::collections::BTreeMap;
 
-use ascetic_ddd_command_log::record::Record;
+use ascetic_ddd_command_log::record::{Header, Record};
 use ascetic_ddd_command_log::validate::NoHost;
 use ascetic_ddd_faker::{Key, Seed};
 use ascetic_ddd_scheduler::machine::{Captured, Critical, End, Entry, Judgement, Skip};
@@ -44,6 +44,29 @@ fn script(seed: u64) -> impl Fn(u64, u32, &Record) -> Attempt {
             answer_after: (draw("silent", 30) != 0).then(|| draw("answer", 3_000)),
             judgement,
         }
+    }
+}
+
+/// What a run's handlers do, attempt by attempt.
+type Script = dyn Fn(u64, u32, &Record) -> Attempt;
+
+/// Every attempt sent at once and answered as expected exactly at its
+/// deadline — an observation's past it, unknown there: the plan's own bound's
+/// schedule (ADR-0047 K1e-2).
+fn at_deadline(header: Header) -> impl Fn(u64, u32, &Record) -> Attempt {
+    move |line, _, r| Attempt {
+        sent_after: 0,
+        answer_after: Some(ascetic_ddd_command_log::plan::timeout(&header, &r.action)),
+        judgement: Judgement::Expected(
+            r.capture
+                .iter()
+                .map(|c| Captured {
+                    subject: c.subject.clone(),
+                    slot: c.slot.clone(),
+                    value: line.to_string().into_bytes(),
+                })
+                .collect(),
+        ),
     }
 }
 
@@ -108,16 +131,39 @@ fn the_machine_is_the_scheduler_by_definition() {
         .spawn()
         .expect("python3, which the library's gate requires");
     let mut runs = 0;
+    // The plan's own bound against the machine (ADR-0047 K1e-2): the runs
+    // whose every read lies within [at − L, at] (A2), those of them with a
+    // reader lagging, and the lines that ended exactly at their worst end.
+    let (mut within, mut lagged, mut attained) = (0u64, 0u64, 0u64);
     {
         let mut stdin = child.stdin.take().unwrap();
+        let mut cases = Vec::new();
         for (name, records) in fixture::corpus::logs() {
-            let report = run_with(fixture::corpus::corpus_header(), &records, &NoHost, 1_000);
+            // The base logs also under timeouts on the window's scale, where
+            // the bound's terms turn within a log.
+            if name.matches('-').count() == 1 {
+                cases.push((
+                    format!("{name}/short"),
+                    fixture::corpus::short_header(),
+                    records.clone(),
+                ));
+            }
+            cases.push((name, fixture::corpus::corpus_header(), records));
+        }
+        for (name, header, records) in cases {
+            let (report, bounds) = run_bounded(header.clone(), &records, &NoHost, 1_000);
             if !report.violations.is_empty() {
                 continue;
             }
-            let log = String::from_utf8(bytes(fixture::corpus::corpus_header(), &records)).unwrap();
-            for seed in [1u64, 2, 3] {
-                let s = script(seed);
+            let peaks = report.peaks;
+            let log = String::from_utf8(bytes(header.clone(), &records)).unwrap();
+            let scripts: Vec<(u64, Box<Script>)> = vec![
+                (1, Box::new(script(1))),
+                (2, Box::new(script(2))),
+                (3, Box::new(script(3))),
+                (0, Box::new(at_deadline(header.clone()))),
+            ];
+            for (seed, s) in scripts {
                 let mut table = BTreeMap::new();
                 for (i, r) in records.iter().enumerate() {
                     let line = i as u64 + 2;
@@ -156,14 +202,49 @@ fn the_machine_is_the_scheduler_by_definition() {
                     }
                 };
                 for read_ahead in [0u64, W / 2, 1 << 40] {
-                    let ran = run_reading(
-                        fixture::corpus::corpus_header(),
-                        &records,
-                        read_ahead,
-                        &lag,
-                        &s,
-                    )
-                    .unwrap();
+                    let ran = run_reading(header.clone(), &records, read_ahead, &lag, &s).unwrap();
+                    // The machine keeps the barrier keys the validator counted.
+                    assert_eq!(
+                        ran.barriers as u64, peaks.barriers,
+                        "{name}/{seed}/{read_ahead}: barriers"
+                    );
+                    let l = header.read_ahead;
+                    let at = |line: u64| records[(line - 2) as usize].at;
+                    let a2 = read_ahead <= l
+                        && ran.entries.iter().all(|e| {
+                            e.read.saturating_add(l) >= at(e.line) && e.read <= at(e.line)
+                        });
+                    if a2 {
+                        within += 1;
+                        if ran
+                            .entries
+                            .iter()
+                            .any(|e| e.read.saturating_add(read_ahead) > at(e.line))
+                        {
+                            lagged += 1;
+                        }
+                        for e in &ran.entries {
+                            let [_, intended, end, _, _] = bounds[(e.line - 2) as usize];
+                            assert!(
+                                e.released <= intended && e.ended <= end,
+                                "{name}/{seed}/{read_ahead} line {}: released {} and ended {}, past the bound's {intended} and {end}",
+                                e.line,
+                                e.released,
+                                e.ended
+                            );
+                            if e.ended == end {
+                                attained += 1;
+                            }
+                        }
+                        assert!(
+                            ran.held as u64 <= peaks.held && ran.pending as u64 <= peaks.pending,
+                            "{name}/{seed}/{read_ahead}: {} held and {} pending past the bound's {} and {}",
+                            ran.held,
+                            ran.pending,
+                            peaks.held,
+                            peaks.pending
+                        );
+                    }
                     assert!(
                         ran.entries.iter().all(|e| e.attempts <= ATTEMPTS),
                         "{name}: more attempts than the table holds"
@@ -205,4 +286,11 @@ fn the_machine_is_the_scheduler_by_definition() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(runs > 500, "{runs} runs");
+    eprintln!(
+        "the bound: {within} runs within A2, {lagged} of them lagging; {attained} lines ended at it"
+    );
+    assert!(
+        within > 0 && lagged > 0 && attained > 0,
+        "{within} {lagged} {attained}"
+    );
 }

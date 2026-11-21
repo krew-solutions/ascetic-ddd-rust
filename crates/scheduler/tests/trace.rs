@@ -278,6 +278,10 @@ fn trace(
     let ran = run_reading(h.clone(), &records, read_ahead, lag, script).unwrap();
     assert_eq!(ran.entries.len(), records.len(), "{name}: every line ends");
     assert_eq!(ran.left, ran.kept, "{name}: cells left behind");
+    assert_eq!(
+        ran.barriers as u64, report.peaks.barriers,
+        "{name}: barriers"
+    );
     let text = trace_text(&h, &records, read_ahead, &ran);
     let file = format!("scheduler-{name}.jsonl");
     match std::env::var_os("ASCETIC_DDD_TRACE_DIR") {

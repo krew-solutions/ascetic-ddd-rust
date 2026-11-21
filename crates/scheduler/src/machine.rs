@@ -217,7 +217,11 @@ enum Phase {
 
 #[derive(Clone, Debug)]
 struct Cell {
-    record: Arc<Record>,
+    /// Its step, until it ends: nothing reads an ended step's record.
+    record: Option<Arc<Record>>,
+    /// Its plan and its think.
+    at: u64,
+    think: u64,
     read: u64,
     waiting: u32,
     ready: u64,
@@ -248,13 +252,16 @@ struct Cell {
     refs: u32,
     /// Whether it still holds its producers and its cause.
     holding: bool,
-    /// The values its captured holes took when it was first dispatched.
+    /// The values its captured holes took when its release was decided.
     captured: Vec<Captured>,
+    /// The producer whose value was missing then: it is skipped for it when
+    /// dispatched.
+    missing: Option<Line>,
     /// Its one pending wake.
     wake: Option<u64>,
 }
 
-type BarrierKey = (String, Vec<u8>, String, u32);
+type BarrierKey = ascetic_ddd_command_log::plan::MemberKey;
 
 #[derive(Clone, Debug, Default)]
 struct Barrier {
@@ -298,8 +305,24 @@ pub struct Machine {
 
 impl Machine {
     /// A machine for a log of this header, reading `read_ahead` microseconds
-    /// ahead of its clock.
-    pub fn new(header: Arc<Header>, read_ahead: u64) -> Machine {
+    /// ahead of its clock: no further than the header plans, the read-ahead
+    /// the plan's own bound assumes (decision 7, K1e-2).
+    pub fn new(header: Arc<Header>, read_ahead: u64) -> Result<Machine, LogError> {
+        if read_ahead > header.read_ahead {
+            return Err(LogError::Malformed {
+                line: 1,
+                reason: format!(
+                    "a read-ahead of {read_ahead} µs past the header's {}: the plan's bound assumes it",
+                    header.read_ahead
+                ),
+            });
+        }
+        Ok(Machine::unbounded(header, read_ahead))
+    }
+
+    /// [`Machine::new`] at any read-ahead: the deterministic stand's, which
+    /// runs past the header's to show that bindings do not depend on it.
+    pub(crate) fn unbounded(header: Arc<Header>, read_ahead: u64) -> Machine {
         let window = Window::new(header.window);
         Machine {
             header,
@@ -322,6 +345,11 @@ impl Machine {
     /// The steps it holds: read and not freed.
     pub fn held(&self) -> usize {
         self.cells.len()
+    }
+
+    /// The barrier keys it keeps: one a key a member was read of.
+    pub fn barriers(&self) -> usize {
+        self.barriers.len()
     }
 
     /// The steps the window keeps: within `W` behind the cursor, or retained.
@@ -368,7 +396,9 @@ impl Machine {
         self.window.read(record.at, |l| gone.push(l));
         self.forget(gone);
         let mut cell = Cell {
-            record: record.clone(),
+            record: Some(record.clone()),
+            at: record.at,
+            think: record.think,
             read: self.now,
             waiting: 0,
             // With no dependency it is ready from the start: a late reader's
@@ -394,6 +424,7 @@ impl Machine {
             refs: 0,
             holding: false,
             captured: Vec::new(),
+            missing: None,
             wake: None,
         };
         // The ready instant is the latest met instant of its dependencies;
@@ -428,8 +459,16 @@ impl Machine {
                     on,
                     ..
                 } => {
-                    let key = (kind.clone(), scope.clone(), label.clone(), *n);
-                    let b = self.barriers.entry(key).or_default();
+                    // A key no member was read of: nothing to wait for, and
+                    // no barrier kept for it.
+                    let Some(b) =
+                        self.barriers
+                            .get_mut(&ascetic_ddd_command_log::plan::barrier_key(
+                                kind, scope, label, *n,
+                            ))
+                    else {
+                        continue;
+                    };
                     let members = b.count;
                     let r = rank(*on);
                     match b.failed {
@@ -483,13 +522,7 @@ impl Machine {
             };
         }
         // It is a member of its own barrier key, for the holders read later.
-        let s = &record.step;
-        let key = (
-            s.subject.kind.clone(),
-            s.subject.scope.clone(),
-            s.label.clone(),
-            s.n,
-        );
+        let key = ascetic_ddd_command_log::plan::member_key(&record.step);
         let b = self.barriers.entry(key.clone()).or_default();
         cell.member = Some((key, b.count));
         b.members.push_back(line);
@@ -540,11 +573,44 @@ impl Machine {
         if c.waiting > 0 || c.phase != Phase::Waiting {
             return;
         }
-        c.intended = c.record.at.max(c.ready.saturating_add(c.record.think));
+        c.intended = ascetic_ddd_command_log::plan::intended(c.at, c.ready, c.think);
         c.released = c.intended.max(c.read);
         c.phase = Phase::Due;
         let t = c.released;
+        self.decided(line);
         self.wake(line, t);
+    }
+
+    /// Its release decided: the values its captured holes take, from their
+    /// producers' cells, and its deadline, from its cause's intended start —
+    /// then it lets go of them, so that a wake taken late holds nothing.
+    fn decided(&mut self, line: Line) {
+        let Some(c) = self.cells.get(&line) else {
+            return;
+        };
+        let mut captured = Vec::new();
+        let mut missing = None;
+        for (subject, slot, producer) in &c.producers {
+            let value = self.cells.get(producer).and_then(|p| {
+                p.captures
+                    .iter()
+                    .find(|v| &v.subject == subject && &v.slot == slot)
+            });
+            match value {
+                Some(v) => captured.push(v.clone()),
+                None => {
+                    missing = Some(*producer);
+                    break;
+                }
+            }
+        }
+        let deadline = self.deadline(line);
+        if let Some(c) = self.cells.get_mut(&line) {
+            c.captured = captured;
+            c.missing = missing;
+            c.deadline = deadline;
+        }
+        self.release(line);
     }
 
     /// The line's one pending wake, at `t`.
@@ -602,36 +668,14 @@ impl Machine {
         let Some(c) = self.cells.get(&line) else {
             return;
         };
-        // The captured values its holes take, from their producers' cells when
-        // it is first dispatched; a resend sends them again.
-        let captured = if attempt == 1 {
-            let mut captured = Vec::new();
-            for (subject, slot, producer) in &c.producers {
-                let value = self.cells.get(producer).and_then(|p| {
-                    p.captures
-                        .iter()
-                        .find(|v| &v.subject == subject && &v.slot == slot)
-                });
-                match value {
-                    Some(v) => captured.push(v.clone()),
-                    None => {
-                        let producer = *producer;
-                        self.finish(line, End::Skipped(Skip::MissingCapture(producer)), now, out);
-                        return;
-                    }
-                }
-            }
-            captured
-        } else {
-            c.captured.clone()
-        };
-        let deadline = if attempt == 1 {
-            let deadline = self.deadline(line);
-            self.release(line);
-            deadline
-        } else {
-            c.deadline
-        };
+        // The values taken when its release was decided; a resend sends
+        // them again.
+        if let Some(producer) = c.missing {
+            self.finish(line, End::Skipped(Skip::MissingCapture(producer)), now, out);
+            return;
+        }
+        let captured = c.captured.clone();
+        let deadline = c.deadline;
         // Released past its deadline — an observation whose cause's window
         // closed before it could start — it ends unknown, never sent.
         if attempt == 1 && now >= deadline {
@@ -644,7 +688,6 @@ impl Machine {
         c.deadline = deadline;
         c.attempts = attempt;
         c.dispatched.get_or_insert(now);
-        c.captured.clone_from(&captured);
         c.phase = Phase::Flight {
             attempt,
             outstanding: true,
@@ -665,35 +708,18 @@ impl Machine {
         let Some(c) = self.cells.get(&line) else {
             return self.now;
         };
-        let h = &self.header;
-        let timeout = |name: &str| {
-            h.operations
-                .iter()
-                .find(|o| o.name == name)
-                .map(|o| o.timeout)
+        let Some(record) = c.record.as_ref() else {
+            return self.now;
         };
-        match &c.record.action {
-            Action::Rest(r) => c.released.saturating_add(timeout(&r.op).unwrap_or(0)),
-            Action::Bus(b) => c.released.saturating_add(
-                h.channels
-                    .iter()
-                    .find(|t| t.name == b.channel)
-                    .map_or(0, |t| t.timeout),
-            ),
-            Action::Host(call) => c.released.saturating_add(
-                h.calls
-                    .iter()
-                    .find(|t| t.name == call.op)
-                    .map_or(0, |t| t.timeout),
-            ),
-            Action::Observe(o) => {
-                let start = c
-                    .cause
-                    .and_then(|l| self.cells.get(&l))
-                    .map_or(c.intended, |cause| cause.intended);
-                start.saturating_add(o.timeout)
-            }
-        }
+        let timeout = ascetic_ddd_command_log::plan::timeout(&self.header, &record.action);
+        let start = match &record.action {
+            Action::Observe(_) => c
+                .cause
+                .and_then(|l| self.cells.get(&l))
+                .map_or(c.intended, |cause| cause.intended),
+            _ => c.released,
+        };
+        start.saturating_add(timeout)
     }
 
     fn sent(&mut self, line: Line, attempt: u32, out: &mut Vec<Output>) {
@@ -717,8 +743,12 @@ impl Machine {
         if c.end.is_some() || c.attempts != attempt || now > c.deadline {
             return;
         }
-        let poll =
-            matches!(&c.record.action, Action::Observe(o) if matches!(o.probe, Probe::Rest(_)));
+        // A poll's interval, if it is one: an observation probing by REST.
+        let every = match c.record.as_ref().map(|r| &r.action) {
+            Some(Action::Observe(o)) if matches!(o.probe, Probe::Rest(_)) => Some(o.every.max(1)),
+            _ => None,
+        };
+        let poll = every.is_some();
         let safety = self.safety(line);
         let Some(c) = self.cells.get_mut(&line) else {
             return;
@@ -730,10 +760,7 @@ impl Machine {
             }
             Judgement::Unexpected | Judgement::NotTaken if poll => {
                 // Not yet: the next poll on its grid, never two out at once.
-                let every = match &c.record.action {
-                    Action::Observe(o) => o.every.max(1),
-                    _ => 1,
-                };
+                let every = every.unwrap_or(1);
                 let since = now.saturating_sub(c.released);
                 let k = since.div_ceil(every).max(u64::from(attempt));
                 let next = c.released.saturating_add(k.saturating_mul(every));
@@ -758,26 +785,12 @@ impl Machine {
     }
 
     fn safety(&self, line: Line) -> Safety {
-        let Some(c) = self.cells.get(&line) else {
-            return Safety::Never;
-        };
-        match &c.record.action {
-            Action::Rest(r) => self
-                .header
-                .operations
-                .iter()
-                .find(|o| o.name == r.op)
-                .map_or(Safety::Never, |o| o.safety),
-            Action::Host(call) => self
-                .header
-                .calls
-                .iter()
-                .find(|t| t.name == call.op)
-                .map_or(Safety::Never, |t| t.safety),
-            // A bus frame is resent byte for byte: the inbox keeps one.
-            Action::Bus(_) => Safety::Idempotent,
-            Action::Observe(_) => Safety::Never,
-        }
+        self.cells
+            .get(&line)
+            .and_then(|c| c.record.as_ref())
+            .map_or(Safety::Never, |r| {
+                ascetic_ddd_command_log::plan::safety(&self.header, &r.action)
+            })
     }
 
     /// A step ends: journaled, and its dependents and barriers told.
@@ -816,6 +829,15 @@ impl Machine {
         // It lets go of its producers before its barrier may free it.
         self.release(line);
         self.notify(line, out);
+        // What only its run needed goes now (K1e-2): a cell still held after
+        // its end — in the window, pinned, unpassed — keeps what is read of
+        // an ended step, its end, sends, captures, intended start and key.
+        if let Some(c) = self.cells.get_mut(&line) {
+            c.record = None;
+            c.bound = Vec::new();
+            c.producers = Vec::new();
+            c.captured = Vec::new();
+        }
         self.free_if_done(line);
     }
 
