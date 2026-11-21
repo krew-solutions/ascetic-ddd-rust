@@ -54,11 +54,35 @@ pub fn run(
     read_ahead: u64,
     script: &dyn Fn(Line, u32, &Record) -> Attempt,
 ) -> Result<Run, LogError> {
+    run_reading(header, records, read_ahead, &|_| 0, script)
+}
+
+/// The most inputs a run takes: past it a machine that loops is stopped.
+pub const INPUTS: u64 = 1 << 22;
+
+/// [`run`] with a reader that lags: a line is read `lag(line)` microseconds
+/// after it may be, and never before the line above it.
+pub fn run_reading(
+    header: Header,
+    records: &[Record],
+    read_ahead: u64,
+    lag: &dyn Fn(Line) -> u64,
+    script: &dyn Fn(Line, u32, &Record) -> Attempt,
+) -> Result<Run, LogError> {
     let records: Vec<Arc<Record>> = records.iter().cloned().map(Arc::new).collect();
     let mut machine = Machine::new(Arc::new(header), read_ahead);
     let mut queue = Ordered::new();
     let mut wakes: BTreeSet<u64> = BTreeSet::new();
     let mut next = 0usize;
+    // When each line is read: once it may be, plus its lag, in order.
+    let mut reads = Vec::with_capacity(records.len());
+    for (i, r) in records.iter().enumerate() {
+        let line = (i as u64).saturating_add(2);
+        let may = r.at.saturating_sub(read_ahead).saturating_add(lag(line));
+        let after = reads.last().copied().unwrap_or(0);
+        reads.push(may.max(after));
+    }
+    let mut taken = 0u64;
     let mut run = Run {
         entries: Vec::new(),
         dispatches: Vec::new(),
@@ -67,9 +91,7 @@ pub fn run(
     queue.push(0, Input::Wake);
     loop {
         // The next instant: an input, a wake, or the next line's reading.
-        let reading = records
-            .get(next)
-            .map(|r| r.at.saturating_sub(read_ahead).max(machine.now()));
+        let reading = reads.get(next).map(|t| (*t).max(machine.now()));
         let Some(t) = [queue.first(), wakes.first().copied(), reading]
             .into_iter()
             .flatten()
@@ -77,8 +99,8 @@ pub fn run(
         else {
             break;
         };
-        while let Some(r) = records.get(next) {
-            if r.at.saturating_sub(read_ahead).max(machine.now()) > t {
+        while let (Some(r), Some(when)) = (records.get(next), reads.get(next)) {
+            if (*when).max(machine.now()) > t {
                 break;
             }
             let line = (next as u64).saturating_add(2);
@@ -96,6 +118,13 @@ pub fn run(
             queue.push(t, Input::Wake);
         }
         while let Some((at, input)) = queue.pop(t) {
+            taken = taken.saturating_add(1);
+            if taken > INPUTS {
+                return Err(LogError::Malformed {
+                    line: 0,
+                    reason: format!("the machine took more than {INPUTS} inputs: it loops"),
+                });
+            }
             for output in machine.step(at, input)? {
                 match output {
                     Output::Want(_) => {}

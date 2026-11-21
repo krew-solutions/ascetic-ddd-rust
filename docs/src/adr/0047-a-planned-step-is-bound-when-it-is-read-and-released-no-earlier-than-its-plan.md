@@ -129,7 +129,9 @@ Final states: **Expected**, **Unexpected** (an answer the contract defines that 
 Every action has a deadline: an operation's `timeout` (required, below the stand's route timeout by more than J, the
 route timeout in the profile, so that one slow call cannot end either censored or as the gateway's 504 by
 microseconds); a channel's (the bus's `message.timeout.ms` at or below it); an observation's, from its `cause`'s
-intended start — an observation may be its own cause, a watch begun on its own, its deadline from its own start. The plan's own bound — every action ending at its deadline, the worst release along each chain — is
+intended start — an observation may be its own cause, a watch begun on its own, its deadline from its own start. A
+step released at or past its deadline — an observation whose cause's window closed while a late reader or slow
+dependencies held it — ends unknown at its release, never sent; the journal's read instant tells whose the delay was. The plan's own bound — every action ending at its deadline, the worst release along each chain — is
 computed by the validator, and a plan past what the machine holds is refused before T0, as decision 16's dry run is.
 Lines blocked behind censored roots are the system's: the run ends failed and names them, never void.
 
@@ -323,6 +325,26 @@ found by the late-reader twin before the commit. Bus observations are dispatched
   value from the slot's latest; a refusal resent though never; an unknown resent though not idempotent; no fault at the
   backstop; ties by arrival.
 
+**K1b — the scheduler by definition** (2026-11-21): `crates/scheduler/vectors/schedule.py` decides every line again
+from the definitions, in log order, quadratically, with no window, cells or prefixes — bindings by the latest earlier
+occurrence within W behind the cursor, met instants from the dependencies' decided entries, a barrier as the set of
+earlier members, the deadline, the attempts, the poll grid — and compares the machine's journal line by line (its end,
+read, intended, released, dispatched, sent, ended, attempts, bound lines, and the critical dependency where one alone
+attains the latest instant, a skipped line's excepted). `sim::run_reading` adds a reader that lags; its read instants
+go to the definition as the environment's. Two findings, both fixed in the machine and the definition: a skip names
+the dependency that failed first, not the first in `after`; a step released past its deadline ends unknown unsent
+(decision 7). The corpus gains feasible think times on its base logs, their verdicts unchanged.
+- **Executors** (`tests/reference.rs`): every clean corpus log × three scripts of mixed latencies and judgements ×
+  read-aheads {0, W/2, ∞}, with a reader lagging on a quarter of the lines: 2,043 runs agree. The definition counts
+  what the runs reach and fails on any zero: bindings that a binding at release would change (517), captures taken
+  after their producer left the window (45), barrier members ending out of read order (30), conditional dependents
+  (213), answers after their deadline (1,222), instants shared by dispatches (1,493), think times (780), reads after
+  the intended instant (5,559), releases past the deadline (63). Twins: a skip naming the dependency that failed first;
+  polls on their grid though answered at once; `sim` stops a machine that loops. Mutations, each alone, red: the
+  machine skipping at the first failed, not the earliest (green until its twin); its polls off their grid (green until
+  its twin); its observation's deadline from its own start; its think ignored; the definition's `Sent` met at the end;
+  its release without the read (green until the reader lagged); its barrier by its last member.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -364,3 +386,4 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   own cause; `until` applies to observations of the bus.
 - 2026-11-21: K1 cut into K1a–K1e; K1a built (§ Measured): the window as a module, the machine, the ordering buffer and
   `sim`.
+- 2026-11-21: K1b built (§ Measured); decision 7 completed: a step released past its deadline ends unknown, unsent.

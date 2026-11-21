@@ -147,6 +147,26 @@ fn base(k: &Key) -> Vec<Record> {
                 names: vec![subject("tenant", tenant)],
             });
         }
+        // A think the plan's times allow, at most what separates the line from
+        // its latest step dependency (ADR-0047 decision 3).
+        let latest = r
+            .after
+            .iter()
+            .filter_map(|d| match d {
+                Dep::Step { step, .. } => {
+                    records.iter().rev().find(|e| &e.step == step).map(|e| e.at)
+                }
+                Dep::Each { .. } => None,
+            })
+            .max();
+        let barrier = r.after.iter().any(|d| matches!(d, Dep::Each { .. }));
+        if let Some(latest) = latest
+            && !barrier
+            && at > latest
+            && draw(&kj, "think", 3) == 0
+        {
+            r.think = draw(&kj, "thought", at - latest + 1);
+        }
         records.push(r);
     }
     // The barrier counts the managed of index 0 to 2 per occurrence 0: count them.

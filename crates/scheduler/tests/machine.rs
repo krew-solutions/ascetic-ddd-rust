@@ -427,3 +427,45 @@ fn a_line_read_late_is_released_when_read() {
         (10, 100, 100, Some(100))
     );
 }
+
+/// Of dependencies already failed when a line is read, the skip names the one
+/// that ended first.
+#[test]
+fn a_skip_names_the_dependency_that_failed_first() {
+    let (a, b) = (call("read", 1, 0, 0, 0), call("read", 2, 0, 10, 0));
+    let c = after(
+        after(
+            step(id("device", 3, "seen", 0), 1_000),
+            &a.step,
+            On::Expected,
+        ),
+        &b.step,
+        On::Expected,
+    );
+    let refused = |line: u64, _: u32, _: &Record| Attempt {
+        sent_after: 0,
+        answer_after: Some(if line == 2 { 500 } else { 100 }),
+        judgement: Judgement::Unexpected,
+    };
+    let ran = run(header(), &[a, b, c], 0, &refused).unwrap();
+    assert_eq!(
+        entry(&ran.entries, 4).end,
+        End::Skipped(Skip::Dependency(3))
+    );
+}
+
+/// An observation's polls keep to their grid, `every` apart, never twice at
+/// one instant, though each answer comes at once (decision 11).
+#[test]
+fn polls_keep_to_their_grid() {
+    let r = polling(1, 0, 0, 100, 450);
+    let not_yet = |_: u64, _: u32, _: &Record| Attempt {
+        sent_after: 0,
+        answer_after: Some(0),
+        judgement: Judgement::Unexpected,
+    };
+    let ran = run(header(), &[r], W, &not_yet).unwrap();
+    let at: Vec<u64> = ran.dispatches.iter().map(|d| d.0).collect();
+    assert_eq!(at, vec![0, 100, 200, 300, 400]);
+    assert_eq!(entry(&ran.entries, 2).end, End::Unknown);
+}

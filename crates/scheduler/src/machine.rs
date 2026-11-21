@@ -379,9 +379,7 @@ impl Machine {
                     cell.bound.push(dep);
                     match self.met(dep, *on) {
                         Met::Yes(t) => fold(&mut ready, t, Critical::Step(dep)),
-                        Met::Never(t) => {
-                            skip.get_or_insert((Skip::Dependency(dep), t));
-                        }
+                        Met::Never(t) => earliest(&mut skip, Skip::Dependency(dep), t),
                         Met::Not => pending.push((dep, *on)),
                     }
                 }
@@ -408,7 +406,7 @@ impl Machine {
                             .get(&first)
                             .and_then(|c| c.end.as_ref())
                             .map_or(self.now, |e| e.1);
-                        skip.get_or_insert((Skip::Member(first), t));
+                        earliest(&mut skip, Skip::Member(first), t);
                     } else if b.prefix[r] >= members {
                         let members = b.members.clone();
                         let latest = members
@@ -570,6 +568,12 @@ impl Machine {
         } else {
             c.deadline
         };
+        // Released past its deadline — an observation whose cause's window
+        // closed before it could start — it ends unknown, never sent.
+        if attempt == 1 && now >= deadline {
+            self.finish(line, End::Unknown, now, out);
+            return;
+        }
         let Some(c) = self.cells.get_mut(&line) else {
             return;
         };
@@ -855,6 +859,14 @@ enum Met {
     Yes(u64),
     Never(u64),
     Not,
+}
+
+/// The skip that ended first: of dependencies already failed when a line is
+/// read, the one whose end came earliest, the first in `after` on a tie.
+fn earliest(skip: &mut Option<(Skip, u64)>, why: Skip, t: u64) {
+    if skip.as_ref().is_none_or(|(_, at)| t < *at) {
+        *skip = Some((why, t));
+    }
 }
 
 fn fold(ready: &mut Option<(u64, Option<Critical>)>, t: u64, c: Critical) {
