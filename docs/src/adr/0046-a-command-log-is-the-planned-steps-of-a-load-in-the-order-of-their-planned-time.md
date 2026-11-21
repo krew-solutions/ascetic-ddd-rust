@@ -580,6 +580,7 @@ available memory, swap and pressure — under `MemorySwapMax=0`, so that a blown
 | V3 | C7 | twins: a line planned past W ahead puts a step out of reach of a later line near it (`edge`), within W it does not; a step dead on arrival answers for no edge and an older occurrence of its id does not answer for it; the window holds only what is within W behind the cursor (21, not the 31 an eviction in line order holds); a deviation against `deviation` is unused; with `kept = 1` a duplicate on line 3 decided at the end is kept before an edge found on line 4; captures counted while live; a stream's late message, a slot's late writer and a gapless stream begun again still break their rules | a step dead on arrival kept; an older occurrence answering for a dead one; the window evicted in line order; captures counted ever written; live captures not evicted; a deviation exempting itself; `kept` by discovery |
 | V4 | C7 | the reference decides on the cursor and computes the peaks from their definitions; the corpus moves a line past 2W ahead and declares deviations of every rule's name and one naming none; the reference fails unless some log's verdict differs between the cursor and the line's own time (47 of 1,642); the corpus's logs, verdicts and peaks are digested beside `RULES_REVISION` | the reference on the line's own time; its captures ever written; any Rust mutation above that V2 sees |
 | V5 | C8 | every corpus log validated with each event its own run through a fan-in of 2, and a few events a run through 3, gives its whole in-memory report, details and peaks included; a gapless stream of 10⁴ messages through runs of a few hundred is clean at fan-ins 2, 3 and derived, and one message dropped breaks it; a stream falling back is broken where it falls; a stream run cut at every byte, and an event cut inside its dependencies, fail the pass; the third run one byte short of its look stops the pass before writing it; a dry run's asked space covers the runs' peak, heard after every write and checked against the files, across memories and fan-ins | stream events sorted without their line; a cascade group dropped; a run's end unchecked; no look before a write; the cascade's second copy not asked; runs asked for though they fit; a settled wait taken as expected; gaps, predecessors or duplicates unchecked at the end; a write not counted or the end not told |
+| V6 | C9 | a hot part past its limit fails the pass naming it, its count and line — completions, captures, barrier counts, buckets, deviations, polls — and at its limit does not; a dry run whose cells hold more steps within W than the limit is refused before its first line, also across a cell's edge, and steps past the last cell are left to the in-pass limit; the validator's peak heap at 6.4·10⁴ steps is within 64 KiB of its peak at 8·10³ at one planned rate (`tests/heap.rs`, a counting allocator) | the window never evicted; the fan-in not held to the memory; no hot limit, or any part left out of it; no refusal before a line; a span a cell short; the last cell bounding though steps pass it; steps past it not counted |
 | Z1 | C6 | compressed and plain logs give the same records and trailer; `make vectors` decodes a crate-written log with the zstd CLI and `cmp`s it with the plain one | a digest over compressed bytes; compression in the header |
 | Z2 | C6 | a two-frame `golden/c1.jsonl.zst` made by the CLI decodes to the golden log | single-frame decoding |
 | Z3 | C6 | a compressed log named `.jsonl` and a plain one named `.zst` both read; anything else refused | detection by extension |
@@ -896,7 +897,35 @@ available memory, swap and pressure — under `MemorySwapMax=0`, so that a blown
 - **Executors:** V5; the unit test of the run reader covers both kinds. Mutations, each alone, red: as in V5. A
   deletion inside a cascade is heard with the next write, not at once: a deletion never makes a peak.
 - **Owed of C8, to C9's counting allocator:** that the hot parts dropped before the end merges and the fan-in held to
-  the memory bound the heap; nothing executes them yet.
+  the memory bound the heap (C9 executes the second).
+
+**M10 after C8** (2026-11-21, M9's harness and laptop, 10⁸ steps of M9's scenario, a day of plan, W two hours, under
+`MemoryMax=6G` and `MemorySwapMax=0`; the spill disk rotating, an HGST HTS545050A7E680 with 8 MiB read-ahead; 8.3 GB
+available at the start, the process never swapping):
+
+| Path | Generation | Validation | Peak RSS | Validator's runs at most | Peak disk |
+|---|---|---|---|---|---|
+| persisted | 1,709 s, a 1.62 GB log | 3,487 s, 28.7·10³ steps/s | 5.45 GB | streams 4.38 GB, ids 2.25 GB | 8.76 GB |
+| dry | 286 s emitting, then paced by the validator | 4,298 s in all | 5.89 GB | as persisted | 7.13 GB |
+| live | 1,613 s, into a sink | — | as the dry run | — | — |
+
+  - Validation now runs at 10⁸ (M9 could not); the plan's own peak, `Peaks.completions`, is 8.34·10⁶. The streams'
+    end merge took about 6 minutes, the ids' under one; the stream path is about a tenth of the validation, the hot
+    table's trigger at its edge.
+  - The resident memory is the window keyed by full step ids, some 550 bytes an entry: the dry run peaked 110 MB
+    short of the cap. C9 keys it by digests.
+
+**C9 — the window by digest, an early refusal** (decision 16, 2026-11-21):
+- **Built:** the window, its order and the retained keyed by the ids' 16-byte digests (computed once a line, and
+  once a dependency); `Limits::hot` (2²⁵ entries by default) bounding each hot part — completions, captured slots,
+  barrier counts, buckets, declared deviations, polls in flight — the pass failing past it with `LogError::Hot`,
+  naming the part, its count and the line; the engine counting steps a cell while emitting and `Emitted::window`, the
+  most any ⌈W / cell⌉ + 1 consecutive cells hold, so that a dry run whose plan keeps more completions than the limit is
+  refused before its first line — the last cell, gathering steps planned past its end, bounding nothing.
+- **Executors:** V6. Mutations, each alone, red: as in V6. The counting allocator executes C8's owed items too: the
+  fan-in held to the memory (its mutation red); the hot parts dropped before the end merges remain unexecuted — the
+  scenario's hot parts are too small to show — and are argued: the end merges read through `memory`, the hot parts
+  are what the pass needed before them.
 
 Owed:
 - **Stage 3's dependency machine against the edge rule** (decision 16): whether the scheduler binds a dependency when
@@ -1001,3 +1030,5 @@ condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
   plan-own bound, the early refusal, the dead-on-arrival step and M10's record.
 - 2026-11-21: Slice C7 built (§ Measured); § 9's edge revised to the read cursor, `RULES_REVISION` 3.
 - 2026-11-21: Slice C8 built (§ Measured): streams decided by sorted runs, `Limits::memory` in bytes.
+- 2026-11-21: M10 measured after C8 at 10⁸ on both paths (§ Measured); slice C9 built: the window by digest, the
+  hot parts' limit and the dry run's refusal before a line.

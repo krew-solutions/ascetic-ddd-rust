@@ -12,7 +12,7 @@ use ascetic_ddd_command_log::disk::Disk;
 use ascetic_ddd_command_log::engine::{
     Config, EngineError, Observer, Progress, Unit, generate, generate_file_on,
 };
-use ascetic_ddd_command_log::live::dry_on;
+use ascetic_ddd_command_log::live::{dry, dry_on};
 use ascetic_ddd_command_log::record::{On, Record};
 use ascetic_ddd_command_log::validate::{Limits, NoHost};
 use fixture::*;
@@ -200,6 +200,7 @@ fn a_dry_run_counts_the_validator_s_runs() {
         fan_in: 2,
         memory_spill: true,
         progress: None,
+        hot: 1 << 20,
     };
     let run = |held, free| {
         let disk = Fake {
@@ -446,6 +447,7 @@ fn validate_with(disk: &Script, dir: &Path) -> Result<(), ascetic_ddd_command_lo
         fan_in: 8,
         memory_spill: true,
         progress: None,
+        hot: 1 << 20,
     };
     let reader = ascetic_ddd_command_log::Reader::new(std::io::Cursor::new(ten())).unwrap();
     ascetic_ddd_command_log::validate::validate_on(reader, &NoHost, &limits, disk).map(|_| ())
@@ -550,6 +552,7 @@ fn the_validator_s_need_covers_what_its_runs_occupy() {
             fan_in,
             memory_spill: true,
             progress: None,
+            hot: 1 << 20,
         };
         let refused = Fake {
             apart: ids.clone(),
@@ -602,5 +605,110 @@ fn the_validator_s_need_covers_what_its_runs_occupy() {
             "memory {memory}, fan-in {fan_in}: {peak} occupied, {need} asked"
         );
         std::fs::remove_file(&path).unwrap();
+    }
+}
+
+/// A dry run whose plan keeps more completions at once than the validator's
+/// limit is refused before its first line, by the steps its cells counted;
+/// at the limit it runs. Steps planned past the last cell bound nothing, and
+/// are left to the validator's own limit.
+#[test]
+fn a_dry_run_too_dense_is_refused_before_a_line() {
+    use ascetic_ddd_command_log::LogError;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("plan.commitment");
+    let units: [&dyn Unit; 1] = [&Devices(9)];
+    let limits = |hot| Limits {
+        hot,
+        memory_spill: true,
+        ..Limits::new(dir.path().join("ids"))
+    };
+    // 18 steps under 100 µs, in one cell of 1,000 µs; W is 1,000: two cells.
+    match dry(
+        header(),
+        &units,
+        &config(dir.path()),
+        &NoHost,
+        &limits(17),
+        "b",
+        4,
+        &path,
+    ) {
+        Err(EngineError::Log(LogError::Hot { part, held, line })) => {
+            assert_eq!((part, held, line), ("completions", 18, 0))
+        }
+        other => panic!("{:?}", other.map(|r| r.violations)),
+    }
+    assert!(!path.exists());
+    dry(
+        header(),
+        &units,
+        &config(dir.path()),
+        &NoHost,
+        &limits(18),
+        "b",
+        4,
+        &path,
+    )
+    .unwrap();
+    // Steps within W of one another on both sides of a cell's edge: the span
+    // is two cells, not one.
+    struct Straddle;
+    impl Unit for Straddle {
+        fn emit(
+            &self,
+            out: &mut dyn FnMut(Record) -> Result<(), EngineError>,
+        ) -> Result<(), EngineError> {
+            for d in 0..18u64 {
+                out(step(id("device", d, "seen", 0), 991 + d))?;
+            }
+            Ok(())
+        }
+    }
+    std::fs::remove_file(&path).unwrap();
+    match dry(
+        header(),
+        &[&Straddle],
+        &config(dir.path()),
+        &NoHost,
+        &limits(17),
+        "b",
+        4,
+        &path,
+    ) {
+        Err(EngineError::Log(LogError::Hot { part, held, line })) => {
+            assert_eq!((part, held, line), ("completions", 18, 0))
+        }
+        other => panic!("{:?}", other.map(|r| r.violations)),
+    }
+    // Past the last cell's end: no bound before the first line; the
+    // validator's limit stops the pass where the completions pass it.
+    struct Late;
+    impl Unit for Late {
+        fn emit(
+            &self,
+            out: &mut dyn FnMut(Record) -> Result<(), EngineError>,
+        ) -> Result<(), EngineError> {
+            for d in 0..9u64 {
+                out(step(id("device", d, "seen", 0), 9_000 + d))?;
+            }
+            Ok(())
+        }
+    }
+    assert!(!path.exists());
+    match dry(
+        header(),
+        &[&Late],
+        &config(dir.path()),
+        &NoHost,
+        &limits(4),
+        "b",
+        4,
+        &path,
+    ) {
+        Err(EngineError::Log(LogError::Hot { part, held, line })) => {
+            assert_eq!((part, held, line), ("completions", 5, 6))
+        }
+        other => panic!("{:?}", other.map(|r| r.violations)),
     }
 }

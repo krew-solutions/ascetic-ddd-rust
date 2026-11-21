@@ -231,6 +231,7 @@ pub fn run_with(header: Header, records: &[Record], host: &impl Host, ids: usize
         fan_in: 0,
         memory_spill: true,
         progress: None,
+        hot: 1 << 20,
     };
     let reader = Reader::new(Cursor::new(bytes(header, records))).unwrap();
     let report = validate(reader, host, &limits).unwrap();

@@ -627,6 +627,7 @@ fn ids_spill_past_their_budget_only() {
             fan_in: 0,
             memory_spill: true,
             progress: None,
+            hot: 1 << 20,
         };
         let reader =
             ascetic_ddd_command_log::Reader::new(std::io::Cursor::new(bytes(header(), &records)))
@@ -656,6 +657,7 @@ fn a_report_keeps_what_it_may_and_counts_the_rest() {
         fan_in: 0,
         memory_spill: true,
         progress: None,
+        hot: 1 << 20,
     };
     let reader =
         ascetic_ddd_command_log::Reader::new(std::io::Cursor::new(bytes(header(), &records)))
@@ -801,6 +803,7 @@ fn the_report_keeps_the_first_lines_whenever_found() {
         fan_in: 0,
         memory_spill: true,
         progress: None,
+        hot: 1 << 20,
     };
     let reader =
         ascetic_ddd_command_log::Reader::new(std::io::Cursor::new(bytes(header(), &records)))
@@ -881,6 +884,7 @@ fn a_report_is_a_function_of_the_log_alone() {
             fan_in,
             memory_spill: true,
             progress: None,
+            hot: 1 << 20,
         };
         let reader = ascetic_ddd_command_log::Reader::new(std::io::Cursor::new(bytes(
             fixture::corpus::corpus_header(),
@@ -931,6 +935,7 @@ fn a_long_stream_through_small_runs_is_clean() {
             fan_in,
             memory_spill: true,
             progress: None,
+            hot: 1 << 20,
         };
         let reader =
             ascetic_ddd_command_log::Reader::new(std::io::Cursor::new(bytes(header(), &records)))
@@ -964,4 +969,94 @@ fn a_stream_falling_back_is_broken_where_it_falls() {
     let first = m(0, 10, 5);
     let report = run(&[first.clone(), after(m(1, 20, 2), &first.step, On::Expected)]);
     assert_eq!(pairs(&report), vec![(3, Rule::Stream)]);
+}
+
+/// Decision 16: a hot part past its limit fails the pass by name and line —
+/// the completions kept, the captured slots, the barrier counts, the declared
+/// deviations, the polls in flight — and at its limit it does not.
+#[test]
+fn a_hot_part_past_its_limit_fails_by_name() {
+    use ascetic_ddd_command_log::LogError;
+    use ascetic_ddd_command_log::record::{By, Header};
+    let at = |header: Header, records: &[Record], hot: u64| {
+        let dir = tempfile::tempdir().unwrap();
+        let limits = ascetic_ddd_command_log::validate::Limits {
+            hot,
+            memory_spill: true,
+            ..ascetic_ddd_command_log::validate::Limits::new(dir.path())
+        };
+        let reader =
+            ascetic_ddd_command_log::Reader::new(std::io::Cursor::new(bytes(header, records)))
+                .unwrap();
+        let result = ascetic_ddd_command_log::validate::validate(reader, &NoHost, &limits);
+        assert!(leftover(dir.path()).is_empty());
+        result.map(|_| ())
+    };
+    // Steps within W of one another for the completions; more than W apart
+    // for the rest, so that only their own part grows.
+    let near = |i: u64| step(id("device", i, "seen", 0), i);
+    let apart = |i: u64| step(id("device", i, "seen", 0), i * 2 * W);
+    // Polls are held for an observation whose call a limit counts; a bucket
+    // a value of the group in a call's path.
+    let counted = limited(vec![limit("all", By::All, 1_000, 1, 1_000)], 2, 0, 0);
+    let by_group = limited(
+        vec![limit(
+            "g",
+            By::At(ascetic_ddd_command_log::record::Place::Path("group".into())),
+            1_000,
+            1,
+            1_000,
+        )],
+        2,
+        0,
+        0,
+    );
+    let cases: Vec<(&str, Header, Vec<Record>)> = vec![
+        ("completions", header(), (0..4).map(near).collect()),
+        (
+            "captures",
+            header(),
+            (0..4).map(|g| writer(g, 0, g * 2 * W)).collect(),
+        ),
+        (
+            "barrier counts",
+            header(),
+            (0..4)
+                .map(|i| step(id("device", 1, &format!("l{i}"), 0), i * 2 * W))
+                .collect(),
+        ),
+        (
+            "deviations",
+            header(),
+            (0..4).map(|i| deviating(apart(i), "gap")).collect(),
+        ),
+        (
+            "buckets",
+            by_group,
+            (0..4).map(|g| call("read", g, 0, g * 2 * W, 0)).collect(),
+        ),
+        (
+            "polls",
+            counted,
+            (0..4)
+                .map(|g| polling(g, 0, g * 2 * W, 10, 10 * W))
+                .collect(),
+        ),
+    ];
+    for (part, header, records) in cases {
+        match at(header.clone(), &records, 3) {
+            Err(LogError::Hot {
+                part: p,
+                held,
+                line,
+            }) => {
+                assert_eq!((p, held, line), (part, 4, 5), "{part}")
+            }
+            other => panic!("{part}: {other:?}"),
+        }
+        assert!(
+            !matches!(at(header, &records, 4), Err(LogError::Hot { .. })),
+            "{part} at its limit"
+        );
+    }
 }

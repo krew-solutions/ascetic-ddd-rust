@@ -570,6 +570,13 @@ pub fn dry_on(
         tally: Tally::new(chunk),
     };
     let need = |e: Emitted| {
+        if e.window > limits.hot {
+            return Err(EngineError::Log(LogError::Hot {
+                part: "completions",
+                held: e.window,
+                line: 0,
+            }));
+        }
         Ok(vec![Need {
             path: limits.spill.clone(),
             bytes: spill_need(e.run_bytes, limits, fan_in),

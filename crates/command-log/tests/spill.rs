@@ -176,6 +176,7 @@ fn a_cut_id_run_fails_the_validation() {
             fan_in: 0,
             memory_spill: true,
             progress: None,
+            hot: 1 << 20,
         };
         let result = validate(Reader::new(Cursor::new(&bytes)).unwrap(), &host, &limits);
         assert!(
@@ -220,6 +221,7 @@ fn a_cut_stream_run_fails_the_validation() {
             fan_in: 0,
             memory_spill: true,
             progress: None,
+            hot: 1 << 20,
         };
         let result = validate(Reader::new(Cursor::new(&bytes)).unwrap(), &host, &limits);
         assert!(
@@ -269,6 +271,7 @@ fn a_failure_leaves_nothing_behind() {
         fan_in: 0,
         memory_spill: true,
         progress: None,
+        hot: 1 << 20,
     };
     let result = validate(Reader::new(Cursor::new(&cut)).unwrap(), &NoHost, &limits);
     assert!(result.is_err());

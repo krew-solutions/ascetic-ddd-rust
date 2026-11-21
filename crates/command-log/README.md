@@ -82,3 +82,11 @@ each only once its prefix digest matches: a stale commitment or a different
 emission is refused before a line is written. A persisted log validated by
 `live::commit_file` leaves the same commitment, and `live::replay` reads it
 through the same check, `live::Verified`.
+
+## The validator's memory
+
+One clock, the read cursor (the running maximum of `at`), behind which the
+window is measured and evicted exactly. Step ids and stream messages go to
+sorted runs past `Limits::memory` and are decided at the end; the window,
+keyed by digests, holds what a run would hold, and every hot part is held to
+`Limits::hot`, past which the pass fails by name rather than grow.

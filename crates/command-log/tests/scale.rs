@@ -157,6 +157,7 @@ mod m9 {
         start: Instant,
         units: u64,
         said: AtomicU64,
+        runs_said: [AtomicU64; 2],
     }
 
     impl Clock {
@@ -185,6 +186,15 @@ mod m9 {
                 self.say(format_args!("merged {cells} cells, {lines} lines"));
             }
         }
+        fn runs(&self, kind: &'static str, on_disk: u64) {
+            // Every gigabyte a kind's runs pass, and when they are gone.
+            let gb = on_disk >> 30;
+            let key = if kind == "ids" { 0 } else { 1 };
+            let last = self.runs_said[key].swap(gb, Ordering::Relaxed);
+            if gb != last || on_disk == 0 {
+                self.say(format_args!("{kind} runs: {on_disk} bytes on disk"));
+            }
+        }
     }
 
     fn m9_config(spill: std::path::PathBuf, units: u64) -> (Config, Arc<Clock>) {
@@ -192,6 +202,7 @@ mod m9 {
             start: Instant::now(),
             units,
             said: AtomicU64::new(0),
+            runs_said: [AtomicU64::new(0), AtomicU64::new(0)],
         });
         let config = Config {
             threads: 4,
@@ -230,6 +241,13 @@ mod m9 {
             "written: {} steps, {bytes} bytes, {compression:?}",
             trailer.records
         ));
+        let limits = Limits {
+            progress: Some(Observer(clock.clone())),
+            ..Limits::new(base.join("ids"))
+        };
+        if std::env::var("M9_READ").as_deref() == Ok("0") {
+            return validated(&path, &limits, &clock);
+        }
         let started = Instant::now();
         let read = open_file(&path)
             .unwrap()
@@ -243,8 +261,13 @@ mod m9 {
         if std::env::var("M9_VALIDATE").as_deref() == Ok("0") {
             return;
         }
+        validated(&path, &limits, &clock);
+    }
+
+    /// The log validated, with what it found and must hold.
+    fn validated(path: &std::path::Path, limits: &Limits, clock: &Clock) {
         let started = Instant::now();
-        let report = validate_file(&path, &NoHost, &Limits::new(base.join("ids"))).unwrap();
+        let report = validate_file(path, &NoHost, limits).unwrap();
         let secs = started.elapsed().as_secs_f64();
         assert!(
             report.violations.is_empty(),
@@ -252,9 +275,10 @@ mod m9 {
             report.violations.first()
         );
         clock.say(format_args!(
-            "validated: {} steps, {:.0} steps/s",
+            "validated: {} steps, {:.0} steps/s, peaks {:?}",
             report.records,
-            report.records as f64 / secs
+            report.records as f64 / secs,
+            report.peaks
         ));
     }
 
@@ -268,7 +292,10 @@ mod m9 {
         let units: Vec<&dyn Unit> = units.iter().map(|u| u as &dyn Unit).collect();
         let (config, clock) = m9_config(base.join("spill"), units.len() as u64);
         let path = base.join("plan.commitment");
-        let limits = Limits::new(base.join("ids"));
+        let limits = Limits {
+            progress: Some(Observer(clock.clone())),
+            ..Limits::new(base.join("ids"))
+        };
         let report = dry(
             header(),
             &units,
@@ -285,7 +312,10 @@ mod m9 {
             "{:?}",
             report.violations.first()
         );
-        clock.say(format_args!("dry: {} steps validated", report.records));
+        clock.say(format_args!(
+            "dry: {} steps validated, peaks {:?}",
+            report.records, report.peaks
+        ));
         let commitment = Commitment::read(&path).unwrap();
         clock.said.store(0, Ordering::Relaxed);
         let (_, trailer) = live(

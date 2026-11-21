@@ -219,11 +219,17 @@ pub struct Limits {
     pub memory_spill: bool,
     /// Who hears the pass's runs, if anyone.
     pub progress: Option<crate::engine::Observer>,
+    /// The most entries a hot part may hold — the completions kept, captured
+    /// slots, barrier counts, buckets, declared deviations, polls in flight —
+    /// past which the pass fails by name (decision 16).
+    pub hot: u64,
 }
 
 impl Limits {
     /// 256 MiB of events in memory, spills under `spill`, a merge as wide as
-    /// the open-file limit and the memory allow, no spill in memory.
+    /// the open-file limit and the memory allow, no spill in memory, hot parts
+    /// of at most 2²⁵ entries each — some 2.7 GB of completions at about 80
+    /// bytes an entry.
     pub fn new(spill: impl Into<PathBuf>) -> Limits {
         Limits {
             memory: 256 << 20,
@@ -232,6 +238,7 @@ impl Limits {
             fan_in: 0,
             memory_spill: false,
             progress: None,
+            hot: 32 << 20,
         }
     }
 }
@@ -522,11 +529,15 @@ struct Pass<'h, H: Host> {
     kept: usize,
     report: Report,
     previous: Option<(u64, StepId)>,
-    window: BTreeMap<StepId, u64>,
+    /// The steps within W behind the cursor, by their ids' digests.
+    window: BTreeMap<[u8; 16], u64>,
     /// The window's steps by planned time: evicted exactly, whatever the
     /// lines' order.
-    order: BTreeSet<(u64, StepId)>,
-    retained: BTreeMap<StepId, u64>,
+    order: BTreeSet<(u64, [u8; 16])>,
+    /// The retained steps, by their ids' digests.
+    retained: BTreeMap<[u8; 16], u64>,
+    /// [`Limits::hot`].
+    hot: u64,
     barriers: BTreeMap<(String, Vec<u8>, String, u32), u64>,
     slots: BTreeMap<(Subject, String), Slot>,
     /// Live captures: slots whose latest writer is within W of the cursor
@@ -859,13 +870,11 @@ impl<H: Host> Pass<'_, H> {
             }
         }
         self.order(line, r);
-        self.ids.push(IdEvent {
-            digest: id_digest(&r.step)?,
-            line,
-        });
+        let digest = id_digest(&r.step)?;
+        self.ids.push(IdEvent { digest, line });
         self.hold()?;
         self.evict();
-        self.edges(line, r);
+        self.edges(line, r)?;
         self.captures(line, r);
         self.stream(line, r)?;
         self.spans(line, r);
@@ -879,8 +888,32 @@ impl<H: Host> Pass<'_, H> {
             }
         }
         self.offered(line, r);
-        self.keep(r);
-        Ok(())
+        self.keep(r, digest);
+        self.within(line)
+    }
+
+    /// Every hot part within [`Limits::hot`] entries: past it the pass fails,
+    /// naming the part, rather than grow until the machine kills it.
+    fn within(&self, line: u64) -> Result<(), LogError> {
+        let parts = [
+            (
+                "completions",
+                self.window.len().saturating_add(self.retained.len()),
+            ),
+            ("captures", self.slots.len()),
+            ("barrier counts", self.barriers.len()),
+            ("buckets", self.buckets.len()),
+            ("deviations", self.deviations.len()),
+            ("polls", self.polls.len()),
+        ];
+        match parts.into_iter().find(|(_, n)| *n as u64 > self.hot) {
+            Some((part, n)) => Err(LogError::Hot {
+                part,
+                held: n as u64,
+                line,
+            }),
+            None => Ok(()),
+        }
     }
 
     fn order(&mut self, line: u64, r: &Record) {
@@ -895,17 +928,18 @@ impl<H: Host> Pass<'_, H> {
         self.previous = Some(key);
     }
 
-    fn edges(&mut self, line: u64, r: &Record) {
+    fn edges(&mut self, line: u64, r: &Record) -> Result<(), LogError> {
         for d in &r.after {
             match d {
                 Dep::Step { step, .. } => {
                     // Eviction behind the cursor is exact (decision 16): a step
                     // in the window is within W of it.
                     let at_l = r.at;
+                    let digest = id_digest(step)?;
                     let found = self
                         .retained
-                        .get(step)
-                        .or_else(|| self.window.get(step))
+                        .get(&digest)
+                        .or_else(|| self.window.get(&digest))
                         .copied();
                     match found {
                         Some(at) if at >= at_l => self.violate(line, Rule::Edge, || {
@@ -940,6 +974,7 @@ impl<H: Host> Pass<'_, H> {
                 }
             }
         }
+        Ok(())
     }
 
     fn captures(&mut self, line: u64, r: &Record) {
@@ -1248,17 +1283,18 @@ impl<H: Host> Pass<'_, H> {
         }
     }
 
-    /// The step, kept for later dependencies; the barrier counts.
-    fn keep(&mut self, r: &Record) {
+    /// The step, kept for later dependencies by its id's digest; the barrier
+    /// counts.
+    fn keep(&mut self, r: &Record, digest: [u8; 16]) {
         if self.header.retained.contains(&r.step.label) {
-            self.retained.insert(r.step.clone(), r.at);
+            self.retained.insert(digest, r.at);
         } else if self.cursor.saturating_sub(r.at) > self.header.window {
             // Dead on arrival: no later edge may accept it, and an older
             // occurrence must not answer for it.
-            self.window.remove(&r.step);
+            self.window.remove(&digest);
         } else {
-            self.window.insert(r.step.clone(), r.at);
-            self.order.insert((r.at, r.step.clone()));
+            self.window.insert(digest, r.at);
+            self.order.insert((r.at, digest));
         }
         let held = (self.window.len() as u64).saturating_add(self.retained.len() as u64);
         self.report.peaks.completions = self.report.peaks.completions.max(held);
@@ -1346,6 +1382,7 @@ pub fn validate_on<R: BufRead>(
         host,
         disk,
         memory: limits.memory.max(1),
+        hot: limits.hot,
         header: reader.header().clone(),
         kept: limits.kept,
         report: Report::default(),

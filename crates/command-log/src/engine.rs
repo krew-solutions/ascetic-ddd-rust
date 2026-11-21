@@ -236,6 +236,9 @@ struct Buckets {
     lines: BTreeMap<u64, u64>,
     /// Bytes of lines spilled, before compression.
     spilled_lines: u64,
+    /// Steps a cell, and those planned past the last cell's end.
+    steps: BTreeMap<u64, u64>,
+    beyond: u64,
 }
 
 /// Free space a pass needs on the filesystem of `path`, beside the engine's
@@ -263,6 +266,9 @@ pub struct Emitted {
     /// The bytes of events the records make in a validator's runs
     /// (decision 16): what a dry run's validator will need on disk.
     pub run_bytes: u64,
+    /// At most the steps planned within `W` of one another — the most
+    /// completions a run keeps at once, counted by cell (decision 16).
+    pub window: u64,
 }
 
 impl Emitted {
@@ -282,6 +288,7 @@ impl Emitted {
             multiset: self.multiset.wrapping_add(other.multiset),
             bytes: self.bytes.saturating_add(other.bytes),
             run_bytes: self.run_bytes.saturating_add(other.run_bytes),
+            window: self.window.max(other.window),
         }
     }
 }
@@ -553,6 +560,8 @@ fn pass<W: Write>(
                     spilled_bytes: 0,
                     lines: BTreeMap::new(),
                     spilled_lines: 0,
+                    steps: BTreeMap::new(),
+                    beyond: 0,
                 };
                 let result = (|| -> Result<(), EngineError> {
                     // What this thread has added to the shared totals.
@@ -571,8 +580,13 @@ fn pass<W: Write>(
                                         ));
                                     }
                                     let key = order_key(record.at, &record.step);
-                                    let at_cell =
-                                        record.at.checked_div(cell).unwrap_or(0).min(last);
+                                    let unclamped = record.at.checked_div(cell).unwrap_or(0);
+                                    let at_cell = unclamped.min(last);
+                                    let n = buckets.steps.entry(at_cell).or_insert(0);
+                                    *n = n.saturating_add(1);
+                                    if unclamped > last {
+                                        buckets.beyond = buckets.beyond.saturating_add(1);
+                                    }
                                     let run_bytes = crate::validate::run_bytes(&record);
                                     let line = encode(&Line::Step(Box::new(record)))?;
                                     buckets.emitted.add(&line);
@@ -638,9 +652,10 @@ fn pass<W: Write>(
     let result = match failed.into_inner().ok().flatten() {
         Some(e) => Err(e),
         None => {
-            let emitted = all
+            let mut emitted = all
                 .iter()
                 .fold(Emitted::default(), |e, b| e.merge(b.emitted));
+            emitted.window = window_bound(&all, header.window, config);
             check(emitted)
                 .and_then(|extra| room(&all, config, disk, log, extra))
                 .and_then(|()| {
@@ -658,6 +673,38 @@ fn pass<W: Write>(
     };
     drop(dir);
     result
+}
+
+/// The most steps any `⌈W / cell⌉ + 1` consecutive cells hold: every step within
+/// `W` behind a cursor lies in such a span. The last cell, when it gathers
+/// steps planned past its end, bounds nothing and is left to the validator's
+/// own limit.
+fn window_bound(all: &[Buckets], w: u64, config: &Config) -> u64 {
+    let mut steps: BTreeMap<u64, u64> = BTreeMap::new();
+    let mut beyond = 0u64;
+    for b in all {
+        for (cell, n) in &b.steps {
+            let c = steps.entry(*cell).or_insert(0);
+            *c = c.saturating_add(*n);
+        }
+        beyond = beyond.saturating_add(b.beyond);
+    }
+    let cell = config.cell.max(1);
+    let last = config.cells.saturating_sub(1);
+    let span = w.div_ceil(cell).saturating_add(1);
+    let mut most = 0u64;
+    for &k in steps.keys() {
+        let end = k.saturating_add(span);
+        if beyond > 0 && end > last {
+            continue;
+        }
+        let held = steps
+            .range(k..end)
+            .map(|(_, n)| *n)
+            .fold(0u64, u64::saturating_add);
+        most = most.max(held);
+    }
+    most
 }
 
 /// Whether the merge will fit, checked before its first line: per

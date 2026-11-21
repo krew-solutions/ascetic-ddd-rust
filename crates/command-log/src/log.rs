@@ -80,6 +80,16 @@ pub enum LogError {
         /// What is free.
         free: u64,
     },
+    /// A hot part of a pass holds more than its limit (decision 16): the plan
+    /// asks more than this machine holds, or the log is broken where it is.
+    Hot {
+        /// The part.
+        part: &'static str,
+        /// What it holds, or would.
+        held: u64,
+        /// Where: the line, or 0 before the first.
+        line: u64,
+    },
     /// A log read through a commitment is not what was validated: what
     /// differs ([`crate::live`]).
     Diverged {
@@ -111,6 +121,9 @@ impl fmt::Display for LogError {
             LogError::AfterTrailer => f.write_str("a line follows the trailer"),
             LogError::Space { path, needed, free } => {
                 write!(f, "{}: {needed} bytes needed, {free} free", path.display())
+            }
+            LogError::Hot { part, held, line } => {
+                write!(f, "line {line}: {held} {part} held, past the limit")
             }
             LogError::Diverged { what } => write!(f, "{what} differs from the commitment"),
         }
