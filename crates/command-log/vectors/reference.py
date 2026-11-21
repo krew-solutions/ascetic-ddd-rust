@@ -22,7 +22,7 @@ The rules (ADR-0046 decisions 5, 7, 9):
   operation writes it on the line's subject.
 - writers: a writer that does not await the slot's latest earlier writer as at
   least settled, and each line that read from that writer since, as at least
-  sent.
+  settled (ADR-0047 decision 5: the server's order, not the client's).
 - stream: a position outside [1, 2^31 - 1], not above the latest earlier
   message's on the same subject and stream, or that message not awaited as
   expected; gap: on a stream the profile names gapless, a position other than
@@ -35,8 +35,9 @@ The rules (ADR-0046 decisions 5, 7, 9):
   not in the table, or with path values other than its parameters; an
   observation polling every 0.
 - deviation: a line's declared deviation exempts it from that rule; one naming
-  no rule, or a rule the line keeps, is itself a violation. A `key` violation
-  is never exempt. A `rate` deviation makes its line's arrivals spend, refused
+  no rule, or a rule the line keeps, is itself a violation. A `key`, `order`,
+  `duplicate`, `edge`, `producer` or `deviation` violation is never exempt,
+  and a deviation naming one is itself a violation (ADR-0047 decision 13). A `rate` deviation makes its line's arrivals spend, refused
   or not, and is kept only if the lower model refuses one of them.
 - header (limits): a zero parameter, a `path` place naming no parameter of its
   template, one bucket name of two shapes (by, requests, per_seconds, burst), no
@@ -45,6 +46,20 @@ The rules (ADR-0046 decisions 5, 7, 9):
 - key: a REST call (an action, an observation's probe) gives no value for a
   limit of its operation: a time, an absent place, a body field without a span,
   no caller or not exactly one name of the kind, a source past the profile's.
+- header (deadlines): an operation whose timeout is 0 or not below the
+  profile's route timeout by more than its jitter; a channel or a host call
+  named twice, or with a timeout of 0.
+- operation (tables): a bus message, or an observation of the bus, on a channel
+  not in the channels table; a host call not in the calls table.
+- feasible: a line planned before the latest earlier step a dependency binds
+  (within reach, planned before it) plus its think; or before the latest
+  earlier member of a barrier it awaits plus its think.
+- measure: a measure from a step no earlier line has.
+- cause: an observation whose cause is neither itself nor a step it awaits.
+- until: an observation of the bus none of whose predicates is an `equals` on
+  a value of its cause: rendered of the cause step, or captured from it.
+- sent: a line, not an observation, that awaits a dependency as sent and has a
+  measure or an expectation.
 - rate: arrivals — a REST action at the running maximum of `at` up to its line,
   an observation with a REST probe polling at that time plus k * every, k = 0
   to timeout // every (fewer than 2^20 + 1 polls, else k = 0 alone) — taken per
@@ -60,9 +75,11 @@ import json
 import sys
 
 AWAIT = {"sent": 0, "settled": 1, "expected": 2}
+NON_DEVIABLE = {"order", "duplicate", "edge", "producer", "key", "deviation"}
 RULES = {
     "header", "order", "duplicate", "edge", "barrier", "producer", "stale", "writers",
     "stream", "gap", "span", "profile", "operation", "required", "deviation", "rate", "key",
+    "feasible", "measure", "cause", "until", "sent",
 }
 MAX_POLLS = 2**20
 
@@ -290,6 +307,16 @@ def verdict(text, clock="cursor"):
         found.add((1, "header"))
     if refused_limits(header)[0]:
         found.add((1, "header"))
+    route, jitter = int(profile["route_timeout"]), int(profile["jitter"])
+    for op in header["operations"]:
+        if int(op["timeout"]) == 0 or int(op["timeout"]) + jitter >= route:
+            found.add((1, "header"))
+    for table in ("channels", "calls"):
+        names = [t["name"] for t in header[table]]
+        if len(names) != len(set(names)) or any(int(t["timeout"]) == 0 for t in header[table]):
+            found.add((1, "header"))
+    channels = {c["name"] for c in header["channels"]}
+    calls_table = {c["name"] for c in header["calls"]}
     raw = {}
     for i, r in enumerate(steps):
         line, at, earlier = i + 2, int(r["at"]), steps[:i]
@@ -307,8 +334,17 @@ def verdict(text, clock="cursor"):
                 near = e is not None and (behind - int(e["at"]) <= w or e["step"]["label"] in header["retained"])
                 if e is None or not int(e["at"]) < at or not near:
                     v.add("edge")
+                elif int(e["at"]) + int(r["think"]) > at:
+                    v.add("feasible")
             else:
                 b = d["each"]
+                members = [
+                    e for e in earlier
+                    if (e["step"]["subject"]["kind"], e["step"]["subject"]["scope"], e["step"]["label"], e["step"]["n"])
+                    == (b["kind"], b["scope"], b["label"], b["n"])
+                ]
+                if members and max(int(e["at"]) for e in members) + int(r["think"]) > at:
+                    v.add("feasible")
                 if b["count"] is not None:
                     planned = sum(
                         1 for e in earlier
@@ -333,7 +369,7 @@ def verdict(text, clock="cursor"):
                     e["step"] for e in earlier[j + 1:]
                     if (subject, slot, json.dumps(previous, sort_keys=True)) in reads(e) and e["step"] != r["step"]
                 ]
-                if not awaits(r, previous, "settled") or not all(awaits(r, x, "sent") for x in readers):
+                if not awaits(r, previous, "settled") or not all(awaits(r, x, "settled") for x in readers):
                     v.add("writers")
         bus = r["action"].get("bus")
         if bus is not None and bus["stream"] is not None:
@@ -371,6 +407,37 @@ def verdict(text, clock="cursor"):
             if "captured" in h and h["captured"]["slot"] == "id":
                 if h["captured"]["subject"]["kind"] not in profile["captured"]:
                     v.add("profile")
+        for m in r["measure"]:
+            if not any(e["step"] == m["from"] for e in earlier):
+                v.add("measure")
+        o = r["action"].get("observe")
+        if o is not None:
+            cause = o["cause"]
+            if cause != r["step"] and not any("step" in d and d["step"]["step"] == cause for d in r["after"]):
+                v.add("cause")
+            if "bus" in o["probe"]:
+                def of_cause(value):
+                    hole = value.get("hole", {})
+                    if "rendered" in hole:
+                        return hole["rendered"]["of"].get("step") == cause
+                    if "captured" in hole:
+                        return hole["captured"]["from"] == cause
+                    return False
+                if not any("equals" in p["test"] and of_cause(p["test"]["equals"]) for p in o["until"]):
+                    v.add("until")
+        elif r["measure"] or r["expect"]:
+            sent = any(
+                (d["step"]["on"] if "step" in d else d["each"]["on"]) == "sent"
+                for d in r["after"]
+            )
+            if sent:
+                v.add("sent")
+        if "bus" in r["action"] and r["action"]["bus"]["channel"] not in channels:
+            v.add("operation")
+        if o is not None and "bus" in o["probe"] and o["probe"]["bus"]["channel"] not in channels:
+            v.add("operation")
+        if "host" in r["action"] and r["action"]["host"]["op"] not in calls_table:
+            v.add("operation")
         action = r["action"]
         calls = [action["rest"]] if "rest" in action else []
         if "observe" in action:
@@ -394,7 +461,7 @@ def verdict(text, clock="cursor"):
         elif rule == "rate":
             if line not in used:
                 v.add("deviation")
-        elif rule == "key":
+        elif rule in NON_DEVIABLE:
             v.add("deviation")
         elif rule in v:
             v.discard(rule)

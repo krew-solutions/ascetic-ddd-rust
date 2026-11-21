@@ -292,20 +292,24 @@ fn a_deliberate_refusal_is_used_only_if_certain() {
 
 #[test]
 fn a_line_out_of_order_arrives_when_the_cursor_is() {
-    // Line 4 is planned before line 3 (an order deviation); it arrives at 2 s,
+    // Line 4 is planned before line 3, which breaks the order and no
+    // deviation excuses (ADR-0047 decision 13); still, it arrives at 2 s,
     // where the bucket has a token, not at 1 s, where it would not.
     let records = [
         call("read", 1, 0, 0, 0),
         call("read", 1, 1, 2 * SECOND, 0),
-        deviating(call("read", 1, 2, SECOND, 0), "order"),
+        call("read", 1, 2, SECOND, 0),
     ];
-    assert_eq!(check(all(1, 1, 2), &records), vec![]);
+    assert_eq!(check(all(1, 1, 2), &records), vec![(4, Rule::Order)]);
     let records = [
         call("read", 1, 0, 0, 0),
         call("read", 1, 1, 2 * SECOND, 0),
-        deviating(polling(1, 0, SECOND, 10, 10), "order"),
+        polling(1, 0, SECOND, 10, 10),
     ];
-    assert_eq!(check(all(1, 1, 2), &records), vec![(4, Rule::Rate)]);
+    assert_eq!(
+        check(all(1, 1, 2), &records),
+        vec![(4, Rule::Order), (4, Rule::Rate)]
+    );
 }
 
 #[test]

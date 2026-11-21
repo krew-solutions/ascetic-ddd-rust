@@ -231,16 +231,25 @@ fn cause_of(r: &Record) -> StepId {
         .unwrap_or_else(|| r.step.clone())
 }
 
+/// An observation of the bus: the fact whose `/cause` is its cause's id.
 pub fn observe(r: Record, every: u64, timeout: u64) -> Record {
+    let cause = cause_of(&r);
     Record {
         action: Action::Observe(Observe {
-            cause: cause_of(&r),
+            cause: cause.clone(),
             probe: Probe::Bus {
                 channel: "c".into(),
                 key: Value::Literal("k".into()),
                 event: "e".into(),
             },
-            until: vec![],
+            until: vec![ascetic_ddd_command_log::record::Predicate {
+                pointer: "/cause".into(),
+                test: ascetic_ddd_command_log::record::Test::Equals(Value::Hole(Hole::Rendered {
+                    of: ascetic_ddd_command_log::record::Of::Step(cause),
+                    role: "id".into(),
+                    rendering: Rendering::UuidText,
+                })),
+            }],
             every,
             timeout,
         }),
@@ -266,9 +275,9 @@ pub fn bytes(header: Header, records: &[Record]) -> Vec<u8> {
 
 pub fn run_with(header: Header, records: &[Record], host: &impl Host, ids: usize) -> Report {
     let dir = tempfile::tempdir().unwrap();
-    // Memory for `ids` step ids of 24 bytes; stream messages share it.
+    // Memory for `ids` step ids of 25 bytes; stream messages share it.
     let limits = Limits {
-        memory: ids * 24,
+        memory: ids * 25,
         spill: dir.path().to_owned(),
         kept: 1_000,
         fan_in: 0,

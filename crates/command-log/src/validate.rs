@@ -21,8 +21,8 @@ use crate::disk::{Disk, LocalDisk};
 use crate::log::{LogError, Reader};
 use crate::rate::{self, Curve, Lower};
 use crate::record::{
-    Action, Bus, By, Codec, Dep, Field, Form, Header, Hole, Limit, Of, On, Outcome, Payload, Place,
-    Predicate, Probe, Record, Rest, Span, StepId, Subject, Test, Value,
+    Action, Bus, By, Codec, Dep, Field, Form, Header, Hole, Limit, Observe, Of, On, Outcome,
+    Payload, Place, Predicate, Probe, Record, Rest, Span, StepId, Subject, Test, Value,
 };
 use crate::runs::{Event, Sorter};
 use crate::spill::{Counted, SpillDir};
@@ -71,11 +71,36 @@ pub enum Rule {
     Rate,
     /// A limit's value a call does not give; no deviation exempts it.
     Key,
+    /// A step planned before its dependencies and its think time allow: a
+    /// release is never earlier than planned (ADR-0047 decision 3).
+    Feasible,
+    /// A measure from no step planned on an earlier line.
+    Measure,
+    /// An observation whose cause it does not await, nor is.
+    Cause,
+    /// An observation of the bus whose `until` does not tell its cause's fact
+    /// from another's: no `Equals` on a value of the cause (ADR-0047 § 12).
+    Until,
+    /// A step that awaits a dependency only sent and carries a measure or an
+    /// expectation: sent is the harness's order, not the server's (ADR-0047
+    /// decision 6).
+    Sent,
 }
+
+/// The rules no deviation exempts: the scheduler's premises, a key, a
+/// deviation itself (ADR-0047 decision 13).
+const NON_DEVIABLE: [Rule; 6] = [
+    Rule::Order,
+    Rule::Duplicate,
+    Rule::Edge,
+    Rule::Producer,
+    Rule::Key,
+    Rule::Deviation,
+];
 
 impl Rule {
     /// Every rule, in order.
-    pub const ALL: [Rule; 17] = [
+    pub const ALL: [Rule; 22] = [
         Rule::Header,
         Rule::Order,
         Rule::Duplicate,
@@ -93,6 +118,11 @@ impl Rule {
         Rule::Deviation,
         Rule::Rate,
         Rule::Key,
+        Rule::Feasible,
+        Rule::Measure,
+        Rule::Cause,
+        Rule::Until,
+        Rule::Sent,
     ];
 
     /// The rule's name, as a deviation names it.
@@ -115,6 +145,11 @@ impl Rule {
             Rule::Deviation => "deviation",
             Rule::Rate => "rate",
             Rule::Key => "key",
+            Rule::Feasible => "feasible",
+            Rule::Measure => "measure",
+            Rule::Cause => "cause",
+            Rule::Until => "until",
+            Rule::Sent => "sent",
         }
     }
 
@@ -267,7 +302,7 @@ pub(crate) fn fan_in(limits: &Limits, disk: &dyn Disk) -> std::io::Result<usize>
 /// The bytes of events a record makes in the validator's runs: its id, and a
 /// stream message's event.
 pub(crate) fn run_bytes(r: &Record) -> u64 {
-    let id = IdEvent::SIZE as u64;
+    let id = (IdEvent::SIZE as u64).saturating_mul((r.measure.len() as u64).saturating_add(1));
     match stream_of(r) {
         Some(_) => id.saturating_add(StreamEvent::size_of(predecessors(r).count()) as u64),
         None => id,
@@ -301,15 +336,18 @@ fn id_digest(step: &StepId) -> Result<[u8; 16], LogError> {
     Ok(crate::runs::digest(&bytes))
 }
 
-/// A step id seen, for uniqueness: its digest and line.
+/// A step id seen, for uniqueness, or a measure's `from` asked for: its
+/// digest and line. Sorted by digest and line, a query follows the ids of
+/// its line, so that only an earlier line's id answers it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct IdEvent {
     digest: [u8; 16],
     line: u64,
+    query: bool,
 }
 
 impl IdEvent {
-    const SIZE: usize = 24;
+    const SIZE: usize = 25;
 }
 
 impl Event for IdEvent {
@@ -319,13 +357,15 @@ impl Event for IdEvent {
 
     fn write(&self, out: &mut dyn Write) -> std::io::Result<()> {
         out.write_all(&self.digest)?;
-        out.write_all(&self.line.to_le_bytes())
+        out.write_all(&self.line.to_le_bytes())?;
+        out.write_all(&[u8::from(self.query)])
     }
 
     fn read<R: Read>(run: &mut Counted<R>) -> std::io::Result<IdEvent> {
         let mut buf = [0u8; IdEvent::SIZE];
         run.exact(&mut buf)?;
-        let (d, l) = buf.split_at(16);
+        let (d, rest) = buf.split_at(16);
+        let (l, q) = rest.split_at(8);
         let mut digest = [0u8; 16];
         digest.copy_from_slice(d);
         let mut line = [0u8; 8];
@@ -333,6 +373,7 @@ impl Event for IdEvent {
         Ok(IdEvent {
             digest,
             line: u64::from_le_bytes(line),
+            query: q == [1],
         })
     }
 }
@@ -520,6 +561,9 @@ struct Slot {
     readers: BTreeSet<StepId>,
 }
 
+/// A barrier's key: the kind, scope, label and occurrence its members share.
+type BarrierKey = (String, Vec<u8>, String, u32);
+
 struct Pass<'h, H: Host> {
     host: &'h H,
     disk: &'h dyn Disk,
@@ -538,7 +582,8 @@ struct Pass<'h, H: Host> {
     retained: BTreeMap<[u8; 16], u64>,
     /// [`Limits::hot`].
     hot: u64,
-    barriers: BTreeMap<(String, Vec<u8>, String, u32), u64>,
+    /// A barrier key's members planned so far, and the latest `at` of them.
+    barriers: BTreeMap<BarrierKey, (u64, u64)>,
     slots: BTreeMap<(Subject, String), Slot>,
     /// Live captures: slots whose latest writer is within W of the cursor
     /// (its `at`) or retained (`None`).
@@ -613,13 +658,13 @@ impl<H: Host> Pass<'_, H> {
     /// report keeps the least `kept` by (line, rule, detail), whenever each is
     /// found; a detail is written only if it could be kept.
     fn violate(&mut self, line: u64, rule: Rule, detail: impl FnOnce() -> String) {
-        // No deviation exempts a key — an arrival left out of its bucket would
-        // be an under-count — nor itself: a deviation declared against
-        // `deviation` is unused, and says so.
+        // No deviation exempts the scheduler's premises — order, uniqueness,
+        // edges, producers — nor a key — an arrival left out of its bucket
+        // would be an under-count — nor itself: one declared against them is
+        // unused, and says so.
         if let Some((declared, used)) = self.deviations.get_mut(&line)
             && *declared == rule
-            && rule != Rule::Key
-            && rule != Rule::Deviation
+            && !NON_DEVIABLE.contains(&rule)
         {
             *used = true;
             return;
@@ -676,6 +721,43 @@ impl<H: Host> Pass<'_, H> {
         }
         for o in twice {
             self.violate(1, Rule::Header, || format!("operation {o:?} twice"));
+        }
+        // Every action has a deadline; an operation's lies below the stand's
+        // route timeout by more than the jitter, so that a slow call cannot
+        // end either censored or as the gateway's own answer by microseconds.
+        let (route, jitter) = (
+            self.header.profile.route_timeout,
+            self.header.profile.jitter,
+        );
+        let mut found = Vec::new();
+        for o in &self.header.operations {
+            if o.timeout == 0 || o.timeout.saturating_add(jitter) >= route {
+                found.push(format!(
+                    "operation {:?}: a timeout of {} µs, not within (0, {route} − {jitter})",
+                    o.name, o.timeout
+                ));
+            }
+        }
+        let mut channels = BTreeSet::new();
+        for c in &self.header.channels {
+            if !channels.insert(c.name.clone()) {
+                found.push(format!("channel {:?} twice", c.name));
+            }
+            if c.timeout == 0 {
+                found.push(format!("channel {:?}: no timeout", c.name));
+            }
+        }
+        let mut calls = BTreeSet::new();
+        for c in &self.header.calls {
+            if !calls.insert(c.name.clone()) {
+                found.push(format!("host call {:?} twice", c.name));
+            }
+            if c.timeout == 0 {
+                found.push(format!("host call {:?}: no timeout", c.name));
+            }
+        }
+        for detail in found {
+            self.violate(1, Rule::Header, || detail);
         }
         let (found, refused) = self.limits();
         self.refused = refused;
@@ -871,12 +953,25 @@ impl<H: Host> Pass<'_, H> {
         }
         self.order(line, r);
         let digest = id_digest(&r.step)?;
-        self.ids.push(IdEvent { digest, line });
+        self.ids.push(IdEvent {
+            digest,
+            line,
+            query: false,
+        });
+        for m in &r.measure {
+            self.ids.push(IdEvent {
+                digest: id_digest(&m.from)?,
+                line,
+                query: true,
+            });
+        }
         self.hold()?;
         self.evict();
         self.edges(line, r)?;
         self.captures(line, r);
         self.stream(line, r)?;
+        self.observation(line, r);
+        self.sent_only(line, r);
         self.spans(line, r);
         self.profile(line, r);
         self.operations(line, r);
@@ -941,10 +1036,16 @@ impl<H: Host> Pass<'_, H> {
                         .get(&digest)
                         .or_else(|| self.window.get(&digest))
                         .copied();
+                    let think = r.think;
                     match found {
                         Some(at) if at >= at_l => self.violate(line, Rule::Edge, || {
                             format!("{step:?} planned at {at}, not before {at_l}")
                         }),
+                        Some(at) if at.saturating_add(think) > at_l => {
+                            self.violate(line, Rule::Feasible, || {
+                                format!("{step:?} planned at {at}, and {think} µs of think, after {at_l}")
+                            });
+                        }
                         Some(_) => {}
                         None => self.violate(line, Rule::Edge, || {
                             format!("{step:?} is no step planned within W behind the cursor, nor retained")
@@ -959,16 +1060,22 @@ impl<H: Host> Pass<'_, H> {
                     count,
                     ..
                 } => {
-                    let planned = self
+                    let (planned, latest) = self
                         .barriers
                         .get(&(kind.clone(), scope.clone(), label.clone(), *n))
                         .copied()
-                        .unwrap_or(0);
+                        .unwrap_or((0, 0));
                     if let Some(c) = count
                         && *c != planned
                     {
                         self.violate(line, Rule::Barrier, || {
                             format!("{kind} {label}#{n}: {c} counted, {planned} planned before")
+                        });
+                    }
+                    let (think, at_l) = (r.think, r.at);
+                    if planned > 0 && latest.saturating_add(think) > at_l {
+                        self.violate(line, Rule::Feasible, || {
+                            format!("{kind} {label}#{n}: its latest planned at {latest}, and {think} µs of think, after {at_l}")
                         });
                     }
                 }
@@ -1026,8 +1133,8 @@ impl<H: Host> Pass<'_, H> {
                     missing.push(format!("the writer {:?} settled", previous.writer));
                 }
                 for reader in &previous.readers {
-                    if reader != &r.step && !awaits(r, reader, On::Sent) {
-                        missing.push(format!("the reader {reader:?}"));
+                    if reader != &r.step && !awaits(r, reader, On::Settled) {
+                        missing.push(format!("the reader {reader:?} settled"));
                     }
                 }
                 if !missing.is_empty() {
@@ -1084,6 +1191,61 @@ impl<H: Host> Pass<'_, H> {
             deps,
         });
         self.hold()
+    }
+
+    /// An observation awaits its cause, or is its own (a watch begun on its
+    /// own, its deadline from its own start); one of the bus tells its
+    /// cause's fact from another's by an `Equals` on a value of the cause.
+    fn observation(&mut self, line: u64, r: &Record) {
+        let Action::Observe(o) = &r.action else {
+            return;
+        };
+        let cause = &o.cause;
+        if cause != &r.step
+            && !r
+                .after
+                .iter()
+                .any(|d| matches!(d, Dep::Step { step, .. } if step == cause))
+        {
+            self.violate(line, Rule::Cause, || {
+                format!("the cause {cause:?} is not awaited")
+            });
+        }
+        if let Probe::Bus { .. } = o.probe {
+            let of_cause = |v: &Value| match v {
+                Value::Hole(Hole::Rendered {
+                    of: Of::Step(step), ..
+                }) => step == cause,
+                Value::Hole(Hole::Captured { from, .. }) => from == cause,
+                _ => false,
+            };
+            let tells = o
+                .until
+                .iter()
+                .any(|p| matches!(&p.test, Test::Equals(v) if of_cause(v)));
+            if !tells {
+                self.violate(line, Rule::Until, || {
+                    format!("no predicate equals a value of the cause {cause:?}")
+                });
+            }
+        }
+    }
+
+    /// A step that awaits a dependency only sent carries no measure and no
+    /// expectation, unless it is an observation.
+    fn sent_only(&mut self, line: u64, r: &Record) {
+        if matches!(r.action, Action::Observe(_)) {
+            return;
+        }
+        let sent = r.after.iter().any(|d| match d {
+            Dep::Step { on, .. } | Dep::Each { on, .. } => *on == On::Sent,
+        });
+        if sent && !(r.measure.is_empty() && r.expect.is_empty()) {
+            self.violate(line, Rule::Sent, || {
+                "a step awaiting a dependency only sent carries a measure or an expectation"
+                    .to_owned()
+            });
+        }
     }
 
     /// The larger buffer to disk while both hold more than the memory.
@@ -1231,6 +1393,24 @@ impl<H: Host> Pass<'_, H> {
                 }
             }
         }
+        let channel = match &r.action {
+            Action::Bus(b) => Some(&b.channel),
+            Action::Observe(Observe {
+                probe: Probe::Bus { channel, .. },
+                ..
+            }) => Some(channel),
+            _ => None,
+        };
+        if let Some(c) = channel
+            && !self.header.channels.iter().any(|t| &t.name == c)
+        {
+            found.push(format!("channel {c:?} is not in the channels table"));
+        }
+        if let Action::Host(h) = &r.action
+            && !self.header.calls.iter().any(|t| t.name == h.op)
+        {
+            found.push(format!("host call {:?} is not in the calls table", h.op));
+        }
         if let Action::Observe(o) = &r.action {
             // Polls at 0, every, … up to the timeout: ⌊timeout / every⌋ + 1.
             match o.timeout.checked_div(o.every) {
@@ -1299,7 +1479,7 @@ impl<H: Host> Pass<'_, H> {
         let held = (self.window.len() as u64).saturating_add(self.retained.len() as u64);
         self.report.peaks.completions = self.report.peaks.completions.max(held);
         let s = &r.step;
-        let count = self
+        let held = self
             .barriers
             .entry((
                 s.subject.kind.clone(),
@@ -1307,8 +1487,8 @@ impl<H: Host> Pass<'_, H> {
                 s.label.clone(),
                 s.n,
             ))
-            .or_insert(0);
-        *count = count.saturating_add(1);
+            .or_insert((0, 0));
+        *held = (held.0.saturating_add(1), held.1.max(r.at));
     }
 
     fn finish(mut self) -> Result<Report, LogError> {
@@ -1326,14 +1506,28 @@ impl<H: Host> Pass<'_, H> {
         self.streams_end()?;
         let ids = std::mem::replace(&mut self.ids, Sorter::new("ids", Path::new(""), 2, None));
         let disk = self.disk;
-        let mut last: Option<[u8; 16]> = None;
+        // The digest in hand, and the first line its id was seen on.
+        let mut seen: Option<([u8; 16], Option<u64>)> = None;
         ids.drain(disk, |e| {
-            if last == Some(e.digest) {
-                self.violate(e.line, Rule::Duplicate, || {
-                    "a step id an earlier line has".to_owned()
-                });
+            let first = match seen {
+                Some((d, first)) if d == e.digest => first,
+                _ => None,
+            };
+            if e.query {
+                if !first.is_some_and(|l| l < e.line) {
+                    self.violate(e.line, Rule::Measure, || {
+                        "a measure from no step planned on an earlier line".to_owned()
+                    });
+                }
+                seen = Some((e.digest, first));
+            } else {
+                if first.is_some() {
+                    self.violate(e.line, Rule::Duplicate, || {
+                        "a step id an earlier line has".to_owned()
+                    });
+                }
+                seen = Some((e.digest, first.or(Some(e.line))));
             }
-            last = Some(e.digest);
             Ok(())
         })?;
         let unused: Vec<(u64, Rule)> = self
@@ -1453,9 +1647,9 @@ mod tests {
         assert!(id(&mut run(Failing, 1)).is_err());
         assert_eq!(id(&mut run(std::io::empty(), 0)).ok(), Some(None));
         assert!(id(&mut run(std::io::empty(), 1)).is_err());
-        assert!(id(&mut run(&[0u8; 23][..], 1)).is_err());
+        assert!(id(&mut run(&[0u8; 24][..], 1)).is_err());
         assert!(id(&mut run(&[0u8; 1][..], 0)).is_err());
-        assert!(matches!(id(&mut run(&[0u8; 24][..], 1)), Ok(Some(_))));
+        assert!(matches!(id(&mut run(&[0u8; 25][..], 1)), Ok(Some(_))));
         let event = StreamEvent {
             key: [1; 16],
             line: 7,

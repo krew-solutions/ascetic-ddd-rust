@@ -1045,3 +1045,6 @@ condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
 - 2026-11-21: FORMAT 3 (ADR-0047 K0a, first part): `think` replaces `Release` (§ 2, § 7), `Observe.cause`, an operation's
   `safety`, `client`, `not_run` and `timeout` in place of `retry`, the profile's `route_timeout`, the header's channels
   and calls. The rules are unchanged until K0a's second part.
+- 2026-11-21: ADR-0047 K0a, second part: § 9 revised — writers await readers `Settled`; `order`, `duplicate`, `edge` and
+  `producer` join `key` and `deviation` as rules no deviation exempts; new rules `feasible`, `measure`, `cause`,
+  `until`, `sent`; the header's deadlines and the channel and call tables (`RULES_REVISION` 4).

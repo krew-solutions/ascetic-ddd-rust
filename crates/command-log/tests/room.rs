@@ -191,10 +191,10 @@ fn a_dry_run_counts_the_validator_s_runs() {
     let (spill, ids) = (dir.path().join("spill"), dir.path().join("ids"));
     let path = dir.path().join("plan.commitment");
     let units: [&dyn Unit; 1] = [&Devices(9)];
-    // 18 steps: 432 bytes of ids in runs of at least 48 bytes (half of four
-    // ids' memory): nine runs past a fan-in of two cascade, so 864.
+    // 18 steps: 450 bytes of ids in runs of at least 50 bytes (half of four
+    // ids' memory): nine runs past a fan-in of two cascade, so 900.
     let limits = |held: usize| Limits {
-        memory: held * 24,
+        memory: held * 25,
         spill: ids.clone(),
         kept: 100,
         fan_in: 2,
@@ -223,16 +223,16 @@ fn a_dry_run_counts_the_validator_s_runs() {
             &disk,
         )
     };
-    match run(4, MARGIN + 863) {
+    match run(4, MARGIN + 899) {
         Err(EngineError::Space {
             path: p, needed, ..
         }) => {
-            assert_eq!((p, needed), (ids.clone(), MARGIN + 864));
+            assert_eq!((p, needed), (ids.clone(), MARGIN + 900));
         }
         other => panic!("{:?}", other.map(|r| r.violations)),
     }
     assert!(!path.exists());
-    let report = run(4, MARGIN + 864).unwrap();
+    let report = run(4, MARGIN + 900).unwrap();
     assert!(report.violations.is_empty(), "{:?}", report.violations);
     assert!(path.exists());
     std::fs::remove_file(&path).unwrap();
@@ -265,7 +265,7 @@ fn a_dry_run_counts_the_validator_s_runs() {
     };
     let engine_alone = beside(18);
     assert!(engine_alone > MARGIN);
-    assert_eq!(beside(4), engine_alone + 864);
+    assert_eq!(beside(4), engine_alone + 900);
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -431,7 +431,7 @@ impl Disk for Script {
     }
 }
 
-/// Ten steps, their ids a run of two each (48 bytes) at 24 bytes of memory.
+/// Ten steps, their ids a run of two each (50 bytes) at 49 bytes of memory.
 fn ten() -> Vec<u8> {
     let records: Vec<Record> = (0..10)
         .map(|i| step(id("device", i, "seen", 0), i))
@@ -441,7 +441,7 @@ fn ten() -> Vec<u8> {
 
 fn validate_with(disk: &Script, dir: &Path) -> Result<(), ascetic_ddd_command_log::LogError> {
     let limits = Limits {
-        memory: 24,
+        memory: 49,
         spill: dir.to_owned(),
         kept: 10,
         fan_in: 8,
@@ -461,17 +461,17 @@ fn a_validation_out_of_room_stops_at_the_run() {
     let dir = tempfile::tempdir().unwrap();
     // Two runs, then the third's look: short.
     let short = Script {
-        free: std::sync::Mutex::new([u64::MAX, u64::MAX, MARGIN + 47].into()),
+        free: std::sync::Mutex::new([u64::MAX, u64::MAX, MARGIN + 49].into()),
     };
     match validate_with(&short, dir.path()) {
         Err(LogError::Space { needed, free, .. }) => {
-            assert_eq!((needed, free), (MARGIN + 48, MARGIN + 47))
+            assert_eq!((needed, free), (MARGIN + 50, MARGIN + 49))
         }
         other => panic!("{other:?}"),
     }
     assert!(leftover(dir.path()).is_empty());
     let just = Script {
-        free: std::sync::Mutex::new([u64::MAX, u64::MAX, MARGIN + 48].into()),
+        free: std::sync::Mutex::new([u64::MAX, u64::MAX, MARGIN + 50].into()),
     };
     validate_with(&just, dir.path()).unwrap();
 }

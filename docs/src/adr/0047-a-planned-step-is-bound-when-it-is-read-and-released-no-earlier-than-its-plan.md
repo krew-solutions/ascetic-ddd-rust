@@ -126,7 +126,7 @@ Final states: **Expected**, **Unexpected** (an answer the contract defines that 
 Every action has a deadline: an operation's `timeout` (required, below the stand's route timeout by more than J, the
 route timeout in the profile, so that one slow call cannot end either censored or as the gateway's 504 by
 microseconds); a channel's (the bus's `message.timeout.ms` at or below it); an observation's, from its `cause`'s
-intended start. The plan's own bound — every action ending at its deadline, the worst release along each chain — is
+intended start — an observation may be its own cause, a watch begun on its own, its deadline from its own start. The plan's own bound — every action ending at its deadline, the worst release along each chain — is
 computed by the validator, and a plan past what the machine holds is refused before T0, as decision 16's dry run is.
 Lines blocked behind censored roots are the system's: the run ends failed and names them, never void.
 
@@ -279,6 +279,27 @@ two-frame compressed golden regenerated; `vectors/format.py` checks it. The rule
 verdicts and peaks are those of FORMAT 2, the reference agrees, and the corpus digest is re-pinned under
 `RULES_REVISION` 3. The rules come in K0a's second part.
 
+**K0a, second part — FORMAT 3's rules** (2026-11-21, `RULES_REVISION` 4): new rules `feasible` (a step dependency's
+bound step plus think, and a barrier's latest member plus think, at or before the line's `at`), `measure` (a measure's
+`from` names a step of an earlier line, decided through the id runs: an id event carries a query flag and sorts after
+its line's ids, so that only an earlier line answers), `cause` (an observation awaits its cause or is its own),
+`until` (an observation of the bus has an `Equals` on a value rendered of its cause step or captured from it; the
+alternative of a stream position bounded by the cause waits for a host need), `sent` (a line that is not an
+observation and awaits a dependency as sent carries no measure or expectation); writers await readers `Settled`;
+`order`, `duplicate`, `edge`, `producer`, `key` and `deviation` are not deviable; the header's deadlines (an
+operation's timeout in (0, route timeout − jitter), channels and calls named once with a timeout) and the tables
+(a bus message's or a bus observation's channel, a host call's name). The reference decides each by definition; the
+corpus's base logs keep their verdicts (writers await readers `Settled`, a group's watch is caused by its latest writer
+within reach), and gains `order-deviated`, `think`, `weaken-reader`, `measure-dangling`, `cause-dropped` and
+`sent-measure`: 1,966 logs agree, 51 only on the cursor's clock.
+- **Executors:** twins for each new rule and for the premises' non-deviability; the out-of-order rate twin without
+  its deviation; the corpus differential; the corpus digest pinned under revision 4. Mutations, each alone, red:
+  `feasible` at its boundary; think ignored; a barrier's latest member ignored; writers back to `Sent`; `order`
+  deviable, in the validator and in the reference; a measure answered by its own line; no `cause`, `until` or `sent`
+  rule; a timeout at the route timeout; channels or host calls unchecked; the reference's writers on `Sent`; the
+  reference's `feasible` gone. `order` deviable was green until the twin of the premises and the `order-deviated`
+  mutant: no log the corpus made broke the order and deviated it.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -316,3 +337,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   failure-path heap, bunching, the verdict fold in K1, the fault matrix, hidden retries, void twins, the gateway's
   refill and the request id at the first host run).
 - 2026-11-21: K0a's first part built (§ Measured): FORMAT 3's model.
+- 2026-11-21: K0a's second part built (§ Measured): FORMAT 3's rules, `RULES_REVISION` 4; an observation may be its
+  own cause; `until` applies to observations of the bus.

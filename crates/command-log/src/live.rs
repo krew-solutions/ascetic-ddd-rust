@@ -28,8 +28,10 @@ use crate::validate::{Host, Limits, Report, Rule, spill_need, validate_on};
 
 /// Bumped when a rule's meaning changes, beside its name: a commitment from
 /// another validator is stale (2: C5 added `rate` and `key`; 3: decision 16
-/// measured W behind the read cursor and stopped `deviation` exempting itself).
-pub const RULES_REVISION: u32 = 3;
+/// measured W behind the read cursor and stopped `deviation` exempting itself;
+/// 4: ADR-0047's FORMAT 3 — `feasible`, `measure`, `cause`, `until`, `sent`,
+/// writers awaiting readers settled, the scheduler's premises not deviable).
+pub const RULES_REVISION: u32 = 4;
 
 /// The validator's identity: its revision and its rules' names.
 pub fn validator() -> String {

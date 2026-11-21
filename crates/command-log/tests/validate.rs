@@ -4,7 +4,7 @@
 mod fixture;
 
 use ascetic_ddd_command_log::record::{
-    Codec, Dep, Form, Hole, Of, On, Record, Rendering, StepId, Value,
+    Action, Codec, Dep, Form, Hole, Of, On, Record, Rendering, StepId, Value,
 };
 use ascetic_ddd_command_log::validate::{Host, NoHost, Rule};
 use fixture::*;
@@ -189,9 +189,24 @@ fn writers() {
         &[
             w0.clone(),
             r0.clone(),
-            after(w1.clone(), &r0.step, On::Sent),
+            after(w1.clone(), &r0.step, On::Settled),
         ],
         &[w0.clone(), r0.clone(), w1.clone()],
+    );
+    // A reader's start is not its end: the server may see the next writer
+    // first (ADR-0047 decision 5).
+    twins(
+        Rule::Writers,
+        &[
+            w0.clone(),
+            r0.clone(),
+            after(w1.clone(), &r0.step, On::Settled),
+        ],
+        &[
+            w0.clone(),
+            r0.clone(),
+            after(w1.clone(), &r0.step, On::Sent),
+        ],
     );
     // The previous writer's start is not its end.
     twins(
@@ -349,10 +364,11 @@ fn deviation() {
         &[first.clone(), deviating(gap, "gap")],
         &[first.clone(), deviating(kept, "gaps")],
     );
-    // A duplicate on purpose, decided at the end, is exempt too.
+    // The scheduler's premises are not deviable (ADR-0047 decision 13): a
+    // duplicate on purpose is a duplicate, and its deviation unused.
     let a = id("device", 1, "seen", 0);
     let report = run(&[step(a.clone(), 10), deviating(step(a, 20), "duplicate")]);
-    assert!(report.violations.is_empty(), "{:?}", report.violations);
+    assert_eq!(rules(&report), vec![Rule::Duplicate, Rule::Deviation]);
 }
 
 #[test]
@@ -703,20 +719,16 @@ fn w_is_behind_the_read_cursor() {
         id("device", 2, "seen", 0),
         id("device", 3, "seen", 0),
     );
-    let y_after = |at| deviating(after(step(y.clone(), at), &s, On::Expected), "order");
+    // Y is planned behind X, which breaks the order — and no deviation
+    // excuses it (ADR-0047 decision 13) — but the edge is decided by the
+    // cursor all the same.
+    let y_after = |at| after(step(y.clone(), at), &s, On::Expected);
     // X within W of S: the cursor at X leaves S in reach.
     let near = run(&[step(s.clone(), 50), step(x.clone(), 50 + W), y_after(150)]);
-    assert!(near.violations.is_empty(), "{:?}", near.violations);
+    assert_eq!(pairs(&near), vec![(4, Rule::Order)]);
     // X past W of S: S is behind the cursor by more than W.
     let ahead = run(&[step(s.clone(), 50), step(x.clone(), 51 + W), y_after(150)]);
-    assert_eq!(pairs(&ahead), vec![(4, Rule::Edge)]);
-    // Undeclared, the order is broken too.
-    let undeclared = run(&[
-        step(s.clone(), 50),
-        step(x.clone(), 51 + W),
-        after(step(y.clone(), 150), &s, On::Expected),
-    ]);
-    assert_eq!(rules(&undeclared), vec![Rule::Order, Rule::Edge]);
+    assert_eq!(pairs(&ahead), vec![(4, Rule::Order), (4, Rule::Edge)]);
 }
 
 /// A step dead on arrival — more than W behind the cursor — answers for no
@@ -760,10 +772,9 @@ fn a_step_dead_on_arrival_answers_for_nothing() {
 fn the_window_holds_only_what_is_within_w() {
     let mut records = vec![step(id("device", 0, "seen", 0), 100_000)];
     // Ten steps a little behind it, each within W on arrival; the first breaks
-    // the order, and says so.
+    // the order.
     for i in 1..=10u64 {
-        let r = step(id("device", i, "seen", 0), 99_000 + i * 10);
-        records.push(if i == 1 { deviating(r, "order") } else { r });
+        records.push(step(id("device", i, "seen", 0), 99_000 + i * 10));
     }
     // The cursor moves on, the line ahead still within W of it: the ten fall
     // more than W behind it while twenty more arrive.
@@ -771,7 +782,8 @@ fn the_window_holds_only_what_is_within_w() {
         records.push(step(id("device", 100 + i, "seen", 0), 100_500 + i));
     }
     let report = run(&records);
-    assert!(report.violations.is_empty(), "{:?}", report.violations);
+    // The first of the ten breaks the order, and no deviation excuses it.
+    assert_eq!(pairs(&report), vec![(3, Rule::Order)]);
     // The line ahead and the twenty; the ten would be held behind it by an
     // eviction in line order.
     assert_eq!(report.peaks.completions, 21);
@@ -847,10 +859,16 @@ fn streams_and_slots_outlive_the_window() {
 #[test]
 fn the_rules_meaning_is_pinned_to_its_revision() {
     use sha2::{Digest, Sha256};
-    const MEANINGS: &[(u32, &str)] = &[(
-        3,
-        "a0f4ebb2d85eb119d5b36d57c8efd5924b264d1236b7fbbbab118dc6f7389fdf",
-    )];
+    const MEANINGS: &[(u32, &str)] = &[
+        (
+            3,
+            "a0f4ebb2d85eb119d5b36d57c8efd5924b264d1236b7fbbbab118dc6f7389fdf",
+        ),
+        (
+            4,
+            "9dde73ac90f0daedccdf328af0d6e13cceb6179ca242df5e6e76b59def9c11bb",
+        ),
+    ];
     let mut digest = Sha256::new();
     for line in fixture::corpus::lines() {
         digest.update(line.as_bytes());
@@ -1059,4 +1077,201 @@ fn a_hot_part_past_its_limit_fails_by_name() {
             "{part} at its limit"
         );
     }
+}
+
+/// ADR-0047 decision 3: a step is planned no earlier than its dependencies and
+/// its think allow — a step dependency and a barrier's latest member alike.
+#[test]
+fn feasible() {
+    let (a, b) = (id("device", 1, "seen", 0), id("device", 2, "seen", 0));
+    let thinking = |at: u64, think: u64| Record {
+        think,
+        ..after(step(b.clone(), at), &a, On::Expected)
+    };
+    twins(
+        Rule::Feasible,
+        &[step(a.clone(), 10), thinking(60, 50)],
+        &[step(a.clone(), 10), thinking(59, 50)],
+    );
+    let barrier = |at: u64, think: u64| Record {
+        think,
+        after: vec![Dep::Each {
+            kind: "device".into(),
+            scope: vec![7],
+            label: "seen".into(),
+            n: 0,
+            on: On::Settled,
+            count: None,
+        }],
+        ..step(id("device", 9, "report", 0), at)
+    };
+    let members = [step(a.clone(), 10), step(b.clone(), 30)];
+    let with = |r: Record| members.iter().cloned().chain([r]).collect::<Vec<_>>();
+    // The latest member, at 30, not the first.
+    twins(
+        Rule::Feasible,
+        &with(barrier(50, 20)),
+        &with(barrier(49, 20)),
+    );
+}
+
+/// A measure is from a step an earlier line has, however far back.
+#[test]
+fn measure() {
+    let (a, b) = (id("device", 1, "seen", 0), id("device", 2, "seen", 0));
+    let measured = |from: &StepId| Record {
+        measure: vec![ascetic_ddd_command_log::record::Measure {
+            metric: "m".into(),
+            from: from.clone(),
+        }],
+        ..step(b.clone(), 10 * W)
+    };
+    // From a step more than W back: still a measure's start.
+    twins(
+        Rule::Measure,
+        &[step(a.clone(), 10), measured(&a)],
+        &[step(a.clone(), 10), measured(&b)],
+    );
+}
+
+/// An observation awaits its cause, or is its own; one of the bus tells its
+/// cause's fact from another's.
+#[test]
+fn cause_and_until() {
+    use ascetic_ddd_command_log::record::{Of, Predicate, Test};
+    let (a, b) = (
+        id("device", 1, "managed", 0),
+        id("device", 1, "reported", 0),
+    );
+    let watched = |cause: &StepId, awaited: bool| {
+        let r = step(b.clone(), 20);
+        let r = if awaited { after(r, &a, On::Sent) } else { r };
+        let mut r = observe(r, 10, 100);
+        if let Action::Observe(o) = &mut r.action {
+            o.cause = cause.clone();
+            o.until = vec![Predicate {
+                pointer: "/cause".into(),
+                test: Test::Equals(Value::Hole(Hole::Rendered {
+                    of: Of::Step(cause.clone()),
+                    role: "id".into(),
+                    rendering: Rendering::UuidText,
+                })),
+            }];
+        }
+        r
+    };
+    twins(
+        Rule::Cause,
+        &[step(a.clone(), 10), watched(&a, true)],
+        &[step(a.clone(), 10), watched(&a, false)],
+    );
+    // Its own cause needs no dependency, but its until must name it.
+    let own_until = watched(&b, false);
+    let mut own = own_until.clone();
+    if let Action::Observe(o) = &mut own.action {
+        o.until = vec![];
+    }
+    twins(Rule::Until, &[own_until], &[own]);
+    // An id that recurs across a subject's lives does not tell its cause.
+    let mut by_subject = watched(&a, true);
+    if let Action::Observe(o) = &mut by_subject.action {
+        o.until = vec![Predicate {
+            pointer: "/device".into(),
+            test: Test::Equals(Value::Hole(Hole::Rendered {
+                of: Of::Subject(a.subject.clone()),
+                role: "id".into(),
+                rendering: Rendering::UuidText,
+            })),
+        }];
+    }
+    twins(
+        Rule::Until,
+        &[step(a.clone(), 10), watched(&a, true)],
+        &[step(a.clone(), 10), by_subject],
+    );
+}
+
+/// A step that awaits a dependency only sent carries no measure and no
+/// expectation; an observation may.
+#[test]
+fn sent() {
+    use ascetic_ddd_command_log::record::Outcome;
+    let (a, b) = (id("device", 1, "seen", 0), id("device", 2, "seen", 0));
+    let expecting = |on: On| Record {
+        expect: vec![Outcome::Delivered],
+        ..after(step(b.clone(), 20), &a, on)
+    };
+    twins(
+        Rule::Sent,
+        &[step(a.clone(), 10), expecting(On::Settled)],
+        &[step(a.clone(), 10), expecting(On::Sent)],
+    );
+    let polled = observe(after(step(b.clone(), 20), &a, On::Sent), 10, 100);
+    let report = run(&[
+        step(a.clone(), 10),
+        Record {
+            expect: vec![Outcome::Observed],
+            ..polled
+        },
+    ]);
+    assert!(report.violations.is_empty(), "{:?}", report.violations);
+}
+
+/// Deadlines: an operation's below the route timeout by more than the
+/// jitter; channels and host calls in their tables, with a timeout.
+#[test]
+fn deadlines_and_tables() {
+    let mut h = header();
+    h.operations[0].timeout = ROUTE_TIMEOUT;
+    let report = run_with(h, &[step(id("device", 1, "seen", 0), 10)], &NoHost, 1_000);
+    assert_eq!(pairs(&report), vec![(1, Rule::Header)]);
+    let mut h = header();
+    h.operations[0].timeout = ROUTE_TIMEOUT - 1;
+    let report = run_with(h, &[step(id("device", 1, "seen", 0), 10)], &NoHost, 1_000);
+    assert!(report.violations.is_empty(), "{:?}", report.violations);
+    let mut h = header();
+    h.channels[0].timeout = 0;
+    let report = run_with(h, &[], &NoHost, 1_000);
+    assert_eq!(pairs(&report), vec![(1, Rule::Header)]);
+    let unknown = Record {
+        action: Action::Host(ascetic_ddd_command_log::record::HostCall {
+            op: "unlisted".into(),
+            args: ascetic_ddd_command_log::record::Payload {
+                codec: Codec::Json,
+                bytes: b"{}".to_vec(),
+                holes: vec![],
+            },
+        }),
+        ..step(id("device", 1, "seen", 0), 10)
+    };
+    assert_eq!(pairs(&run(&[unknown])), vec![(2, Rule::Operation)]);
+    let mut off = message(step(id("device", 1, "fact", 0), 10), "lifecycle", 1);
+    if let Action::Bus(b) = &mut off.action {
+        b.channel = "unlisted".into();
+    }
+    assert_eq!(pairs(&run(&[off])), vec![(2, Rule::Operation)]);
+}
+
+/// The scheduler's premises are not deviable (ADR-0047 decision 13): a line
+/// out of order, an edge out of reach, a producer not awaited stay broken
+/// under a deviation naming them, and the deviation is unused.
+#[test]
+fn the_premises_are_not_deviable() {
+    let (a, b) = (id("device", 1, "seen", 0), id("device", 2, "seen", 0));
+    let back = run(&[step(b.clone(), 20), deviating(step(a.clone(), 10), "order")]);
+    assert_eq!(pairs(&back), vec![(3, Rule::Order), (3, Rule::Deviation)]);
+    let far = run(&[
+        step(a.clone(), 10),
+        deviating(after(step(b.clone(), 20 + W), &a, On::Expected), "edge"),
+    ]);
+    assert_eq!(pairs(&far), vec![(3, Rule::Edge), (3, Rule::Deviation)]);
+    let w = writer(1, 0, 10);
+    let unawaited = run(&[
+        w.clone(),
+        deviating(reader(1, 0, 20, &w.step, On::Sent), "producer"),
+    ]);
+    assert_eq!(
+        pairs(&unawaited),
+        vec![(3, Rule::Producer), (3, Rule::Deviation)]
+    );
 }

@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 
 use super::*;
 use ascetic_ddd_command_log::record::{
-    Action, Caller, Codec, Dep, Form, Header, Hole, Of, On, Record, Rendering, StepId, Subject,
-    Value,
+    Action, Caller, Codec, Dep, Form, Header, Hole, Measure, Of, On, Record, Rendering, StepId,
+    Subject, Value,
 };
 use ascetic_ddd_command_log::validate::NoHost;
 use ascetic_ddd_faker::{Key, Seed};
@@ -63,7 +63,7 @@ fn base(k: &Key) -> Vec<Record> {
                 if let Some((w, readers)) = writers.get(&index) {
                     r = after(r, w, On::Settled);
                     for reader in readers {
-                        r = after(r, reader, On::Sent);
+                        r = after(r, reader, On::Settled);
                     }
                 }
                 if draw(&kj, "capture", 2) == 0 {
@@ -94,6 +94,25 @@ fn base(k: &Key) -> Vec<Record> {
             "watched" => {
                 r = polling(index, step_id.n, at, 300, 1_500);
                 r.step = step_id.clone();
+                // Caused by the group's latest writer, when it has one within
+                // reach; else a watch of its own.
+                let reach = |w: &StepId| {
+                    records
+                        .iter()
+                        .rev()
+                        .find(|e| &e.step == w)
+                        .is_some_and(|e| e.at < at && at - e.at <= W)
+                };
+                let cause = match writers.get(&index) {
+                    Some((w, _)) if reach(w) => {
+                        r = after(r, w, On::Sent);
+                        w.clone()
+                    }
+                    _ => step_id.clone(),
+                };
+                if let Action::Observe(o) = &mut r.action {
+                    o.cause = cause;
+                }
             }
             "report" => r.after.push(Dep::Each {
                 kind: "device".into(),
@@ -319,6 +338,99 @@ fn mutant(records: &[Record], which: &str, k: &Key) -> Option<Vec<Record>> {
             let rule = names[draw(k, "rule", names.len() as u64) as usize];
             m[i] = deviating(m[i].clone(), rule);
         }
+        // A line planned before the one above it, the order deviated: still
+        // broken, the deviation unused (ADR-0047 decision 13).
+        "order-deviated" => {
+            let i = pick(
+                "i",
+                &all[1..]
+                    .iter()
+                    .copied()
+                    .filter(|&i| m[i - 1].at > 0)
+                    .collect::<Vec<_>>(),
+            )?;
+            m[i].at = m[i - 1].at - 1;
+            m[i] = deviating(m[i].clone(), "order");
+        }
+        // A think past what the plan's times allow (ADR-0047 decision 3).
+        "think" => {
+            let i = pick(
+                "i",
+                &all.iter()
+                    .copied()
+                    .filter(|&i| m[i].after.iter().any(|d| matches!(d, Dep::Step { .. })))
+                    .collect::<Vec<_>>(),
+            )?;
+            m[i].think = W * 2;
+        }
+        // A writer that awaits a reader only sent.
+        "weaken-reader" => {
+            let candidates: Vec<(usize, usize)> = m
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.step.label == "update")
+                .flat_map(|(i, r)| {
+                    r.after
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, d)| {
+                            matches!(d, Dep::Step { step, on: On::Settled } if step.label == "read")
+                        })
+                        .map(move |(j, _)| (i, j))
+                })
+                .collect();
+            let (i, j) = *candidates.get(draw(k, "i", candidates.len() as u64) as usize)?;
+            if let Dep::Step { on, .. } = &mut m[i].after[j] {
+                *on = On::Sent;
+            }
+        }
+        // A measure from a step no earlier line has: its own.
+        "measure-dangling" => {
+            let i = pick("i", &all)?;
+            let from = m[i].step.clone();
+            m[i].measure.push(Measure {
+                metric: "m".into(),
+                from,
+            });
+        }
+        // An observation whose cause it no longer awaits.
+        "cause-dropped" => {
+            let caused: Vec<usize> = all
+                .iter()
+                .copied()
+                .filter(|&i| matches!(&m[i].action, Action::Observe(o) if o.cause != m[i].step))
+                .collect();
+            let i = pick("i", &caused)?;
+            let cause = match &m[i].action {
+                Action::Observe(o) => o.cause.clone(),
+                _ => return None,
+            };
+            m[i].after
+                .retain(|d| !matches!(d, Dep::Step { step, .. } if step == &cause));
+        }
+        // A measure on a step that awaits a dependency only sent.
+        "sent-measure" => {
+            let sent: Vec<usize> = all
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    !matches!(m[i].action, Action::Observe(_))
+                        && m[i]
+                            .after
+                            .iter()
+                            .any(|d| matches!(d, Dep::Step { on: On::Sent, .. }))
+                })
+                .collect();
+            let i = pick("i", &sent)?;
+            let from = m[i].after.iter().find_map(|d| match d {
+                Dep::Step { step, on: On::Sent } => Some(step.clone()),
+                _ => None,
+            })?;
+            m[i].measure.push(Measure {
+                metric: "m".into(),
+                from,
+            });
+        }
         "squeeze" => {
             let calls: Vec<usize> = all[1..]
                 .iter()
@@ -400,6 +512,12 @@ pub fn logs() -> Vec<(String, Vec<Record>)> {
         "profile",
         "deviation",
         "squeeze",
+        "order-deviated",
+        "think",
+        "weaken-reader",
+        "measure-dangling",
+        "cause-dropped",
+        "sent-measure",
         "source-past",
         "every-halved",
         "key-time",
