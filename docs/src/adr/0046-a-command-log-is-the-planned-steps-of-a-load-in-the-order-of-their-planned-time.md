@@ -476,8 +476,9 @@ verdict differs between the two clocks — above zero, or V2 does not execute th
 runs, the run machinery generalised from `Ids`, duplicates fed straight into the report, room per run type; V2 at run
 budgets of 1 and 2 and a fan-in of 2, a long clean stream through small runs, every run type cut at every byte; then
 M10 at 10⁸. **C9:** the window, order and retained by digest, the early refusal; a counting allocator asserting the
-peak heap flat across eight times the subjects at one planned rate; then M10: a dense 10⁸, and 10⁹ at M9's planned
-rate on both paths. **A window budget with edges deferred to the id merge** waits for a host plan whose W times rate
+peak heap flat across eight times the subjects at one planned rate; then M10: a dense 10⁸ on both paths (10⁹ was
+dropped for this laptop by the owner on 2026-11-21: it would measure only this machine's throughput, some 14 hours
+persisted and 17 more without a log; the stand's scale is measured on the stand). **A window budget with edges deferred to the id merge** waits for a host plan whose W times rate
 the run's machine holds and the validator's does not.
 
 M10 records, beside wall time by phase and peak RSS: the planned rate and W, `Peaks.completions` and the retained
@@ -927,6 +928,19 @@ available at the start, the process never swapping):
   scenario's hot parts are too small to show — and are argued: the end merges read through `memory`, the hot parts
   are what the pass needed before them.
 
+**M10 after C9** (2026-11-21, as M10 after C8):
+
+| Path | Generation | Validation | Peak RSS | Before C9 |
+|---|---|---|---|---|
+| persisted | 1,684 s | 2,480 s, 40.3·10³ steps/s | 1.77 GB | 1 h 27 min, 5.45 GB |
+| dry, then live | 291 s emitting, 3,191 s in all, then a live run of 1,215 s | inside the dry run | 2.19 GB | 1 h 39 min, 5.89 GB |
+
+  - In all, 1 h 09 min persisted and 1 h 13 min without a log. The window's 8.34·10⁶ completions take at most about
+    150 bytes an entry — the resident memory less the events' 256 MiB and the end merges' read buffers — a third of
+    what full step ids took; without the ids' clones validation runs 40 % faster.
+  - The decision's bound holds on this laptop for M9's scenario at 10⁸: a window of the plan's own size beside a
+    generation, under the 6 GiB cap with room. A window budget (S4) stays on its trigger.
+
 Owed:
 - **Stage 3's dependency machine against the edge rule** (decision 16): whether the scheduler binds a dependency when
   it reads a line or when it releases it, with read-ahead, decides what the cursor must be; both oracles derive the
@@ -934,17 +948,7 @@ Owed:
 - **One SHA-256 a pass** (M9, decision 16's review): `commit_file` hashes a log twice on the validator's thread (the
   tally and the reader), the dry run twice on the generator's (the writer and the tally) — about 4.7 µs a step each
   here, 1.3 h at 10⁹ — beside the hashing thread M9 left owed.
-- **M9's rest** (C6): the host scenario's bytes a step and its ratio at levels 1 and 3 — the host has no scenario yet;
-  validation at 10⁸ on both paths and 10⁹ persisted, after decision 16.
-- **Decision 16's slices** C7, C8, C9 and their M10 (§ Decision 16).
-- **10⁹ steps** (M7): a log of 450 B a step and a peak of twice it do not fit a laptop. The owner's direction
-  (2026-11-20): the persisted log is compressed with zstd, its digest over the canonical lines, not the compressed
-  bytes (M3); and, as an alternative, a generation streamed straight into the run with no log (decision 1 allows it;
-  the run records the digest). Owed, under the gate: the slice that builds both, with how the streamed path is
-  validated — a dry generation first and a live one whose digest must equal it, or validation as the steps go,
-  stopping at the first violation (duplicates and unused deviations are decided only at the end). The measurement to
-  bring: bytes a step of the host's real scenarios, and a compressed pass's throughput.
-- SHA-256 throughput on the laptop (no SHA-NI) for 3 GB.
+- **M9's rest** (C6): the host scenario's bytes a step and its ratio at levels 1 and 3 — the host has no scenario yet.
 
 ## Owed
 
@@ -1032,3 +1036,6 @@ condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
 - 2026-11-21: Slice C8 built (§ Measured): streams decided by sorted runs, `Limits::memory` in bytes.
 - 2026-11-21: M10 measured after C8 at 10⁸ on both paths (§ Measured); slice C9 built: the window by digest, the
   hot parts' limit and the dry run's refusal before a line.
+- 2026-11-21: M10 measured after C9 at 10⁸ on both paths (§ Measured): decision 16 closed but for S4, on its trigger.
+  The owner dropped 10⁹ for this laptop — it would measure only its throughput; 10⁸ stays its scale measurement and
+  the stand's scale is measured on the stand. The § Measured owed list cleared of what C6 and M9 delivered.

@@ -25,6 +25,8 @@ const DAY: u64 = 86_400_000_000;
 struct Devices {
     first: u64,
     count: u64,
+    /// The days the managed steps are spread over.
+    days: u64,
 }
 
 impl Unit for Devices {
@@ -34,7 +36,7 @@ impl Unit for Devices {
     ) -> Result<(), EngineError> {
         for d in self.first..self.first + self.count {
             let key = Key::root(Seed(7)).child("device").at(d);
-            let at = key.child("managed").unit().raw() % DAY;
+            let at = key.child("managed").unit().raw() % (DAY * self.days);
             let managed = step(id("device", d, "managed", 0), at);
             let mut before = managed.step.clone();
             out(managed)?;
@@ -66,6 +68,7 @@ fn m7_ten_million_steps() {
         .map(|i| Devices {
             first: i * 2_500,
             count: 2_500,
+            days: 1,
         })
         .collect();
     let units: Vec<&dyn Unit> = units.iter().map(|u| u as &dyn Unit).collect();
@@ -134,6 +137,15 @@ mod m9 {
         base
     }
 
+    /// The days the plan spans (`M9_DAYS`, 1 by default): the planned rate
+    /// is the steps over them.
+    fn m9_days() -> u64 {
+        std::env::var("M9_DAYS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1)
+    }
+
     fn m9_steps() -> u64 {
         std::env::var("M9_STEPS")
             .ok()
@@ -148,6 +160,7 @@ mod m9 {
             .map(|i| Devices {
                 first: i * 2_500,
                 count: 2_500.min(devices - i * 2_500),
+                days: m9_days(),
             })
             .collect()
     }
@@ -207,7 +220,7 @@ mod m9 {
         let config = Config {
             threads: 4,
             budget: 64 << 20,
-            cell: DAY / 64,
+            cell: DAY * m9_days() / 64,
             cells: 128,
             spill,
             fan_in: 0,
