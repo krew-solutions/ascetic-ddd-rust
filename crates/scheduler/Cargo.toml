@@ -1,0 +1,26 @@
+[package]
+name = "ascetic-ddd-scheduler"
+description = "The scheduler's pure machine: a command log's steps bound when read, released no earlier than their plan, judged and journaled — no clock, no IO."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+# The machine's dependencies are an allowlist (ADR-0047 decision 1): the lint
+# gate names std paths only, so a crate with a clock of its own would pass it.
+# `tests/allowlist.rs` holds this list.
+[dependencies]
+ascetic-ddd-command-log = { path = "../command-log" }
+
+[dev-dependencies]
+# The command log's test fixture and corpus, shared by path.
+ascetic-ddd-faker = { path = "../faker" }
+proptest = "1.11.0"
+serde_json = { workspace = true }
+tempfile = "3"

@@ -9,8 +9,11 @@ sent, judged and recorded, what voids a run. Nothing is built yet.
 To be built in slices, each a commit of its own:
 - **K0a** (`crates/command-log`, FORMAT 3, `RULES_REVISION` 4): the command log's changes this decision needs
   (decision 13).
-- **K1** (`crates/scheduler`, pure): the machine, the reference scheduler, the stateful server model, the TLA+ model,
-  the verdict fold and the journal's schema.
+- **K1** (`crates/scheduler`, pure), in five parts: **K1a** the machine and `sim`; **K1b** the reference scheduler by
+  definition, the differential and the corpus's coverage counters; **K1c** the stateful server model; **K1d** the TLA+
+  model and trace validation of `sim`'s journals; **K1e** the verdict fold, the journal's schema and golden journals,
+  the plan's own bound with peaks and a peak rate in the commitment, and the heap executors. (The plan's bound, the
+  commitment's peaks and the reference's bound lines were first listed in K0a; they moved where their consumer is.)
 - **K2** (`crates/load-run`, the shell): REST, the clock, the reader, the journal writer, the gates.
 - **The first host run:** REST only, on the compose stand, `sources = 1` — a correctness run.
 - **K3** facts and the bus; **K4** shaping and the emulated client's retries; **K5** the report.
@@ -300,6 +303,26 @@ within reach), and gains `order-deviated`, `think`, `weaken-reader`, `measure-da
   reference's `feasible` gone. `order` deviable was green until the twin of the premises and the `order-deviated`
   mutant: no log the corpus made broke the order and deviated it.
 
+**K1a — the machine** (2026-11-21): `command-log` gains `window` — the binding rule as a public module, `Window<V>`
+evicted by the read cursor, dead on arrival not kept, and `digest` — and the validator binds through it (its corpus
+digest unchanged); `validate::holes` is public. `crates/scheduler`: `machine::Machine`, stepped by stamped inputs (a
+line read, an attempt's bytes left, an attempt ended with its judgement, a wake) and answering with dispatches, wakes,
+how far to read, and each step's journal entry (its end, read, ready, intended, released, dispatched, sent, ended,
+attempts, critical dependency, bound lines, fault); `order::Ordered`, inputs by (stamp, line, kind) up to a
+watermark; `sim::run`, the machine in virtual time against a script. A step with no dependency is ready from the start
+(`ready = 0`), so that a late reader's gap is the reader's and `intended` stays its plan — a defect of the first draft,
+found by the late-reader twin before the commit. Bus observations are dispatched like calls until K3.
+- **Executors** (`tests/machine.rs`, `tests/allowlist.rs`): under zero latency every clean corpus log runs on its plan
+  (`intended = at`, readers of a writer that captured nothing skipped for it); bindings, critical dependencies,
+  intended instants and ends equal across L ∈ {0, W/2, ∞} on the clean corpus under keyed latencies, every step sent at
+  its release and never before it is read; the strengths; a barrier by prefix; a reader's value from its producer, a
+  stale read on purpose taking its own producer's; retries by safety; the backstop a fault; inputs of one instant in
+  one order; a line read late released when read; the crate's dependencies the command log alone. Mutations, each
+  alone, red: release by `ready + think` alone, or by `at` alone; released before read (green until the late-reader
+  twin); `Sent` met only at the end; a skip propagating through `Sent`; a barrier's prefix past an unmet member; the
+  value from the slot's latest; a refusal resent though never; an unknown resent though not idempotent; no fault at the
+  backstop; ties by arrival.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -339,3 +362,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-21: K0a's first part built (§ Measured): FORMAT 3's model.
 - 2026-11-21: K0a's second part built (§ Measured): FORMAT 3's rules, `RULES_REVISION` 4; an observation may be its
   own cause; `until` applies to observations of the bus.
+- 2026-11-21: K1 cut into K1a–K1e; K1a built (§ Measured): the window as a module, the machine, the ordering buffer and
+  `sim`.

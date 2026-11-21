@@ -90,3 +90,9 @@ window is measured and evicted exactly. Step ids and stream messages go to
 sorted runs past `Limits::memory` and are decided at the end; the window,
 keyed by digests, holds what a run would hold, and every hot part is held to
 `Limits::hot`, past which the pass fails by name rather than grow.
+
+## The binding rule
+
+`window::Window` is the rule by which a dependency names an earlier step,
+decided when its line is read: the validator checks a log by it, and the
+scheduler binds by it.

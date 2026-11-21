@@ -201,6 +201,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ascetic-ddd-scheduler"
+version = "0.1.0"
+dependencies = [
+ "ascetic-ddd-command-log",
+ "ascetic-ddd-faker",
+ "proptest",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "ascetic-ddd-session"
 version = "0.1.0"
 dependencies = [

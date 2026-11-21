@@ -20,6 +20,7 @@ pub mod sample;
 mod spill;
 pub mod template;
 pub mod validate;
+pub mod window;
 mod wire;
 
 pub use crate::log::{

@@ -330,10 +330,9 @@ fn predecessors(r: &Record) -> impl Iterator<Item = &StepId> {
     })
 }
 
-/// A step id's digest in the validator's runs.
+/// A step id's digest in the validator's runs and window.
 fn id_digest(step: &StepId) -> Result<[u8; 16], LogError> {
-    let bytes = serde_json::to_vec(step).map_err(|e| LogError::Encode(e.to_string()))?;
-    Ok(crate::runs::digest(&bytes))
+    crate::window::digest(step)
 }
 
 /// A step id seen, for uniqueness, or a measure's `from` asked for: its
@@ -470,7 +469,7 @@ fn awaits(record: &Record, step: &StepId, on: On) -> bool {
 }
 
 /// Every hole a record holds, in its values and its payloads' spans.
-pub(crate) fn holes(record: &Record) -> Vec<&Hole> {
+pub fn holes(record: &Record) -> Vec<&Hole> {
     fn value<'a>(v: &'a Value, out: &mut Vec<&'a Hole>) {
         if let Value::Hole(h) = v {
             out.push(h);
@@ -573,13 +572,8 @@ struct Pass<'h, H: Host> {
     kept: usize,
     report: Report,
     previous: Option<(u64, StepId)>,
-    /// The steps within W behind the cursor, by their ids' digests.
-    window: BTreeMap<[u8; 16], u64>,
-    /// The window's steps by planned time: evicted exactly, whatever the
-    /// lines' order.
-    order: BTreeSet<(u64, [u8; 16])>,
-    /// The retained steps, by their ids' digests.
-    retained: BTreeMap<[u8; 16], u64>,
+    /// The steps a later line may bind (ADR-0047 decision 2).
+    window: crate::window::Window<()>,
     /// [`Limits::hot`].
     hot: u64,
     /// A barrier key's members planned so far, and the latest `at` of them.
@@ -991,10 +985,7 @@ impl<H: Host> Pass<'_, H> {
     /// naming the part, rather than grow until the machine kills it.
     fn within(&self, line: u64) -> Result<(), LogError> {
         let parts = [
-            (
-                "completions",
-                self.window.len().saturating_add(self.retained.len()),
-            ),
+            ("completions", self.window.len()),
             ("captures", self.slots.len()),
             ("barrier counts", self.barriers.len()),
             ("buckets", self.buckets.len()),
@@ -1031,11 +1022,7 @@ impl<H: Host> Pass<'_, H> {
                     // in the window is within W of it.
                     let at_l = r.at;
                     let digest = id_digest(step)?;
-                    let found = self
-                        .retained
-                        .get(&digest)
-                        .or_else(|| self.window.get(&digest))
-                        .copied();
+                    let found = self.window.get(&digest).map(|e| e.0);
                     let think = r.think;
                     match found {
                         Some(at) if at >= at_l => self.violate(line, Rule::Edge, || {
@@ -1441,16 +1428,7 @@ impl<H: Host> Pass<'_, H> {
     /// cursor never going back. A step id kept again later stays.
     fn evict(&mut self) {
         let (w, c) = (self.header.window, self.cursor);
-        while let Some((planned, _)) = self.order.first() {
-            if c.saturating_sub(*planned) <= w {
-                break;
-            }
-            if let Some((planned, step)) = self.order.pop_first()
-                && self.window.get(&step) == Some(&planned)
-            {
-                self.window.remove(&step);
-            }
-        }
+        self.window.read(c);
         while let Some((written, _)) = self.live_order.first() {
             if c.saturating_sub(*written) <= w {
                 break;
@@ -1466,17 +1444,9 @@ impl<H: Host> Pass<'_, H> {
     /// The step, kept for later dependencies by its id's digest; the barrier
     /// counts.
     fn keep(&mut self, r: &Record, digest: [u8; 16]) {
-        if self.header.retained.contains(&r.step.label) {
-            self.retained.insert(digest, r.at);
-        } else if self.cursor.saturating_sub(r.at) > self.header.window {
-            // Dead on arrival: no later edge may accept it, and an older
-            // occurrence must not answer for it.
-            self.window.remove(&digest);
-        } else {
-            self.window.insert(digest, r.at);
-            self.order.insert((r.at, digest));
-        }
-        let held = (self.window.len() as u64).saturating_add(self.retained.len() as u64);
+        let retained = self.header.retained.contains(&r.step.label);
+        self.window.keep(digest, r.at, retained, ());
+        let held = self.window.len() as u64;
         self.report.peaks.completions = self.report.peaks.completions.max(held);
         let s = &r.step;
         let held = self
@@ -1495,9 +1465,7 @@ impl<H: Host> Pass<'_, H> {
         // The polls still due arrive before deviations are judged.
         self.drain(u64::MAX);
         // The hot parts go before the runs are read back: their memory reads.
-        self.window = BTreeMap::new();
-        self.order = BTreeSet::new();
-        self.retained = BTreeMap::new();
+        self.window = crate::window::Window::new(self.header.window);
         self.barriers = BTreeMap::new();
         self.slots = BTreeMap::new();
         self.live = BTreeMap::new();
@@ -1581,9 +1549,7 @@ pub fn validate_on<R: BufRead>(
         kept: limits.kept,
         report: Report::default(),
         previous: None,
-        window: BTreeMap::new(),
-        order: BTreeSet::new(),
-        retained: BTreeMap::new(),
+        window: crate::window::Window::new(reader.header().window),
         barriers: BTreeMap::new(),
         slots: BTreeMap::new(),
         live: BTreeMap::new(),
