@@ -19,7 +19,7 @@ tlc() { java -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -workers auto -deadloc
 # reason.
 check_trace() {
   work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
-  cp Outbox.tla TraceOutbox.tla Inbox.tla TraceInbox.tla Bridge.tla TraceBridge.tla "$work"
+  cp Outbox.tla TraceOutbox.tla Inbox.tla TraceInbox.tla Bridge.tla TraceBridge.tla Scheduler.tla TraceScheduler.tla "$work"
   if ! name=$(python3 trace2tla.py "$1" "$work"); then
     echo "   $1: refused by trace2tla.py"; return 1
   fi
@@ -40,7 +40,7 @@ check_trace() {
 # it stands `refused, its steps before unfit`, which no entry lists.
 verdict() {
   work=$(mktemp -d)
-  cp Outbox.tla TraceOutbox.tla Inbox.tla TraceInbox.tla Bridge.tla TraceBridge.tla "$work"
+  cp Outbox.tla TraceOutbox.tla Inbox.tla TraceInbox.tla Bridge.tla TraceBridge.tla Scheduler.tla TraceScheduler.tla "$work"
   if name=$(python3 trace2tla.py "$1" "$work" 2> "$work/refused"); then status=0; else status=$?; fi
   case $status in
     0|3) ;;
@@ -161,7 +161,7 @@ must_fail_with_twin() {
 # except where one would grow too long: the rotation beside a dependency is
 # a group of its own for its length alone. The traces are one group, the
 # one `make traces` runs after recording them again.
-GROUPS="outbox inbox inbox-pg inbox-pg-rotation inbox-pg-rotation-deps inbox-outage bridge traces"
+GROUPS="outbox inbox inbox-pg inbox-pg-rotation inbox-pg-rotation-deps inbox-outage bridge scheduler traces"
 
 group_outbox() {
   echo "== outbox: with the visibility rule, every property holds"
@@ -445,6 +445,47 @@ group_bridge() {
   must_fail BridgeAckBeforeReject MCBridge.tla "Temporal properties were violated"
 }
 
+group_scheduler() {
+  echo "== scheduler: the window and a captured value, as decided, every property holds"
+  must_hold SchedulerWindow MCScheduler.tla 556782
+
+  echo "== scheduler: a barrier and provenance, as decided, every property holds"
+  must_hold SchedulerBarrier MCScheduler.tla 105278
+
+  echo "== scheduler: dependencies bound at release, TLC must find one the window let go bound to nothing"
+  must_fail_with_twin SchedulerBindAtRelease MCScheduler.tla "Invariant BoundAsChecked is violated" 556782
+
+  echo "== scheduler: the window evicted by the clock, TLC must find a late reader's dependency bound to nothing"
+  must_fail_with_twin SchedulerEvictByClock MCScheduler.tla "Invariant BoundAsChecked is violated" 1665389
+
+  echo "== scheduler: a cell freed as the window lets it go, TLC must find a waiting reader reading it"
+  must_fail_with_twin SchedulerFreeOnEvict MCScheduler.tla "Invariant NoUseAfterFree is violated" 556782
+
+  echo "== scheduler: released at ready + think, TLC must find a step released before its plan"
+  must_fail_with_twin SchedulerReadyWithoutAt MCScheduler.tla "Invariant ReleaseSafe is violated" 556782
+
+  echo "== scheduler: a barrier counting its members, TLC must find its holder released before a member"
+  must_fail_with_twin SchedulerCounterBarrier MCScheduler.tla "Invariant BarrierSafe is violated" 105278
+
+  echo "== scheduler: a failed dependency skipping nothing, TLC must find a read line that never ends"
+  must_fail_with_twin SchedulerNoSkipPropagation MCScheduler.tla "Invariant EveryReadLineEnds is violated" 105278
+
+  echo "== scheduler: a fold marking nothing conditional, TLC must find a conditional step it missed"
+  must_fail_with_twin SchedulerNoProvenance MCScheduler.tla "Invariant ConditionalExact is violated" 105278
+
+  echo "== scheduler: a fold marking direct dependents only, TLC must find a step conditional through another"
+  must_fail_with_twin SchedulerProvenanceOneLevel MCScheduler.tla "Invariant ConditionalExact is violated" 105278
+
+  echo "== scheduler: the machine's own timer at the deadline, TLC must find an answer stamped by it censored"
+  must_fail_with_twin SchedulerDeadlineByArrival MCScheduler.tla "Invariant NoCensored is violated" 105278
+
+  echo "== scheduler: a failed prefix swept again, as K1a's machine does, TLC must find the failed member's freed cell read"
+  must_fail_with_twin SchedulerResweepFailed MCScheduler.tla "Invariant NoUseAfterFree is violated" 105278
+
+  echo "== scheduler: a holder walking its members' cells, as K1a's machine does, TLC must find a freed member read"
+  must_fail_with_twin SchedulerWalkMembers MCScheduler.tla "Invariant NoUseAfterFree is violated" 105278
+}
+
 group_traces() {
   echo "== outbox: recorded runs of the tests fit the model"
   for trace in traces/outbox-*.jsonl; do
@@ -475,6 +516,25 @@ group_traces() {
     echo "unexpected: the forged run fits the model"; exit 1
   fi
   grep -q "Deadlock reached" "${TMPDIR:-/tmp}/tlc-inbox-forged-snapshot.log" || { cat "${TMPDIR:-/tmp}/tlc-inbox-forged-snapshot.log"; exit 1; }
+  echo "   refused, as expected"
+
+  echo "== scheduler: runs of the machine in sim fit the model"
+  for trace in traces/scheduler-*.jsonl; do
+    check_trace "$trace"
+  done
+
+  echo "== scheduler: a forged run, a step sent before the one it awaits settled, must not fit"
+  if check_trace traces/forged/scheduler-sent-before-settled.jsonl > "${TMPDIR:-/tmp}/tlc-scheduler-forged.log" 2>&1; then
+    echo "unexpected: the forged run fits the model"; exit 1
+  fi
+  grep -q "Deadlock reached" "${TMPDIR:-/tmp}/tlc-scheduler-forged.log" || { cat "${TMPDIR:-/tmp}/tlc-scheduler-forged.log"; exit 1; }
+  echo "   refused, as expected"
+
+  echo "== scheduler: a forged journal, a barrier's holder released before its last member settled, must not fit"
+  if check_trace traces/forged/scheduler-holder-before-member.jsonl > "${TMPDIR:-/tmp}/tlc-scheduler-forged-journal.log" 2>&1; then
+    echo "unexpected: the forged run fits the model"; exit 1
+  fi
+  grep -q "Deadlock reached" "${TMPDIR:-/tmp}/tlc-scheduler-forged-journal.log" || { cat "${TMPDIR:-/tmp}/tlc-scheduler-forged-journal.log"; exit 1; }
   echo "   refused, as expected"
 
   echo "== bridge: a recorded run of an outbox feeding an inbox fits the model"

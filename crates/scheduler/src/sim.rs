@@ -44,6 +44,9 @@ pub struct Run {
     pub dispatches: Vec<(u64, Line, u32, Vec<Captured>)>,
     /// The most steps the machine held at once.
     pub held: usize,
+    /// Every input the machine took, with its stamp, in the order it took
+    /// them; wakes left out (a trace of the run: verify/tla/TraceScheduler.tla).
+    pub inputs: Vec<(u64, Input)>,
 }
 
 /// Runs `records` (lines 2, 3, …) against the script, reading `read_ahead`
@@ -146,7 +149,11 @@ impl Handler for Scripted<'_> {
         if sent < deadline {
             queue.push(sent, Input::Sent { line, attempt });
         }
-        let answered = a.answer_after.map(|d| sent.saturating_add(d));
+        // An attempt whose bytes never left is answered by nobody.
+        let answered = (sent < deadline)
+            .then_some(a.answer_after)
+            .flatten()
+            .map(|d| sent.saturating_add(d));
         answer(queue, line, attempt, answered, deadline, a.judgement);
     }
 }
@@ -176,6 +183,7 @@ fn drive(
         entries: Vec::new(),
         dispatches: Vec::new(),
         held: 0,
+        inputs: Vec::new(),
     };
     queue.push(0, Input::Wake);
     loop {
@@ -213,6 +221,9 @@ fn drive(
             queue.push(t, Input::Wake);
         }
         while let Some((at, input)) = queue.pop(t) {
+            if input != Input::Wake {
+                run.inputs.push((at, input.clone()));
+            }
             taken = taken.saturating_add(1);
             if taken > INPUTS {
                 return Err(LogError::Malformed {

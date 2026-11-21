@@ -28,8 +28,8 @@ The definitions:
   answer; missing, the line is skipped at its release.
 - a line released at or past its deadline ends unknown then, never sent.
 - attempts: dispatched at released; sent at dispatch + sent_after if before the
-  deadline; answered at sent + answer_after if by the deadline, else unknown at
-  the deadline. An expected answer ends it; a not-yet answer of a polled
+  deadline; answered at sent + answer_after if sent and by the deadline, else
+  unknown at the deadline. An expected answer ends it; a not-yet answer of a polled
   observation dispatches the next poll on the grid released + k * every, k at
   least the attempt and the answer's own grid index, ending unknown at the
   deadline if that is not before it; a not-taken answer is resent unless the
@@ -234,7 +234,8 @@ def schedule(text, read_ahead, reads, script, seen):
             sent = t + s["sent_after"]
             if sent < deadline and entry["sent"] is None:
                 entry["sent"] = sent
-            answered = None if s["answer_after"] is None else sent + s["answer_after"]
+            # An attempt whose bytes never left is answered by nobody.
+            answered = None if s["answer_after"] is None or sent >= deadline else sent + s["answer_after"]
             if answered is None or answered > deadline:
                 judgement, at_ = "unknown", deadline
                 seen["answer_after_deadline"] += 1

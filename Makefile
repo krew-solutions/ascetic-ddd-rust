@@ -147,6 +147,7 @@ traces: ## the traces recorded again by the live tests at ASCETIC_DDD_TEST_PG_UR
 	trap 'rm -rf "$$recorded"' EXIT
 	ASCETIC_DDD_TRACE_DIR="$$recorded" $(CARGO) test -p ascetic-ddd-outbox -p ascetic-ddd-inbox \
 	  --all-features --test pg --test bridge --test outage -- --include-ignored --test-threads=1
+	ASCETIC_DDD_TRACE_DIR="$$recorded" $(CARGO) test -p ascetic-ddd-scheduler --test trace
 	gone=0
 	for kept in verify/tla/traces/*.jsonl; do
 	  if [ -f "$$recorded/$${kept##*/}" ]; then cp "$$recorded/$${kept##*/}" "$$kept"

@@ -723,7 +723,75 @@ The main configuration explores 1.6 million distinct states and takes about
 seven minutes; the rest run in seconds.
 
 
-## Trace validation — `TraceOutbox.tla`, `TraceInbox.tla`, `TraceBridge.tla`
+## Scheduler — `Scheduler.tla`
+
+The dependency machine of `crates/scheduler` (ADR-0047 decisions 2–8): a
+command log's lines read in order, each no earlier than its instant less the
+read-ahead `L`; dependencies bound when a line is read, through the window —
+the lines within `W` behind the read cursor, or retained; a barrier waiting
+for its key's members read before its holder, by prefix; a captured value in
+its producer's cell, taken when the reader is dispatched; a release at
+`max(at, ready + think)` and not before the read; deadlines from the release,
+resends by safety. Handlers send, answer by the deadline or give up at it,
+every input stamped; the machine takes each input with everything it sets off
+before the next, as it does, and time moves only when nothing is due.
+
+It also states the rule the machine's heap is to follow (ADR-0047 K1e), which
+the machine of K1a does not implement yet — it keeps every cell: a cell is
+freed once its step ended, the window let it go, no reader of its captured
+value is still to be dispatched, and every prefix of its barrier key passed
+it. Freeing is taken as early as it may be, the worst case for a read of a
+freed cell. Building the model found what that rule needs of the machine: a
+prefix of members expected stops for good at a member that failed it and is
+not swept again — the machine's sweep reads the failed member's cell on
+every later member's end — and a holder reads its key's latest met instant,
+not its members' cells.
+
+`MCScheduler.tla` holds two instances of four lines, `W = 1` below `L = 2`:
+the window and a captured value (a producer, its reader, a settled
+dependent, a line the read-ahead brings in that lets the producer go), and a
+barrier and provenance (two members, a holder, a member read after the
+holder that awaits the second expected; the holder and that member, read
+ahead, let the first member go).
+
+| property | kind | meaning |
+| --- | --- | --- |
+| `ReleaseSafe` | invariant | a step is released no earlier than planned, than read, than each dependency met it |
+| `BarrierSafe` | invariant | a holder is released only once every member read before it met it |
+| `NoUseAfterFree` | invariant | nothing reads a freed cell |
+| `BoundAsChecked` | invariant | every dependency is bound, to the step the validator bound it to |
+| `NoCensored` | invariant | an answer stamped by its deadline decides its attempt |
+| `EveryReadLineEnds` | invariant | at the last instant, with nothing due, every line read has ended |
+| `ConditionalExact` | invariant | then the verdict's fold, in line order by the lines each step bound, marks conditional exactly the steps the definition does: those awaiting sent or settled a step that ended unknown or skipped, transitively |
+
+Each refuted design of ADR-0047 § Alternatives Considered is a configuration
+that must break its property, beside a twin — the same configuration with
+`Mutant = "none"` — that must hold every property, its distinct states
+pinned (`must_fail_with_twin`):
+
+| configuration | the mutation | what TLC finds |
+| --- | --- | --- |
+| `SchedulerBindAtRelease.cfg` | dependencies bound when the step is released | a dependency the window let go bound to nothing (`BoundAsChecked`) |
+| `SchedulerEvictByClock.cfg` | the window evicted by the machine's clock, a reader one instant late | a late reader's dependency bound to nothing (`BoundAsChecked`) |
+| `SchedulerFreeOnEvict.cfg` | a cell freed as the window lets it go | a waiting reader reading its producer's freed cell (`NoUseAfterFree`) |
+| `SchedulerReadyWithoutAt.cfg` | released at `ready + think`, the plan ignored | a step released before its instant (`ReleaseSafe`) |
+| `SchedulerCounterBarrier.cfg` | a barrier counting the members that met it | a member read after the holder firing it before an earlier one settled (`BarrierSafe`) |
+| `SchedulerNoSkipPropagation.cfg` | a failed dependency skipping nothing | its dependent never ends (`EveryReadLineEnds`) |
+| `SchedulerNoProvenance.cfg` | the fold marking nothing conditional | a step awaiting an unknown one sent, unmarked (`ConditionalExact`) |
+| `SchedulerProvenanceOneLevel.cfg` | the fold marking a failure's direct dependents only | a step conditional through a conditional one, unmarked (`ConditionalExact`) |
+| `SchedulerDeadlineByArrival.cfg` | the machine's own timer ending a step at its deadline | an answer stamped at the deadline censored (`NoCensored`) |
+| `SchedulerResweepFailed.cfg` | a prefix of members expected swept again from the member that failed it, as K1a's machine does | the failed member's freed cell read by the next member's sweep (`NoUseAfterFree`) |
+| `SchedulerWalkMembers.cfg` | a holder taking its members' instants from their cells, as K1a's machine does | a failed member's freed cell read when the holder fires (`NoUseAfterFree`) |
+
+The window's instance explores 556,782 distinct states in about a minute,
+with the late reader 1,665,389 in four; the barrier's 105,278 in seconds. The
+handlers' answers and the timeouts are cut to what each instance's properties
+need: with every answer and longer timeouts each passed two million distinct
+states in five minutes, its queue still growing, and was stopped.
+The plan's own bound and its mutation `PendingByRate` are K1e's, beside the
+bound they check.
+
+## Trace validation — `TraceOutbox.tla`, `TraceInbox.tla`, `TraceBridge.tla`, `TraceScheduler.tla`
 
 A model proves the protocol; a trace check shows the code follows it. The
 tests attach the recorder of `crates/trace`, an observer of both the outbox
@@ -933,6 +1001,24 @@ of marks to the inbox's dependency check, a statement of its own whose
 snapshot is not logged: a run with two dispatchers, dependencies between
 their messages and a mark committed between one's walk and the other's check
 could show as not fitting, and would be a false alarm, not a false pass.
+
+### The scheduler — `TraceScheduler.tla`
+
+`crates/scheduler`'s `tests/trace.rs` runs the machine in `sim` and writes
+each run as `traces/scheduler-*.jsonl`: the log — every step's instant,
+think, dependencies by the line of their step's id (the log's, not the
+machine's binding), barrier key, producer, timeout and safety — then every
+input the machine took with its stamp, in its order, and its journal. The
+model takes exactly those inputs at their stamps, and its own steps between
+them; the run fits when the trace is taken, nothing is due, every line ended
+and the model's journal is the machine's, line by line — its end and skip,
+read, intended, released, dispatched, sent and end instants, attempts and
+bound lines. Four runs are covered: resends, skips, a deadline, a late
+reader. The machine is deterministic, so the test also holds each run to its
+trace: a change of the machine's behaviour fails `cargo test` until `make
+traces` records the traces again, and `check.sh traces` checks them. Two
+forged runs must not fit: a step sent before the one it awaits settled, and a
+journal whose barrier holder was released before its last member settled.
 
 ## Notes on TLC
 

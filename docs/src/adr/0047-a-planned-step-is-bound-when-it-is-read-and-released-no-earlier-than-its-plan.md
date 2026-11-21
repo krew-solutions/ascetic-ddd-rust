@@ -13,7 +13,8 @@ To be built in slices, each a commit of its own:
   definition, the differential and the corpus's coverage counters; **K1c** the stateful server model; **K1d** the TLA+
   model and trace validation of `sim`'s journals; **K1e** the verdict fold, the journal's schema and golden journals,
   the plan's own bound with peaks and a peak rate in the commitment, and the heap executors. (The plan's bound, the
-  commitment's peaks and the reference's bound lines were first listed in K0a; they moved where their consumer is.)
+  commitment's peaks and the reference's bound lines were first listed in K0a; they moved where their consumer is.
+  K1-4's `PendingByRate` moved to K1e with the bound it mutates.)
 - **K2** (`crates/load-run`, the shell): REST, the clock, the reader, the journal writer, the gates.
 - **The first host run:** REST only, on the compose stand, `sources = 1` — a correctness run.
 - **K3** facts and the bus; **K4** shaping and the emulated client's retries; **K5** the report.
@@ -256,7 +257,7 @@ budget lies inside its interval.
 | K1-1 | K1 | bindings and releases invariant across L ∈ {0, a chunk well below the log, ∞} on the corpus × latency scripts — the executor of decision 2; bindings equal the reference's bound lines | binding at release; the window evicted by the clock |
 | K1-2 | K1 | `vectors/schedule.py`, a scheduler by definition (no window, cells or prefixes; captures through a versioned per-slot map; barriers as the set of earlier members; met instants from the event history), compared per line; the comparison may differ only on declared stale reads | a per-key barrier counter; the value from the slot's latest; release without `max`; the deadline from the step's own start |
 | K1-3 | K1 | the stateful server model: every clean log ends all Expected under every failure-free latency script, the order of processing chosen by the script | writers awaiting readers `Sent` (a 412 under reordering); a wrong cell spliced into a request (the attempt's sent-bytes digest) |
-| K1-4 | K1 | `verify/tla/Scheduler.tla`: `ReleaseSafe`, every read line ends, `NoUseAfterFree`, `BarrierSafe`, `BoundAsChecked`, `ConditionalExact`, no response stamped by its deadline censored; mutant configs `BindAtRelease`, `FreeOnEvict`, `CounterBarrier`, `ReadyWithoutAt`, `NoProvenance`, `ProvenanceOneLevel`, `DeadlineByArrival`, `NoSkipPropagation`, `PendingByRate`, each with a pinned twin and state count (`must_fail_with_twin`), on an instance of at least four lines with W below L or a latency above W | each config's own |
+| K1-4 | K1 | `verify/tla/Scheduler.tla`: `ReleaseSafe`, every read line ends, `NoUseAfterFree`, `BarrierSafe`, `BoundAsChecked`, `ConditionalExact`, no response stamped by its deadline censored; mutant configs `BindAtRelease`, `FreeOnEvict`, `CounterBarrier`, `ReadyWithoutAt`, `NoProvenance`, `ProvenanceOneLevel`, `DeadlineByArrival`, `NoSkipPropagation` (and `PendingByRate` in K1e, beside the plan's bound), each with a pinned twin and state count (`must_fail_with_twin`), on an instance of at least four lines with W below L or a latency above W | each config's own |
 | K1-5 | K1 | sim journals checked against `Scheduler.tla` (the `trace2tla.py` pattern) | the machine diverging from the model |
 | K1-6 | K1 | corpus coverage counted and failing on zero: lines where the two bindings differ, cells taken after their producer's eviction, barrier members finishing before earlier ones, conditional dependents, responses after their deadline, same-instant inputs, `think > 0` | — |
 | K1-7 | K1 | the journal invariant under any permutation of same-instant inputs | ties broken by arrival |
@@ -359,6 +360,38 @@ the reference alike), and the corpus's base logs read an ETag only after a write
   validator's producer capture unchecked (a reader skipped for a missing value, on an `uncaptured-writer` log — green
   until that corpus mutant). A twin in `command-log`: a writer that captures nothing is no producer.
 
+**K1d — the TLA+ model and trace validation** (2026-11-22): `verify/tla/Scheduler.tla`, the machine as a protocol —
+reads no earlier than `at − L`, bindings through a window evicted by the read cursor, barriers by prefix with each
+key's latest met instant, captured values in the producer's cell, release at `max(at, ready + think)` and not before
+the read, deadlines from the release, resends by safety, stamped inputs each taken with everything it sets off before
+the next — and the rule the heap is to follow, which K1a's machine does not implement (it keeps every cell): a cell is
+freed once its step ended, the window let it go, no reader of its captured value is still to be dispatched, and every
+prefix of its key passed it, freed as early as it may be. The model's first run broke `NoUseAfterFree` under that rule
+as first written: the machine re-sweeps a key's expected prefix from the member that failed it on every later member's
+end, reading that member's cell. Two requirements on K1e follow, both in the model: a prefix of members expected stops
+for good at a failure and is not swept again; a holder takes its key's latest met instant (and the member that met it
+last) from the barrier, not by walking its members' cells, as `Machine::read` and `Machine::barrier` do now.
+- **Executors** (`verify/tla/check.sh scheduler`): two instances of four lines, `W = 1` below `L = 2` — the window and
+  a captured value (556,782 distinct states), a barrier and provenance (105,278) — each holding `ReleaseSafe`,
+  `BarrierSafe`, `NoUseAfterFree`, `BoundAsChecked`, `NoCensored`, `EveryReadLineEnds`, `ConditionalExact`, with the
+  handlers' answers and timeouts cut to what each needs (with every answer, each passed two million states in five
+  minutes and was stopped). Mutant configurations, each breaking its property beside a pinned twin: `BindAtRelease`,
+  `EvictByClock` (a reader one instant late; twin 1,665,389), `FreeOnEvict`, `ReadyWithoutAt`, `CounterBarrier`,
+  `NoSkipPropagation`, `NoProvenance`, `ProvenanceOneLevel` (a step conditional through a conditional one),
+  `DeadlineByArrival` (an answer stamped at the deadline after the machine's own timer); and the two requirements on
+  K1e, each the K1a machine's own behaviour as a mutant: `ResweepFailed` and `WalkMembers`, both reading a failed
+  member's freed cell. The first run's finding had no executor until the barrier's instance let its failed member go;
+  the instance was changed so that it does.
+- **Trace validation** (K1-5; `TraceScheduler.tla`, `crates/scheduler/tests/trace.rs`): `sim` records every input the
+  machine took with its stamp; four runs of one six-step log — resends, skips, a deadline, a late reader — fit the
+  model, its journal equal to the machine's line by line. The machine is deterministic, so the test also holds each run
+  to its committed trace: a change of behaviour fails `cargo test` until `make traces` records them again. Two forged
+  runs do not fit (a step sent before the one it awaits settled; a holder released before its last member settled).
+  Machine mutations, each alone, recorded again and checked: release not after the read, a barrier one member short,
+  a not-taken answer not resent — each leaves a trace unfit.
+- `sim` answers no attempt whose bytes never left (`schedule.py` alike): a send at the deadline with a zero answer
+  delay used to end by its judgement, sent never.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -402,3 +435,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   `sim`.
 - 2026-11-21: K1b built (§ Measured); decision 7 completed: a step released past its deadline ends unknown, unsent.
 - 2026-11-21: K1c built (§ Measured): the model stand; `producer` refuses a reader whose producer captures nothing.
+- 2026-11-22: K1d built (§ Measured): the TLA+ model, its mutants and trace validation; the heap's free rule stated for
+  K1e, with the two requirements the model found; `PendingByRate` moved to K1e.
