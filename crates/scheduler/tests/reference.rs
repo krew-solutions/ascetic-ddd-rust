@@ -168,6 +168,11 @@ fn the_machine_is_the_scheduler_by_definition() {
                         ran.entries.iter().all(|e| e.attempts <= ATTEMPTS),
                         "{name}: more attempts than the table holds"
                     );
+                    // Every cell the window let go is freed by the end.
+                    assert_eq!(
+                        ran.left, ran.kept,
+                        "{name}/{seed}/{read_ahead}: cells left behind"
+                    );
                     let journal: Vec<Json> = ran.entries.iter().map(entry_json).collect();
                     let line = json!({
                         "name": format!("{name}/{seed}/{read_ahead}"),

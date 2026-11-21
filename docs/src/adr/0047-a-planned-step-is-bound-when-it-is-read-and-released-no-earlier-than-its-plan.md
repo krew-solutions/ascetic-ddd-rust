@@ -12,7 +12,8 @@ To be built in slices, each a commit of its own:
 - **K1** (`crates/scheduler`, pure), in five parts: **K1a** the machine and `sim`; **K1b** the reference scheduler by
   definition, the differential and the corpus's coverage counters; **K1c** the stateful server model; **K1d** the TLA+
   model and trace validation of `sim`'s journals; **K1e** the verdict fold, the journal's schema and golden journals,
-  the plan's own bound with peaks and a peak rate in the commitment, and the heap executors. (The plan's bound, the
+  the plan's own bound with peaks and a peak rate in the commitment, and the heap executors — in three parts: **K1e-1**
+  the heap, **K1e-2** the plan's bound, peaks and peak rate, **K1e-3** the verdict fold, schema and goldens. (The plan's bound, the
   commitment's peaks and the reference's bound lines were first listed in K0a; they moved where their consumer is.
   K1-4's `PendingByRate` moved to K1e with the bound it mutates.)
 - **K2** (`crates/load-run`, the shell): REST, the clock, the reader, the journal writer, the gates.
@@ -392,6 +393,27 @@ last) from the barrier, not by walking its members' cells, as `Machine::read` an
 - `sim` answers no attempt whose bytes never left (`schedule.py` alike): a send at the deadline with a zero answer
   delay used to end by its judgement, sent never.
 
+**K1e-1 — the heap** (2026-11-22): the machine frees a cell by the rule `Scheduler.tla` states — its step ended, the
+window let it go (`Window::read` now returns what it evicts), no reader of its captured values nor observation of it
+as a cause is still to be dispatched, every prefix of its barrier key passed it. A reader copies its captured values
+at its first dispatch and resends them (decision 10's frame built once), and its deadline is decided then, so it lets
+go of its producers and its cause at that point, or when it ends unsent. A barrier keeps per key the members no
+prefix has passed yet, each prefix's latest met instant and the member that met it, and its holders by the count of
+members they wait for, fired as the sweep passes that count; a prefix of members expected stops for good at a failure.
+Each line has one pending wake, dropped when it ends. Found by the heap executor, fixed before the commit: a step
+freed by its own barrier's sweep before it let go of its producer, which then never freed — a step holding producers
+is not freed, and it lets go before its barrier is told.
+- **Executors**: every run of the differential, the stand and the traces ends with the cells the window keeps and
+  no other (`Run::left == Run::kept`). `tests/heap.rs`, a counting allocator over `sim::run_streaming` (the lines from
+  an iterator, no journal kept): 32,000 lines at 125 µs, eight subjects live at a time, a share of producers refused
+  or answering without the value, reads and calls unknown — 1,333 subjects of eight cycles peak at 444,413 B above the
+  plan, 10,666 subjects of one at 402,343 B; half the plan peaks at the same 402,343 B; 161 steps held at once in
+  both. 24 s in a debug build. Mutations, each alone, red: a cell freed as the window lets it go (the differential,
+  the stand, a trace); a skipped reader keeping its producer (cells left behind; the heap); the window's evictions not
+  told; a holder read late walking its members' cells (the read-ahead invariance, the differential); a prefix's
+  members never let go; a step's wake left behind when it ends (the heap over twice the length: 1.44 MB against
+  0.92 MB, the steps held unchanged). The stalls of K1-8 and the bound chosen by rate are K1e-2's.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -437,3 +459,4 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-21: K1c built (§ Measured): the model stand; `producer` refuses a reader whose producer captures nothing.
 - 2026-11-22: K1d built (§ Measured): the TLA+ model, its mutants and trace validation; the heap's free rule stated for
   K1e, with the two requirements the model found; `PendingByRate` moved to K1e.
+- 2026-11-22: K1e cut into three parts; K1e-1 built (§ Measured): the machine frees its cells by the model's rule.

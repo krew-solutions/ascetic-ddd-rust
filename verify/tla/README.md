@@ -736,8 +736,8 @@ resends by safety. Handlers send, answer by the deadline or give up at it,
 every input stamped; the machine takes each input with everything it sets off
 before the next, as it does, and time moves only when nothing is due.
 
-It also states the rule the machine's heap is to follow (ADR-0047 K1e), which
-the machine of K1a does not implement yet — it keeps every cell: a cell is
+It also states the rule the machine's heap follows (ADR-0047 K1e; the
+machine of K1a kept every cell): a cell is
 freed once its step ended, the window let it go, no reader of its captured
 value is still to be dispatched, and every prefix of its barrier key passed
 it. Freeing is taken as early as it may be, the worst case for a read of a
@@ -780,8 +780,8 @@ pinned (`must_fail_with_twin`):
 | `SchedulerNoProvenance.cfg` | the fold marking nothing conditional | a step awaiting an unknown one sent, unmarked (`ConditionalExact`) |
 | `SchedulerProvenanceOneLevel.cfg` | the fold marking a failure's direct dependents only | a step conditional through a conditional one, unmarked (`ConditionalExact`) |
 | `SchedulerDeadlineByArrival.cfg` | the machine's own timer ending a step at its deadline | an answer stamped at the deadline censored (`NoCensored`) |
-| `SchedulerResweepFailed.cfg` | a prefix of members expected swept again from the member that failed it, as K1a's machine does | the failed member's freed cell read by the next member's sweep (`NoUseAfterFree`) |
-| `SchedulerWalkMembers.cfg` | a holder taking its members' instants from their cells, as K1a's machine does | a failed member's freed cell read when the holder fires (`NoUseAfterFree`) |
+| `SchedulerResweepFailed.cfg` | a prefix of members expected swept again from the member that failed it, as the machine did before K1e | the failed member's freed cell read by the next member's sweep (`NoUseAfterFree`) |
+| `SchedulerWalkMembers.cfg` | a holder taking its members' instants from their cells, as the machine did before K1e | a failed member's freed cell read when the holder fires (`NoUseAfterFree`) |
 
 The window's instance explores 556,782 distinct states in about a minute,
 with the late reader 1,665,389 in four; the barrier's 105,278 in seconds. The

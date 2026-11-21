@@ -479,10 +479,10 @@ group_scheduler() {
   echo "== scheduler: the machine's own timer at the deadline, TLC must find an answer stamped by it censored"
   must_fail_with_twin SchedulerDeadlineByArrival MCScheduler.tla "Invariant NoCensored is violated" 105278
 
-  echo "== scheduler: a failed prefix swept again, as K1a's machine does, TLC must find the failed member's freed cell read"
+  echo "== scheduler: a failed prefix swept again, as the machine did before K1e, TLC must find the failed member's freed cell read"
   must_fail_with_twin SchedulerResweepFailed MCScheduler.tla "Invariant NoUseAfterFree is violated" 105278
 
-  echo "== scheduler: a holder walking its members' cells, as K1a's machine does, TLC must find a freed member read"
+  echo "== scheduler: a holder walking its members' cells, as the machine did before K1e, TLC must find a freed member read"
   must_fail_with_twin SchedulerWalkMembers MCScheduler.tla "Invariant NoUseAfterFree is violated" 105278
 }
 

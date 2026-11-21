@@ -9,7 +9,7 @@ use std::sync::Arc;
 use ascetic_ddd_command_log::LogError;
 use ascetic_ddd_command_log::record::{Action, Dep, Header, Hole, Probe, Record, Subject, Value};
 
-use crate::machine::{Captured, Entry, Input, Judgement, Line, Machine, Output};
+use crate::machine::{Captured, End, Entry, Input, Judgement, Line, Machine, Output};
 use crate::order::Ordered;
 
 /// What becomes of one attempt.
@@ -47,6 +47,16 @@ pub struct Run {
     /// Every input the machine took, with its stamp, in the order it took
     /// them; wakes left out (a trace of the run: verify/tla/TraceScheduler.tla).
     pub inputs: Vec<(u64, Input)>,
+    /// The steps the machine held when the run ended, and those its window
+    /// kept: every other cell freed, they are equal.
+    pub left: usize,
+    /// See `left`.
+    pub kept: usize,
+    /// How many steps ended each way, kept or not: expected, unexpected,
+    /// unknown, skipped.
+    pub ends: [u64; 4],
+    /// Attempts dispatched past each step's first.
+    pub resent: u64,
 }
 
 /// Runs `records` (lines 2, 3, …) against the script, reading `read_ahead`
@@ -63,6 +73,25 @@ pub fn run(
 /// The most inputs a run takes: past it a machine that loops is stopped.
 pub const INPUTS: u64 = 1 << 22;
 
+/// [`run`] over lines as an iterator yields them, keeping no entry, dispatch
+/// or input: only the counts. What it holds is the machine's own and the
+/// lines in flight — what a heap executor measures.
+pub fn run_streaming(
+    header: Header,
+    records: &mut dyn Iterator<Item = Record>,
+    read_ahead: u64,
+    script: &dyn Fn(Line, u32, &Record) -> Attempt,
+) -> Result<Run, LogError> {
+    drive(
+        header,
+        &mut records.map(Arc::new),
+        read_ahead,
+        &|_| 0,
+        &mut Scripted { script },
+        false,
+    )
+}
+
 /// [`run`] with a reader that lags: a line is read `lag(line)` microseconds
 /// after it may be, and never before the line above it.
 pub fn run_reading(
@@ -72,7 +101,14 @@ pub fn run_reading(
     lag: &dyn Fn(Line) -> u64,
     script: &dyn Fn(Line, u32, &Record) -> Attempt,
 ) -> Result<Run, LogError> {
-    drive(header, records, read_ahead, lag, &mut Scripted { script })
+    drive(
+        header,
+        &mut records.iter().cloned().map(Arc::new),
+        read_ahead,
+        lag,
+        &mut Scripted { script },
+        true,
+    )
 }
 
 /// What carries out the machine's dispatches: a script, or a model stand.
@@ -158,38 +194,47 @@ impl Handler for Scripted<'_> {
     }
 }
 
+/// The machine against `handler`, the lines as `records` yields them; with
+/// `keep`, its entries, dispatches and inputs kept in the run.
 fn drive(
     header: Header,
-    records: &[Record],
+    records: &mut dyn Iterator<Item = Arc<Record>>,
     read_ahead: u64,
     lag: &dyn Fn(Line) -> u64,
     handler: &mut dyn Handler,
+    keep: bool,
 ) -> Result<Run, LogError> {
-    let records: Vec<Arc<Record>> = records.iter().cloned().map(Arc::new).collect();
     let mut machine = Machine::new(Arc::new(header), read_ahead);
     let mut queue = Ordered::new();
     let mut wakes: BTreeSet<u64> = BTreeSet::new();
-    let mut next = 0usize;
-    // When each line is read: once it may be, plus its lag, in order.
-    let mut reads = Vec::with_capacity(records.len());
-    for (i, r) in records.iter().enumerate() {
-        let line = (i as u64).saturating_add(2);
-        let may = r.at.saturating_sub(read_ahead).saturating_add(lag(line));
-        let after = reads.last().copied().unwrap_or(0);
-        reads.push(may.max(after));
-    }
+    // The lines read and not ended, for their dispatches.
+    let mut live: BTreeMap<Line, Arc<Record>> = BTreeMap::new();
+    // The next line to read and when: once it may be, plus its lag, and not
+    // before the line above it.
+    let upcoming = |line: Line, last: u64, records: &mut dyn Iterator<Item = Arc<Record>>| {
+        records.next().map(|r| {
+            let may = r.at.saturating_sub(read_ahead).saturating_add(lag(line));
+            (may.max(last), r)
+        })
+    };
+    let mut line: Line = 2;
+    let mut pending = upcoming(line, 0, records);
     let mut taken = 0u64;
     let mut run = Run {
         entries: Vec::new(),
         dispatches: Vec::new(),
         held: 0,
         inputs: Vec::new(),
+        left: 0,
+        kept: 0,
+        ends: [0; 4],
+        resent: 0,
     };
     queue.push(0, Input::Wake);
     loop {
         // The next instant: an input, a wake, the handler's own, or the next
         // line's reading.
-        let reading = reads.get(next).map(|t| (*t).max(machine.now()));
+        let reading = pending.as_ref().map(|(t, _)| (*t).max(machine.now()));
         let Some(t) = [
             queue.first(),
             wakes.first().copied(),
@@ -202,26 +247,22 @@ fn drive(
             break;
         };
         handler.advance(t, &mut queue);
-        while let (Some(r), Some(when)) = (records.get(next), reads.get(next)) {
-            if (*when).max(machine.now()) > t {
+        while let Some((when, r)) = pending.take() {
+            if when.max(machine.now()) > t {
+                pending = Some((when, r));
                 break;
             }
-            let line = (next as u64).saturating_add(2);
-            queue.push(
-                t,
-                Input::Line {
-                    line,
-                    record: r.clone(),
-                },
-            );
-            next = next.saturating_add(1);
+            live.insert(line, r.clone());
+            queue.push(t, Input::Line { line, record: r });
+            line = line.saturating_add(1);
+            pending = upcoming(line, when, records);
         }
         while wakes.first().is_some_and(|w| *w <= t) {
             wakes.pop_first();
             queue.push(t, Input::Wake);
         }
         while let Some((at, input)) = queue.pop(t) {
-            if input != Input::Wake {
+            if keep && input != Input::Wake {
                 run.inputs.push((at, input.clone()));
             }
             taken = taken.saturating_add(1);
@@ -243,21 +284,41 @@ fn drive(
                         deadline,
                         captured,
                     } => {
-                        let index = usize::try_from(line.saturating_sub(2)).unwrap_or(usize::MAX);
-                        if let Some(record) = records.get(index) {
+                        if let Some(record) = live.get(&line) {
                             handler.dispatch(
                                 at, line, attempt, record, &captured, deadline, &mut queue,
                             );
                         }
-                        run.dispatches.push((at, line, attempt, captured));
+                        if attempt > 1 {
+                            run.resent = run.resent.saturating_add(1);
+                        }
+                        if keep {
+                            run.dispatches.push((at, line, attempt, captured));
+                        }
                     }
-                    Output::Ended(e) => run.entries.push(*e),
+                    Output::Ended(e) => {
+                        live.remove(&e.line);
+                        let kind = match e.end {
+                            End::Expected => 0,
+                            End::Unexpected => 1,
+                            End::Unknown => 2,
+                            End::Skipped(_) => 3,
+                        };
+                        if let Some(n) = run.ends.get_mut(kind) {
+                            *n = n.saturating_add(1);
+                        }
+                        if keep {
+                            run.entries.push(*e);
+                        }
+                    }
                 }
             }
             run.held = run.held.max(machine.held());
         }
     }
     run.entries.sort_by_key(|e| e.line);
+    run.left = machine.held();
+    run.kept = machine.kept();
     Ok(run)
 }
 
@@ -282,7 +343,14 @@ pub fn run_stand(
         versions: BTreeMap::new(),
         processed: BTreeSet::new(),
     };
-    drive(header, records, read_ahead, &|_| 0, &mut stand)
+    drive(
+        header,
+        &mut records.iter().cloned().map(Arc::new),
+        read_ahead,
+        &|_| 0,
+        &mut stand,
+        true,
+    )
 }
 
 /// A request on its way: what it carries, the delay of its answer, its

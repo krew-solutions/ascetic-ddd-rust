@@ -53,20 +53,23 @@ impl<V> Window<V> {
     }
 
     /// A line read at `at`: the cursor moves, and what it leaves more than `W`
-    /// behind goes.
-    pub fn read(&mut self, at: u64) {
+    /// behind goes — the values it held, returned.
+    pub fn read(&mut self, at: u64) -> Vec<V> {
         self.cursor = self.cursor.max(at);
         let (w, c) = (self.w, self.cursor);
+        let mut gone = Vec::new();
         while let Some((planned, _)) = self.order.first() {
             if c.saturating_sub(*planned) <= w {
                 break;
             }
             if let Some((planned, id)) = self.order.pop_first()
                 && self.kept.get(&id).map(|e| e.0) == Some(planned)
+                && let Some((_, value)) = self.kept.remove(&id)
             {
-                self.kept.remove(&id);
+                gone.push(value);
             }
         }
+        gone
     }
 
     /// The step a dependency on `id` binds: a retained one, or one within `W`

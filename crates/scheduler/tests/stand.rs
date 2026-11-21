@@ -42,6 +42,7 @@ fn a_clean_log_ends_all_expected_on_the_model_stand() {
             for e in &ran.entries {
                 assert_eq!(e.end, End::Expected, "{name}, seed {seed}, line {}", e.line);
             }
+            assert_eq!(ran.left, ran.kept, "{name}, seed {seed}: cells left behind");
             runs += 1;
         }
     }

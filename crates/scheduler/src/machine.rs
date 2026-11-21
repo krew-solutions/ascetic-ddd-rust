@@ -9,8 +9,17 @@
 //! an expected end — or, for a dependency that ended otherwise, never: the
 //! step is skipped. A step that is never sent meets `Sent` and `Settled` at its
 //! end. A barrier waits for the members read before it, by prefix.
+//!
+//! A step's cell is freed once it ended, the window let it go, no reader of
+//! its captured value nor observation of it as a cause is still to be
+//! dispatched, and every prefix of its barrier key passed it
+//! (verify/tla/Scheduler.tla): nothing else reads an ended step's cell. A
+//! dependent folds a met instant in when it is told; a holder takes its key's
+//! latest met instant from the barrier; a prefix of members expected stops
+//! for good at a member that failed it; a reader takes its captured values
+//! when first dispatched, and resends them.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use ascetic_ddd_command_log::LogError;
@@ -232,21 +241,37 @@ struct Cell {
     /// Its barrier key and ordinal, if it is a member of one.
     member: Option<(BarrierKey, usize)>,
     fault: bool,
+    /// Whether the window still keeps it, for dependencies read later.
+    in_window: bool,
+    /// Readers of its captured values, and observations of it as their
+    /// cause, still to be dispatched.
+    refs: u32,
+    /// Whether it still holds its producers and its cause.
+    holding: bool,
+    /// The values its captured holes took when it was first dispatched.
+    captured: Vec<Captured>,
+    /// Its one pending wake.
+    wake: Option<u64>,
 }
 
 type BarrierKey = (String, Vec<u8>, String, u32);
 
 #[derive(Clone, Debug, Default)]
 struct Barrier {
-    members: Vec<Line>,
-    /// Members up to here met the strength, by `On` rank; and the latest
-    /// instant among them.
+    /// The members some prefix has not passed yet, from ordinal `base`.
+    members: VecDeque<Line>,
+    base: usize,
+    /// The members read.
+    count: usize,
+    /// Members up to here met the strength, by `On` rank; the latest instant
+    /// among them and the member that met it last.
     prefix: [usize; 3],
-    latest: [u64; 3],
-    /// The first member awaited as expected that ended otherwise.
-    failed: Option<usize>,
-    /// Holders: their line, the members read before them, the strength.
-    holders: Vec<(Line, usize, On)>,
+    latest: [(u64, Line); 3],
+    /// The first member awaited as expected that ended otherwise: its
+    /// ordinal, line and end. The prefix of members expected stops there.
+    failed: Option<(usize, Line, u64)>,
+    /// Holders waiting, by strength rank, by the members read before them.
+    holders: [BTreeMap<usize, Vec<Line>>; 3],
 }
 
 fn rank(on: On) -> usize {
@@ -294,9 +319,14 @@ impl Machine {
         self.now
     }
 
-    /// The steps it holds: read and not ended, or ended and still bound.
+    /// The steps it holds: read and not freed.
     pub fn held(&self) -> usize {
         self.cells.len()
+    }
+
+    /// The steps the window keeps: within `W` behind the cursor, or retained.
+    pub fn kept(&self) -> usize {
+        self.window.len()
     }
 
     /// Takes one input stamped `at`, no earlier than the last one's.
@@ -334,7 +364,12 @@ impl Machine {
         record: Arc<Record>,
         out: &mut Vec<Output>,
     ) -> Result<(), LogError> {
-        self.window.read(record.at);
+        for gone in self.window.read(record.at) {
+            if let Some(c) = self.cells.get_mut(&gone) {
+                c.in_window = false;
+            }
+            self.free_if_done(gone);
+        }
         let mut cell = Cell {
             record: record.clone(),
             read: self.now,
@@ -358,6 +393,11 @@ impl Machine {
             waiters: Vec::new(),
             member: None,
             fault: false,
+            in_window: false,
+            refs: 0,
+            holding: false,
+            captured: Vec::new(),
+            wake: None,
         };
         // The ready instant is the latest met instant of its dependencies;
         // with none, 0.
@@ -392,36 +432,25 @@ impl Machine {
                     ..
                 } => {
                     let key = (kind.clone(), scope.clone(), label.clone(), *n);
-                    let b = self.barriers.entry(key.clone()).or_default();
-                    let members = b.members.len();
+                    let b = self.barriers.entry(key).or_default();
+                    let members = b.count;
                     let r = rank(*on);
-                    if *on == On::Expected && b.failed.is_some_and(|f| f < members) {
-                        let first = b
-                            .failed
-                            .and_then(|f| b.members.get(f))
-                            .copied()
-                            .unwrap_or(0);
-                        let t = self
-                            .cells
-                            .get(&first)
-                            .and_then(|c| c.end.as_ref())
-                            .map_or(self.now, |e| e.1);
-                        earliest(&mut skip, Skip::Member(first), t);
-                    } else if b.prefix[r] >= members {
-                        let members = b.members.clone();
-                        let latest = members
-                            .iter()
-                            .filter_map(|m| match self.met(*m, *on) {
-                                Met::Yes(t) => Some((t, *m)),
-                                _ => None,
-                            })
-                            .max();
-                        if let Some((t, m)) = latest {
-                            fold(&mut ready, t, Critical::Member(m));
+                    match b.failed {
+                        Some((f, first, t)) if *on == On::Expected && f < members => {
+                            earliest(&mut skip, Skip::Member(first), t);
                         }
-                    } else {
-                        b.holders.push((line, members, *on));
-                        cell.waiting = cell.waiting.saturating_add(1);
+                        _ if b.prefix[r] >= members => {
+                            // Every member read met it: the latest of them, from
+                            // the barrier, not their cells.
+                            if members > 0 {
+                                let (t, m) = b.latest[r];
+                                fold(&mut ready, t, Critical::Member(m));
+                            }
+                        }
+                        _ => {
+                            b.holders[r].entry(members).or_default().push(line);
+                            cell.waiting = cell.waiting.saturating_add(1);
+                        }
                     }
                 }
             }
@@ -465,11 +494,22 @@ impl Machine {
             s.n,
         );
         let b = self.barriers.entry(key.clone()).or_default();
-        cell.member = Some((key, b.members.len()));
-        b.members.push(line);
+        cell.member = Some((key, b.count));
+        b.members.push_back(line);
+        b.count = b.count.saturating_add(1);
         let retained = self.header.retained.contains(&record.step.label);
-        self.window
-            .keep(digest(&record.step)?, record.at, retained, line);
+        let id = digest(&record.step)?;
+        self.window.keep(id, record.at, retained, line);
+        cell.in_window = self.window.get(&id).is_some_and(|e| e.1 == line);
+        // It holds its producers and its cause until it is first dispatched.
+        let mut held: Vec<Line> = cell.producers.iter().map(|p| p.2).collect();
+        held.extend(cell.cause.filter(|c| *c != line));
+        for p in &held {
+            if let Some(c) = self.cells.get_mut(p) {
+                c.refs = c.refs.saturating_add(1);
+            }
+        }
+        cell.holding = !held.is_empty();
         self.cells.insert(line, cell);
         match skip {
             Some((why, t)) => self.finish(line, End::Skipped(why), t.max(self.now), out),
@@ -503,7 +543,19 @@ impl Machine {
         c.intended = c.record.at.max(c.ready.saturating_add(c.record.think));
         c.released = c.intended.max(c.read);
         c.phase = Phase::Due;
-        self.wakes.insert((c.released, line));
+        let t = c.released;
+        self.wake(line, t);
+    }
+
+    /// The line's one pending wake, at `t`.
+    fn wake(&mut self, line: Line, t: u64) {
+        let Some(c) = self.cells.get_mut(&line) else {
+            return;
+        };
+        if let Some(old) = c.wake.replace(t) {
+            self.wakes.remove(&(old, line));
+        }
+        self.wakes.insert((t, line));
     }
 
     /// Dispatches what is due, polls on their grid, ends what passed its
@@ -514,9 +566,13 @@ impl Machine {
                 break;
             }
             self.wakes.pop_first();
-            let Some(c) = self.cells.get(&line) else {
+            let Some(c) = self.cells.get_mut(&line) else {
                 continue;
             };
+            if c.wake != Some(t) {
+                continue;
+            }
+            c.wake = None;
             match c.phase.clone() {
                 Phase::Due => self.dispatch(line, 1, out),
                 Phase::Flight {
@@ -546,25 +602,33 @@ impl Machine {
         let Some(c) = self.cells.get(&line) else {
             return;
         };
-        // The captured values its holes take, from their producers' cells.
-        let mut captured = Vec::new();
-        for (subject, slot, producer) in &c.producers {
-            let value = self.cells.get(producer).and_then(|p| {
-                p.captures
-                    .iter()
-                    .find(|v| &v.subject == subject && &v.slot == slot)
-            });
-            match value {
-                Some(v) => captured.push(v.clone()),
-                None => {
-                    let producer = *producer;
-                    self.finish(line, End::Skipped(Skip::MissingCapture(producer)), now, out);
-                    return;
+        // The captured values its holes take, from their producers' cells when
+        // it is first dispatched; a resend sends them again.
+        let captured = if attempt == 1 {
+            let mut captured = Vec::new();
+            for (subject, slot, producer) in &c.producers {
+                let value = self.cells.get(producer).and_then(|p| {
+                    p.captures
+                        .iter()
+                        .find(|v| &v.subject == subject && &v.slot == slot)
+                });
+                match value {
+                    Some(v) => captured.push(v.clone()),
+                    None => {
+                        let producer = *producer;
+                        self.finish(line, End::Skipped(Skip::MissingCapture(producer)), now, out);
+                        return;
+                    }
                 }
             }
-        }
+            captured
+        } else {
+            c.captured.clone()
+        };
         let deadline = if attempt == 1 {
-            self.deadline(line)
+            let deadline = self.deadline(line);
+            self.release(line);
+            deadline
         } else {
             c.deadline
         };
@@ -580,11 +644,12 @@ impl Machine {
         c.deadline = deadline;
         c.attempts = attempt;
         c.dispatched.get_or_insert(now);
+        c.captured.clone_from(&captured);
         c.phase = Phase::Flight {
             attempt,
             outstanding: true,
         };
-        self.wakes.insert((deadline.saturating_add(GRACE), line));
+        self.wake(line, deadline.saturating_add(GRACE));
         out.push(Output::Dispatch {
             line,
             attempt,
@@ -677,7 +742,7 @@ impl Machine {
                     outstanding: false,
                 };
                 let deadline = c.deadline;
-                self.wakes.insert((next.min(deadline), line));
+                self.wake(line, next.min(deadline));
             }
             Judgement::NotTaken if safety != Safety::Never && now < c.deadline => {
                 self.dispatch(line, attempt.saturating_add(1), out);
@@ -730,6 +795,9 @@ impl Machine {
         }
         c.end = Some((end.clone(), at));
         c.phase = Phase::Done;
+        if let Some(t) = c.wake.take() {
+            self.wakes.remove(&(t, line));
+        }
         out.push(Output::Ended(Box::new(Entry {
             line,
             end,
@@ -745,7 +813,44 @@ impl Machine {
             bound: c.bound.clone(),
             fault: c.fault,
         })));
+        // It lets go of its producers before its barrier may free it.
+        self.release(line);
         self.notify(line, out);
+        self.free_if_done(line);
+    }
+
+    /// A step lets go of its producers and its cause: its captured values are
+    /// taken, its deadline decided, or it ended unsent.
+    fn release(&mut self, line: Line) {
+        let held = match self.cells.get_mut(&line) {
+            Some(c) if c.holding => {
+                c.holding = false;
+                let mut held: Vec<Line> = c.producers.iter().map(|p| p.2).collect();
+                held.extend(c.cause.filter(|x| *x != line));
+                held
+            }
+            _ => return,
+        };
+        for p in held {
+            if let Some(c) = self.cells.get_mut(&p) {
+                c.refs = c.refs.saturating_sub(1);
+            }
+            self.free_if_done(p);
+        }
+    }
+
+    /// Frees a step's cell once nothing can read it again.
+    fn free_if_done(&mut self, line: Line) {
+        let Some(c) = self.cells.get(&line) else {
+            return;
+        };
+        let passed = c
+            .member
+            .as_ref()
+            .is_none_or(|(key, ord)| self.barriers.get(key).is_none_or(|b| *ord < b.base));
+        if c.end.is_some() && !c.holding && !c.in_window && c.refs == 0 && passed {
+            self.cells.remove(&line);
+        }
     }
 
     /// Tells a step's waiters and its barrier what it has now met.
@@ -787,51 +892,59 @@ impl Machine {
         let Some(mut b) = self.barriers.remove(&key) else {
             return;
         };
+        let mut fired: Vec<(Line, u64, Line)> = Vec::new();
+        let mut skipped: Vec<(Line, Line, u64)> = Vec::new();
         for on in [On::Sent, On::Settled, On::Expected] {
             let r = rank(on);
-            while let Some(&m) = b.members.get(b.prefix[r]) {
+            // A prefix of members expected stops for good at a failure.
+            if on == On::Expected && b.failed.is_some() {
+                continue;
+            }
+            while b.prefix[r] < b.count {
+                let ord = b.prefix[r];
+                let Some(&m) = b.members.get(ord.saturating_sub(b.base)) else {
+                    break;
+                };
                 match self.met(m, on) {
                     Met::Yes(t) => {
-                        b.latest[r] = b.latest[r].max(t);
-                        b.prefix[r] = b.prefix[r].saturating_add(1);
+                        if (t, m) >= b.latest[r] {
+                            b.latest[r] = (t, m);
+                        }
+                        b.prefix[r] = ord.saturating_add(1);
+                        // The holders waiting for exactly these members: the
+                        // latest among them is the latest so far.
+                        if let Some(holders) = b.holders[r].remove(&b.prefix[r]) {
+                            let (t, last) = b.latest[r];
+                            fired.extend(holders.into_iter().map(|h| (h, t, last)));
+                        }
                     }
-                    Met::Never(_) => {
-                        b.failed = Some(b.failed.map_or(b.prefix[r], |f| f.min(b.prefix[r])));
+                    Met::Never(t) => {
+                        b.failed = Some((ord, m, t));
+                        for (_, holders) in std::mem::take(&mut b.holders[r]) {
+                            skipped.extend(holders.into_iter().map(|h| (h, m, t)));
+                        }
                         break;
                     }
                     Met::Not => break,
                 }
             }
         }
-        let holders = std::mem::take(&mut b.holders);
-        let mut fired = Vec::new();
-        let mut skipped = Vec::new();
-        for (holder, members, on) in holders {
-            let r = rank(on);
-            if on == On::Expected && b.failed.is_some_and(|f| f < members) {
-                let first = b
-                    .failed
-                    .and_then(|f| b.members.get(f))
-                    .copied()
-                    .unwrap_or(0);
-                skipped.push((holder, first));
-            } else if b.prefix[r] >= members {
-                // The latest among the holder's members, the first `members`
-                // read; its critical member, the one that met it last.
-                let (t, last) = b
-                    .members
-                    .iter()
-                    .take(members)
-                    .filter_map(|m| match self.met(*m, on) {
-                        Met::Yes(t) => Some((t, *m)),
-                        _ => None,
-                    })
-                    .max()
-                    .unwrap_or((0, 0));
-                fired.push((holder, t, last));
-            } else {
-                b.holders.push((holder, members, on));
-            }
+        // The members every prefix passed: nothing sweeps them again.
+        let expected = if b.failed.is_some() {
+            usize::MAX
+        } else {
+            b.prefix[rank(On::Expected)]
+        };
+        let passed_all = b.prefix[rank(On::Sent)]
+            .min(b.prefix[rank(On::Settled)])
+            .min(expected);
+        let mut passed = Vec::new();
+        while b.base < passed_all {
+            let Some(m) = b.members.pop_front() else {
+                break;
+            };
+            b.base = b.base.saturating_add(1);
+            passed.push(m);
         }
         self.barriers.insert(key, b);
         for (holder, t, last) in fired {
@@ -844,13 +957,11 @@ impl Machine {
             }
             self.ready_if_met(holder);
         }
-        for (holder, first) in skipped {
-            let t = self
-                .cells
-                .get(&first)
-                .and_then(|c| c.end.as_ref())
-                .map_or(self.now, |e| e.1);
+        for (holder, first, t) in skipped {
             self.finish(holder, End::Skipped(Skip::Member(first)), t, out);
+        }
+        for m in passed {
+            self.free_if_done(m);
         }
     }
 }
