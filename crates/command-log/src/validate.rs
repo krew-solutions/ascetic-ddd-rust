@@ -184,7 +184,8 @@ impl fmt::Display for Violation {
 }
 
 /// What a run must hold, as the log plans it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Peaks {
     /// The most completions kept at once for later dependencies: the steps
     /// whose latest occurrence is within `W` behind the cursor, and the
@@ -196,6 +197,19 @@ pub struct Peaks {
     /// The polls the observations imply, summed over the log (not at once):
     /// each one's timeout over its interval, and one.
     pub polls: u64,
+    /// The plan's own bound (ADR-0047 decision 7, K1e-2): the most steps a
+    /// machine holds at once when every action ends at its deadline and every
+    /// line is read within `[at − L, at]`, `L` the header's read-ahead — those
+    /// the window keeps, and those it let go whose hold has not ended at a
+    /// read: their end, the latest end of their barrier key's members up to
+    /// them, the release of a step they pin.
+    pub held: u64,
+    /// Of them, the most not ended.
+    pub pending: u64,
+    /// The latest end: no run of the plan ends later.
+    pub horizon: u64,
+    /// The barrier keys: one a step's own, kept for the run.
+    pub barriers: u64,
 }
 
 /// What a pass found.
@@ -565,7 +579,17 @@ struct Slot {
 }
 
 /// A barrier's key: the kind, scope, label and occurrence its members share.
-type BarrierKey = (String, Vec<u8>, String, u32);
+type BarrierKey = crate::plan::MemberKey;
+
+/// A step the window keeps, in the plan's worst schedule (ADR-0047 K1e-2):
+/// its latest intended start, its latest end, and the latest instant a
+/// machine may still hold it.
+#[derive(Clone, Copy, Debug, Default)]
+struct Held {
+    intended: u64,
+    end: u64,
+    hold: u64,
+}
 
 struct Pass<'h, H: Host> {
     host: &'h H,
@@ -576,12 +600,20 @@ struct Pass<'h, H: Host> {
     kept: usize,
     report: Report,
     previous: Option<(u64, StepId)>,
-    /// The steps a later line may bind (ADR-0047 decision 2).
-    window: crate::window::Window<()>,
+    /// The steps a later line may bind (ADR-0047 decision 2), with their
+    /// worst schedule.
+    window: crate::window::Window<Held>,
     /// [`Limits::hot`].
     hot: u64,
-    /// A barrier key's members planned so far, and the latest `at` of them.
-    barriers: BTreeMap<BarrierKey, (u64, u64)>,
+    /// A barrier key's members planned so far, the latest `at` of them, and
+    /// the latest worst end.
+    barriers: BTreeMap<BarrierKey, (u64, u64, u64)>,
+    /// The holds of steps the window let go that a machine may still hold: a
+    /// min-heap, popped as reads pass them (ADR-0047 K1e-2).
+    beyond: BinaryHeap<Reverse<u64>>,
+    /// The worst ends of steps read and not ended, alike.
+    ends: BinaryHeap<Reverse<u64>>,
+    progress: Option<crate::engine::Observer>,
     slots: BTreeMap<(Subject, String), Slot>,
     /// Live captures: slots whose latest writer is within W of the cursor
     /// (its `at`) or retained (`None`).
@@ -965,7 +997,7 @@ impl<H: Host> Pass<'_, H> {
         }
         self.hold()?;
         self.evict();
-        self.edges(line, r)?;
+        let ready = self.edges(line, r)?;
         self.captures(line, r);
         self.stream(line, r)?;
         self.observation(line, r);
@@ -981,7 +1013,7 @@ impl<H: Host> Pass<'_, H> {
             }
         }
         self.offered(line, r);
-        self.keep(r, digest);
+        self.keep(line, r, digest, ready)?;
         self.within(line)
     }
 
@@ -995,6 +1027,8 @@ impl<H: Host> Pass<'_, H> {
             ("buckets", self.buckets.len()),
             ("deviations", self.deviations.len()),
             ("polls", self.polls.len()),
+            ("held past the window", self.beyond.len()),
+            ("pending", self.ends.len()),
         ];
         match parts.into_iter().find(|(_, n)| *n as u64 > self.hot) {
             Some((part, n)) => Err(LogError::Hot {
@@ -1018,7 +1052,18 @@ impl<H: Host> Pass<'_, H> {
         self.previous = Some(key);
     }
 
-    fn edges(&mut self, line: u64, r: &Record) -> Result<(), LogError> {
+    /// The dependencies bound, `feasible` (decision 3), and the latest worst
+    /// end among them (K1e-2).
+    fn edges(&mut self, line: u64, r: &Record) -> Result<u64, LogError> {
+        let mut ready = 0u64;
+        // A step's think after the start of the run, before its plan: with no
+        // dependency, or only empty barriers, nothing else checks it.
+        if r.think > r.at {
+            let (think, at) = (r.think, r.at);
+            self.violate(line, Rule::Feasible, || {
+                format!("{think} µs of think, after its plan at {at}")
+            });
+        }
         for d in &r.after {
             match d {
                 Dep::Step { step, .. } => {
@@ -1026,7 +1071,10 @@ impl<H: Host> Pass<'_, H> {
                     // in the window is within W of it.
                     let at_l = r.at;
                     let digest = id_digest(step)?;
-                    let found = self.window.get(&digest).map(|e| e.0);
+                    let found = self.window.get(&digest).map(|e| {
+                        ready = ready.max(e.1.end);
+                        e.0
+                    });
                     let think = r.think;
                     match found {
                         Some(at) if at >= at_l => self.violate(line, Rule::Edge, || {
@@ -1051,11 +1099,12 @@ impl<H: Host> Pass<'_, H> {
                     count,
                     ..
                 } => {
-                    let (planned, latest) = self
+                    let (planned, latest, end) = self
                         .barriers
-                        .get(&(kind.clone(), scope.clone(), label.clone(), *n))
+                        .get(&crate::plan::barrier_key(kind, scope, label, *n))
                         .copied()
-                        .unwrap_or((0, 0));
+                        .unwrap_or((0, 0, 0));
+                    ready = ready.max(end);
                     if let Some(c) = count
                         && *c != planned
                     {
@@ -1072,7 +1121,7 @@ impl<H: Host> Pass<'_, H> {
                 }
             }
         }
-        Ok(())
+        Ok(ready)
     }
 
     fn captures(&mut self, line: u64, r: &Record) {
@@ -1442,7 +1491,14 @@ impl<H: Host> Pass<'_, H> {
     /// cursor never going back. A step id kept again later stays.
     fn evict(&mut self) {
         let (w, c) = (self.header.window, self.cursor);
-        self.window.read(c);
+        let tau = c.saturating_sub(self.header.read_ahead);
+        let beyond = &mut self.beyond;
+        // What the window lets go a machine may still hold (K1e-2).
+        self.window.read(c, |h| {
+            if h.hold >= tau {
+                beyond.push(Reverse(h.hold));
+            }
+        });
         while let Some((written, _)) = self.live_order.first() {
             if c.saturating_sub(*written) <= w {
                 break;
@@ -1455,24 +1511,78 @@ impl<H: Host> Pass<'_, H> {
         }
     }
 
-    /// The step, kept for later dependencies by its id's digest; the barrier
-    /// counts.
-    fn keep(&mut self, r: &Record, digest: [u8; 16]) {
-        let retained = self.header.retained.contains(&r.step.label);
-        self.window.keep(digest, r.at, retained, ());
-        let held = self.window.len() as u64;
-        self.report.peaks.completions = self.report.peaks.completions.max(held);
+    /// The step, kept for later dependencies by its id's digest, with its
+    /// worst schedule (ADR-0047 K1e-2); the barrier counts; the plan's bound
+    /// at its read.
+    fn keep(
+        &mut self,
+        line: u64,
+        r: &Record,
+        digest: [u8; 16],
+        ready: u64,
+    ) -> Result<(), LogError> {
+        let tau = self.cursor.saturating_sub(self.header.read_ahead);
+        // Its latest release, and its latest end: at its deadline, or at its
+        // release if that is past it (decision 7).
+        let intended = crate::plan::intended(r.at, ready, r.think);
+        let timeout = crate::plan::timeout(&self.header, &r.action);
+        let start = match crate::plan::cause(r) {
+            Some(cause) => self
+                .window
+                .get(&id_digest(cause)?)
+                .map_or(intended, |e| e.1.intended),
+            None => intended,
+        };
+        let end = intended.max(start.saturating_add(timeout));
+        // The steps it pins are held until its release is decided.
+        for pinned in crate::plan::pins(r) {
+            if let Some(h) = self.window.get_mut(&id_digest(pinned)?) {
+                h.hold = h.hold.max(intended);
+            }
+        }
+        // Every prefix of its key passes it once every member up to it ended.
         let s = &r.step;
-        let held = self
-            .barriers
-            .entry((
-                s.subject.kind.clone(),
-                s.subject.scope.clone(),
-                s.label.clone(),
-                s.n,
-            ))
-            .or_insert((0, 0));
-        *held = (held.0.saturating_add(1), held.1.max(r.at));
+        let key = crate::plan::member_key(s);
+        let b = self.barriers.entry(key).or_insert((0, 0, 0));
+        let hold = end.max(b.2);
+        *b = (b.0.saturating_add(1), b.1.max(r.at), b.2.max(end));
+        let retained = self.header.retained.contains(&r.step.label);
+        let beyond = &mut self.beyond;
+        self.window.keep(
+            digest,
+            r.at,
+            retained,
+            Held {
+                intended,
+                end,
+                hold,
+            },
+            |h| {
+                if h.hold >= tau {
+                    beyond.push(Reverse(h.hold));
+                }
+            },
+        );
+        self.ends.push(Reverse(end));
+        while self.beyond.peek().is_some_and(|Reverse(h)| *h < tau) {
+            self.beyond.pop();
+        }
+        while self.ends.peek().is_some_and(|Reverse(e)| *e < tau) {
+            self.ends.pop();
+        }
+        let p = &mut self.report.peaks;
+        let window = self.window.len() as u64;
+        p.completions = p.completions.max(window);
+        let held = window.saturating_add(self.beyond.len() as u64);
+        let pending = self.ends.len() as u64;
+        p.held = p.held.max(held);
+        p.pending = p.pending.max(pending);
+        p.horizon = p.horizon.max(end);
+        p.barriers = p.barriers.max(self.barriers.len() as u64);
+        if let Some(o) = &self.progress {
+            o.0.bound(line, intended, end, held, pending);
+        }
+        Ok(())
     }
 
     fn finish(mut self) -> Result<Report, LogError> {
@@ -1481,6 +1591,8 @@ impl<H: Host> Pass<'_, H> {
         // The hot parts go before the runs are read back: their memory reads.
         self.window = crate::window::Window::new(self.header.window);
         self.barriers = BTreeMap::new();
+        self.beyond = BinaryHeap::new();
+        self.ends = BinaryHeap::new();
         self.slots = BTreeMap::new();
         self.live = BTreeMap::new();
         self.live_order = BTreeSet::new();
@@ -1565,6 +1677,9 @@ pub fn validate_on<R: BufRead>(
         previous: None,
         window: crate::window::Window::new(reader.header().window),
         barriers: BTreeMap::new(),
+        beyond: BinaryHeap::new(),
+        ends: BinaryHeap::new(),
+        progress: limits.progress.clone(),
         slots: BTreeMap::new(),
         live: BTreeMap::new(),
         live_order: BTreeSet::new(),

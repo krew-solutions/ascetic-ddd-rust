@@ -273,6 +273,44 @@ pub fn bytes(header: Header, records: &[Record]) -> Vec<u8> {
     w.finish().unwrap().0
 }
 
+/// What the plan's bound counts at each read (ADR-0047 K1e-2): the line, its
+/// worst intended start and end, the steps held and those not ended.
+#[derive(Default)]
+pub struct Bounds(pub std::sync::Mutex<Vec<[u64; 5]>>);
+
+impl ascetic_ddd_command_log::engine::Progress for Bounds {
+    fn bound(&self, line: u64, intended: u64, end: u64, held: u64, pending: u64) {
+        self.0
+            .lock()
+            .unwrap()
+            .push([line, intended, end, held, pending]);
+    }
+}
+
+/// [`run_with`], and what the bound counts at each read.
+pub fn run_bounded(
+    header: Header,
+    records: &[Record],
+    host: &impl Host,
+    ids: usize,
+) -> (Report, Vec<[u64; 5]>) {
+    let dir = tempfile::tempdir().unwrap();
+    let bounds = std::sync::Arc::new(Bounds::default());
+    let limits = Limits {
+        memory: ids * 25,
+        spill: dir.path().to_owned(),
+        kept: 1_000,
+        fan_in: 0,
+        memory_spill: true,
+        progress: Some(ascetic_ddd_command_log::engine::Observer(bounds.clone())),
+        hot: 1 << 20,
+    };
+    let reader = Reader::new(Cursor::new(bytes(header, records))).unwrap();
+    let report = validate(reader, host, &limits).unwrap();
+    let seen = std::mem::take(&mut *bounds.0.lock().unwrap());
+    (report, seen)
+}
+
 pub fn run_with(header: Header, records: &[Record], host: &impl Host, ids: usize) -> Report {
     let dir = tempfile::tempdir().unwrap();
     // Memory for `ids` step ids of 25 bytes; stream messages share it.

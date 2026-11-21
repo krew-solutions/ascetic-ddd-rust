@@ -362,3 +362,107 @@ mod m9 {
         eprintln!("M9 sha256: {:.0} MB/s", 1024.0 * 1.048_576 / secs);
     }
 }
+
+// K1e-2 of ADR-0047: what the plan's own bound costs the validator, on a plan
+// whose every hold outlasts the window — eight subjects live at a time through
+// cycles of an update capturing its ETag, a read sending it, and a call
+// awaiting the read settled, a line every 125 µs, W 20 ms and timeouts of
+// 10 s: some 8·10⁴ steps held past the window and as many not ended at once,
+// a pin on every update, a barrier key a label and a cycle. In release, the
+// validation timed inside, beside /usr/bin/time -v:
+//
+//     KE2_STEPS=2000000 cargo test --release -p ascetic-ddd-command-log \
+//         --test scale -- --ignored --nocapture k1e2_
+mod k1e2 {
+    #![allow(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        reason = "a measurement: it reads its size from the environment and times the pass"
+    )]
+    use super::*;
+    use ascetic_ddd_command_log::log::Writer;
+    use ascetic_ddd_command_log::record::{Header, Value};
+    use ascetic_ddd_command_log::validate::{Limits, NoHost, validate_file};
+
+    const EVERY: u64 = 125;
+    const LIVE: u64 = 8;
+
+    fn record(i: u64, cycles: u64) -> Record {
+        let at = i * EVERY;
+        let (round, within) = (i / (3 * LIVE), i % (3 * LIVE));
+        let (phase, slot) = (within / LIVE, within % LIVE);
+        let cycle = (round % cycles) as u32;
+        let s = (round / cycles) * LIVE + slot;
+        let update = id("group", s, "update", cycle);
+        let read = id("group", s, "read", cycle);
+        match phase {
+            0 => {
+                let mut r = captures_etag(
+                    Record {
+                        action: rest("update", vec![Value::Literal(s.to_string())]),
+                        ..step(update, at)
+                    },
+                    s,
+                );
+                if cycle > 0 {
+                    r = after(r, &id("group", s, "update", cycle - 1), On::Settled);
+                    r = after(r, &id("group", s, "read", cycle - 1), On::Settled);
+                }
+                r
+            }
+            1 => after(
+                Record {
+                    action: read_etag("read", s, &update),
+                    ..step(read, at)
+                },
+                &update,
+                On::Expected,
+            ),
+            _ => after(step(id("group", s, "call", cycle), at), &read, On::Settled),
+        }
+    }
+
+    #[test]
+    #[ignore = "K1e-2: the bound's cost, in release, under /usr/bin/time -v"]
+    fn k1e2_bound() {
+        let steps: u64 = std::env::var("KE2_STEPS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2_000_000);
+        // On disk: the validator refuses to spill into memory.
+        let base = std::path::PathBuf::from(
+            std::env::var("KE2_DIR")
+                .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../target").into()),
+        );
+        std::fs::create_dir_all(&base).unwrap();
+        let dir = tempfile::tempdir_in(base).unwrap();
+        let path = dir.path().join("plan.jsonl");
+        let header = Header {
+            window: 20_000,
+            ..header()
+        };
+        let started = std::time::Instant::now();
+        {
+            let mut w = Writer::new(BufWriter::new(File::create(&path).unwrap()), header).unwrap();
+            for i in 0..steps {
+                w.step(record(i, 16)).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        let written = started.elapsed().as_secs_f64();
+        let spill = dir.path().join("spill");
+        let started = std::time::Instant::now();
+        let report = validate_file(&path, &NoHost, &Limits::new(spill)).unwrap();
+        let secs = started.elapsed().as_secs_f64();
+        assert!(
+            report.violations.is_empty(),
+            "{:?}",
+            &report.violations[..1]
+        );
+        eprintln!(
+            "K1e-2: {steps} steps written in {written:.1} s, validated in {secs:.1} s, {:.1}·10³ steps/s; {:?}",
+            steps as f64 / secs / 1e3,
+            report.peaks
+        );
+    }
+}

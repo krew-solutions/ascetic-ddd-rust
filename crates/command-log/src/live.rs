@@ -26,13 +26,15 @@ use crate::log::{FORMAT, LogError, Partial, Reader, encode};
 use crate::record::{Header, Line, Trailer};
 use crate::validate::{Host, Limits, Report, Rule, spill_need, validate_on};
 
-/// Bumped when a rule's meaning changes, beside its name: a commitment from
-/// another validator is stale (2: C5 added `rate` and `key`; 3: decision 16
-/// measured W behind the read cursor and stopped `deviation` exempting itself;
-/// 4: ADR-0047's FORMAT 3 — `feasible`, `measure`, `cause`, `until`, `sent`,
-/// writers awaiting readers settled, the scheduler's premises not deviable;
-/// 5: a producer captures the value its reader sends).
-pub const RULES_REVISION: u32 = 5;
+/// Bumped when a rule's or a committed peak's meaning changes, beside its
+/// name: a commitment from another validator is stale (2: C5 added `rate` and
+/// `key`; 3: decision 16 measured W behind the read cursor and stopped
+/// `deviation` exempting itself; 4: ADR-0047's FORMAT 3 — `feasible`,
+/// `measure`, `cause`, `until`, `sent`, writers awaiting readers settled, the
+/// scheduler's premises not deviable; 5: a producer captures the value its
+/// reader sends; 6: ADR-0047 K1e-2 — the plan's own bound and its peaks
+/// committed, two hot parts beside them, `feasible` for every step's think).
+pub const RULES_REVISION: u32 = 6;
 
 /// The validator's identity: its revision and its rules' names.
 pub fn validator() -> String {
@@ -65,6 +67,10 @@ pub struct Commitment {
     pub multiset: String,
     /// The trailer's digest: of the header and every step line.
     pub sha256: String,
+    /// What a run of it must hold (ADR-0047 K1e-2): the validator's peaks,
+    /// the plan's own bound among them, which the scheduler's shell refuses
+    /// before T0 when its machine cannot.
+    pub peaks: crate::validate::Peaks,
 }
 
 impl Commitment {
@@ -197,7 +203,12 @@ impl Tally {
         });
     }
 
-    fn commitment(self, fingerprint: &str, chunk: u64) -> Commitment {
+    fn commitment(
+        self,
+        fingerprint: &str,
+        chunk: u64,
+        peaks: crate::validate::Peaks,
+    ) -> Commitment {
         Commitment {
             format: FORMAT.to_owned(),
             validator: validator(),
@@ -208,6 +219,7 @@ impl Tally {
             records: self.emitted.records,
             multiset: format!("{:032x}", self.emitted.multiset),
             sha256: self.sha256.unwrap_or_default(),
+            peaks,
         }
     }
 }
@@ -415,7 +427,9 @@ pub fn commit_file(
         validate_on(Reader::new(tee)?, host, limits, disk)?
     };
     if report.violations.is_empty() && report.violated == 0 {
-        tally.commitment(fingerprint, chunk).write(commitment)?;
+        tally
+            .commitment(fingerprint, chunk, report.peaks)
+            .write(commitment)?;
     }
     Ok(report)
 }
@@ -603,7 +617,7 @@ pub fn dry_on(
     let report = validated.map_err(EngineError::Log)?;
     if report.violations.is_empty() && report.violated == 0 {
         tally
-            .commitment(fingerprint, chunk)
+            .commitment(fingerprint, chunk, report.peaks)
             .write(commitment)
             .map_err(|e| EngineError::Log(LogError::Io(e)))?;
     }

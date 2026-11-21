@@ -54,7 +54,8 @@ The rules (ADR-0046 decisions 5, 7, 9):
   not in the channels table; a host call not in the calls table.
 - feasible: a line planned before the latest earlier step a dependency binds
   (within reach, planned before it) plus its think; or before the latest
-  earlier member of a barrier it awaits plus its think.
+  earlier member of a barrier it awaits plus its think; or before its think
+  (from the run's start, whatever it awaits).
 - measure: a measure from a step no earlier line has.
 - cause: an observation whose cause is neither itself nor a step it awaits.
 - until: an observation of the bus none of whose predicates is an `equals` on
@@ -328,6 +329,8 @@ def verdict(text, clock="cursor"):
             v.add("order")
         if any(e["step"] == r["step"] for e in earlier):
             v.add("duplicate")
+        if int(r["think"]) > at:
+            v.add("feasible")
         for d in r["after"]:
             if "step" in d:
                 match = [e for e in earlier if e["step"] == d["step"]["step"]]
@@ -504,17 +507,138 @@ def peaks(text):
     return [completions, captures, polls]
 
 
+# What the corpus reaches of the bound's terms (ADR-0047 K1e-2): reads at which a
+# step the window let go is held only because of one term. Each must be reached.
+REACHED = ("pin", "prefix", "read_ahead", "tie")
+
+
+def bound(text, seen):
+    """The plan's own bound (ADR-0047 K1e-2), by definition, quadratic: every
+    line read at its earliest, at - L with L the header's read-ahead, and every
+    action ending at its deadline. Per line: R, the latest release — its plan,
+    or the latest end of what it awaits plus its think; E, the latest end — R
+    plus its timeout (an operation's, a channel's, a host call's; an
+    observation's from its cause's R), or R if past it; H, the latest instant
+    a machine may hold it — E, the latest E of its barrier key's members up to
+    it, the R of a later line it is the captured producer or the cause of. At
+    the read of line j, tau the cursor less L: the steps held are those the
+    window keeps (latest of their id, within W behind the cursor or retained)
+    and those it let go with H >= tau; those not ended have E >= tau. Returns
+    the per-line [line, R, E, held, pending] and the folds [held, pending,
+    horizon, barriers]."""
+    lines = text.split("\n")[:-1]
+    header = json.loads(lines[0])["header"]
+    steps = [json.loads(line)["step"] for line in lines[1:-1]]
+    w, retained, ahead = int(header["window"]), header["retained"], int(header["read_ahead"])
+    tables = {}
+    for kind, table, name in (("rest", "operations", "name"), ("bus", "channels", "name"), ("host", "calls", "name")):
+        tables[kind] = {}
+        for t in header[table]:
+            tables[kind].setdefault(t[name], int(t["timeout"]))
+
+    def timeout(r):
+        a = r["action"]
+        if "rest" in a:
+            return tables["rest"].get(a["rest"]["op"], 0)
+        if "bus" in a:
+            return tables["bus"].get(a["bus"]["channel"], 0)
+        if "host" in a:
+            return tables["host"].get(a["host"]["op"], 0)
+        return int(a["observe"]["timeout"])
+
+    cursors = []
+    for r in steps:
+        cursors.append(max([int(r["at"])] + cursors[-1:]))
+
+    def bind(i, step_id):
+        match = [j for j in range(i) if steps[j]["step"] == step_id]
+        if not match:
+            return None
+        j = match[-1]
+        e = steps[j]
+        if e["step"]["label"] in retained or cursors[i] - int(e["at"]) <= w:
+            return j
+        return None
+
+    def member(s):
+        return (s["subject"]["kind"], s["subject"]["scope"], s["label"], s["n"])
+
+    R, E, P, Q = [], [], [], []
+    for i, r in enumerate(steps):
+        ready = 0
+        for d in r["after"]:
+            if "step" in d:
+                b = bind(i, d["step"]["step"])
+                if b is not None:
+                    ready = max(ready, E[b])
+            else:
+                e = d["each"]
+                for j in range(i):
+                    if member(steps[j]["step"]) == (e["kind"], e["scope"], e["label"], e["n"]):
+                        ready = max(ready, E[j])
+        rel = max(int(r["at"]), ready + int(r["think"]))
+        start = rel
+        o = r["action"].get("observe")
+        if o is not None and o["cause"] != r["step"]:
+            c = bind(i, o["cause"])
+            if c is not None:
+                start = R[c]
+        R.append(rel)
+        E.append(max(rel, start + timeout(r)))
+        P.append(max(E[j] for j in range(i + 1) if member(steps[j]["step"]) == member(r["step"])))
+        Q.append(0)
+    for i, r in enumerate(steps):
+        pinned = [h["captured"]["from"] for h in holes(r) if "captured" in h]
+        o = r["action"].get("observe")
+        if o is not None and o["cause"] != r["step"]:
+            pinned.append(o["cause"])
+        for p in pinned:
+            b = bind(i, p)
+            if b is not None:
+                Q[b] = max(Q[b], R[i])
+    H = [max(E[k], P[k], Q[k]) for k in range(len(steps))]
+    per_line, held, pending = [], 0, 0
+    for j in range(len(steps)):
+        tau = max(cursors[j] - ahead, 0)
+        now_held = now_pending = 0
+        for k in range(j + 1):
+            latest = max(x for x in range(j + 1) if steps[x]["step"] == steps[k]["step"]) == k
+            kept = latest and (steps[k]["step"]["label"] in retained or cursors[j] - int(steps[k]["at"]) <= w)
+            if kept or H[k] >= tau:
+                now_held += 1
+            if E[k] >= tau:
+                now_pending += 1
+            if not kept and H[k] >= tau:
+                if max(E[k], P[k]) < tau <= Q[k]:
+                    seen["pin"] += 1
+                if max(E[k], Q[k]) < tau <= P[k]:
+                    seen["prefix"] += 1
+                if H[k] < cursors[j]:
+                    seen["read_ahead"] += 1
+                if H[k] == tau:
+                    seen["tie"] += 1
+        per_line.append([j + 2, R[j], E[j], now_held, now_pending])
+        held, pending = max(held, now_held), max(pending, now_pending)
+    keys = {member(r["step"]) for r in steps}
+    return per_line, [held, pending, max(E, default=0), len(keys)]
+
+
 def main():
     count, apart, rules = 0, 0, {}
+    seen = {k: 0 for k in REACHED}
     for entry in sys.stdin:
         entry = json.loads(entry)
         mine = verdict(entry["log"])
         theirs = sorted((line, rule) for line, rule in entry["verdict"])
         if mine != theirs:
             raise SystemExit(f"{entry['name']}: the reference finds {mine}, the validator {theirs}")
-        held = peaks(entry["log"])
+        per_line, folds = bound(entry["log"], seen)
+        held = peaks(entry["log"]) + folds
         if held != entry["peaks"]:
             raise SystemExit(f"{entry['name']}: the reference's peaks are {held}, the validator's {entry['peaks']}")
+        if per_line != entry["bounds"]:
+            diff = next(((m, t) for m, t in zip(per_line, entry["bounds"]) if m != t), (per_line[-1:], entry["bounds"][-1:]))
+            raise SystemExit(f"{entry['name']}: the bound by definition {diff[0]}, the validator's {diff[1]} ([line, R, E, held, pending])")
         if verdict(entry["log"], clock="line") != mine:
             apart += 1
         count += 1
@@ -524,7 +648,10 @@ def main():
         raise SystemExit("no corpus on stdin")
     if apart == 0:
         raise SystemExit("no log tells the cursor from the line's own time: the corpus does not execute decision 16's clock")
-    print(f"{count} logs agree, {apart} of them only on the cursor's clock; violations by rule: {dict(sorted(rules.items()))}")
+    missed = [k for k, n in seen.items() if n == 0]
+    if missed:
+        raise SystemExit(f"the corpus reaches no read held only by {missed}: the bound's executors do not execute them")
+    print(f"{count} logs agree, {apart} of them only on the cursor's clock; violations by rule: {dict(sorted(rules.items()))}; the bound's terms reached at {seen}")
 
 
 if __name__ == "__main__":

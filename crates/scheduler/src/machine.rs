@@ -364,12 +364,9 @@ impl Machine {
         record: Arc<Record>,
         out: &mut Vec<Output>,
     ) -> Result<(), LogError> {
-        for gone in self.window.read(record.at) {
-            if let Some(c) = self.cells.get_mut(&gone) {
-                c.in_window = false;
-            }
-            self.free_if_done(gone);
-        }
+        let mut gone = Vec::new();
+        self.window.read(record.at, |l| gone.push(l));
+        self.forget(gone);
         let mut cell = Cell {
             record: record.clone(),
             read: self.now,
@@ -499,7 +496,9 @@ impl Machine {
         b.count = b.count.saturating_add(1);
         let retained = self.header.retained.contains(&record.step.label);
         let id = digest(&record.step)?;
-        self.window.keep(id, record.at, retained, line);
+        let mut gone = Vec::new();
+        self.window
+            .keep(id, record.at, retained, line, |l| gone.push(l));
         cell.in_window = self.window.get(&id).is_some_and(|e| e.1 == line);
         // It holds its producers and its cause until it is first dispatched.
         let mut held: Vec<Line> = cell.producers.iter().map(|p| p.2).collect();
@@ -511,6 +510,7 @@ impl Machine {
         }
         cell.holding = !held.is_empty();
         self.cells.insert(line, cell);
+        self.forget(gone);
         match skip {
             Some((why, t)) => self.finish(line, End::Skipped(why), t.max(self.now), out),
             None => self.ready_if_met(line),
@@ -836,6 +836,16 @@ impl Machine {
                 c.refs = c.refs.saturating_sub(1);
             }
             self.free_if_done(p);
+        }
+    }
+
+    /// The lines the window let go: no dependency read later binds them.
+    fn forget(&mut self, gone: Vec<Line>) {
+        for l in gone {
+            if let Some(c) = self.cells.get_mut(&l) {
+                c.in_window = false;
+            }
+            self.free_if_done(l);
         }
     }
 

@@ -12,6 +12,7 @@ pub mod disk;
 pub mod engine;
 pub mod live;
 pub mod log;
+pub mod plan;
 pub mod rate;
 pub mod record;
 pub mod render;

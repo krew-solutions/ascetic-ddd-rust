@@ -882,6 +882,10 @@ fn the_rules_meaning_is_pinned_to_its_revision() {
             5,
             "e513cbb1258ca9684b36c132ccea304c67b00a45617e811f6c4729bc29a93b8a",
         ),
+        (
+            6,
+            "b3a9d0a3f191eacee7f21e38ff52af87c4e3074f97d8bf93340eedd40076c298",
+        ),
     ];
     let mut digest = Sha256::new();
     for line in fixture::corpus::lines() {
@@ -1075,6 +1079,46 @@ fn a_hot_part_past_its_limit_fails_by_name() {
                 .collect(),
         ),
     ];
+    // The bound's parts (ADR-0047 K1e-2), each with its own line: steps the
+    // window let go held by an earlier member of their key, which a host call
+    // that times out at once leaves no other reason to hold; and steps not
+    // ended, two in the window and two let go.
+    let mut quick = header();
+    quick.calls[0].timeout = W / 2;
+    let first = Record {
+        action: rest("update", vec![Value::Literal("0".into())]),
+        ..step(id("device", 0, "x", 0), 0)
+    };
+    let held_past: Vec<Record> = std::iter::once(first)
+        .chain((1..5).map(|i| step(id("device", i, "x", 0), i * 2 * W)))
+        .collect();
+    let long = |i: u64, at: u64| step(id("device", i, "long", 0), at);
+    let pending = vec![
+        long(1, 0),
+        long(2, 2 * W),
+        long(3, 2 * W + 1),
+        long(4, 4 * W + 2),
+    ];
+    let bound_cases: Vec<(&str, Header, Vec<Record>, u64)> = vec![
+        ("held past the window", quick, held_past, 6),
+        ("pending", header(), pending, 5),
+    ];
+    for (part, header, records, line) in bound_cases {
+        match at(header.clone(), &records, 3) {
+            Err(LogError::Hot {
+                part: p,
+                held,
+                line: l,
+            }) => {
+                assert_eq!((p, held, l), (part, 4, line), "{part}")
+            }
+            other => panic!("{part}: {other:?}"),
+        }
+        assert!(
+            !matches!(at(header, &records, 4), Err(LogError::Hot { .. })),
+            "{part} at its limit"
+        );
+    }
     for (part, header, records) in cases {
         match at(header.clone(), &records, 3) {
             Err(LogError::Hot {
@@ -1127,6 +1171,14 @@ fn feasible() {
         &with(barrier(50, 20)),
         &with(barrier(49, 20)),
     );
+    // Think from the run's start, whatever a step awaits (K1e-2): a step with
+    // no dependency, and a holder of a barrier no member was read before.
+    let alone = |at: u64, think: u64| Record {
+        think,
+        ..step(a.clone(), at)
+    };
+    twins(Rule::Feasible, &[alone(20, 20)], &[alone(19, 20)]);
+    twins(Rule::Feasible, &[barrier(20, 20)], &[barrier(19, 20)]);
 }
 
 /// A measure is from a step an earlier line has, however far back.

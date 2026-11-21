@@ -349,7 +349,7 @@ fn a_dry_run_commits_only_what_is_clean() {
 fn the_validator_s_identity_is_its_rules() {
     assert_eq!(
         validator(),
-        "5: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent"
+        "6: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent"
     );
 }
 
@@ -381,6 +381,8 @@ mod replay {
     use ascetic_ddd_command_log::disk::LocalDisk;
     use ascetic_ddd_command_log::engine::generate_file;
     use ascetic_ddd_command_log::live::{commit_file, replay};
+    use ascetic_ddd_command_log::log::Reader;
+    use ascetic_ddd_command_log::validate::validate;
     use ascetic_ddd_command_log::{Compression, LogError, open_file};
 
     fn persisted(dir: &Path, compression: Compression) -> (PathBuf, Commitment) {
@@ -436,10 +438,20 @@ mod replay {
     fn a_persisted_log_commits_what_its_dry_run_commits() {
         let dir = tempfile::tempdir().unwrap();
         let plan = Devices::new(9);
-        let (dry, _) = committed(dir.path(), &[&plan]);
+        let (dry, log) = committed(dir.path(), &[&plan]);
         for compression in [Compression::None, Compression::Zstd { level: 1 }] {
             assert_eq!(persisted(dir.path(), compression).1, dry, "{compression:?}");
         }
+        // The commitment carries what the validator found of the log: its
+        // peaks, the plan's bound among them (ADR-0047 K1e-2).
+        let reader = Reader::new(std::io::Cursor::new(log)).unwrap();
+        let report = validate(reader, &NoHost, &limits_in(dir.path())).unwrap();
+        assert_eq!(dry.peaks, report.peaks);
+        assert!(
+            dry.peaks.held > 0 && dry.peaks.horizon > 0,
+            "{:?}",
+            dry.peaks
+        );
     }
 
     fn read_all(path: &Path, commitment: &Commitment) -> (u64, Option<LogError>) {

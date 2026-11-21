@@ -1050,3 +1050,8 @@ condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
   `until`, `sent`; the header's deadlines and the channel and call tables (`RULES_REVISION` 4).
 - 2026-11-21: ADR-0047 K1c: § 9's producer rule also refuses a reader whose producer, the slot's latest writer,
   captures no value of it — the plan could never pass (`RULES_REVISION` 5).
+- 2026-11-22: ADR-0047 K1e-2: the validator also holds the plan's own bound — 24 B more a window entry and 8 B a step
+  held past the window or not ended, which grows with the plan's chains times their timeouts, not with W — two hot
+  parts by name; V6's plan runs timeouts on its window's scale, its bound equal across its plans. Decision 16's refusal
+  counts W × rate against the validating process: the scheduler's refusal of a plan its machine cannot hold is
+  ADR-0047's `fits`, not it. `feasible` also holds every step's think from the run's start (`RULES_REVISION` 6).

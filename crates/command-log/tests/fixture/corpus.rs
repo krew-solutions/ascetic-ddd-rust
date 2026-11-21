@@ -581,27 +581,58 @@ pub fn logs() -> Vec<(String, Vec<Record>)> {
 }
 
 /// The corpus as JSON lines: a name, a log, the validator's verdict and peaks.
+/// The corpus's header with every operation, channel and host call timing out
+/// on the window's scale, not in seconds: the plan's bound then turns on its
+/// terms within a log's few milliseconds (ADR-0047 K1e-2).
+pub fn short_header() -> Header {
+    let mut h = corpus_header();
+    for o in &mut h.operations {
+        o.timeout = 600;
+    }
+    for c in &mut h.channels {
+        c.timeout = 600;
+    }
+    for c in &mut h.calls {
+        c.timeout = 600;
+    }
+    h
+}
+
 pub fn lines() -> Vec<String> {
     let mut out = Vec::new();
     for (name, records) in logs() {
-        let report = run_with(corpus_header(), &records, &NoHost, 3);
-        let mut verdict: Vec<(u64, &str)> = report
-            .violations
-            .iter()
-            .map(|v| (v.line, v.rule.name()))
-            .collect();
-        verdict.dedup();
-        verdict.sort();
-        verdict.dedup();
-        let log = String::from_utf8(bytes(corpus_header(), &records)).unwrap();
-        let peaks = [
-            report.peaks.completions,
-            report.peaks.captures,
-            report.peaks.polls,
-        ];
-        let line =
-            serde_json::json!({ "name": name, "log": log, "verdict": verdict, "peaks": peaks });
-        out.push(line.to_string());
+        // The base logs also under the short header.
+        let base = name.matches('-').count() == 1;
+        let mut headers = vec![(name.clone(), corpus_header())];
+        if base {
+            headers.push((format!("{name}/short"), short_header()));
+        }
+        for (name, header) in headers {
+            let (report, bounds) = run_bounded(header.clone(), &records, &NoHost, 3);
+            let mut verdict: Vec<(u64, &str)> = report
+                .violations
+                .iter()
+                .map(|v| (v.line, v.rule.name()))
+                .collect();
+            verdict.dedup();
+            verdict.sort();
+            verdict.dedup();
+            let log = String::from_utf8(bytes(header, &records)).unwrap();
+            let p = report.peaks;
+            let peaks = [
+                p.completions,
+                p.captures,
+                p.polls,
+                p.held,
+                p.pending,
+                p.horizon,
+                p.barriers,
+            ];
+            let line = serde_json::json!({
+                "name": name, "log": log, "verdict": verdict, "peaks": peaks, "bounds": bounds,
+            });
+            out.push(line.to_string());
+        }
     }
     out
 }

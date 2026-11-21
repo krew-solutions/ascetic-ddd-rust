@@ -142,6 +142,12 @@ pub trait Progress: Send + Sync {
     fn runs(&self, kind: &'static str, on_disk: u64) {
         let _ = (kind, on_disk);
     }
+    /// A validation read `line` (ADR-0047 K1e-2): its worst intended start and
+    /// end, and what the plan's bound counts at its read — the steps a machine
+    /// holds and those not ended.
+    fn bound(&self, line: u64, intended: u64, end: u64, held: u64, pending: u64) {
+        let _ = (line, intended, end, held, pending);
+    }
 }
 
 /// A [`Progress`] a [`Config`] carries.

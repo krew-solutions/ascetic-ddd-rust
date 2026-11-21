@@ -137,6 +137,24 @@ dependencies held it — ends unknown at its release, never sent; the journal's 
 computed by the validator, and a plan past what the machine holds is refused before T0, as decision 16's dry run is.
 Lines blocked behind censored roots are the system's: the run ends failed and names them, never void.
 
+The bound, as built (K1e-2, decided under the gate: a blind solver, the main position, a discriminator, then three
+roles — Verifiability, Performance, Software Design): the worst schedule the deadlines allow, under A1 every attempt
+ends by its deadline (past it only the backstop, a harness fault), A2 every line is read within `[at − L, at]`, `L` the
+header's `read_ahead` (its first reader), A3 a wake is taken at its instant. Per line in log order: `R̂` its latest
+release, `max(at, ready̅ + think)`, `ready̅` the latest `Ê` of what it awaits — a strength is met, or its dependent
+skipped, by the dependency's end; `Ê` its latest end, `R̂` plus its timeout (an observation's from its cause's `R̂`),
+or `R̂` if that is past it; `Ĥ` the latest instant a machine may hold it — `Ê`, the latest `Ê` of its key's members up
+to it, the `R̂` of a step it pins. Every hold is monotone in every end (checked case by case: skips, `Sent` met by the
+end, observations released past their deadline, causes skipped while waiting, failed keys passing sooner), so every
+end at its deadline maximises each. The validator folds it into the committed `Peaks` at each read, `τ` the cursor less
+`L`: `held` the steps the window keeps and those it let go with `Ĥ ≥ τ`; `pending` those with `Ê ≥ τ`; `horizon` the
+latest `Ê`; `barriers` the keys. A plan past what a machine holds is refused before T0 by a pure `scheduler::fits`
+against one byte budget, `held`, `pending` and `barriers` each at a per-part cost the heap executor pins — not by
+decision 16's refusal, which counts W × rate against the validating process and cannot see chains (ADR-0046 decision
+16). At run time the shell compares the machine with its budget, not with the prediction: A2's late side is lateness
+decision 9 judges, and a real timer breaks A3 by its slack. The rules the bound and the machine share — a step's key,
+its intended start, its action's timeout and safety, the steps it pins — are one module, `command-log::plan`.
+
 ### 8. Barriers by prefix
 
 A barrier's members are its key's lines read before the holder; the machine keeps prefixes of members that met
@@ -186,8 +204,9 @@ match the wrong cause.
 non-deviable; `Measure.from` checked through the id runs (a measure may span more than W); `Operation.timeout`
 required and capped; the route timeout in the profile; a channel table with deadlines; host calls in the operations
 table; the retry split and the not-run problem codes; `Observe.cause`, an edge awaited at least `Sent`; the
-discriminating-`until` rule; the `Sent`-only rule of decision 6; the plan's own bound in the validator and peaks with
-a peak rate in the commitment; the window as a public module; `reference.py` emitting each edge's bound line and
+discriminating-`until` rule; the `Sent`-only rule of decision 6; the plan's own bound in the validator and its peaks
+in the commitment (the peak rate deferred to M11, which names its width and its consumer); the window as a public
+module; `reference.py` emitting each edge's bound line and
 deciding the new rules.
 
 ### 14. The journal and the verdict
@@ -414,6 +433,38 @@ is not freed, and it lets go before its barrier is told.
   members never let go; a step's wake left behind when it ends (the heap over twice the length: 1.44 MB against
   0.92 MB, the steps held unchanged). The stalls of K1-8 and the bound chosen by rate are K1e-2's.
 
+**K1e-2a — the bound in the validator** (2026-11-22, the command log's half; the scheduler's — `fits`, the machine's
+shared rules, its executors and the TLA+ model — is K1e-2b): `command-log::plan` holds the rules the validator and the
+machine share. The validator keeps each window entry's worst intended start, end and hold (`Window` hands what it
+evicts or displaces to a callback, and gains a crate-private `get_mut`), each barrier key's latest worst end beside its
+count, a min-heap of holds the window let go and one of ends; `Peaks` gains `held`, `pending`, `horizon`, `barriers`;
+the commitment carries the report's peaks; both heaps are hot parts by name. `feasible` holds every step's think from
+the run's start (a step with no dependency, or awaiting only a barrier no member was read before, with `think > at`
+passed and was released at its think). `RULES_REVISION` 6.
+- **Executors**: `reference.py` decides the bound by definition, quadratically, and is compared at every read — each
+  line's `R̂`, `Ê`, and the steps held and not ended at its read — on the corpus, whose base logs also run under a header
+  with timeouts on W's scale (with seconds, every hold outlasts a log): 2,209 logs agree, and the corpus reaches reads
+  at which a step is held only by a pin (12), only by its key's prefix (4), only by the read-ahead (1,014), and exactly
+  at the threshold (2), each failing on zero. Mutations, each alone, red: the chain ignored; a barrier's members
+  ignored; think ignored; the read-ahead ignored; pins dropped; the prefix hold dropped; strict for non-strict, for
+  held and for pending; an observation's deadline from its own start; the let-go steps not counted; the think rule
+  only beside dependencies. Twins: think past the plan with no dependency and with an empty barrier; the two new hot
+  parts, each failing by name one line past its limit; the commitment's peaks equal to the report's. ADR-0046's V6 now
+  runs timeouts on its window's scale and holds `held` and `pending` equal across its two plans: with seconds, its
+  longer plan holds 57,996 steps against 8,000 — the bound grows with a plan shorter than its chains' horizon — and its
+  heaps stayed under the end merges' peak, invisible to it.
+- **Measured** (this laptop, release, one run at a time, A/B against f636577; `tests/scale.rs` `k1e2_bound`, a plan of
+  eight live subjects through update–read–call cycles a line every 125 µs, W 20 ms, timeouts 10 s, its every hold
+  outlasting the window; and M9's persisted path at 10⁷): the stress plan at 2·10⁶ validates at 38.6·10³ steps/s
+  against 39.3·10³ (−1.8 %) and peaks at 154.8 MB against 134.6 MB — its two heaps of 1,279,904 steps; M9 at 10⁷
+  validates at 43,972 steps/s against 43,013 (noise) and peaks at 1.163 GB against 1.120 GB — the larger window entry,
+  its heaps empty (`held` equals `completions`, 834,884). A first run of the new side, a browser open beside it, gave
+  38.7·10³ and 44,151 steps/s.
+- **Found**: the stress plan's bound is nearly the whole plan — 1,279,904 of 2·10⁶ steps, the horizon 580 s — since a
+  subject's chain spaced 3 ms below a 10 s deadline accumulates 20 s of worst lateness a cycle. A plan whose subjects
+  chain below their deadlines is held whole by a machine under a full stall, and the bound says so; whether host plans
+  do is read off the first host plan's bound (Rule of Three 1, § Owed's barrier and fraction triggers).
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -430,6 +481,17 @@ only and measures move to the 12-core box.
 - **One SHA-256 a pass and a hashing thread** (ADR-0046 § Owed): K3 or later.
 - **Statement time against commit time** in the per-hop joins (QAS-SCALE-0001 defines hops from commit to commit).
 - **ABBA, snapshots, TLA+ trace validation of the shell, a partitioned machine**: each on its trigger.
+- **The bound's deferred parts** (K1e-2): the bytes of the steps not ended (the reader exposing a line's length;
+  trigger: a host plan's lines far from their mean); the peak planned rate and a burst (M11, with its width); the
+  release rate when a stall clears (M12); a bound parameterised by the reader's lag (K2's reader measured late past
+  J); ports (K2-7).
+- **Barrier keys** (K1e-2): every step is a member of its key `(kind, scope, label, n)`, with no subject, held until
+  every earlier member of the key ended, and the machine keeps a barrier a key for the run. (B) a barrier keeping each
+  unpassed member's met instants, so a cell frees whatever its key's prefixes — trigger: `held − completions`
+  material on the first host plan; (C) barrier labels declared in the header, FORMAT 4 — trigger: `barriers` times
+  the bytes a key past a budget on a host plan.
+- **A cell's residue** (K1e-2): an ended cell keeps its key's strings and its map node, some 0.6–0.9 kB; a compact
+  ended cell and keys interned per barrier — trigger: capacity binding on a host plan.
 
 ## References
 
@@ -460,3 +522,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-22: K1d built (§ Measured): the TLA+ model, its mutants and trace validation; the heap's free rule stated for
   K1e, with the two requirements the model found; `PendingByRate` moved to K1e.
 - 2026-11-22: K1e cut into three parts; K1e-1 built (§ Measured): the machine frees its cells by the model's rule.
+- 2026-11-22: K1e-2 decided under the gate (solver, discriminator, three roles); decision 7 gains the bound as built;
+  decision 13's peak rate deferred to M11; K1e-2a built (§ Measured).

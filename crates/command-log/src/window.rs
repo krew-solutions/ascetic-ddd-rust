@@ -53,11 +53,10 @@ impl<V> Window<V> {
     }
 
     /// A line read at `at`: the cursor moves, and what it leaves more than `W`
-    /// behind goes — the values it held, returned.
-    pub fn read(&mut self, at: u64) -> Vec<V> {
+    /// behind goes, each value it held handed to `gone`.
+    pub fn read(&mut self, at: u64, mut gone: impl FnMut(V)) {
         self.cursor = self.cursor.max(at);
         let (w, c) = (self.w, self.cursor);
-        let mut gone = Vec::new();
         while let Some((planned, _)) = self.order.first() {
             if c.saturating_sub(*planned) <= w {
                 break;
@@ -66,10 +65,9 @@ impl<V> Window<V> {
                 && self.kept.get(&id).map(|e| e.0) == Some(planned)
                 && let Some((_, value)) = self.kept.remove(&id)
             {
-                gone.push(value);
+                gone(value);
             }
         }
-        gone
     }
 
     /// The step a dependency on `id` binds: a retained one, or one within `W`
@@ -80,15 +78,36 @@ impl<V> Window<V> {
 
     /// The step just read, planned at `at`, kept for later dependencies: for
     /// the whole run when `retained`, else while within `W` behind the cursor —
-    /// and not at all when already past it.
-    pub fn keep(&mut self, id: [u8; 16], at: u64, retained: bool, value: V) {
-        if retained {
-            self.retained.insert(id, (at, value));
+    /// and not at all when already past it. What it is no longer kept — an
+    /// earlier step of its id it displaces, or itself, dead on arrival — goes
+    /// to `gone`.
+    pub fn keep(
+        &mut self,
+        id: [u8; 16],
+        at: u64,
+        retained: bool,
+        value: V,
+        mut gone: impl FnMut(V),
+    ) {
+        let displaced = if retained {
+            self.retained.insert(id, (at, value))
         } else if self.cursor.saturating_sub(at) > self.w {
-            self.kept.remove(&id);
+            gone(value);
+            self.kept.remove(&id)
         } else {
-            self.kept.insert(id, (at, value));
             self.order.insert((at, id));
+            self.kept.insert(id, (at, value))
+        };
+        if let Some((_, old)) = displaced {
+            gone(old);
+        }
+    }
+
+    /// The value kept for `id`, to change: a retained one, or one within `W`.
+    pub(crate) fn get_mut(&mut self, id: &[u8; 16]) -> Option<&mut V> {
+        match self.retained.get_mut(id) {
+            Some(e) => Some(&mut e.1),
+            None => self.kept.get_mut(id).map(|e| &mut e.1),
         }
     }
 

@@ -60,7 +60,11 @@ static ALLOCATOR: Counting = Counting;
 
 /// `devices` managed a millisecond apart, each then telling three facts two
 /// milliseconds apart on a gapless stream, each awaiting the one before; W ten
-/// milliseconds. The planned rate is the same at any count.
+/// milliseconds, every call and message timing out in one. The planned rate
+/// is the same at any count, and so is the plan's own bound (ADR-0047 K1e-2):
+/// with timeouts of seconds a plan shorter than its chains' horizon holds more
+/// the longer it is, and so does the validator's heap of it — 8 B a step held
+/// past the window or not ended.
 fn plan(devices: u64) -> Vec<u8> {
     let mut records: Vec<Record> = Vec::new();
     for d in 0..devices {
@@ -83,15 +87,22 @@ fn plan(devices: u64) -> Vec<u8> {
         }
     }
     records.sort_by(|a, b| (a.at, &a.step).cmp(&(b.at, &b.step)));
-    let header = ascetic_ddd_command_log::record::Header {
+    let mut header = ascetic_ddd_command_log::record::Header {
         window: 10_000,
         ..header()
     };
+    for c in &mut header.calls {
+        c.timeout = 1_000;
+    }
+    for c in &mut header.channels {
+        c.timeout = 1_000;
+    }
     bytes(header, &records)
 }
 
-/// The peak heap of a validation of `log` beyond what was held before it.
-fn peak(log: &[u8], spill: &std::path::Path) -> usize {
+/// The peak heap of a validation of `log` beyond what was held before it, and
+/// the plan's peaks.
+fn peak(log: &[u8], spill: &std::path::Path) -> (usize, ascetic_ddd_command_log::validate::Peaks) {
     let limits = Limits {
         memory: 256 << 10,
         memory_spill: true,
@@ -104,7 +115,7 @@ fn peak(log: &[u8], spill: &std::path::Path) -> usize {
     let most = PEAK.load(Relaxed).saturating_sub(before);
     assert!(report.violations.is_empty(), "{:?}", report.violations);
     assert!(report.peaks.completions < 64, "{:?}", report.peaks);
-    most
+    (most, report.peaks)
 }
 
 #[test]
@@ -112,7 +123,10 @@ fn the_validator_s_heap_does_not_grow_with_the_plan() {
     let dir = tempfile::tempdir().unwrap();
     let small = plan(2_000);
     let large = plan(16_000);
-    let (one, eight) = (peak(&small, dir.path()), peak(&large, dir.path()));
+    let ((one, small), (eight, large)) = (peak(&small, dir.path()), peak(&large, dir.path()));
+    // One rate, one bound: what the validator holds of it is the same.
+    assert_eq!((small.held, small.pending), (large.held, large.pending));
+    assert!(small.held < 64, "{small:?}");
     // Both past the memory, so both spill; eight times the plan, within a
     // quarter of the memory of the same peak.
     eprintln!("heap: {one} at 8·10³ steps, {eight} at 6.4·10⁴");
