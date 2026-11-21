@@ -862,3 +862,5 @@ ADR-0004 (the scope receives its session by value), ADR-0011 and ADR-0012 (the s
   `testing::check_golden` returns the number of rows it checked (`Result<usize, _>`), before any host pins the
   crate. Draws are S4's but for units within about 10⁻¹² of a step near the series' boundary; `ALGORITHM`
   unchanged.
+- 2026-11-21: ADR-0047 refutes § Context's "`Session`, `HttpAccess` and `RestObserver` serve stage 3's handlers": they time
+  a caller's whole future with `std::time::Instant` and know no step or attempt; the scheduler's shell has its own.

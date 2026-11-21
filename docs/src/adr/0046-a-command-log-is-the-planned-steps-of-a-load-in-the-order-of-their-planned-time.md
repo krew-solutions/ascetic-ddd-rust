@@ -1039,3 +1039,6 @@ condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
 - 2026-11-21: M10 measured after C9 at 10⁸ on both paths (§ Measured): decision 16 closed but for S4, on its trigger.
   The owner dropped 10⁹ for this laptop — it would measure only its throughput; 10⁸ stays its scale measurement and
   the stand's scale is measured on the stand. The § Measured owed list cleared of what C6 and M9 delivered.
+- 2026-11-21: ADR-0047 (the scheduler) proposes amendments to §§ 7, 9, 12 and 13 — one release rule with `feasible`,
+  writers awaiting readers `Settled`, the scheduler's premises non-deviable, the window (not a machine) shared — to
+  be made in its slice K0a with FORMAT 3.
