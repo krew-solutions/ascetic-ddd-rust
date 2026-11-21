@@ -1,0 +1,43 @@
+# Every planned time and every byte of a log is a function of the Plan
+# (ADR-0045 decisions 2 and 3). The crate root forbids these lints, so no
+# module can allow its way past them.
+disallowed-methods = [
+    # Float functions whose precision the standard library leaves unspecified:
+    # their results may differ across platforms and Rust releases. Quantiles
+    # go through the crate's pinned `math` instead. `sqrt` and `+ - * /` are
+    # correctly rounded and stay allowed.
+    { path = "f64::powf", reason = "unspecified precision; use the crate's `math` (ADR-0045 decision 3)" },
+    { path = "f64::powi", reason = "unspecified precision; use the crate's `math` (ADR-0045 decision 3)" },
+    { path = "f64::ln", reason = "unspecified precision; use the crate's `math` (ADR-0045 decision 3)" },
+    { path = "f64::log", reason = "unspecified precision; use the crate's `math` (ADR-0045 decision 3)" },
+    { path = "f64::log2", reason = "unspecified precision; use the crate's `math` (ADR-0045 decision 3)" },
+    { path = "f64::log10", reason = "unspecified precision; use the crate's `math` (ADR-0045 decision 3)" },
+    { path = "f64::exp", reason = "unspecified precision; use the crate's `math` (ADR-0045 decision 3)" },
+    { path = "f64::exp2", reason = "unspecified precision; use the crate's `math` (ADR-0045 decision 3)" },
+    { path = "f64::exp_m1", reason = "unspecified precision; use the crate's `math` (ADR-0045 decision 3)" },
+    { path = "f64::ln_1p", reason = "unspecified precision; use the crate's `math` (ADR-0045 decision 3)" },
+    { path = "f64::cbrt", reason = "unspecified precision; use the crate's `math` (ADR-0045 decision 3)" },
+    { path = "f64::hypot", reason = "unspecified precision; use the crate's `math` (ADR-0045 decision 3)" },
+    { path = "f64::sin", reason = "unspecified precision; use the crate's `math` (ADR-0045 decision 3)" },
+    { path = "f64::cos", reason = "unspecified precision; use the crate's `math` (ADR-0045 decision 3)" },
+    { path = "f64::tan", reason = "unspecified precision; use the crate's `math` (ADR-0045 decision 3)" },
+    { path = "f32::powf", reason = "unspecified precision; use the crate's `math` (ADR-0045 decision 3)" },
+    { path = "f32::ln", reason = "unspecified precision; use the crate's `math` (ADR-0045 decision 3)" },
+    { path = "f32::exp", reason = "unspecified precision; use the crate's `math` (ADR-0045 decision 3)" },
+    # Ambient sources: a value from any of them is not a function of the Plan.
+    { path = "std::time::Instant::now", reason = "generation has no clock (ADR-0045)" },
+    { path = "std::time::SystemTime::now", reason = "generation has no clock (ADR-0045)" },
+    { path = "std::env::var", reason = "every parameter is in the Plan (ADR-0045)" },
+    { path = "std::env::var_os", reason = "every parameter is in the Plan (ADR-0045)" },
+    { path = "std::env::vars", reason = "every parameter is in the Plan (ADR-0045)" },
+    { path = "std::process::id", reason = "a pid is not a function of the Plan (ADR-0045)" },
+    { path = "std::thread::current", reason = "a thread is not a function of the Plan (ADR-0045)" },
+    { path = "std::collections::hash_map::RandomState::new", reason = "random per process (ADR-0045)" },
+]
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order is random per process; use BTreeMap (ADR-0045)" },
+    { path = "std::collections::HashSet", reason = "iteration order is random per process; use BTreeSet (ADR-0045)" },
+    { path = "std::collections::hash_map::RandomState", reason = "random per process (ADR-0045)" },
+    { path = "std::time::Instant", reason = "generation has no clock (ADR-0045)" },
+    { path = "std::time::SystemTime", reason = "generation has no clock (ADR-0045)" },
+]
