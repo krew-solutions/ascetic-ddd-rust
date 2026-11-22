@@ -791,7 +791,7 @@ pinned (`must_fail_with_twin`):
 | `SchedulerBoundWithoutReadAhead.cfg` | the bound counting from the cursor, not from L before it | lines read early held past it (`HeldWithinBound`) |
 
 The window's instance explores 556,786 distinct states in about a minute,
-with the late reader 1,665,393 in four; the barrier's 105,278 in seconds. The
+with the late reader 1,665,393 in four; the barrier's 115,196 in seconds. The
 handlers' answers and the timeouts are cut to what each instance's properties
 need: with every answer and longer timeouts each passed two million distinct
 states in five minutes, its queue still growing, and was stopped.

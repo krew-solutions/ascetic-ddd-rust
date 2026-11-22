@@ -450,7 +450,7 @@ group_scheduler() {
   must_hold SchedulerWindow MCScheduler.tla 556786
 
   echo "== scheduler: a barrier and provenance, as decided, every property holds"
-  must_hold SchedulerBarrier MCScheduler.tla 105278
+  must_hold SchedulerBarrier MCScheduler.tla 115196
 
   echo "== scheduler: dependencies bound at release, TLC must find one the window let go bound to nothing"
   must_fail_with_twin SchedulerBindAtRelease MCScheduler.tla "Invariant BoundAsChecked is violated" 556786
@@ -465,25 +465,25 @@ group_scheduler() {
   must_fail_with_twin SchedulerReadyWithoutAt MCScheduler.tla "Invariant ReleaseSafe is violated" 556786
 
   echo "== scheduler: a barrier counting its members, TLC must find its holder released before a member"
-  must_fail_with_twin SchedulerCounterBarrier MCScheduler.tla "Invariant BarrierSafe is violated" 105278
+  must_fail_with_twin SchedulerCounterBarrier MCScheduler.tla "Invariant BarrierSafe is violated" 115196
 
   echo "== scheduler: a failed dependency skipping nothing, TLC must find a read line that never ends"
-  must_fail_with_twin SchedulerNoSkipPropagation MCScheduler.tla "Invariant EveryReadLineEnds is violated" 105278
+  must_fail_with_twin SchedulerNoSkipPropagation MCScheduler.tla "Invariant EveryReadLineEnds is violated" 115196
 
   echo "== scheduler: a fold marking nothing conditional, TLC must find a conditional step it missed"
-  must_fail_with_twin SchedulerNoProvenance MCScheduler.tla "Invariant ConditionalExact is violated" 105278
+  must_fail_with_twin SchedulerNoProvenance MCScheduler.tla "Invariant ConditionalExact is violated" 115196
 
   echo "== scheduler: a fold marking direct dependents only, TLC must find a step conditional through another"
-  must_fail_with_twin SchedulerProvenanceOneLevel MCScheduler.tla "Invariant ConditionalExact is violated" 105278
+  must_fail_with_twin SchedulerProvenanceOneLevel MCScheduler.tla "Invariant ConditionalExact is violated" 115196
 
   echo "== scheduler: the machine's own timer at the deadline, TLC must find an answer stamped by it censored"
-  must_fail_with_twin SchedulerDeadlineByArrival MCScheduler.tla "Invariant NoCensored is violated" 105278
+  must_fail_with_twin SchedulerDeadlineByArrival MCScheduler.tla "Invariant NoCensored is violated" 115196
 
   echo "== scheduler: a failed prefix swept again, as the machine did before K1e, TLC must find the failed member's freed cell read"
-  must_fail_with_twin SchedulerResweepFailed MCScheduler.tla "Invariant NoUseAfterFree is violated" 105278
+  must_fail_with_twin SchedulerResweepFailed MCScheduler.tla "Invariant NoUseAfterFree is violated" 115196
 
   echo "== scheduler: a holder walking its members' cells, as the machine did before K1e, TLC must find a freed member read"
-  must_fail_with_twin SchedulerWalkMembers MCScheduler.tla "Invariant NoUseAfterFree is violated" 105278
+  must_fail_with_twin SchedulerWalkMembers MCScheduler.tla "Invariant NoUseAfterFree is violated" 115196
 
   echo "== scheduler: the plan's own bound, its tables the validator's, every property holds"
   must_hold SchedulerBound MCScheduler.tla 468858

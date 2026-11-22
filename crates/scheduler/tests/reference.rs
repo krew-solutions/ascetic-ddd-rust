@@ -20,9 +20,11 @@ const ATTEMPTS: u32 = 16;
 
 /// A script drawn from a key of (seed, line, attempt): mostly expected, some
 /// refusals of every kind, some answers never coming.
-fn script(seed: u64) -> impl Fn(u64, u32, &Record) -> Attempt {
+fn script(seed: u64, log: &str) -> impl Fn(u64, u32, &Record) -> Attempt + use<> {
+    // Each log draws its own: lines of one number fare differently across logs.
+    let root = Key::root(Seed(seed)).child(log);
     move |line, attempt, r| {
-        let k = Key::root(Seed(seed)).at(line).at(u64::from(attempt));
+        let k = root.at(line).at(u64::from(attempt));
         let draw = |label: &str, m: u64| k.child(label).unit().raw() % m;
         let judgement = match draw("judgement", 20) {
             0 => Judgement::Unexpected,
@@ -158,9 +160,9 @@ fn the_machine_is_the_scheduler_by_definition() {
             let peaks = report.peaks;
             let log = String::from_utf8(bytes(header.clone(), &records)).unwrap();
             let scripts: Vec<(u64, Box<Script>)> = vec![
-                (1, Box::new(script(1))),
-                (2, Box::new(script(2))),
-                (3, Box::new(script(3))),
+                (1, Box::new(script(1, &name))),
+                (2, Box::new(script(2, &name))),
+                (3, Box::new(script(3, &name))),
                 (0, Box::new(at_deadline(header.clone()))),
             ];
             for (seed, s) in scripts {
@@ -203,6 +205,17 @@ fn the_machine_is_the_scheduler_by_definition() {
                 };
                 for read_ahead in [0u64, W / 2, 1 << 40] {
                     let ran = run_reading(header.clone(), &records, read_ahead, &lag, &s).unwrap();
+                    // No step released or ended before it was read.
+                    for e in &ran.entries {
+                        assert!(
+                            e.released >= e.read && e.ended >= e.read,
+                            "{name}/{seed}/{read_ahead} line {}: read at {}, released at {}, ended at {}",
+                            e.line,
+                            e.read,
+                            e.released,
+                            e.ended
+                        );
+                    }
                     // The machine keeps the barrier keys the validator counted.
                     assert_eq!(
                         ran.barriers as u64, peaks.barriers,

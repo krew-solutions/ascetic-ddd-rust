@@ -144,14 +144,15 @@ VARIABLES
   cap,      \* cap[l]: its expected answer gave the value it captures
   pre,      \* pre[b][s]: the members of key b, in line order, that met s
   lat,      \* lat[b][s]: the latest instant among them
-  fail,     \* fail[b]: the ordinal of its first member that ended otherwise than expected, 0 for none
+  fail,     \* fail[b]: the lowest ordinal of a member that ended otherwise than expected, 0 for none
+  ffail,    \* ffail[b]: the first such member in time and its end, <<>> for none
   freed,    \* freed[l]: its cell is gone
   err,      \* the machine refused a line: a dependency bound to nothing
   uaf,      \* a freed cell was read
   heard     \* heard[l]: what its handler answered its attempt, "none" before
 
 vars == <<now, next, kept, read, bnd, ph, wait, rdy, skp, int, rel, dl, att, disp, snt, out, left,
-          end, ended, cap, pre, lat, fail, freed, err, uaf, heard>>
+          end, ended, cap, pre, lat, fail, ffail, freed, err, uaf, heard>>
 
 (* ------------------------------------------------------------------------ *)
 (* When a dependency is met                                                  *)
@@ -200,16 +201,18 @@ Settle(j, s, e, t, why, u) ==
   LET b == Key[j]
       nr == Count(next, b)
       Mn(m, on) == IF m = j THEN MetOf(s, e, t, on) ELSE Met(m, on)
-      \* A prefix of members expected stops for good at one that ended
-      \* otherwise: it is not swept again, and that member's cell not read.
-      Stuck(on) == on = "expected" /\ fail[b] # 0 /\ Mutant # "ResweepFailed"
-      np == [on \in Strengths |-> IF Stuck(on) THEN pre[b][on] ELSE SweepFrom(j, s, e, t, b, on, pre[b][on], nr)]
+      \* A member that ended otherwise than expected fails, at its end, every
+      \* holder awaiting it expected, wherever the prefix stands.
+      jfails == Key[j] = b /\ MetOf(s, e, t, "expected") = Never
+      nf == IF jfails /\ (fail[b] = 0 \/ Ord(j) < fail[b]) THEN Ord(j) ELSE fail[b]
+      \* The prefix of members expected stops for good before the lowest that
+      \* failed: it is not swept to, and that member's cell not read.
+      Limit(on) == IF on = "expected" /\ nf # 0 /\ Mutant # "ResweepFailed" THEN nf - 1 ELSE nr
+      np == [on \in Strengths |-> SweepFrom(j, s, e, t, b, on, pre[b][on], Limit(on))]
       nl == [on \in Strengths |->
                Max({lat[b][on]} \cup {Mn(MemberAt(b, x), on) : x \in (pre[b][on] + 1)..np[on]})]
-      stop == np["expected"] + 1
-      nf == IF fail[b] = 0 /\ stop <= nr /\ Mn(MemberAt(b, stop), "expected") = Never THEN stop ELSE fail[b]
       \* The members the sweeps read: each up to the one that stopped it.
-      swept == UNION {{MemberAt(b, x) : x \in (pre[b][on] + 1)..Min({np[on] + 1, nr})} : on \in {o \in Strengths : ~Stuck(o)}}
+      swept == UNION {{MemberAt(b, x) : x \in (pre[b][on] + 1)..Min({np[on] + 1, Limit(on)})} : on \in Strengths}
       StepHit(r, i) == IsStep(r, i) /\ bnd[r][i] = j
       BarHit(r, i) == ~IsStep(r, i) /\ After[r][i].key = b
       NewMet(r, i) == IF StepHit(r, i) THEN Mn(j, After[r][i].on)
@@ -218,13 +221,15 @@ Settle(j, s, e, t, why, u) ==
       Told(r) == ph[r] = "waiting" /\ r # j
       met(r) == {i \in wait[r] : NewMet(r, i) >= 0}
       bad(r) == {i \in wait[r] : NewMet(r, i) = Never}
-      Why(r) == IF \E i \in bad(r) : StepHit(r, i) THEN <<"dependency", j>> ELSE <<"member", MemberAt(b, nf)>>
+      \* A holder newly failed is failed by j, the member just ended.
+      Why(r) == IF \E i \in bad(r) : StepHit(r, i) THEN <<"dependency", j>> ELSE <<"member", j>>
   IN /\ snt' = [snt EXCEPT ![j] = s]
      /\ end' = [end EXCEPT ![j] = e]
      /\ ended' = [ended EXCEPT ![j] = t]
      /\ pre' = [pre EXCEPT ![b] = np]
      /\ lat' = [lat EXCEPT ![b] = nl]
      /\ fail' = [fail EXCEPT ![b] = nf]
+     /\ ffail' = [ffail EXCEPT ![b] = IF ffail[b] = <<>> /\ jfails THEN <<j, t>> ELSE ffail[b]]
      /\ wait' = [r \in Lines |-> IF Told(r) THEN wait[r] \ met(r) ELSE wait[r]]
      /\ rdy' = [r \in Lines |-> IF Told(r) THEN Max({rdy[r]} \cup {NewMet(r, i) : i \in met(r)}) ELSE rdy[r]]
      /\ skp' = [r \in Lines |->
@@ -264,11 +269,11 @@ ReadLine ==
                  ELSE HolderMet(l, i, pre[After[l][i].key], lat[After[l][i].key], fail[After[l][i].key], Met)]
          failed == {i \in Entries(l) : m[i] = Never}
          Inst(i) == IF IsStep(l, i) THEN ended[b[i]]
-                    ELSE ended[MemberAt(After[l][i].key, fail[After[l][i].key])]
+                    ELSE ffail[After[l][i].key][2]
          \* The dependency that failed first; on a tie, the first in its list.
          first == LET t0 == Min({Inst(i) : i \in failed}) IN Min({i \in failed : Inst(i) = t0})
          why == IF IsStep(l, first) THEN <<"dependency", b[first]>>
-                ELSE <<"member", MemberAt(After[l][first].key, fail[After[l][first].key])>>
+                ELSE <<"member", ffail[After[l][first].key][1]>>
      IN /\ next' = next + 1
         /\ kept' = IF KeepAt(c, l) THEN k1 \cup {l} ELSE k1
         /\ read' = [read EXCEPT ![l] = now]
@@ -283,7 +288,7 @@ ReadLine ==
                   \/ \E i \in Entries(l) : IsStep(l, i) /\ b[i] # 0 /\ freed[b[i]]
                   \/ Mutant = "WalkMembers" /\ \E i \in Entries(l) :
                        ~IsStep(l, i) /\ m[i] >= 0 /\ \E x \in Awaited(l, i) : freed[x]
-  /\ UNCHANGED <<now, int, rel, dl, att, disp, snt, out, left, end, ended, cap, pre, lat, fail, freed, heard>>
+  /\ UNCHANGED <<now, int, rel, dl, att, disp, snt, out, left, end, ended, cap, pre, lat, fail, ffail, freed, heard>>
 
 (* ------------------------------------------------------------------------ *)
 (* The machine's own steps                                                   *)
@@ -314,7 +319,7 @@ Decide(l) ==
   /\ IF Mutant = "BindAtRelease" /\ LateUnbound(l)
      THEN /\ err' = TRUE
           /\ UNCHANGED <<now, next, kept, read, bnd, ph, wait, rdy, skp, int, rel, dl, att, disp, snt, out,
-                         left, end, ended, cap, pre, lat, fail, freed, uaf, heard>>
+                         left, end, ended, cap, pre, lat, fail, ffail, freed, uaf, heard>>
      ELSE IF skp[l] # <<>> \/ (Mutant = "BindAtRelease" /\ LateFailed(l) # {})
      THEN /\ Finish(l, "skipped",
                     IF skp[l] # <<>> THEN skp[l]
@@ -332,7 +337,7 @@ Decide(l) ==
              /\ skp' = [skp EXCEPT ![l] = IF p # 0 /\ (freed[p] \/ ~cap[p]) THEN <<"missing_capture", p>> ELSE <<>>]
              /\ uaf' = (uaf \/ (p # 0 /\ freed[p]))
           /\ UNCHANGED <<now, next, kept, read, wait, rdy, dl, att, disp, snt, out, left, end, ended,
-                         cap, pre, lat, fail, freed, err, heard>>
+                         cap, pre, lat, fail, ffail, freed, err, heard>>
 
 CanDispatch(l) == ~err /\ ph[l] = "due" /\ rel[l] = now
 
@@ -350,7 +355,7 @@ Dispatch(l) ==
              /\ left' = [left EXCEPT ![l] = FALSE]
              /\ ph' = [ph EXCEPT ![l] = "flight"]
              /\ UNCHANGED <<now, next, kept, read, bnd, wait, rdy, skp, int, rel, snt, end, ended, cap,
-                            pre, lat, fail, freed, err, uaf, heard>>
+                            pre, lat, fail, ffail, freed, err, uaf, heard>>
 
 \* The refuted timer: the machine ends a step at its deadline by its own
 \* clock, whatever its handler holds.
@@ -381,7 +386,7 @@ Free(l) ==
   /\ CanFree(l)
   /\ freed' = [freed EXCEPT ![l] = TRUE]
   /\ UNCHANGED <<now, next, kept, read, bnd, ph, wait, rdy, skp, int, rel, dl, att, disp, snt, out, left,
-                 end, ended, cap, pre, lat, fail, err, uaf, heard>>
+                 end, ended, cap, pre, lat, fail, ffail, err, uaf, heard>>
 
 (* ------------------------------------------------------------------------ *)
 (* The handlers: an attempt's bytes leave, it is answered, or its handler   *)
@@ -395,7 +400,7 @@ Sent(l) ==
   /\ left' = [left EXCEPT ![l] = TRUE]
   /\ IF snt[l] = None /\ end[l] = "none" /\ att[l] = out[l]
      THEN Settle(l, now, end[l], ended[l], skp[l], FALSE)
-     ELSE UNCHANGED <<snt, end, ended, wait, rdy, skp, pre, lat, fail, uaf>>
+     ELSE UNCHANGED <<snt, end, ended, wait, rdy, skp, pre, lat, fail, ffail, uaf>>
   /\ UNCHANGED <<now, next, kept, read, bnd, ph, int, rel, dl, att, disp, out, cap, freed, err, heard>>
 
 \* "bare" is an expected answer without the value the step captures.
@@ -410,7 +415,7 @@ Answer(l, j) ==
      THEN \* An answer the machine no longer waits for changes nothing.
           /\ out' = [out EXCEPT ![l] = 0]
           /\ UNCHANGED <<now, next, kept, read, bnd, ph, wait, rdy, skp, int, rel, dl, att, disp, snt, left,
-                         end, ended, cap, pre, lat, fail, freed, err, uaf>>
+                         end, ended, cap, pre, lat, fail, ffail, freed, err, uaf>>
      ELSE IF j \in {"expected", "bare"}
      THEN /\ out' = [out EXCEPT ![l] = 0]
           /\ cap' = [cap EXCEPT ![l] = (j = "expected" /\ Captures[l])]
@@ -423,7 +428,7 @@ Answer(l, j) ==
           /\ out' = [out EXCEPT ![l] = out[l] + 1]
           /\ left' = [left EXCEPT ![l] = FALSE]
           /\ UNCHANGED <<now, next, kept, read, bnd, ph, wait, rdy, skp, int, rel, dl, disp, snt, end, ended,
-                         cap, pre, lat, fail, freed, err, uaf>>
+                         cap, pre, lat, fail, ffail, freed, err, uaf>>
      ELSE /\ out' = [out EXCEPT ![l] = 0]
           /\ Finish(l, IF j = "unknown" THEN "unknown" ELSE "unexpected", <<>>, FALSE)
           /\ UNCHANGED <<now, next, kept, read, bnd, int, rel, dl, att, disp, left, cap, freed, err>>
@@ -439,7 +444,7 @@ GiveUp(l) ==
      THEN /\ Finish(l, "unknown", <<>>, FALSE)
           /\ UNCHANGED <<now, next, kept, read, bnd, int, rel, dl, att, disp, left, cap, freed, err>>
      ELSE UNCHANGED <<now, next, kept, read, bnd, ph, wait, rdy, skp, int, rel, dl, att, disp, snt, left,
-                      end, ended, cap, pre, lat, fail, freed, err, uaf>>
+                      end, ended, cap, pre, lat, fail, ffail, freed, err, uaf>>
 
 (* ------------------------------------------------------------------------ *)
 (* Time                                                                      *)
@@ -466,7 +471,7 @@ Tick ==
        /\ \A d \in Dues : d > now => t <= d
        /\ now' = t
   /\ UNCHANGED <<next, kept, read, bnd, ph, wait, rdy, skp, int, rel, dl, att, disp, snt, out, left,
-                 end, ended, cap, pre, lat, fail, freed, err, uaf, heard>>
+                 end, ended, cap, pre, lat, fail, ffail, freed, err, uaf, heard>>
 
 Init ==
   /\ now = Min(Times)
@@ -492,6 +497,7 @@ Init ==
   /\ pre = [b \in Keys |-> [s \in Strengths |-> 0]]
   /\ lat = [b \in Keys |-> [s \in Strengths |-> 0]]
   /\ fail = [b \in Keys |-> 0]
+  /\ ffail = [b \in Keys |-> <<>>]
   /\ freed = [l \in Lines |-> FALSE]
   /\ err = FALSE
   /\ uaf = FALSE

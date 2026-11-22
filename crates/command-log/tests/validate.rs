@@ -884,7 +884,7 @@ fn the_rules_meaning_is_pinned_to_its_revision() {
         ),
         (
             6,
-            "b3a9d0a3f191eacee7f21e38ff52af87c4e3074f97d8bf93340eedd40076c298",
+            "a7b4728558e9465c6d197224f8d4d22a9d141956bb0581f8c43335a513f46aac",
         ),
     ];
     let mut digest = Sha256::new();

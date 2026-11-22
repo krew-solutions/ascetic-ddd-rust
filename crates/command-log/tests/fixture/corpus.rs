@@ -118,12 +118,19 @@ fn base(k: &Key) -> Vec<Record> {
                     o.cause = cause;
                 }
             }
+            // A report awaits the managed settled, or every one expected: a
+            // member failing while an earlier one runs fails the latter
+            // (ADR-0047 K1e-3).
             "report" => r.after.push(Dep::Each {
                 kind: "device".into(),
                 scope: vec![7],
                 label: "managed".into(),
                 n: 0,
-                on: On::Settled,
+                on: if draw(&kj, "barrier", 2) == 0 {
+                    On::Settled
+                } else {
+                    On::Expected
+                },
                 count: Some(managed.min(3)),
             }),
             _ => {}
@@ -576,6 +583,41 @@ pub fn logs() -> Vec<(String, Vec<Record>)> {
             }
         }
         out.extend(entries);
+    }
+    // Reports awaiting three or four managed devices' reads expected, 300 µs apart:
+    // under the scheduler's scripts a later member fails while an earlier one
+    // still runs, which fails the report all the same (ADR-0047 K1e-3).
+    for members in [3u64, 3, 3, 4, 4, 4] {
+        let i = out.len() as u64;
+        // Reads, which are never resent: a refusal ends them; each from a
+        // caller of a Tenant, as every corpus call is.
+        let mut records: Vec<Record> = (0..members)
+            .map(|d| {
+                let mut r = Record {
+                    action: rest("read", vec![Value::Literal(d.to_string())]),
+                    ..step(id("device", i * 10 + d, "managed", 0), d * 300)
+                };
+                if let Some(rest) = call_of(&mut r) {
+                    rest.caller = Some(Caller {
+                        principal: subject("principal", 0),
+                        names: vec![subject("tenant", 0)],
+                    });
+                }
+                r
+            })
+            .collect();
+        records.push(Record {
+            after: vec![Dep::Each {
+                kind: "device".into(),
+                scope: vec![7],
+                label: "managed".into(),
+                n: 0,
+                on: On::Expected,
+                count: Some(members),
+            }],
+            ..step(id("group", i, "report", 0), members * 300 + 100)
+        });
+        out.push((format!("barrier-{i}"), records));
     }
     out
 }

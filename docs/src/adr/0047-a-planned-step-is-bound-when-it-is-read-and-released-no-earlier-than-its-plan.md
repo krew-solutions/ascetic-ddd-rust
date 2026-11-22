@@ -13,7 +13,9 @@ To be built in slices, each a commit of its own:
   definition, the differential and the corpus's coverage counters; **K1c** the stateful server model; **K1d** the TLA+
   model and trace validation of `sim`'s journals; **K1e** the verdict fold, the journal's schema and golden journals,
   the plan's own bound with peaks and a peak rate in the commitment, and the heap executors — in three parts: **K1e-1**
-  the heap, **K1e-2** the plan's bound, peaks and peak rate, **K1e-3** the verdict fold, schema and goldens. (The plan's bound, the
+  the heap, **K1e-2** the plan's bound, peaks and peak rate, **K1e-3** the verdict fold, schema and goldens (itself in
+  four: **K1e-3a** a defect of the machine's barriers the round found, **K1e-3b** the journal's bytes, **K1e-3c** the
+  fold and its reader, **K1e-3d** the stand with failures injected and the cause amendment). (The plan's bound, the
   commitment's peaks and the reference's bound lines were first listed in K0a; they moved where their consumer is.
   K1-4's `PendingByRate` moved to K1e with the bound it mutates.)
 - **K2** (`crates/load-run`, the shell): REST, the clock, the reader, the journal writer, the gates.
@@ -210,6 +212,42 @@ module; `reference.py` emitting each edge's bound line and
 deciding the new rules.
 
 ### 14. The journal and the verdict
+
+*As decided for K1e-3* (2026-11-22, under the gate: a blind solver and a discriminator on Fable, then three roles —
+Verifiability, Software Design, Evolution — on Opus; the paragraphs after this one are the decision as first written):
+- **The journal's bytes.** The framing — a canonical line in declared field order, re-encode and compare, a streaming
+  digest, a trailer of counts, truncation detected, its own error naming its format — is `command-log`'s, generic and
+  public; the vocabulary is the machine's, `scheduler::journal`, `serde` its one new dependency, and the scheduler's
+  lint gate refuses `std::fs`, `std::net` and `command-log`'s file functions. Version 1: a `header` (the journal's
+  version, the machine's revision, the writer's source revision, the log's commitment digest and `validator()`, the
+  run's read-ahead, the profile's J); `read` (the line's barrier key, and each dependency's strength with the line it
+  bound or the barrier key with its members' count — the journal is self-contained, the log needed only for its
+  identity); `release` (intended, released, the deadline, at the decision); `dispatch`; `sent`; `answer` (the
+  judgement's kind and the captured slots' names, never values; an answer the machine ignored marked so, and why);
+  `end` (at the instant decided, the entry); `fault` (a closed class — the backstop in version 1, each later kind
+  with its producer); a `trailer`. A pure `journal::events` writes the same bytes in `sim` and the shell. A golden
+  holding every variant, built by exhaustive matches, its digest pinned (`JOURNAL`), the machine's revision pinned
+  beside the digest of the differential's journals, every differential journal decoded back and compared with the
+  run, the goldens also read in the host's serde build. Journals before K5 are disposable; from the first host run on
+  a reader accepts the versions it lists (§ Owed).
+- **The fold.** From the journal alone, in two passes — ends and per-attempt facts in any order, then the reads, which
+  the journal holds in line order — one byte a line beside a few flags a barrier key: no sort. Classes, a partition by
+  precedence: Consequent (skipped) before Inconclusive (conditional) before Undecided before Root before Passed. A step
+  is conditional when it awaits sent or settled a step that ended unknown or skipped, or awaits a conditional one,
+  and — amending decision 6 — when it is an observation whose cause did not end expected, whatever the strength: an
+  observation asserts its cause's effect. Undecided: an unknown whose deadline the harness ate past J — a call whose
+  last attempt left more than J after its dispatch, or never; a step released at or past its deadline though
+  intended before it, read more than J late; an observation whose cause left more than J after its intended start —
+  decision 9's interval applied to the deadline, the timeout the plan's own budget. The verdict in two levels: void on
+  broken evidence (unreadable, incoherent, another log, a fault) above fail (a root) above void undecided (an
+  undecided step); pass defined positively — every line expected, the evidence sound, nothing undecided. Under zero
+  tolerance pass means every line expected, so provenance changes no run's verdict but its roots and classes, which
+  the executors judge. The fold's revision comes with its verdict, pinned beside the digest of the classes it gives
+  the goldens and the differential.
+- **Deferred:** measures and decision 9's intervals over them, with K1-9's interval clause, to K5 — no corpus log
+  carries a measure and no plan a budget, so no executor would reach them (trigger: the first host plan with a
+  measure and a QAS number); gates, and the K2–K4 fault kinds, with their producers; late answers' meaning (K2; version
+  1 marks them ignored); a list of readable journal versions (the first host run).
 
 An event stream: canonical JSON lines, zstd, a trailer of counts and SHA-256, so that a killed run reads as
 truncated; a line per step is the report's fold of it. The header anchors the run: the log's identity, the
@@ -506,6 +544,21 @@ plan; kept, not narrowed, its meaning unchanged.
   1,665,393, the barrier's 105,278), every earlier mutant breaking what it broke; the four traces fit and the two
   forged ones do not.
 
+**K1e-3a — a holder failed past the prefix** (2026-11-22, found by the K1e-3 round's Software Design role): a holder
+awaiting its barrier as expected was failed only when the members' prefix reached the failed one, and stamped with
+that member's end — read at 20, it ended at 10 when its earlier member answered at 50 (`Entry` against its own
+`released = max(intended, read)`). Now a member that ends otherwise than expected fails at its end every holder
+awaiting it expected, wherever the prefix stands: one read later is skipped for the first failure in time, at its end
+or its read, whichever is later — as `schedule.py` defines it, which now names the first failure in time, as a step
+dependency's skip does (K1b). The barrier keeps the lowest failed ordinal, where its expected prefix stops, apart from
+the first failure in time; the model alike (`fail` and `ffail`), the skip reason the member that failed it — its
+barrier instance re-pinned at 115,196 distinct states, every mutant breaking what it broke, the traces fitting.
+- **Executors**: a twin (read at 20, skipped at 20); the differential reaches it (a counter, 9 holders), over corpus
+  reports half of which now await their members expected and six reports of three or four reads, the differential's
+  scripts drawn per log as well (lines of one number fared alike in every log); every differential run asserts no
+  step released or ended before its read; 3,924 runs agree. The corpus changed, its rules not: revision 6's digest
+  re-pinned.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -567,3 +620,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   decision 13's peak rate deferred to M11; K1e-2a built (§ Measured).
 - 2026-11-22: K1e-2b built (§ Measured): the machine on the shared rules, `fits`, the bound's executors in `sim`.
 - 2026-11-22: K1e-2c built (§ Measured): the bound in the model, its own instance tied to the validator, `PendingByRate`.
+- 2026-11-22: K1e-3 decided under the gate (decision 14's journal and verdict, decision 6's cause amendment, measures to
+  K5); K1e-3a built (§ Measured): a holder failed by a member past its prefix.

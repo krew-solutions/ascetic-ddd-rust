@@ -274,9 +274,12 @@ struct Barrier {
     /// among them and the member that met it last.
     prefix: [usize; 3],
     latest: [(u64, Line); 3],
-    /// The first member awaited as expected that ended otherwise: its
-    /// ordinal, line and end. The prefix of members expected stops there.
-    failed: Option<(usize, Line, u64)>,
+    /// The lowest ordinal of a member that ended otherwise than expected:
+    /// the prefix of members expected stops there for good.
+    failed: Option<usize>,
+    /// The first such member in time, and its end: what a holder read later
+    /// is skipped for, and when.
+    first_failure: Option<(Line, u64)>,
     /// Holders waiting, by strength rank, by the members read before them.
     holders: [BTreeMap<usize, Vec<Line>>; 3],
 }
@@ -471,8 +474,9 @@ impl Machine {
                     };
                     let members = b.count;
                     let r = rank(*on);
-                    match b.failed {
-                        Some((f, first, t)) if *on == On::Expected && f < members => {
+                    match b.first_failure {
+                        // Every member that failed was read before it.
+                        Some((first, t)) if *on == On::Expected => {
                             earliest(&mut skip, Skip::Member(first), t);
                         }
                         _ if b.prefix[r] >= members => {
@@ -918,7 +922,7 @@ impl Machine {
 
     /// Advances a member's barrier prefixes, and fires or skips its holders.
     fn barrier(&mut self, line: Line, out: &mut Vec<Output>) {
-        let Some((key, _)) = self.cells.get(&line).and_then(|c| c.member.clone()) else {
+        let Some((key, ord)) = self.cells.get(&line).and_then(|c| c.member.clone()) else {
             return;
         };
         let Some(mut b) = self.barriers.remove(&key) else {
@@ -926,15 +930,31 @@ impl Machine {
         };
         let mut fired: Vec<(Line, u64, Line)> = Vec::new();
         let mut skipped: Vec<(Line, Line, u64)> = Vec::new();
+        // A member that ended otherwise than expected fails every holder
+        // awaiting it expected at once, wherever the prefix stands: such a
+        // holder can never be met (decision 6, `vectors/schedule.py`).
+        if let Met::Never(t) = self.met(line, On::Expected)
+            && b.failed.is_none_or(|f| ord < f)
+        {
+            b.failed = Some(ord);
+            b.first_failure.get_or_insert((line, t));
+            let r = rank(On::Expected);
+            let failing = b.holders[r].split_off(&ord.saturating_add(1));
+            for (_, holders) in failing {
+                skipped.extend(holders.into_iter().map(|h| (h, line, t)));
+            }
+        }
         for on in [On::Sent, On::Settled, On::Expected] {
             let r = rank(on);
-            // A prefix of members expected stops for good at a failure.
-            if on == On::Expected && b.failed.is_some() {
-                continue;
-            }
-            while b.prefix[r] < b.count {
-                let ord = b.prefix[r];
-                let Some(&m) = b.members.get(ord.saturating_sub(b.base)) else {
+            // A prefix of members expected stops for good at the first that
+            // failed: it is not swept to, nor its cell read again.
+            let limit = match b.failed {
+                Some(f) if on == On::Expected => f,
+                _ => b.count,
+            };
+            while b.prefix[r] < limit {
+                let at = b.prefix[r];
+                let Some(&m) = b.members.get(at.saturating_sub(b.base)) else {
                     break;
                 };
                 match self.met(m, on) {
@@ -942,7 +962,7 @@ impl Machine {
                         if (t, m) >= b.latest[r] {
                             b.latest[r] = (t, m);
                         }
-                        b.prefix[r] = ord.saturating_add(1);
+                        b.prefix[r] = at.saturating_add(1);
                         // The holders waiting for exactly these members: the
                         // latest among them is the latest so far.
                         if let Some(holders) = b.holders[r].remove(&b.prefix[r]) {
@@ -950,22 +970,17 @@ impl Machine {
                             fired.extend(holders.into_iter().map(|h| (h, t, last)));
                         }
                     }
-                    Met::Never(t) => {
-                        b.failed = Some((ord, m, t));
-                        for (_, holders) in std::mem::take(&mut b.holders[r]) {
-                            skipped.extend(holders.into_iter().map(|h| (h, m, t)));
-                        }
-                        break;
-                    }
-                    Met::Not => break,
+                    // A failure is recorded when its member ends, above.
+                    Met::Never(_) | Met::Not => break,
                 }
             }
         }
-        // The members every prefix passed: nothing sweeps them again.
-        let expected = if b.failed.is_some() {
-            usize::MAX
-        } else {
-            b.prefix[rank(On::Expected)]
+        // The members every prefix passed: nothing sweeps them again — for
+        // expected, those before its prefix, and every one once it reached
+        // the first that failed.
+        let expected = match b.failed {
+            Some(f) if b.prefix[rank(On::Expected)] >= f => usize::MAX,
+            _ => b.prefix[rank(On::Expected)],
         };
         let passed_all = b.prefix[rank(On::Sent)]
             .min(b.prefix[rank(On::Settled)])

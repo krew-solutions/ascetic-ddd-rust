@@ -469,3 +469,39 @@ fn polls_keep_to_their_grid() {
     assert_eq!(at, vec![0, 100, 200, 300, 400]);
     assert_eq!(entry(&ran.entries, 2).end, End::Unknown);
 }
+
+/// A holder awaiting its barrier as expected is skipped when a member read
+/// before it ended otherwise — at that end, and not before the holder was read
+/// (decision 6, `vectors/schedule.py`) — whatever the members before that one
+/// are still doing: m1 refused at 10, m0 answering only at 50, the holder read
+/// at 20 is skipped at 20, its journal's instants no earlier than its read.
+#[test]
+fn a_holder_is_skipped_by_a_member_failed_past_the_prefix() {
+    let member = |n: u64, at: u64| step(id("device", n, "m", 0), at);
+    let holder = Record {
+        after: vec![Dep::Each {
+            kind: "device".into(),
+            scope: vec![7],
+            label: "m".into(),
+            n: 0,
+            on: On::Expected,
+            count: None,
+        }],
+        ..step(id("group", 1, "report", 0), 20)
+    };
+    let records = [member(1, 0), member(2, 5), holder];
+    let script = |line: u64, _: u32, _: &Record| Attempt {
+        sent_after: 0,
+        answer_after: Some(if line == 2 { 50 } else { 5 }),
+        judgement: if line == 3 {
+            Judgement::Unexpected
+        } else {
+            Judgement::Expected(vec![])
+        },
+    };
+    let ran = run(header(), &records, 0, &script).unwrap();
+    let h = entry(&ran.entries, 4);
+    assert_eq!(h.end, End::Skipped(Skip::Member(3)));
+    assert!(h.ended >= h.read && h.released >= h.read, "{h:?}");
+    assert_eq!(h.ended, 20);
+}

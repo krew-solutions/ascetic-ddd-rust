@@ -92,7 +92,7 @@ def holes(step):
 
 COVERED = ("binding_at_release_differs", "capture_after_its_producer_left", "barrier_members_out_of_order",
            "conditional", "answer_after_deadline", "same_instant", "think", "read_after_intended",
-           "released_past_deadline")
+           "released_past_deadline", "member_failed_past_the_prefix")
 
 
 def schedule(text, read_ahead, reads, script, seen):
@@ -147,7 +147,12 @@ def schedule(text, read_ahead, reads, script, seen):
                 ]
                 failed = [m for m in members if met(m, e["on"])[0] == "never"]
                 if failed:
-                    first = failed[0]
+                    # The member that failed first in time, the lowest on a tie.
+                    first = min(failed, key=lambda m: (done[m]["ended"], m))
+                    # A member before the failed one still running when it
+                    # failed: the holder fails all the same.
+                    if any(done[m]["ended"] > done[first]["ended"] for m in members if m < first) or first != failed[0]:
+                        seen["member_failed_past_the_prefix"] += 1
                     t = done[first]["ended"]
                     if skip is None or t < skip[1]:
                         skip = (("member", first), t)
