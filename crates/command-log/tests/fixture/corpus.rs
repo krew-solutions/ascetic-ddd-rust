@@ -178,6 +178,17 @@ fn base(k: &Key) -> Vec<Record> {
         {
             r.think = draw(&kj, "thought", at - latest + 1);
         }
+        // What the step expects: its action's plainest answer; nothing when
+        // it awaits a dependency only sent, but for an observation (ADR-0047
+        // decision 15).
+        let sent = r.after.iter().any(|d| match d {
+            Dep::Step { on, .. } | Dep::Each { on, .. } => *on == On::Sent,
+        });
+        r.expect = if sent && !matches!(r.action, Action::Observe(_)) {
+            vec![]
+        } else {
+            expected(&r.action)
+        };
         records.push(r);
     }
     // The barrier counts the managed of index 0 to 2 per occurrence 0: count them.
@@ -539,6 +550,94 @@ fn mutant(records: &[Record], which: &str, k: &Key) -> Option<Vec<Record>> {
                 c.names.clear();
             }
         }
+        // What the shell could not send (ADR-0047 decision 15): a header a
+        // step may not plan, a dot segment, bytes where a text is needed.
+        "reserved-header" => {
+            let calls: Vec<usize> = all
+                .iter()
+                .copied()
+                .filter(|&i| call_of(&mut m[i].clone()).is_some())
+                .collect();
+            let i = pick("i", &calls)?;
+            let name = ["Content-Length", "host", "X-Correlation-Id"][draw(k, "name", 3) as usize];
+            if let Some(rest) = call_of(&mut m[i]) {
+                rest.headers.push(ascetic_ddd_command_log::record::Field {
+                    name: name.into(),
+                    value: Value::Literal("0".into()),
+                });
+            }
+        }
+        "dot-segment" => {
+            let calls: Vec<usize> = all
+                .iter()
+                .copied()
+                .filter(|&i| call_of(&mut m[i].clone()).is_some_and(|r| !r.path.is_empty()))
+                .collect();
+            let i = pick("i", &calls)?;
+            if let Some(rest) = call_of(&mut m[i]) {
+                rest.path[0] = Value::Literal([".", "..", ""][draw(k, "dots", 3) as usize].into());
+            }
+        }
+        "key-in-path" => {
+            let calls: Vec<usize> = all
+                .iter()
+                .copied()
+                .filter(|&i| call_of(&mut m[i].clone()).is_some_and(|r| !r.path.is_empty()))
+                .collect();
+            let i = pick("i", &calls)?;
+            let rendering =
+                [Rendering::Secret32, Rendering::UuidBytes][draw(k, "bytes", 2) as usize];
+            if let Some(rest) = call_of(&mut m[i]) {
+                rest.path[0] = Value::Hole(Hole::Rendered {
+                    of: Of::Subject(subject("device", 1)),
+                    role: "dpop".into(),
+                    rendering,
+                });
+            }
+        }
+        // What the harness could not judge: a pointer or a literal written
+        // wrong.
+        "bad-predicate" => {
+            let watched: Vec<usize> = all
+                .iter()
+                .copied()
+                .filter(|&i| matches!(&m[i].action, Action::Observe(_)))
+                .collect();
+            let i = pick("i", &watched)?;
+            let (pointer, test) = match draw(k, "how", 3) {
+                0 => ("state", ascetic_ddd_command_log::record::Test::Exists),
+                1 => ("/s~2", ascetic_ddd_command_log::record::Test::Exists),
+                _ => (
+                    "/state",
+                    ascetic_ddd_command_log::record::Test::Equals(Value::Literal("done".into())),
+                ),
+            };
+            if let Action::Observe(o) = &mut m[i].action {
+                o.until.push(ascetic_ddd_command_log::record::Predicate {
+                    pointer: pointer.into(),
+                    test,
+                });
+            }
+        }
+        // An assertion left out, or one its action cannot have.
+        "expect-dropped" => {
+            let asserting: Vec<usize> = all
+                .iter()
+                .copied()
+                .filter(|&i| !m[i].expect.is_empty())
+                .collect();
+            let i = pick("i", &asserting)?;
+            m[i].expect.clear();
+        }
+        "expect-misfit" => {
+            let i = pick("i", &all)?;
+            m[i].expect = match &m[i].action {
+                Action::Observe(_) | Action::Host(_) => {
+                    vec![ascetic_ddd_command_log::record::Outcome::Delivered]
+                }
+                _ => vec![ascetic_ddd_command_log::record::Outcome::Observed],
+            };
+        }
         _ => return None,
     }
     (m != records).then_some(m)
@@ -572,6 +671,12 @@ pub fn logs() -> Vec<(String, Vec<Record>)> {
         "every-halved",
         "key-time",
         "names-dropped",
+        "reserved-header",
+        "dot-segment",
+        "key-in-path",
+        "bad-predicate",
+        "expect-dropped",
+        "expect-misfit",
     ];
     for i in 0..LOGS {
         let k = root.at(i);
@@ -593,10 +698,10 @@ pub fn logs() -> Vec<(String, Vec<Record>)> {
         // caller of a Tenant, as every corpus call is.
         let mut records: Vec<Record> = (0..members)
             .map(|d| {
-                let mut r = Record {
-                    action: rest("read", vec![Value::Literal(d.to_string())]),
-                    ..step(id("device", i * 10 + d, "managed", 0), d * 300)
-                };
+                let mut r = acting(
+                    step(id("device", i * 10 + d, "managed", 0), d * 300),
+                    rest("read", vec![Value::Literal(d.to_string())]),
+                );
                 if let Some(rest) = call_of(&mut r) {
                     rest.caller = Some(Caller {
                         principal: subject("principal", 0),

@@ -148,8 +148,9 @@ def written(span, value):
     return b
 
 
-def build(case):
-    op, rest, corr = case["op"], case["rest"], case["correlation"]
+def check(op, rest, corr):
+    """The frame's static half: what the step's values cannot change. Returns
+    the template's pieces."""
     if not token(op["method"]):
         raise Refused("method")
     path = op["path"]
@@ -180,6 +181,12 @@ def build(case):
             raise Refused("header_value")
     if rest["body"] is not None and (not op["content_type"] or not field_value(op["content_type"])):
         raise Refused("content_type")
+    return pieces
+
+
+def build(case):
+    op, rest, corr = case["op"], case["rest"], case["correlation"]
+    pieces = check(op, rest, corr)
     target = ""
     values = iter(rest["path"])
     for p in pieces:

@@ -252,20 +252,20 @@ fn a_reader_lets_go_of_its_producer_when_its_release_is_decided() {
         c.timeout = T;
     }
     let w = captures_etag(
-        Record {
-            action: rest(
+        acting(
+            step(id("group", 1, "update", 0), 0),
+            rest(
                 "update",
                 vec![ascetic_ddd_command_log::record::Value::Literal("1".into())],
             ),
-            ..step(id("group", 1, "update", 0), 0)
-        },
+        ),
         1,
     );
     let r = after(
-        Record {
-            action: read_etag("read", 1, &w.step),
-            ..step(id("group", 1, "read", 0), 900)
-        },
+        acting(
+            step(id("group", 1, "read", 0), 900),
+            read_etag("read", 1, &w.step),
+        ),
         &w.step,
         On::Expected,
     );
@@ -327,10 +327,10 @@ fn the_model_s_bound_instance_has_the_validator_s_numbers() {
         r
     };
     let w = captures_etag(
-        Record {
-            action: rest("update", vec![Value::Literal("1".into())]),
-            ..step(id("group", 1, "update", 0), 0)
-        },
+        acting(
+            step(id("group", 1, "update", 0), 0),
+            rest("update", vec![Value::Literal("1".into())]),
+        ),
         1,
     );
     let first = call(step(id("device", 0, "a", 0), 0), "t3");
@@ -338,10 +338,10 @@ fn the_model_s_bound_instance_has_the_validator_s_numbers() {
     // as 1's end, it pins 2 until then.
     let reader = after(
         after(
-            Record {
-                action: read_etag("read", 1, &w.step),
-                ..step(id("group", 1, "read", 0), 1)
-            },
+            acting(
+                step(id("group", 1, "read", 0), 1),
+                read_etag("read", 1, &w.step),
+            ),
             &w.step,
             On::Expected,
         ),

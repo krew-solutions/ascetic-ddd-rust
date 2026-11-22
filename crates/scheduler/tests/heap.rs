@@ -99,10 +99,10 @@ fn plan(cycles: u32, lines: u64) -> impl Iterator<Item = Record> {
         match phase {
             0 => {
                 let mut r = captures_etag(
-                    Record {
-                        action: rest("update", vec![Value::Literal(s.to_string())]),
-                        ..step(update, at)
-                    },
+                    acting(
+                        step(update, at),
+                        rest("update", vec![Value::Literal(s.to_string())]),
+                    ),
                     s,
                 );
                 if cycle > 0 {
@@ -112,10 +112,7 @@ fn plan(cycles: u32, lines: u64) -> impl Iterator<Item = Record> {
                 r
             }
             1 => after(
-                Record {
-                    action: read_etag("read", s, &update),
-                    ..step(read, at)
-                },
+                acting(step(read, at), read_etag("read", s, &update)),
                 &update,
                 On::Expected,
             ),

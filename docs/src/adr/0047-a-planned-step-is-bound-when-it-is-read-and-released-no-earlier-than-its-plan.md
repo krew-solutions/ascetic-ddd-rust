@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a-1 to K2a-3 and K2a-4a built (§ Measured), K2a-4b next. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e) and K2a-1 to K2a-4 built (§ Measured), K2a-5 next. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -828,6 +828,35 @@ header it planned is `X-Trace`.
   re-pinned under (2, 1), and the golden runs written again, their log and validator being the new ones — every
   class and verdict as before.
 
+**K2a-4b — the rules over steps** (2026-11-22): what the shell sends and judges is checked before a run, under four
+rules no deviation exempts — `frame` (a REST call's request can be built: `request::check`, and no UUID bytes or key
+material in a plain value; the arity check moves here from `operation`), `predicate` (an RFC 6901 pointer, a literal
+of JSON text, no bytes), `expect` (a REST call expects responses, a message its delivery, an observation its effect, a
+host call nothing; only a step awaiting a dependency only sent expects nothing), `secret` (no key material and no
+value captured as secret in a request's target or a message's key) — and four rules extended: `header` (a
+`not_taken` operation names its codes), `operation` (an idempotent call sends no value of a slot its own first
+attempt rewrites), `producer` (one producer a slot a record), `span` (no captured value in a raw span).
+`RULES_REVISION` 8; `vectors/reference.py` decides each by definition, the frame's static half by
+`vectors/request.py`'s and literals by `vectors/json.py`. The fixture's builders expect what their action plainly
+does, and awaiting a step only sent clears a call's or a message's expectation; the corpus's logs expect so too.
+- **Executors**: a twin per rule and per case (a reserved, a correlation and a lower-case header, a line break, a
+  dot and an empty segment, bytes in a header and a path, a poll's frame, a deviated frame; pointers without their
+  slash and with a bad escape, a literal not JSON, key material in a predicate, a body's predicate; an expectation
+  missing or misfit on a call, a poll, a message and a host call, a sent-only call clean; a captured secret in a path
+  against one in a header, key material in a query and in a message's key; a not-taken operation without codes; an
+  idempotent update sending its own ETag; a read from two producers; a captured raw span). V2: six mutant kinds join
+  the corpus — a reserved header, a dot segment, key material in a path, a predicate written wrong, an expectation
+  dropped, one misfit — and the validator and the reference agree on its 2,841 logs, which reach `frame` 324 times,
+  `expect` 249, `predicate` 65, `secret` 51; the test now fails if the corpus reaches none of them. Sixteen clean
+  logs fewer: the mutants that drop a step's only `Sent` edge now assert its answer without an expectation, and are
+  refused; the scheduler's differential runs 3,732 journals, its digests re-pinned under (2, 1) and (2, 1, 1), the
+  golden runs written again. Sixteen mutants, each killed: `frame` unchecked, bytes in a plain value, a pointer
+  and a literal unchecked, bytes in a predicate, a misfit expected, no expectation let through, a sent-only call
+  refused, a captured secret, key material in a target, a message's key unchecked, a not-taken resend without codes,
+  an idempotent call's own slot, two producers, a captured raw span, `frame` deviable — eight by the twins and the
+  reference both, the other eight by the twins alone (the corpus plans no secret capture, no message keyed by a
+  secret, no idempotent update and no second producer).
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -931,3 +960,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   decision 3 amended); K2-5 gains the frame's byte identity across attempts, from K2a-2's row.
 - 2026-11-22: K2a-3 built (§ Measured): reading an answer, and the judge.
 - 2026-11-22: K2a-4 cut into K2a-4a and K2a-4b; K2a-4a built (§ Measured): FORMAT 4's model.
+- 2026-11-22: K2a-4b built (§ Measured): the rules over steps — `frame`, `predicate`, `expect`, `secret`, and four
+  extended; `RULES_REVISION` 8.

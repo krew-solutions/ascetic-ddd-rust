@@ -1,8 +1,8 @@
-{"header":{"journal":2,"machine":1,"source":"verdict","log":"ca518f200afe64eb2d17d06fab9d26dc030e5818fe0d7a682afc66cbdafc1e62","validator":"7: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent","read_ahead":"1000","jitter":"200"}}
+{"header":{"journal":2,"machine":1,"source":"verdict","log":"8a92f6b7baf1d65bdc077084bdeebd07c9e2df587866f751d524218d8afe1d06","validator":"8: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent frame predicate expect secret","read_ahead":"1000","jitter":"200"}}
 {"read":{"at":"0","line":"2","key":{"kind":"device","scope":"Bw==","label":"read","n":0},"action":"rest","cause":null,"after":[]}}
 {"released":{"at":"0","line":"2","intended":"0","released":"0","deadline":"10000000"}}
 {"dispatch":{"at":"0","line":"2","attempt":1,"deadline":"10000000"}}
 {"sent":{"at":"0","line":"2","attempt":1}}
 {"end":{"at":"11000000","line":"2","end":"unknown","read":"0","ready":"0","intended":"0","released":"0","dispatched":"0","sent":"0","ended":"11000000","attempts":1,"critical":null,"bound":[],"fault":true}}
 {"fault":{"at":"11000000","class":"backstop","line":"2"}}
-{"trailer":{"events":"6","steps":"1","sha256":"924e1048d5ad5b833e3e4ca8bf97e29ccb23685eeef31a64ef7a8da48167c8af"}}
+{"trailer":{"events":"6","steps":"1","sha256":"46587d69c150dd94257fe348c543ca90acbe0ff3ac5201cac1475f9c3015afcd"}}

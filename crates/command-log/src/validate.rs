@@ -21,8 +21,9 @@ use crate::disk::{Disk, LocalDisk};
 use crate::log::{LogError, Reader};
 use crate::rate::{self, Curve, Lower};
 use crate::record::{
-    Action, Bus, By, Codec, Dep, Field, Form, Header, Hole, Limit, Observe, Of, On, Outcome,
-    Payload, Place, Predicate, Probe, Record, Rest, Span, StepId, Subject, Test, Value,
+    Action, Bus, By, Capture, Codec, Dep, Field, Form, Header, Hole, Limit, Observe, Of, On,
+    Outcome, Payload, Place, Predicate, Probe, Record, Rendering, Rest, Safety, Span, StepId,
+    Subject, Test, Value,
 };
 use crate::runs::{Event, Sorter};
 use crate::spill::{Counted, SpillDir};
@@ -61,8 +62,9 @@ pub enum Rule {
     /// An id rendered for a kind the profile does not render, or captured for a
     /// kind it does not capture.
     Profile,
-    /// An operation not in the table, a path of another arity, an observation
-    /// that polls every 0.
+    /// An operation not in the table, an observation that polls every 0, an
+    /// idempotent call that sends a value of a slot its own first attempt
+    /// rewrites (ADR-0047 decision 15).
     Operation,
     /// A dependency the host's domain requires, not awaited.
     Required,
@@ -86,22 +88,44 @@ pub enum Rule {
     /// expectation: sent is the harness's order, not the server's (ADR-0047
     /// decision 6).
     Sent,
+    /// A REST call whose request cannot be built — a template, a literal, an
+    /// arity, a header the step may not plan, bytes where a text is needed —
+    /// which the shell could not send (ADR-0047 decision 15).
+    Frame,
+    /// A predicate whose pointer is not RFC 6901's, whose literal is not JSON
+    /// text, or whose value is bytes (ADR-0047 decision 15).
+    Predicate,
+    /// An expectation its action cannot have, or none where the step asserts
+    /// its answer: a REST call expects responses, a message its delivery, an
+    /// observation its effect, a host call nothing, its port judging it; only a
+    /// step awaiting a dependency only sent expects nothing (ADR-0047 decision
+    /// 15).
+    Expect,
+    /// A secret — key material, a value a step captured as secret — in a
+    /// request's target or a message's key, which every proxy logs (ADR-0047
+    /// decision 15).
+    Secret,
 }
 
 /// The rules no deviation exempts: the scheduler's premises, a key, a
-/// deviation itself (ADR-0047 decision 13).
-const NON_DEVIABLE: [Rule; 6] = [
+/// deviation itself (ADR-0047 decision 13); what the shell could not send or
+/// judge, an assertion left out, a secret in what proxies log (decision 15).
+const NON_DEVIABLE: [Rule; 10] = [
     Rule::Order,
     Rule::Duplicate,
     Rule::Edge,
     Rule::Producer,
     Rule::Key,
     Rule::Deviation,
+    Rule::Frame,
+    Rule::Predicate,
+    Rule::Expect,
+    Rule::Secret,
 ];
 
 impl Rule {
     /// Every rule, in order.
-    pub const ALL: [Rule; 22] = [
+    pub const ALL: [Rule; 26] = [
         Rule::Header,
         Rule::Order,
         Rule::Duplicate,
@@ -124,6 +148,10 @@ impl Rule {
         Rule::Cause,
         Rule::Until,
         Rule::Sent,
+        Rule::Frame,
+        Rule::Predicate,
+        Rule::Expect,
+        Rule::Secret,
     ];
 
     /// The rule's name, as a deviation names it.
@@ -151,6 +179,10 @@ impl Rule {
             Rule::Cause => "cause",
             Rule::Until => "until",
             Rule::Sent => "sent",
+            Rule::Frame => "frame",
+            Rule::Predicate => "predicate",
+            Rule::Expect => "expect",
+            Rule::Secret => "secret",
         }
     }
 
@@ -576,6 +608,9 @@ struct Slot {
     /// Whether the writer captures the slot's value: a writer that only
     /// writes it gives its readers nothing to send (ADR-0047 decision 5).
     captured: bool,
+    /// Whether the writer captures it as secret: its readers may send it only
+    /// in a body or a header (ADR-0047 decision 15).
+    secret: bool,
 }
 
 /// A barrier's key: the kind, scope, label and occurrence its members share.
@@ -761,6 +796,12 @@ impl<H: Host> Pass<'_, H> {
         );
         let mut found = Vec::new();
         for o in &self.header.operations {
+            if o.safety == Safety::NotTaken && o.not_run.is_empty() {
+                found.push(format!(
+                    "operation {:?}: resent when not taken, but no problem code certifies it",
+                    o.name
+                ));
+            }
             if o.timeout == 0 || o.timeout.saturating_add(jitter) >= route {
                 found.push(format!(
                     "operation {:?}: a timeout of {} µs, not within (0, {route} − {jitter})",
@@ -1028,6 +1069,7 @@ impl<H: Host> Pass<'_, H> {
         self.hold()?;
         self.evict();
         let ready = self.edges(line, r)?;
+        self.secrets(line, r);
         self.captures(line, r);
         self.stream(line, r)?;
         self.observation(line, r);
@@ -1035,6 +1077,9 @@ impl<H: Host> Pass<'_, H> {
         self.spans(line, r);
         self.profile(line, r);
         self.operations(line, r);
+        self.frame(line, r);
+        self.predicates(line, r);
+        self.expectations(line, r);
         for (step, on) in self.host.required(r) {
             if !awaits(r, &step, on) {
                 self.violate(line, Rule::Required, || {
@@ -1167,6 +1212,21 @@ impl<H: Host> Pass<'_, H> {
                 _ => None,
             })
             .collect();
+        // One producer a slot a record: the shell fills a hole by its subject
+        // and slot (ADR-0047 decision 15).
+        let mut producers: BTreeMap<(&Subject, &String), usize> = BTreeMap::new();
+        for (subject, slot, _) in &reads {
+            let n = producers.entry((subject, slot)).or_insert(0);
+            *n = n.saturating_add(1);
+        }
+        let twice: Vec<String> = producers
+            .into_iter()
+            .filter(|(_, n)| *n > 1)
+            .map(|((subject, slot), _)| format!("{slot} of {subject:?}: read from two producers"))
+            .collect();
+        for detail in twice {
+            self.violate(line, Rule::Producer, || detail);
+        }
         for (subject, slot, from) in reads {
             if !awaits(r, &from, On::Expected) {
                 self.violate(line, Rule::Producer, || {
@@ -1232,16 +1292,16 @@ impl<H: Host> Pass<'_, H> {
             } else {
                 self.live.remove(&key);
             }
-            let captured = r
-                .capture
-                .iter()
-                .any(|c| c.subject == key.0 && c.slot == key.1);
+            let mine = |c: &&Capture| c.subject == key.0 && c.slot == key.1;
+            let captured = r.capture.iter().any(|c| mine(&c));
+            let secret = r.capture.iter().filter(mine).any(|c| c.secret);
             self.slots.insert(
                 key,
                 Slot {
                     writer: r.step.clone(),
                     readers: BTreeSet::new(),
                     captured,
+                    secret,
                 },
             );
         }
@@ -1417,6 +1477,11 @@ impl<H: Host> Pass<'_, H> {
                 if let Err(e) = self.host.span(p, span) {
                     found.push(format!("{}: {e}", span.field));
                 }
+                // A raw span is of a fixed length; a captured value is not
+                // (ADR-0047 decision 15).
+                if span.form == Form::Raw && matches!(span.hole, Hole::Captured { .. }) {
+                    found.push(format!("{}: a captured value in a raw span", span.field));
+                }
                 end = end.max(stop);
             }
         }
@@ -1456,21 +1521,166 @@ impl<H: Host> Pass<'_, H> {
         }
     }
 
+    /// Every REST call's request can be built from its plan, and its plain
+    /// values take text (ADR-0047 decision 15).
+    fn frame(&mut self, line: u64, r: &Record) {
+        let mut found = Vec::new();
+        let correlation = &self.header.profile.correlation;
+        for rest in calls(r) {
+            if let Some(op) = self.header.operations.iter().find(|o| o.name == rest.op)
+                && let Err(e) = crate::request::check(op, rest, correlation)
+            {
+                found.push(format!("{}: {e}", op.name));
+            }
+            let plain = rest
+                .path
+                .iter()
+                .chain(rest.query.iter().map(|f| &f.value))
+                .chain(rest.headers.iter().map(|f| &f.value));
+            for v in plain {
+                if let Value::Hole(Hole::Rendered {
+                    rendering: Rendering::UuidBytes | Rendering::Secret32,
+                    ..
+                }) = v
+                {
+                    found.push(format!("{}: bytes where a text is needed", rest.op));
+                }
+            }
+        }
+        for detail in found {
+            self.violate(line, Rule::Frame, || detail);
+        }
+    }
+
+    /// Every predicate of `expect` and `until` can be judged (ADR-0047
+    /// decision 15).
+    fn predicates(&mut self, line: u64, r: &Record) {
+        let mut found = Vec::new();
+        let bodies = r.expect.iter().flat_map(|o| match o {
+            Outcome::Response { body, .. } => body.as_slice(),
+            Outcome::Delivered | Outcome::Observed => &[],
+        });
+        let until = match &r.action {
+            Action::Observe(o) => o.until.as_slice(),
+            _ => &[],
+        };
+        for p in bodies.chain(until) {
+            if crate::json::tokens(&p.pointer).is_err() {
+                found.push(format!("the pointer {:?} is not RFC 6901's", p.pointer));
+            }
+            match &p.test {
+                Test::Exists => {}
+                Test::Equals(v) | Test::Contains(v) => match v {
+                    Value::Literal(s) if crate::json::parse(s.as_bytes()).is_err() => {
+                        found.push(format!("{}: a literal that is not JSON text", p.pointer));
+                    }
+                    Value::Hole(Hole::Rendered {
+                        rendering: Rendering::UuidBytes | Rendering::Secret32,
+                        ..
+                    }) => found.push(format!("{}: bytes where a value is needed", p.pointer)),
+                    _ => {}
+                },
+            }
+        }
+        for detail in found {
+            self.violate(line, Rule::Predicate, || detail);
+        }
+    }
+
+    /// An expectation fits its action, and only a step awaiting a dependency
+    /// only sent expects nothing (ADR-0047 decision 15).
+    fn expectations(&mut self, line: u64, r: &Record) {
+        let fits = |o: &Outcome| {
+            matches!(
+                (&r.action, o),
+                (Action::Rest(_), Outcome::Response { .. })
+                    | (Action::Bus(_), Outcome::Delivered)
+                    | (Action::Observe(_), Outcome::Observed)
+            )
+        };
+        let sent = r.after.iter().any(|d| match d {
+            Dep::Step { on, .. } | Dep::Each { on, .. } => *on == On::Sent,
+        });
+        let mut found = Vec::new();
+        if r.expect.iter().any(|o| !fits(o)) {
+            found.push(match &r.action {
+                Action::Host(_) => "a host call expects nothing: its port judges it",
+                _ => "an expectation its action cannot have",
+            });
+        }
+        if r.expect.is_empty() {
+            match &r.action {
+                Action::Observe(_) => found.push("an observation expects its effect observed"),
+                Action::Rest(_) | Action::Bus(_) if !sent => {
+                    found.push("no expectation of a step that asserts its answer")
+                }
+                _ => {}
+            }
+        }
+        for detail in found {
+            self.violate(line, Rule::Expect, || detail.to_owned());
+        }
+    }
+
+    /// No secret in what proxies log: a request's target, a message's key
+    /// (ADR-0047 decision 15). Read before the step's own writes.
+    fn secrets(&mut self, line: u64, r: &Record) {
+        let secret = |h: &Hole| match h {
+            Hole::Rendered {
+                rendering: Rendering::Secret32,
+                ..
+            } => true,
+            Hole::Captured { subject, slot, .. } => self
+                .slots
+                .get(&(subject.clone(), slot.clone()))
+                .is_some_and(|s| s.secret),
+            _ => false,
+        };
+        let mut logged: Vec<&Value> = Vec::new();
+        for rest in calls(r) {
+            logged.extend(rest.path.iter());
+            logged.extend(rest.query.iter().map(|f| &f.value));
+        }
+        match &r.action {
+            Action::Bus(b) => logged.push(&b.key),
+            Action::Observe(Observe {
+                probe: Probe::Bus { key, .. },
+                ..
+            }) => logged.push(key),
+            _ => {}
+        }
+        let found = logged
+            .into_iter()
+            .filter(|v| matches!(v, Value::Hole(h) if secret(h)))
+            .count();
+        for _ in 0..found {
+            self.violate(line, Rule::Secret, || {
+                "a secret in a request's target or a message's key".to_owned()
+            });
+        }
+    }
+
     fn operations(&mut self, line: u64, r: &Record) {
         let mut found = Vec::new();
         for rest in calls(r) {
             match self.header.operations.iter().find(|o| o.name == rest.op) {
                 None => found.push(format!("{:?} is not in the operations table", rest.op)),
-                Some(op) => {
-                    let arity = op.path.matches('{').count();
-                    if arity != rest.path.len() {
-                        found.push(format!(
-                            "{}: {} path values for {arity} parameters",
-                            op.name,
-                            rest.path.len()
-                        ));
+                // A repeat that answers the first attempt's outcome cannot send
+                // a value its first attempt rewrote (ADR-0047 decision 15).
+                Some(op) if op.safety == Safety::Idempotent => {
+                    for h in holes(r) {
+                        if let Hole::Captured { subject, slot, .. } = h
+                            && *subject == r.step.subject
+                            && op.writes.contains(slot)
+                        {
+                            found.push(format!(
+                                "{}: idempotent, but it sends {slot}, which its own first attempt rewrites",
+                                op.name
+                            ));
+                        }
                     }
                 }
+                Some(_) => {}
             }
         }
         let channel = match &r.action {

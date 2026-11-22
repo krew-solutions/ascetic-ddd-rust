@@ -30,6 +30,7 @@ fn trace_header() -> Header {
     for op in &mut h.operations {
         if op.name == "update" {
             op.safety = Safety::NotTaken;
+            op.not_run = vec!["service.unavailable".into()];
         }
     }
     h
@@ -44,18 +45,18 @@ fn member(n: u64, at: u64) -> Record {
 /// after the barrier, awaiting it and the reader expected.
 fn log() -> Vec<Record> {
     let w = captures_etag(
-        Record {
-            action: rest("update", vec![Value::Literal("1".into())]),
-            ..step(id("group", 1, "update", 0), 0)
-        },
+        acting(
+            step(id("group", 1, "update", 0), 0),
+            rest("update", vec![Value::Literal("1".into())]),
+        ),
         1,
     );
     let a = after(member(1, 100), &w.step, On::Sent);
     let r = after(
-        Record {
-            action: read_etag("read", 1, &w.step),
-            ..step(id("group", 1, "read", 0), 500)
-        },
+        acting(
+            step(id("group", 1, "read", 0), 500),
+            read_etag("read", 1, &w.step),
+        ),
         &w.step,
         On::Expected,
     );

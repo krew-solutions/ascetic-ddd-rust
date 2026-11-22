@@ -1,4 +1,4 @@
-{"header":{"journal":2,"machine":1,"source":"verdict","log":"c3792d82691f9fc4ce2d2fb976d4ccd484ccc33246345ca0918bbf3d549be2de","validator":"7: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent","read_ahead":"1000","jitter":"200"}}
+{"header":{"journal":2,"machine":1,"source":"verdict","log":"ba8051289c61a93417c5e83b484f706fa7d27f5426099478c00a87936cdd906e","validator":"8: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent frame predicate expect secret","read_ahead":"1000","jitter":"200"}}
 {"read":{"at":"0","line":"2","key":{"kind":"device","scope":"Bw==","label":"update","n":0},"action":"rest","cause":null,"after":[]}}
 {"released":{"at":"0","line":"2","intended":"0","released":"0","deadline":"10000000"}}
 {"dispatch":{"at":"0","line":"2","attempt":1,"deadline":"10000000"}}
@@ -8,4 +8,4 @@
 {"end":{"at":"100","line":"2","end":"expected","read":"0","ready":"0","intended":"0","released":"0","dispatched":"0","sent":"0","ended":"100","attempts":1,"critical":null,"bound":[],"fault":false}}
 {"released":{"at":"100","line":"3","intended":"100","released":"100","deadline":"10000100"}}
 {"end":{"at":"100","line":"3","end":{"skipped":{"missing_capture":"2"}},"read":"0","ready":"100","intended":"100","released":"100","dispatched":null,"sent":null,"ended":"100","attempts":0,"critical":{"step":"2"},"bound":["2"],"fault":false}}
-{"trailer":{"events":"9","steps":"2","sha256":"56a286eb28853a4ec4e640d2306099ed0c2a32954d628a372e6a6b0bbf5f166f"}}
+{"trailer":{"events":"9","steps":"2","sha256":"8fbc81953d7d42d9343f305e057fad0919e78c01159a88ba5e7a51f09fd87d8b"}}

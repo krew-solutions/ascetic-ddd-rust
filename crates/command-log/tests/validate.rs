@@ -4,7 +4,8 @@
 mod fixture;
 
 use ascetic_ddd_command_log::record::{
-    Action, Codec, Dep, Form, Hole, Of, On, Profile, Record, Rendering, StepId, Value,
+    Action, Codec, Dep, Form, Hole, Of, On, Outcome, Predicate, Probe, Profile, Record, Rendering,
+    Safety, StepId, Test, Value,
 };
 use ascetic_ddd_command_log::validate::{Host, NoHost, Rule};
 use fixture::*;
@@ -129,15 +130,16 @@ fn barrier() {
 
 /// A group's update: it writes the group's ETag and captures it.
 fn writer(g: u64, n: u32, at: u64) -> Record {
-    let mut r = step(id("group", g, "update", n), at);
-    r.action = rest("update", vec![Value::Literal(g.to_string())]);
-    captures_etag(r, g)
+    let r = step(id("group", g, "update", n), at);
+    captures_etag(
+        acting(r, rest("update", vec![Value::Literal(g.to_string())])),
+        g,
+    )
 }
 
 fn reader(g: u64, n: u32, at: u64, from: &StepId, on: On) -> Record {
-    let mut r = after(step(id("group", g, "read", n), at), from, on);
-    r.action = read_etag("read", g, from);
-    r
+    let r = step(id("group", g, "read", n), at);
+    after(acting(r, read_etag("read", g, from)), from, on)
 }
 
 #[test]
@@ -311,43 +313,34 @@ fn span() {
 #[test]
 fn profile() {
     let rendered = |kind: &str| {
-        let mut r = step(id("tenant", 1, "joined", 0), 10);
-        r.action = rest(
-            "read",
-            vec![Value::Hole(Hole::Rendered {
-                of: Of::Subject(subject(kind, 3)),
-                role: "id".into(),
-                rendering: Rendering::UuidText,
-            })],
-        );
-        r
+        acting(
+            step(id("tenant", 1, "joined", 0), 10),
+            rest(
+                "read",
+                vec![Value::Hole(Hole::Rendered {
+                    of: Of::Subject(subject(kind, 3)),
+                    role: "id".into(),
+                    rendering: Rendering::UuidText,
+                })],
+            ),
+        )
     };
     twins(Rule::Profile, &[rendered("device")], &[rendered("group")]);
 }
 
 #[test]
 fn operation() {
-    let call = |op: &str, path: Vec<Value>| {
-        let mut r = step(id("group", 1, "seen", 0), 10);
-        r.action = rest(op, path);
-        r
-    };
+    let call =
+        |op: &str, path: Vec<Value>| acting(step(id("group", 1, "seen", 0), 10), rest(op, path));
     let one = || vec![Value::Literal("1".into())];
     twins(
         Rule::Operation,
         &[call("read", one())],
         &[call("delete", one())],
     );
-    twins(
-        Rule::Operation,
-        &[call("read", one())],
-        &[call("read", vec![])],
-    );
-    twins(
-        Rule::Operation,
-        &[call("list", vec![])],
-        &[call("list", one())],
-    );
+    // A path of another arity cannot be built (ADR-0047 decision 15).
+    twins(Rule::Frame, &[call("read", one())], &[call("read", vec![])]);
+    twins(Rule::Frame, &[call("list", vec![])], &[call("list", one())]);
     let o = |every| observe(step(id("group", 1, "seen", 0), 10), every, 100);
     twins(Rule::Operation, &[o(10)], &[o(0)]);
 }
@@ -513,6 +506,30 @@ fn the_validator_agrees_with_the_reference() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+    println!("{}", String::from_utf8_lossy(&out.stdout));
+    // The corpus reaches decision 15's rules, or the agreement on them says
+    // nothing (ADR-0047 K2a-4b).
+    let mut reached = std::collections::BTreeSet::new();
+    for line in fixture::corpus::lines() {
+        let entry: serde_json::Value = serde_json::from_str(&line).unwrap();
+        for v in entry["verdict"].as_array().unwrap() {
+            reached.insert(v[1].as_str().unwrap().to_owned());
+        }
+    }
+    for rule in [
+        "frame",
+        "predicate",
+        "expect",
+        "secret",
+        "sent",
+        "operation",
+        "span",
+    ] {
+        assert!(
+            reached.contains(rule),
+            "the corpus reaches no {rule}: {reached:?}"
+        );
+    }
 }
 
 /// Holes are found wherever a record holds them: in a payload's spans, in an
@@ -531,14 +548,14 @@ fn holes_inside_payloads_and_predicates_are_seen() {
         r.action = Action::Host(ascetic_ddd_command_log::record::HostCall {
             op: "noop".into(),
             args: Payload {
-                codec: Codec::Text,
-                bytes: vec![b'x'; 8],
+                codec: Codec::Json,
+                bytes: b"\"xxxxxx\"".to_vec(),
                 holes: vec![Span {
                     offset: 0,
                     len: 8,
-                    field: "etag".into(),
+                    field: "/etag".into(),
                     hole: captured.clone(),
-                    form: Form::Raw,
+                    form: Form::JsonToken,
                 }],
             },
         });
@@ -600,18 +617,21 @@ fn a_captured_id_is_of_a_kind_the_stand_captures() {
             source: Source::Location,
             secret: false,
         });
-        let mut r = after(
+        let r = after(
             step(id("tenant", 1, "joined", 0), 20),
             &created.step,
             On::Expected,
         );
-        r.action = rest(
-            "read",
-            vec![Value::Hole(Hole::Captured {
-                subject: subject(kind, 1),
-                slot: "id".into(),
-                from: created.step.clone(),
-            })],
+        let r = acting(
+            r,
+            rest(
+                "read",
+                vec![Value::Hole(Hole::Captured {
+                    subject: subject(kind, 1),
+                    slot: "id".into(),
+                    from: created.step.clone(),
+                })],
+            ),
         );
         vec![created, r]
     };
@@ -889,6 +909,10 @@ fn the_rules_meaning_is_pinned_to_its_revision() {
         (
             7,
             "0ae498d98f8cf6e01c6913a4d382c12067abb6cee01289d7a311030226fcd67a",
+        ),
+        (
+            8,
+            "c566f139665e1b35f212c91eba373a3ea4539e096c1feb706ddb1fca28ee6e38",
         ),
     ];
     let mut digest = Sha256::new();
@@ -1269,7 +1293,7 @@ fn sent() {
     let (a, b) = (id("device", 1, "seen", 0), id("device", 2, "seen", 0));
     let expecting = |on: On| Record {
         expect: vec![Outcome::Delivered],
-        ..after(step(b.clone(), 20), &a, on)
+        ..after(message(step(b.clone(), 20), "lifecycle", 1), &a, on)
     };
     twins(
         Rule::Sent,
@@ -1384,5 +1408,365 @@ fn the_premises_are_not_deviable() {
     assert_eq!(
         pairs(&unawaited),
         vec![(3, Rule::Producer), (3, Rule::Deviation)]
+    );
+}
+
+// ADR-0047 decision 15, K2a-4b: what the shell sends and judges, checked
+// before a run.
+
+fn lit(s: &str) -> Value {
+    Value::Literal(s.into())
+}
+
+fn one() -> Vec<Value> {
+    vec![lit("1")]
+}
+
+/// A read of group 1 planning `headers` and these path values.
+fn read_with(headers: Vec<(&str, Value)>, path: Vec<Value>) -> Record {
+    let mut action = rest("read", path);
+    if let Action::Rest(r) = &mut action {
+        r.headers = headers
+            .into_iter()
+            .map(|(name, value)| ascetic_ddd_command_log::record::Field {
+                name: name.into(),
+                value,
+            })
+            .collect();
+    }
+    acting(step(id("group", 1, "seen", 0), 10), action)
+}
+
+fn rendered(role: &str, rendering: Rendering) -> Value {
+    Value::Hole(Hole::Rendered {
+        of: Of::Subject(subject("device", 1)),
+        role: role.into(),
+        rendering,
+    })
+}
+
+/// A REST call's request can be built from its plan.
+#[test]
+fn frame() {
+    let fine = || read_with(vec![("X-A", lit("1"))], one());
+    for (name, broken) in [
+        ("a host header", read_with(vec![("Host", lit("x"))], one())),
+        (
+            "the correlation header",
+            read_with(vec![("x-correlation-id", lit("x"))], one()),
+        ),
+        (
+            "a line break",
+            read_with(vec![("X-A", lit("a\r\nb"))], one()),
+        ),
+        (
+            "a name not a token",
+            read_with(vec![("X A", lit("1"))], one()),
+        ),
+        ("a dot segment", read_with(vec![], vec![lit("..")])),
+        ("an empty segment", read_with(vec![], vec![lit("")])),
+        (
+            "bytes in a header",
+            read_with(
+                vec![("X-A", rendered("serial", Rendering::UuidBytes))],
+                one(),
+            ),
+        ),
+        (
+            "bytes in a path",
+            read_with(vec![], vec![rendered("serial", Rendering::UuidBytes)]),
+        ),
+    ] {
+        let kept = run(&[fine()]);
+        assert!(kept.violations.is_empty(), "{name}: {:?}", kept.violations);
+        assert_eq!(rules(&run(&[broken])), vec![Rule::Frame], "{name}");
+    }
+    // A poll's request too.
+    let mut poll = polling(1, 0, 10, 10, 100);
+    if let Action::Observe(o) = &mut poll.action
+        && let Probe::Rest(r) = &mut o.probe
+    {
+        r.path.clear();
+    }
+    assert_eq!(rules(&run(&[poll])), vec![Rule::Frame]);
+    // Frames are not deviable.
+    let deviated = deviating(read_with(vec![("Host", lit("x"))], one()), "frame");
+    assert!(rules(&run(&[deviated])).contains(&Rule::Frame));
+}
+
+/// Every predicate can be judged.
+#[test]
+fn predicate() {
+    let until = |pointer: &str, test: Test| {
+        let mut r = polling(1, 0, 10, 10, 100);
+        if let Action::Observe(o) = &mut r.action {
+            o.until.push(Predicate {
+                pointer: pointer.into(),
+                test,
+            });
+        }
+        r
+    };
+    twins(
+        Rule::Predicate,
+        &[until("/a", Test::Exists)],
+        &[until("a", Test::Exists)],
+    );
+    twins(
+        Rule::Predicate,
+        &[until("/a~0", Test::Exists)],
+        &[until("/a~2", Test::Exists)],
+    );
+    twins(
+        Rule::Predicate,
+        &[until("/a", Test::Equals(lit("{\"n\":1.5}")))],
+        &[until("/a", Test::Equals(lit("one")))],
+    );
+    twins(
+        Rule::Predicate,
+        &[until(
+            "/a",
+            Test::Contains(rendered("serial", Rendering::UuidText)),
+        )],
+        &[until(
+            "/a",
+            Test::Contains(rendered("serial", Rendering::Secret32)),
+        )],
+    );
+    let body = |pointer: &str| Record {
+        expect: vec![Outcome::Response {
+            status: 200,
+            problem: None,
+            body: vec![Predicate {
+                pointer: pointer.into(),
+                test: Test::Exists,
+            }],
+        }],
+        ..read_with(vec![], one())
+    };
+    twins(Rule::Predicate, &[body("")], &[body("x")]);
+}
+
+/// An expectation fits its action; a step asserting its answer has one.
+#[test]
+fn expect() {
+    let read = || read_with(vec![], one());
+    let response = |status| Outcome::Response {
+        status,
+        problem: None,
+        body: vec![],
+    };
+    twins(
+        Rule::Expect,
+        &[read()],
+        &[Record {
+            expect: vec![],
+            ..read()
+        }],
+    );
+    twins(
+        Rule::Expect,
+        &[read()],
+        &[Record {
+            expect: vec![response(200), Outcome::Delivered],
+            ..read()
+        }],
+    );
+    let poll = || polling(1, 0, 10, 10, 100);
+    twins(
+        Rule::Expect,
+        &[poll()],
+        &[Record {
+            expect: vec![],
+            ..poll()
+        }],
+    );
+    twins(
+        Rule::Expect,
+        &[poll()],
+        &[Record {
+            expect: vec![Outcome::Observed, response(409)],
+            ..poll()
+        }],
+    );
+    let fact = || message(step(id("device", 1, "fact", 0), 10), "lifecycle", 1);
+    twins(
+        Rule::Expect,
+        &[fact()],
+        &[Record {
+            expect: vec![],
+            ..fact()
+        }],
+    );
+    let host = || step(id("device", 1, "seen", 0), 10);
+    twins(
+        Rule::Expect,
+        &[host()],
+        &[Record {
+            expect: vec![response(200)],
+            ..host()
+        }],
+    );
+    // A call awaiting a step only sent expects nothing, and is clean.
+    let a = step(id("device", 2, "seen", 0), 5);
+    let sent = after(read_with(vec![], one()), &a.step, On::Sent);
+    let report = run(&[a, sent]);
+    assert!(report.violations.is_empty(), "{:?}", report.violations);
+}
+
+/// No secret in a request's target or a message's key.
+#[test]
+fn secret() {
+    use ascetic_ddd_command_log::record::{Capture, Source};
+    let w = {
+        let mut w = writer(1, 0, 10);
+        w.capture.push(Capture {
+            subject: subject("group", 1),
+            slot: "token".into(),
+            source: Source::Header("X-Token".into()),
+            secret: true,
+        });
+        w
+    };
+    let token = Value::Hole(Hole::Captured {
+        subject: subject("group", 1),
+        slot: "token".into(),
+        from: w.step.clone(),
+    });
+    let reading = |in_path: bool| {
+        let r = if in_path {
+            read_with(vec![], vec![token.clone()])
+        } else {
+            read_with(vec![("Authorization", token.clone())], one())
+        };
+        after(
+            Record {
+                step: id("group", 1, "read", 0),
+                at: 20,
+                ..r
+            },
+            &w.step,
+            On::Expected,
+        )
+    };
+    twins(
+        Rule::Secret,
+        &[w.clone(), reading(false)],
+        &[w.clone(), reading(true)],
+    );
+    // Key material in a query, which also cannot be text there.
+    let mut q = read_with(vec![], one());
+    if let Action::Rest(r) = &mut q.action {
+        r.query.push(ascetic_ddd_command_log::record::Field {
+            name: "k".into(),
+            value: rendered("dpop", Rendering::Secret32),
+        });
+    }
+    assert_eq!(rules(&run(&[q])), vec![Rule::Frame, Rule::Secret]);
+    // In a message's key.
+    let keyed = |secret: bool| {
+        let mut m = message(step(id("device", 1, "fact", 0), 10), "lifecycle", 1);
+        if let Action::Bus(b) = &mut m.action {
+            b.key = if secret {
+                rendered("dpop", Rendering::Secret32)
+            } else {
+                rendered("serial", Rendering::Hex { len: 4 })
+            };
+        }
+        m
+    };
+    twins(Rule::Secret, &[keyed(false)], &[keyed(true)]);
+}
+
+/// A not-taken resend needs its codes; an idempotent call cannot send a value
+/// its own first attempt rewrites; one producer a slot a record; no captured
+/// value in a raw span.
+#[test]
+fn resends_producers_and_raw_spans() {
+    let mut h = header();
+    h.operations[0].safety = Safety::NotTaken;
+    assert_eq!(
+        pairs(&run_with(h.clone(), &[], &NoHost, 1_000)),
+        vec![(1, Rule::Header)]
+    );
+    h.operations[0].not_run = vec!["service.unavailable".into()];
+    assert!(run_with(h, &[], &NoHost, 1_000).violations.is_empty());
+    // An update sending the ETag it rewrites, idempotent or not.
+    let w0 = writer(1, 0, 10);
+    let w1 = {
+        let mut r = after(writer(1, 1, 30), &w0.step, On::Expected);
+        if let (Action::Rest(rest), Action::Rest(read)) =
+            (&mut r.action, read_etag("update", 1, &w0.step))
+        {
+            rest.headers = read.headers;
+        }
+        r
+    };
+    let plan = [w0.clone(), w1.clone()];
+    assert!(
+        run(&plan).violations.is_empty(),
+        "{:?}",
+        run(&plan).violations
+    );
+    let mut h = header();
+    h.operations[0].safety = Safety::Idempotent;
+    assert_eq!(
+        pairs(&run_with(h, &plan, &NoHost, 1_000)),
+        vec![(3, Rule::Operation)]
+    );
+    // A read of the ETag from two producers, the older one deviated stale.
+    let from_both = |both: bool| {
+        let mut r = reader(1, 0, 40, &w1.step, On::Expected);
+        if both {
+            r = after(r, &w0.step, On::Expected);
+            if let (Action::Rest(rest), Action::Rest(old)) =
+                (&mut r.action, read_etag("read", 1, &w0.step))
+            {
+                rest.headers.extend(old.headers.into_iter().map(|mut f| {
+                    f.name = "X-Old".into();
+                    f
+                }));
+            }
+            r = deviating(r, "stale");
+        }
+        r
+    };
+    let kept = run(&[w0.clone(), w1.clone(), from_both(false)]);
+    assert!(kept.violations.is_empty(), "{:?}", kept.violations);
+    assert_eq!(
+        rules(&run(&[w0.clone(), w1.clone(), from_both(true)])),
+        vec![Rule::Producer]
+    );
+    // A captured value in a raw span, against one in a JSON token.
+    let spanned = |raw: bool| {
+        let mut r = after(
+            step(id("group", 1, "posted", 0), 20),
+            &w0.step,
+            On::Expected,
+        );
+        r.action = Action::Host(ascetic_ddd_command_log::record::HostCall {
+            op: "noop".into(),
+            args: ascetic_ddd_command_log::record::Payload {
+                codec: if raw { Codec::Text } else { Codec::Json },
+                bytes: b"\"xxxxxx\"".to_vec(),
+                holes: vec![ascetic_ddd_command_log::record::Span {
+                    offset: 0,
+                    len: 8,
+                    field: "/etag".into(),
+                    hole: Hole::Captured {
+                        subject: subject("group", 1),
+                        slot: "etag".into(),
+                        from: w0.step.clone(),
+                    },
+                    form: if raw { Form::Raw } else { Form::JsonToken },
+                }],
+            },
+        });
+        r
+    };
+    twins(
+        Rule::Span,
+        &[w0.clone(), spanned(false)],
+        &[w0.clone(), spanned(true)],
     );
 }

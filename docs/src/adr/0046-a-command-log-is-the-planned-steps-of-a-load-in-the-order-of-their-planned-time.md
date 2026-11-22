@@ -1068,3 +1068,7 @@ condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
 - 2026-11-22: ADR-0047 K2a-4a: FORMAT 4. The profile names a problem pointer, a correlation header, a resend floor,
   an answer cap and the stand's idle, checked by the header rule (`RULES_REVISION` 7); the record's documentation
   follows ADR-0047 decision 15. No deployed client: the golden log and the corpus are regenerated.
+- 2026-11-22: ADR-0047 K2a-4b: the validator checks what the scheduler sends and judges — rules `frame`,
+  `predicate`, `expect` and `secret`, not deviable; a not-taken operation names its codes, an idempotent call sends no
+  value its own first attempt rewrites, one producer a slot a record, no captured value in a raw span
+  (`RULES_REVISION` 8). The corpus's steps expect what their actions plainly do.

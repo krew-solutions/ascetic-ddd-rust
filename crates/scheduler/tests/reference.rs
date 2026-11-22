@@ -144,7 +144,7 @@ const JOURNALS: &[(u32, u32, &str)] = &[
     (
         2,
         1,
-        "cc56f3d9a66f5f2c2a34aef4c1e65c1509205d5b786e140d3fb1851197e5eaba",
+        "adc7ab97553a58621e21f77d3c2fcf03763208ea069bb9073133604e4c2aa00e",
     ),
 ];
 
@@ -156,7 +156,7 @@ const CLASSES: &[(u32, u32, u32, &str)] = &[(
     2,
     1,
     1,
-    "5d757fb0dbf71a6cbfcc58dad6f04cdf98014365f28fb95bce688d3452a3af4a",
+    "2124597f7d52665afb12cf13b908b35e7ea8908ca31dfba5d3ee07e8bf13935a",
 )];
 
 /// The journal written, read back, and told against the run it journals

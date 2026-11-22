@@ -7,8 +7,8 @@ use std::io::Cursor;
 
 use ascetic_ddd_command_log::record::{
     Action, Bus, Call, Capture, Channel, ClientRetry, Codec, Dep, Deviation, Field, Form, Header,
-    Hole, HostCall, Observe, On, Operation, Payload, Probe, Profile, Record, Rendering, Rest,
-    Safety, Source, Span, StepId, StreamPosition, Subject, Value,
+    Hole, HostCall, Observe, On, Operation, Outcome, Payload, Probe, Profile, Record, Rendering,
+    Rest, Safety, Source, Span, StepId, StreamPosition, Subject, Value,
 };
 use ascetic_ddd_command_log::validate::{Host, Limits, NoHost, Report, Rule, validate};
 use ascetic_ddd_command_log::{Reader, Writer};
@@ -128,11 +128,41 @@ pub fn step(id: StepId, at: u64) -> Record {
     }
 }
 
+/// What a step of `action` expects, the plainest answer of its kind: a 200,
+/// a delivery, its effect observed; a host call nothing, its port judging it
+/// (ADR-0047 decision 15).
+pub fn expected(action: &Action) -> Vec<Outcome> {
+    match action {
+        Action::Rest(_) => vec![Outcome::Response {
+            status: 200,
+            problem: None,
+            body: vec![],
+        }],
+        Action::Bus(_) => vec![Outcome::Delivered],
+        Action::Observe(_) => vec![Outcome::Observed],
+        Action::Host(_) => vec![],
+    }
+}
+
+/// `r` doing `action`, expecting what it plainly does.
+pub fn acting(r: Record, action: Action) -> Record {
+    Record {
+        expect: expected(&action),
+        action,
+        ..r
+    }
+}
+
+/// `r` awaiting `step`; awaiting it only sent, a call or a message expects
+/// nothing (ADR-0047 decision 6), an observation still its effect.
 pub fn after(mut r: Record, step: &StepId, on: On) -> Record {
     r.after.push(Dep::Step {
         step: step.clone(),
         on,
     });
+    if on == On::Sent && !matches!(r.action, Action::Observe(_)) {
+        r.expect.clear();
+    }
     r
 }
 
@@ -181,6 +211,7 @@ pub fn captures_etag(mut r: Record, g: u64) -> Record {
 
 pub fn message(r: Record, stream: &str, position: u32) -> Record {
     Record {
+        expect: vec![Outcome::Delivered],
         action: Action::Bus(Bus {
             channel: "device.lifecycle".into(),
             key: Value::Literal("k".into()),
@@ -243,6 +274,7 @@ fn cause_of(r: &Record) -> StepId {
 pub fn observe(r: Record, every: u64, timeout: u64) -> Record {
     let cause = cause_of(&r);
     Record {
+        expect: vec![Outcome::Observed],
         action: Action::Observe(Observe {
             cause: cause.clone(),
             probe: Probe::Bus {
@@ -405,6 +437,7 @@ pub fn call(op: &str, g: u64, n: u32, at: u64, source: u32) -> Record {
         headers: vec![],
         body: None,
     });
+    r.expect = expected(&r.action);
     r
 }
 
@@ -421,6 +454,7 @@ pub fn polling(g: u64, n: u32, at: u64, every: u64, timeout: u64) -> Record {
         every,
         timeout,
     });
+    r.expect = vec![Outcome::Observed];
     r
 }
 

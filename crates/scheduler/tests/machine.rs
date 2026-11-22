@@ -21,14 +21,15 @@ use fixture::*;
 
 /// A group's update, writing its ETag.
 fn writer(g: u64, n: u32, at: u64) -> Record {
-    let mut r = step(id("group", g, "update", n), at);
-    r.action = rest(
-        "update",
-        vec![ascetic_ddd_command_log::record::Value::Literal(
-            g.to_string(),
-        )],
-    );
-    r
+    acting(
+        step(id("group", g, "update", n), at),
+        rest(
+            "update",
+            vec![ascetic_ddd_command_log::record::Value::Literal(
+                g.to_string(),
+            )],
+        ),
+    )
 }
 
 /// A group's read, sending the ETag `from` captured.
@@ -39,9 +40,14 @@ fn reader(
     from: &ascetic_ddd_command_log::record::StepId,
     on: On,
 ) -> Record {
-    let mut r = after(step(id("group", g, "read", n), at), from, on);
-    r.action = read_etag("read", g, from);
-    r
+    after(
+        acting(
+            step(id("group", g, "read", n), at),
+            read_etag("read", g, from),
+        ),
+        from,
+        on,
+    )
 }
 
 /// What a step's expected answer captures: every slot it declares.

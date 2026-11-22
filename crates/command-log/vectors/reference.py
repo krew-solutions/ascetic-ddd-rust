@@ -73,17 +73,40 @@ The rules (ADR-0046 decisions 5, 7, 9):
   B + ceil(R * J / P) + 1.
 """
 
+import importlib.util
 import json
+import pathlib
 import re
 import sys
 
+sys.dont_write_bytecode = True
+_HERE = pathlib.Path(__file__).resolve().parent
+
+
+def _load(name):
+    """A vector by definition beside this one, under its own name."""
+    spec = importlib.util.spec_from_file_location(name, _HERE / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# The frame's static half (ADR-0047 decision 15) and the answers' JSON, by
+# their own definitions.
+request = _load("request")
+answers = _load("json")
+
 AWAIT = {"sent": 0, "settled": 1, "expected": 2}
-NON_DEVIABLE = {"order", "duplicate", "edge", "producer", "key", "deviation"}
+NON_DEVIABLE = {
+    "order", "duplicate", "edge", "producer", "key", "deviation", "frame", "predicate", "expect",
+    "secret",
+}
 RULES = {
     "header", "order", "duplicate", "edge", "barrier", "producer", "stale", "writers",
     "stream", "gap", "span", "profile", "operation", "required", "deviation", "rate", "key",
-    "feasible", "measure", "cause", "until", "sent",
+    "feasible", "measure", "cause", "until", "sent", "frame", "predicate", "expect", "secret",
 }
+BYTES = {"uuid_bytes", "secret32"}
 MAX_POLLS = 2**20
 
 
@@ -324,6 +347,8 @@ def verdict(text, clock="cursor"):
     for op in header["operations"]:
         if int(op["timeout"]) == 0 or int(op["timeout"]) + jitter >= route:
             found.add((1, "header"))
+        if op["safety"] == "not_taken" and not op["not_run"]:
+            found.add((1, "header"))
     for table in ("channels", "calls"):
         names = [t["name"] for t in header[table]]
         if len(names) != len(set(names)) or any(int(t["timeout"]) == 0 for t in header[table]):
@@ -368,6 +393,11 @@ def verdict(text, clock="cursor"):
                     )
                     if int(b["count"]) != planned:
                         v.add("barrier")
+        producers = {}
+        for subject, slot, _ in reads(r):
+            producers[(subject, slot)] = producers.get((subject, slot), 0) + 1
+        if any(n > 1 for n in producers.values()):
+            v.add("producer")
         for subject, slot, source in reads(r):
             producer = json.loads(source)
             if not awaits(r, producer, "expected"):
@@ -418,6 +448,8 @@ def verdict(text, clock="cursor"):
                     v.add("span")
                 if (s["form"] == "json_token") != (p["codec"] == "json"):
                     v.add("span")
+                if s["form"] == "raw" and "captured" in s["hole"]:
+                    v.add("span")
         for h in holes(r):
             if "rendered" in h and "subject" in h["rendered"]["of"] and h["rendered"]["role"] == "id":
                 if h["rendered"]["of"]["subject"]["kind"] not in profile["rendered"]:
@@ -464,10 +496,69 @@ def verdict(text, clock="cursor"):
             every = int(action["observe"]["every"])
             if every == 0 or int(action["observe"]["timeout"]) // every >= MAX_POLLS:
                 v.add("operation")
+        subject_of = json.dumps(r["step"]["subject"], sort_keys=True)
         for c in calls:
+            plain = c["path"] + [f["value"] for f in c["query"] + c["headers"]]
+            if any("hole" in x and "rendered" in x["hole"] and x["hole"]["rendered"]["as"] in BYTES for x in plain):
+                v.add("frame")
             ops = [op for op in header["operations"] if op["name"] == c["op"]]
-            if not ops or ops[0]["path"].count("{") != len(c["path"]):
+            if not ops:
                 v.add("operation")
+                continue
+            if ops[0]["safety"] == "idempotent" and any(
+                subject == subject_of and slot in ops[0]["writes"] for subject, slot, _ in reads(r)
+            ):
+                v.add("operation")
+            try:
+                request.check(ops[0], c, profile["correlation"])
+            except request.Refused:
+                v.add("frame")
+        # Predicates that can be judged: an RFC 6901 pointer, a literal that is
+        # JSON text, a value that is no bytes.
+        bodies = [p for o in r["expect"] if isinstance(o, dict) for p in o["response"]["body"]]
+        until = action["observe"]["until"] if "observe" in action else []
+        for p in bodies + until:
+            pointer = p["pointer"]
+            if pointer and (not pointer.startswith("/") or re.search(r"~(?![01])", pointer)):
+                v.add("predicate")
+            if p["test"] != "exists":
+                (value,) = p["test"].values()
+                if "literal" in value:
+                    try:
+                        answers.read(value["literal"].encode())
+                    except answers.Unreadable:
+                        v.add("predicate")
+                elif "rendered" in value["hole"] and value["hole"]["rendered"]["as"] in BYTES:
+                    v.add("predicate")
+        # An expectation fits its action; only a step awaiting a dependency
+        # only sent, a host call, expects nothing.
+        kind = next(iter(action))
+        fits = {"rest": "response", "bus": "delivered", "observe": "observed"}.get(kind)
+        outcome = lambda o: next(iter(o)) if isinstance(o, dict) else o  # noqa: E731
+        if any(outcome(o) != fits for o in r["expect"]):
+            v.add("expect")
+        sent_only = any((d["step"]["on"] if "step" in d else d["each"]["on"]) == "sent" for d in r["after"])
+        if not r["expect"] and (kind == "observe" or (kind in ("rest", "bus") and not sent_only)):
+            v.add("expect")
+        # No secret in a request's target or a message's key.
+        logged = [x for c in calls for x in c["path"] + [f["value"] for f in c["query"]]]
+        if kind == "bus":
+            logged.append(action["bus"]["key"])
+        if kind == "observe" and "bus" in action["observe"]["probe"]:
+            logged.append(action["observe"]["probe"]["bus"]["key"])
+        for x in logged:
+            hole = x.get("hole", {})
+            if "rendered" in hole and hole["rendered"]["as"] == "secret32":
+                v.add("secret")
+            if "captured" in hole:
+                c = hole["captured"]
+                key_ = (json.dumps(c["subject"], sort_keys=True), c["slot"])
+                writers = [e for e in earlier if key_ in writes(header, e)]
+                if writers and any(
+                    json.dumps(w["subject"], sort_keys=True) == key_[0] and w["slot"] == key_[1] and w["secret"]
+                    for w in writers[-1]["capture"]
+                ):
+                    v.add("secret")
     used = offered_load(header, steps, raw)
     for i, r in enumerate(steps):
         if r["deviation"] is None:
