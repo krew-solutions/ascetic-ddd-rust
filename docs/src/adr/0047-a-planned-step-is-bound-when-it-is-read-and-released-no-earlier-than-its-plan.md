@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a and K1 (K1a to K1e) built (§ Measured), K2 next. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e) and K2a-1 built (§ Measured), K2a-2 next. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -19,7 +19,11 @@ To be built in slices, each a commit of its own:
   the stand with failures injected). (The plan's bound, the
   commitment's peaks and the reference's bound lines were first listed in K0a; they moved where their consumer is.
   K1-4's `PendingByRate` moved to K1e with the bound it mutates.)
-- **K2** (`crates/load-run`, the shell): REST, the clock, the reader, the journal writer, the gates.
+- **K2a** (pure, decision 15): a REST attempt's frame and its judgement, in five parts: **K2a-1** an answer's JSON
+  (`command-log::json`); **K2a-2** the fills and the request, `Secret32` from a run secret; **K2a-3** reading an
+  answer, and `scheduler::judge`; **K2a-4** FORMAT 4 and the validator's rules; **K2a-5** the machine, the journal
+  and the fold: polls re-polled, resends spaced and licensed.
+- **K2b** (`crates/load-run`, the shell): REST, the clock, the reader, the journal writer, the gates.
 - **The first host run:** REST only, on the compose stand, `sources = 1` — a correctness run.
 - **K3** facts and the bus; **K4** shaping and the emulated client's retries; **K5** the report.
 
@@ -184,8 +188,8 @@ and the passing poll's answer. The critical dependency is journaled, so that att
 
 `Operation.retry` splits into `safety` — what the harness may resend: `Never`, `NotTaken`, `Idempotent` — and
 `client`, what the emulated client retries (load, measured). **Not taken** is certified by the problem codes the
-contract says mean "not run" (`service.session_failed`, `request.rate_limited`, `projection.behind`), never by a
-status: a 503 with `Retry-After` may follow a COMMIT that took effect. Everything else not answered is Unknown; an
+contract says mean "not run" (the host's `request.rate_limited` and `access.projection_behind`;
+`service.session_failed` only where it means that no session opened — decision 15, § Owed), never by a status: a 503 with `Retry-After` may follow a COMMIT that took effect. Everything else not answered is Unknown; an
 Unknown non-idempotent step is never resent. A poll is never retried, never two in flight. A connection is kept past
 a censored deadline until the gateway's own timeout, so that the late answer is journaled and the port is not left
 in TIME_WAIT; abandoned only past the route timeout and a grace, a stand defect, counted. A plan needing more ports
@@ -263,6 +267,75 @@ partitions, the gateway's buckets refilled since their last use); a harness faul
 fact, a backstop deadline); an unplanned 429; a divergence from the commitment; a truncated journal; a measure whose
 budget lies inside its interval.
 
+### 15. A REST attempt: its frame and its judgement
+
+*Decided for K2a* (2026-11-22, under the gate: a blind solver and a discriminator on Fable, then three roles —
+Distributed Systems, Verifiability, Security — on Opus; it cuts decision 1's pure half, amends decisions 10, 11 and 14
+and ADR-0046 decision 3; § Alternatives Considered keeps what each refuted):
+- **Placement.** What a record means against a request and an answer is `command-log`'s, beside `plan` — one copy
+  for the validator, which checks its static half, and the scheduler: `json` (an answer's JSON), `fills` (every hole
+  resolved), `request` (the frame, and `check`), `answer` (the code, predicates, captures, `Retry-After`).
+  `scheduler::judge` is a decision list over what `answer` read, with no JSON: the scheduler's dependency allowlist
+  is unchanged. The shell keeps scheme and authority (a `Stand` port: the host serves each Tenant on its own
+  authority), decorators, hyper and the stamps.
+- **An answer's JSON is read by the crate's own reader**, not by serde_json: strict RFC 8259 over UTF-8 — no byte
+  order mark, no `NaN`; a document unreadable if it escapes half of a surrogate pair, names a member twice, nests
+  deeper than 128 or writes an exponent of more than 18 digits — its numbers kept as their text. serde_json's number
+  categories follow its build's features, and the host's workspace turns on `arbitrary_precision` (host
+  `crates/http/Cargo.toml`, unified into every crate it builds): `1e400` reads in one build and is refused in the
+  other, `-0` is an integer or a float, a 23-digit id keeps its text or becomes a float. A judgement left to it would
+  depend on who built the shell. Two numbers are equal when their decimal values are; values member by member,
+  objects in any order; pointers are RFC 6901's.
+- **The frame.** The path: `op.path`'s literals verbatim — the validator holds them to RFC 3986 `pchar` and `/`, no
+  `%` — each `{name}` filled in order by its value with every byte outside unreserved percent-encoded. A custom method
+  (`/devices/{device_id}:retire`, 101 of the host's paths) then reaches its route, which the gateway matches as
+  `[^/:]+:retire` on the undecoded path; encoded, `%3A` sends it to the 405 of `/devices/{device_id}`. The query:
+  `name=value` in record order, encoded alike. Planned headers: a token name, a value of visible ASCII with inner
+  blanks only; reserved — compared without case, for planned names, `op.decorated` and the correlation header alike
+  — Host, Content-Length, Transfer-Encoding, Connection, Content-Type, every decorated name and the correlation
+  header; `content-type` iff a body. A frame lives as long as its attempts are resends of one request: a call's is
+  built at its first dispatch and resent byte for byte; each poll builds its own. `TimeBase::Sent` is the frame's
+  first dispatch stamp on the run's wall clock, never the write instant.
+- **Per attempt**, in the shell: the correlation id — `root(namespace) / "ascetic-ddd-command-log/correlation" / step
+  / attempt`, 32 hex digits, a key domain no planned role reaches — under the profile's header; decorators, which see
+  the final bytes and the attempt's deadline and return headers only of `op.decorated`'s names (any other is a
+  harness fault). The frame's digest covers the frame with every secret replaced by its hole, and the decorated
+  names, never their values.
+- **Secrets.** `Secret32` is drawn from a run secret — 32 bytes from the OS, held in memory only — not from the
+  namespace: faker's derivation is public, so every rendering is a function of the namespace, and a journal naming
+  the namespace named every secret. The namespace is then public, and the journal carries it. A secret — a
+  `Secret32` hole, or a captured hole of a secret capture — stands only in a body or a header, never in the target,
+  which every proxy logs. Every type holding the run secret, a fill, a frame or a captured value redacts its `Debug`.
+- **Captures**, from an expected answer only: `Header(n)` exactly one field line; `Json(p)` a string or a number;
+  `Location` its last non-empty path segment, query and fragment stripped, percent-decoded strictly. A value is taken
+  only if every use can carry it — a number, or a string of visible ASCII with inner blanks, neither empty, `.` nor
+  `..`, at most 8 KiB; otherwise it is absent, named beside the judgement, which stays Expected, and the machine skips
+  its readers for a missing capture, the producer the root (decision 5): a frame never fails on a server's value. A
+  captured hole in a raw span is refused statically.
+- **The judgement**, first match: (1) a reset or a cut answer after a byte of the request left, or no answer by the
+  deadline — Unknown; (2) the code: the string at the profile's pointer, read only from a status ≥ 400 whose media
+  type is `application/problem+json` and whose body, within the profile's cap, is an object; (3) an `expect`
+  response whose status equals, whose problem equals the code strictly — `None` is "no readable code", so the
+  gateway's 404 `route.not_found` never passes for a service's 404 — and whose body predicates hold — Expected; (4) a
+  poll: a 2xx where every `until` holds — Expected; (5) the code in `not_run` — NotTaken, its `Retry-After` beside it;
+  (6) a status ≥ 500 or below 200 — Unknown, the service's or the gateway's own; (7) an empty `expect`, a sent-only
+  step's — Expected; (8) else Unexpected, for a poll "not yet". A request no byte of which left is no attempt's end:
+  the shell keeps it in its pool-and-connect gap until a byte leaves or the deadline passes (hyper hands back a
+  request it never started). The judge sees no clock, attempt or safety; it returns the status and a bounded code
+  beside the judgement, and the journal carries them.
+- **Resends**, the machine's: a poll's Unknown takes the next point of its grid, a poll censored only at its
+  observation's deadline — the gateway's own timeout frees a hung one — so that never two polls of one observation
+  are out; a harness resend leaves at `now + max(Retry-After, the profile's floor)` and only if that is before the
+  deadline by more than J, else the step ends as it stands (NotTaken as Unexpected, Unknown as Unknown).
+  `Idempotent` means a repeat answers the first attempt's outcome, as the contract certifies; a step carrying a
+  captured value of a slot its own operation writes is refused `Idempotent` (its first attempt invalidates its own
+  `If-Match`). The journal's `read` carries the operation's safety and its header the floor and the namespace, so
+  that the fold refuses a resend its predecessor did not license.
+- **The model**, FORMAT 4: the profile's problem pointer, correlation header, resend floor, answer cap, and the
+  stand's downstream idle — the shell retires a pooled connection before it, and a first write refused with no byte
+  accepted reconnects within the attempt (the race the host measured on its own hop as `503 UC`). Each rule above
+  with a static half is the validator's.
+
 ## Consequences
 
 - A load run is judged against the plan the validator checked, with every lateness the run's and every failure
@@ -304,6 +377,18 @@ budget lies inside its interval.
 - **A voiding cap chosen by hand**: voids the stalls QAS-SCALE-0001's open-loop probe exists to catch.
 - **The `ahead` rule** (a bus-probe observation within L of its cause): the chunked reader's read-ahead swings to 0;
   held facts make matching independent of it.
+- **serde_json for answers** (K2a): its number categories follow its build's features; a judgement would depend on
+  who built the shell.
+- **Path literals encoded with the values** (K2a's synthesis, refuted by all three roles): every custom method
+  misrouted to the 405 of its resource.
+- **The namespace as the secrets' root** (K2a, Security): a journal naming it names every secret.
+- **A request never written judged NotTaken** (the main position): a `Never` step ends Unexpected, a root, for a
+  keep-alive race; **a fifth judgement for it**: no machine arm needs one.
+- **`problem: None` as a wildcard** (the main position): the gateway's 404 `route.not_found` passes for a service's.
+- **A poll's own deadline** (the discriminator): a censored poll's connection is kept, so several polls of one
+  observation are out at once; **a poll's Unknown as "not yet" in the judge** (the main position): decision 9's
+  bracket then starts from a poll that carried no information.
+- **Resends at once** (the machine as built): thousands within a timeout against a fast 500 or a `Retry-After`.
 - **One SHA-256 a pass and a hashing thread**, **a partitioned machine for telemetry**, **ABBA and snapshots**,
   **TLA+ trace validation of the shell**: later, each on its own trigger (§ Owed).
 
@@ -323,6 +408,11 @@ budget lies inside its interval.
 | K1-8 | K1 | a counting allocator: the heap flat across eight times the subjects at one planned rate, with a share of producers Unknown or Unexpected and captures missing; a stall of s ∈ {T/2, T − 1 µs} over chains of depth ≥ 2 not void, its peak in flight as derived; a stalled stand on a `Settled` chain spaced below its deadline ending failed within the plan's bound | a cell freed on eviction; a refcount leak on a skip path; a bound chosen by rate alone |
 | K1-9 | K1 | the verdict fold against golden journals and an independent Python reader: one twin per void, the interval verdicts (a stall that fails by more than own lateness fails; a straddling one is void), a skipped publication inconclusive, transitive provenance | a conditional step counted as a pass; one-level provenance |
 | K1-10 | K1 | the dependency allowlist of `crates/scheduler` | a clock crate added |
+| K2a-1 | K2a | the reader against `vectors/json.py` (Python's `json` under hooks, and `decimal`) on 6,000 drawn documents, a third of them mutated, every pointer into them, and 6,000 pairs of values; a twin per rule | a member named twice read; the depth off by one; numbers equal by text; `-0` signed; the exponent's digits; an index with a leading zero; a lone surrogate; objects compared in order; trailing bytes; a raw control character; `~0` and `~1` swapped; trailing zeros kept; a leading zero; the exponent's sign |
+| K2a-2 | K2a | `vectors/request.py` writing `golden/frames.txt` — the sample, a `:verb` path, values with `:`, `/`, `%`, a space and non-ASCII — diffed in `make vectors`; `TimeBase::Sent` equal across a call's attempts, apart across polls; a captured ETag into a body quoted, a JSON id into a path unquoted; `Secret32` changing with the run secret, not with the namespace; `{:?}` of every fill, frame and secret holding none | literals encoded; `+` for a space; lower-case hex; `Sent` per attempt; a captured value's form ignored; `Secret32` from the namespace; a derived `Debug` |
+| K2a-3 | K2a | `vectors/judge.py` over a sample of raw answers — statuses at each class's edges, media types with parameters and in other cases, a code not a string, two `ETag` lines, a header not UTF-8, a `Location` with a query, a fragment, a trailing slash, `%FF` and `%zz`, `Retry-After` in seconds, as a date, negative and huge; an `expect` listing a `not_run` code, one listing 503, `problem: None` against a coded refusal, a 2xx problem document with a `not_run` code; `answer` total over drawn statuses, headers and bodies | rules 3 and 5, or 3 and 6, swapped; a wildcard `None`; the code read from any body; `>` for `≥`; the first of two header lines taken |
+| K2a-4 | K2a | a validator twin and a corpus mutant per new rule; the corpus with expectations that fit its actions, a resend floor, and every safety with `not_run` codes | each rule's condition weakened |
+| K2a-5 | K2a | the machine and `schedule.py`: a poll's Unknown on its grid, one poll out; resends at `max(after, floor)`, none within J of the deadline, scripts drawing `retry_after`, coverage counted (`resend_by_retry_after`, `resend_by_floor`, `resend_past_deadline`); the fold refusing an unlicensed resend; TLA+ `ResendPastDeadline` | a poll's Unknown ending it; a resend at `now`; the floor ignored; an Unknown `Never` step resent |
 | K2-1 | K2 | the shell against an in-memory transport (hyper over `tokio::io::duplex`) under paused time reproduces `sim`'s journal | `std::time::Instant` in a handler |
 | K2-2 | K2 | each cause delayed alone — the reader, the token, the pool, the connect, the write, the dependency — moves exactly one gap of the chain | a gap merged |
 | K2-3 | K2 | on the real clock, multi-thread: chain order, no release before its stamped met instants, the stub's requests per correlation id equal the journal's attempts — a keep-alive connection closed as it is reused included; a request processed then reset before the answer is Unknown; a response stamped 1 µs before its deadline delivered after the tick is Expected | hyper's hidden retry; Unknown read as not taken; deadlines by arrival |
@@ -653,6 +743,23 @@ answer, 115 by a refusal, none counted a root.
 - **Executors**: three mutants, each turning the oracle red with second roots — the refusal not handled by the stand,
   an unknown dependency not doubtful, a failure's dependents not inconclusive.
 
+**K2a-1 — an answer's JSON** (2026-11-22): `command-log::json`, the crate's own reader of what a stand answers
+(decision 15): strict RFC 8259 over UTF-8, unreadable on half of a surrogate pair, a member named twice, nesting past
+128 or an exponent past 18 digits; numbers kept as their text, equal by their decimal values; values member by member,
+objects in any order; RFC 6901 pointers, `-` an object's member and never an array's element. Its `Debug` shows a
+value's shape, never its content. It denies indexing, slicing, `unwrap`, `expect`, `panic` and `unreachable`, beside
+the crate's arithmetic gate.
+- **Executors**: a twin per rule; and `vectors/json.py` — Python's `json` with hooks refusing a member named twice and
+  `NaN`, its own depth, surrogate and exponent rules, `decimal` for numbers, its own RFC 6901 — on 6,000 documents
+  drawn by the test (numbers in tricky forms, escapes and surrogates, names repeated one object in eight, nesting
+  around 128, a third of them mutated by a byte), every pointer into each and beside it, and 6,000 pairs of values —
+  one value written two ways (numbers rewritten, letters escaped, members reordered) and values drawn apart: 11,499
+  cases agree, every rule reached (88 duplicates, 63 too deep, 454 surrogates, 176 exponents, 118 not UTF-8, 1,407
+  syntax; 2,524 pairs equal). Fourteen mutants, each killed: a member named twice read, the depth off by one, numbers
+  equal by text, `-0` signed, the exponent's digits by one, an index with a leading zero, a lone surrogate replaced,
+  objects compared in order, trailing bytes, a raw control character, `~0` and `~1` swapped, trailing zeros kept, a
+  leading zero, the exponent's sign dropped.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -686,6 +793,22 @@ only and measures move to the 12-core box.
   carries an expectation — then, under the gate, the validator requiring `Expected` of an expectation over a
   dependency's effect against the fold making a `Settled` dependent of any end but expected conditional (which hides
   a dependent's own failure, never flips a verdict), with a stand that models the report's content to execute it.
+- **Resends paced against the gateway's buckets** (K2a, Distributed Systems): a wave of Unknown `Idempotent` steps on
+  one edge bucket resends at one `now + floor`, past its burst, and the 429s void the run. Trigger: K4's shaping,
+  which every resend then goes through; until then a void, never a false pass.
+- **A stand refusing connections** (K2a, Verifiability): every call ends unsent and Unknown, which the fold classes
+  undecided — a void where the system failed. Trigger: K2-7, with the refused connects journaled, so that the fold
+  tells them from the harness's lateness.
+- **The host's `service.session_failed`** (the host's owner): tenancy, content and device answer it for a refused
+  COMMIT as well — `503`, and `500` without `Retry-After` for a scope that absorbed a failure — so it certifies
+  nothing there; the host's operations table must not list it in `not_run` until the code is split (no session
+  opened, commit in doubt, aborted).
+- **The host's frames against its routes** (the host's tool package): every operation's frame, built from example
+  values, matches its own `template_regex` and no other route.
+- **H-1's measurements, added by K2a**: whether the correlation header survives the gateway (`use_remote_address`, no
+  `preserve_external_request_id`) and lies outside the prefix it strips; whether Envoy rewrites a UUID-shaped
+  `x-request-id` under tracing; the largest answer of the plan's operations, for the cap; `Content-Type` parameters
+  on answers; Unknown attempts with no line in Envoy's access log, which must be none.
 - **A cell's residue** (K1e-2): an ended cell keeps its key's strings and its map node, some 0.6–0.9 kB; a compact
   ended cell and keys interned per barrier — trigger: capacity binding on a host plan.
 
@@ -733,3 +856,6 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-22: K1e-3d built (§ Measured): failures injected on the stand, a failure counted at its root only; the stand
   counts a refused request handled; a `Settled` dependent asserting a refused dependency's effect owed.
 - 2026-11-22: § Status names what is built: K0a and K1; K2 is next.
+- 2026-11-22: K2 cut into K2a (pure) and K2b (the shell); decision 15 decided under the gate (a solver and a
+  discriminator on Fable, three roles on Opus); decision 11's examples are the host's codes; K2a-1 built (§ Measured):
+  an answer's JSON, read by the crate's own reader.

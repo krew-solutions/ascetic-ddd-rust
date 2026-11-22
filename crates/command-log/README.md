@@ -96,3 +96,12 @@ keyed by digests, holds what a run would hold, and every hot part is held to
 `window::Window` is the rule by which a dependency names an earlier step,
 decided when its line is read: the validator checks a log by it, and the
 scheduler binds by it.
+
+## An answer's JSON
+
+`json::parse` is the crate's own reader of what a stand answers (ADR-0047
+decision 15): strict RFC 8259, a document unreadable on half of a surrogate
+pair, a member named twice, nesting past 128 or an exponent past 18 digits;
+numbers kept as their text and equal by their decimal values; RFC 6901
+pointers. serde_json is not used for answers: its number categories follow
+its build's features, and a host's workspace may turn them on for every crate.

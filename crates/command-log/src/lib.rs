@@ -11,6 +11,7 @@
 pub mod disk;
 pub mod engine;
 pub mod frame;
+pub mod json;
 pub mod live;
 pub mod log;
 pub mod plan;
