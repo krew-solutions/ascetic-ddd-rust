@@ -2,9 +2,9 @@
 
 ## Status
 
-Proposed (2026-11-21). Stage 3 of three toward the host's fitness functions (ADR-0045 § Status): the scheduler that
-runs a command log (ADR-0046) against a stand — what is pure and what is the shell, how steps are bound, released,
-sent, judged and recorded, what voids a run. Nothing is built yet.
+Proposed (2026-11-21); slices K0a and K1 (K1a to K1e) built (§ Measured), K2 next. Stage 3 of three toward the host's
+fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
+and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
 To be built in slices, each a commit of its own:
 - **K0a** (`crates/command-log`, FORMAT 3, `RULES_REVISION` 4): the command log's changes this decision needs
@@ -732,3 +732,4 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   amendment moved from K1e-3d into it.
 - 2026-11-22: K1e-3d built (§ Measured): failures injected on the stand, a failure counted at its root only; the stand
   counts a refused request handled; a `Settled` dependent asserting a refused dependency's effect owed.
+- 2026-11-22: § Status names what is built: K0a and K1; K2 is next.
