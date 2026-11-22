@@ -8,6 +8,7 @@
 #![deny(clippy::arithmetic_side_effects)]
 #![warn(missing_docs)]
 
+pub mod answer;
 pub mod disk;
 pub mod engine;
 pub mod fills;

@@ -10,6 +10,7 @@
 
 pub mod fits;
 pub mod journal;
+pub mod judge;
 pub mod machine;
 pub mod order;
 pub mod sim;

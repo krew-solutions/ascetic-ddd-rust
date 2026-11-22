@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a-1 and K2a-2 built (§ Measured), K2a-3 next. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e) and K2a-1 to K2a-3 built (§ Measured), K2a-4 next. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -783,6 +783,34 @@ waits for the slice that journals it.
   `Secret32` from the namespace, a derived `Debug`, the correlation id under the rendered key, the HMAC's pads swapped,
   the role left out of the secret.
 
+**K2a-3 — reading an answer, and the judge** (2026-11-22): `command-log::answer` reads what an answer says against
+a record — the problem's code (the profile's pointer, a status of 400 or more, one `Content-Type` whose essence is
+`application/problem+json` without case, an object body), predicates over the body (none holds past the cap or of a
+body not JSON), the values a step takes (only those every use can carry, as one JSON value's text; `Location` its
+last path segment, strictly decoded), `Retry-After` in delta-seconds; `scheduler::judge` is decision 15's list over
+it, with no JSON, returning the judgement beside its rule, the status, the code as the journal may carry it (a short
+dotted name, or `Other`), the wait and the slots missing. Both deny indexing, slicing, `unwrap`, `expect`, `panic`
+and `unreachable`.
+- **Executors**: `vectors/judge.py` — the rules in Python, JSON by `vectors/json.py` — judges the 54 cases of
+  `golden/answers.jsonl` into `golden/judgements.txt`, diffed in `make vectors`, and the crates give the same text:
+  statuses at each class's edges (199, 300, 399, 499, 500, 999), media types with parameters, in another case and
+  another type, two of them, a code not a string or in no object, a code past the journal's bound and one not a
+  dotted name, two `ETag` lines, a header not UTF-8, `Location` as a path, a URL with a query and a fragment, a
+  fragment alone, `%zz`, `%FF`, a dot segment; `Retry-After` in seconds, as a date, negative, huge, twice; an
+  `expect` listing a `not_run` code and one listing 503, `problem: None` against a coded refusal and against the
+  gateway's 404, a 2xx problem with a `not_run` code; predicates that hold and fail, over a body past the cap and one
+  not JSON, a captured value in one; polls that hold, not yet, 304, 404, 503, a certified 503, one without an
+  expectation; a sent-only step's 409, 504 and not-run code; a reset; no answer. The judge is total over 4,096 drawn
+  answers — statuses 100 to 999, header lines of every name the rules read, bodies of random bytes and of hostile
+  JSON (`1e400`, `-0`, nesting) — never failing on a record whose predicates the validator passes, every capture
+  taken or named missing; no `Debug` of a judgement shows a taken value. Twenty-one mutants, each killed: `not_run`
+  before `expect`, 5xx before `expect`, a wildcard `None`, 1xx certain, 500 certain, a poll's empty expectation
+  passed, a poll's 3xx passed, codes unbounded, no `Retry-After`, the code read from any body, the code from 401
+  up, the media type by case, the media type by prefix, the first of two lines taken, a `Location`'s fragment kept,
+  a bad escape kept, a dot segment carried, a number not taken, `Contains` as `Equals`, `Retry-After` none on
+  overflow, a body past the cap read — three alive until their cases were added (a poll without an expectation, a
+  poll's 304, a fragment without a query).
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -884,3 +912,4 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   an answer's JSON, read by the crate's own reader.
 - 2026-11-22: K2a-2 built (§ Measured): the fills and the request; `Secret32` from the run's secret (ADR-0046
   decision 3 amended); K2-5 gains the frame's byte identity across attempts, from K2a-2's row.
+- 2026-11-22: K2a-3 built (§ Measured): reading an answer, and the judge.

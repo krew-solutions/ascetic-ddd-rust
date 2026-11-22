@@ -25,6 +25,8 @@ serde = { workspace = true }
 [dev-dependencies]
 # The command log's test fixture and corpus, shared by path.
 ascetic-ddd-faker = { path = "../faker" }
+# The judge's golden answers carry their bytes in base64.
+base64 = "0.22"
 proptest = "1.11.0"
 serde_json = { workspace = true }
 sha2 = "0.10"
