@@ -122,6 +122,11 @@ impl Frontier {
         self.deadlines.first().map(|d| d.0)
     }
 
+    /// The stamp of the earliest input pushed and not yet released.
+    pub fn next_pushed(&self) -> Option<u64> {
+        self.pushed.first()
+    }
+
     /// The instant of the oldest answer being judged.
     pub fn floor(&self) -> Option<u64> {
         self.floors.first().map(|f| f.0)

@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a and K2b-0b built (§ Measured), K2b-1 next. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b and K2b-1 built (§ Measured), K2b-2 next. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -373,7 +373,10 @@ Distributed Systems, Verifiability, Performance — on Opus; it amends decision 
   it under one mutex, every stamp a clock read and a push under it; inputs are taken in (stamp, line, kind) order
   among those released, a stamp below the last taken a harness fault — an input caused at an instant may sort below one
   already taken there, as `sim` takes it (the frontier's property found the key-order rule the roles proposed wrong). The frontier decides a deadline; an attempt's timer only leaves the pool gap.
-  `sim` drives the same frontier.
+  `sim` drives the same frontier. While an answer is judged the machine takes nothing at or past its floor — neither
+  the frontier's inputs nor its own lines and wakes, which are stamped at the instant taken; they are taken once it
+  ends, late, the judging's lateness shown (K2b-1: taking them meanwhile put an input below the machine's clock, which
+  `Machine::step` absorbs silently; the loop refuses one, a harness fault).
 - **The machine re-checks a wake at the instant it is taken**: a resend leaves only if `now + J` is before the
   deadline, a poll only if `now` is; else the step ends as it stands, then — a real timer breaks A3 by its slack, and a
   resend taken late is otherwise one the fold refuses. The fold makes such an end undecided whatever the lateness (the
@@ -406,10 +409,12 @@ Distributed Systems, Verifiability, Performance — on Opus; it amends decision 
   `Egress`; ports and the descriptor limit against `kept`; the idle margin; the time of `answer::read` + `judge` on an
   object-dense document of the cap against J/4; `Stand::gates`. A plan refusal writes no journal; a gate refusal
   writes the header, one fault, the trailer.
-- **Clock**: `now` (µs), `wall`, `sleep_until`, `settled(at)`. Live: a timed wait on the machine thread woken by every
-  push (no spin: a spin takes a core for the run); `settled` returns once `now > at`. Virtual: an own µs counter and
-  sleepers, tokio's documented auto-advance as the idle signal — no scaling of µs to ms, no tokio pin; it panics idle
-  with nothing to wake. A lint refuses `std::time` and `tokio::time` outside `clock`. Every `select!` is `biased`.
+- **Clock**: `now` (µs), `wall`, `sleep_until`, `settled(at)`. Live: a timed wait — the clock's own timer thread,
+  parked to each sleeper's microsecond, wakes it; a push wakes the machine (no spin: a spin takes a core for the run;
+  tokio's timer rounds up to its millisecond); `settled` returns once `now > at`, spinning at most the timer's slack,
+  50 µs — in the loop, the microsecond it awaits. Virtual: an own µs counter and sleepers, tokio's documented
+  auto-advance as the idle signal — no scaling of µs to ms, no tokio pin; idle with nothing to wake, it panics in the
+  test's own future (`within`: a panic in a spawned task is tokio's to swallow). A lint refuses `std::time` and `tokio::time` outside `clock`. Every `select!` is `biased`.
 
 ## Consequences
 
@@ -497,6 +502,7 @@ Distributed Systems, Verifiability, Performance — on Opus; it amends decision 
 | K2a-5 | K2a | the machine and `schedule.py`: a poll's Unknown on its grid, one poll out; resends at `max(after, floor)`, none within J of the deadline, scripts drawing `retry_after`, coverage counted (`resend_by_retry_after`, `resend_by_floor`, `resend_past_deadline`); the fold refusing an unlicensed resend; TLA+ `ResendPastDeadline` | a poll's Unknown ending it; a resend at `now`; the floor ignored; an Unknown `Never` step resent |
 | K2b-0a | K2b | the frontier's properties under drawn interleavings with monotone clocks and ties — drains nondecreasing, no input released below a released bound, an arrival by its deadline keeping its judgement, an attempt with none censored once at its deadline before anything later, `Sent` only before the deadline, nothing at or past a live floor, nothing at T0 unsettled; twins: an answer at D, at D + 1 (the censor, then the late answer), a send at D, a deadline inside a released batch, an early local reply; `sim` through it with every digest unchanged | censor at `<`; `Sent` at `<=`; a floor ignored; `through = now` unsettled; an arrival past D uncensored; a double censor; an answer stamped at its end |
 | K2b-0b | K2b | `sim` with wakes taken late over the corpus, deadlines a few answers long: the fold never incoherent, the definition agreeing, both new rules reached; the machine's twin — a resend due at `D − J − 1` taken 1 or 2 µs late ends as it stood, a poll's next taken past the deadline ends unknown then; golden runs — a poll taken 1 µs past its deadline undecided, a resend due at `D − J − 1` taken 2 µs late undecided, one due at `D − J` never scheduled and a root; on the differential, with no wake late, neither rule fires | the wake's re-check removed, or without J; a late poll ended at its deadline; either rule dropped, at its edge, or with J; a late refusal a root; the definition's rules dropped |
+| K2b-1 | K2b | under the virtual clock and a scripted carrier, the shell journals what `sim` journals, line for line, on every clean corpus log under the differential's scripts at three read-aheads; a line after an idle gap read at `at − L`; an answer judged for 50 µs holding the machine's own work, the line due meanwhile read after it at the instant taken; judging drawn up to 400 µs on the corpus, no input taken below the last; the clock's probe — a 137 µs sleep woken at 137, an instant settled only after a chain of spawned yields, idle with nothing to wake said; a dropped and a panicking carrier faulted; a carrier refusing the log and a source with no runtime refused before T0; on the real clock across four threads, no push below the frontier, none taken out of order, no stall, every line ended, the fold coherent — and with every read on a carrier's thread slowed by 200 µs; the allowlist, the clock's confinement, every `select!` biased | the settle skipped; drained unsettled; the read-ahead ignored; own work not held by a floor, or lines or wakes alone; the bound at `now` while held; a stamp read outside the lock; a dropped attempt no fault; sleepers woken before settlers; settled at the instant; a real sleep woken early; a `select!` unbiased |
 | K2-1 | K2 | the shell against an in-memory transport (hyper over `tokio::io::duplex`) under paused time reproduces `sim`'s journal | `std::time::Instant` in a handler |
 | K2-2 | K2 | each cause delayed alone — the reader, the token, the pool, the connect, the write, the dependency — moves exactly one gap of the chain | a gap merged |
 | K2-3 | K2 | on the real clock, multi-thread: chain order, no release before its stamped met instants, the stub's requests per correlation id equal the journal's attempts — a keep-alive connection closed as it is reused included; a request processed then reset before the answer is Unknown; a response stamped 1 µs before its deadline delivered after the tick is Expected | hyper's hidden retry; Unknown read as not taken; deadlines by arrival |
@@ -1029,6 +1035,33 @@ takes a wake due at `w` at `w + lag(w)`.
   the poll's rule dropped, at the deadline, or past `D + J`; the resend's rule dropped, at `<=`, or without J; a late
   refusal a root; the definition's two rules dropped.
 
+**K2b-1 — the shell's loop** (2026-11-23): the `load-run` crate — its dependencies the command log, the scheduler and
+tokio, an allowlist; the clocks its lint refuses read by the `clock` module alone. `RealClock`: the monotonic clock
+from T0, its wall instant bracketed within J; its sleeps woken by a timer thread of its own, parked to each sleeper's
+microsecond. `VirtualClock` (feature `testing`): a counter of its own and its sleepers, moved only on tokio's paused
+auto-advance, which tokio takes only when its scheduler parks with no task ready — a yield or a maintenance poll parks
+with a zero limit and moves nothing (tokio 1.53.1, `runtime/time/mod.rs`). `stamps`: the frontier under one lock,
+every report of an attempt a clock read and a push under it; an attempt's handle a drop guard. `run`: `sim`'s loop
+with time read from the clock; the ports `LineSource`, `JournalSink`, `Carrier`, each with an in-task adapter and a
+thread adapter (the log through its commitment; the journal through its writer). `Frontier::next_pushed`, so that the
+loop waits rather than turns while an answer is judged.
+- **What it found**: the loop first took its own lines and wakes while an answer was judged; once released, the
+  answer's stamp lay below the machine's clock, and `Machine::step` absorbs that silently (`now.max(at)`). Only
+  judging that takes time shows it, which neither `sim` nor the first carrier had: the twin and the corpus run with
+  judging drawn reveal it, and the loop now refuses an input below the machine's clock, a harness fault. A stamp read
+  outside the frontier's lock survived the stress until every read on a carrier's thread was slowed by 200 µs: read
+  under the lock that only slows the run, read before it a stamp goes stale. A mutant made the loop sleep to an instant
+  passed, and the run hung rather than failed: such a sleep is a stall now.
+- **Executors**: 3,732 runs, 137,157 journal lines equal to `sim`'s; the twins and the probe of the executor row; on
+  the real clock, eight seeds of 400 calls over four runtime threads and three of 200 with the slowed reads, each
+  coherent to the fold. Thirteen mutants: eleven killed — the settle skipped, drained unsettled, the read-ahead
+  ignored, own work not held by a floor, the bound at `now` while held, a stamp read outside the lock, a dropped
+  attempt no fault, sleepers woken before settlers, settled at the instant, a real sleep woken early, a `select!`
+  unbiased; two survive, equivalent under the virtual clock — lines alone, or wakes alone, not held by a floor: there
+  the machine is never late, so no floor stands below work due; live, a busy machine would stamp its late work at the
+  floor less one, understating its lateness without breaking the order. Their executor is a lateness drill on the real
+  clock, K2b-6's (§ Owed).
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -1088,6 +1121,16 @@ only and measures move to the 12-core box.
   and the fold, reading journal version 3, counts a root where the harness ate the last poll. Executor: K2b-3's journal
   version 4 carries a wake's due instant, and the fold's rule reads it — a golden run of a wake due at `D − 1` taken at
   `D` undecided.
+- **The shell's faults in its journal** (K2b-1): a harness fault — a push below the frontier, an input taken below
+  the last, an attempt dropped unended, a stall, a poisoned lock — ends the run with an error and its journal without a
+  trailer, which reads as truncated and void; a fault's line and the trailer, its class in the journal's vocabulary,
+  are K2b-7's. A journal writer that fails is heard at the finish, not at its line.
+- **A hold that never ends** (K2b-1): the machine waits for an answer being judged however long, and a carrier stuck
+  in its judging holds the run; a hold is a fault at the stuck scale, the route timeout — K2b-3, with the hold's age.
+- **The live composition** (K2b-1): `Runtimes` takes a handle per source; the threads that run them, a lag sampler
+  each, and the machine's own runtime are K2b-6's, with the real clock measured against a spin — and a lateness drill:
+  the machine kept busy by a burst while answers are judged, its own late work stamped at the instant taken, never at
+  a floor less one (the two mutants K2b-1 leaves alive).
 - **A cell's residue** (K1e-2): an ended cell keeps its key's strings and its map node, some 0.6–0.9 kB; a compact
   ended cell and keys interned per barrier — trigger: capacity binding on a host plan.
 
@@ -1156,3 +1199,7 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   fold makes undecided what a late wake ended, `FOLD_REVISION` 3. Decision 16's rule corrected: undecided whatever the
   lateness, not past J — its executor's own case, a resend taken 2 µs late, contradicted it. A poll's wake taken
   exactly at its deadline owed to journal version 4.
+- 2026-11-23: K2b-1 built (§ Measured): the `load-run` crate — the clock, the frontier's lock, the machine's loop,
+  the ports. Decision 16 refined: the floor of an answer being judged holds the machine's own work too, an input below
+  the machine's clock a harness fault; the live clock's timed wait is its own timer thread's; the virtual clock's
+  idle panic is raised in the test's future.

@@ -162,6 +162,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ascetic-ddd-load-run"
+version = "0.1.0"
+dependencies = [
+ "ascetic-ddd-command-log",
+ "ascetic-ddd-faker",
+ "ascetic-ddd-load-run",
+ "ascetic-ddd-scheduler",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "ascetic-ddd-migration"
 version = "0.1.0"
 dependencies = [
