@@ -447,22 +447,22 @@ group_bridge() {
 
 group_scheduler() {
   echo "== scheduler: the window and a captured value, as decided, every property holds"
-  must_hold SchedulerWindow MCScheduler.tla 556782
+  must_hold SchedulerWindow MCScheduler.tla 556786
 
   echo "== scheduler: a barrier and provenance, as decided, every property holds"
   must_hold SchedulerBarrier MCScheduler.tla 105278
 
   echo "== scheduler: dependencies bound at release, TLC must find one the window let go bound to nothing"
-  must_fail_with_twin SchedulerBindAtRelease MCScheduler.tla "Invariant BoundAsChecked is violated" 556782
+  must_fail_with_twin SchedulerBindAtRelease MCScheduler.tla "Invariant BoundAsChecked is violated" 556786
 
   echo "== scheduler: the window evicted by the clock, TLC must find a late reader's dependency bound to nothing"
-  must_fail_with_twin SchedulerEvictByClock MCScheduler.tla "Invariant BoundAsChecked is violated" 1665389
+  must_fail_with_twin SchedulerEvictByClock MCScheduler.tla "Invariant BoundAsChecked is violated" 1665393
 
   echo "== scheduler: a cell freed as the window lets it go, TLC must find a waiting reader reading it"
-  must_fail_with_twin SchedulerFreeOnEvict MCScheduler.tla "Invariant NoUseAfterFree is violated" 556782
+  must_fail_with_twin SchedulerFreeOnEvict MCScheduler.tla "Invariant NoUseAfterFree is violated" 556786
 
   echo "== scheduler: released at ready + think, TLC must find a step released before its plan"
-  must_fail_with_twin SchedulerReadyWithoutAt MCScheduler.tla "Invariant ReleaseSafe is violated" 556782
+  must_fail_with_twin SchedulerReadyWithoutAt MCScheduler.tla "Invariant ReleaseSafe is violated" 556786
 
   echo "== scheduler: a barrier counting its members, TLC must find its holder released before a member"
   must_fail_with_twin SchedulerCounterBarrier MCScheduler.tla "Invariant BarrierSafe is violated" 105278
@@ -484,6 +484,21 @@ group_scheduler() {
 
   echo "== scheduler: a holder walking its members' cells, as the machine did before K1e, TLC must find a freed member read"
   must_fail_with_twin SchedulerWalkMembers MCScheduler.tla "Invariant NoUseAfterFree is violated" 105278
+
+  echo "== scheduler: the plan's own bound, its tables the validator's, every property holds"
+  must_hold SchedulerBound MCScheduler.tla 468858
+
+  echo "== scheduler: the bound by rate alone, TLC must find more held than it counts"
+  must_fail_with_twin SchedulerPendingByRate MCScheduler.tla "Invariant HeldWithinBound is violated" 468858
+
+  echo "== scheduler: the bound without its pins, TLC must find a producer held past it"
+  must_fail_with_twin SchedulerBoundWithoutPins MCScheduler.tla "Invariant HeldWithinBound is violated" 468858
+
+  echo "== scheduler: the bound without its key's prefix, TLC must find a member held past it"
+  must_fail_with_twin SchedulerBoundWithoutPrefix MCScheduler.tla "Invariant HeldWithinBound is violated" 468858
+
+  echo "== scheduler: the bound without the read-ahead, TLC must find lines read early held past it"
+  must_fail_with_twin SchedulerBoundWithoutReadAhead MCScheduler.tla "Invariant HeldWithinBound is violated" 468858
 }
 
 group_traces() {

@@ -277,7 +277,7 @@ budget lies inside its interval.
 | K1-1 | K1 | bindings and releases invariant across L ∈ {0, a chunk well below the log, ∞} on the corpus × latency scripts — the executor of decision 2; bindings equal the reference's bound lines | binding at release; the window evicted by the clock |
 | K1-2 | K1 | `vectors/schedule.py`, a scheduler by definition (no window, cells or prefixes; captures through a versioned per-slot map; barriers as the set of earlier members; met instants from the event history), compared per line; the comparison may differ only on declared stale reads | a per-key barrier counter; the value from the slot's latest; release without `max`; the deadline from the step's own start |
 | K1-3 | K1 | the stateful server model: every clean log ends all Expected under every failure-free latency script, the order of processing chosen by the script | writers awaiting readers `Sent` (a 412 under reordering); a wrong cell spliced into a request (the attempt's sent-bytes digest) |
-| K1-4 | K1 | `verify/tla/Scheduler.tla`: `ReleaseSafe`, every read line ends, `NoUseAfterFree`, `BarrierSafe`, `BoundAsChecked`, `ConditionalExact`, no response stamped by its deadline censored; mutant configs `BindAtRelease`, `FreeOnEvict`, `CounterBarrier`, `ReadyWithoutAt`, `NoProvenance`, `ProvenanceOneLevel`, `DeadlineByArrival`, `NoSkipPropagation` (and `PendingByRate` in K1e, beside the plan's bound), each with a pinned twin and state count (`must_fail_with_twin`), on an instance of at least four lines with W below L or a latency above W | each config's own |
+| K1-4 | K1 | `verify/tla/Scheduler.tla`: `ReleaseSafe`, every read line ends, `NoUseAfterFree`, `BarrierSafe`, `BoundAsChecked`, `ConditionalExact`, no response stamped by its deadline censored; mutant configs `BindAtRelease`, `FreeOnEvict`, `CounterBarrier`, `ReadyWithoutAt`, `NoProvenance`, `ProvenanceOneLevel`, `DeadlineByArrival`, `NoSkipPropagation` (and `PendingByRate`, built in K1e-2c beside the plan's bound), each with a pinned twin and state count (`must_fail_with_twin`), on an instance of at least four lines with W below L or a latency above W | each config's own |
 | K1-5 | K1 | sim journals checked against `Scheduler.tla` (the `trace2tla.py` pattern) | the machine diverging from the model |
 | K1-6 | K1 | corpus coverage counted and failing on zero: lines where the two bindings differ, cells taken after their producer's eviction, barrier members finishing before earlier ones, conditional dependents, responses after their deadline, same-instant inputs, `think > 0` | — |
 | K1-7 | K1 | the journal invariant under any permutation of same-instant inputs | ties broken by arrival |
@@ -489,6 +489,23 @@ pending · (LIVE_CELL − ENDED_CELL + line) + barriers · BARRIER` — or a rea
   alone, red: the bound by rate alone (the chain ignored); the window counted twice; the machine freeing no prefix;
   pins kept past the decision; a holder of an empty key making a barrier; `fits` without the pending.
 
+**K1e-2c — the bound in the model** (2026-11-22): `Scheduler.tla` follows the machine's pins — a reader takes its
+value and lets go of its producer when its release is decided, a value missing then skipping it at its dispatch — and
+computes the plan's own bound from its constants as the validator does: `EndsWithinBound` (no release or end past
+it), `HeldWithinBound` and `PendingWithinBound` (with nothing due, no more held, nor read and not ended, than the bound
+counts at the latest read), in every configuration with `Lag = 0` (the late reader's breaks A2 by design). A third
+instance, `Bnd`, six lines with `W = 1` and `L = 1`, is the bound's own: at one read a producer is held only by its
+pin and a member only by its key, two lines only by the read-ahead, and at another the bound holds three of six; its
+tables are pinned (`BndTables`) and `tests/bound.rs` builds the same plan as a log and asserts the validator's
+per-line bound has the same numbers. Found while tuning it: since the machine lets go of a pin at the decision, the
+bound's pin term, the reader's latest release, is an upper bound of that instant, loose by the reader's think and
+plan; kept, not narrowed, its meaning unchanged.
+- **Executors** (`check.sh scheduler`): `Bnd` holds everything, 468,858 distinct states (answers cut to expected);
+  the bound by rate alone (`PendingByRate`), without its pins, without its key's prefix, without the read-ahead, each
+  breaks `HeldWithinBound` beside its twin; the earlier instances re-pinned (the window's 556,786, its late reader's
+  1,665,393, the barrier's 105,278), every earlier mutant breaking what it broke; the four traces fit and the two
+  forged ones do not.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -549,3 +566,4 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-22: K1e-2 decided under the gate (solver, discriminator, three roles); decision 7 gains the bound as built;
   decision 13's peak rate deferred to M11; K1e-2a built (§ Measured).
 - 2026-11-22: K1e-2b built (§ Measured): the machine on the shared rules, `fits`, the bound's executors in `sim`.
+- 2026-11-22: K1e-2c built (§ Measured): the bound in the model, its own instance tied to the validator, `PendingByRate`.

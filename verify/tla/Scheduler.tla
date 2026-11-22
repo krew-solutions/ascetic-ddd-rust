@@ -27,7 +27,7 @@
 (* an unknown one only if it is idempotent.                                *)
 (*                                                                         *)
 (* A cell is freed once its step ended, the window let it go, no reader   *)
-(* of its captured value is still to be dispatched and every prefix of    *)
+(* of its captured value is still to be decided and every prefix of       *)
 (* its barrier key passed it.  Nothing else reads an ended step's cell:   *)
 (* a dependent folds a met instant in when it is told, a barrier holder   *)
 (* reads its key's prefix and latest instant, and the prefix of members   *)
@@ -52,6 +52,10 @@
 (*                       member that failed it                             *)
 (*   WalkMembers         a holder takes its members' instants from their    *)
 (*                       cells                                             *)
+(*   PendingByRate       the plan's bound by rate alone: a step ends its   *)
+(*                       timeout after its plan, whatever it awaits         *)
+(*   BoundWithoutPins, BoundWithoutPrefix, BoundWithoutReadAhead            *)
+(*                       the bound with one of its terms left out           *)
 (* Every one is "none" in the decided design.                             *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
@@ -322,18 +326,22 @@ Decide(l) ==
                        ELSE rdy[l]
              IN Release(l, r0)
           /\ bnd' = IF Mutant = "BindAtRelease" THEN [bnd EXCEPT ![l] = LateBound(l)] ELSE bnd
-          /\ UNCHANGED <<now, next, kept, read, wait, rdy, skp, dl, att, disp, snt, out, left, end, ended,
-                         cap, pre, lat, fail, freed, err, uaf, heard>>
+          \* Its release decided, it takes the value it sends from its producer's
+          \* cell and lets go of it: missing, it is skipped for it when dispatched.
+          /\ LET p == Producer[l] IN
+             /\ skp' = [skp EXCEPT ![l] = IF p # 0 /\ (freed[p] \/ ~cap[p]) THEN <<"missing_capture", p>> ELSE <<>>]
+             /\ uaf' = (uaf \/ (p # 0 /\ freed[p]))
+          /\ UNCHANGED <<now, next, kept, read, wait, rdy, dl, att, disp, snt, out, left, end, ended,
+                         cap, pre, lat, fail, freed, err, heard>>
 
 CanDispatch(l) == ~err /\ ph[l] = "due" /\ rel[l] = now
 
-\* The values its captured holes take come from its producer's cell.
+\* The value its captured hole takes was taken when its release was decided.
 Dispatch(l) ==
   /\ CanDispatch(l)
-  /\ LET p == Producer[l]
-         d == rel[l] + Timeout[l]
-     IN IF p # 0 /\ (freed[p] \/ ~cap[p])
-        THEN /\ Finish(l, "skipped", <<"missing_capture", p>>, freed[p])
+  /\ LET d == rel[l] + Timeout[l]
+     IN IF skp[l] # <<>>
+        THEN /\ Finish(l, "skipped", skp[l], FALSE)
              /\ UNCHANGED <<now, next, kept, read, bnd, int, rel, dl, att, disp, out, left, cap, freed, err, heard>>
         ELSE /\ dl' = [dl EXCEPT ![l] = d]
              /\ att' = [att EXCEPT ![l] = 1]
@@ -353,8 +361,8 @@ Timer(l) ==
   /\ Finish(l, "unknown", <<>>, FALSE)
   /\ UNCHANGED <<now, next, kept, read, bnd, int, rel, dl, att, disp, out, left, cap, freed, err, heard>>
 
-\* Readers of a captured value still to be dispatched.
-NoReader(l) == \A r \in Lines : Producer[r] = l /\ r < next => ph[r] \in {"flight", "done"}
+\* Readers of a captured value whose release is still to be decided.
+NoReader(l) == \A r \in Lines : Producer[r] = l /\ r < next => ph[r] # "waiting"
 \* Every prefix of its key passed it, or, for expected, stopped at or
 \* before it for good.
 Passed(l) == \A s \in Strengths :
@@ -582,4 +590,46 @@ Folded == IF Mutant = "NoProvenance" THEN {} ELSE FoldTo(N)
 ProvenanceExact == Folded = {l \in Lines : read[l] # None /\ Conditional(l)}
 
 ConditionalExact == Over => ProvenanceExact
+
+(* ------------------------------------------------------------------------ *)
+(* The plan's own bound (ADR-0047 decision 7, K1e-2), from the constants    *)
+(* alone, as the validator computes it: every action ending at its          *)
+(* deadline, every line read at its instant less L at the earliest.  The    *)
+(* refuted PendingByRate ends a step its timeout after its plan, whatever   *)
+(* it awaits.                                                               *)
+
+RECURSIVE BoundOf(_)
+\* <<latest release, latest end>> of line l.
+BoundOf(l) ==
+  LET deps == {After[l][i].dep : i \in {x \in Entries(l) : IsStep(l, x)}}
+      members == UNION {Awaited(l, i) : i \in {x \in Entries(l) : ~IsStep(l, x)}}
+      ready == Max({0} \cup {BoundOf(d)[2] : d \in deps} \cup {BoundOf(m)[2] : m \in members})
+      r == Max({At[l], ready + Think[l]})
+  IN <<r, IF Mutant = "PendingByRate" THEN At[l] + Timeout[l] ELSE r + Timeout[l]>>
+
+RelB == [l \in Lines |-> BoundOf(l)[1]]
+EndB == [l \in Lines |-> BoundOf(l)[2]]
+\* The latest instant a machine may hold a step: its end, its key's latest
+\* end up to it, the release of a reader of its value.
+HoldB == [l \in Lines |->
+            Max({EndB[l]}
+                \cup (IF Mutant = "BoundWithoutPrefix" THEN {}
+                     ELSE {EndB[m] : m \in {x \in Lines : x <= l /\ Key[x] = Key[l]}})
+                \cup (IF Mutant = "BoundWithoutPins" THEN {}
+                     ELSE {RelB[r] : r \in {x \in Lines : Producer[x] = l}}))]
+Tau(j) == IF Mutant = "BoundWithoutReadAhead" THEN At[j] ELSE Max({At[j] - L, 0})
+\* At the read of line j: the steps held — the window's, and those it let go
+\* whose hold has not ended — and those not ended.
+HeldAt == [j \in Lines |-> Cardinality({k \in 1..j : Retained[k] \/ At[j] - At[k] <= W \/ HoldB[k] >= Tau(j)})]
+PendingAt == [j \in Lines |-> Cardinality({k \in 1..j : EndB[k] >= Tau(j)})]
+
+\* No step released or ended past the bound.
+EndsWithinBound ==
+  \A l \in Lines : (rel[l] # None => rel[l] <= RelB[l]) /\ (end[l] # "none" => ended[l] <= EndB[l])
+
+\* No more held, nor not ended, than the bound at the latest read, nothing due.
+HeldWithinBound ==
+  (~Busy /\ next > 1) => Cardinality({l \in Lines : read[l] # None /\ ~freed[l]}) <= HeldAt[next - 1]
+PendingWithinBound ==
+  (~Busy /\ next > 1) => Cardinality({l \in Lines : read[l] # None /\ end[l] = "none"}) <= PendingAt[next - 1]
 =============================================================================

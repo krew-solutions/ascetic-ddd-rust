@@ -62,4 +62,43 @@ BarTimeout == <<3, 1, 1, 1>>
 BarSafety == <<"never", "idempotent", "never", "not_taken">>
 BarRetained == <<FALSE, FALSE, FALSE, FALSE>>
 BarTimes == 0..6
+
+(* ------------------------------------------------------------------------ *)
+(* The plan's own bound (ADR-0047 K1e-2): an instance whose bound turns on   *)
+(* each of its terms, W = 1, L = 1                                           *)
+(*   1  at 0, key a, timeout 3                                               *)
+(*   2  at 0, captures a value                                               *)
+(*   3  at 1, key a: held by 1's end, its key's, past its own                *)
+(*   4  at 1, awaits 2 expected and 1 settled, and sends 2's value: it pins  *)
+(*      2 until its release is decided, as late as 1's end                   *)
+(*   5  at 4, 6 at 5: the cursor moves on                                    *)
+(* At the read of 5, 2 is held only by its pin and 3 only by its key; at    *)
+(* the read of 6 the bound holds 3 of the 6 lines read.  The same plan as a *)
+(* command log (`crates/scheduler/tests/bound.rs`) gives the validator's     *)
+(* bound these numbers too.                                                 *)
+
+BndN == 6
+BndAt == <<0, 0, 1, 1, 4, 5>>
+BndThink == <<0, 0, 0, 0, 0, 0>>
+BndAfter == << <<>>, <<>>, <<>>,
+               << [k |-> "step", dep |-> 2, on |-> "expected"], [k |-> "step", dep |-> 1, on |-> "settled"] >>,
+               <<>>, <<>> >>
+BndKey == <<"a", "p", "a", "r", "x", "y">>
+BndProducer == <<0, 0, 0, 2, 0, 0>>
+BndCaptures == <<FALSE, TRUE, FALSE, FALSE, FALSE, FALSE>>
+BndTimeout == <<3, 1, 1, 1, 1, 1>>
+BndSafety == <<"never", "never", "never", "never", "never", "never">>
+BndRetained == <<FALSE, FALSE, FALSE, FALSE, FALSE, FALSE>>
+BndTimes == 0..6
+BndJudgements == {"expected"}
+
+\* The bound's tables on it, as the validator computes them, and a read at
+\* which it holds fewer than the lines read.
+BndTables ==
+  /\ RelB = <<0, 0, 1, 3, 4, 5>>
+  /\ EndB = <<3, 1, 2, 4, 5, 6>>
+  /\ HoldB = <<3, 3, 3, 4, 5, 6>>
+  /\ HeldAt = <<1, 2, 3, 4, 5, 3>>
+  /\ PendingAt = <<1, 2, 3, 4, 3, 3>>
+  /\ \E j \in 1..BndN : HeldAt[j] < j
 =============================================================================

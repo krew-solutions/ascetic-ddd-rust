@@ -289,3 +289,91 @@ fn a_reader_lets_go_of_its_producer_when_its_release_is_decided() {
     assert!(ran.entries.iter().all(|e| e.end == End::Expected));
     assert_eq!(ran.held, 2, "the producer held past its reader's decision");
 }
+
+/// The TLA+ model's bound instance (`verify/tla/MCScheduler.tla`, `Bnd`) as a
+/// command log: the validator's bound has the numbers the model pins in
+/// `BndTables` — so the model's tables are the validator's, not a copy of a
+/// sentence.
+#[test]
+fn the_model_s_bound_instance_has_the_validator_s_numbers() {
+    use ascetic_ddd_command_log::record::{Action, Call, Safety, Value};
+    let mut h = Header {
+        window: 1,
+        read_ahead: 1,
+        ..header()
+    };
+    for o in &mut h.operations {
+        o.timeout = 1;
+    }
+    h.calls = vec![
+        Call {
+            name: "t3".into(),
+            timeout: 3,
+            safety: Safety::Never,
+        },
+        Call {
+            name: "t1".into(),
+            timeout: 1,
+            safety: Safety::Never,
+        },
+    ];
+    let call = |r: Record, op: &str| {
+        let mut r = r;
+        if let Action::Host(c) = &mut r.action {
+            c.op = op.into();
+        }
+        r
+    };
+    let w = captures_etag(
+        Record {
+            action: rest("update", vec![Value::Literal("1".into())]),
+            ..step(id("group", 1, "update", 0), 0)
+        },
+        1,
+    );
+    let first = call(step(id("device", 0, "a", 0), 0), "t3");
+    // The reader also awaits the long first line: its release decided as late
+    // as 1's end, it pins 2 until then.
+    let reader = after(
+        after(
+            Record {
+                action: read_etag("read", 1, &w.step),
+                ..step(id("group", 1, "read", 0), 1)
+            },
+            &w.step,
+            On::Expected,
+        ),
+        &first.step,
+        On::Settled,
+    );
+    let records = vec![
+        first,
+        w,
+        call(step(id("device", 1, "a", 0), 1), "t1"),
+        reader,
+        call(step(id("device", 5, "x", 0), 4), "t1"),
+        call(step(id("device", 6, "y", 0), 5), "t1"),
+    ];
+    let (report, bounds) = run_bounded(h, &records, &NoHost, 1_000);
+    assert!(report.violations.is_empty(), "{:?}", report.violations);
+    // [line, R̂, Ê, held, pending], the header being line 1.
+    assert_eq!(
+        bounds,
+        vec![
+            [2, 0, 3, 1, 1],
+            [3, 0, 1, 2, 2],
+            [4, 1, 2, 3, 3],
+            [5, 3, 4, 4, 4],
+            [6, 4, 5, 5, 3],
+            [7, 5, 6, 3, 3],
+        ]
+    );
+    assert_eq!(
+        (
+            report.peaks.held,
+            report.peaks.pending,
+            report.peaks.horizon
+        ),
+        (5, 4, 6)
+    );
+}

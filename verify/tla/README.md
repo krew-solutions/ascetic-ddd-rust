@@ -739,7 +739,8 @@ before the next, as it does, and time moves only when nothing is due.
 It also states the rule the machine's heap follows (ADR-0047 K1e; the
 machine of K1a kept every cell): a cell is
 freed once its step ended, the window let it go, no reader of its captured
-value is still to be dispatched, and every prefix of its barrier key passed
+value is still to be decided — a reader takes the value and lets go of it
+when its release is decided — and every prefix of its barrier key passed
 it. Freeing is taken as early as it may be, the worst case for a read of a
 freed cell. Building the model found what that rule needs of the machine: a
 prefix of members expected stops for good at a member that failed it and is
@@ -763,6 +764,8 @@ ahead, let the first member go).
 | `NoCensored` | invariant | an answer stamped by its deadline decides its attempt |
 | `EveryReadLineEnds` | invariant | at the last instant, with nothing due, every line read has ended |
 | `ConditionalExact` | invariant | then the verdict's fold, in line order by the lines each step bound, marks conditional exactly the steps the definition does: those awaiting sent or settled a step that ended unknown or skipped, transitively |
+| `EndsWithinBound` | invariant | no step released or ended past the plan's own bound — the latest release and end the deadlines allow, from the constants as the validator computes them (ADR-0047 K1e-2) |
+| `HeldWithinBound`, `PendingWithinBound` | invariants | nothing due, no more steps held, nor read and not ended, than the bound counts at the latest read |
 
 Each refuted design of ADR-0047 § Alternatives Considered is a configuration
 that must break its property, beside a twin — the same configuration with
@@ -782,14 +785,27 @@ pinned (`must_fail_with_twin`):
 | `SchedulerDeadlineByArrival.cfg` | the machine's own timer ending a step at its deadline | an answer stamped at the deadline censored (`NoCensored`) |
 | `SchedulerResweepFailed.cfg` | a prefix of members expected swept again from the member that failed it, as the machine did before K1e | the failed member's freed cell read by the next member's sweep (`NoUseAfterFree`) |
 | `SchedulerWalkMembers.cfg` | a holder taking its members' instants from their cells, as the machine did before K1e | a failed member's freed cell read when the holder fires (`NoUseAfterFree`) |
+| `SchedulerPendingByRate.cfg` | the bound by rate alone: a step's end its timeout after its plan | more held than it counts (`HeldWithinBound`) |
+| `SchedulerBoundWithoutPins.cfg` | the bound without its pins | a producer held while its reader is undecided (`HeldWithinBound`) |
+| `SchedulerBoundWithoutPrefix.cfg` | the bound without its key's prefix | a member held while an earlier one of its key runs (`HeldWithinBound`) |
+| `SchedulerBoundWithoutReadAhead.cfg` | the bound counting from the cursor, not from L before it | lines read early held past it (`HeldWithinBound`) |
 
-The window's instance explores 556,782 distinct states in about a minute,
-with the late reader 1,665,389 in four; the barrier's 105,278 in seconds. The
+The window's instance explores 556,786 distinct states in about a minute,
+with the late reader 1,665,393 in four; the barrier's 105,278 in seconds. The
 handlers' answers and the timeouts are cut to what each instance's properties
 need: with every answer and longer timeouts each passed two million distinct
 states in five minutes, its queue still growing, and was stopped.
-The plan's own bound and its mutation `PendingByRate` are K1e's, beside the
-bound they check.
+
+A third instance, `Bnd` — six lines, `W = 1`, `L = 1` — is the bound's own: at
+one read a producer is held only by its reader's pin and a member only by its
+key's earlier member, two lines only by the read-ahead, and at another the
+bound holds three of the six lines read. `BndTables` pins its tables, and
+`crates/scheduler/tests/bound.rs` builds the same plan as a command log and
+asserts the validator's bound has the same numbers: the model's tables are the
+validator's. It explores 468,858 distinct states in about a minute, answers
+cut to expected (a step's worst end is its deadline whatever it answers). The
+bound's invariants are in every configuration with `Lag = 0`, not in the late
+reader's: the bound assumes every line read by its plan.
 
 ## Trace validation — `TraceOutbox.tla`, `TraceInbox.tla`, `TraceBridge.tla`, `TraceScheduler.tla`
 
