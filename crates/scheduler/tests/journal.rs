@@ -11,9 +11,9 @@ mod fixture;
 use std::collections::BTreeSet;
 use std::io::Cursor;
 
-use ascetic_ddd_command_log::record::On;
+use ascetic_ddd_command_log::record::{On, Safety};
 use ascetic_ddd_scheduler::journal::{
-    self, Action, Critical, Dep, End, FaultClass, Header, Ignored, JOURNAL, JOURNAL_VERSION,
+    self, Action, Code, Critical, Dep, End, FaultClass, Header, Ignored, JOURNAL, JOURNAL_VERSION,
     JournalError, Judged, Line, Reader, Skip, Writer, sample,
 };
 use sha2::{Digest, Sha256};
@@ -137,6 +137,23 @@ fn action_kind(a: Action) -> usize {
         Action::Bus => 1,
         Action::Observe => 2,
         Action::Host => 3,
+        Action::Poll => 4,
+    }
+}
+
+fn safety_kind(s: Safety) -> usize {
+    match s {
+        Safety::Never => 0,
+        Safety::NotTaken => 1,
+        Safety::Idempotent => 2,
+    }
+}
+
+fn code_kind(c: &Option<Code>) -> usize {
+    match c {
+        None => 0,
+        Some(Code::Named(_)) => 1,
+        Some(Code::Other) => 2,
     }
 }
 
@@ -151,7 +168,7 @@ fn fault_kind(f: FaultClass) -> usize {
 #[test]
 fn the_golden_holds_every_variant() {
     let (_, lines) = read_all(GOLDEN).unwrap();
-    let mut seen: [BTreeSet<usize>; 10] = Default::default();
+    let mut seen: [BTreeSet<usize>; 12] = Default::default();
     // The header and the trailer are lines of every journal.
     seen[0].extend([0, 8]);
     let mut options = BTreeSet::new();
@@ -160,6 +177,7 @@ fn the_golden_holds_every_variant() {
         match l {
             Line::Read(r) => {
                 seen[8].insert(action_kind(r.action));
+                seen[9].insert(safety_kind(r.safety));
                 options.insert(("cause", r.cause.is_some()));
                 for d in &r.after {
                     seen[1].insert(dep_kind(d));
@@ -171,6 +189,9 @@ fn the_golden_holds_every_variant() {
                 seen[3].insert(judged_kind(a.judged));
                 seen[4].insert(ignored_kind(a.ignored));
                 options.insert(("captured", !a.captured.is_empty()));
+                seen[10].insert(code_kind(&a.code));
+                options.insert(("status", a.status.is_some()));
+                options.insert(("after", a.after.is_some()));
             }
             Line::End(e) => {
                 seen[5].insert(end_kind(e.end));
@@ -187,11 +208,20 @@ fn the_golden_holds_every_variant() {
             Line::Trailer(_) => unreachable!("the reader hands no trailer out"),
         }
     }
-    let counts = [9, 2, 3, 4, 4, 6, 3, 1, 4];
+    let counts = [9, 2, 3, 4, 4, 6, 3, 1, 5, 3, 3];
     for (i, n) in counts.iter().enumerate() {
         assert_eq!(seen[i], (0..*n).collect(), "enum {i}");
     }
-    for name in ["captured", "dispatched", "sent", "bound", "fault", "cause"] {
+    for name in [
+        "captured",
+        "dispatched",
+        "sent",
+        "bound",
+        "fault",
+        "cause",
+        "status",
+        "after",
+    ] {
         assert!(
             options.contains(&(name, true)) && options.contains(&(name, false)),
             "{name}"
@@ -207,6 +237,8 @@ fn the_golden_holds_every_variant() {
         "read_ahead",
         "sent",
         "cause",
+        "after",
+        "namespace",
     ] {
         assert!(
             text.contains(&format!(r#""{field}":"18446744073709551615""#)),
@@ -508,4 +540,58 @@ fn regenerate() {
     )
     .unwrap();
     eprintln!("JOURNAL = {}", hex(&Sha256::digest(&bytes)));
+}
+
+/// Decision 15: what came back beside an answer's judgement is journaled as the
+/// machine took it — the status, the code as the journal may carry it, the wait.
+#[test]
+fn an_answer_journals_what_came_back() {
+    use std::sync::Arc;
+
+    use ascetic_ddd_scheduler::machine::{Code as Taken, Input, Judgement, Machine, Seen};
+    let fresh = || {
+        let r = Arc::new(fixture::call("read", 1, 0, 0, 0));
+        let mut m = Machine::new(Arc::new(fixture::header()), fixture::W).unwrap();
+        m.step(0, Input::Line { line: 2, record: r }).unwrap();
+        m
+    };
+    for (seen, journaled) in [
+        (
+            Seen {
+                status: Some(503),
+                code: Some(Taken::Named("service.unavailable".into())),
+                after: Some(5_000_000),
+            },
+            (
+                Some(503),
+                Some(Code::Named("service.unavailable".into())),
+                Some(5_000_000),
+            ),
+        ),
+        (
+            Seen {
+                status: Some(400),
+                code: Some(Taken::Other),
+                after: None,
+            },
+            (Some(400), Some(Code::Other), None),
+        ),
+        (Seen::default(), (None, None, None)),
+    ] {
+        let input = Input::Ended {
+            line: 2,
+            attempt: 1,
+            judgement: Judgement::Unexpected,
+            seen,
+        };
+        let out = fresh().step(5, input.clone()).unwrap();
+        let answer = journal::events(5, &input, &out)
+            .into_iter()
+            .find_map(|l| match l {
+                Line::Answer(a) => Some(a),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!((answer.status, answer.code, answer.after), journaled);
+    }
 }

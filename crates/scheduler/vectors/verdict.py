@@ -49,6 +49,7 @@ class Run:
         if header["log"] != log["sha256"]:
             raise AnotherLog()
         self.j = int(header["jitter"])
+        self.floor = int(header["resend"])
         body = lines[1:-1]
         self.reads, self.ends, self.released = {}, {}, {}
         self.events = collections.defaultdict(list)  # line -> [(index, kind, value)]
@@ -102,6 +103,7 @@ class Run:
             raise Incoherent("ended before read")
         attempts, first_dispatch, sent, taken = 0, None, None, None
         last_dispatch, last_sent = None, None
+        answered = None  # the last taken answer: (attempt, at, after)
         rel = None
         for i, kind, v in self.events[l]:
             if i < ri:
@@ -121,9 +123,11 @@ class Run:
             elif kind == "dispatch":
                 if rel is None or v["attempt"] != attempts + 1 or u(v["at"]) < u(rel["released"]):
                     raise Incoherent("an attempt out of turn")
+                if v["attempt"] > 1 and not self.licensed(r, rel, taken, answered, u(v["at"])):
+                    raise Incoherent("a resend its answer did not license")
                 attempts = v["attempt"]
                 first_dispatch = u(v["at"]) if first_dispatch is None else first_dispatch
-                last_dispatch, last_sent, taken = u(v["at"]), None, None
+                last_dispatch, last_sent, taken, answered = u(v["at"]), None, None, None
             elif kind == "sent":
                 if v["attempt"] > attempts or v["attempt"] == 0:
                     raise Incoherent("a send of an attempt not dispatched")
@@ -135,6 +139,7 @@ class Run:
                     if v["attempt"] != attempts or attempts == 0:
                         raise Incoherent("an answer taken from an attempt not out")
                     taken = v["judged"]
+                    answered = (v["attempt"], u(v["at"]), u(v["after"]))
                 elif v["attempt"] > attempts:
                     raise Incoherent("an answer of an attempt not dispatched")
         if (
@@ -177,6 +182,21 @@ class Run:
                 raise Incoherent("skipped for a producer not read before it")
         self.taken_attempts = attempts
 
+    def licensed(self, r, rel, taken, answered, at):
+        """Decision 15: a poll's next after an answer not expected, no sooner
+        than its wait; a call's resend after a certified refusal of an operation
+        that may be resent, or an unknown answer of an idempotent one, at the
+        later of its wait and the floor, more than J before its deadline."""
+        if answered is None:
+            return False
+        _, then, after = answered
+        wait = after or 0
+        if r["action"] == "poll":
+            return taken in ("unexpected", "not_taken", "unknown") and at >= then + wait
+        resendable = (taken == "not_taken" and r["safety"] != "never") or (
+            taken == "unknown" and r["safety"] == "idempotent")
+        return resendable and at >= then + max(wait, self.floor) and at + self.j < u(rel["deadline"])
+
     # The decision's sentences.
 
     def members(self, holder, key, count):
@@ -214,7 +234,7 @@ class Run:
             if self.conditional(dep, memo):
                 why = why or "transitive"
         r = self.read(l)
-        if r["action"] == "observe":
+        if r["action"] in ("observe", "poll"):
             cause = u(r["cause"])
             if cause is None or not (2 <= cause <= l):
                 raise Incoherent("an observation's cause not read before it")
@@ -244,7 +264,7 @@ class Run:
             i, rr, d = u(rel["intended"]), u(rel["released"]), u(rel["deadline"])
             if rr >= d and i < d and rr - i > j:
                 return "read"
-        if r["action"] == "observe":
+        if r["action"] in ("observe", "poll"):
             c = self.end(u(r["cause"]))
             if c["sent"] is None or u(c["sent"]) - u(c["intended"]) > j:
                 return "cause"

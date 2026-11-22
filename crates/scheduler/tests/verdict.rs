@@ -46,6 +46,9 @@ fn journal_header(header: &Header, log: &Log) -> journal::Header {
         validator: ascetic_ddd_command_log::live::validator(),
         read_ahead: header.read_ahead,
         jitter: header.profile.jitter,
+        resend: header.profile.resend,
+        namespace: 1,
+        t0: 1_763_640_000_000_000,
     }
 }
 
@@ -269,6 +272,42 @@ fn goldens() -> Vec<Golden> {
                 answer(0, Some(10), Judgement::Unknown)
             } else {
                 answer(2 * TIMEOUT, Some(10), Judgement::Expected(vec![]))
+            }
+        }),
+        vec![Undecided],
+        "void:undecided",
+    );
+    // A certified refusal resent, after the floor, and then expected.
+    let mut resent = header_j();
+    for o in &mut resent.operations {
+        o.safety = Safety::NotTaken;
+        o.not_run = vec!["service.unavailable".into()];
+    }
+    add(
+        "refusal_resent",
+        resent,
+        vec![call("read", 1, 0, 0, 0)],
+        Box::new(|_, attempt| {
+            if attempt == 1 {
+                answer(0, Some(10), Judgement::NotTaken)
+            } else {
+                expected()
+            }
+        }),
+        vec![Passed],
+        "pass",
+    );
+    // A poll whose last poll never left: the harness ate the deadline, as for
+    // a call (ADR-0047 K2a-5b; fold revision 1 counted it a root).
+    add(
+        "last_poll_never_sent",
+        header_j(),
+        vec![polling(1, 0, 0, 1_000, 10_000)],
+        Box::new(|_, attempt| {
+            if attempt == 1 {
+                answer(0, Some(10), Judgement::Unexpected)
+            } else {
+                answer(20_000, Some(10), Judgement::Expected(vec![]))
             }
         }),
         vec![Undecided],
@@ -505,7 +544,67 @@ fn broken_evidence_is_void() {
     let position = |lines: &[Line], f: &dyn Fn(&Line) -> bool| lines.iter().position(f).unwrap();
     let is_end = |l: &Line| matches!(l, Line::End(_));
     type Edit = Box<dyn Fn(&mut journal::Header, &mut Vec<Line>, &mut Log)>;
+    let resend = |l: &mut Vec<Line>, f: &dyn Fn(&mut journal::Dispatch)| {
+        for x in l.iter_mut() {
+            if let Line::Dispatch(d) = x
+                && d.attempt == 2
+            {
+                f(d);
+            }
+        }
+    };
     let edits: Vec<(&str, &str, Edit, &str)> = vec![
+        // Decision 15: a resend its predecessor's answer did not license.
+        (
+            "a resend before its floor",
+            "retry_never_sent",
+            Box::new(move |_, l, _| resend(l, &|d| d.at = 50)),
+            "void:incoherent",
+        ),
+        (
+            "a resend too near its deadline",
+            "retry_never_sent",
+            Box::new(move |_, l, _| resend(l, &|d| d.at = d.deadline - J)),
+            "void:incoherent",
+        ),
+        (
+            "a refusal resent of a call never resent",
+            "refusal_resent",
+            Box::new(|_, l, _| {
+                for x in l.iter_mut() {
+                    if let Line::Read(r) = x {
+                        r.safety = ascetic_ddd_command_log::record::Safety::Never;
+                    }
+                }
+            }),
+            "void:incoherent",
+        ),
+        (
+            "a poll before the wait its answer asked for",
+            "last_poll_never_sent",
+            Box::new(|_, l, _| {
+                for x in l.iter_mut() {
+                    if let Line::Answer(a) = x
+                        && a.attempt == 1
+                    {
+                        a.after = Some(5_000);
+                    }
+                }
+            }),
+            "void:incoherent",
+        ),
+        (
+            "a resend of a call never resent",
+            "retry_never_sent",
+            Box::new(|_, l, _| {
+                for x in l.iter_mut() {
+                    if let Line::Read(r) = x {
+                        r.safety = ascetic_ddd_command_log::record::Safety::Never;
+                    }
+                }
+            }),
+            "void:incoherent",
+        ),
         (
             "an end dropped",
             "clean",

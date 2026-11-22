@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/krew-solutions/ascetic-ddd-rust/crates/scheduler/schema/journal.schema.json",
-  "title": "A line of a scheduler's journal (ADR-0047 decision 14), version 2",
+  "title": "A line of a scheduler's journal (ADR-0047 decision 14), version 3",
   "description": "Normative. Every object's properties are listed in the order a line writes them: the canonical order. A line is the compact JSON of one of these, then a newline; the first line is a header and only it, the last a trailer, whose sha256 is of every line before it and events the number of lines between the two. Every u64 is a decimal string.",
   "oneOf": [
     {
@@ -146,6 +146,7 @@
         "rest",
         "bus",
         "observe",
+        "poll",
         "host"
       ]
     },
@@ -392,7 +393,7 @@
       "type": "object",
       "properties": {
         "journal": {
-          "const": 2
+          "const": 3
         },
         "machine": {
           "$ref": "#/$defs/u32"
@@ -411,6 +412,15 @@
         },
         "jitter": {
           "$ref": "#/$defs/u64"
+        },
+        "resend": {
+          "$ref": "#/$defs/u64"
+        },
+        "namespace": {
+          "$ref": "#/$defs/u64"
+        },
+        "t0": {
+          "$ref": "#/$defs/i64"
         }
       },
       "required": [
@@ -420,7 +430,10 @@
         "log",
         "validator",
         "read_ahead",
-        "jitter"
+        "jitter",
+        "resend",
+        "namespace",
+        "t0"
       ],
       "additionalProperties": false
     },
@@ -438,6 +451,9 @@
         },
         "action": {
           "$ref": "#/$defs/action"
+        },
+        "safety": {
+          "$ref": "#/$defs/safety"
         },
         "cause": {
           "oneOf": [
@@ -461,6 +477,7 @@
         "line",
         "key",
         "action",
+        "safety",
         "cause",
         "after"
       ],
@@ -561,6 +578,29 @@
         },
         "ignored": {
           "$ref": "#/$defs/ignored"
+        },
+        "status": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u16"
+            }
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/code"
+        },
+        "after": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
         }
       },
       "required": [
@@ -569,7 +609,10 @@
         "attempt",
         "judged",
         "captured",
-        "ignored"
+        "ignored",
+        "status",
+        "code",
+        "after"
       ],
       "additionalProperties": false
     },
@@ -693,6 +736,44 @@
         "sha256"
       ],
       "additionalProperties": false
+    },
+    "i64": {
+      "type": "string",
+      "pattern": "^(0|-?[1-9][0-9]{0,18})$"
+    },
+    "u16": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    "safety": {
+      "enum": [
+        "never",
+        "not_taken",
+        "idempotent"
+      ]
+    },
+    "code": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "const": "other"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "named": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "named"
+          ],
+          "additionalProperties": false
+        }
+      ]
     }
   }
 }

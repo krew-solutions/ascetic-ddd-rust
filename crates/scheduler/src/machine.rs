@@ -247,6 +247,8 @@ pub enum Output {
         after: Vec<Binding>,
         /// An observation's cause's line; its own if it is its own.
         cause: Option<Line>,
+        /// Its action's safety, for the journal (ADR-0047 decision 15).
+        safety: Safety,
     },
     /// A step's release decided: when it was to start, when it is released,
     /// and its deadline.
@@ -666,11 +668,15 @@ impl Machine {
         }
         cell.holding = !held.is_empty();
         let cause = cell.cause;
+        let safety = cell.record.as_ref().map_or(Safety::Never, |r| {
+            ascetic_ddd_command_log::plan::safety(&self.header, &r.action)
+        });
         self.cells.insert(line, cell);
         out.push(Output::Bound {
             line,
             after: binding,
             cause,
+            safety,
         });
         self.forget(gone);
         match skip {

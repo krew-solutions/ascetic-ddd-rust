@@ -3,10 +3,10 @@
 //! whose digest is [`JOURNAL`](super::JOURNAL). Its lines are not a run's: the
 //! byte form is what it pins, not what a verdict makes of it.
 
-use ascetic_ddd_command_log::record::{On, Subject};
+use ascetic_ddd_command_log::record::{On, Safety, Subject};
 
 use super::{
-    Action, Answer, Critical, Dep, Dispatch, End, Ended, Fault, FaultClass, Header, Ignored,
+    Action, Answer, Code, Critical, Dep, Dispatch, End, Ended, Fault, FaultClass, Header, Ignored,
     JOURNAL_VERSION, Judged, Key, Line, Read, Released, Sent, Skip, Slot,
 };
 use crate::machine::MACHINE_REVISION;
@@ -21,6 +21,10 @@ pub fn header() -> Header {
         validator: "6: golden".to_owned(),
         read_ahead: u64::MAX,
         jitter: 200,
+        resend: 100_000,
+        namespace: u64::MAX,
+        // Before the epoch, past what a float holds exactly.
+        t0: i64::MIN,
     }
 }
 
@@ -69,6 +73,7 @@ pub fn lines() -> Vec<Line> {
             line: 2,
             key: key("enroll", 0),
             action: Action::Rest,
+            safety: Safety::NotTaken,
             cause: None,
             after: vec![],
         }),
@@ -77,6 +82,7 @@ pub fn lines() -> Vec<Line> {
             line: 3,
             key: key("report", 1),
             action: Action::Observe,
+            safety: Safety::Never,
             cause: Some(u64::MAX),
             after: vec![
                 Dep::Step {
@@ -99,6 +105,7 @@ pub fn lines() -> Vec<Line> {
             line: 4,
             key: key("publish", 0),
             action: Action::Bus,
+            safety: Safety::Idempotent,
             cause: None,
             after: vec![],
         }),
@@ -107,7 +114,17 @@ pub fn lines() -> Vec<Line> {
             line: 5,
             key: key("onboard", 0),
             action: Action::Host,
+            safety: Safety::Idempotent,
             cause: None,
+            after: vec![],
+        }),
+        Line::Read(Read {
+            at: 2,
+            line: 6,
+            key: key("watched", 0),
+            action: Action::Poll,
+            safety: Safety::Never,
+            cause: Some(2),
             after: vec![],
         }),
         Line::Released(Released {
@@ -135,14 +152,29 @@ pub fn lines() -> Vec<Line> {
             judged: Judged::Expected,
             captured: vec![slot("id"), slot("token")],
             ignored: None,
+            status: Some(201),
+            code: None,
+            after: None,
         }),
     ];
     let judged = [
-        (Judged::Unexpected, Some(Ignored::Ended)),
-        (Judged::NotTaken, Some(Ignored::Stale)),
-        (Judged::Unknown, Some(Ignored::Late)),
+        (
+            Judged::Unexpected,
+            Some(Ignored::Ended),
+            Some(u16::MAX),
+            Some(Code::Other),
+            None,
+        ),
+        (
+            Judged::NotTaken,
+            Some(Ignored::Stale),
+            Some(503),
+            Some(Code::Named("service.session_failed".to_owned())),
+            Some(u64::MAX),
+        ),
+        (Judged::Unknown, Some(Ignored::Late), None, None, Some(0)),
     ];
-    for (i, (judged, ignored)) in (6u64..).zip(judged) {
+    for (i, (judged, ignored, status, code, after)) in (6u64..).zip(judged) {
         lines.push(Line::Answer(Answer {
             at: i,
             line: 3,
@@ -150,6 +182,9 @@ pub fn lines() -> Vec<Line> {
             judged,
             captured: vec![],
             ignored,
+            status,
+            code,
+            after,
         }));
     }
     let ends = [

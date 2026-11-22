@@ -161,6 +161,11 @@ const JOURNALS: &[(u32, u32, &str)] = &[
         2,
         "fd777c4682da7021b139a7758a5e1d0915bb7a9af5535e3325c549f07fe42a4f",
     ),
+    (
+        3,
+        2,
+        "dd08d141ef8cef469e04a6a24bfe55d13611a551e4fca30e4e11f1232c5f4cf4",
+    ),
 ];
 
 /// What the fold decided of the differential's runs, the digest of their
@@ -180,12 +185,24 @@ const CLASSES: &[(u32, u32, u32, &str)] = &[
         1,
         "67d4cdacc4d04099c1d62a5dd1d47ace78f6c4f3e4295f7f567201d3f0a5469e",
     ),
+    (
+        3,
+        2,
+        2,
+        "b4690f124fe6bbb392ec46b476af57a0f43f4e7b0c589e92ea44af817d79be1b",
+    ),
 ];
 
 /// The journal written, read back, and told against the run it journals
 /// (ADR-0047 K1e-3b): every end and dispatch, every send and answer in the
 /// order the machine took them, the bindings of every read, the releases.
-fn journal_of(name: &str, header: journal::Header, ran: &Run, records: &[Record]) -> Vec<u8> {
+fn journal_of(
+    name: &str,
+    header: journal::Header,
+    plan: &Header,
+    ran: &Run,
+    records: &[Record],
+) -> Vec<u8> {
     use journal::Line;
     let mut writer = journal::Writer::new(Vec::new(), header.clone()).unwrap();
     for l in &ran.journal {
@@ -202,6 +219,7 @@ fn journal_of(name: &str, header: journal::Header, ran: &Run, records: &[Record]
     let mut dispatches = Vec::new();
     let mut taken = Vec::new();
     let mut faults = Vec::new();
+    let mut seen = Vec::new();
     for l in &lines {
         match l {
             Line::Read(r) => {
@@ -210,13 +228,29 @@ fn journal_of(name: &str, header: journal::Header, ran: &Run, records: &[Record]
                 // step its log names, read before it, or itself.
                 let record = &records[(r.line - 2) as usize];
                 use ascetic_ddd_command_log::record::Action as Act;
+                use ascetic_ddd_command_log::record::{Probe, Safety};
                 let action = match &record.action {
                     Act::Rest(_) => journal::Action::Rest,
                     Act::Bus(_) => journal::Action::Bus,
-                    Act::Observe(_) => journal::Action::Observe,
+                    Act::Observe(o) => match o.probe {
+                        Probe::Rest(_) => journal::Action::Poll,
+                        Probe::Bus { .. } => journal::Action::Observe,
+                    },
                     Act::Host(_) => journal::Action::Host,
                 };
                 assert_eq!(r.action, action, "{name} line {}", r.line);
+                // Its safety from the log's tables, looked up here.
+                let safety = match &record.action {
+                    Act::Rest(c) => plan
+                        .operations
+                        .iter()
+                        .find(|o| o.name == c.op)
+                        .map(|o| o.safety),
+                    Act::Host(c) => plan.calls.iter().find(|x| x.name == c.op).map(|x| x.safety),
+                    Act::Bus(_) => Some(Safety::Idempotent),
+                    Act::Observe(_) => Some(Safety::Never),
+                };
+                assert_eq!(Some(r.safety), safety, "{name} line {}: safety", r.line);
                 match (&record.action, r.cause) {
                     (ascetic_ddd_command_log::record::Action::Observe(o), Some(c)) => {
                         assert!(c <= r.line, "{name} line {}: a cause read later", r.line);
@@ -250,7 +284,10 @@ fn journal_of(name: &str, header: journal::Header, ran: &Run, records: &[Record]
             }
             Line::Dispatch(d) => dispatches.push((d.at, d.line, d.attempt)),
             Line::Sent(t) => taken.push((t.at, t.line, t.attempt, None)),
-            Line::Answer(a) => taken.push((a.at, a.line, a.attempt, Some(a.judged))),
+            Line::Answer(a) => {
+                taken.push((a.at, a.line, a.attempt, Some(a.judged)));
+                seen.push((a.line, a.attempt, a.status, a.code.clone(), a.after));
+            }
             Line::End(e) => {
                 assert!(
                     ends.insert(e.line, e.clone()).is_none(),
@@ -326,6 +363,27 @@ fn journal_of(name: &str, header: journal::Header, ran: &Run, records: &[Record]
         })
         .collect();
     assert_eq!(taken, ran_taken, "{name}: inputs");
+    // What came back beside each judgement, as the machine took it.
+    let ran_seen: Vec<_> = ran
+        .inputs
+        .iter()
+        .filter_map(|(_, input)| match input {
+            Input::Ended {
+                line,
+                attempt,
+                seen,
+                ..
+            } => Some((
+                *line,
+                *attempt,
+                seen.status,
+                seen.code.as_ref().map(journal::Code::from),
+                seen.after,
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(seen, ran_seen, "{name}: what came back");
     let ran_faults: Vec<u64> = ran
         .entries
         .iter()
@@ -544,9 +602,12 @@ fn the_machine_is_the_scheduler_by_definition() {
                         validator: ascetic_ddd_command_log::live::validator(),
                         read_ahead,
                         jitter: header.profile.jitter,
+                        resend: header.profile.resend,
+                        namespace: 1,
+                        t0: 1_763_640_000_000_000,
                     };
                     let journal_bytes =
-                        journal_of(&run_name, journal_header.clone(), &ran, &records);
+                        journal_of(&run_name, journal_header.clone(), &header, &ran, &records);
                     sha2::Digest::update(&mut journals, &journal_bytes);
                     let open = || {
                         journal::Reader::new(std::io::Cursor::new(journal_bytes.clone())).unwrap()

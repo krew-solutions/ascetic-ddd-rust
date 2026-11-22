@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 
-use ascetic_ddd_command_log::record::On;
+use ascetic_ddd_command_log::record::{On, Safety};
 
 use crate::journal::{
     Action, Dep, End, Ended, Header, JournalError, Judged, Key, Line, Read, Skip,
@@ -27,7 +27,7 @@ use crate::machine::Line as Number;
 /// What the fold decides, as a number: raised whenever the classes or the
 /// verdict it gives a journal change, which the goldens' and the differential's
 /// classes pin beside it.
-pub const FOLD_REVISION: u32 = 1;
+pub const FOLD_REVISION: u32 = 2;
 
 /// A line's class (decision 14), by precedence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -167,6 +167,8 @@ fn end_code(e: End) -> u8 {
 struct Live {
     read: u64,
     action: Action,
+    /// Its action's safety: which resends its answers license.
+    safety: Safety,
     /// Its step dependencies, by strength.
     deps: Vec<(On, Number)>,
     /// Intended, released, deadline.
@@ -180,10 +182,14 @@ struct Live {
     sent: Option<u64>,
     /// The last attempt's answer the machine took.
     taken: Option<Judged>,
+    /// That answer: its attempt, its instant, the wait it asked for.
+    answered: Option<(u32, u64, Option<u64>)>,
 }
 
 struct First {
     jitter: u64,
+    /// The profile's resend floor.
+    floor: u64,
     bytes: Vec<u8>,
     live: BTreeMap<Number, Live>,
     next: Number,
@@ -250,6 +256,7 @@ impl First {
                     Live {
                         read: r.at,
                         action: r.action,
+                        safety: r.safety,
                         deps,
                         released: None,
                         attempts: 0,
@@ -258,6 +265,7 @@ impl First {
                         last_sent: None,
                         sent: None,
                         taken: None,
+                        answered: None,
                     },
                 );
                 Ok(())
@@ -272,18 +280,51 @@ impl First {
                 Ok(())
             }
             Line::Dispatch(d) => {
+                let (jitter, floor) = (self.jitter, self.floor);
                 let lv = self.live(d.line)?;
-                let Some((_, released, _)) = lv.released else {
+                let Some((_, released, deadline)) = lv.released else {
                     return Err(incoherent(d.line, "an attempt dispatched unreleased"));
                 };
                 if Some(d.attempt) != lv.attempts.checked_add(1) || d.at < released {
                     return Err(incoherent(d.line, "an attempt dispatched out of turn"));
+                }
+                // A resend its predecessor's answer licensed (ADR-0047
+                // decision 15): a poll's next after an answer not expected, no
+                // sooner than its wait; a call's after a refusal its safety
+                // resends, at the later of its wait and the floor, more than J
+                // before its deadline.
+                if d.attempt > 1 {
+                    let Some((attempt, at, after)) = lv.answered else {
+                        return Err(incoherent(d.line, "a resend no answer licensed"));
+                    };
+                    let licensed = match (lv.action, lv.taken) {
+                        (
+                            Action::Poll,
+                            Some(Judged::Unexpected | Judged::NotTaken | Judged::Unknown),
+                        ) => d.at >= at.saturating_add(after.unwrap_or(0)),
+                        (Action::Poll, _) => false,
+                        (_, Some(j)) => {
+                            let by_safety = match j {
+                                Judged::NotTaken => lv.safety != Safety::Never,
+                                Judged::Unknown => lv.safety == Safety::Idempotent,
+                                Judged::Expected | Judged::Unexpected => false,
+                            };
+                            by_safety
+                                && d.at >= at.saturating_add(after.unwrap_or(0).max(floor))
+                                && d.at.saturating_add(jitter) < deadline
+                        }
+                        (_, None) => false,
+                    };
+                    if attempt != lv.attempts || !licensed {
+                        return Err(incoherent(d.line, "a resend its answer did not license"));
+                    }
                 }
                 lv.attempts = d.attempt;
                 lv.first_dispatch.get_or_insert(d.at);
                 lv.last_dispatch = d.at;
                 lv.last_sent = None;
                 lv.taken = None;
+                lv.answered = None;
                 Ok(())
             }
             Line::Sent(t) => {
@@ -314,6 +355,7 @@ impl First {
                             ));
                         }
                         lv.taken = Some(a.judged);
+                        lv.answered = Some((a.attempt, a.at, a.after));
                         Ok(())
                     }
                     (Some(lv), Some(_)) => {
@@ -502,7 +544,7 @@ impl Second {
         }
         // Decision 6 amended: an observation asserts its cause's effect.
         let mut late_cause = false;
-        if r.action == Action::Observe {
+        if r.action.observes() {
             let Some(cause) = r.cause else {
                 return Err(incoherent(r.line, "an observation without its cause"));
             };
@@ -572,6 +614,7 @@ where
     }
     let mut one = First {
         jitter: header.jitter,
+        floor: header.resend,
         bytes: Vec::new(),
         live: BTreeMap::new(),
         next: 2,

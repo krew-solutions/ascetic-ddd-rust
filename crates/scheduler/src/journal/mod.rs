@@ -7,14 +7,18 @@
 //! bound, so that the verdict needs the log only to check its identity. No
 //! captured value is journaled, only the slots an answer captured. A pure
 //! [`events`] turns one machine step into its events, so that `sim` and the
-//! shell write the same bytes. Version 1; any change of meaning is another.
+//! shell write the same bytes. Version 3 (ADR-0047 decision 15): the header
+//! names the run's namespace, T0 and the resend floor; a read, its
+//! operation's safety and whether an observation polls; an answer, its status,
+//! its code and the wait it asked for — what the fold needs to tell a licensed
+//! resend from another. Any change of meaning is another version.
 
 use std::fmt;
 use std::io::{BufRead, Write};
 
 use ascetic_ddd_command_log::frame::{self, Digest, FrameError};
-use ascetic_ddd_command_log::record::{self, Name, On, Subject};
-use ascetic_ddd_command_log::wire::{b64, u64s, u64s_option, u64s_vec};
+use ascetic_ddd_command_log::record::{self, Name, On, Safety, Subject};
+use ascetic_ddd_command_log::wire::{b64, i64s, u64s, u64s_option, u64s_vec};
 use serde::{Deserialize, Serialize};
 
 use crate::machine::{self, Binding, Input, Judgement, Line as Number, Output};
@@ -22,13 +26,13 @@ use crate::machine::{self, Binding, Input, Judgement, Line as Number, Output};
 pub mod sample;
 
 /// The version a reader accepts and a writer writes: exactly this one.
-pub const JOURNAL_VERSION: u32 = 2;
+pub const JOURNAL_VERSION: u32 = 3;
 
 /// The byte form's identity: the SHA-256 of the golden journal
 /// (`golden/journal.jsonl`, [`sample`]), which holds every line and variant. A
 /// change to how any line is written changes the golden journal, and so this,
 /// in the same edit.
-pub const JOURNAL: &str = "7038f4dd6638c17871c82e14386fb7d0468e0df91649512d9641c4392960535b";
+pub const JOURNAL: &str = "fd8f6d0802d9914a00c08fade092f5a5c46f4cd2db7e32ae09da7c6ae6790c31";
 
 /// A journal's line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +78,18 @@ pub struct Header {
     /// The profile's jitter J.
     #[serde(with = "u64s")]
     pub jitter: u64,
+    /// The profile's resend floor (ADR-0047 decision 15).
+    #[serde(with = "u64s")]
+    pub resend: u64,
+    /// The run's namespace: public, every secret drawn from the run's own
+    /// secret instead (decision 15), so that the run's rendered values and
+    /// correlation ids can be told again.
+    #[serde(with = "u64s")]
+    pub namespace: u64,
+    /// T0's wall instant, microseconds since the Unix epoch: the base of the
+    /// run's times.
+    #[serde(with = "i64s")]
+    pub t0: i64,
 }
 
 /// A barrier key: the kind, scope, label and occurrence its members share.
@@ -123,8 +139,11 @@ pub enum Action {
     Rest,
     /// A message published on the bus.
     Bus,
-    /// An effect awaited.
+    /// An effect awaited on the bus.
     Observe,
+    /// An effect awaited by polling a REST call (ADR-0047 decision 15): each
+    /// poll an attempt of its own.
+    Poll,
     /// A call of the stand's own.
     Host,
 }
@@ -134,9 +153,19 @@ impl From<&record::Action> for Action {
         match a {
             record::Action::Rest(_) => Action::Rest,
             record::Action::Bus(_) => Action::Bus,
-            record::Action::Observe(_) => Action::Observe,
+            record::Action::Observe(o) => match o.probe {
+                record::Probe::Rest(_) => Action::Poll,
+                record::Probe::Bus { .. } => Action::Observe,
+            },
             record::Action::Host(_) => Action::Host,
         }
+    }
+}
+
+impl Action {
+    /// Whether it awaits an effect: an observation, by the bus or polled.
+    pub fn observes(self) -> bool {
+        matches!(self, Action::Observe | Action::Poll)
     }
 }
 
@@ -154,6 +183,9 @@ pub struct Read {
     pub key: Key,
     /// What it does.
     pub action: Action,
+    /// Its action's safety: what a harness resend of it may be (ADR-0047
+    /// decision 11, 15).
+    pub safety: Safety,
     /// An observation's cause's line — its own if it is its own; none for
     /// another action (version 2: the fold reads the journal alone).
     #[serde(with = "u64s_option")]
@@ -268,6 +300,33 @@ pub struct Answer {
     pub captured: Vec<Slot>,
     /// Whether the machine took nothing from it, and why.
     pub ignored: Option<Ignored>,
+    /// Its status, if an answer came (ADR-0047 decision 15).
+    pub status: Option<u16>,
+    /// Its problem's code, as the journal may carry it.
+    pub code: Option<Code>,
+    /// Microseconds its `Retry-After` asked for.
+    #[serde(with = "u64s_option")]
+    pub after: Option<u64>,
+}
+
+/// A problem's code: a short dotted name as the server wrote it, or `other`
+/// (ADR-0047 decision 15): no other server text enters the journal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Code {
+    /// A dotted name.
+    Named(Name),
+    /// Any other text.
+    Other,
+}
+
+impl From<&machine::Code> for Code {
+    fn from(c: &machine::Code) -> Code {
+        match c {
+            machine::Code::Named(n) => Code::Named(n.clone()),
+            machine::Code::Other => Code::Other,
+        }
+    }
 }
 
 /// Why a step was not sent.
@@ -461,10 +520,12 @@ pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
                     line: l,
                     after,
                     cause,
-                } if l == line => Some((after, *cause)),
+                    safety,
+                } if l == line => Some((after, *cause, *safety)),
                 _ => None,
             });
             let cause = bound.and_then(|b| b.1);
+            let safety = bound.map_or(Safety::Never, |b| b.2);
             let after = bound
                 .map(|b| b.0)
                 .into_iter()
@@ -491,6 +552,7 @@ pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
                 line: *line,
                 key: key_of(&record.step),
                 action: (&record.action).into(),
+                safety,
                 cause,
                 after,
             }));
@@ -504,7 +566,7 @@ pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
             line,
             attempt,
             judgement,
-            ..
+            seen,
         } => {
             let ignored = outputs.iter().find_map(|o| match o {
                 Output::Ignored {
@@ -535,6 +597,9 @@ pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
                 judged,
                 captured,
                 ignored,
+                status: seen.status,
+                code: seen.code.as_ref().map(Code::from),
+                after: seen.after,
             }));
         }
         Input::Wake => {}

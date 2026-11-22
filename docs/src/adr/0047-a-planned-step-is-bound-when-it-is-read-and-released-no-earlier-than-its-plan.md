@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e) and K2a-1 to K2a-5a built (§ Measured), K2a-5b next. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e) and K2a built (§ Measured), K2b next. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -882,6 +882,29 @@ falls due at `now + Max({w, Floor})`, none out until then, kept before the deadl
   `Retry-After` ignored, the floor ignored, J ignored, a resend past the deadline, a refusal past it ended unknown,
   an unknown resent unless the operation is never resent.
 
+**K2a-5b — journal version 3, resends licensed** (2026-11-22): the journal's header names the resend floor, the
+run's namespace (public, every secret drawn from the run's own) and T0's wall instant; a read, its action's safety,
+and an observation that polls is a `poll`; an answer, its status, its code as the journal may carry it (a short
+dotted name, or `other`) and the wait it asked for. The fold, `FOLD_REVISION` 2: an attempt past the first is
+licensed by the answer it follows, or the journal is incoherent — a poll's next after an answer not expected, no
+sooner than its wait; a call's resend after a certified refusal of an operation that may be resent or an unknown
+answer of an idempotent one, at the later of its wait and the floor, more than J before its deadline. A poll's last
+poll that never left is the harness's lateness, as a call's is — undecided, where revision 1 counted a root (the
+Distributed Systems role's M3) — and a poll is an observation for its cause's rules. `vectors/verdict.py` decides the
+same; the schema and `vectors/journal.py` read version 3.
+- **Executors**: the golden journal holds every new variant — a poll, each safety, a code named and other, a status
+  and a wait on both sides, a namespace at the top, a T0 before the epoch; a golden run of a poll whose last poll
+  never left, its class written by hand (undecided); three twins of broken evidence, each void and the definition
+  agreeing — a resend before its floor, one too near its deadline, an unknown resent and a certified refusal resent
+  of a call never resent (the latter on a golden run of its own, a refusal resent and then expected), a poll before
+  the wait its answer asked for. The differential checks each read's action and safety by its own lookup in the log's
+  tables, and each answer's status, code and wait against what the machine took; its 3,732 verdicts agree with the
+  definition; a test journals an answer's status, code and wait as the machine took them, `sim` giving none. Journals
+  pinned under (3, 2), classes under (3, 2, 2). Eleven mutants, each killed: the license dropped, its floor, its J,
+  its safety, a poll's wait; a poll's lateness not the harness's; a poll no observation; a poll journaled an
+  observation; no safety, no wait, no code journaled — three alive until their executors were added (the refusal's
+  golden run, the poll's twin, the journaling test).
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -989,3 +1012,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   extended; `RULES_REVISION` 8.
 - 2026-11-22: K2a-5 cut into K2a-5a and K2a-5b; K2a-5a built (§ Measured): polls re-polled, resends spaced,
   `MACHINE_REVISION` 2, the model's resend.
+- 2026-11-22: K2a-5b built (§ Measured): journal version 3, the fold licensing resends, `FOLD_REVISION` 2. K2a is
+  complete; K2b, the shell, next.
