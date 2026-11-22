@@ -13,8 +13,7 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
-
+use crate::frame::{self, Digest, FrameError};
 use crate::record::{Header, Line, Record, Trailer};
 
 /// The format a reader accepts, and a writer writes: exactly this one.
@@ -28,9 +27,7 @@ pub const FORMAT: &str = "34d0604f25ecb8d0fa280db8b55837ff0ba21e52e3ab4d0ceb89b1
 
 /// The canonical bytes of a line, `\n` included.
 pub fn encode(line: &Line) -> Result<Vec<u8>, LogError> {
-    let mut bytes = serde_json::to_vec(line).map_err(|e| LogError::Encode(e.to_string()))?;
-    bytes.push(b'\n');
-    Ok(bytes)
+    Ok(frame::canonical(line)?)
 }
 
 /// Why a log was refused.
@@ -132,6 +129,19 @@ impl fmt::Display for LogError {
 
 impl std::error::Error for LogError {}
 
+impl From<FrameError> for LogError {
+    fn from(e: FrameError) -> LogError {
+        match e {
+            // Through `From<io::Error>`: a replay's divergence rides an I/O error.
+            FrameError::Io(e) => LogError::from(e),
+            FrameError::Encode(e) => LogError::Encode(e),
+            FrameError::Malformed { line, reason } => LogError::Malformed { line, reason },
+            FrameError::NotCanonical { line } => LogError::NotCanonical { line },
+            FrameError::Truncated => LogError::Truncated,
+        }
+    }
+}
+
 impl From<io::Error> for LogError {
     fn from(e: io::Error) -> LogError {
         match e
@@ -150,7 +160,7 @@ impl From<io::Error> for LogError {
 /// [`finish`](Writer::finish).
 pub struct Writer<W: Write> {
     out: W,
-    digest: Sha256,
+    digest: Digest,
     records: u64,
 }
 
@@ -160,7 +170,7 @@ impl<W: Write> Writer<W> {
         if header.format != FORMAT_VERSION {
             return Err(LogError::Format(header.format));
         }
-        let mut digest = Sha256::new();
+        let mut digest = Digest::new();
         let bytes = encode(&Line::Header(Box::new(header)))?;
         out.write_all(&bytes)?;
         digest.update(&bytes);
@@ -190,7 +200,7 @@ impl<W: Write> Writer<W> {
     pub fn finish(mut self) -> Result<(W, Trailer), LogError> {
         let trailer = Trailer {
             records: self.records,
-            sha256: hex(&self.digest.finalize()),
+            sha256: self.digest.hex(),
         };
         self.out
             .write_all(&encode(&Line::Trailer(trailer.clone()))?)?;
@@ -365,7 +375,7 @@ pub fn open_file(path: &Path) -> Result<Reader<Box<dyn BufRead + Send>>, LogErro
 pub struct Reader<R: BufRead> {
     input: R,
     header: Header,
-    digest: Sha256,
+    digest: Digest,
     records: u64,
     line: u64,
     ended: bool,
@@ -374,7 +384,7 @@ pub struct Reader<R: BufRead> {
 impl<R: BufRead> Reader<R> {
     /// Opens a log; refused unless its first line is a header of this format.
     pub fn new(mut input: R) -> Result<Reader<R>, LogError> {
-        let mut digest = Sha256::new();
+        let mut digest = Digest::new();
         let header = match read_line(&mut input, 1, &mut digest)? {
             Some(Line::Header(header)) => *header,
             _ => return Err(LogError::Header { line: 1 }),
@@ -417,7 +427,7 @@ impl<R: BufRead> Reader<R> {
                 self.ended = true;
                 let read = Trailer {
                     records: self.records,
-                    sha256: hex(&self.digest.clone().finalize()),
+                    sha256: self.digest.hex(),
                 };
                 if expected != read {
                     return Err(LogError::Trailer { expected, read });
@@ -453,30 +463,12 @@ impl<R: BufRead> Iterator for Reader<R> {
 fn read_line(
     input: &mut impl BufRead,
     number: u64,
-    digest: &mut Sha256,
+    digest: &mut Digest,
 ) -> Result<Option<Line>, LogError> {
-    let mut bytes = Vec::new();
-    if input.read_until(b'\n', &mut bytes)? == 0 {
+    let Some(bytes) = frame::next_line(input)? else {
         return Ok(None);
-    }
-    if bytes.last() != Some(&b'\n') {
-        // A line cut short: the writer died mid-line.
-        return Err(LogError::Truncated);
-    }
-    let body = bytes
-        .get(..bytes.len().saturating_sub(1))
-        .unwrap_or_default();
-    let line: Line = serde_json::from_slice(body).map_err(|e| LogError::Malformed {
-        line: number,
-        reason: e.to_string(),
-    })?;
-    if encode(&line)? != bytes {
-        return Err(LogError::NotCanonical { line: number });
-    }
+    };
+    let line: Line = frame::decode(&bytes, number)?;
     digest.update(&bytes);
     Ok(Some(line))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

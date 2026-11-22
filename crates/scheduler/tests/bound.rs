@@ -5,8 +5,10 @@
 //! step's plan breaks the assumption it rests on; `fits` refuses at and past
 //! each boundary.
 
+// The command log's fixture reads its corpus's directory; the lint gate refuses
+// files to the machine, not to its tests (ADR-0047 K1e-3).
 #[path = "../../command-log/tests/fixture/mod.rs"]
-#[allow(unused_imports)]
+#[allow(unused_imports, clippy::disallowed_methods, clippy::disallowed_types)]
 mod fixture;
 
 use ascetic_ddd_command_log::record::{Header, On, Record};

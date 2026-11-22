@@ -9,6 +9,7 @@ use std::sync::Arc;
 use ascetic_ddd_command_log::LogError;
 use ascetic_ddd_command_log::record::{Action, Dep, Header, Hole, Probe, Record, Subject, Value};
 
+use crate::journal;
 use crate::machine::{Captured, End, Entry, Input, Judgement, Line, Machine, Output};
 use crate::order::Ordered;
 
@@ -61,6 +62,9 @@ pub struct Run {
     pub pending: usize,
     /// The barrier keys the machine kept by the end.
     pub barriers: usize,
+    /// The journal's lines between its header and its trailer, as
+    /// [`journal::events`] writes them: only with the run's inputs kept.
+    pub journal: Vec<journal::Line>,
 }
 
 /// Runs `records` (lines 2, 3, …) against the script, reading `read_ahead`
@@ -235,6 +239,7 @@ fn drive(
         resent: 0,
         pending: 0,
         barriers: 0,
+        journal: Vec::new(),
     };
     queue.push(0, Input::Wake);
     loop {
@@ -268,7 +273,10 @@ fn drive(
             queue.push(t, Input::Wake);
         }
         while let Some((at, input)) = queue.pop(t) {
-            if keep && input != Input::Wake {
+            let taken_input = keep.then(|| input.clone());
+            if let Some(input) = &taken_input
+                && *input != Input::Wake
+            {
                 run.inputs.push((at, input.clone()));
             }
             taken = taken.saturating_add(1);
@@ -278,9 +286,16 @@ fn drive(
                     reason: format!("the machine took more than {INPUTS} inputs: it loops"),
                 });
             }
-            for output in machine.step(at, input)? {
+            let outputs = machine.step(at, input)?;
+            if let Some(input) = &taken_input {
+                run.journal.extend(journal::events(at, input, &outputs));
+            }
+            for output in outputs {
                 match output {
-                    Output::Want(_) => {}
+                    Output::Want(_)
+                    | Output::Bound { .. }
+                    | Output::Released { .. }
+                    | Output::Ignored { .. } => {}
                     Output::WakeAt(w) => {
                         wakes.insert(w.max(at));
                     }

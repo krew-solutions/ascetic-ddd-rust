@@ -559,6 +559,34 @@ barrier instance re-pinned at 115,196 distinct states, every mutant breaking wha
   step released or ended before its read; 3,924 runs agree. The corpus changed, its rules not: revision 6's digest
   re-pinned.
 
+**K1e-3b — the journal's bytes** (2026-11-22): decision 14's journal as decided for K1e-3, version 1.
+- **The framing** is `command-log::frame` — a value's canonical line, its decoding refused unless re-encoded to the
+  same bytes, the next line of a stream, a running digest, `FrameError` — public, and the log's reader and writer
+  stand on it (the golden log's bytes and `FORMAT` unchanged). `command-log::wire` is public too, with a list of
+  `u64`s, so that the journal writes its numbers as the log does: every `u64` a decimal string.
+- **The vocabulary** is `scheduler::journal`: the lines, a `Writer` and a `Reader` that refuse another version, a
+  header out of place, a truncated journal, a trailer that disagrees, a line after it, a non-canonical line, an
+  unknown field; and the pure `journal::events`, which `sim` writes with the run (`Run.journal`). The machine says
+  what the journal needs and `Entry` does not hold: a read's bindings (`Output::Bound`, each dependency's strength
+  beside the line it bound or the barrier's key and its members' count), a release decided (`Output::Released`,
+  with its deadline), an answer it took nothing from and why (`Output::Ignored` — stale, late, or its step ended,
+  its cell freed or not). `MACHINE_REVISION` 1. J is in the journal's header though the log's profile holds it:
+  the fold reads the journal alone. `serde` is the crate's one new dependency; `clippy.toml` refuses `std::fs`,
+  `std::net` and the command log's file functions to the machine.
+- **Executors**: the golden journal (`golden/journal.jsonl`, 19 lines, `JOURNAL`), holding every line and variant
+  by exhaustive matches, both sides of every optional field and a `u64` at its top in every kind of field — also
+  written and read in the host's serde build (`verify/inbox-features`); twins: every strict prefix of its bytes
+  refused, a line dropped, swapped or changed and a miscounted trailer refused, the header first and only, nothing
+  after the trailer, another version, a line not canonical four ways, a step's story in order, an answer stale,
+  late and after its end marked so; the differential's 3,924 journals written, read back and told against their
+  runs — every end, dispatch, send and answer, every read's bound lines, every release — their digest pinned
+  beside `MACHINE_REVISION` (`JOURNALS`). Fourteen mutants, each killed: a release, an ignored answer's mark or a
+  fault line dropped from `events`; the trailer unchecked; the end of input taken for the end; the header left out
+  of the digest; a release's deadline, a barrier's members or a step's binding journaled wrong (the first two only
+  the pinned digest sees); `std::fs`, a socket type, the log's file reader and the commitment's file read in the
+  machine; a variant dropped from the golden with the golden and its pin regenerated alike. A vacuous assertion in the silent
+  handler's twin (`… || true`) now asserts that nothing ends before the grace.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -622,3 +650,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-22: K1e-2c built (§ Measured): the bound in the model, its own instance tied to the validator, `PendingByRate`.
 - 2026-11-22: K1e-3 decided under the gate (decision 14's journal and verdict, decision 6's cause amendment, measures to
   K5); K1e-3a built (§ Measured): a holder failed by a member past its prefix.
+- 2026-11-22: K1e-3b built (§ Measured): the journal's bytes, `command-log::frame` and `wire` public, the machine's
+  bindings, releases and ignored answers told, `MACHINE_REVISION` 1.

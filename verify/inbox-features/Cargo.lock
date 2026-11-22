@@ -36,6 +36,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ascetic-ddd-scheduler"
+version = "0.1.0"
+dependencies = [
+ "ascetic-ddd-command-log",
+ "serde",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -352,6 +360,7 @@ version = "0.0.0"
 dependencies = [
  "ascetic-ddd-bus",
  "ascetic-ddd-command-log",
+ "ascetic-ddd-scheduler",
  "proptest",
  "serde_json",
 ]

@@ -2,8 +2,10 @@
 //! read, the strengths, barriers by prefix, captures in their producers' cells,
 //! retries by safety, the backstop.
 
+// The command log's fixture reads its corpus's directory; the lint gate refuses
+// files to the machine, not to its tests (ADR-0047 K1e-3).
 #[path = "../../command-log/tests/fixture/mod.rs"]
-#[allow(unused_imports)]
+#[allow(unused_imports, clippy::disallowed_methods, clippy::disallowed_types)]
 mod fixture;
 
 use std::sync::Arc;
@@ -333,12 +335,11 @@ fn a_silent_handler_is_the_harness_s_fault() {
             _ => None,
         })
         .unwrap();
-    assert!(
-        m.step(deadline.saturating_add(GRACE) - 1, Input::Wake)
-            .unwrap()
-            .is_empty()
-            || true
-    );
+    // Not before the grace has passed.
+    let early = m
+        .step(deadline.saturating_add(GRACE) - 1, Input::Wake)
+        .unwrap();
+    assert!(!early.iter().any(|o| matches!(o, Output::Ended(_))));
     let out = m.step(deadline.saturating_add(GRACE), Input::Wake).unwrap();
     let ended = out
         .iter()

@@ -9,6 +9,7 @@
 #![warn(missing_docs)]
 
 pub mod fits;
+pub mod journal;
 pub mod machine;
 pub mod order;
 pub mod sim;

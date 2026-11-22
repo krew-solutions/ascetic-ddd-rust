@@ -14,13 +14,18 @@ readme = "README.md"
 
 # The machine's dependencies are an allowlist (ADR-0047 decision 1): the lint
 # gate names std paths only, so a crate with a clock of its own would pass it.
-# `tests/allowlist.rs` holds this list.
+# `tests/allowlist.rs` holds this list; `clippy.toml` refuses the files and
+# sockets that `std` and the command log would lend it.
 [dependencies]
 ascetic-ddd-command-log = { path = "../command-log" }
+# The journal's vocabulary derives its JSON (ADR-0047 K1e-3); the bytes, the
+# digest and serde_json stay behind the command log's framing.
+serde = { workspace = true }
 
 [dev-dependencies]
 # The command log's test fixture and corpus, shared by path.
 ascetic-ddd-faker = { path = "../faker" }
 proptest = "1.11.0"
 serde_json = { workspace = true }
+sha2 = "0.10"
 tempfile = "3"

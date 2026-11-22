@@ -20,4 +20,5 @@ ascetic-ddd-command-log = { path = "../../crates/command-log" }
 serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
 
 [dev-dependencies]
+ascetic-ddd-scheduler = { path = "../../crates/scheduler" }
 proptest = "1.11.0"

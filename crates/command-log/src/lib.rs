@@ -10,6 +10,7 @@
 
 pub mod disk;
 pub mod engine;
+pub mod frame;
 pub mod live;
 pub mod log;
 pub mod plan;
@@ -22,7 +23,7 @@ mod spill;
 pub mod template;
 pub mod validate;
 pub mod window;
-mod wire;
+pub mod wire;
 
 pub use crate::log::{
     Compression, FORMAT, FORMAT_VERSION, LogError, Reader, Writer, encode, open, open_file,

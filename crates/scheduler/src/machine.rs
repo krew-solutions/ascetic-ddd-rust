@@ -162,7 +162,8 @@ pub struct Entry {
     pub released: u64,
     /// When its first attempt was dispatched.
     pub dispatched: Option<u64>,
-    /// When its first attempt's bytes left.
+    /// When an attempt's bytes first left: the attempt then out's, which a
+    /// retry before any send makes a later one's.
     pub sent: Option<u64>,
     /// When it ended.
     pub ended: u64,
@@ -197,7 +198,74 @@ pub enum Output {
     Want(u64),
     /// A step ended.
     Ended(Box<Entry>),
+    /// A line read, its dependencies bound: in its `after`'s order (the
+    /// journal's, K1e-3).
+    Bound {
+        /// Its line.
+        line: Line,
+        /// Each dependency's binding.
+        after: Vec<Binding>,
+    },
+    /// A step's release decided: when it was to start, when it is released,
+    /// and its deadline.
+    Released {
+        /// Its line.
+        line: Line,
+        /// `max(at, ready + think)`.
+        intended: u64,
+        /// `max(intended, read)`.
+        released: u64,
+        /// When its handler gives up on it.
+        deadline: u64,
+    },
+    /// An answer the machine took nothing from.
+    Ignored {
+        /// Its step's line.
+        line: Line,
+        /// The attempt it answers.
+        attempt: u32,
+        /// Why.
+        why: Ignored,
+    },
 }
+
+/// What a dependency bound when its line was read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Binding {
+    /// A step dependency: its strength, the line it bound.
+    Step {
+        /// Its strength.
+        on: On,
+        /// The line it bound.
+        line: Line,
+    },
+    /// A barrier: its strength, its key, its members read before the holder.
+    Each {
+        /// Its strength.
+        on: On,
+        /// Its key.
+        key: ascetic_ddd_command_log::plan::MemberKey,
+        /// Its members read before the holder.
+        members: u64,
+    },
+}
+
+/// Why an answer changed nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ignored {
+    /// Its step had ended.
+    Ended,
+    /// It answers an attempt no longer out.
+    Stale,
+    /// It came past its deadline.
+    Late,
+}
+
+/// What the machine decides, as a number: raised whenever a run's journal
+/// for the same inputs changes, which the differential's journals pin beside
+/// it (ADR-0047 K1e-3). A journal's header names it, so that a verdict is read
+/// against the machine that made it.
+pub const MACHINE_REVISION: u32 = 1;
 
 /// How long past a deadline the machine waits for a handler that does not
 /// report: then the step ends unknown, and it is the harness's fault.
@@ -435,6 +503,7 @@ impl Machine {
         let mut ready: Option<(u64, Option<Critical>)> = None;
         let mut skip: Option<(Skip, u64)> = None;
         let mut pending: Vec<(Line, On)> = Vec::new();
+        let mut binding: Vec<Binding> = Vec::with_capacity(record.after.len());
         for d in &record.after {
             match d {
                 Dep::Step { step, on } => {
@@ -448,6 +517,7 @@ impl Machine {
                         });
                     };
                     cell.bound.push(dep);
+                    binding.push(Binding::Step { on: *on, line: dep });
                     match self.met(dep, *on) {
                         Met::Yes(t) => fold(&mut ready, t, Critical::Step(dep)),
                         Met::Never(t) => earliest(&mut skip, Skip::Dependency(dep), t),
@@ -464,15 +534,21 @@ impl Machine {
                 } => {
                     // A key no member was read of: nothing to wait for, and
                     // no barrier kept for it.
-                    let Some(b) =
-                        self.barriers
-                            .get_mut(&ascetic_ddd_command_log::plan::barrier_key(
-                                kind, scope, label, *n,
-                            ))
-                    else {
+                    let key = ascetic_ddd_command_log::plan::barrier_key(kind, scope, label, *n);
+                    let Some(b) = self.barriers.get_mut(&key) else {
+                        binding.push(Binding::Each {
+                            on: *on,
+                            key,
+                            members: 0,
+                        });
                         continue;
                     };
                     let members = b.count;
+                    binding.push(Binding::Each {
+                        on: *on,
+                        key,
+                        members: u64::try_from(members).unwrap_or(u64::MAX),
+                    });
                     let r = rank(*on);
                     match b.first_failure {
                         // Every member that failed was read before it.
@@ -547,10 +623,14 @@ impl Machine {
         }
         cell.holding = !held.is_empty();
         self.cells.insert(line, cell);
+        out.push(Output::Bound {
+            line,
+            after: binding,
+        });
         self.forget(gone);
         match skip {
             Some((why, t)) => self.finish(line, End::Skipped(why), t.max(self.now), out),
-            None => self.ready_if_met(line),
+            None => self.ready_if_met(line, out),
         }
         Ok(())
     }
@@ -570,7 +650,7 @@ impl Machine {
     }
 
     /// A step whose dependencies are all met is released.
-    fn ready_if_met(&mut self, line: Line) {
+    fn ready_if_met(&mut self, line: Line, out: &mut Vec<Output>) {
         let Some(c) = self.cells.get_mut(&line) else {
             return;
         };
@@ -581,14 +661,14 @@ impl Machine {
         c.released = c.intended.max(c.read);
         c.phase = Phase::Due;
         let t = c.released;
-        self.decided(line);
+        self.decided(line, out);
         self.wake(line, t);
     }
 
     /// Its release decided: the values its captured holes take, from their
     /// producers' cells, and its deadline, from its cause's intended start —
     /// then it lets go of them, so that a wake taken late holds nothing.
-    fn decided(&mut self, line: Line) {
+    fn decided(&mut self, line: Line, out: &mut Vec<Output>) {
         let Some(c) = self.cells.get(&line) else {
             return;
         };
@@ -613,6 +693,12 @@ impl Machine {
             c.captured = captured;
             c.missing = missing;
             c.deadline = deadline;
+            out.push(Output::Released {
+                line,
+                intended: c.intended,
+                released: c.released,
+                deadline,
+            });
         }
         self.release(line);
     }
@@ -741,10 +827,24 @@ impl Machine {
     fn ended(&mut self, line: Line, attempt: u32, judgement: Judgement, out: &mut Vec<Output>) {
         let now = self.now;
         let Some(c) = self.cells.get_mut(&line) else {
+            // Its cell freed: its step ended long ago.
+            out.push(Output::Ignored {
+                line,
+                attempt,
+                why: Ignored::Ended,
+            });
             return;
         };
         // A late answer, or one of an attempt no longer out, changes nothing.
         if c.end.is_some() || c.attempts != attempt || now > c.deadline {
+            let why = if c.end.is_some() {
+                Ignored::Ended
+            } else if c.attempts != attempt {
+                Ignored::Stale
+            } else {
+                Ignored::Late
+            };
+            out.push(Output::Ignored { line, attempt, why });
             return;
         }
         // A poll's interval, if it is one: an observation probing by REST.
@@ -906,7 +1006,7 @@ impl Machine {
                             d.critical = Some(Critical::Step(line));
                         }
                     }
-                    self.ready_if_met(dependent);
+                    self.ready_if_met(dependent, out);
                 }
                 Met::Never(t) => {
                     self.finish(dependent, End::Skipped(Skip::Dependency(line)), t, out);
@@ -1002,7 +1102,7 @@ impl Machine {
                     d.critical = Some(Critical::Member(last));
                 }
             }
-            self.ready_if_met(holder);
+            self.ready_if_met(holder, out);
         }
         for (holder, first, t) in skipped {
             self.finish(holder, End::Skipped(Skip::Member(first)), t, out);

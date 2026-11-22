@@ -1055,3 +1055,6 @@ condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
   parts by name; V6's plan runs timeouts on its window's scale, its bound equal across its plans. Decision 16's refusal
   counts W × rate against the validating process: the scheduler's refusal of a plan its machine cannot hold is
   ADR-0047's `fits`, not it. `feasible` also holds every step's think from the run's start (`RULES_REVISION` 6).
+- 2026-11-22: ADR-0047 K1e-3b: the log's framing — a value's canonical line, its decoding, the next line, the running
+  digest — is `frame`, public, for the scheduler's journal as well; the log's reader and writer stand on it, its bytes
+  and `FORMAT` unchanged. `wire` is public, with a list of `u64`s.

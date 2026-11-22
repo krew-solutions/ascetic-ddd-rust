@@ -2,8 +2,10 @@
 //! (`vectors/schedule.py`) on every clean corpus log, under scripts of mixed
 //! latencies and judgements, at three read-aheads.
 
+// The command log's fixture reads its corpus's directory; the lint gate refuses
+// files to the machine, not to its tests (ADR-0047 K1e-3).
 #[path = "../../command-log/tests/fixture/mod.rs"]
-#[allow(unused_imports)]
+#[allow(unused_imports, clippy::disallowed_methods, clippy::disallowed_types)]
 mod fixture;
 
 use std::collections::BTreeMap;
@@ -11,8 +13,11 @@ use std::collections::BTreeMap;
 use ascetic_ddd_command_log::record::{Header, Record};
 use ascetic_ddd_command_log::validate::NoHost;
 use ascetic_ddd_faker::{Key, Seed};
-use ascetic_ddd_scheduler::machine::{Captured, Critical, End, Entry, Judgement, Skip};
-use ascetic_ddd_scheduler::sim::{Attempt, run_reading};
+use ascetic_ddd_scheduler::journal::{self, JOURNAL_VERSION, Judged};
+use ascetic_ddd_scheduler::machine::{
+    Captured, Critical, End, Entry, Input, Judgement, MACHINE_REVISION, Skip,
+};
+use ascetic_ddd_scheduler::sim::{Attempt, Run, run_reading};
 use fixture::*;
 use serde_json::{Value as Json, json};
 
@@ -120,6 +125,175 @@ fn entry_json(e: &Entry) -> Json {
     })
 }
 
+/// What the machine decided in a run, its journal's digests: raised with
+/// `MACHINE_REVISION` (ADR-0047 K1e-3). A corpus that changes changes the
+/// digest without a revision: re-pin it then, as revision 6's MEANINGS was.
+const JOURNALS: &[(u32, &str)] = &[(
+    1,
+    "5f3f0a6c485c77c6c3c7ca916afda5f0bac9ccd76cd1363400e7a908a58bab91",
+)];
+
+/// The journal written, read back, and told against the run it journals
+/// (ADR-0047 K1e-3b): every end and dispatch, every send and answer in the
+/// order the machine took them, the bindings of every read, the releases.
+fn journal_of(name: &str, header: journal::Header, ran: &Run) -> Vec<u8> {
+    use journal::Line;
+    let mut writer = journal::Writer::new(Vec::new(), header.clone()).unwrap();
+    for l in &ran.journal {
+        writer.line(l).unwrap();
+    }
+    let bytes = writer.finish().unwrap().0;
+    let reader = journal::Reader::new(std::io::Cursor::new(bytes.clone())).unwrap();
+    assert_eq!(reader.header(), &header, "{name}");
+    let lines: Vec<Line> = reader.collect::<Result<_, _>>().unwrap();
+    assert_eq!(lines, ran.journal, "{name}: read back");
+    let mut reads = Vec::new();
+    let mut released = BTreeMap::new();
+    let mut ends = BTreeMap::new();
+    let mut dispatches = Vec::new();
+    let mut taken = Vec::new();
+    let mut faults = Vec::new();
+    for l in &lines {
+        match l {
+            Line::Read(r) => {
+                reads.push(r.line);
+                let bound: Vec<u64> = r
+                    .after
+                    .iter()
+                    .filter_map(|d| match d {
+                        journal::Dep::Step { line, .. } => Some(*line),
+                        journal::Dep::Each { .. } => None,
+                    })
+                    .collect();
+                taken.push((r.at, r.line, 0, None));
+                released.entry(r.line).or_insert((bound, None));
+            }
+            Line::Released(r) => {
+                let slot = released.get_mut(&r.line).expect("released before read");
+                assert!(slot.1.is_none(), "{name}: line {} released twice", r.line);
+                slot.1 = Some((r.intended, r.released, r.at));
+            }
+            Line::Dispatch(d) => dispatches.push((d.at, d.line, d.attempt)),
+            Line::Sent(t) => taken.push((t.at, t.line, t.attempt, None)),
+            Line::Answer(a) => taken.push((a.at, a.line, a.attempt, Some(a.judged))),
+            Line::End(e) => {
+                assert!(
+                    ends.insert(e.line, e.clone()).is_none(),
+                    "{name}: line {} ended twice",
+                    e.line
+                );
+            }
+            Line::Fault(f) => faults.push(f.line),
+            Line::Header(_) | Line::Trailer(_) => panic!("{name}: a header or trailer amid"),
+        }
+    }
+    // Reads in line order: the fold's second pass depends on it.
+    assert!(reads.windows(2).all(|w| w[0] < w[1]), "{name}: reads");
+    assert_eq!(ends.len(), ran.entries.len(), "{name}: ends");
+    for e in &ran.entries {
+        let j = &ends[&e.line];
+        assert!(
+            j.at >= e.ended,
+            "{name} line {}: decided before its end",
+            e.line
+        );
+        assert_eq!(
+            **j,
+            journal::Ended {
+                at: j.at,
+                ..journal_entry(e)
+            },
+            "{name}"
+        );
+        let (bound, rel) = &released[&e.line];
+        assert_eq!(bound, &e.bound, "{name} line {}: bound", e.line);
+        match rel {
+            Some((intended, r, _)) => {
+                assert_eq!(
+                    (*intended, *r),
+                    (e.intended, e.released),
+                    "{name} line {}",
+                    e.line
+                )
+            }
+            None => assert!(
+                e.dispatched.is_none(),
+                "{name} line {}: dispatched unreleased",
+                e.line
+            ),
+        }
+    }
+    let ran_dispatches: Vec<_> = ran.dispatches.iter().map(|d| (d.0, d.1, d.2)).collect();
+    assert_eq!(dispatches, ran_dispatches, "{name}: dispatches");
+    let ran_taken: Vec<_> = ran
+        .inputs
+        .iter()
+        .map(|(at, input)| match input {
+            Input::Line { line, .. } => (*at, *line, 0, None),
+            Input::Sent { line, attempt } => (*at, *line, *attempt, None),
+            Input::Ended {
+                line,
+                attempt,
+                judgement,
+            } => (
+                *at,
+                *line,
+                *attempt,
+                Some(match judgement {
+                    Judgement::Expected(_) => Judged::Expected,
+                    Judgement::Unexpected => Judged::Unexpected,
+                    Judgement::NotTaken => Judged::NotTaken,
+                    Judgement::Unknown => Judged::Unknown,
+                }),
+            ),
+            Input::Wake => unreachable!("a run keeps no wake"),
+        })
+        .collect();
+    assert_eq!(taken, ran_taken, "{name}: inputs");
+    let ran_faults: Vec<u64> = ran
+        .entries
+        .iter()
+        .filter(|e| e.fault)
+        .map(|e| e.line)
+        .collect();
+    let mut sorted = faults.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, ran_faults, "{name}: faults");
+    bytes
+}
+
+fn journal_entry(e: &Entry) -> journal::Ended {
+    let skip = |s: &Skip| match s {
+        Skip::Dependency(l) => journal::Skip::Dependency(*l),
+        Skip::Member(l) => journal::Skip::Member(*l),
+        Skip::MissingCapture(l) => journal::Skip::MissingCapture(*l),
+    };
+    journal::Ended {
+        at: 0,
+        line: e.line,
+        end: match &e.end {
+            End::Expected => journal::End::Expected,
+            End::Unexpected => journal::End::Unexpected,
+            End::Unknown => journal::End::Unknown,
+            End::Skipped(s) => journal::End::Skipped(skip(s)),
+        },
+        read: e.read,
+        ready: e.ready,
+        intended: e.intended,
+        released: e.released,
+        dispatched: e.dispatched,
+        sent: e.sent,
+        ended: e.ended,
+        attempts: e.attempts,
+        critical: e.critical.map(|c| match c {
+            Critical::Step(l) => journal::Critical::Step(l),
+            Critical::Member(l) => journal::Critical::Member(l),
+        }),
+        bound: e.bound.clone(),
+        fault: e.fault,
+    }
+}
+
 #[test]
 fn the_machine_is_the_scheduler_by_definition() {
     use std::io::Write;
@@ -133,6 +307,7 @@ fn the_machine_is_the_scheduler_by_definition() {
         .spawn()
         .expect("python3, which the library's gate requires");
     let mut runs = 0;
+    let mut journals = <sha2::Sha256 as sha2::Digest>::new();
     // The plan's own bound against the machine (ADR-0047 K1e-2): the runs
     // whose every read lies within [at − L, at] (A2), those of them with a
     // reader lagging, and the lines that ended exactly at their worst end.
@@ -159,6 +334,11 @@ fn the_machine_is_the_scheduler_by_definition() {
             }
             let peaks = report.peaks;
             let log = String::from_utf8(bytes(header.clone(), &records)).unwrap();
+            let identity = serde_json::from_str::<Json>(log.lines().last().unwrap()).unwrap()
+                ["trailer"]["sha256"]
+                .as_str()
+                .unwrap()
+                .to_owned();
             let scripts: Vec<(u64, Box<Script>)> = vec![
                 (1, Box::new(script(1, &name))),
                 (2, Box::new(script(2, &name))),
@@ -267,6 +447,20 @@ fn the_machine_is_the_scheduler_by_definition() {
                         ran.left, ran.kept,
                         "{name}/{seed}/{read_ahead}: cells left behind"
                     );
+                    let run_name = format!("{name}/{seed}/{read_ahead}");
+                    let journal_header = journal::Header {
+                        journal: JOURNAL_VERSION,
+                        machine: MACHINE_REVISION,
+                        source: "differential".to_owned(),
+                        log: identity.clone(),
+                        validator: ascetic_ddd_command_log::live::validator(),
+                        read_ahead,
+                        jitter: header.profile.jitter,
+                    };
+                    sha2::Digest::update(
+                        &mut journals,
+                        journal_of(&run_name, journal_header, &ran),
+                    );
                     let journal: Vec<Json> = ran.entries.iter().map(entry_json).collect();
                     let line = json!({
                         "name": format!("{name}/{seed}/{read_ahead}"),
@@ -299,6 +493,17 @@ fn the_machine_is_the_scheduler_by_definition() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(runs > 500, "{runs} runs");
+    let digest: String = sha2::Digest::finalize(journals)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let revisions: Vec<u32> = JOURNALS.iter().map(|m| m.0).collect();
+    assert!(revisions.windows(2).all(|w| w[0] < w[1]));
+    assert_eq!(
+        JOURNALS.last().copied(),
+        Some((MACHINE_REVISION, digest.as_str())),
+        "what the machine decides changed: bump MACHINE_REVISION and append its digest"
+    );
     eprintln!(
         "the bound: {within} runs within A2, {lagged} of them lagging; {attained} lines ended at it"
     );

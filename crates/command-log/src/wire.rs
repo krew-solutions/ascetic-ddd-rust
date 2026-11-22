@@ -1,16 +1,19 @@
 //! How the record types meet JSON (ADR-0046 decision 6): integers that can pass
 //! 2⁵³ as decimal strings, so that no reader rounds them; bytes as standard
-//! padded base64.
+//! padded base64. Public for the streams sharing the log's framing
+//! ([`frame`](crate::frame)): the scheduler's journal writes its numbers alike.
 
 /// A `u64` as a decimal string.
-pub(crate) mod u64s {
+pub mod u64s {
     use serde::{Deserialize, Deserializer, Serializer, de::Error};
 
-    pub(crate) fn serialize<S: Serializer>(v: &u64, s: S) -> Result<S::Ok, S::Error> {
+    /// Writes it.
+    pub fn serialize<S: Serializer>(v: &u64, s: S) -> Result<S::Ok, S::Error> {
         s.collect_str(v)
     }
 
-    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    /// Reads it, only in its canonical text.
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
         let text = String::deserialize(d)?;
         canonical_u64(&text)
             .ok_or_else(|| D::Error::custom(format!("not a canonical u64: {text:?}")))
@@ -18,7 +21,7 @@ pub(crate) mod u64s {
 
     /// Decimal digits, no sign, no leading zero but for zero itself: one text a
     /// value, so a re-encoding is the same bytes.
-    pub(crate) fn canonical_u64(text: &str) -> Option<u64> {
+    pub fn canonical_u64(text: &str) -> Option<u64> {
         let digits = text.bytes().all(|b| b.is_ascii_digit());
         let leading_zero = text.len() > 1 && text.starts_with('0');
         if text.is_empty() || !digits || leading_zero {
@@ -29,17 +32,19 @@ pub(crate) mod u64s {
 }
 
 /// An optional `u64` as a decimal string or `null`.
-pub(crate) mod u64s_option {
+pub mod u64s_option {
     use serde::{Deserialize, Deserializer, Serializer, de::Error};
 
-    pub(crate) fn serialize<S: Serializer>(v: &Option<u64>, s: S) -> Result<S::Ok, S::Error> {
+    /// Writes it.
+    pub fn serialize<S: Serializer>(v: &Option<u64>, s: S) -> Result<S::Ok, S::Error> {
         match v {
             Some(v) => s.collect_str(v),
             None => s.serialize_none(),
         }
     }
 
-    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    /// Reads it, only in its canonical text.
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
         match Option::<String>::deserialize(d)? {
             None => Ok(None),
             Some(text) => super::u64s::canonical_u64(&text)
@@ -49,15 +54,43 @@ pub(crate) mod u64s_option {
     }
 }
 
-/// An `i64` as a decimal string.
-pub(crate) mod i64s {
+/// A list of `u64`s, each a decimal string.
+pub mod u64s_vec {
+    use serde::ser::SerializeSeq;
     use serde::{Deserialize, Deserializer, Serializer, de::Error};
 
-    pub(crate) fn serialize<S: Serializer>(v: &i64, s: S) -> Result<S::Ok, S::Error> {
+    /// Writes it.
+    pub fn serialize<S: Serializer>(v: &[u64], s: S) -> Result<S::Ok, S::Error> {
+        let mut seq = s.serialize_seq(Some(v.len()))?;
+        for x in v {
+            seq.serialize_element(&x.to_string())?;
+        }
+        seq.end()
+    }
+
+    /// Reads it, only in its canonical text.
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u64>, D::Error> {
+        Vec::<String>::deserialize(d)?
+            .iter()
+            .map(|text| {
+                super::u64s::canonical_u64(text)
+                    .ok_or_else(|| D::Error::custom(format!("not a canonical u64: {text:?}")))
+            })
+            .collect()
+    }
+}
+
+/// An `i64` as a decimal string.
+pub mod i64s {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    /// Writes it.
+    pub fn serialize<S: Serializer>(v: &i64, s: S) -> Result<S::Ok, S::Error> {
         s.collect_str(v)
     }
 
-    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    /// Reads it, only in its canonical text.
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
         let text = String::deserialize(d)?;
         let parsed: Option<i64> = text.parse().ok();
         // The canonical text is the one `i64` writes: no `+`, no leading zero, no `-0`.
@@ -69,16 +102,18 @@ pub(crate) mod i64s {
 }
 
 /// Bytes as standard padded base64.
-pub(crate) mod b64 {
+pub mod b64 {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
     use serde::{Deserialize, Deserializer, Serializer, de::Error};
 
-    pub(crate) fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
+    /// Writes it.
+    pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&STANDARD.encode(v))
     }
 
-    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+    /// Reads it, only in its canonical text.
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
         let text = String::deserialize(d)?;
         let bytes = STANDARD
             .decode(&text)

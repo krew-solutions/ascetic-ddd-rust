@@ -7,8 +7,10 @@
 //! verify/tla/traces: a change of the machine's behaviour fails here until its
 //! traces are recorded again and checked against the model.
 
+// The command log's fixture reads its corpus's directory; the lint gate refuses
+// files to the machine, not to its tests (ADR-0047 K1e-3).
 #[path = "../../command-log/tests/fixture/mod.rs"]
-#[allow(unused_imports)]
+#[allow(unused_imports, clippy::disallowed_methods, clippy::disallowed_types)]
 mod fixture;
 
 use std::collections::BTreeMap;
@@ -264,6 +266,11 @@ fn trace_text(h: &Header, records: &[Record], read_ahead: u64, ran: &Run) -> Str
 #[allow(
     clippy::disallowed_methods,
     reason = "the test harness, not the machine, asks where `make traces` records"
+)]
+// A test writes and reads its traces; the lint gate is the machine's.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the golden traces are files (ADR-0047 K1e-3 refuses files to the machine, not its tests)"
 )]
 fn trace(
     name: &str,

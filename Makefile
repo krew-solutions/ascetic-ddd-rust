@@ -100,7 +100,7 @@ test-pg: ## the tests ignored for want of PostgreSQL, at ASCETIC_DDD_TEST_PG_URL
 # of its own, since this one tests with `--all-features`.
 HOST_FEATURES := --manifest-path verify/inbox-features/Cargo.toml
 
-host-features: ## the stream id's golden table and properties, and the command log's golden log, under serde_json's arbitrary_precision and preserve_order, then raw_value too (verify/inbox-features)
+host-features: ## the stream id's golden table and properties, the command log's golden log and the scheduler's golden journal, under serde_json's arbitrary_precision and preserve_order, then raw_value too (verify/inbox-features)
 	$(CARGO) fmt $(HOST_FEATURES) -- --check
 	$(CARGO) clippy $(HOST_FEATURES) --all-targets --all-features -- -D warnings
 	$(CARGO) test $(HOST_FEATURES)
