@@ -10,6 +10,7 @@
 
 pub mod disk;
 pub mod engine;
+pub mod fills;
 pub mod frame;
 pub mod json;
 pub mod live;
@@ -18,6 +19,7 @@ pub mod plan;
 pub mod rate;
 pub mod record;
 pub mod render;
+pub mod request;
 mod runs;
 pub mod sample;
 mod spill;

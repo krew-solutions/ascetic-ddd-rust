@@ -5,7 +5,7 @@
 use ascetic_ddd_command_log::record::{
     Codec, Form, Hole, Of, Payload, Rendering, StepId, Subject, TimeBase, TimeRendering,
 };
-use ascetic_ddd_command_log::render::{FillError, Filled, fill, render, render_time};
+use ascetic_ddd_command_log::render::{FillError, Filled, RunSecret, fill, render, render_time};
 use ascetic_ddd_command_log::template::{Template, TemplateError};
 use ascetic_ddd_faker::Namespace;
 use proptest::prelude::*;
@@ -55,7 +55,7 @@ fn value(span: &ascetic_ddd_command_log::record::Span) -> Result<Filled, FillErr
             of,
             role,
             rendering,
-        } => Ok(render(NS, of, role, *rendering)),
+        } => Ok(render(NS, &RunSecret::new([7; 32]), of, role, *rendering)),
         Hole::Time {
             offset, rendering, ..
         } => render_time(SENT, *offset, *rendering),
@@ -114,7 +114,7 @@ fn value_of(hole: Hole) -> Filled {
             of,
             role,
             rendering,
-        } => render(NS, &of, &role, rendering),
+        } => render(NS, &RunSecret::new([7; 32]), &of, &role, rendering),
         _ => unreachable!(),
     }
 }
@@ -350,8 +350,20 @@ fn a_step_renders_apart_from_its_subject() {
         label: "managed".into(),
         n: 0,
     };
-    let of_step = render(NS, &Of::Step(step), "id", Rendering::UuidText);
-    let of_subject = render(NS, &Of::Subject(device(1)), "id", Rendering::UuidText);
+    let of_step = render(
+        NS,
+        &RunSecret::new([7; 32]),
+        &Of::Step(step),
+        "id",
+        Rendering::UuidText,
+    );
+    let of_subject = render(
+        NS,
+        &RunSecret::new([7; 32]),
+        &Of::Subject(device(1)),
+        "id",
+        Rendering::UuidText,
+    );
     assert_ne!(of_step, of_subject);
 }
 

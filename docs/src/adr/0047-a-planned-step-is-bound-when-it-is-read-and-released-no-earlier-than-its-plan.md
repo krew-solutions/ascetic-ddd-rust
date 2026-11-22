@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e) and K2a-1 built (§ Measured), K2a-2 next. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a-1 and K2a-2 built (§ Measured), K2a-3 next. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -409,7 +409,7 @@ and ADR-0046 decision 3; § Alternatives Considered keeps what each refuted):
 | K1-9 | K1 | the verdict fold against golden journals and an independent Python reader: one twin per void, the interval verdicts (a stall that fails by more than own lateness fails; a straddling one is void), a skipped publication inconclusive, transitive provenance | a conditional step counted as a pass; one-level provenance |
 | K1-10 | K1 | the dependency allowlist of `crates/scheduler` | a clock crate added |
 | K2a-1 | K2a | the reader against `vectors/json.py` (Python's `json` under hooks, and `decimal`) on 6,000 drawn documents, a third of them mutated, every pointer into them, and 6,000 pairs of values; a twin per rule | a member named twice read; the depth off by one; numbers equal by text; `-0` signed; the exponent's digits; an index with a leading zero; a lone surrogate; objects compared in order; trailing bytes; a raw control character; `~0` and `~1` swapped; trailing zeros kept; a leading zero; the exponent's sign |
-| K2a-2 | K2a | `vectors/request.py` writing `golden/frames.txt` — the sample, a `:verb` path, values with `:`, `/`, `%`, a space and non-ASCII — diffed in `make vectors`; `TimeBase::Sent` equal across a call's attempts, apart across polls; a captured ETag into a body quoted, a JSON id into a path unquoted; `Secret32` changing with the run secret, not with the namespace; `{:?}` of every fill, frame and secret holding none | literals encoded; `+` for a space; lower-case hex; `Sent` per attempt; a captured value's form ignored; `Secret32` from the namespace; a derived `Debug` |
+| K2a-2 | K2a | `vectors/request.py` writing `golden/frames.txt` — the sample, a `:verb` path, values with `:`, `/`, `%`, a space and non-ASCII — diffed in `make vectors`; a frame a function of its fills, `Sent` among them; a captured ETag into a body quoted, a JSON id into a path unquoted; `Secret32` changing with the run secret, not with the namespace; `{:?}` of every fill, frame and secret holding none | literals encoded; `+` for a space; lower-case hex; `Sent` from the run's start; a captured value's form ignored; `Secret32` from the namespace; a derived `Debug` |
 | K2a-3 | K2a | `vectors/judge.py` over a sample of raw answers — statuses at each class's edges, media types with parameters and in other cases, a code not a string, two `ETag` lines, a header not UTF-8, a `Location` with a query, a fragment, a trailing slash, `%FF` and `%zz`, `Retry-After` in seconds, as a date, negative and huge; an `expect` listing a `not_run` code, one listing 503, `problem: None` against a coded refusal, a 2xx problem document with a `not_run` code; `answer` total over drawn statuses, headers and bodies | rules 3 and 5, or 3 and 6, swapped; a wildcard `None`; the code read from any body; `>` for `≥`; the first of two header lines taken |
 | K2a-4 | K2a | a validator twin and a corpus mutant per new rule; the corpus with expectations that fit its actions, a resend floor, and every safety with `not_run` codes | each rule's condition weakened |
 | K2a-5 | K2a | the machine and `schedule.py`: a poll's Unknown on its grid, one poll out; resends at `max(after, floor)`, none within J of the deadline, scripts drawing `retry_after`, coverage counted (`resend_by_retry_after`, `resend_by_floor`, `resend_past_deadline`); the fold refusing an unlicensed resend; TLA+ `ResendPastDeadline` | a poll's Unknown ending it; a resend at `now`; the floor ignored; an Unknown `Never` step resent |
@@ -417,7 +417,7 @@ and ADR-0046 decision 3; § Alternatives Considered keeps what each refuted):
 | K2-2 | K2 | each cause delayed alone — the reader, the token, the pool, the connect, the write, the dependency — moves exactly one gap of the chain | a gap merged |
 | K2-3 | K2 | on the real clock, multi-thread: chain order, no release before its stamped met instants, the stub's requests per correlation id equal the journal's attempts — a keep-alive connection closed as it is reused included; a request processed then reset before the answer is Unknown; a response stamped 1 µs before its deadline delivered after the tick is Expected | hyper's hidden retry; Unknown read as not taken; deadlines by arrival |
 | K2-4 | K2 | a 503 with `Retry-After` and an uncertified code not resent; `service.session_failed` resent; an Envoy-shaped 504 Unknown with its `Settled` dependent conditional; a non-idempotent call timing out after writing not resent | not taken by status |
-| K2-5 | K2 | decorated headers differ across attempts (a fresh DPoP `jti`), the rest byte-identical; a retried step joins one server record; no secret in the decompressed journal, raw, base64, base64url or hex | a decorator run once; one correlation id a step |
+| K2-5 | K2 | decorated headers differ across attempts (a fresh DPoP `jti`), the rest byte-identical, a `Sent` time hole included, and each poll's frame its own; a retried step joins one server record; no secret in the decompressed journal, raw, base64, base64url or hex | a decorator run once; one correlation id a step |
 | K2-6 | K2 | void twins: a refused gate each, an unplanned 429, a harness fault, a divergence, the rate monitor's refusal (its key equal to `rate`'s on every corpus call); the gateway's buckets waited for since their last use | the monitor off; the bucket wait skipped |
 | K2-7 | K2 | a stub answering only at the gateway's timeout, at rate, for twice TIME_WAIT, from a non-loopback address: no `EADDRNOTAVAIL`, the run failed; a stub never answering: abandoned connections within the bound | connections dropped at the deadline |
 | H-1 | first host run | the gateway refills continuously (spend the burst, send at 90 % of the rate for one `per_seconds`, no refusal); whether `X-Request-Id` survives the gateway in `direct` mode; the journal's attempts per route and status reconciled with Envoy's access log | — |
@@ -760,6 +760,29 @@ the crate's arithmetic gate.
   objects compared in order, trailing bytes, a raw control character, `~0` and `~1` swapped, trailing zeros kept, a
   leading zero, the exponent's sign dropped.
 
+**K2a-2 — the fills and the request** (2026-11-22): `fills` resolves every hole of a step — public renderings from the
+namespace, key material from the run's secret, times from the run's start or the frame's first send, captured values
+as one JSON value's text (a string's content in a plain value, re-quoted in a JSON token; a number as written) —
+and `request` builds a REST step's frame and checks its static half (decision 15). `Captured` moves into the command
+log, the machine re-exporting it. Amends ADR-0046 decision 3: `Secret32` is HMAC-SHA256 under the run's secret
+(`render::RunSecret`, 32 bytes the shell draws, never serialised) of what it is rendered of and its role, no longer a
+function of the namespace; a correlation id is drawn from the namespace under its own key, `render::correlation`. No
+`Debug` of a fill, a frame, a captured value, a rendered value or the secret shows its bytes. The frame's digest
+waits for the slice that journals it.
+- **Executors**: `vectors/request.py` — `urllib.parse.quote`, `json.dumps`, `hmac`, the decision's sentences — builds
+  `golden/frames.txt` from the 35 cases of `golden/frames.jsonl` (a custom method, a collection's verb, values
+  encoded beside literals, a query in order, rendered values, times from the run's start and the send, captured
+  values in a path, a query, a header and a body, key material in a raw body; 27 refusals, one defect each), diffed in
+  `make vectors`, and the crate builds the same text; `render.py` computes the key material under two secrets and the
+  correlation ids, and `golden/render.txt` holds them; twins: `check` refuses what the frame refuses for its plan, a
+  frame is a function of its fills, key material follows the secret and not the namespace, a correlation id is its
+  attempt's and no planned role's, no `Debug` shows a planted secret, key or captured value. Seventeen mutants, each
+  killed: literals encoded, `+` for a space, lower-case hex, reserved names by case (alive until a `Content-Length`
+  case was added), a captured `.` segment let through, no content type, the query's `?`, a filled header unchecked, a
+  decorated name not reserved, `%` in a literal, `Sent` from the run's start, a captured string as its JSON text,
+  `Secret32` from the namespace, a derived `Debug`, the correlation id under the rendered key, the HMAC's pads swapped,
+  the role left out of the secret.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -859,3 +882,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-22: K2 cut into K2a (pure) and K2b (the shell); decision 15 decided under the gate (a solver and a
   discriminator on Fable, three roles on Opus); decision 11's examples are the host's codes; K2a-1 built (§ Measured):
   an answer's JSON, read by the crate's own reader.
+- 2026-11-22: K2a-2 built (§ Measured): the fills and the request; `Secret32` from the run's secret (ADR-0046
+  decision 3 amended); K2-5 gains the frame's byte identity across attempts, from K2a-2's row.

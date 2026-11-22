@@ -150,6 +150,10 @@ stamps it at replay.
 - **Renderings by family.** A UUID is the rendering key's id under the namespace: one id as text and as bytes. Hex
   and key material are the first words of `key / hex` and `key / secret32`, so a public value rendered under a role
   never shows the bytes of a secret rendered under the same role.
+  *Amended by ADR-0047 decision 15 (K2a-2):* key material is not drawn from the namespace. faker's derivations are
+  public, so every value drawn from the namespace is known to whoever knows it, and a run's journal names it: a
+  `Secret32` is HMAC-SHA256 under the run's secret — 32 bytes the scheduler's shell draws from its OS and holds in
+  memory only — of what it is rendered of and its role, each field after its length.
 
 ### 4. Ids are rendered from the subject, in this crate (amends ADR-0045 decision 7)
 
@@ -1058,3 +1062,6 @@ condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
 - 2026-11-22: ADR-0047 K1e-3b: the log's framing — a value's canonical line, its decoding, the next line, the running
   digest — is `frame`, public, for the scheduler's journal as well; the log's reader and writer stand on it, its bytes
   and `FORMAT` unchanged. `wire` is public, with a list of `u64`s.
+- 2026-11-22: ADR-0047 K2a-2 amends decision 3: `Secret32` from the run's secret by HMAC-SHA256, not from the
+  namespace, which a run's journal names; `render` takes the secret beside the namespace; `golden/render.txt`'s key
+  material is the vectors' two secrets', and it gains correlation ids. The log's bytes and `FORMAT` are unchanged.

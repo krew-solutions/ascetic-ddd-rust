@@ -3,19 +3,27 @@
 //! A rendered value is a function of the run's namespace, what it is rendered
 //! of and a role, drawn with faker's public key derivations:
 //! `root(namespace) / "ascetic-ddd-command-log/rendered" / of / role`. A UUID is
-//! that key's id under the namespace — the same id as text and as bytes; hex and
-//! key material are the first words of `key / family`, `family` being `hex` or
-//! `secret32`, so a public value never shows a secret's bytes rendered under the
-//! same role. `vectors/render.py` computes them outside the crate (H2).
+//! that key's id under the namespace — the same id as text and as bytes; hex is
+//! the first words of `key / hex`. Key material is not drawn from the
+//! namespace (ADR-0047 decision 15): faker's derivations are public, so every
+//! value drawn from the namespace is known to whoever knows it, and a run's
+//! evidence names it. A `Secret32` is HMAC-SHA256 under the run's secret — 32
+//! bytes the shell draws from its OS and holds in memory only — of what it is
+//! rendered of and its role. A step's correlation id is drawn from the
+//! namespace under a key of its own, `root(namespace) /
+//! "ascetic-ddd-command-log/correlation" / step / attempt`, which no planned
+//! role reaches. `vectors/render.py` computes them outside the crate (H2).
 
 use std::fmt;
 
 use ascetic_ddd_faker::{Encoder, Key, KeyPart, Namespace, Seed};
+use sha2::{Digest, Sha256};
 
 use crate::record::{Form, Of, Payload, Rendering, Span, StepId, Subject, TimeRendering};
 
-/// A value to splice, before its form writes it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A value to splice, before its form writes it. Its `Debug` shows only its
+/// kind: it may be key material, or a value a step captured.
+#[derive(Clone, PartialEq, Eq)]
 pub enum Filled {
     /// A text: a JSON string token, or its UTF-8 bytes raw.
     Text(String),
@@ -25,6 +33,36 @@ pub enum Filled {
     Integer(i64),
     /// One JSON value's text, as a response held it: as it is, either form.
     Json(String),
+}
+
+impl fmt::Debug for Filled {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Filled::Text(s) => write!(f, "Text({} bytes)", s.len()),
+            Filled::Bytes(b) => write!(f, "Bytes({} bytes)", b.len()),
+            Filled::Integer(_) => f.write_str("Integer"),
+            Filled::Json(s) => write!(f, "Json({} bytes)", s.len()),
+        }
+    }
+}
+
+/// The run's secret: 32 bytes the shell draws from its OS at the run's start
+/// and holds in memory only, the key of every `Secret32` the run renders. It
+/// is never serialised, and its `Debug` shows nothing of it.
+#[derive(Clone)]
+pub struct RunSecret([u8; 32]);
+
+impl RunSecret {
+    /// A secret of these bytes.
+    pub fn new(bytes: [u8; 32]) -> RunSecret {
+        RunSecret(bytes)
+    }
+}
+
+impl fmt::Debug for RunSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RunSecret(..)")
+    }
 }
 
 /// Why a payload could not be filled.
@@ -123,8 +161,70 @@ fn words(key: &Key, family: &str, len: usize) -> Vec<u8> {
         .collect()
 }
 
-/// The value of a rendered hole.
-pub fn render(namespace: Namespace, of: &Of, role: &str, rendering: Rendering) -> Filled {
+/// `bytes`, after their length as eight bytes little-endian: a prefix-free field.
+fn field(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    out.extend_from_slice(bytes);
+}
+
+/// What a `Secret32` is the HMAC of: the family, what it is rendered of, its
+/// role, each field prefixed by its length.
+fn secret_message(of: &Of, role: &str) -> Vec<u8> {
+    let mut out = b"ascetic-ddd-command-log/secret32".to_vec();
+    let subject = |out: &mut Vec<u8>, s: &Subject| {
+        field(out, s.kind.as_bytes());
+        field(out, &s.scope);
+        out.extend_from_slice(&s.index.to_le_bytes());
+    };
+    match of {
+        Of::Subject(s) => {
+            out.push(0);
+            subject(&mut out, s);
+        }
+        Of::Step(step) => {
+            out.push(1);
+            subject(&mut out, &step.subject);
+            field(&mut out, step.label.as_bytes());
+            out.extend_from_slice(&step.n.to_le_bytes());
+        }
+    }
+    field(&mut out, role.as_bytes());
+    out
+}
+
+/// HMAC-SHA256 (RFC 2104) under a 32-byte key.
+fn hmac(key: &RunSecret, message: &[u8]) -> Vec<u8> {
+    let pad = |b: u8| -> Vec<u8> {
+        key.0
+            .iter()
+            .copied()
+            .chain(std::iter::repeat_n(0, 32))
+            .map(|k| k ^ b)
+            .collect()
+    };
+    let inner = Sha256::new()
+        .chain_update(pad(0x36))
+        .chain_update(message)
+        .finalize();
+    Sha256::new()
+        .chain_update(pad(0x5c))
+        .chain_update(inner)
+        .finalize()
+        .to_vec()
+}
+
+/// The value of a rendered hole: public renderings from the namespace, key
+/// material from the run's secret.
+pub fn render(
+    namespace: Namespace,
+    secret: &RunSecret,
+    of: &Of,
+    role: &str,
+    rendering: Rendering,
+) -> Filled {
+    if rendering == Rendering::Secret32 {
+        return Filled::Bytes(hmac(secret, &secret_message(of, role)));
+    }
     let key = key(namespace, of, role);
     match rendering {
         Rendering::UuidText => Filled::Text(key.uuid(&namespace).to_string()),
@@ -135,8 +235,23 @@ pub fn render(namespace: Namespace, of: &Of, role: &str, rendering: Rendering) -
                 .map(|b| format!("{b:02x}"))
                 .collect(),
         ),
-        Rendering::Secret32 => Filled::Bytes(words(&key, "secret32", 32)),
+        Rendering::Secret32 => Filled::Bytes(hmac(secret, &secret_message(of, role))),
     }
+}
+
+/// Attempt `attempt`'s correlation id of `step`: 32 lower-case hex digits, the
+/// first words of `root(namespace) / "ascetic-ddd-command-log/correlation" /
+/// step / attempt / id` (ADR-0047 decision 15). A server's record of the
+/// attempt joins to it; nothing planned renders under its key.
+pub fn correlation(namespace: Namespace, step: &StepId, attempt: u32) -> String {
+    let key = Key::root(Seed(namespace.0))
+        .child("ascetic-ddd-command-log/correlation")
+        .part(step)
+        .at(u64::from(attempt));
+    words(&key, "id", 16)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// The value of a time hole: `base` plus `offset`, microseconds since the

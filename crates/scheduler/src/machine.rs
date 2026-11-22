@@ -32,16 +32,9 @@ use ascetic_ddd_command_log::window::{Window, digest};
 /// A line of the log: the header's is 1, the first step's 2.
 pub type Line = u64;
 
-/// A value a step's answer gave for a slot of a subject (decision 5).
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Captured {
-    /// Whose.
-    pub subject: Subject,
-    /// Which.
-    pub slot: Name,
-    /// The value, as the answer gave it.
-    pub value: Vec<u8>,
-}
+/// A value a step's answer gave for a slot of a subject (decision 5): the
+/// command log's, which fills the holes it is spliced into (decision 15).
+pub use ascetic_ddd_command_log::fills::Captured;
 
 /// How an attempt ended, as its handler judged it (decision 6).
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -15,8 +15,9 @@ A log is JSON Lines: a header, one line a planned step, a trailer.
   (subject, label, occurrence), planned at a time, ordered by its edges: what
   must happen first, a barrier over a wave, the step before it on its stream.
 - **A value the generation cannot know is a hole** beside the bytes it fills:
-  rendered at replay from the run's namespace and a subject, captured from an
-  earlier step's outcome, or a time.
+  rendered at replay from the run's namespace and a subject — key material
+  from the run's secret instead, which never leaves the run's memory —
+  captured from an earlier step's outcome, or a time.
 - **One byte form.** Fields in their declared order, no whitespace; integers
   that can pass 2⁵³ as strings; bytes as base64. A reader re-encodes every line
   and refuses one that differs.
@@ -105,3 +106,13 @@ pair, a member named twice, nesting past 128 or an exponent past 18 digits;
 numbers kept as their text and equal by their decimal values; RFC 6901
 pointers. serde_json is not used for answers: its number categories follow
 its build's features, and a host's workspace may turn them on for every crate.
+
+## A REST step's frame
+
+`request::frame` builds what a REST step sends from its operation, its call
+and `fills::Fills` — the namespace, the run's secret, the run's start, the
+frame's first send and the captured values (ADR-0047 decision 15): the path
+template's literals verbatim and its values percent-encoded, the query in
+order, the planned headers checked and none of them reserved, the body's spans
+filled. `request::check` is its static half, for the validator. No `Debug` of a
+fill, a frame or a captured value shows a secret or a captured value.
