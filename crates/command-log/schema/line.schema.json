@@ -82,7 +82,7 @@
       "type": "object",
       "properties": {
         "format": {
-          "const": 3
+          "const": 4
         },
         "algorithm": {
           "type": "string"
@@ -188,6 +188,21 @@
         },
         "route_timeout": {
           "$ref": "#/$defs/u64"
+        },
+        "problem": {
+          "type": "string"
+        },
+        "correlation": {
+          "type": "string"
+        },
+        "resend": {
+          "$ref": "#/$defs/u64"
+        },
+        "answer_cap": {
+          "$ref": "#/$defs/u64"
+        },
+        "idle": {
+          "$ref": "#/$defs/u64"
         }
       },
       "required": [
@@ -198,7 +213,12 @@
         "sources",
         "jitter",
         "reserve",
-        "route_timeout"
+        "route_timeout",
+        "problem",
+        "correlation",
+        "resend",
+        "answer_cap",
+        "idle"
       ],
       "additionalProperties": false
     },

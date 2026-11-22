@@ -119,6 +119,26 @@ pub struct Profile {
     /// than `jitter`.
     #[serde(with = "crate::wire::u64s")]
     pub route_timeout: u64,
+    /// Where the stand's problem documents hold their stable code, an RFC 6901
+    /// pointer (ADR-0047 decision 15): what `not_run` and an outcome's
+    /// `problem` name.
+    pub problem: String,
+    /// The header the shell sets each attempt's correlation id in, so that a
+    /// server's record joins to one attempt (ADR-0047 decision 15): no step
+    /// plans it, no decorator sets it.
+    pub correlation: String,
+    /// Microseconds a harness resend waits at least after the answer it
+    /// follows, `Retry-After` the longer (ADR-0047 decision 15).
+    #[serde(with = "crate::wire::u64s")]
+    pub resend: u64,
+    /// The most bytes of an answer's body the shell reads: past it the body
+    /// is unreadable, and only its status is judged (ADR-0047 decision 15).
+    #[serde(with = "crate::wire::u64s")]
+    pub answer_cap: u64,
+    /// Microseconds the stand's gateway keeps an idle client connection: the
+    /// shell retires a pooled one before it (ADR-0047 decision 15).
+    #[serde(with = "crate::wire::u64s")]
+    pub idle: u64,
 }
 
 /// An operation a step calls, from the host's contracts.
@@ -294,7 +314,10 @@ pub struct Record {
     pub after: Vec<Dep>,
     /// What it does.
     pub action: Action,
-    /// The outcomes that count as expected; any other fails the step.
+    /// The outcomes that count as expected; any other fails the step. Empty
+    /// only for a step that awaits a dependency only sent, whose answer, any,
+    /// is expected, and a host call's, which its port judges (ADR-0047
+    /// decision 15).
     pub expect: Vec<Outcome>,
     /// Values its outcome provides to later steps.
     pub capture: Vec<Capture>,
@@ -467,12 +490,13 @@ pub struct HostCall {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Outcome {
-    /// A response: its status, a problem's type when refused, predicates on its
-    /// body.
+    /// A response: its status, a problem's code when refused, predicates on
+    /// its body.
     Response {
         /// The status.
         status: u16,
-        /// The problem's type, for a refusal.
+        /// The problem's code, at the profile's pointer, for a refusal; none
+        /// for an answer with no readable code (ADR-0047 decision 15).
         problem: Option<Name>,
         /// What must hold of the body.
         body: Vec<Predicate>,
@@ -500,9 +524,10 @@ pub struct Predicate {
 pub enum Test {
     /// Present.
     Exists,
-    /// Equal to the value, as JSON text.
+    /// Equal to the value, given as JSON text: equal as values, numbers by
+    /// their decimal values, objects in any order (ADR-0047 decision 15).
     Equals(Value),
-    /// An array containing the value, as JSON text.
+    /// An array holding an element equal to the value, given as JSON text.
     Contains(Value),
 }
 
@@ -528,7 +553,9 @@ pub enum Source {
     Header(String),
     /// A JSON pointer into the response body, or into an observed event.
     Json(String),
-    /// The `Location` header.
+    /// The last non-empty path segment of the `Location` header, its query
+    /// and fragment dropped, percent-decoded: a created resource's id
+    /// (ADR-0047 decision 15). The whole header is `Header("Location")`.
     Location,
 }
 
@@ -683,7 +710,8 @@ pub enum Rendering {
 pub enum TimeBase {
     /// The run's start.
     RunStart,
-    /// The moment the step is sent.
+    /// The moment the step's frame is first dispatched: a call's resends
+    /// carry its first attempt's (ADR-0047 decision 15).
     Sent,
 }
 

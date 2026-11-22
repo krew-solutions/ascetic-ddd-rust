@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e) and K2a-1 to K2a-3 built (§ Measured), K2a-4 next. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a-1 to K2a-3 and K2a-4a built (§ Measured), K2a-4b next. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -21,7 +21,8 @@ To be built in slices, each a commit of its own:
   K1-4's `PendingByRate` moved to K1e with the bound it mutates.)
 - **K2a** (pure, decision 15): a REST attempt's frame and its judgement, in five parts: **K2a-1** an answer's JSON
   (`command-log::json`); **K2a-2** the fills and the request, `Secret32` from a run secret; **K2a-3** reading an
-  answer, and `scheduler::judge`; **K2a-4** FORMAT 4 and the validator's rules; **K2a-5** the machine, the journal
+  answer, and `scheduler::judge`; **K2a-4** FORMAT 4 and the validator's rules, in two: **K2a-4a** the model,
+  **K2a-4b** the rules over steps; **K2a-5** the machine, the journal
   and the fold: polls re-polled, resends spaced and licensed.
 - **K2b** (`crates/load-run`, the shell): REST, the clock, the reader, the journal writer, the gates.
 - **The first host run:** REST only, on the compose stand, `sources = 1` — a correctness run.
@@ -811,6 +812,22 @@ and `unreachable`.
   overflow, a body past the cap read — three alive until their cases were added (a poll without an expectation, a
   poll's 304, a fragment without a query).
 
+**K2a-4a — FORMAT 4's model** (2026-11-22): the profile names what the shell reads and sends by — `problem` (the
+pointer to a problem's code; the host's `/code`), `correlation` (the header of each attempt's correlation id),
+`resend` (a harness resend's floor), `answer_cap` (the most of a body the shell reads) and `idle` (the stand's
+downstream idle) — and the header rule checks them: the pointer RFC 6901's, the correlation header a token outside
+the reserved names in any case, the three numbers above zero; `vectors/reference.py` decides the same.
+`FORMAT_VERSION` 4, `RULES_REVISION` 7. The record's documentation says what decision 15 made of it: `problem` is a
+code, an empty `expect` a sent-only step's or a host call's, `Location` the last segment, `Equals` value equality,
+`TimeBase::Sent` the frame's first dispatch. The sample no longer plans an `X-Request-Id` per step (the correlation
+id is the shell's, one an attempt): its profile names `X-Request-Id` as the correlation header, and the rendered
+header it planned is `X-Trace`.
+- **Executors**: a twin per field (a pointer without its slash or with a bad escape, a correlation header missing,
+  not a token, reserved in either case, no floor, no cap, no idle; an empty pointer, the document itself, passes);
+  the golden log, its schema and `FORMAT` regenerated; the rules' meaning pinned at revision 7; the corpus's journals
+  re-pinned under (2, 1), and the golden runs written again, their log and validator being the new ones — every
+  class and verdict as before.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -913,3 +930,4 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-22: K2a-2 built (§ Measured): the fills and the request; `Secret32` from the run's secret (ADR-0046
   decision 3 amended); K2-5 gains the frame's byte identity across attempts, from K2a-2's row.
 - 2026-11-22: K2a-3 built (§ Measured): reading an answer, and the judge.
+- 2026-11-22: K2a-4 cut into K2a-4a and K2a-4b; K2a-4a built (§ Measured): FORMAT 4's model.

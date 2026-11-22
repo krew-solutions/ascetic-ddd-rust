@@ -21,6 +21,9 @@ pub const TIMEOUT: u64 = 10_000_000;
 /// The fixture stand's gateway timeout.
 pub const ROUTE_TIMEOUT: u64 = 15_000_000;
 
+/// The least a harness resend waits after the answer it follows.
+pub const RESEND: u64 = 100;
+
 pub fn subject(kind: &str, index: u64) -> Subject {
     Subject {
         kind: kind.into(),
@@ -70,6 +73,11 @@ pub fn header() -> Header {
             jitter: 0,
             reserve: 0,
             route_timeout: ROUTE_TIMEOUT,
+            problem: "/code".into(),
+            correlation: "X-Correlation-Id".into(),
+            resend: RESEND,
+            answer_cap: 1 << 20,
+            idle: 3_600_000_000,
         },
         window: W,
         read_ahead: W,

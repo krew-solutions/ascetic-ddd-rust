@@ -4,7 +4,7 @@
 mod fixture;
 
 use ascetic_ddd_command_log::record::{
-    Action, Codec, Dep, Form, Hole, Of, On, Record, Rendering, StepId, Value,
+    Action, Codec, Dep, Form, Hole, Of, On, Profile, Record, Rendering, StepId, Value,
 };
 use ascetic_ddd_command_log::validate::{Host, NoHost, Rule};
 use fixture::*;
@@ -886,6 +886,10 @@ fn the_rules_meaning_is_pinned_to_its_revision() {
             6,
             "a7b4728558e9465c6d197224f8d4d22a9d141956bb0581f8c43335a513f46aac",
         ),
+        (
+            7,
+            "0ae498d98f8cf6e01c6913a4d382c12067abb6cee01289d7a311030226fcd67a",
+        ),
     ];
     let mut digest = Sha256::new();
     for line in fixture::corpus::lines() {
@@ -1281,6 +1285,47 @@ fn sent() {
         },
     ]);
     assert!(report.violations.is_empty(), "{:?}", report.violations);
+}
+
+/// ADR-0047 decision 15: the profile names a problem pointer, a correlation
+/// header of its own, a resend floor, an answer cap and the stand's idle.
+#[test]
+fn the_profile_names_what_the_shell_reads_and_sends_by() {
+    let seen = [step(id("device", 1, "seen", 0), 10)];
+    let report = run_with(header(), &seen, &NoHost, 1_000);
+    assert!(report.violations.is_empty(), "{:?}", report.violations);
+    type Edit = (&'static str, fn(&mut Profile));
+    let edits: [Edit; 9] = [
+        ("a pointer without its slash", |p| p.problem = "code".into()),
+        ("a pointer's bad escape", |p| p.problem = "/c~2".into()),
+        ("no correlation header", |p| p.correlation = String::new()),
+        ("a correlation header not a token", |p| {
+            p.correlation = "X Id".into()
+        }),
+        ("a reserved correlation header", |p| {
+            p.correlation = "Content-Length".into()
+        }),
+        ("a reserved one in another case", |p| {
+            p.correlation = "hOST".into()
+        }),
+        ("no resend floor", |p| p.resend = 0),
+        ("no answer cap", |p| p.answer_cap = 0),
+        ("no idle", |p| p.idle = 0),
+    ];
+    for (name, edit) in edits {
+        let mut h = header();
+        edit(&mut h.profile);
+        let report = run_with(h, &seen, &NoHost, 1_000);
+        assert_eq!(pairs(&report), vec![(1, Rule::Header)], "{name}");
+    }
+    let mut h = header();
+    h.profile.problem = String::new();
+    let report = run_with(h, &seen, &NoHost, 1_000);
+    assert!(
+        report.violations.is_empty(),
+        "the document itself: {:?}",
+        report.violations
+    );
 }
 
 /// Deadlines: an operation's below the route timeout by more than the

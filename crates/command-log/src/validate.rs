@@ -768,6 +768,36 @@ impl<H: Host> Pass<'_, H> {
                 ));
             }
         }
+        // What the shell reads and sends by (ADR-0047 decision 15): a
+        // pointer to the problem's code, a correlation header no step or
+        // decorator may take, a resend's floor, an answer's cap, the stand's
+        // idle.
+        let profile = &self.header.profile;
+        if crate::json::tokens(&profile.problem).is_err() {
+            found.push(format!(
+                "profile: the problem pointer {:?} is not RFC 6901's",
+                profile.problem
+            ));
+        }
+        if !crate::request::token(&profile.correlation)
+            || crate::request::RESERVED
+                .iter()
+                .any(|r| r.eq_ignore_ascii_case(&profile.correlation))
+        {
+            found.push(format!(
+                "profile: the correlation header {:?} is not a header's name of its own",
+                profile.correlation
+            ));
+        }
+        for (name, v) in [
+            ("resend", profile.resend),
+            ("answer_cap", profile.answer_cap),
+            ("idle", profile.idle),
+        ] {
+            if v == 0 {
+                found.push(format!("profile: no {name}"));
+            }
+        }
         let mut channels = BTreeSet::new();
         for c in &self.header.channels {
             if !channels.insert(c.name.clone()) {

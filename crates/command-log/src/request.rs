@@ -165,7 +165,8 @@ fn tchar(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
 }
 
-fn token(s: &str) -> bool {
+/// Whether `s` is an RFC 9110 token: a header's or a method's name.
+pub fn token(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(tchar)
 }
 

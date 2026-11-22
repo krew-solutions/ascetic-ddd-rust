@@ -74,6 +74,7 @@ The rules (ADR-0046 decisions 5, 7, 9):
 """
 
 import json
+import re
 import sys
 
 AWAIT = {"sent": 0, "settled": 1, "expected": 2}
@@ -308,6 +309,16 @@ def verdict(text, clock="cursor"):
     if len(names) != len(set(names)):
         found.add((1, "header"))
     if refused_limits(header)[0]:
+        found.add((1, "header"))
+    pointer = profile["problem"]
+    if pointer and (not pointer.startswith("/") or re.search(r"~(?![01])", pointer)):
+        found.add((1, "header"))
+    tchar = set("!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+    corr = profile["correlation"]
+    reserved = {"host", "content-length", "transfer-encoding", "connection", "content-type"}
+    if not corr or any(c not in tchar for c in corr) or corr.lower() in reserved:
+        found.add((1, "header"))
+    if any(int(profile[f]) == 0 for f in ("resend", "answer_cap", "idle")):
         found.add((1, "header"))
     route, jitter = int(profile["route_timeout"]), int(profile["jitter"])
     for op in header["operations"]:

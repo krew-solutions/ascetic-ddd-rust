@@ -17,13 +17,13 @@ use crate::frame::{self, Digest, FrameError};
 use crate::record::{Header, Line, Record, Trailer};
 
 /// The format a reader accepts, and a writer writes: exactly this one.
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
 
 /// The byte form's identity: the SHA-256 of the golden log
 /// (`golden/c1.jsonl`), which holds every record and hole variant. A change to
 /// how any line is written changes the golden log, and so this, in the same
 /// edit (ADR-0046 decision 6, F2).
-pub const FORMAT: &str = "34d0604f25ecb8d0fa280db8b55837ff0ba21e52e3ab4d0ceb89b1e5ba24149d";
+pub const FORMAT: &str = "f4611ec575e2c880b5c6ba8bfa33c6d1a4d124e6c0234619defce732188c0fa0";
 
 /// The canonical bytes of a line, `\n` included.
 pub fn encode(line: &Line) -> Result<Vec<u8>, LogError> {

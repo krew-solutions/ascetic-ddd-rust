@@ -144,7 +144,7 @@ const JOURNALS: &[(u32, u32, &str)] = &[
     (
         2,
         1,
-        "b607aaf27a52910aba004cd40da4fb3e9997a438d37dcb9aad4fc6ca89dce7a2",
+        "cc56f3d9a66f5f2c2a34aef4c1e65c1509205d5b786e140d3fb1851197e5eaba",
     ),
 ];
 

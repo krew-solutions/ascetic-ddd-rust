@@ -1,4 +1,4 @@
-{"header":{"journal":2,"machine":1,"source":"verdict","log":"92b9e10ca70d01bd7d47d592d00f09adff8e93e09c354eee18c084c98ec718e4","validator":"6: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent","read_ahead":"1000","jitter":"200"}}
+{"header":{"journal":2,"machine":1,"source":"verdict","log":"428490d0ac9b228b0a9b504db79b7ba74067c9d2608ea60b114f1d23b0d77537","validator":"7: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent","read_ahead":"1000","jitter":"200"}}
 {"read":{"at":"0","line":"2","key":{"kind":"device","scope":"Bw==","label":"update","n":0},"action":"rest","cause":null,"after":[]}}
 {"released":{"at":"0","line":"2","intended":"0","released":"0","deadline":"10000000"}}
 {"dispatch":{"at":"0","line":"2","attempt":1,"deadline":"10000000"}}
@@ -11,4 +11,4 @@
 {"end":{"at":"200","line":"3","end":"expected","read":"0","ready":"0","intended":"100","released":"100","dispatched":"100","sent":"100","ended":"200","attempts":1,"critical":{"step":"2"},"bound":["2"],"fault":false}}
 {"answer":{"at":"10000000","line":"2","attempt":1,"judged":"unknown","captured":[],"ignored":null}}
 {"end":{"at":"10000000","line":"2","end":"unknown","read":"0","ready":"0","intended":"0","released":"0","dispatched":"0","sent":"0","ended":"10000000","attempts":1,"critical":null,"bound":[],"fault":false}}
-{"trailer":{"events":"12","steps":"2","sha256":"ab5756cbe15dc29b6aca9daa54928c2ad6b540f2623e5b04cfb9e95850e226c3"}}
+{"trailer":{"events":"12","steps":"2","sha256":"ebce3b7f5fae841bf1aff414e961a5e9c4e8543a3fbeefb14fe7232502c9dd77"}}

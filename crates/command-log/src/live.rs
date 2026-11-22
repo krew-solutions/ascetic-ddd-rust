@@ -33,8 +33,10 @@ use crate::validate::{Host, Limits, Report, Rule, spill_need, validate_on};
 /// `measure`, `cause`, `until`, `sent`, writers awaiting readers settled, the
 /// scheduler's premises not deviable; 5: a producer captures the value its
 /// reader sends; 6: ADR-0047 K1e-2 — the plan's own bound and its peaks
-/// committed, two hot parts beside them, `feasible` for every step's think).
-pub const RULES_REVISION: u32 = 6;
+/// committed, two hot parts beside them, `feasible` for every step's think; 7:
+/// ADR-0047 K2a-4a — the profile's problem pointer, correlation header,
+/// resend floor, answer cap and idle checked).
+pub const RULES_REVISION: u32 = 7;
 
 /// The validator's identity: its revision and its rules' names.
 pub fn validator() -> String {

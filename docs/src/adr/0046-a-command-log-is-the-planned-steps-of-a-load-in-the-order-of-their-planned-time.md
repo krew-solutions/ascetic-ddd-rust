@@ -1065,3 +1065,6 @@ condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
 - 2026-11-22: ADR-0047 K2a-2 amends decision 3: `Secret32` from the run's secret by HMAC-SHA256, not from the
   namespace, which a run's journal names; `render` takes the secret beside the namespace; `golden/render.txt`'s key
   material is the vectors' two secrets', and it gains correlation ids. The log's bytes and `FORMAT` are unchanged.
+- 2026-11-22: ADR-0047 K2a-4a: FORMAT 4. The profile names a problem pointer, a correlation header, a resend floor,
+  an answer cap and the stand's idle, checked by the header rule (`RULES_REVISION` 7); the record's documentation
+  follows ADR-0047 decision 15. No deployed client: the golden log and the corpus are regenerated.

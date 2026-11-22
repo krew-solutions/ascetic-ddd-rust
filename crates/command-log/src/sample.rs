@@ -54,6 +54,11 @@ pub fn header() -> Header {
             jitter: 2_000,
             reserve: 50,
             route_timeout: 15_000_000,
+            problem: "/code".to_owned(),
+            correlation: "X-Request-Id".to_owned(),
+            resend: 100_000,
+            answer_cap: 1 << 20,
+            idle: 3_600_000_000,
         },
         window: 600_000_000,
         read_ahead: 60_000_000,
@@ -193,8 +198,10 @@ pub fn records() -> Vec<Record> {
                 source: 2,
                 path: vec![],
                 query: vec![field("dry", Value::Literal("false".to_owned()))],
+                // The correlation id is the shell's, one an attempt, under the
+                // profile's header (ADR-0047 decision 15): never planned.
                 headers: vec![field(
-                    "X-Request-Id",
+                    "X-Trace",
                     Value::Hole(Hole::Rendered {
                         of: Of::Step(created.clone()),
                         role: "request".to_owned(),
