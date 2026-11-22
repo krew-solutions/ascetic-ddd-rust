@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e) and K2a built (§ Measured), K2b next. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a and K2b-0a built (§ Measured), K2b-0b next. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -25,7 +25,12 @@ To be built in slices, each a commit of its own:
   **K2a-4b** the rules over steps; **K2a-5** the machine, the journal
   and the fold, in two: **K2a-5a** the machine and its model — polls re-polled, resends spaced; **K2a-5b** the
   journal's version 3 and the fold licensing resends.
-- **K2b** (`crates/load-run`, the shell): REST, the clock, the reader, the journal writer, the gates.
+- **K2b** (the shell, decision 16), in parts: **K2b-0a** the frontier in the scheduler, `sim` driven through it;
+  **K2b-0b** the machine re-checking a wake at the instant taken, the fold seeing a resend taken late; **K2b-1** the
+  `load-run` crate — the clock, the frontier's lock, the machine loop, the line source and the journal sink, a scripted
+  carrier; **K2b-2** REST over hyper; **K2b-3** journal version 4's `attempt` line and the receive side's lateness;
+  **K2b-4** frames, correlation, decorators; **K2b-5** resends end to end; **K2b-6** connections on the real clock;
+  **K2b-7** the gates before T0 and the shell's memory; **K2b-8** connections kept and abandoned.
 - **The first host run:** REST only, on the compose stand, `sources = 1` — a correctness run.
 - **K3** facts and the bus; **K4** shaping and the emulated client's retries; **K5** the report.
 
@@ -338,6 +343,69 @@ and ADR-0046 decision 3; § Alternatives Considered keeps what each refuted):
   accepted reconnects within the attempt (the race the host measured on its own hop as `503 UC`). Each rule above
   with a static half is the validator's.
 
+### 16. The shell: inputs ordered by a frontier, HTTP/1.1 attempts, the host's ports
+
+*Decided for K2b* (2026-11-23, under the gate: a blind solver and a discriminator on Fable, then three roles —
+Distributed Systems, Verifiability, Performance — on Opus; it amends decision 4 and refines decisions 1, 9, 10, 11;
+§ Alternatives Considered keeps what each refuted):
+- **Structure.** Two crates hold (`scheduler`'s root forbids what a shell needs). `crates/load-run`: tokio, hyper's
+  `client::conn::http1`, http, http-body, bytes, getrandom, the scheduler, the command log — a dependency allowlist;
+  no hyper-util (its pool is keyed by authority, not by source; it shows no pool, connect or write instant; a dropped
+  response cannot be kept past a deadline), no TLS (the compose stand's listener is plaintext; `Egress::Io` leaves it to
+  the host), HTTP/1.1 only (the gateway negotiates h2 with a real client: a declared difference with its trigger). One
+  machine task. Ports the host implements: `Clock`, `Stand` (a route per step; the gates before T0), `Egress` (connect
+  from a source; its sources and ports; zero linger on an abandoned or capped connection), `Decorator` (once per
+  attempt, seeing the step, the attempt, the caller, the operation, the route, the final frame, the correlation id, the
+  deadline and wall time; only `op.decorated` names back). The line source and the journal sink are ports too, with
+  in-task adapters for tests and thread adapters live: a std thread or `spawn_blocking` under paused time races the
+  stamps. `HostCalls` and `Facts` wait for K3: a log with channels or host calls is refused. The run secret is a
+  parameter (`os_secret()` from the OS, called by the composition root). `Runtimes { machine, sources }`: live, one
+  `current_thread` runtime per source (a lag sampler per worker), the machine on its own; in tests one paused runtime.
+  Dispatch spawns an attempt on its source's runtime, no queue (open loop: a queue hides lateness).
+- **The watermark is constructed** (amending decision 4, whose wording — the minimum of each source's last stamp —
+  stalls on a source awaiting a long answer; `order.rs`'s "the least instant any source may still report" stands). A
+  pure `scheduler::frontier::Frontier` holds the open attempts by deadline, the floors of answers being judged and the
+  inputs pushed: `open` at dispatch (a deadline at or below what was released censors at once, into the machine's
+  buffer); `sent` pushes `Sent` iff before the deadline; `arrived` — past the deadline the censor at the deadline first —
+  holds a floor while the answer is read and judged; `ended` pushes the answer at its arrival, and `Sent` before it if
+  none was (an early local reply); `drain(now, settled)` releases through the least of `now − 1` (or `now`, settled)
+  and the least floor less one, censoring at its deadline every open attempt with no arrival within it. The shell holds
+  it under one mutex, every stamp a clock read and a push under it; inputs are taken in (stamp, line, kind) order
+  among those released, a stamp below the last taken a harness fault — an input caused at an instant may sort below one
+  already taken there, as `sim` takes it (the frontier's property found the key-order rule the roles proposed wrong). The frontier decides a deadline; an attempt's timer only leaves the pool gap.
+  `sim` drives the same frontier.
+- **The machine re-checks a wake at the instant it is taken**: a resend leaves only if `now + J` is before the
+  deadline, a poll only if `now` is; else the step ends as it stands — a real timer breaks A3 by its slack, and a resend
+  taken late is otherwise one the fold refuses. The fold makes such an end undecided when it came more than J after
+  the resend was due.
+- **An attempt**: the frame from a cache (a call's built once and resent byte for byte, a poll's its own); the
+  correlation and decorated headers; `try_send_request`, never once `now` reached the deadline. Two write instants,
+  by the shell's own `Io` counting accepted bytes: the first byte is the commit point (no reconnect after it);
+  `Sent` is the first flush once the body ended. A request handed back unstarted, or with no byte accepted, is no end:
+  the next connection, connects a floor apart, until a byte leaves or the frontier censors. The answer arrives at its
+  last body frame (or at the cap passed: unreadable, the connection closed); it is read lazily — JSON only when a
+  predicate, a capture or a problem needs it — and judged under the hold. Past a censored deadline a connection is kept
+  only if `Sent` was pushed before it, until `sent + route_timeout + grace`, its late answer journaled ignored; an
+  attempt with a byte out and no `Sent` is shut at the censor (else the request completes after its step ended). Pool
+  per (source, endpoint), capped by the source's ports (`open + closes within TIME_WAIT`), retired at checkout before
+  `idle − margin`; a connection the peer closes younger than that is a profile fault. One drop guard per attempt and per
+  connection task: an attempt dropped unended, a panic, hyper's user or dispatch-gone error, a poisoned lock — each a
+  harness fault, never the system's Unknown.
+- **Lateness the fold must see** (journal version 4, an `attempt` line): when the machine's output reached the
+  attempt (`handed`), decorated, checked out, connected, the first write, connect tries and refusals, the hold's age,
+  the source's lag around a censor, abandoned. A censored Unknown is undecided when the source's lag or the hold
+  delayed the answer past J (the receive side, as `call_late` is the send side). A hold is a fault only at a stuck
+  scale (the route timeout), never at J (an OS slice exceeds J).
+- **Before T0**: the commitment; `fits`, with the shell's own memory — kept connections (`Peaks.kept`: REST steps
+  within `R̂ + route_timeout + grace` of the cursor) at their measured cost, answers at the cap; the sources against
+  `Egress`; ports and the descriptor limit against `kept`; the idle margin; the time of `answer::read` + `judge` on an
+  object-dense document of the cap against J/4; `Stand::gates`. A plan refusal writes no journal; a gate refusal
+  writes the header, one fault, the trailer.
+- **Clock**: `now` (µs), `wall`, `sleep_until`, `settled(at)`. Live: a timed wait on the machine thread woken by every
+  push (no spin: a spin takes a core for the run); `settled` returns once `now > at`. Virtual: an own µs counter and
+  sleepers, tokio's documented auto-advance as the idle signal — no scaling of µs to ms, no tokio pin; it panics idle
+  with nothing to wake. A lint refuses `std::time` and `tokio::time` outside `clock`. Every `select!` is `biased`.
+
 ## Consequences
 
 - A load run is judged against the plan the validator checked, with every lateness the run's and every failure
@@ -391,6 +459,13 @@ and ADR-0046 decision 3; § Alternatives Considered keeps what each refuted):
   observation are out at once; **a poll's Unknown as "not yet" in the judge** (the main position): decision 9's
   bracket then starts from a poll that carried no information.
 - **Resends at once** (the machine as built): thousands within a timeout against a fast 500 or a `Retry-After`.
+- **The watermark by a delivery slack** (K2b's main position): no slack fits between a tokio timer's millisecond and
+  J, and every reaction moves by it; **an attempt's timer censoring its deadline**: an answer stamped by its deadline
+  but taken after the tick is lost, and a backdated censor is an ignored answer and a backstop fault.
+- **tokio's paused clock as the virtual one** (the main position): it ticks in milliseconds; **microseconds as tokio
+  milliseconds over its park hook** (the solver): it rests on internals and pins the host's tokio down.
+- **A fault for a hold older than J** (the synthesis, refuted by Performance): an OS slice exceeds J; **a spin before
+  each timer**: a core for the run, and no push seen while spinning.
 - **One SHA-256 a pass and a hashing thread**, **a partitioned machine for telemetry**, **ABBA and snapshots**,
   **TLA+ trace validation of the shell**: later, each on its own trigger (§ Owed).
 
@@ -415,6 +490,8 @@ and ADR-0046 decision 3; § Alternatives Considered keeps what each refuted):
 | K2a-3 | K2a | `vectors/judge.py` over a sample of raw answers — statuses at each class's edges, media types with parameters and in other cases, a code not a string, two `ETag` lines, a header not UTF-8, a `Location` with a query, a fragment, a trailing slash, `%FF` and `%zz`, `Retry-After` in seconds, as a date, negative and huge; an `expect` listing a `not_run` code, one listing 503, `problem: None` against a coded refusal, a 2xx problem document with a `not_run` code; `answer` total over drawn statuses, headers and bodies | rules 3 and 5, or 3 and 6, swapped; a wildcard `None`; the code read from any body; `>` for `≥`; the first of two header lines taken |
 | K2a-4 | K2a | a validator twin and a corpus mutant per new rule; the corpus with expectations that fit its actions, a resend floor, and every safety with `not_run` codes | each rule's condition weakened |
 | K2a-5 | K2a | the machine and `schedule.py`: a poll's Unknown on its grid, one poll out; resends at `max(after, floor)`, none within J of the deadline, scripts drawing `retry_after`, coverage counted (`resend_by_retry_after`, `resend_by_floor`, `resend_past_deadline`); the fold refusing an unlicensed resend; TLA+ `ResendPastDeadline` | a poll's Unknown ending it; a resend at `now`; the floor ignored; an Unknown `Never` step resent |
+| K2b-0a | K2b | the frontier's properties under drawn interleavings with monotone clocks and ties — drains nondecreasing, no input released below a released bound, an arrival by its deadline keeping its judgement, an attempt with none censored once at its deadline before anything later, `Sent` only before the deadline, nothing at or past a live floor, nothing at T0 unsettled; twins: an answer at D, at D + 1 (the censor, then the late answer), a send at D, a deadline inside a released batch, an early local reply; `sim` through it with every digest unchanged | censor at `<`; `Sent` at `<=`; a floor ignored; `through = now` unsettled; an arrival past D uncensored; a double censor; an answer stamped at its end |
+| K2b-0b | K2b | `sim` with wakes taken late: the fold never incoherent; a resend due at `D − J − 1` taken 2 µs late ends as it stood, undecided | the wake's re-check removed |
 | K2-1 | K2 | the shell against an in-memory transport (hyper over `tokio::io::duplex`) under paused time reproduces `sim`'s journal | `std::time::Instant` in a handler |
 | K2-2 | K2 | each cause delayed alone — the reader, the token, the pool, the connect, the write, the dependency — moves exactly one gap of the chain | a gap merged |
 | K2-3 | K2 | on the real clock, multi-thread: chain order, no release before its stamped met instants, the stub's requests per correlation id equal the journal's attempts — a keep-alive connection closed as it is reused included; a request processed then reset before the answer is Unknown; a response stamped 1 µs before its deadline delivered after the tick is Expected | hyper's hidden retry; Unknown read as not taken; deadlines by arrival |
@@ -905,6 +982,29 @@ same; the schema and `vectors/journal.py` read version 3.
   observation; no safety, no wait, no code journaled — three alive until their executors were added (the refusal's
   golden run, the poll's twin, the journaling test).
 
+**K2b-0a — the frontier** (2026-11-23): `scheduler::frontier`, pure, no clock (decision 16): attempts opened with
+their deadlines, indexed by them; a send pushed only before its deadline; an answer held at a floor while judged,
+censoring its attempt at the deadline first if it came past it, and pushed with `Sent` before it if none was; a drain
+releasing through the least of `now − 1` (`now` settled) and the oldest floor less one, after censoring every attempt
+with no answer whose deadline lies within it; an attempt opened within what was released censored at once; a push below
+what was released refused. `sim` drives it: its handlers put what their attempts see on a timeline, applied to the
+frontier as each instant comes, every instant settled, and model no answer past its deadline — the frontier censors
+there.
+- **What it found**: the rule the roles proposed — an input taken below the last taken key a fault — is wrong: an
+  input caused at a settled instant sorts below one already taken there, as `sim` takes it (a `Sent` of line 9 caused
+  by line 10's end, both at one instant). Only stamps are bound across drains; decision 16 says so.
+- **Executors**: the property over 4,000 drawn interleavings of dispatches, sends, answers, judgements and drains on a
+  clock with ties — stamps never back across drains and in key order within one, nothing at or past a live floor, an
+  answer by its deadline and before its release kept, one past it or after it censored once at the deadline and then
+  taken late, an attempt with none censored once, a send only before its deadline or at an early reply — its seed of
+  the same-instant case kept; twins: an answer at its deadline held past it, one past it after its censor, a send at
+  the deadline, a deadline already released, an early reply, nothing at T0 unsettled, a push below refused. `sim`
+  through it leaves every digest as it was: the differential's journals and classes, the stand, the traces, the golden
+  runs, the heap. Nine mutants, each killed: a censor at `<` (it first hung `sim` at a deadline it never censored —
+  `sim` now stops a run turning more than four times its input cap), `Sent` at `<=`, a floor ignored, the unsettled
+  bound at `now`, an arrival past its deadline uncensored, a censored attempt kept open, an early reply unsent, no censor
+  at once, a push below accepted.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -954,6 +1054,12 @@ only and measures move to the 12-core box.
   `preserve_external_request_id`) and lies outside the prefix it strips; whether Envoy rewrites a UUID-shaped
   `x-request-id` under tracing; the largest answer of the plan's operations, for the cap; `Content-Type` parameters
   on answers; Unknown attempts with no line in Envoy's access log, which must be none.
+- **K2b's measurements** (the roles): a burst of a bucket's size at one instant through the scripted carrier, one
+  source and spread — past J at the plan's largest burst, the machine partitioned or the source sharded before the
+  first host run; the stamp lock's wait and the holds' durations, p99.99 and maximum, at the launch's sources on the
+  reference machine; `answer::read` + `judge` at the cap on an object-dense document; bytes per kept connection and
+  open attempt (a counting allocator); a timed wait against a spin, the stand's p99 A/B on one machine; the probe of
+  the virtual clock on the newest tokio (a library job) — each before the first host run.
 - **A cell's residue** (K1e-2): an ended cell keeps its key's strings and its map node, some 0.6–0.9 kB; a compact
   ended cell and keys interned per barrier — trigger: capacity binding on a host plan.
 
@@ -1014,3 +1120,7 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   `MACHINE_REVISION` 2, the model's resend.
 - 2026-11-22: K2a-5b built (§ Measured): journal version 3, the fold licensing resends, `FOLD_REVISION` 2. K2a is
   complete; K2b, the shell, next.
+- 2026-11-23: K2b decided under the gate (decision 16; a solver and a discriminator on Fable, three roles on Opus) and
+  cut into K2b-0a to K2b-8; decision 4 amended: the watermark constructed by a frontier.
+- 2026-11-23: K2b-0a built (§ Measured): the frontier, `sim` driven through it; decision 16's rule on the order of
+  inputs taken corrected by its property: stamps, not keys.

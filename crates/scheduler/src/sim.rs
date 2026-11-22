@@ -9,6 +9,7 @@ use std::sync::Arc;
 use ascetic_ddd_command_log::LogError;
 use ascetic_ddd_command_log::record::{Action, Dep, Header, Hole, Probe, Record, Subject, Value};
 
+use crate::frontier::Frontier;
 use crate::journal;
 use crate::machine::{Captured, End, Entry, Input, Judgement, Line, Machine, Output, Seen};
 use crate::order::Ordered;
@@ -126,7 +127,8 @@ pub fn run_reading(
 /// What carries out the machine's dispatches: a script, or a model stand.
 trait Handler {
     /// Attempt `attempt` of `record` dispatched at `at`, its captured holes
-    /// filled from `captured`, to end by `deadline`: its inputs, queued.
+    /// filled from `captured`, to end by `deadline`: what becomes of it, on the
+    /// timeline.
     #[allow(clippy::too_many_arguments)]
     fn dispatch(
         &mut self,
@@ -136,22 +138,88 @@ trait Handler {
         record: &Record,
         captured: &[Captured],
         deadline: u64,
-        queue: &mut Ordered,
+        timeline: &mut Timeline,
     );
     /// The handler's own next instant, if it has one.
     fn next(&self) -> Option<u64> {
         None
     }
-    /// What it does up to `t`, its inputs queued.
-    fn advance(&mut self, t: u64, queue: &mut Ordered) {
-        let _ = (t, queue);
+    /// What it does up to `t`, on the timeline.
+    fn advance(&mut self, t: u64, timeline: &mut Timeline) {
+        let _ = (t, timeline);
     }
 }
 
-/// The ending of an attempt answered at `answered`, asking for `after`, or
-/// unknown at its deadline.
+/// What an attempt's handler sees, at an instant to come.
+#[derive(Debug)]
+enum Event {
+    Sent {
+        line: Line,
+        attempt: u32,
+    },
+    Answer {
+        line: Line,
+        attempt: u32,
+        judgement: Judgement,
+        after: Option<u64>,
+    },
+}
+
+/// The handlers' events to come, given to the frontier as their instants come
+/// (ADR-0047 decision 16): what the shell's tasks stamp as they see them.
+#[derive(Debug, Default)]
+pub(crate) struct Timeline {
+    events: BTreeMap<(u64, u64), Event>,
+    seq: u64,
+}
+
+impl Timeline {
+    fn add(&mut self, at: u64, e: Event) {
+        self.seq = self.seq.saturating_add(1);
+        self.events.insert((at, self.seq), e);
+    }
+
+    fn first(&self) -> Option<u64> {
+        self.events.first_key_value().map(|(k, _)| k.0)
+    }
+
+    /// Everything seen up to `t`, given to the frontier in its order.
+    fn apply(&mut self, t: u64, frontier: &mut Frontier) -> Result<(), LogError> {
+        let below = |b: crate::frontier::Below| LogError::Malformed {
+            line: 0,
+            reason: b.to_string(),
+        };
+        while let Some(entry) = self.events.first_entry() {
+            let at = entry.key().0;
+            if at > t {
+                break;
+            }
+            match entry.remove() {
+                Event::Sent { line, attempt } => frontier.sent(at, line, attempt).map_err(below)?,
+                Event::Answer {
+                    line,
+                    attempt,
+                    judgement,
+                    after,
+                } => {
+                    let hold = frontier.arrived(at, line, attempt).map_err(below)?;
+                    let seen = Seen {
+                        after,
+                        ..Seen::default()
+                    };
+                    frontier.ended(hold, judgement, seen).map_err(below)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The answer of an attempt answered at `answered`, asking for `after`: on
+/// the timeline if it comes by the deadline. `sim` models no answer past it:
+/// the frontier censors the attempt at its deadline.
 fn answer(
-    queue: &mut Ordered,
+    timeline: &mut Timeline,
     line: Line,
     attempt: u32,
     answered: Option<u64>,
@@ -159,28 +227,18 @@ fn answer(
     judgement: Judgement,
     after: Option<u64>,
 ) {
-    match answered {
-        Some(t) if t <= deadline => queue.push(
+    if let Some(t) = answered
+        && t <= deadline
+    {
+        timeline.add(
             t,
-            Input::Ended {
+            Event::Answer {
                 line,
                 attempt,
                 judgement,
-                seen: Seen {
-                    after,
-                    ..Seen::default()
-                },
+                after,
             },
-        ),
-        _ => queue.push(
-            deadline,
-            Input::Ended {
-                line,
-                attempt,
-                judgement: Judgement::Unknown,
-                seen: Seen::default(),
-            },
-        ),
+        );
     }
 }
 
@@ -197,12 +255,12 @@ impl Handler for Scripted<'_> {
         record: &Record,
         _: &[Captured],
         deadline: u64,
-        queue: &mut Ordered,
+        timeline: &mut Timeline,
     ) {
         let a = (self.script)(line, attempt, record);
         let sent = at.saturating_add(a.sent_after);
         if sent < deadline {
-            queue.push(sent, Input::Sent { line, attempt });
+            timeline.add(sent, Event::Sent { line, attempt });
         }
         // An attempt whose bytes never left is answered by nobody.
         let answered = (sent < deadline)
@@ -210,7 +268,7 @@ impl Handler for Scripted<'_> {
             .flatten()
             .map(|d| sent.saturating_add(d));
         answer(
-            queue,
+            timeline,
             line,
             attempt,
             answered,
@@ -233,6 +291,21 @@ fn drive(
 ) -> Result<Run, LogError> {
     let mut machine = Machine::unbounded(Arc::new(header), read_ahead);
     let mut queue = Ordered::new();
+    let mut timeline = Timeline::default();
+    let mut frontier = Frontier::new();
+    // What the handlers saw up to `t`, through the frontier, into the queue:
+    // the instant settled, as nothing in `sim` is stamped later at it.
+    let settle = |t: u64,
+                  timeline: &mut Timeline,
+                  frontier: &mut Frontier,
+                  queue: &mut Ordered|
+     -> Result<(), LogError> {
+        timeline.apply(t, frontier)?;
+        for (at, input) in frontier.drain(t, true) {
+            queue.push(at, input);
+        }
+        Ok(())
+    };
     let mut wakes: BTreeSet<u64> = BTreeSet::new();
     // The lines read and not ended, for their dispatches.
     let mut live: BTreeMap<Line, Arc<Record>> = BTreeMap::new();
@@ -261,7 +334,18 @@ fn drive(
         journal: Vec::new(),
     };
     queue.push(0, Input::Wake);
+    // Every turn takes an input, applies an event or moves time on; a run
+    // turning more often than that loops (a frontier that never censors a
+    // deadline it names, say), and is stopped rather than left to hang.
+    let mut turns = 0u64;
     loop {
+        turns = turns.saturating_add(1);
+        if turns > INPUTS.saturating_mul(4) {
+            return Err(LogError::Malformed {
+                line: 0,
+                reason: format!("the run turned {turns} times: it loops"),
+            });
+        }
         // The next instant: an input, a wake, the handler's own, or the next
         // line's reading.
         let reading = pending.as_ref().map(|(t, _)| (*t).max(machine.now()));
@@ -269,6 +353,8 @@ fn drive(
             queue.first(),
             wakes.first().copied(),
             handler.next(),
+            timeline.first(),
+            frontier.next_deadline(),
             reading,
         ]
         .into_iter()
@@ -276,7 +362,7 @@ fn drive(
         .min() else {
             break;
         };
-        handler.advance(t, &mut queue);
+        handler.advance(t, &mut timeline);
         while let Some((when, r)) = pending.take() {
             if when.max(machine.now()) > t {
                 pending = Some((when, r));
@@ -291,6 +377,7 @@ fn drive(
             wakes.pop_first();
             queue.push(t, Input::Wake);
         }
+        settle(t, &mut timeline, &mut frontier, &mut queue)?;
         while let Some((at, input)) = queue.pop(t) {
             let taken_input = keep.then(|| input.clone());
             if let Some(input) = &taken_input
@@ -324,9 +411,18 @@ fn drive(
                         deadline,
                         captured,
                     } => {
+                        if let Some((at, censor)) = frontier.open(line, attempt, deadline) {
+                            queue.push(at, censor);
+                        }
                         if let Some(record) = live.get(&line) {
                             handler.dispatch(
-                                at, line, attempt, record, &captured, deadline, &mut queue,
+                                at,
+                                line,
+                                attempt,
+                                record,
+                                &captured,
+                                deadline,
+                                &mut timeline,
                             );
                         }
                         if attempt > 1 {
@@ -355,6 +451,7 @@ fn drive(
             }
             run.held = run.held.max(machine.held());
             run.pending = run.pending.max(live.len());
+            settle(t, &mut timeline, &mut frontier, &mut queue)?;
         }
     }
     run.entries.sort_by_key(|e| e.line);
@@ -549,13 +646,13 @@ impl Handler for Stand<'_> {
         _: &Record,
         captured: &[Captured],
         deadline: u64,
-        queue: &mut Ordered,
+        timeline: &mut Timeline,
     ) {
         let (sent_after, there, back) = (self.delays)(line, attempt);
         let sent = at.saturating_add(sent_after);
         if sent >= deadline {
             answer(
-                queue,
+                timeline,
                 line,
                 attempt,
                 None,
@@ -565,14 +662,14 @@ impl Handler for Stand<'_> {
             );
             return;
         }
-        queue.push(sent, Input::Sent { line, attempt });
+        timeline.add(sent, Event::Sent { line, attempt });
         let failure = self
             .failure
             .filter(|(l, _)| *l == line && attempt == 1)
             .map(|(_, f)| f);
         if failure == Some(Failure::LostRequest) {
             answer(
-                queue,
+                timeline,
                 line,
                 attempt,
                 None,
@@ -592,7 +689,7 @@ impl Handler for Stand<'_> {
         self.arriving.first_key_value().map(|(k, _)| k.0)
     }
 
-    fn advance(&mut self, t: u64, queue: &mut Ordered) {
+    fn advance(&mut self, t: u64, timeline: &mut Timeline) {
         while let Some((&(arrived, line, attempt), _)) = self.arriving.first_key_value() {
             if arrived > t {
                 break;
@@ -609,7 +706,7 @@ impl Handler for Stand<'_> {
                 Some(Failure::LostRequest) | None => (self.process(line, &captured), true),
             };
             answer(
-                queue,
+                timeline,
                 line,
                 attempt,
                 answered.then(|| arrived.saturating_add(back)),
