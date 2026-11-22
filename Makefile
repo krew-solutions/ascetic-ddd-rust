@@ -106,10 +106,11 @@ host-features: ## the stream id's golden table and properties, the command log's
 	$(CARGO) test $(HOST_FEATURES)
 	$(CARGO) test $(HOST_FEATURES) --features raw_value
 
-vectors: ## byte forms checked outside the crates, python3's standard library only: faker's SipHash against the reference implementation's published vector, the command log's golden log and the scheduler's golden journal against their normative schemas and their trailers, its renderings against golden/render.txt, its compressed logs through the zstd CLI
+vectors: ## byte forms checked outside the crates, python3's standard library only: faker's SipHash against the reference implementation's published vector, the command log's golden log and the scheduler's golden journal and golden runs against their normative schemas and their trailers, its renderings against golden/render.txt, its compressed logs through the zstd CLI
 	python3 -I crates/faker/vectors/key_vectors.py > /dev/null
 	python3 -I crates/command-log/vectors/format.py crates/command-log/golden/c1.jsonl
 	python3 -I crates/scheduler/vectors/journal.py crates/scheduler/golden/journal.jsonl
+	for f in crates/scheduler/golden/runs/*.jsonl; do python3 -I crates/scheduler/vectors/journal.py $$f > /dev/null || exit 1; done
 	python3 -I crates/command-log/vectors/render.py | diff - crates/command-log/golden/render.txt
 	$(CARGO) run -q -p ascetic-ddd-command-log --example zstd_golden | zstd -dc | cmp - crates/command-log/golden/c1.jsonl
 	zstd -dc crates/command-log/golden/c1.jsonl.zst | cmp - crates/command-log/golden/c1.jsonl

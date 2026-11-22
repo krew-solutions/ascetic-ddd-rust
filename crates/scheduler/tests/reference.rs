@@ -18,6 +18,7 @@ use ascetic_ddd_scheduler::machine::{
     Captured, Critical, End, Entry, Input, Judgement, MACHINE_REVISION, Skip,
 };
 use ascetic_ddd_scheduler::sim::{Attempt, Run, run_reading};
+use ascetic_ddd_scheduler::verdict::{FOLD_REVISION, Log, fold};
 use fixture::*;
 use serde_json::{Value as Json, json};
 
@@ -35,6 +36,9 @@ fn script(seed: u64, log: &str) -> impl Fn(u64, u32, &Record) -> Attempt + use<>
             0 => Judgement::Unexpected,
             1 => Judgement::NotTaken,
             2 => Judgement::Unknown,
+            // An expected answer without the values it was to capture: its
+            // readers are skipped, and it is their root (K1e-3c-2).
+            _ if !r.capture.is_empty() && draw("bare", 6) == 0 => Judgement::Expected(vec![]),
             _ => Judgement::Expected(
                 r.capture
                     .iter()
@@ -128,8 +132,9 @@ fn entry_json(e: &Entry) -> Json {
 /// What the machine decided in the differential's runs, their journals'
 /// digests by journal version and machine revision (ADR-0047 K1e-3): a machine
 /// that decides otherwise raises its revision, a journal written otherwise its
-/// version. A corpus that changes changes the digest with neither: re-pin it
-/// then, as revision 6's MEANINGS was.
+/// version. A corpus or a script that changes changes the digest with
+/// neither: re-pin it then, as revision 6's MEANINGS was (K1e-3c-2's bare
+/// answers re-pinned (2, 1)).
 const JOURNALS: &[(u32, u32, &str)] = &[
     (
         1,
@@ -139,9 +144,20 @@ const JOURNALS: &[(u32, u32, &str)] = &[
     (
         2,
         1,
-        "f8fb381aca89f5731bd36cb60bb4af385e6fae6f58a7186bb473fa70c03ba233",
+        "b607aaf27a52910aba004cd40da4fb3e9997a438d37dcb9aad4fc6ca89dce7a2",
     ),
 ];
+
+/// What the fold decided of the differential's runs, the digest of their
+/// verdicts and classes, by journal version, machine revision and fold
+/// revision (ADR-0047 K1e-3c-2): a fold that decides otherwise raises its
+/// revision.
+const CLASSES: &[(u32, u32, u32, &str)] = &[(
+    2,
+    1,
+    1,
+    "5d757fb0dbf71a6cbfcc58dad6f04cdf98014365f28fb95bce688d3452a3af4a",
+)];
 
 /// The journal written, read back, and told against the run it journals
 /// (ADR-0047 K1e-3b): every end and dispatch, every send and answer in the
@@ -344,6 +360,17 @@ fn the_machine_is_the_scheduler_by_definition() {
         .expect("python3, which the library's gate requires");
     let mut runs = 0;
     let mut journals = <sha2::Sha256 as sha2::Digest>::new();
+    let mut classes = <sha2::Sha256 as sha2::Digest>::new();
+    // The verdict by definition, beside the scheduler by definition.
+    let verdict_py = concat!(env!("CARGO_MANIFEST_DIR"), "/vectors/verdict.py");
+    let mut verdicts = Command::new("python3")
+        .args(["-I", verdict_py])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("python3, which the library's gate requires");
+    let mut verdicts_in = verdicts.stdin.take().unwrap();
     // The plan's own bound against the machine (ADR-0047 K1e-2): the runs
     // whose every read lies within [at − L, at] (A2), those of them with a
     // reader lagging, and the lines that ended exactly at their worst end.
@@ -493,10 +520,37 @@ fn the_machine_is_the_scheduler_by_definition() {
                         read_ahead,
                         jitter: header.profile.jitter,
                     };
+                    let journal_bytes =
+                        journal_of(&run_name, journal_header.clone(), &ran, &records);
+                    sha2::Digest::update(&mut journals, &journal_bytes);
+                    let open = || {
+                        journal::Reader::new(std::io::Cursor::new(journal_bytes.clone())).unwrap()
+                    };
+                    let log_id = Log {
+                        sha256: identity.clone(),
+                        records: records.len() as u64,
+                    };
+                    let folded = fold(&journal_header, &log_id, open(), open());
+                    let names: Vec<&str> = folded.classes.iter().map(|c| c.name()).collect();
                     sha2::Digest::update(
-                        &mut journals,
-                        journal_of(&run_name, journal_header, &ran, &records),
+                        &mut classes,
+                        format!("{} {}\n", folded.verdict.name(), names.join(" ")),
                     );
+                    let parsed: Vec<Json> = std::str::from_utf8(&journal_bytes)
+                        .unwrap()
+                        .lines()
+                        .map(|l| serde_json::from_str(l).unwrap())
+                        .collect();
+                    let case = json!({
+                        "name": run_name,
+                        "log": {"sha256": log_id.sha256, "records": log_id.records},
+                        "journal": parsed,
+                        "verdict": folded.verdict.name(),
+                        "classes": names,
+                    });
+                    // The definition stops at its first difference: its
+                    // reason, not a broken pipe, is the failure.
+                    let _ = writeln!(verdicts_in, "{case}");
                     let journal: Vec<Json> = ran.entries.iter().map(entry_json).collect();
                     let line = json!({
                         "name": format!("{name}/{seed}/{read_ahead}"),
@@ -520,6 +574,15 @@ fn the_machine_is_the_scheduler_by_definition() {
             }
         }
     }
+    drop(verdicts_in);
+    let verdicts_out = verdicts.wait_with_output().unwrap();
+    let reached = String::from_utf8_lossy(&verdicts_out.stdout).into_owned();
+    eprintln!("{reached}");
+    assert!(
+        verdicts_out.status.success(),
+        "{reached}{}",
+        String::from_utf8_lossy(&verdicts_out.stderr)
+    );
     let out = child.wait_with_output().unwrap();
     eprintln!("{}", String::from_utf8_lossy(&out.stdout));
     assert!(
@@ -533,6 +596,43 @@ fn the_machine_is_the_scheduler_by_definition() {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
+    // What the differential's verdicts reach (the definition counts them).
+    for counter in [
+        "conditional_doubtful",
+        "conditional_transitive",
+        "conditional_and_expected",
+        "conditional_ended_before_its_dependency",
+        "undecided_call",
+        "undecided_cause",
+        "undecided_read",
+        "producer_root",
+        "root",
+        "consequent",
+        "inconclusive",
+        "passed",
+        "pass",
+        "fail",
+        "void:undecided",
+    ] {
+        assert!(
+            reached.contains(&format!("'{counter}'")),
+            "{counter}: {reached}"
+        );
+    }
+    let classes: String = sha2::Digest::finalize(classes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(
+        CLASSES.last().copied(),
+        Some((
+            JOURNAL_VERSION,
+            MACHINE_REVISION,
+            FOLD_REVISION,
+            classes.as_str()
+        )),
+        "the verdicts changed: bump FOLD_REVISION if the fold decides otherwise, and append their digest"
+    );
     let revisions: Vec<(u32, u32)> = JOURNALS.iter().map(|m| (m.0, m.1)).collect();
     assert!(revisions.windows(2).all(|w| w[0] < w[1]));
     assert_eq!(

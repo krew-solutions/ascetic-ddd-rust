@@ -15,7 +15,8 @@ To be built in slices, each a commit of its own:
   the plan's own bound with peaks and a peak rate in the commitment, and the heap executors — in three parts: **K1e-1**
   the heap, **K1e-2** the plan's bound, peaks and peak rate, **K1e-3** the verdict fold, schema and goldens (itself in
   four: **K1e-3a** a defect of the machine's barriers the round found, **K1e-3b** the journal's bytes, **K1e-3c** the
-  fold and its reader, **K1e-3d** the stand with failures injected and the cause amendment). (The plan's bound, the
+  fold and its reader — the cause amendment with them, since the fold carries every class rule at once — **K1e-3d**
+  the stand with failures injected). (The plan's bound, the
   commitment's peaks and the reference's bound lines were first listed in K0a; they moved where their consumer is.
   K1-4's `PendingByRate` moved to K1e with the bound it mutates.)
 - **K2** (`crates/load-run`, the shell): REST, the clock, the reader, the journal writer, the gates.
@@ -605,6 +606,37 @@ order, its canonical bytes, the header's place and the trailer, in `make vectors
   as a REST call — each killed by the differential's own check (the action's first check went through `From` itself,
   so that only the pinned digest saw the third: the test now names each action by its own match).
 
+**K1e-3c-2 — the fold** (2026-11-22): `scheduler::verdict`, decision 14's fold as decided, `FOLD_REVISION` 1.
+- **Two passes, one byte a line.** The first takes the journal in its order, keeping the steps read and not ended
+  and, a line, its end, whether the harness's lateness made it (`UNDECIDED`: a backstop; a call's last attempt sent
+  past J after its dispatch, or never; a release at or past its deadline though intended before it, read past J late),
+  whether a later reader lacked its value (`PRODUCER`), whether its bytes left past J after its intended start or never
+  (`LATE`) — and tells every end against its step's events: its read, release, attempts, sends and the answer the
+  machine took, a skip's reason, a backstop's fault line after it. The second takes the reads, in line order, every
+  dependency a line before its holder: conditional from its dependencies' bytes (`CONDITIONAL`, transitively) and a
+  barrier key's flags (members counted, one doubtful, one conditional, one failed), then the class by precedence. An
+  observation's Undecided is its cause's `LATE` — its own polls' lateness is not the measure, its deadline runs from
+  its cause — a call's its last attempt's. A backstop's step is Undecided, its run void on the fault.
+- **The log is the commitment's digest and step count**: a journal that reads fewer lines than its log holds is not
+  that log's run, though every line of it is sound.
+- **The verdict by definition** (`vectors/verdict.py`): the decision's sentences, each its own function, in memory —
+  conditional recursive, members as decision 8 says them, no byte and no second pass — and the evidence told by
+  definition. It stops at the first disagreement, and counts what it reached.
+- **Executors**: eleven golden runs (`golden/runs/*.jsonl`, under the normative schema in `make vectors`), each with
+  its classes and verdict written by hand — a clean pass; a root and the skips it causes; doubt three levels deep;
+  a dependent ended before its unknown dependency; a refused cause observed (the amendment alone); a producer without
+  its value; a retry never sent; a barrier settled beside a step sent; a late cause; a read past its deadline; a
+  backstop — every class and verdict but `unreadable`, every rule of Undecided, every way to be conditional, reached;
+  twelve twins of broken evidence, each resealed so that only the fold can refuse it — an end dropped, duplicated or
+  given another's line, a read or a dispatch dropped, an end's read moved, a skipped step said expected, a barrier's
+  members miscounted, a backstop's fault dropped, a fault without its backstop, another log, a log of more steps —
+  and an unreadable line; the definition agrees on every one. The differential folds its 3,924 journals and the
+  definition agrees with each; its scripts now answer a capturing step without its values one time in six, so that a
+  producer root is reached there too (12); their verdicts' digest is pinned by journal version, machine revision and
+  fold revision (`CLASSES`), the journals' (2, 1) re-pinned for the scripts. Seventeen mutants of the fold, each killed
+  — fifteen by the goldens and twins, the barrier's provenance cut to one level and J taken inclusive only by the
+  differential.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -672,3 +704,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   bindings, releases and ignored answers told, `MACHINE_REVISION` 1.
 - 2026-11-22: K1e-3c-1 built (§ Measured): journal version 2 — a read's action and an observation's cause — its
   normative schema and `vectors/journal.py`.
+- 2026-11-22: K1e-3c-2 built (§ Measured): the fold, its verdict by definition, golden runs and twins; the cause
+  amendment moved from K1e-3d into it.

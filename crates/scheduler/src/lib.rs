@@ -13,3 +13,4 @@ pub mod journal;
 pub mod machine;
 pub mod order;
 pub mod sim;
+pub mod verdict;
