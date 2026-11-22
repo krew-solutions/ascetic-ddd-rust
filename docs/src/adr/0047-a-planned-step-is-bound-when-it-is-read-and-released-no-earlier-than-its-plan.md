@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a and K2b-0a built (§ Measured), K2b-0b next. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a and K2b-0b built (§ Measured), K2b-1 next. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -375,9 +375,14 @@ Distributed Systems, Verifiability, Performance — on Opus; it amends decision 
   already taken there, as `sim` takes it (the frontier's property found the key-order rule the roles proposed wrong). The frontier decides a deadline; an attempt's timer only leaves the pool gap.
   `sim` drives the same frontier.
 - **The machine re-checks a wake at the instant it is taken**: a resend leaves only if `now + J` is before the
-  deadline, a poll only if `now` is; else the step ends as it stands — a real timer breaks A3 by its slack, and a resend
-  taken late is otherwise one the fold refuses. The fold makes such an end undecided when it came more than J after
-  the resend was due.
+  deadline, a poll only if `now` is; else the step ends as it stands, then — a real timer breaks A3 by its slack, and a
+  resend taken late is otherwise one the fold refuses. The fold makes such an end undecided whatever the lateness (the
+  first wording, "more than J after the resend was due", contradicted its own executor, K2b-0b): a resend its last
+  answer licensed, due more than J before the deadline, that the step ended without — the machine schedules no other,
+  and taken on time it leaves; an unknown ended past its deadline, released before it — only a wake due before the
+  deadline and taken past it ends a step there. A poll's wake taken exactly at its deadline ends the step there, as an
+  unsatisfied observation ends; journal version 3 cannot tell the two, so the fold counts it a root — a false failure,
+  never a false pass — until version 4 journals a wake's due instant (§ Owed).
 - **An attempt**: the frame from a cache (a call's built once and resent byte for byte, a poll's its own); the
   correlation and decorated headers; `try_send_request`, never once `now` reached the deadline. Two write instants,
   by the shell's own `Io` counting accepted bytes: the first byte is the commit point (no reconnect after it);
@@ -491,7 +496,7 @@ Distributed Systems, Verifiability, Performance — on Opus; it amends decision 
 | K2a-4 | K2a | a validator twin and a corpus mutant per new rule; the corpus with expectations that fit its actions, a resend floor, and every safety with `not_run` codes | each rule's condition weakened |
 | K2a-5 | K2a | the machine and `schedule.py`: a poll's Unknown on its grid, one poll out; resends at `max(after, floor)`, none within J of the deadline, scripts drawing `retry_after`, coverage counted (`resend_by_retry_after`, `resend_by_floor`, `resend_past_deadline`); the fold refusing an unlicensed resend; TLA+ `ResendPastDeadline` | a poll's Unknown ending it; a resend at `now`; the floor ignored; an Unknown `Never` step resent |
 | K2b-0a | K2b | the frontier's properties under drawn interleavings with monotone clocks and ties — drains nondecreasing, no input released below a released bound, an arrival by its deadline keeping its judgement, an attempt with none censored once at its deadline before anything later, `Sent` only before the deadline, nothing at or past a live floor, nothing at T0 unsettled; twins: an answer at D, at D + 1 (the censor, then the late answer), a send at D, a deadline inside a released batch, an early local reply; `sim` through it with every digest unchanged | censor at `<`; `Sent` at `<=`; a floor ignored; `through = now` unsettled; an arrival past D uncensored; a double censor; an answer stamped at its end |
-| K2b-0b | K2b | `sim` with wakes taken late: the fold never incoherent; a resend due at `D − J − 1` taken 2 µs late ends as it stood, undecided | the wake's re-check removed |
+| K2b-0b | K2b | `sim` with wakes taken late over the corpus, deadlines a few answers long: the fold never incoherent, the definition agreeing, both new rules reached; the machine's twin — a resend due at `D − J − 1` taken 1 or 2 µs late ends as it stood, a poll's next taken past the deadline ends unknown then; golden runs — a poll taken 1 µs past its deadline undecided, a resend due at `D − J − 1` taken 2 µs late undecided, one due at `D − J` never scheduled and a root; on the differential, with no wake late, neither rule fires | the wake's re-check removed, or without J; a late poll ended at its deadline; either rule dropped, at its edge, or with J; a late refusal a root; the definition's rules dropped |
 | K2-1 | K2 | the shell against an in-memory transport (hyper over `tokio::io::duplex`) under paused time reproduces `sim`'s journal | `std::time::Instant` in a handler |
 | K2-2 | K2 | each cause delayed alone — the reader, the token, the pool, the connect, the write, the dependency — moves exactly one gap of the chain | a gap merged |
 | K2-3 | K2 | on the real clock, multi-thread: chain order, no release before its stamped met instants, the stub's requests per correlation id equal the journal's attempts — a keep-alive connection closed as it is reused included; a request processed then reset before the answer is Unknown; a response stamped 1 µs before its deadline delivered after the tick is Expected | hyper's hidden retry; Unknown read as not taken; deadlines by arrival |
@@ -1005,6 +1010,25 @@ there.
   bound at `now`, an arrival past its deadline uncensored, a censored attempt kept open, an early reply unsent, no censor
   at once, a push below accepted.
 
+**K2b-0b — a wake taken late** (2026-11-23): the machine re-checks a resend or a poll at the instant its wake is taken
+(`MACHINE_REVISION` 3); the fold makes undecided what a late wake ended (`FOLD_REVISION` 3); `sim::run_waking_late`
+takes a wake due at `w` at `w + lag(w)`.
+- **What it found**: decision 16's first rule, undecided "more than J after the resend was due", contradicted its
+  executor's own case — a resend due at `D − J − 1` taken 2 µs late ends within J of being due, a root by that rule,
+  though the harness alone kept it from leaving. Undecided whatever the lateness is exact: the machine schedules a
+  resend only if due more than J before the deadline, and taken on time it leaves; a step ends past its deadline only
+  by a wake taken past it. The poll's rule first survived its mutant: on the corpus every poll ended late by a wake had
+  also sent its first poll more than J after its intended instant, so the cause rule covered it; the golden run of a
+  poll sent on time and taken 1 µs past its deadline separates them.
+- **Executors**: 434 runs of the corpus with deadlines of 2,000 µs, answers within 300 µs and a quarter each refused
+  and unknown, under wake lags drawn from {0, 1, J, J + 1, 3J + 7, 1,000, 1,700}: never incoherent, the definition
+  agreeing, the resend rule firing 64 times and the poll's 27; on the differential, with no wake late, neither fires;
+  the machine's twin; golden runs `poll_taken_late`, `resend_taken_late`, `resend_too_late_to_schedule`. Journals
+  pinned under (3, 3); classes under (3, 3, 3) equal to (3, 2, 2)'s, as no wake is late there. Thirteen mutants, each
+  killed: the re-check of a resend removed, or without J; that of a poll removed; a late poll ended at its deadline;
+  the poll's rule dropped, at the deadline, or past `D + J`; the resend's rule dropped, at `<=`, or without J; a late
+  refusal a root; the definition's two rules dropped.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -1060,6 +1084,10 @@ only and measures move to the 12-core box.
   reference machine; `answer::read` + `judge` at the cap on an object-dense document; bytes per kept connection and
   open attempt (a counting allocator); a timed wait against a spin, the stand's p99 A/B on one machine; the probe of
   the virtual clock on the newest tokio (a library job) — each before the first host run.
+- **A poll's wake taken exactly at its deadline** (K2b-0b): the step ends there as an unsatisfied observation ends,
+  and the fold, reading journal version 3, counts a root where the harness ate the last poll. Executor: K2b-3's journal
+  version 4 carries a wake's due instant, and the fold's rule reads it — a golden run of a wake due at `D − 1` taken at
+  `D` undecided.
 - **A cell's residue** (K1e-2): an ended cell keeps its key's strings and its map node, some 0.6–0.9 kB; a compact
   ended cell and keys interned per barrier — trigger: capacity binding on a host plan.
 
@@ -1124,3 +1152,7 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   cut into K2b-0a to K2b-8; decision 4 amended: the watermark constructed by a frontier.
 - 2026-11-23: K2b-0a built (§ Measured): the frontier, `sim` driven through it; decision 16's rule on the order of
   inputs taken corrected by its property: stamps, not keys.
+- 2026-11-23: K2b-0b built (§ Measured): the machine re-checks a wake at the instant taken, `MACHINE_REVISION` 3; the
+  fold makes undecided what a late wake ended, `FOLD_REVISION` 3. Decision 16's rule corrected: undecided whatever the
+  lateness, not past J — its executor's own case, a resend taken 2 µs late, contradicted it. A poll's wake taken
+  exactly at its deadline owed to journal version 4.

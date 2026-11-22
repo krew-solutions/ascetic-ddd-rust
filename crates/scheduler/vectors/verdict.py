@@ -243,9 +243,35 @@ class Run:
         memo[l] = why
         return why
 
+    def resend_late(self, l):
+        """Decision 16: a resend its last answer licensed, due more than J
+        before the deadline, the step ended without it — a call's, not a
+        poll's; the machine schedules it only then, and on time it leaves."""
+        r = self.read(l)
+        if r["action"] == "poll":
+            return False
+        e, ei = self.end(l), self.ends[l][0]
+        dispatches = [i for i, k, _ in self.events[l] if k == "dispatch"]
+        after_last = dispatches[-1] if dispatches else -1
+        taken = [v for i, k, v in self.events[l]
+                 if k == "answer" and v["ignored"] is None and after_last < i < ei]
+        if not taken:
+            return False
+        v = taken[-1]
+        licensed = (v["judged"] == "not_taken" and r["safety"] != "never") or (
+            v["judged"] == "unknown" and r["safety"] == "idempotent")
+        rel = self.released.get(l)
+        if rel is None:
+            return False
+        due = u(v["at"]) + max(u(v["after"]) or 0, self.floor)
+        return licensed and due + self.j < u(rel["deadline"])
+
     def undecided(self, l):
-        """An unknown whose deadline the harness ate past J."""
+        """An unknown whose deadline the harness ate past J; decision 16: an
+        end a late wake made, unknown or a refusal."""
         e = self.end(l)
+        if end_kind(e) == "unexpected":
+            return "resend" if self.resend_late(l) else None
         if end_kind(e) != "unknown":
             return None
         if e["fault"]:
@@ -264,10 +290,14 @@ class Run:
             i, rr, d = u(rel["intended"]), u(rel["released"]), u(rel["deadline"])
             if rr >= d and i < d and rr - i > j:
                 return "read"
+            if e["attempts"] >= 1 and rr < d and u(e["ended"]) > d:
+                return "ended_late"
         if r["action"] in ("observe", "poll"):
             c = self.end(u(r["cause"]))
             if c["sent"] is None or u(c["sent"]) - u(c["intended"]) > j:
                 return "cause"
+        if self.resend_late(l):
+            return "resend"
         return None
 
     def producer(self, l):
@@ -284,6 +314,8 @@ class Run:
                     raise Incoherent("awaited as expected a failed step, and not skipped")
             cond = self.conditional(l, memo)
             und = self.undecided(l)
+            if und:
+                REACHED[f"fired_{und}"] += 1
             if kind == "skipped":
                 c = "consequent"
             elif cond:

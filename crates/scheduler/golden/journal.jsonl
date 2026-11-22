@@ -1,4 +1,4 @@
-{"header":{"journal":3,"machine":2,"source":"golden — every variant","log":"34d0604f25ecb8d0fa280db8b55837ff0ba21e52e3ab4d0ceb89b1e5ba24149d","validator":"6: golden","read_ahead":"18446744073709551615","jitter":"200","resend":"100000","namespace":"18446744073709551615","t0":"-9223372036854775808"}}
+{"header":{"journal":3,"machine":3,"source":"golden — every variant","log":"34d0604f25ecb8d0fa280db8b55837ff0ba21e52e3ab4d0ceb89b1e5ba24149d","validator":"6: golden","read_ahead":"18446744073709551615","jitter":"200","resend":"100000","namespace":"18446744073709551615","t0":"-9223372036854775808"}}
 {"read":{"at":"0","line":"2","key":{"kind":"device","scope":"AP8i","label":"enroll","n":0},"action":"rest","safety":"not_taken","cause":null,"after":[]}}
 {"read":{"at":"18446744073709551615","line":"3","key":{"kind":"device","scope":"AP8i","label":"report","n":1},"action":"observe","safety":"never","cause":"18446744073709551615","after":[{"step":{"on":"sent","line":"2"}},{"each":{"on":"expected","key":{"kind":"device","scope":"AP8i","label":"read","n":4294967295},"members":"18446744073709551615"}},{"step":{"on":"settled","line":"18446744073709551615"}}]}}
 {"read":{"at":"1","line":"4","key":{"kind":"device","scope":"AP8i","label":"publish","n":0},"action":"bus","safety":"idempotent","cause":null,"after":[]}}
@@ -19,4 +19,4 @@
 {"end":{"at":"6000","line":"6","end":{"skipped":{"member":"4"}},"read":"10","ready":"20","intended":"30","released":"40","dispatched":"50","sent":null,"ended":"6000","attempts":1,"critical":null,"bound":["2","18446744073709551615"],"fault":false}}
 {"end":{"at":"7000","line":"7","end":{"skipped":{"missing_capture":"18446744073709551615"}},"read":"10","ready":"20","intended":"30","released":"40","dispatched":"50","sent":null,"ended":"7000","attempts":1,"critical":null,"bound":["2","18446744073709551615"],"fault":false}}
 {"end":{"at":"8000","line":"8","end":"expected","read":"10","ready":"20","intended":"30","released":"40","dispatched":null,"sent":"18446744073709551615","ended":"8000","attempts":4294967295,"critical":null,"bound":[],"fault":false}}
-{"trailer":{"events":"20","steps":"7","sha256":"0225762295ff4199b7c0f334c9ccd907477c0d1d6e2d4dc540018df707fa3684"}}
+{"trailer":{"events":"20","steps":"7","sha256":"896e65b3db5789b3cae9882889ab4097c9441f89ac304bc10058c833897f33af"}}

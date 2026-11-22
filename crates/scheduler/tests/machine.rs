@@ -614,3 +614,50 @@ fn a_holder_is_skipped_by_a_member_failed_past_the_prefix() {
     assert!(h.ended >= h.read && h.released >= h.read, "{h:?}");
     assert_eq!(h.ended, 20);
 }
+
+/// Decision 16: a wake is re-checked at the instant it is taken. A resend due
+/// J + 1 before its deadline leaves when taken on time; taken 1 or 2 µs late
+/// it would leave within J of it, so the step ends as it stood, then. A poll's
+/// next taken past the observation's deadline ends it unknown, then.
+#[test]
+fn a_late_wake_ends_its_step_as_it_stands() {
+    use ascetic_ddd_scheduler::sim::run_waking_late;
+    let records = [call("read", 1, 0, 0, 0)];
+    let refused = |_: u64, attempt: u32, _: &Record| Attempt {
+        after: None,
+        sent_after: 0,
+        answer_after: Some(if attempt == 1 { 10 } else { 1 }),
+        judgement: if attempt == 1 {
+            Judgement::NotTaken
+        } else {
+            Judgement::Expected(vec![])
+        },
+    };
+    let j = 5;
+    // Answered at 10, the resend due at 110: the deadline J + 1 past it.
+    let deadline = 10 + RESEND + j + 1;
+    let ended = |lag: u64| {
+        let mut h = header_with(Safety::NotTaken);
+        h.operations.iter_mut().for_each(|o| o.timeout = deadline);
+        h.profile.jitter = j;
+        let late = move |w: u64| if w == 10 + RESEND { lag } else { 0 };
+        let ran = run_waking_late(h, &records, W, &|_| 0, &late, &refused).unwrap();
+        let e = entry(&ran.entries, 2).clone();
+        (e.end, e.attempts, e.ended)
+    };
+    assert_eq!(ended(0), (End::Expected, 2, 10 + RESEND + 1));
+    assert_eq!(ended(1), (End::Unexpected, 1, 10 + RESEND + 1));
+    assert_eq!(ended(2), (End::Unexpected, 1, 10 + RESEND + 2));
+    // A poll on a grid of 1,000 to 2,500, its next taken at 2,600.
+    let not_yet = |_: u64, _: u32, _: &Record| Attempt {
+        after: None,
+        sent_after: 0,
+        answer_after: Some(10),
+        judgement: Judgement::Unexpected,
+    };
+    let poll = polling(1, 0, 0, 1_000, 2_500);
+    let late = |w: u64| if w == 1_000 { 1_600 } else { 0 };
+    let ran = run_waking_late(header(), &[poll], W, &|_| 0, &late, &not_yet).unwrap();
+    let e = entry(&ran.entries, 2).clone();
+    assert_eq!((e.end, e.attempts, e.ended), (End::Unknown, 1, 2_600));
+}

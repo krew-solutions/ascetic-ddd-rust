@@ -16,7 +16,7 @@ use std::sync::Arc;
 use ascetic_ddd_command_log::record::{Dep, Header, On, Record, Safety, StepId};
 use ascetic_ddd_scheduler::journal::{self, JOURNAL_VERSION, Line, Reader, Writer};
 use ascetic_ddd_scheduler::machine::{Input, Judgement, MACHINE_REVISION, Machine, Output};
-use ascetic_ddd_scheduler::sim::{Attempt, run_reading};
+use ascetic_ddd_scheduler::sim::{Attempt, run_waking_late};
 use ascetic_ddd_scheduler::verdict::{Class, FOLD_REVISION, Folded, Log, Verdict, fold};
 use fixture::*;
 
@@ -136,13 +136,15 @@ fn watched(g: u64, at: u64, cause: &StepId, timeout: u64) -> Record {
     )
 }
 
-/// A golden run: its log, a script by line and attempt, a lag by line.
+/// A golden run: its log, a script by line and attempt, a lag by line, the
+/// lateness of the machine's wakes by the instant each was due.
 struct Golden {
     name: &'static str,
     header: Header,
     records: Vec<Record>,
     script: Box<dyn Fn(u64, u32) -> Attempt>,
     lag: Box<dyn Fn(u64) -> u64>,
+    wake_lag: Box<dyn Fn(u64) -> u64>,
     classes: Vec<Class>,
     verdict: &'static str,
 }
@@ -158,6 +160,7 @@ fn goldens() -> Vec<Golden> {
                 records,
                 script,
                 lag: Box::new(|_| 0),
+                wake_lag: Box::new(|_| 0),
                 classes,
                 verdict,
             })
@@ -375,9 +378,49 @@ fn goldens() -> Vec<Golden> {
         records: vec![c, o],
         script: Box::new(|_, _| expected()),
         lag: Box::new(|line| if line == 3 { 5_000 } else { 0 }),
+        wake_lag: Box::new(|_| 0),
         classes: vec![Passed, Undecided],
         verdict: "void:undecided",
     });
+    // Decision 16: a poll sent on time, its next poll (due at 1,000) taken
+    // 1 µs past the observation's deadline (2,500): whatever its lateness,
+    // the harness ate the step's last poll.
+    out.push(Golden {
+        name: "poll_taken_late",
+        header: header_j(),
+        records: vec![polling(1, 0, 0, 1_000, 2_500)],
+        script: Box::new(|_, _| answer(0, Some(10), Judgement::Unexpected)),
+        lag: Box::new(|_| 0),
+        wake_lag: Box::new(|w| if w == 1_000 { 1_501 } else { 0 }),
+        classes: vec![Undecided],
+        verdict: "void:undecided",
+    });
+    // Decision 16: a certified refusal at 10, its resend due at 110, J + 1
+    // before the deadline (311): taken 2 µs late it would leave within J of
+    // it, so it never leaves and the step ends unexpected — the harness's
+    // lateness, not the step's. With the deadline at 310 the machine never
+    // schedules the resend: the refusal is the step's own.
+    for (name, deadline, lag, class, verdict) in [
+        ("resend_taken_late", 311, 2, Undecided, "void:undecided"),
+        ("resend_too_late_to_schedule", 310, 0, Root, "fail"),
+    ] {
+        let mut late = header_j();
+        for o in &mut late.operations {
+            o.safety = Safety::NotTaken;
+            o.not_run = vec!["service.unavailable".into()];
+            o.timeout = deadline;
+        }
+        out.push(Golden {
+            name,
+            header: late,
+            records: vec![call("read", 1, 0, 0, 0)],
+            script: Box::new(|_, _| answer(0, Some(10), Judgement::NotTaken)),
+            lag: Box::new(|_| 0),
+            wake_lag: Box::new(move |w| if w == 10 + RESEND { lag } else { 0 }),
+            classes: vec![class],
+            verdict,
+        });
+    }
     out
 }
 
@@ -437,11 +480,12 @@ fn golden_journals() -> Vec<Journal> {
     let mut out = Vec::new();
     for g in goldens() {
         let script = &g.script;
-        let ran = run_reading(
+        let ran = run_waking_late(
             g.header.clone(),
             &g.records,
             W,
             &*g.lag,
+            &*g.wake_lag,
             &|line, attempt, _| script(line, attempt),
         )
         .unwrap();
@@ -514,6 +558,8 @@ fn every_golden_run_folds_as_the_hand_wrote() {
         "undecided_read",
         "undecided_cause",
         "undecided_backstop",
+        "undecided_ended_late",
+        "undecided_resend",
         "producer_root",
         "consequent",
         "root",

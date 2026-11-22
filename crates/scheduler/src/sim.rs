@@ -100,6 +100,7 @@ pub fn run_streaming(
         &mut records.map(Arc::new),
         read_ahead,
         &|_| 0,
+        &|_| 0,
         &mut Scripted { script },
         false,
     )
@@ -119,6 +120,29 @@ pub fn run_reading(
         &mut records.iter().cloned().map(Arc::new),
         read_ahead,
         lag,
+        &|_| 0,
+        &mut Scripted { script },
+        true,
+    )
+}
+
+/// [`run_reading`] with the machine's wakes taken late: a wake for `w` is
+/// taken at `w + wake_lag(w)`, as a real timer's slack takes it (ADR-0047
+/// decision 7's A3 broken on purpose, decision 16).
+pub fn run_waking_late(
+    header: Header,
+    records: &[Record],
+    read_ahead: u64,
+    lag: &dyn Fn(Line) -> u64,
+    wake_lag: &dyn Fn(u64) -> u64,
+    script: &dyn Fn(Line, u32, &Record) -> Attempt,
+) -> Result<Run, LogError> {
+    drive(
+        header,
+        &mut records.iter().cloned().map(Arc::new),
+        read_ahead,
+        lag,
+        wake_lag,
         &mut Scripted { script },
         true,
     )
@@ -286,6 +310,7 @@ fn drive(
     records: &mut dyn Iterator<Item = Arc<Record>>,
     read_ahead: u64,
     lag: &dyn Fn(Line) -> u64,
+    wake_lag: &dyn Fn(u64) -> u64,
     handler: &mut dyn Handler,
     keep: bool,
 ) -> Result<Run, LogError> {
@@ -403,7 +428,8 @@ fn drive(
                     | Output::Released { .. }
                     | Output::Ignored { .. } => {}
                     Output::WakeAt(w) => {
-                        wakes.insert(w.max(at));
+                        // Taken late by `wake_lag`, as a real timer may.
+                        wakes.insert(w.max(at).saturating_add(wake_lag(w)));
                     }
                     Output::Dispatch {
                         line,
@@ -511,6 +537,7 @@ pub fn run_stand_failing(
         header,
         &mut records.iter().cloned().map(Arc::new),
         read_ahead,
+        &|_| 0,
         &|_| 0,
         &mut stand,
         true,

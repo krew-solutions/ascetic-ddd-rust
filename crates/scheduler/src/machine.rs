@@ -309,7 +309,7 @@ pub enum Ignored {
 /// for the same inputs changes, which the differential's journals pin beside
 /// it (ADR-0047 K1e-3). A journal's header names it, so that a verdict is read
 /// against the machine that made it.
-pub const MACHINE_REVISION: u32 = 2;
+pub const MACHINE_REVISION: u32 = 3;
 
 /// How long past a deadline the machine waits for a handler that does not
 /// report: then the step ends unknown, and it is the harness's fault.
@@ -371,6 +371,9 @@ struct Cell {
     missing: Option<Line>,
     /// Its one pending wake.
     wake: Option<u64>,
+    /// How it ends if a resend is taken too late to leave: a refusal
+    /// unexpected, an unknown unknown (ADR-0047 decision 16). None for a poll.
+    fallback: Option<End>,
 }
 
 type BarrierKey = ascetic_ddd_command_log::plan::MemberKey;
@@ -542,6 +545,7 @@ impl Machine {
             captured: Vec::new(),
             missing: None,
             wake: None,
+            fallback: None,
         };
         // The ready instant is the latest met instant of its dependencies;
         // with none, 0.
@@ -796,7 +800,20 @@ impl Machine {
                         // An observation not yet satisfied by its deadline.
                         self.finish(line, End::Unknown, deadline, out);
                     } else if !outstanding {
-                        self.dispatch(line, attempt.saturating_add(1), out);
+                        // Taken at `now`, which a real timer leaves past `t`
+                        // (ADR-0047 decision 16): a resend leaves only if
+                        // before the deadline by more than J, a poll only if
+                        // before it; else the step ends as it stands, then.
+                        let now = self.now;
+                        let jitter = self.header.profile.jitter;
+                        let fallback = self.cells.get_mut(&line).and_then(|c| c.fallback.take());
+                        match fallback {
+                            Some(end) if now.saturating_add(jitter) >= deadline => {
+                                self.finish(line, end, now, out);
+                            }
+                            None if now >= deadline => self.finish(line, End::Unknown, now, out),
+                            _ => self.dispatch(line, attempt.saturating_add(1), out),
+                        }
                     }
                 }
                 Phase::Waiting | Phase::Done => {}
@@ -973,6 +990,7 @@ impl Machine {
                 attempt,
                 outstanding: false,
             };
+            c.fallback = Some(otherwise);
             self.wake(line, at);
         } else {
             self.finish(line, otherwise, now, out);

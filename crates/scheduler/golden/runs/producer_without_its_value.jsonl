@@ -1,4 +1,4 @@
-{"header":{"journal":3,"machine":2,"source":"verdict","log":"ba8051289c61a93417c5e83b484f706fa7d27f5426099478c00a87936cdd906e","validator":"8: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent frame predicate expect secret","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000"}}
+{"header":{"journal":3,"machine":3,"source":"verdict","log":"ba8051289c61a93417c5e83b484f706fa7d27f5426099478c00a87936cdd906e","validator":"8: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent frame predicate expect secret","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000"}}
 {"read":{"at":"0","line":"2","key":{"kind":"device","scope":"Bw==","label":"update","n":0},"action":"rest","safety":"never","cause":null,"after":[]}}
 {"released":{"at":"0","line":"2","intended":"0","released":"0","deadline":"10000000"}}
 {"dispatch":{"at":"0","line":"2","attempt":1,"deadline":"10000000"}}
@@ -8,4 +8,4 @@
 {"end":{"at":"100","line":"2","end":"expected","read":"0","ready":"0","intended":"0","released":"0","dispatched":"0","sent":"0","ended":"100","attempts":1,"critical":null,"bound":[],"fault":false}}
 {"released":{"at":"100","line":"3","intended":"100","released":"100","deadline":"10000100"}}
 {"end":{"at":"100","line":"3","end":{"skipped":{"missing_capture":"2"}},"read":"0","ready":"100","intended":"100","released":"100","dispatched":null,"sent":null,"ended":"100","attempts":0,"critical":{"step":"2"},"bound":["2"],"fault":false}}
-{"trailer":{"events":"9","steps":"2","sha256":"1732709b6109daec86e24a4da7dbc1fd01fe3b86807fd9edaa5b34aef69f1f9b"}}
+{"trailer":{"events":"9","steps":"2","sha256":"e779c10c64c928f26f8474ed5287a562275b23cb351cb20c2ab9a9ba215f4bb3"}}

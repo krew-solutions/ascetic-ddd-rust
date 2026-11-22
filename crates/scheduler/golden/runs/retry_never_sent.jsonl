@@ -1,4 +1,4 @@
-{"header":{"journal":3,"machine":2,"source":"verdict","log":"707b45b6c6b902cbe9aad8950b56810c68405c08a00911f20d383217070d6940","validator":"8: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent frame predicate expect secret","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000"}}
+{"header":{"journal":3,"machine":3,"source":"verdict","log":"707b45b6c6b902cbe9aad8950b56810c68405c08a00911f20d383217070d6940","validator":"8: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent frame predicate expect secret","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000"}}
 {"read":{"at":"0","line":"2","key":{"kind":"device","scope":"Bw==","label":"read","n":0},"action":"rest","safety":"idempotent","cause":null,"after":[]}}
 {"released":{"at":"0","line":"2","intended":"0","released":"0","deadline":"10000000"}}
 {"dispatch":{"at":"0","line":"2","attempt":1,"deadline":"10000000"}}
@@ -7,4 +7,4 @@
 {"dispatch":{"at":"110","line":"2","attempt":2,"deadline":"10000000"}}
 {"answer":{"at":"10000000","line":"2","attempt":2,"judged":"unknown","captured":[],"ignored":null,"status":null,"code":null,"after":null}}
 {"end":{"at":"10000000","line":"2","end":"unknown","read":"0","ready":"0","intended":"0","released":"0","dispatched":"0","sent":"0","ended":"10000000","attempts":2,"critical":null,"bound":[],"fault":false}}
-{"trailer":{"events":"8","steps":"1","sha256":"0ec58b8e53b0ee034cab06bbb436a42a8897c5e1b674e229ba2e3453c6ab9c08"}}
+{"trailer":{"events":"8","steps":"1","sha256":"caa8e81eff88670c4e14f11fecf6c91b1e253ecdd32cffa0ce20843a6b3eabd9"}}

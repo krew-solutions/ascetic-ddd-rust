@@ -1,4 +1,4 @@
-{"header":{"journal":3,"machine":2,"source":"verdict","log":"f32b62d5a84c331b3b356cecbfc2c471dfde1321dfd868c2491fbbece5dc0faf","validator":"8: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent frame predicate expect secret","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000"}}
+{"header":{"journal":3,"machine":3,"source":"verdict","log":"f32b62d5a84c331b3b356cecbfc2c471dfde1321dfd868c2491fbbece5dc0faf","validator":"8: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent frame predicate expect secret","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000"}}
 {"read":{"at":"0","line":"2","key":{"kind":"device","scope":"Bw==","label":"update","n":0},"action":"rest","safety":"never","cause":null,"after":[]}}
 {"released":{"at":"0","line":"2","intended":"0","released":"0","deadline":"10000000"}}
 {"dispatch":{"at":"0","line":"2","attempt":1,"deadline":"10000000"}}
@@ -9,4 +9,4 @@
 {"end":{"at":"50","line":"2","end":"unexpected","read":"0","ready":"0","intended":"0","released":"0","dispatched":"0","sent":"0","ended":"50","attempts":1,"critical":null,"bound":[],"fault":false}}
 {"end":{"at":"50","line":"3","end":{"skipped":{"dependency":"2"}},"read":"0","ready":"0","intended":"50","released":"50","dispatched":null,"sent":null,"ended":"50","attempts":0,"critical":null,"bound":["2"],"fault":false}}
 {"end":{"at":"50","line":"4","end":{"skipped":{"dependency":"3"}},"read":"0","ready":"0","intended":"50","released":"50","dispatched":null,"sent":null,"ended":"50","attempts":0,"critical":null,"bound":["3"],"fault":false}}
-{"trailer":{"events":"10","steps":"3","sha256":"6f32dcb91ad4bfa3aa99aebc943b3da31fa577e3ace18b2f088d671edecafaca"}}
+{"trailer":{"events":"10","steps":"3","sha256":"aab889f75de76024c0260e0800164b3f817b10e9a6a0b2a9dd26eaea54f72a24"}}

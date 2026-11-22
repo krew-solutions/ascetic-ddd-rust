@@ -17,7 +17,7 @@ use ascetic_ddd_scheduler::journal::{self, JOURNAL_VERSION, Judged};
 use ascetic_ddd_scheduler::machine::{
     Captured, Critical, End, Entry, Input, Judgement, MACHINE_REVISION, Skip,
 };
-use ascetic_ddd_scheduler::sim::{Attempt, Run, run_reading};
+use ascetic_ddd_scheduler::sim::{Attempt, Run, run_reading, run_waking_late};
 use ascetic_ddd_scheduler::verdict::{FOLD_REVISION, Log, fold};
 use fixture::*;
 use serde_json::{Value as Json, json};
@@ -166,6 +166,11 @@ const JOURNALS: &[(u32, u32, &str)] = &[
         2,
         "dd08d141ef8cef469e04a6a24bfe55d13611a551e4fca30e4e11f1232c5f4cf4",
     ),
+    (
+        3,
+        3,
+        "8ece1efca5fed0268ad6d4a4c2ba8821130805cf7538d5bb30210dccd238e34f",
+    ),
 ];
 
 /// What the fold decided of the differential's runs, the digest of their
@@ -189,6 +194,12 @@ const CLASSES: &[(u32, u32, u32, &str)] = &[
         3,
         2,
         2,
+        "b4690f124fe6bbb392ec46b476af57a0f43f4e7b0c589e92ea44af817d79be1b",
+    ),
+    (
+        3,
+        3,
+        3,
         "b4690f124fe6bbb392ec46b476af57a0f43f4e7b0c589e92ea44af817d79be1b",
     ),
 ];
@@ -705,6 +716,13 @@ fn the_machine_is_the_scheduler_by_definition() {
             "{counter}: {reached}"
         );
     }
+    // Decision 16's rules see only a wake taken late: with none, neither fires.
+    for counter in ["fired_resend", "fired_ended_late"] {
+        assert!(
+            !reached.contains(&format!("'{counter}'")),
+            "{counter} with no wake late: {reached}"
+        );
+    }
     let classes: String = sha2::Digest::finalize(classes)
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -734,4 +752,158 @@ fn the_machine_is_the_scheduler_by_definition() {
         within > 0 && lagged > 0 && attained > 0,
         "{within} {lagged} {attained}"
     );
+}
+
+/// Decision 16: the machine's wakes taken late, as a real timer's slack takes
+/// them (A3 broken on purpose). A resend or a poll taken too late to leave ends
+/// the step as it stands; the fold never finds such a journal incoherent, and
+/// counts what the late wake made undecided — the definition agreeing, and
+/// reaching both rules.
+#[test]
+fn late_wakes_are_the_harness_s_lateness() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    use ascetic_ddd_scheduler::verdict::{Verdict, Void};
+
+    let verdict_py = concat!(env!("CARGO_MANIFEST_DIR"), "/vectors/verdict.py");
+    let mut verdicts = Command::new("python3")
+        .args(["-I", verdict_py])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("python3, which the library's gate requires");
+    let mut verdicts_in = verdicts.stdin.take().unwrap();
+    let mut runs = 0;
+    // Deadlines a few answers long, answers fast, refusals and unknowns
+    // common: resends and polls fall due near their deadlines, where a late
+    // wake decides.
+    let mut header = fixture::corpus::corpus_header();
+    for o in &mut header.operations {
+        o.timeout = 2_000;
+    }
+    for c in &mut header.channels {
+        c.timeout = 2_000;
+    }
+    for c in &mut header.calls {
+        c.timeout = 2_000;
+    }
+    let quick = |seed: u64, log: &str| {
+        let root = Key::root(Seed(seed)).child("quick").child(log);
+        move |line: u64, attempt: u32, r: &Record| {
+            let k = root.at(line).at(u64::from(attempt));
+            let draw = |label: &str, m: u64| k.child(label).unit().raw() % m;
+            let judgement = match draw("judgement", 4) {
+                0 => Judgement::NotTaken,
+                1 => Judgement::Unknown,
+                _ => Judgement::Expected(
+                    r.capture
+                        .iter()
+                        .map(|c| Captured {
+                            subject: c.subject.clone(),
+                            slot: c.slot.clone(),
+                            value: line.to_string().into_bytes(),
+                        })
+                        .collect(),
+                ),
+            };
+            Attempt {
+                after: None,
+                sent_after: draw("sent", 50),
+                answer_after: Some(draw("answer", 300)),
+                judgement,
+            }
+        }
+    };
+    for (name, records) in fixture::corpus::logs() {
+        let (report, _) = run_bounded(header.clone(), &records, &NoHost, 1_000);
+        if !report.violations.is_empty() {
+            continue;
+        }
+        let j = header.profile.jitter;
+        for seed in 1..=2u64 {
+            let lags = Key::root(Seed(seed)).child("late").child(&name);
+            let wake_lag = move |w: u64| {
+                [0, 1, j, j + 1, 3 * j + 7, 1_000, 1_700][(lags.at(w).unit().raw() % 7) as usize]
+            };
+            let ran = run_waking_late(
+                header.clone(),
+                &records,
+                1_000,
+                &|_| 0,
+                &wake_lag,
+                &quick(seed, &name),
+            )
+            .unwrap();
+            let log = String::from_utf8(bytes(header.clone(), &records)).unwrap();
+            let identity = serde_json::from_str::<Json>(log.lines().last().unwrap()).unwrap()
+                ["trailer"]["sha256"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let journal_header = journal::Header {
+                journal: JOURNAL_VERSION,
+                machine: MACHINE_REVISION,
+                source: "late wakes".to_owned(),
+                log: identity.clone(),
+                validator: ascetic_ddd_command_log::live::validator(),
+                read_ahead: 1_000,
+                jitter: j,
+                resend: header.profile.resend,
+                namespace: 1,
+                t0: 1_763_640_000_000_000,
+            };
+            let mut w = journal::Writer::new(Vec::new(), journal_header.clone()).unwrap();
+            for l in &ran.journal {
+                w.line(l).unwrap();
+            }
+            let bytes = w.finish().unwrap().0;
+            let open = || journal::Reader::new(std::io::Cursor::new(bytes.clone())).unwrap();
+            let log_id = Log {
+                sha256: identity,
+                records: records.len() as u64,
+            };
+            let folded = fold(&journal_header, &log_id, open(), open());
+            assert!(
+                !matches!(
+                    folded.verdict,
+                    Verdict::Void(Void::Incoherent { .. } | Void::Fault { .. })
+                ),
+                "{name}/{seed}: {:?}",
+                folded.verdict
+            );
+            let parsed: Vec<Json> = std::str::from_utf8(&bytes)
+                .unwrap()
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect();
+            let names: Vec<&str> = folded.classes.iter().map(|c| c.name()).collect();
+            let case = json!({
+                "name": format!("{name}/{seed}"),
+                "log": {"sha256": log_id.sha256, "records": log_id.records},
+                "journal": parsed,
+                "verdict": folded.verdict.name(),
+                "classes": names,
+            });
+            let _ = writeln!(verdicts_in, "{case}");
+            runs += 1;
+        }
+    }
+    drop(verdicts_in);
+    let out = verdicts.wait_with_output().unwrap();
+    let reached = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.success(),
+        "{reached}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(runs > 100, "{runs} runs");
+    for counter in ["undecided_resend", "undecided_ended_late"] {
+        assert!(
+            reached.contains(&format!("'{counter}'")),
+            "{counter}: {reached}"
+        );
+    }
+    eprintln!("{reached}");
 }

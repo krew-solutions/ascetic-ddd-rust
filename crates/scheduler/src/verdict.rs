@@ -27,7 +27,7 @@ use crate::machine::Line as Number;
 /// What the fold decides, as a number: raised whenever the classes or the
 /// verdict it gives a journal change, which the goldens' and the differential's
 /// classes pin beside it.
-pub const FOLD_REVISION: u32 = 2;
+pub const FOLD_REVISION: u32 = 3;
 
 /// A line's class (decision 14), by precedence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -450,11 +450,38 @@ impl First {
         let read_late = lv
             .released
             .is_some_and(|(i, r, d)| r >= d && i < d && r.saturating_sub(i) > j);
+        // A wake the harness took too late (ADR-0047 decision 16), whatever
+        // its lateness: an unknown ended past its deadline, released before it
+        // — only a wake due before the deadline and taken past it ends a step
+        // there; a resend its last answer licensed, due more than J before the
+        // deadline, the step ended without it — the machine schedules no other
+        // and, taken on time, it leaves.
+        let ended_late = e.end == End::Unknown
+            && lv.attempts >= 1
+            && lv.released.is_some_and(|(_, r, d)| r < d && e.ended > d);
+        let resend_late = lv.action != Action::Poll
+            && match (lv.taken, lv.answered, lv.released) {
+                (Some(taken), Some((_, at, after)), Some((_, _, d))) => {
+                    let licensed = match taken {
+                        Judged::NotTaken => lv.safety != Safety::Never,
+                        Judged::Unknown => lv.safety == Safety::Idempotent,
+                        Judged::Expected | Judged::Unexpected => false,
+                    };
+                    licensed
+                        && at
+                            .saturating_add(after.unwrap_or(0).max(self.floor))
+                            .saturating_add(j)
+                            < d
+                }
+                _ => false,
+            };
         let mut byte = end_code(e.end);
         if late {
             byte |= LATE;
         }
-        if e.end == End::Unknown && (e.fault || call_late || read_late) {
+        if (e.end == End::Unknown && (e.fault || call_late || read_late || ended_late))
+            || (matches!(e.end, End::Unknown | End::Unexpected) && resend_late)
+        {
             byte |= UNDECIDED;
         }
         self.mark(e.line, byte);
@@ -566,7 +593,8 @@ impl Second {
                 "awaited as expected a failed step, and not skipped",
             ));
         }
-        let undecided = end == UNKNOWN && (me & UNDECIDED != 0 || late_cause);
+        let undecided = (end == UNKNOWN && (me & UNDECIDED != 0 || late_cause))
+            || (end == UNEXPECTED && me & UNDECIDED != 0);
         let class = if end == SKIPPED {
             Class::Consequent
         } else if conditional {
