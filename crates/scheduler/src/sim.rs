@@ -358,6 +358,30 @@ pub fn run_stand(
     read_ahead: u64,
     delays: &dyn Fn(Line, u32) -> (u64, u64, u64),
 ) -> Result<Run, LogError> {
+    run_stand_failing(header, records, read_ahead, delays, None)
+}
+
+/// A failure the stand injects at a step's first attempt (ADR-0047 K1e-3d):
+/// what a network or a server does, not what the decision says of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Failure {
+    /// The request is lost on its way: never processed, never answered.
+    LostRequest,
+    /// The request is processed, its answer lost.
+    LostAnswer,
+    /// The request is refused unprocessed, with an answer the contract
+    /// defines and `expect` does not list.
+    Refused,
+}
+
+/// [`run_stand`] with `failure` injected at a line's first attempt.
+pub fn run_stand_failing(
+    header: Header,
+    records: &[Record],
+    read_ahead: u64,
+    delays: &dyn Fn(Line, u32) -> (u64, u64, u64),
+    failure: Option<(Line, Failure)>,
+) -> Result<Run, LogError> {
     let mut stand = Stand {
         header: header.clone(),
         delays,
@@ -365,6 +389,7 @@ pub fn run_stand(
         arriving: BTreeMap::new(),
         versions: BTreeMap::new(),
         processed: BTreeSet::new(),
+        failure,
     };
     drive(
         header,
@@ -377,8 +402,8 @@ pub fn run_stand(
 }
 
 /// A request on its way: what it carries, the delay of its answer, its
-/// deadline.
-type Arriving = (Vec<Captured>, u64, u64);
+/// deadline, the failure it meets.
+type Arriving = (Vec<Captured>, u64, u64, Option<Failure>);
 
 struct Stand<'a> {
     header: Header,
@@ -388,7 +413,11 @@ struct Stand<'a> {
     /// delay of their answer and their deadline.
     arriving: BTreeMap<(u64, Line, u32), Arriving>,
     versions: BTreeMap<(Subject, String), u64>,
+    /// The requests the stand has handled, refused or not: what a barrier's
+    /// holder must follow (a refusal is the server's answer, not a request
+    /// that never arrived).
     processed: BTreeSet<Line>,
+    failure: Option<(Line, Failure)>,
 }
 
 impl Stand<'_> {
@@ -510,9 +539,17 @@ impl Handler for Stand<'_> {
             return;
         }
         queue.push(sent, Input::Sent { line, attempt });
+        let failure = self
+            .failure
+            .filter(|(l, _)| *l == line && attempt == 1)
+            .map(|(_, f)| f);
+        if failure == Some(Failure::LostRequest) {
+            answer(queue, line, attempt, None, deadline, Judgement::Unknown);
+            return;
+        }
         self.arriving.insert(
             (sent.saturating_add(there), line, attempt),
-            (captured.to_vec(), back, deadline),
+            (captured.to_vec(), back, deadline, failure),
         );
     }
 
@@ -525,17 +562,28 @@ impl Handler for Stand<'_> {
             if arrived > t {
                 break;
             }
-            let Some((_, (captured, back, deadline))) = self.arriving.pop_first() else {
+            let Some((_, (captured, back, deadline, failure))) = self.arriving.pop_first() else {
                 break;
             };
-            let judgement = self.process(line, &captured);
+            let (judgement, answered) = match failure {
+                Some(Failure::Refused) => {
+                    self.processed.insert(line);
+                    (Judgement::Unexpected, true)
+                }
+                Some(Failure::LostAnswer) => (self.process(line, &captured), false),
+                Some(Failure::LostRequest) | None => (self.process(line, &captured), true),
+            };
             answer(
                 queue,
                 line,
                 attempt,
-                Some(arrived.saturating_add(back)),
+                answered.then(|| arrived.saturating_add(back)),
                 deadline,
-                judgement,
+                if answered {
+                    judgement
+                } else {
+                    Judgement::Unknown
+                },
             );
         }
     }

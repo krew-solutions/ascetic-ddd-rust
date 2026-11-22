@@ -637,6 +637,22 @@ order, its canonical bytes, the header's place and the trailer, in `make vectors
   — fifteen by the goldens and twins, the barrier's provenance cut to one level and J taken inclusive only by the
   differential.
 
+**K1e-3d — failures injected on the stand** (2026-11-22): the one oracle not written from decision 6. `run_stand`
+gains `run_stand_failing`, which injects one failure at a line's first attempt — a request lost on its way (never
+processed, never answered), an answer lost (processed), a refusal (unprocessed, answered unexpected) — what a network
+or a server does, not what the decision says of it. Every clean corpus log passes on the stand; then, a failure at
+each of its lines in turn, every other step whose end the failure changed must not be a root, the failed step itself
+a root or undecided, and the run must not pass: 4,281 runs, 142 steps changed by a lost request, 115 by a lost
+answer, 115 by a refusal, none counted a root.
+- **What it found**: 27 barrier holders made second roots by a refused member — awaiting their members `Settled`,
+  answered unexpected by the stand because a refused member was not "processed". The holders carry no expectation
+  (each also awaits a step `Sent`, and the validator's `Sent` rule leaves them none), so the host would judge any
+  answer of theirs expected: the stand's rule is a probe of order — a holder must follow its members — and a refusal
+  is the server's handling of a member, not a member that never arrived. The stand now counts a refused request
+  handled; a holder that overtakes one still fails. Decision 6 is unchanged; what it leaves open is in § Owed.
+- **Executors**: three mutants, each turning the oracle red with second roots — the refusal not handled by the stand,
+  an unknown dependency not doubtful, a failure's dependents not inconclusive.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -662,6 +678,14 @@ only and measures move to the 12-core box.
   unpassed member's met instants, so a cell frees whatever its key's prefixes — trigger: `held − completions`
   material on the first host plan; (C) barrier labels declared in the header, FORMAT 4 — trigger: `barriers` times
   the bytes a key past a budget on a host plan.
+- **A dependent asserting a refused dependency's effect** (K1e-3d): a step awaiting a dependency `Settled` may carry
+  an expectation, and one over that dependency's effect — a report counting its members — fails when the dependency
+  is refused, a second root under decision 6, which makes a `Settled` dependent conditional only on an unknown or
+  skipped end. No executor reaches it: the stand models no content but `If-Match` and a barrier's order, and the
+  corpus's `Settled` holders carry no expectation. Trigger: the first host plan with a step awaiting `Settled` that
+  carries an expectation — then, under the gate, the validator requiring `Expected` of an expectation over a
+  dependency's effect against the fold making a `Settled` dependent of any end but expected conditional (which hides
+  a dependent's own failure, never flips a verdict), with a stand that models the report's content to execute it.
 - **A cell's residue** (K1e-2): an ended cell keeps its key's strings and its map node, some 0.6–0.9 kB; a compact
   ended cell and keys interned per barrier — trigger: capacity binding on a host plan.
 
@@ -706,3 +730,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   normative schema and `vectors/journal.py`.
 - 2026-11-22: K1e-3c-2 built (§ Measured): the fold, its verdict by definition, golden runs and twins; the cause
   amendment moved from K1e-3d into it.
+- 2026-11-22: K1e-3d built (§ Measured): failures injected on the stand, a failure counted at its root only; the stand
+  counts a refused request handled; a `Settled` dependent asserting a refused dependency's effect owed.
