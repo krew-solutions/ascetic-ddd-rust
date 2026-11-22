@@ -912,7 +912,7 @@ fn the_rules_meaning_is_pinned_to_its_revision() {
         ),
         (
             8,
-            "c566f139665e1b35f212c91eba373a3ea4539e096c1feb706ddb1fca28ee6e38",
+            "2c611cc2ae7e1d1659f54eab2de6e2135cdcc06ec965d28a3f90053afb6812eb",
         ),
     ];
     let mut digest = Sha256::new();

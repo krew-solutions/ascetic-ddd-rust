@@ -50,7 +50,16 @@ fn script(seed: u64, log: &str) -> impl Fn(u64, u32, &Record) -> Attempt + use<>
                     .collect(),
             ),
         };
+        // A refusal's Retry-After: none, below the resend floor, above it,
+        // past any deadline (ADR-0047 decision 15).
+        let after = match draw("after", 4) {
+            0 => None,
+            1 => Some(RESEND / 2),
+            2 => Some(RESEND * 3 + draw("by", 500)),
+            _ => Some(u64::MAX / 4),
+        };
         Attempt {
+            after,
             sent_after: draw("sent", 300),
             answer_after: (draw("silent", 30) != 0).then(|| draw("answer", 3_000)),
             judgement,
@@ -66,6 +75,7 @@ type Script = dyn Fn(u64, u32, &Record) -> Attempt;
 /// schedule (ADR-0047 K1e-2).
 fn at_deadline(header: Header) -> impl Fn(u64, u32, &Record) -> Attempt {
     move |line, _, r| Attempt {
+        after: None,
         sent_after: 0,
         answer_after: Some(ascetic_ddd_command_log::plan::timeout(&header, &r.action)),
         judgement: Judgement::Expected(
@@ -146,18 +156,31 @@ const JOURNALS: &[(u32, u32, &str)] = &[
         1,
         "adc7ab97553a58621e21f77d3c2fcf03763208ea069bb9073133604e4c2aa00e",
     ),
+    (
+        2,
+        2,
+        "fd777c4682da7021b139a7758a5e1d0915bb7a9af5535e3325c549f07fe42a4f",
+    ),
 ];
 
 /// What the fold decided of the differential's runs, the digest of their
 /// verdicts and classes, by journal version, machine revision and fold
 /// revision (ADR-0047 K1e-3c-2): a fold that decides otherwise raises its
 /// revision.
-const CLASSES: &[(u32, u32, u32, &str)] = &[(
-    2,
-    1,
-    1,
-    "2124597f7d52665afb12cf13b908b35e7ea8908ca31dfba5d3ee07e8bf13935a",
-)];
+const CLASSES: &[(u32, u32, u32, &str)] = &[
+    (
+        2,
+        1,
+        1,
+        "2124597f7d52665afb12cf13b908b35e7ea8908ca31dfba5d3ee07e8bf13935a",
+    ),
+    (
+        2,
+        2,
+        1,
+        "67d4cdacc4d04099c1d62a5dd1d47ace78f6c4f3e4295f7f567201d3f0a5469e",
+    ),
+];
 
 /// The journal written, read back, and told against the run it journals
 /// (ADR-0047 K1e-3b): every end and dispatch, every send and answer in the
@@ -287,6 +310,7 @@ fn journal_of(name: &str, header: journal::Header, ran: &Run, records: &[Record]
                 line,
                 attempt,
                 judgement,
+                ..
             } => (
                 *at,
                 *line,
@@ -433,6 +457,7 @@ fn the_machine_is_the_scheduler_by_definition() {
                                 "answer_after": a.answer_after,
                                 "judgement": judgement_json(&a.judgement),
                                 "captures": captures,
+                                "after": a.after,
                             }),
                         );
                     }

@@ -21,7 +21,7 @@
 EXTENDS Scheduler, TLC
 
 CONSTANTS
-  Trace,    \* Seq of [input, at, line, attempt, judgement], see trace2tla.py
+  Trace,    \* Seq of [input, at, line, attempt, judgement, after], see trace2tla.py
   Journal   \* Journal[l]: the machine's entry for line l
 
 VARIABLE i  \* the next input of the trace
@@ -40,7 +40,7 @@ Logged ==
      \/ Step.input = "sent" /\ out[Step.line] = Step.attempt /\ Sent(Step.line)
      \/ /\ Step.input = "ended"
         /\ out[Step.line] = Step.attempt
-        /\ \/ Answer(Step.line, Step.judgement)
+        /\ \/ Answer(Step.line, Step.judgement, Step.after)
            \/ Step.judgement = "unknown" /\ GiveUp(Step.line)
 
 \* Time moves to the next input's stamp, or to what falls due before it;

@@ -1,4 +1,4 @@
-{"event":"log","lines":[{"after":[],"at":0,"captures":true,"key":"group/[7]/update/0","producer":0,"retained":false,"safety":"not_taken","think":0,"timeout":10000000},{"after":[{"on":"sent","step":2}],"at":100,"captures":false,"key":"device/[7]/a/0","producer":0,"retained":false,"safety":"idempotent","think":0,"timeout":10000000},{"after":[{"on":"expected","step":2}],"at":500,"captures":false,"key":"group/[7]/read/0","producer":2,"retained":false,"safety":"never","think":0,"timeout":10000000},{"after":[{"on":"settled","step":3}],"at":600,"captures":false,"key":"device/[7]/a/0","producer":0,"retained":false,"safety":"idempotent","think":0,"timeout":10000000},{"after":[{"each":"device/[7]/a/0","on":"settled"}],"at":1000,"captures":false,"key":"group/[7]/report/0","producer":0,"retained":false,"safety":"idempotent","think":0,"timeout":10000000},{"after":[{"on":"expected","step":6},{"on":"expected","step":4}],"at":1500,"captures":false,"key":"device/[7]/a/0","producer":0,"retained":false,"safety":"idempotent","think":0,"timeout":10000000}],"observer":"scheduler","read_ahead":3000,"w":1000}
+{"event":"log","jitter":0,"lines":[{"after":[],"at":0,"captures":true,"key":"group/[7]/update/0","producer":0,"retained":false,"safety":"not_taken","think":0,"timeout":10000000},{"after":[{"on":"sent","step":2}],"at":100,"captures":false,"key":"device/[7]/a/0","producer":0,"retained":false,"safety":"idempotent","think":0,"timeout":10000000},{"after":[{"on":"expected","step":2}],"at":500,"captures":false,"key":"group/[7]/read/0","producer":2,"retained":false,"safety":"never","think":0,"timeout":10000000},{"after":[{"on":"settled","step":3}],"at":600,"captures":false,"key":"device/[7]/a/0","producer":0,"retained":false,"safety":"idempotent","think":0,"timeout":10000000},{"after":[{"each":"device/[7]/a/0","on":"settled"}],"at":1000,"captures":false,"key":"group/[7]/report/0","producer":0,"retained":false,"safety":"idempotent","think":0,"timeout":10000000},{"after":[{"on":"expected","step":6},{"on":"expected","step":4}],"at":1500,"captures":false,"key":"device/[7]/a/0","producer":0,"retained":false,"safety":"idempotent","think":0,"timeout":10000000}],"observer":"scheduler","read_ahead":3000,"resend":100,"w":1000}
 {"at":0,"event":"input","input":"read","line":2,"observer":"scheduler"}
 {"at":0,"event":"input","input":"read","line":3,"observer":"scheduler"}
 {"at":0,"event":"input","input":"read","line":4,"observer":"scheduler"}
@@ -7,12 +7,12 @@
 {"at":0,"event":"input","input":"read","line":7,"observer":"scheduler"}
 {"at":10,"attempt":1,"event":"input","input":"sent","line":2,"observer":"scheduler"}
 {"at":110,"attempt":1,"event":"input","input":"sent","line":3,"observer":"scheduler"}
-{"at":310,"attempt":1,"event":"input","input":"ended","judgement":"unexpected","line":2,"observer":"scheduler"}
-{"at":10000100,"attempt":1,"event":"input","input":"ended","judgement":"unknown","line":3,"observer":"scheduler"}
+{"after":0,"at":310,"attempt":1,"event":"input","input":"ended","judgement":"unexpected","line":2,"observer":"scheduler"}
+{"after":0,"at":10000100,"attempt":1,"event":"input","input":"ended","judgement":"unknown","line":3,"observer":"scheduler"}
 {"at":10000110,"attempt":1,"event":"input","input":"sent","line":5,"observer":"scheduler"}
-{"at":10000310,"attempt":1,"event":"input","input":"ended","judgement":"expected","line":5,"observer":"scheduler"}
+{"after":0,"at":10000310,"attempt":1,"event":"input","input":"ended","judgement":"expected","line":5,"observer":"scheduler"}
 {"at":10000320,"attempt":1,"event":"input","input":"sent","line":6,"observer":"scheduler"}
-{"at":10000520,"attempt":1,"event":"input","input":"ended","judgement":"expected","line":6,"observer":"scheduler"}
+{"after":0,"at":10000520,"attempt":1,"event":"input","input":"ended","judgement":"expected","line":6,"observer":"scheduler"}
 {"attempts":1,"bound":[],"dispatched":0,"end":"unexpected","ended":310,"event":"journal","intended":0,"line":2,"observer":"scheduler","read":0,"released":0,"sent":10}
 {"attempts":1,"bound":[2],"dispatched":100,"end":"unknown","ended":10000100,"event":"journal","intended":100,"line":3,"observer":"scheduler","read":0,"released":100,"sent":110}
 {"attempts":0,"bound":[2],"dispatched":null,"end":["skipped","dependency",2],"ended":310,"event":"journal","intended":310,"line":4,"observer":"scheduler","read":0,"released":310,"sent":null}

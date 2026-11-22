@@ -37,7 +37,8 @@ use ascetic_ddd_command_log::answer::{PredicateError, Read};
 use ascetic_ddd_command_log::fills::{Captured, Fills};
 use ascetic_ddd_command_log::record::{Action, Name, Outcome, Probe, Record, Subject};
 
-use crate::machine::Judgement;
+pub use crate::machine::{CODE, Code};
+use crate::machine::{Judgement, Seen};
 
 /// What the shell saw of an attempt whose bytes left.
 #[derive(Debug)]
@@ -80,37 +81,6 @@ pub enum Why {
     Unlisted,
 }
 
-/// A problem's code as the journal may carry it: the server's text only if it
-/// is a short dotted name, as every host and gateway code is; any other the
-/// journal does not take in.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Code {
-    /// A dotted name of at most [`CODE`] bytes.
-    Named(Name),
-    /// Some other text.
-    Other,
-}
-
-/// The most bytes a journaled code has.
-pub const CODE: usize = 64;
-
-impl Code {
-    fn of(code: &str) -> Code {
-        let part = |p: &str| {
-            let mut b = p.bytes();
-            b.next().is_some_and(|c| c.is_ascii_lowercase())
-                && b.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
-        };
-        let mut parts = code.split('.');
-        let named = code.len() <= CODE && parts.clone().count() >= 2 && parts.all(part);
-        if named {
-            Code::Named(code.to_owned())
-        } else {
-            Code::Other
-        }
-    }
-}
-
 /// An attempt's judgement and what beside it the journal carries.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Judged {
@@ -126,6 +96,17 @@ pub struct Judged {
     pub retry_after: Option<u64>,
     /// What an expected answer did not give: whose, which.
     pub missing: Vec<(Subject, Name)>,
+}
+
+impl Judged {
+    /// What of it the machine takes beside the judgement.
+    pub fn seen(&self) -> Seen {
+        Seen {
+            status: self.status,
+            code: self.code.clone(),
+            after: self.retry_after,
+        }
+    }
 }
 
 impl fmt::Debug for Judged {

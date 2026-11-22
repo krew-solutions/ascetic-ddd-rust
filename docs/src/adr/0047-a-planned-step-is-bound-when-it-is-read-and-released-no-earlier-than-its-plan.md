@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e) and K2a-1 to K2a-4 built (§ Measured), K2a-5 next. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e) and K2a-1 to K2a-5a built (§ Measured), K2a-5b next. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -23,7 +23,8 @@ To be built in slices, each a commit of its own:
   (`command-log::json`); **K2a-2** the fills and the request, `Secret32` from a run secret; **K2a-3** reading an
   answer, and `scheduler::judge`; **K2a-4** FORMAT 4 and the validator's rules, in two: **K2a-4a** the model,
   **K2a-4b** the rules over steps; **K2a-5** the machine, the journal
-  and the fold: polls re-polled, resends spaced and licensed.
+  and the fold, in two: **K2a-5a** the machine and its model — polls re-polled, resends spaced; **K2a-5b** the
+  journal's version 3 and the fold licensing resends.
 - **K2b** (`crates/load-run`, the shell): REST, the clock, the reader, the journal writer, the gates.
 - **The first host run:** REST only, on the compose stand, `sources = 1` — a correctness run.
 - **K3** facts and the bus; **K4** shaping and the emulated client's retries; **K5** the report.
@@ -857,6 +858,30 @@ does, and awaiting a step only sent clears a call's or a message's expectation; 
   reference both, the other eight by the twins alone (the corpus plans no secret capture, no message keyed by a
   secret, no idempotent update and no second producer).
 
+**K2a-5a — polls re-polled, resends spaced** (2026-11-22): the machine, `MACHINE_REVISION` 2 (decision 15). A poll's
+unknown answer takes its grid's next point as a not-yet one does, no sooner than its `Retry-After`: one gateway reply
+no longer ends an observation, and never two polls of one are out. A harness resend — a certified refusal of an
+operation that may be resent, an unknown answer of an idempotent one — leaves at the later of its `Retry-After` and
+the profile's floor after the answer, and only if that is before the deadline by more than J; else the step ends as it
+stood, a refusal unexpected, an unknown unknown. `Input::Ended` carries what came back beside the judgement (`Seen`:
+the status, the code as the journal may carry it, the wait), which the judge gives; the journal's version 2 does not
+write it yet (K2a-5b). `vectors/schedule.py` decides the same by definition. `verify/tla/Scheduler.tla`: a resend
+falls due at `now + Max({w, Floor})`, none out until then, kept before the deadline by more than `Jitter`
+(`ResendInTime`); trace validation carries each answer's wait, the floor and J.
+- **Executors**: a machine test of the wait — the floor, a shorter and a longer `Retry-After`, J one microsecond
+  either side of its edge, a wait past any deadline, a poll's grid against its `Retry-After`. The differential's
+  scripts draw a `Retry-After` none, below the floor, above it and past any deadline; the corpus's update is resent
+  when a code certifies it not run, its read when unknown; `schedule.py` counts, failing on zero: 3,732 runs agree,
+  198 resends by `Retry-After`, 519 by the floor, 3,909 refused near their deadline, 15 polls re-polled. Journals
+  pinned under (2, 2), classes under (2, 2, 1); the golden journal and runs written again. TLC: `SchedulerResendPast
+  Deadline` drops the guard and violates `ResendInTime`, its twin holding; a guarded resend reached (an invariant
+  that none is ever due falls in 43 states); the window's state count 556,786 to 276,405 and the late reader's
+  1,665,393 to 821,976, a resend no longer instant; the scheduler's traces recorded again fit the model, the forged
+  ones still refused. Nine mutants of the machine, each killed by the differential alone, three also by the traces
+  and all nine by the machine test: a poll's unknown ending it, a poll's `Retry-After` ignored, a resend at once,
+  `Retry-After` ignored, the floor ignored, J ignored, a resend past the deadline, a refusal past it ended unknown,
+  an unknown resent unless the operation is never resent.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -962,3 +987,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-22: K2a-4 cut into K2a-4a and K2a-4b; K2a-4a built (§ Measured): FORMAT 4's model.
 - 2026-11-22: K2a-4b built (§ Measured): the rules over steps — `frame`, `predicate`, `expect`, `secret`, and four
   extended; `RULES_REVISION` 8.
+- 2026-11-22: K2a-5 cut into K2a-5a and K2a-5b; K2a-5a built (§ Measured): polls re-polled, resends spaced,
+  `MACHINE_REVISION` 2, the model's resend.

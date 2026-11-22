@@ -28,7 +28,7 @@ pub const JOURNAL_VERSION: u32 = 2;
 /// (`golden/journal.jsonl`, [`sample`]), which holds every line and variant. A
 /// change to how any line is written changes the golden journal, and so this,
 /// in the same edit.
-pub const JOURNAL: &str = "1015cde6fda7f91d4ee314597ac8772ef43ebdd3a53880b18d0d90d0319d5268";
+pub const JOURNAL: &str = "7038f4dd6638c17871c82e14386fb7d0468e0df91649512d9641c4392960535b";
 
 /// A journal's line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -504,6 +504,7 @@ pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
             line,
             attempt,
             judgement,
+            ..
         } => {
             let ignored = outputs.iter().find_map(|o| match o {
                 Output::Ignored {

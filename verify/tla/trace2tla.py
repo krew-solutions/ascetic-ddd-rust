@@ -455,7 +455,10 @@ def scheduler(trace, out, events):
         return [model_line(next(it)) if "step" in a else 0 for a in lines[line]["after"]]
 
     steps = [record(input=e["input"], at=e["at"], line=model_line(e["line"]),
-                    attempt=e.get("attempt", 0), judgement=e.get("judgement", "")) for e in inputs]
+                    attempt=e.get("attempt", 0), judgement=e.get("judgement", ""),
+                    after=e.get("after", 0)) for e in inputs]
+    floor, jitter = log["resend"], log["jitter"]
+    waits = {0} | {e.get("after", 0) for e in inputs if e["input"] == "ended"}
     entries = []
     for line in range(len(lines)):
         j = journal[line + 2]
@@ -464,6 +467,9 @@ def scheduler(trace, out, events):
                               sent=none(j["sent"]), ended=j["ended"], attempts=j["attempts"],
                               bound=bound(line)))
     times = {0} | {e["at"] for e in inputs}
+    # The instants a resend may fall due: an answer's, plus the later of its
+    # wait and the floor (ADR-0047 decision 15).
+    times |= {e["at"] + max(e.get("after", 0), floor) for e in inputs if e["input"] == "ended"}
     for j in journal.values():
         times |= {j[f] for f in ("read", "intended", "released", "dispatched", "sent", "ended") if j[f] is not None}
     attempts = max(j["attempts"] for j in journal.values())
@@ -487,6 +493,7 @@ def scheduler(trace, out, events):
         + "".join(f"{k} == {tla(v)}\n" for k, v in consts.items())
         + "TrTimes == {" + ", ".join(str(t) for t in sorted(times)) + "}\n"
         + 'TrJudgements == {"expected", "bare", "unexpected", "not_taken", "unknown"}\n'
+        + "TrWaits == {" + ", ".join(str(w) for w in sorted(waits)) + "}\n"
         + "TrJournal == <<\n  " + ",\n  ".join(str(e) for e in entries) + "\n>>\n"
         + f"TraceDef == <<\n  {body}\n>>\n\n"
         "====\n"
@@ -498,10 +505,11 @@ def scheduler(trace, out, events):
         + f"  W = {log['w']}\n  L = {log['read_ahead']}\n  Lag = {max(times) + 1}\n"
         "  Times <- TrTimes\n  Judgements <- TrJudgements\n"
         f"  MaxAttempts = {attempts + 1}\n"
+        f"  Floor = {floor}\n  Jitter = {jitter}\n  Waits <- TrWaits\n"
         '  Mutant = "none"\n'
         "  Trace <- TraceDef\n  Journal <- TrJournal\n"
         "INVARIANTS\n"
-        + "".join(f"  {inv}\n" for inv in ["TypeOK", "ReleaseSafe", "BarrierSafe", "NoUseAfterFree",
+        + "".join(f"  {inv}\n" for inv in ["TypeOK", "ResendInTime", "ReleaseSafe", "BarrierSafe", "NoUseAfterFree",
                                               "BoundAsChecked", "NoCensored", "EndsAsModelled",
                                               "NotFinished"])
     )

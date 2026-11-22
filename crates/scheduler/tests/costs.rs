@@ -85,6 +85,7 @@ fn costs(lines: u64, every: u64, answer: u64, w: u64, keys: bool) -> (usize, Run
     let bytes = bytes(header.clone(), &(0..lines).map(record).collect::<Vec<_>>());
     let line = (bytes.len() as u64) / lines.max(1);
     let script = move |_: u64, _: u32, _: &Record| Attempt {
+        after: None,
         sent_after: 0,
         answer_after: Some(answer),
         judgement: Judgement::Expected(vec![]),

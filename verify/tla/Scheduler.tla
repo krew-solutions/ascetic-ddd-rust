@@ -79,6 +79,9 @@ CONSTANTS
   Times,       \* the instants time takes
   Judgements,  \* what the handlers may answer
   MaxAttempts, \* the attempts a not-taken or unknown answer may lead to
+  Floor,       \* the least a harness resend waits after the answer it follows
+  Jitter,      \* J: a resend leaves more than J before its deadline
+  Waits,       \* what an answer's Retry-After may ask for
   Mutant
 
 Lines == 1..N
@@ -120,8 +123,10 @@ ASSUME \A l \in Lines : Producer[l] # 0 =>
          /\ \E i \in Entries(l) : IsStep(l, i) /\ After[l][i].dep = Producer[l] /\ After[l][i].on = "expected"
 ASSUME \A l \in Lines : \A i \in Entries(l) : \A m \in Awaited(l, i) : At[l] >= At[m] + Think[l]
 ASSUME \A l \in Lines : Timeout[l] > 0
+ASSUME Floor > 0 /\ Jitter >= 0 /\ \A w \in Waits : w >= 0
 
 VARIABLES
+  rs,       \* rs[l]: when its resend falls due, or None (ADR-0047 decision 15)
   now,      \* the machine's instant: the stamp of the inputs it takes
   next,     \* the line the reader gives next
   kept,     \* the window: the lines a dependency read now may bind
@@ -151,7 +156,7 @@ VARIABLES
   uaf,      \* a freed cell was read
   heard     \* heard[l]: what its handler answered its attempt, "none" before
 
-vars == <<now, next, kept, read, bnd, ph, wait, rdy, skp, int, rel, dl, att, disp, snt, out, left,
+vars == <<rs, now, next, kept, read, bnd, ph, wait, rdy, skp, int, rel, dl, att, disp, snt, out, left,
           end, ended, cap, pre, lat, fail, ffail, freed, err, uaf, heard>>
 
 (* ------------------------------------------------------------------------ *)
@@ -288,7 +293,7 @@ ReadLine ==
                   \/ \E i \in Entries(l) : IsStep(l, i) /\ b[i] # 0 /\ freed[b[i]]
                   \/ Mutant = "WalkMembers" /\ \E i \in Entries(l) :
                        ~IsStep(l, i) /\ m[i] >= 0 /\ \E x \in Awaited(l, i) : freed[x]
-  /\ UNCHANGED <<now, int, rel, dl, att, disp, snt, out, left, end, ended, cap, pre, lat, fail, ffail, freed, heard>>
+  /\ UNCHANGED <<rs, now, int, rel, dl, att, disp, snt, out, left, end, ended, cap, pre, lat, fail, ffail, freed, heard>>
 
 (* ------------------------------------------------------------------------ *)
 (* The machine's own steps                                                   *)
@@ -318,14 +323,14 @@ Decide(l) ==
   /\ CanDecide(l)
   /\ IF Mutant = "BindAtRelease" /\ LateUnbound(l)
      THEN /\ err' = TRUE
-          /\ UNCHANGED <<now, next, kept, read, bnd, ph, wait, rdy, skp, int, rel, dl, att, disp, snt, out,
+          /\ UNCHANGED <<rs, now, next, kept, read, bnd, ph, wait, rdy, skp, int, rel, dl, att, disp, snt, out,
                          left, end, ended, cap, pre, lat, fail, ffail, freed, uaf, heard>>
      ELSE IF skp[l] # <<>> \/ (Mutant = "BindAtRelease" /\ LateFailed(l) # {})
      THEN /\ Finish(l, "skipped",
                     IF skp[l] # <<>> THEN skp[l]
                     ELSE <<"dependency", After[l][Min(LateFailed(l))].dep>>, FALSE)
           /\ bnd' = IF Mutant = "BindAtRelease" THEN [bnd EXCEPT ![l] = LateBound(l)] ELSE bnd
-          /\ UNCHANGED <<now, next, kept, read, int, rel, dl, att, disp, out, left, cap, freed, err, heard>>
+          /\ UNCHANGED <<rs, now, next, kept, read, int, rel, dl, att, disp, out, left, cap, freed, err, heard>>
      ELSE /\ LET r0 == IF Mutant = "BindAtRelease"
                        THEN Max({rdy[l]} \cup {Met(After[l][i].dep, After[l][i].on) : i \in {x \in Entries(l) : IsStep(l, x)}})
                        ELSE rdy[l]
@@ -336,7 +341,7 @@ Decide(l) ==
           /\ LET p == Producer[l] IN
              /\ skp' = [skp EXCEPT ![l] = IF p # 0 /\ (freed[p] \/ ~cap[p]) THEN <<"missing_capture", p>> ELSE <<>>]
              /\ uaf' = (uaf \/ (p # 0 /\ freed[p]))
-          /\ UNCHANGED <<now, next, kept, read, wait, rdy, dl, att, disp, snt, out, left, end, ended,
+          /\ UNCHANGED <<rs, now, next, kept, read, wait, rdy, dl, att, disp, snt, out, left, end, ended,
                          cap, pre, lat, fail, ffail, freed, err, heard>>
 
 CanDispatch(l) == ~err /\ ph[l] = "due" /\ rel[l] = now
@@ -347,14 +352,14 @@ Dispatch(l) ==
   /\ LET d == rel[l] + Timeout[l]
      IN IF skp[l] # <<>>
         THEN /\ Finish(l, "skipped", skp[l], FALSE)
-             /\ UNCHANGED <<now, next, kept, read, bnd, int, rel, dl, att, disp, out, left, cap, freed, err, heard>>
+             /\ UNCHANGED <<rs, now, next, kept, read, bnd, int, rel, dl, att, disp, out, left, cap, freed, err, heard>>
         ELSE /\ dl' = [dl EXCEPT ![l] = d]
              /\ att' = [att EXCEPT ![l] = 1]
              /\ disp' = [disp EXCEPT ![l] = now]
              /\ out' = [out EXCEPT ![l] = 1]
              /\ left' = [left EXCEPT ![l] = FALSE]
              /\ ph' = [ph EXCEPT ![l] = "flight"]
-             /\ UNCHANGED <<now, next, kept, read, bnd, wait, rdy, skp, int, rel, snt, end, ended, cap,
+             /\ UNCHANGED <<rs, now, next, kept, read, bnd, wait, rdy, skp, int, rel, snt, end, ended, cap,
                             pre, lat, fail, ffail, freed, err, uaf, heard>>
 
 \* The refuted timer: the machine ends a step at its deadline by its own
@@ -364,7 +369,7 @@ CanTimer(l) == Mutant = "DeadlineByArrival" /\ ~err /\ ph[l] = "flight" /\ end[l
 Timer(l) ==
   /\ CanTimer(l)
   /\ Finish(l, "unknown", <<>>, FALSE)
-  /\ UNCHANGED <<now, next, kept, read, bnd, int, rel, dl, att, disp, out, left, cap, freed, err, heard>>
+  /\ UNCHANGED <<rs, now, next, kept, read, bnd, int, rel, dl, att, disp, out, left, cap, freed, err, heard>>
 
 \* Readers of a captured value whose release is still to be decided.
 NoReader(l) == \A r \in Lines : Producer[r] = l /\ r < next => ph[r] # "waiting"
@@ -385,7 +390,7 @@ CanFree(l) ==
 Free(l) ==
   /\ CanFree(l)
   /\ freed' = [freed EXCEPT ![l] = TRUE]
-  /\ UNCHANGED <<now, next, kept, read, bnd, ph, wait, rdy, skp, int, rel, dl, att, disp, snt, out, left,
+  /\ UNCHANGED <<rs, now, next, kept, read, bnd, ph, wait, rdy, skp, int, rel, dl, att, disp, snt, out, left,
                  end, ended, cap, pre, lat, fail, ffail, err, uaf, heard>>
 
 (* ------------------------------------------------------------------------ *)
@@ -400,11 +405,12 @@ Sent(l) ==
   /\ left' = [left EXCEPT ![l] = TRUE]
   /\ IF snt[l] = None /\ end[l] = "none" /\ att[l] = out[l]
      THEN Settle(l, now, end[l], ended[l], skp[l], FALSE)
-     ELSE UNCHANGED <<snt, end, ended, wait, rdy, skp, pre, lat, fail, ffail, uaf>>
-  /\ UNCHANGED <<now, next, kept, read, bnd, ph, int, rel, dl, att, disp, out, cap, freed, err, heard>>
+     ELSE UNCHANGED <<rs, snt, end, ended, wait, rdy, skp, pre, lat, fail, ffail, uaf>>
+  /\ UNCHANGED <<rs, now, next, kept, read, bnd, ph, int, rel, dl, att, disp, out, cap, freed, err, heard>>
 
-\* "bare" is an expected answer without the value the step captures.
-Answer(l, j) ==
+\* "bare" is an expected answer without the value the step captures; w is
+\* the wait its Retry-After asks for.
+Answer(l, j, w) ==
   /\ ~err
   /\ out[l] # 0
   /\ left[l]
@@ -414,24 +420,24 @@ Answer(l, j) ==
   /\ IF end[l] # "none" \/ att[l] # out[l]
      THEN \* An answer the machine no longer waits for changes nothing.
           /\ out' = [out EXCEPT ![l] = 0]
-          /\ UNCHANGED <<now, next, kept, read, bnd, ph, wait, rdy, skp, int, rel, dl, att, disp, snt, left,
+          /\ UNCHANGED <<rs, now, next, kept, read, bnd, ph, wait, rdy, skp, int, rel, dl, att, disp, snt, left,
                          end, ended, cap, pre, lat, fail, ffail, freed, err, uaf>>
      ELSE IF j \in {"expected", "bare"}
      THEN /\ out' = [out EXCEPT ![l] = 0]
           /\ cap' = [cap EXCEPT ![l] = (j = "expected" /\ Captures[l])]
           /\ Finish(l, "expected", <<>>, FALSE)
-          /\ UNCHANGED <<now, next, kept, read, bnd, int, rel, dl, att, disp, left, freed, err>>
-     ELSE IF (j = "not_taken" /\ Safety[l] # "never" /\ now < dl[l])
-             \/ (j = "unknown" /\ Safety[l] = "idempotent" /\ now < dl[l])
-     THEN \* Resent at once, under the same deadline.
-          /\ att' = [att EXCEPT ![l] = out[l] + 1]
-          /\ out' = [out EXCEPT ![l] = out[l] + 1]
-          /\ left' = [left EXCEPT ![l] = FALSE]
-          /\ UNCHANGED <<now, next, kept, read, bnd, ph, wait, rdy, skp, int, rel, dl, disp, snt, end, ended,
-                         cap, pre, lat, fail, ffail, freed, err, uaf>>
+          /\ UNCHANGED <<rs, now, next, kept, read, bnd, int, rel, dl, att, disp, left, freed, err>>
+     ELSE IF /\ (j = "not_taken" /\ Safety[l] # "never") \/ (j = "unknown" /\ Safety[l] = "idempotent")
+             /\ Mutant = "ResendPastDeadline" \/ now + Max({w, Floor}) + Jitter < dl[l]
+     THEN \* Resent at the later of its Retry-After and the floor, before its
+          \* deadline by more than J (ADR-0047 decision 15): none out until then.
+          /\ rs' = [rs EXCEPT ![l] = now + Max({w, Floor})]
+          /\ out' = [out EXCEPT ![l] = 0]
+          /\ UNCHANGED <<now, next, kept, read, bnd, ph, wait, rdy, skp, int, rel, dl, att, disp, snt, left,
+                         end, ended, cap, pre, lat, fail, ffail, freed, err, uaf>>
      ELSE /\ out' = [out EXCEPT ![l] = 0]
           /\ Finish(l, IF j = "unknown" THEN "unknown" ELSE "unexpected", <<>>, FALSE)
-          /\ UNCHANGED <<now, next, kept, read, bnd, int, rel, dl, att, disp, left, cap, freed, err>>
+          /\ UNCHANGED <<rs, now, next, kept, read, bnd, int, rel, dl, att, disp, left, cap, freed, err>>
 
 \* The handler's own deadline: unknown, stamped at it.
 GiveUp(l) ==
@@ -442,9 +448,20 @@ GiveUp(l) ==
   /\ out' = [out EXCEPT ![l] = 0]
   /\ IF end[l] = "none" /\ att[l] = out[l]
      THEN /\ Finish(l, "unknown", <<>>, FALSE)
-          /\ UNCHANGED <<now, next, kept, read, bnd, int, rel, dl, att, disp, left, cap, freed, err>>
-     ELSE UNCHANGED <<now, next, kept, read, bnd, ph, wait, rdy, skp, int, rel, dl, att, disp, snt, left,
+          /\ UNCHANGED <<rs, now, next, kept, read, bnd, int, rel, dl, att, disp, left, cap, freed, err>>
+     ELSE UNCHANGED <<rs, now, next, kept, read, bnd, ph, wait, rdy, skp, int, rel, dl, att, disp, snt, left,
                       end, ended, cap, pre, lat, fail, ffail, freed, err, uaf>>
+
+\* A resend falls due: the next attempt goes out, under the same deadline.
+CanResend(l) == ~err /\ rs[l] = now
+Resend(l) ==
+  /\ CanResend(l)
+  /\ rs' = [rs EXCEPT ![l] = None]
+  /\ att' = [att EXCEPT ![l] = att[l] + 1]
+  /\ out' = [out EXCEPT ![l] = att[l] + 1]
+  /\ left' = [left EXCEPT ![l] = FALSE]
+  /\ UNCHANGED <<now, next, kept, read, bnd, ph, wait, rdy, skp, int, rel, dl, disp, snt, end, ended,
+                 cap, pre, lat, fail, ffail, freed, err, uaf, heard>>
 
 (* ------------------------------------------------------------------------ *)
 (* Time                                                                      *)
@@ -454,13 +471,15 @@ GiveUp(l) ==
 \* a free: a cell freed as early as it may be is the worst case for a read
 \* of it.
 Urgent ==
-  \/ \E l \in Lines : CanDecide(l) \/ CanDispatch(l) \/ CanTimer(l) \/ CanFree(l) \/ (out[l] # 0 /\ now = dl[l])
+  \/ \E l \in Lines : CanDecide(l) \/ CanDispatch(l) \/ CanTimer(l) \/ CanFree(l) \/ CanResend(l)
+                    \/ (out[l] # 0 /\ now = dl[l])
   \/ next <= N /\ now >= At[next] + Lag
 
 \* The instants it may not pass.
 Dues ==
   {rel[l] : l \in {x \in Lines : ph[x] = "due"}}
   \cup {dl[l] : l \in {x \in Lines : out[x] # 0 \/ (ph[x] = "flight" /\ end[x] = "none")}}
+  \cup {rs[l] : l \in {x \in Lines : rs[x] # None}}
   \cup (IF next <= N THEN {At[next] + Lag} ELSE {})
 
 Tick ==
@@ -470,11 +489,12 @@ Tick ==
        /\ t > now
        /\ \A d \in Dues : d > now => t <= d
        /\ now' = t
-  /\ UNCHANGED <<next, kept, read, bnd, ph, wait, rdy, skp, int, rel, dl, att, disp, snt, out, left,
+  /\ UNCHANGED <<rs, next, kept, read, bnd, ph, wait, rdy, skp, int, rel, dl, att, disp, snt, out, left,
                  end, ended, cap, pre, lat, fail, ffail, freed, err, uaf, heard>>
 
 Init ==
   /\ now = Min(Times)
+  /\ rs = [l \in Lines |-> None]
   /\ next = 1
   /\ kept = {}
   /\ read = [l \in Lines |-> None]
@@ -507,7 +527,7 @@ Init ==
 \* input with everything it sets off — decisions, dispatches, frees — before
 \* the next one, and those steps decide what they decide in any order; so
 \* they are taken one at a time, the lowest line's first.
-CanStep(l) == CanDecide(l) \/ CanDispatch(l) \/ CanTimer(l) \/ CanFree(l)
+CanStep(l) == CanDecide(l) \/ CanDispatch(l) \/ CanTimer(l) \/ CanFree(l) \/ CanResend(l)
 Busy == \E l \in Lines : CanStep(l)
 Internal ==
   LET l == Min({x \in Lines : CanStep(x)})
@@ -515,12 +535,13 @@ Internal ==
      /\ IF CanDecide(l) THEN Decide(l)
         ELSE IF CanDispatch(l) THEN Dispatch(l)
         ELSE IF CanTimer(l) THEN Timer(l)
+        ELSE IF CanResend(l) THEN Resend(l)
         ELSE Free(l)
 \* The inputs: a line read, an attempt's bytes left, its answer, its deadline.
 Input ==
   /\ ~Busy
   /\ \/ ReadLine
-     \/ \E l \in Lines : Sent(l) \/ GiveUp(l) \/ \E j \in Judgements : Answer(l, j)
+     \/ \E l \in Lines : Sent(l) \/ GiveUp(l) \/ \E j \in Judgements, w \in Waits : Answer(l, j, w)
 
 Next == Internal \/ Input \/ Tick
 
@@ -531,6 +552,7 @@ Spec == Init /\ [][Next]_vars
 
 TypeOK ==
   /\ now \in Times
+  /\ rs \in [Lines -> Nat \cup {None}]
   /\ next \in 1..(N + 1)
   /\ kept \subseteq Lines
   /\ ph \in [Lines -> {"unread", "waiting", "due", "flight", "done"}]
@@ -554,6 +576,9 @@ BarrierSafe ==
       \A m \in Awaited(l, i) : LET x == Met(m, After[l][i].on) IN x >= 0 /\ x + Think[l] <= rel[l]
 
 NoUseAfterFree == ~uaf
+
+\* A resend leaves more than J before its deadline (ADR-0047 decision 15).
+ResendInTime == \A l \in Lines : rs[l] # None => rs[l] + Jitter < dl[l]
 
 \* Every dependency bound, to the step the validator bound it to.
 BoundAsChecked ==

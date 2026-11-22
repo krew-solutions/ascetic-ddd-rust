@@ -144,6 +144,7 @@ fn script(line: u64, attempt: u32, r: &Record) -> Attempt {
         _ => Judgement::Expected(captures),
     };
     Attempt {
+        after: None,
         sent_after: draw("sent", 100),
         answer_after: Some(200 + draw("answer", 1_000)),
         judgement,

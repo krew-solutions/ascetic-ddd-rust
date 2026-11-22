@@ -447,22 +447,22 @@ group_bridge() {
 
 group_scheduler() {
   echo "== scheduler: the window and a captured value, as decided, every property holds"
-  must_hold SchedulerWindow MCScheduler.tla 556786
+  must_hold SchedulerWindow MCScheduler.tla 276405
 
   echo "== scheduler: a barrier and provenance, as decided, every property holds"
   must_hold SchedulerBarrier MCScheduler.tla 115196
 
   echo "== scheduler: dependencies bound at release, TLC must find one the window let go bound to nothing"
-  must_fail_with_twin SchedulerBindAtRelease MCScheduler.tla "Invariant BoundAsChecked is violated" 556786
+  must_fail_with_twin SchedulerBindAtRelease MCScheduler.tla "Invariant BoundAsChecked is violated" 276405
 
   echo "== scheduler: the window evicted by the clock, TLC must find a late reader's dependency bound to nothing"
-  must_fail_with_twin SchedulerEvictByClock MCScheduler.tla "Invariant BoundAsChecked is violated" 1665393
+  must_fail_with_twin SchedulerEvictByClock MCScheduler.tla "Invariant BoundAsChecked is violated" 821976
 
   echo "== scheduler: a cell freed as the window lets it go, TLC must find a waiting reader reading it"
-  must_fail_with_twin SchedulerFreeOnEvict MCScheduler.tla "Invariant NoUseAfterFree is violated" 556786
+  must_fail_with_twin SchedulerFreeOnEvict MCScheduler.tla "Invariant NoUseAfterFree is violated" 276405
 
   echo "== scheduler: released at ready + think, TLC must find a step released before its plan"
-  must_fail_with_twin SchedulerReadyWithoutAt MCScheduler.tla "Invariant ReleaseSafe is violated" 556786
+  must_fail_with_twin SchedulerReadyWithoutAt MCScheduler.tla "Invariant ReleaseSafe is violated" 276405
 
   echo "== scheduler: a barrier counting its members, TLC must find its holder released before a member"
   must_fail_with_twin SchedulerCounterBarrier MCScheduler.tla "Invariant BarrierSafe is violated" 115196
@@ -475,6 +475,9 @@ group_scheduler() {
 
   echo "== scheduler: a fold marking direct dependents only, TLC must find a step conditional through another"
   must_fail_with_twin SchedulerProvenanceOneLevel MCScheduler.tla "Invariant ConditionalExact is violated" 115196
+
+  echo "== scheduler: a resend let past its deadline, TLC must find one leaving J or less before it"
+  must_fail_with_twin SchedulerResendPastDeadline MCScheduler.tla "Invariant ResendInTime is violated" 276405
 
   echo "== scheduler: the machine's own timer at the deadline, TLC must find an answer stamped by it censored"
   must_fail_with_twin SchedulerDeadlineByArrival MCScheduler.tla "Invariant NoCensored is violated" 115196

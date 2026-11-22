@@ -10,7 +10,7 @@ use ascetic_ddd_command_log::LogError;
 use ascetic_ddd_command_log::record::{Action, Dep, Header, Hole, Probe, Record, Subject, Value};
 
 use crate::journal;
-use crate::machine::{Captured, End, Entry, Input, Judgement, Line, Machine, Output};
+use crate::machine::{Captured, End, Entry, Input, Judgement, Line, Machine, Output, Seen};
 use crate::order::Ordered;
 
 /// What becomes of one attempt.
@@ -22,6 +22,9 @@ pub struct Attempt {
     pub answer_after: Option<u64>,
     /// How its answer is judged.
     pub judgement: Judgement,
+    /// Microseconds its answer's `Retry-After` asks for (ADR-0047 decision
+    /// 15).
+    pub after: Option<u64>,
 }
 
 impl Attempt {
@@ -32,6 +35,7 @@ impl Attempt {
             sent_after: 0,
             answer_after: Some(latency),
             judgement: Judgement::Expected(vec![]),
+            after: None,
         }
     }
 }
@@ -144,7 +148,8 @@ trait Handler {
     }
 }
 
-/// The ending of an attempt answered at `answered`, or unknown at its deadline.
+/// The ending of an attempt answered at `answered`, asking for `after`, or
+/// unknown at its deadline.
 fn answer(
     queue: &mut Ordered,
     line: Line,
@@ -152,6 +157,7 @@ fn answer(
     answered: Option<u64>,
     deadline: u64,
     judgement: Judgement,
+    after: Option<u64>,
 ) {
     match answered {
         Some(t) if t <= deadline => queue.push(
@@ -160,6 +166,10 @@ fn answer(
                 line,
                 attempt,
                 judgement,
+                seen: Seen {
+                    after,
+                    ..Seen::default()
+                },
             },
         ),
         _ => queue.push(
@@ -168,6 +178,7 @@ fn answer(
                 line,
                 attempt,
                 judgement: Judgement::Unknown,
+                seen: Seen::default(),
             },
         ),
     }
@@ -198,7 +209,15 @@ impl Handler for Scripted<'_> {
             .then_some(a.answer_after)
             .flatten()
             .map(|d| sent.saturating_add(d));
-        answer(queue, line, attempt, answered, deadline, a.judgement);
+        answer(
+            queue,
+            line,
+            attempt,
+            answered,
+            deadline,
+            a.judgement,
+            a.after,
+        );
     }
 }
 
@@ -535,7 +554,15 @@ impl Handler for Stand<'_> {
         let (sent_after, there, back) = (self.delays)(line, attempt);
         let sent = at.saturating_add(sent_after);
         if sent >= deadline {
-            answer(queue, line, attempt, None, deadline, Judgement::Unknown);
+            answer(
+                queue,
+                line,
+                attempt,
+                None,
+                deadline,
+                Judgement::Unknown,
+                None,
+            );
             return;
         }
         queue.push(sent, Input::Sent { line, attempt });
@@ -544,7 +571,15 @@ impl Handler for Stand<'_> {
             .filter(|(l, _)| *l == line && attempt == 1)
             .map(|(_, f)| f);
         if failure == Some(Failure::LostRequest) {
-            answer(queue, line, attempt, None, deadline, Judgement::Unknown);
+            answer(
+                queue,
+                line,
+                attempt,
+                None,
+                deadline,
+                Judgement::Unknown,
+                None,
+            );
             return;
         }
         self.arriving.insert(
@@ -584,6 +619,7 @@ impl Handler for Stand<'_> {
                 } else {
                     Judgement::Unknown
                 },
+                None,
             );
         }
     }

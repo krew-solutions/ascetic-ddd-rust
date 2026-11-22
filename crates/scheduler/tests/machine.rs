@@ -13,7 +13,7 @@ use std::sync::Arc;
 use ascetic_ddd_command_log::record::{Dep, Header, On, Record, Safety};
 use ascetic_ddd_command_log::validate::NoHost;
 use ascetic_ddd_scheduler::machine::{
-    Captured, Critical, End, Entry, GRACE, Input, Judgement, Machine, Output, Skip,
+    Captured, Critical, End, Entry, GRACE, Input, Judgement, Machine, Output, Seen, Skip,
 };
 use ascetic_ddd_scheduler::order::Ordered;
 use ascetic_ddd_scheduler::sim::{Attempt, run};
@@ -64,6 +64,7 @@ fn captures(r: &Record) -> Vec<Captured> {
 
 fn expected_after(latency: u64) -> impl Fn(u64, u32, &Record) -> Attempt {
     move |_, _, r| Attempt {
+        after: None,
         sent_after: 0,
         answer_after: Some(latency),
         judgement: Judgement::Expected(captures(r)),
@@ -111,6 +112,7 @@ fn scripted(line: u64, attempt: u32, r: &Record) -> Attempt {
         .at(line)
         .at(u64::from(attempt));
     Attempt {
+        after: None,
         sent_after: k.child("sent").unit().raw() % 200,
         answer_after: Some(k.child("answer").unit().raw() % 2_000),
         judgement: Judgement::Expected(captures(r)),
@@ -172,6 +174,7 @@ fn a_dependency_is_met_by_its_strength() {
     let after_a = |on: On| vec![a.clone(), after(step(b.clone(), 10), &a.step, on)];
     // a sends at 50 and answers at 150.
     let slow = |line: u64, _: u32, _: &Record| Attempt {
+        after: None,
         sent_after: if line == 2 { 50 } else { 0 },
         answer_after: Some(if line == 2 { 100 } else { 0 }),
         judgement: Judgement::Expected(vec![]),
@@ -183,6 +186,7 @@ fn a_dependency_is_met_by_its_strength() {
     assert_eq!(entry(&settled.entries, 3).intended, 150);
     // An unexpected end does not meet `Expected`: the dependent is skipped.
     let refused = |_: u64, _: u32, _: &Record| Attempt {
+        after: None,
         sent_after: 0,
         answer_after: Some(100),
         judgement: Judgement::Unexpected,
@@ -226,6 +230,7 @@ fn a_barrier_waits_for_its_members_by_prefix() {
     let records = [member(1, 0), member(2, 10), holder, member(3, 30)];
     // The first member answers at 500, the others at once.
     let script = |line: u64, _: u32, _: &Record| Attempt {
+        after: None,
         sent_after: 0,
         answer_after: Some(if line == 2 { 500 } else { 0 }),
         judgement: Judgement::Expected(vec![]),
@@ -267,6 +272,7 @@ fn a_stale_read_takes_its_producer_s_value() {
     );
     assert!(report.violations.is_empty(), "{:?}", report.violations);
     let by_line = |line: u64, _: u32, r: &Record| Attempt {
+        after: None,
         sent_after: 0,
         answer_after: Some(1),
         judgement: Judgement::Expected(
@@ -295,6 +301,7 @@ fn an_attempt_is_resent_by_its_safety() {
     let records = [call("read", 1, 0, 0, 0)];
     let first = |j: Judgement| {
         move |_: u64, attempt: u32, _: &Record| Attempt {
+            after: None,
             sent_after: 0,
             answer_after: Some(10),
             judgement: if attempt == 1 {
@@ -325,6 +332,96 @@ fn an_attempt_is_resent_by_its_safety() {
         ends(Safety::Idempotent, Judgement::Unknown),
         (End::Expected, 2)
     );
+}
+
+/// Decision 15: a resend waits for the later of its answer's `Retry-After`
+/// and the profile's floor, and none leaves J or less before its deadline: the
+/// step ends as it stands instead; a poll's unknown answer takes its grid's next
+/// point, no sooner than its `Retry-After`.
+#[test]
+fn a_resend_waits_and_never_crowds_its_deadline() {
+    let records = [call("read", 1, 0, 0, 0)];
+    let refused = |j: Judgement, after: Option<u64>| {
+        move |_: u64, attempt: u32, _: &Record| Attempt {
+            after: if attempt == 1 { after } else { None },
+            sent_after: 0,
+            // The resend answered at once, within the tightest deadline.
+            answer_after: Some(if attempt == 1 { 10 } else { 1 }),
+            judgement: if attempt == 1 {
+                j.clone()
+            } else {
+                Judgement::Expected(vec![])
+            },
+        }
+    };
+    let second = |safety: Safety, timeout: u64, jitter: u64, j: Judgement, after: Option<u64>| {
+        let mut h = header_with(safety);
+        h.operations.iter_mut().for_each(|o| o.timeout = timeout);
+        h.profile.jitter = jitter;
+        let ran = run(h, &records, W, &refused(j, after)).unwrap();
+        let e = entry(&ran.entries, 2).clone();
+        let at = ran
+            .dispatches
+            .iter()
+            .find(|d| d.1 == 2 && d.2 == 2)
+            .map(|d| d.0);
+        (e.end, at)
+    };
+    let (t, floor) = (10_000_000, RESEND);
+    // Answered at 10: resent at 10 plus the floor, or plus a longer Retry-After.
+    for j in [Judgement::NotTaken, Judgement::Unknown] {
+        assert_eq!(
+            second(Safety::Idempotent, t, 0, j.clone(), None),
+            (End::Expected, Some(10 + floor))
+        );
+        assert_eq!(
+            second(Safety::Idempotent, t, 0, j.clone(), Some(floor / 2)),
+            (End::Expected, Some(10 + floor))
+        );
+        assert_eq!(
+            second(Safety::Idempotent, t, 0, j, Some(3 * floor)),
+            (End::Expected, Some(10 + 3 * floor))
+        );
+    }
+    // Not before the deadline by more than J: never resent, ended as it stood.
+    let deadline = 10 + floor + 5;
+    assert_eq!(
+        second(Safety::NotTaken, deadline, 4, Judgement::NotTaken, None),
+        (End::Expected, Some(10 + floor))
+    );
+    assert_eq!(
+        second(Safety::NotTaken, deadline, 5, Judgement::NotTaken, None),
+        (End::Unexpected, None)
+    );
+    assert_eq!(
+        second(Safety::Idempotent, deadline, 5, Judgement::Unknown, None),
+        (End::Unknown, None)
+    );
+    assert_eq!(
+        second(
+            Safety::Idempotent,
+            t,
+            0,
+            Judgement::Unknown,
+            Some(u64::MAX / 4)
+        ),
+        (End::Unknown, None)
+    );
+    // A poll's unknown, not yet: the grid's next point; its Retry-After, if
+    // later.
+    let polled = |after: Option<u64>| {
+        let poll = polling(1, 0, 0, 1_000, 100_000);
+        let ran = run(header(), &[poll], W, &refused(Judgement::Unknown, after)).unwrap();
+        let e = entry(&ran.entries, 2).clone();
+        let at = ran
+            .dispatches
+            .iter()
+            .find(|d| d.1 == 2 && d.2 == 2)
+            .map(|d| d.0);
+        (e.end, at)
+    };
+    assert_eq!(polled(None), (End::Expected, Some(1_000)));
+    assert_eq!(polled(Some(2_500)), (End::Expected, Some(2_510)));
 }
 
 /// A handler that never reports ends its step unknown at the backstop, the
@@ -367,6 +464,7 @@ fn inputs_of_one_instant_are_taken_in_one_order() {
                 line: 3,
                 attempt: 1,
                 judgement: Judgement::Unknown,
+                seen: Seen::default(),
             },
             Input::Sent {
                 line: 3,
@@ -419,6 +517,7 @@ fn a_line_read_late_is_released_when_read() {
                 line: 2,
                 attempt: 1,
                 judgement: Judgement::Expected(vec![]),
+                seen: Seen::default(),
             },
         )
         .unwrap();
@@ -450,6 +549,7 @@ fn a_skip_names_the_dependency_that_failed_first() {
         On::Expected,
     );
     let refused = |line: u64, _: u32, _: &Record| Attempt {
+        after: None,
         sent_after: 0,
         answer_after: Some(if line == 2 { 500 } else { 100 }),
         judgement: Judgement::Unexpected,
@@ -467,6 +567,7 @@ fn a_skip_names_the_dependency_that_failed_first() {
 fn polls_keep_to_their_grid() {
     let r = polling(1, 0, 0, 100, 450);
     let not_yet = |_: u64, _: u32, _: &Record| Attempt {
+        after: None,
         sent_after: 0,
         answer_after: Some(0),
         judgement: Judgement::Unexpected,
@@ -498,6 +599,7 @@ fn a_holder_is_skipped_by_a_member_failed_past_the_prefix() {
     };
     let records = [member(1, 0), member(2, 5), holder];
     let script = |line: u64, _: u32, _: &Record| Attempt {
+        after: None,
         sent_after: 0,
         answer_after: Some(if line == 2 { 50 } else { 5 }),
         judgement: if line == 3 {

@@ -29,12 +29,15 @@ The definitions:
 - a line released at or past its deadline ends unknown then, never sent.
 - attempts: dispatched at released; sent at dispatch + sent_after if before the
   deadline; answered at sent + answer_after if sent and by the deadline, else
-  unknown at the deadline. An expected answer ends it; a not-yet answer of a polled
-  observation dispatches the next poll on the grid released + k * every, k at
-  least the attempt and the answer's own grid index, ending unknown at the
-  deadline if that is not before it; a not-taken answer is resent unless the
-  operation is never resent; an unknown is resent only if it is idempotent; any
-  other ends it.
+  unknown at the deadline. An expected answer ends it; a polled observation's
+  not-yet, not-taken or unknown answer dispatches the next poll on the grid
+  released + k * every, k at least the attempt and the answer's own grid index,
+  no sooner than the answer plus its Retry-After, ending unknown at the deadline
+  if that is not before it; a not-taken answer is resent unless the operation is
+  never resent, an unknown only if it is idempotent — at the answer plus the
+  longer of its Retry-After and the profile's resend floor, if that is before the
+  deadline by more than J, else it ends there, unexpected or unknown (ADR-0047
+  decision 15); any other ends it.
 - critical: the dependency whose met instant is the latest; compared only when
   one alone attains it, and not for a skipped line.
 """
@@ -92,7 +95,8 @@ def holes(step):
 
 COVERED = ("binding_at_release_differs", "capture_after_its_producer_left", "barrier_members_out_of_order",
            "conditional", "answer_after_deadline", "same_instant", "think", "read_after_intended",
-           "released_past_deadline", "member_failed_past_the_prefix")
+           "released_past_deadline", "member_failed_past_the_prefix", "resend_by_retry_after",
+           "resend_by_floor", "resend_past_deadline", "poll_unknown_repolled")
 
 
 def schedule(text, read_ahead, reads, script, seen):
@@ -103,6 +107,7 @@ def schedule(text, read_ahead, reads, script, seen):
     ops = {o["name"]: o for o in header["operations"]}
     channels = {c["name"]: c for c in header["channels"]}
     calls = {c["name"]: c for c in header["calls"]}
+    floor, jitter = int(header["profile"]["resend"]), int(header["profile"]["jitter"])
     done = {}
     for i, r in enumerate(steps):
         line, at = i + 2, int(r["at"])
@@ -246,21 +251,29 @@ def schedule(text, read_ahead, reads, script, seen):
                 seen["answer_after_deadline"] += 1
             else:
                 judgement, at_ = s["judgement"], answered
+            # What the answer asked to wait, if one came by the deadline.
+            after = s.get("after") if answered is not None and answered <= deadline else None
             if judgement == "expected":
                 end, ended = "expected", at_
                 entry["captures"] = s.get("captures", [])
-            elif judgement in ("unexpected", "not_taken") and poll:
+            elif judgement in ("unexpected", "not_taken", "unknown") and poll:
                 every = max(int(a["observe"]["every"]), 1)
                 k = max(-(-(at_ - released) // every), attempt)
-                nxt = released + k * every
+                nxt = max(released + k * every, at_ + (after or 0))
+                if judgement == "unknown" and at_ < deadline:
+                    seen["poll_unknown_repolled"] += 1
                 if nxt >= deadline:
                     end, ended = "unknown", deadline
                 else:
                     t, attempt = nxt, attempt + 1
-            elif judgement == "not_taken" and safety != "never" and at_ < deadline:
-                t, attempt = at_, attempt + 1
-            elif judgement == "unknown" and safety == "idempotent" and not poll and at_ < deadline:
-                t, attempt = at_, attempt + 1
+            elif (judgement == "not_taken" and safety != "never") or (judgement == "unknown" and safety == "idempotent"):
+                resend = at_ + max(after or 0, floor)
+                if resend + jitter < deadline:
+                    seen["resend_by_retry_after" if (after or 0) > floor else "resend_by_floor"] += 1
+                    t, attempt = resend, attempt + 1
+                else:
+                    seen["resend_past_deadline"] += 1
+                    end, ended = ("unexpected" if judgement == "not_taken" else "unknown"), at_
             elif judgement in ("unexpected", "not_taken"):
                 end, ended = "unexpected", at_
             else:

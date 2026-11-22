@@ -114,6 +114,7 @@ fn by_definition(cases: &[serde_json::Value]) -> String {
 
 fn answer(sent_after: u64, answer_after: Option<u64>, judgement: Judgement) -> Attempt {
     Attempt {
+        after: None,
         sent_after,
         answer_after,
         judgement,

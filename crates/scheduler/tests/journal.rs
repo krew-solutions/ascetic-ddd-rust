@@ -414,7 +414,7 @@ fn a_step_s_story_is_told_in_order() {
 fn an_answer_taken_nowhere_is_marked_with_why() {
     use std::sync::Arc;
 
-    use ascetic_ddd_scheduler::machine::{GRACE, Input, Judgement, Machine, Output};
+    use ascetic_ddd_scheduler::machine::{GRACE, Input, Judgement, Machine, Output, Seen};
     let r = Arc::new(fixture::call("read", 1, 0, 0, 0));
     let mut header = fixture::header();
     for o in &mut header.operations {
@@ -447,6 +447,7 @@ fn an_answer_taken_nowhere_is_marked_with_why() {
         line,
         attempt,
         judgement,
+        seen: Seen::default(),
     };
     let out = step(&mut m, 0, Input::Line { line: 2, record: r });
     assert!(dispatched(&out, 1).is_some());

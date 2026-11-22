@@ -36,6 +36,51 @@ pub type Line = u64;
 /// command log's, which fills the holes it is spliced into (decision 15).
 pub use ascetic_ddd_command_log::fills::Captured;
 
+/// What the shell saw of an answer beside its judgement (ADR-0047 decision
+/// 15): the status and the problem's code for the journal, the wait its
+/// `Retry-After` asks for before a resend.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Seen {
+    /// The answer's status, if one came.
+    pub status: Option<u16>,
+    /// Its problem's code, as the journal may carry it.
+    pub code: Option<Code>,
+    /// Microseconds its `Retry-After` asks for.
+    pub after: Option<u64>,
+}
+
+/// A problem's code as the journal may carry it: the server's text only if it
+/// is a short dotted name, as every host and gateway code is; any other the
+/// journal does not take in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Code {
+    /// A dotted name of at most [`CODE`] bytes.
+    Named(Name),
+    /// Some other text.
+    Other,
+}
+
+/// The most bytes a journaled code has.
+pub const CODE: usize = 64;
+
+impl Code {
+    /// The code a problem's text is journaled as.
+    pub fn of(code: &str) -> Code {
+        let part = |p: &str| {
+            let mut b = p.bytes();
+            b.next().is_some_and(|c| c.is_ascii_lowercase())
+                && b.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
+        };
+        let mut parts = code.split('.');
+        let named = code.len() <= CODE && parts.clone().count() >= 2 && parts.all(part);
+        if named {
+            Code::Named(code.to_owned())
+        } else {
+            Code::Other
+        }
+    }
+}
+
 /// How an attempt ended, as its handler judged it (decision 6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Judgement {
@@ -77,6 +122,8 @@ pub enum Input {
         attempt: u32,
         /// How.
         judgement: Judgement,
+        /// What came back beside it.
+        seen: Seen,
     },
     /// Time passed.
     Wake,
@@ -260,7 +307,7 @@ pub enum Ignored {
 /// for the same inputs changes, which the differential's journals pin beside
 /// it (ADR-0047 K1e-3). A journal's header names it, so that a verdict is read
 /// against the machine that made it.
-pub const MACHINE_REVISION: u32 = 1;
+pub const MACHINE_REVISION: u32 = 2;
 
 /// How long past a deadline the machine waits for a handler that does not
 /// report: then the step ends unknown, and it is the harness's fault.
@@ -434,7 +481,8 @@ impl Machine {
                 line,
                 attempt,
                 judgement,
-            } => self.ended(line, attempt, judgement, &mut out),
+                seen,
+            } => self.ended(line, attempt, judgement, seen.after, &mut out),
             Input::Wake => {}
         }
         self.due(&mut out);
@@ -821,7 +869,14 @@ impl Machine {
         self.notify(line, out);
     }
 
-    fn ended(&mut self, line: Line, attempt: u32, judgement: Judgement, out: &mut Vec<Output>) {
+    fn ended(
+        &mut self,
+        line: Line,
+        attempt: u32,
+        judgement: Judgement,
+        after: Option<u64>,
+        out: &mut Vec<Output>,
+    ) {
         let now = self.now;
         let Some(c) = self.cells.get_mut(&line) else {
             // Its cell freed: its step ended long ago.
@@ -859,12 +914,16 @@ impl Machine {
                 c.captures = captures;
                 self.finish(line, End::Expected, now, out);
             }
-            Judgement::Unexpected | Judgement::NotTaken if poll => {
-                // Not yet: the next poll on its grid, never two out at once.
+            Judgement::Unexpected | Judgement::NotTaken | Judgement::Unknown if poll => {
+                // Not yet, or no telling: the next poll on its grid, no sooner
+                // than its `Retry-After`, never two out at once (decision 15).
                 let every = every.unwrap_or(1);
                 let since = now.saturating_sub(c.released);
                 let k = since.div_ceil(every).max(u64::from(attempt));
-                let next = c.released.saturating_add(k.saturating_mul(every));
+                let next = c
+                    .released
+                    .saturating_add(k.saturating_mul(every))
+                    .max(now.saturating_add(after.unwrap_or(0)));
                 c.phase = Phase::Flight {
                     attempt,
                     outstanding: false,
@@ -872,16 +931,45 @@ impl Machine {
                 let deadline = c.deadline;
                 self.wake(line, next.min(deadline));
             }
-            Judgement::NotTaken if safety != Safety::Never && now < c.deadline => {
-                self.dispatch(line, attempt.saturating_add(1), out);
+            Judgement::NotTaken if safety != Safety::Never => {
+                self.resend(line, attempt, after, End::Unexpected, out);
             }
-            Judgement::Unknown if safety == Safety::Idempotent && !poll && now < c.deadline => {
-                self.dispatch(line, attempt.saturating_add(1), out);
+            Judgement::Unknown if safety == Safety::Idempotent => {
+                self.resend(line, attempt, after, End::Unknown, out);
             }
             Judgement::Unexpected | Judgement::NotTaken => {
                 self.finish(line, End::Unexpected, now, out);
             }
             Judgement::Unknown => self.finish(line, End::Unknown, now, out),
+        }
+    }
+
+    /// A harness resend (decision 15): at the later of the answer's
+    /// `Retry-After` and the profile's floor after it, and only if that is
+    /// before the deadline by more than J; else the step ends `otherwise`.
+    fn resend(
+        &mut self,
+        line: Line,
+        attempt: u32,
+        after: Option<u64>,
+        otherwise: End,
+        out: &mut Vec<Output>,
+    ) {
+        let now = self.now;
+        let profile = &self.header.profile;
+        let at = now.saturating_add(after.unwrap_or(0).max(profile.resend));
+        let jitter = profile.jitter;
+        let Some(c) = self.cells.get_mut(&line) else {
+            return;
+        };
+        if at.saturating_add(jitter) < c.deadline {
+            c.phase = Phase::Flight {
+                attempt,
+                outstanding: false,
+            };
+            self.wake(line, at);
+        } else {
+            self.finish(line, otherwise, now, out);
         }
     }
 

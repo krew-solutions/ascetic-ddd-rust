@@ -64,6 +64,7 @@ fn chains() -> Vec<Record> {
 /// Every attempt sent at once and answered expected `s` after — or never.
 fn stalled(s: Option<u64>) -> impl Fn(u64, u32, &Record) -> Attempt {
     move |_, _, _| Attempt {
+        after: None,
         sent_after: 0,
         answer_after: s,
         judgement: Judgement::Expected(vec![]),
@@ -274,6 +275,7 @@ fn a_reader_lets_go_of_its_producer_when_its_release_is_decided() {
     let report = run_with(h.clone(), &records, &NoHost, 1_000);
     assert!(report.violations.is_empty(), "{:?}", report.violations);
     let script = |line: u64, _: u32, r: &Record| Attempt {
+        after: None,
         sent_after: 0,
         answer_after: Some(if line == 2 { 100 } else { 1_000 }),
         judgement: Judgement::Expected(

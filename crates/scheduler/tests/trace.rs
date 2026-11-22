@@ -94,6 +94,7 @@ fn captures(r: &Record, line: u64) -> Vec<Captured> {
 /// An attempt: its bytes leave after `sent`, its answer `after` later.
 fn answered(sent: u64, after: Option<u64>, judgement: Judgement) -> Attempt {
     Attempt {
+        after: None,
         sent_after: sent,
         answer_after: after,
         judgement,
@@ -195,6 +196,8 @@ fn log_json(h: &Header, records: &[Record], read_ahead: u64) -> Json {
         "event": "log",
         "w": h.window,
         "read_ahead": read_ahead,
+        "resend": h.profile.resend,
+        "jitter": h.profile.jitter,
         "lines": lines,
     })
 }
@@ -212,6 +215,7 @@ fn input_json(at: u64, input: &Input, records: &[Record]) -> Json {
             line,
             attempt,
             judgement,
+            seen,
         } => {
             let r = &records[(*line - 2) as usize];
             let j = match judgement {
@@ -224,6 +228,7 @@ fn input_json(at: u64, input: &Input, records: &[Record]) -> Json {
             json!({
                 "observer": "scheduler", "event": "input", "input": "ended",
                 "at": at, "line": line, "attempt": attempt, "judgement": j,
+                "after": seen.after.unwrap_or(0),
             })
         }
         Input::Wake => unreachable!("wakes are not recorded"),

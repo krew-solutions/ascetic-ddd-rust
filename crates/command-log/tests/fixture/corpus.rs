@@ -223,7 +223,7 @@ fn call_of(r: &mut Record) -> Option<&mut ascetic_ddd_command_log::record::Rest>
 /// `R · J / P` is no integer and a reserve.
 pub fn corpus_header() -> Header {
     use ascetic_ddd_command_log::record::{By, Place};
-    limited(
+    let mut h = limited(
         vec![
             limit("address", By::Source, 4_000, 1, 6),
             limit("all", By::All, 6_000, 1, 10),
@@ -239,7 +239,20 @@ pub fn corpus_header() -> Header {
         2,
         250,
         100,
-    )
+    );
+    // Operations of every safety: an update resent when a code certifies it
+    // not run, a read resent on an unknown answer (ADR-0047 decision 15).
+    for op in &mut h.operations {
+        match op.name.as_str() {
+            "update" => {
+                op.safety = Safety::NotTaken;
+                op.not_run = vec!["service.unavailable".into()];
+            }
+            "read" => op.safety = Safety::Idempotent,
+            _ => {}
+        }
+    }
+    h
 }
 
 /// One edit, if the log has what it edits.
