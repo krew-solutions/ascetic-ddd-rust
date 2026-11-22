@@ -205,6 +205,8 @@ pub enum Output {
         line: Line,
         /// Each dependency's binding.
         after: Vec<Binding>,
+        /// An observation's cause's line; its own if it is its own.
+        cause: Option<Line>,
     },
     /// A step's release decided: when it was to start, when it is released,
     /// and its deadline.
@@ -622,10 +624,12 @@ impl Machine {
             }
         }
         cell.holding = !held.is_empty();
+        let cause = cell.cause;
         self.cells.insert(line, cell);
         out.push(Output::Bound {
             line,
             after: binding,
+            cause,
         });
         self.forget(gone);
         match skip {

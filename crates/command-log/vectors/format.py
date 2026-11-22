@@ -25,9 +25,9 @@ class Invalid(Exception):
     pass
 
 
-def resolve(schema):
+def resolve(schema, root=SCHEMA):
     while "$ref" in schema:
-        schema = SCHEMA["$defs"][schema["$ref"].rsplit("/", 1)[1]]
+        schema = root["$defs"][schema["$ref"].rsplit("/", 1)[1]]
     return schema
 
 
@@ -47,14 +47,16 @@ def kind_of(value):
     return "other"
 
 
-def check(value, schema, where):
-    """Valid against `schema`, objects' keys in its order; raises Invalid."""
-    schema = resolve(schema)
+def check(value, schema, where, root=SCHEMA):
+    """Valid against `schema`, whose references are `root`'s, objects' keys in
+    its order; raises Invalid. Also the scheduler's journal's checker's
+    (crates/scheduler/vectors/journal.py)."""
+    schema = resolve(schema, root)
     if "oneOf" in schema:
         passing = []
         for branch in schema["oneOf"]:
             try:
-                check(value, branch, where)
+                check(value, branch, where, root)
                 passing.append(branch)
             except Invalid:
                 pass
@@ -87,10 +89,10 @@ def check(value, schema, where):
         if keys != [p for p in props if p in value]:
             raise Invalid(f"{where}: keys {keys} out of the schema's order {list(props)}")
         for k, v in value.items():
-            check(v, props.get(k, {}), f"{where}/{k}")
+            check(v, props.get(k, {}), f"{where}/{k}", root)
     if isinstance(value, list):
         for i, v in enumerate(value):
-            check(v, schema.get("items", {}), f"{where}/{i}")
+            check(v, schema.get("items", {}), f"{where}/{i}", root)
 
 
 def no_duplicates(items):

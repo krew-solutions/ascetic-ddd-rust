@@ -6,7 +6,7 @@
 use ascetic_ddd_command_log::record::{On, Subject};
 
 use super::{
-    Answer, Critical, Dep, Dispatch, End, Ended, Fault, FaultClass, Header, Ignored,
+    Action, Answer, Critical, Dep, Dispatch, End, Ended, Fault, FaultClass, Header, Ignored,
     JOURNAL_VERSION, Judged, Key, Line, Read, Released, Sent, Skip, Slot,
 };
 use crate::machine::MACHINE_REVISION;
@@ -68,12 +68,16 @@ pub fn lines() -> Vec<Line> {
             at: 0,
             line: 2,
             key: key("enroll", 0),
+            action: Action::Rest,
+            cause: None,
             after: vec![],
         }),
         Line::Read(Read {
             at: u64::MAX,
             line: 3,
             key: key("report", 1),
+            action: Action::Observe,
+            cause: Some(u64::MAX),
             after: vec![
                 Dep::Step {
                     on: On::Sent,
@@ -89,6 +93,22 @@ pub fn lines() -> Vec<Line> {
                     line: u64::MAX,
                 },
             ],
+        }),
+        Line::Read(Read {
+            at: 1,
+            line: 4,
+            key: key("publish", 0),
+            action: Action::Bus,
+            cause: None,
+            after: vec![],
+        }),
+        Line::Read(Read {
+            at: 1,
+            line: 5,
+            key: key("onboard", 0),
+            action: Action::Host,
+            cause: None,
+            after: vec![],
         }),
         Line::Released(Released {
             at: 1,

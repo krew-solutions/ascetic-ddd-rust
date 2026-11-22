@@ -125,18 +125,28 @@ fn entry_json(e: &Entry) -> Json {
     })
 }
 
-/// What the machine decided in a run, its journal's digests: raised with
-/// `MACHINE_REVISION` (ADR-0047 K1e-3). A corpus that changes changes the
-/// digest without a revision: re-pin it then, as revision 6's MEANINGS was.
-const JOURNALS: &[(u32, &str)] = &[(
-    1,
-    "5f3f0a6c485c77c6c3c7ca916afda5f0bac9ccd76cd1363400e7a908a58bab91",
-)];
+/// What the machine decided in the differential's runs, their journals'
+/// digests by journal version and machine revision (ADR-0047 K1e-3): a machine
+/// that decides otherwise raises its revision, a journal written otherwise its
+/// version. A corpus that changes changes the digest with neither: re-pin it
+/// then, as revision 6's MEANINGS was.
+const JOURNALS: &[(u32, u32, &str)] = &[
+    (
+        1,
+        1,
+        "5f3f0a6c485c77c6c3c7ca916afda5f0bac9ccd76cd1363400e7a908a58bab91",
+    ),
+    (
+        2,
+        1,
+        "f8fb381aca89f5731bd36cb60bb4af385e6fae6f58a7186bb473fa70c03ba233",
+    ),
+];
 
 /// The journal written, read back, and told against the run it journals
 /// (ADR-0047 K1e-3b): every end and dispatch, every send and answer in the
 /// order the machine took them, the bindings of every read, the releases.
-fn journal_of(name: &str, header: journal::Header, ran: &Run) -> Vec<u8> {
+fn journal_of(name: &str, header: journal::Header, ran: &Run, records: &[Record]) -> Vec<u8> {
     use journal::Line;
     let mut writer = journal::Writer::new(Vec::new(), header.clone()).unwrap();
     for l in &ran.journal {
@@ -157,6 +167,32 @@ fn journal_of(name: &str, header: journal::Header, ran: &Run) -> Vec<u8> {
         match l {
             Line::Read(r) => {
                 reads.push(r.line);
+                // Its action as the log names it; an observation's cause the
+                // step its log names, read before it, or itself.
+                let record = &records[(r.line - 2) as usize];
+                use ascetic_ddd_command_log::record::Action as Act;
+                let action = match &record.action {
+                    Act::Rest(_) => journal::Action::Rest,
+                    Act::Bus(_) => journal::Action::Bus,
+                    Act::Observe(_) => journal::Action::Observe,
+                    Act::Host(_) => journal::Action::Host,
+                };
+                assert_eq!(r.action, action, "{name} line {}", r.line);
+                match (&record.action, r.cause) {
+                    (ascetic_ddd_command_log::record::Action::Observe(o), Some(c)) => {
+                        assert!(c <= r.line, "{name} line {}: a cause read later", r.line);
+                        assert_eq!(
+                            records[(c - 2) as usize].step,
+                            o.cause,
+                            "{name} line {}: cause",
+                            r.line
+                        );
+                    }
+                    (ascetic_ddd_command_log::record::Action::Observe(_), None) => {
+                        panic!("{name} line {}: an observation without its cause", r.line)
+                    }
+                    (_, cause) => assert_eq!(cause, None, "{name} line {}", r.line),
+                }
                 let bound: Vec<u64> = r
                     .after
                     .iter()
@@ -459,7 +495,7 @@ fn the_machine_is_the_scheduler_by_definition() {
                     };
                     sha2::Digest::update(
                         &mut journals,
-                        journal_of(&run_name, journal_header, &ran),
+                        journal_of(&run_name, journal_header, &ran, &records),
                     );
                     let journal: Vec<Json> = ran.entries.iter().map(entry_json).collect();
                     let line = json!({
@@ -497,12 +533,13 @@ fn the_machine_is_the_scheduler_by_definition() {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    let revisions: Vec<u32> = JOURNALS.iter().map(|m| m.0).collect();
+    let revisions: Vec<(u32, u32)> = JOURNALS.iter().map(|m| (m.0, m.1)).collect();
     assert!(revisions.windows(2).all(|w| w[0] < w[1]));
     assert_eq!(
         JOURNALS.last().copied(),
-        Some((MACHINE_REVISION, digest.as_str())),
-        "what the machine decides changed: bump MACHINE_REVISION and append its digest"
+        Some((JOURNAL_VERSION, MACHINE_REVISION, digest.as_str())),
+        "the journals changed: bump MACHINE_REVISION if the machine decides otherwise, \
+         JOURNAL_VERSION if a journal is written otherwise, and append their digest"
     );
     eprintln!(
         "the bound: {within} runs within A2, {lagged} of them lagging; {attained} lines ended at it"

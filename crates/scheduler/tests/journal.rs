@@ -13,8 +13,8 @@ use std::io::Cursor;
 
 use ascetic_ddd_command_log::record::On;
 use ascetic_ddd_scheduler::journal::{
-    self, Critical, Dep, End, FaultClass, Header, Ignored, JOURNAL, JOURNAL_VERSION, JournalError,
-    Judged, Line, Reader, Skip, Writer, sample,
+    self, Action, Critical, Dep, End, FaultClass, Header, Ignored, JOURNAL, JOURNAL_VERSION,
+    JournalError, Judged, Line, Reader, Skip, Writer, sample,
 };
 use sha2::{Digest, Sha256};
 
@@ -131,6 +131,15 @@ fn critical_kind(c: Option<Critical>) -> usize {
     }
 }
 
+fn action_kind(a: Action) -> usize {
+    match a {
+        Action::Rest => 0,
+        Action::Bus => 1,
+        Action::Observe => 2,
+        Action::Host => 3,
+    }
+}
+
 fn fault_kind(f: FaultClass) -> usize {
     match f {
         FaultClass::Backstop => 0,
@@ -150,6 +159,8 @@ fn the_golden_holds_every_variant() {
         seen[0].insert(line_kind(l));
         match l {
             Line::Read(r) => {
+                seen[8].insert(action_kind(r.action));
+                options.insert(("cause", r.cause.is_some()));
                 for d in &r.after {
                     seen[1].insert(dep_kind(d));
                     let (Dep::Step { on, .. } | Dep::Each { on, .. }) = d;
@@ -176,11 +187,11 @@ fn the_golden_holds_every_variant() {
             Line::Trailer(_) => unreachable!("the reader hands no trailer out"),
         }
     }
-    let counts = [9, 2, 3, 4, 4, 6, 3, 1];
+    let counts = [9, 2, 3, 4, 4, 6, 3, 1, 4];
     for (i, n) in counts.iter().enumerate() {
         assert_eq!(seen[i], (0..*n).collect(), "enum {i}");
     }
-    for name in ["captured", "dispatched", "sent", "bound", "fault"] {
+    for name in ["captured", "dispatched", "sent", "bound", "fault", "cause"] {
         assert!(
             options.contains(&(name, true)) && options.contains(&(name, false)),
             "{name}"
@@ -195,6 +206,7 @@ fn the_golden_holds_every_variant() {
         "index",
         "read_ahead",
         "sent",
+        "cause",
     ] {
         assert!(
             text.contains(&format!(r#""{field}":"18446744073709551615""#)),
@@ -328,36 +340,52 @@ fn another_version_is_refused() {
 #[test]
 fn a_line_not_in_its_canonical_bytes_is_refused() {
     let lines = golden_lines();
+    // The release: a line of several numbers.
+    let i = lines
+        .iter()
+        .position(|l| l.starts_with(r#"{"released":"#))
+        .unwrap();
+    let number = i as u64 + 1;
     let cases = [
         (
-            lines[3].replacen(r#"{"released":{"#, r#"{ "released":{"#, 1),
+            lines[i].replacen(r#"{"released":{"#, r#"{ "released":{"#, 1),
             "space",
         ),
         (
-            lines[3].replacen(r#""at":"1","#, r#""at":"1","extra":0,"#, 1),
+            lines[i].replacen(r#""at":"1","#, r#""at":"1","extra":0,"#, 1),
             "unknown field",
         ),
-        (lines[3].replacen(r#""at":"1""#, r#""at":1"#, 1), "a number"),
+        (lines[i].replacen(r#""at":"1""#, r#""at":1"#, 1), "a number"),
         (
-            lines[3].replacen(r#""at":"1""#, r#""at":"01""#, 1),
+            lines[i].replacen(r#""at":"1""#, r#""at":"01""#, 1),
             "a leading zero",
         ),
     ];
     for (line, name) in cases {
-        assert_ne!(line, lines[3], "{name}");
+        assert_ne!(line, lines[i], "{name}");
         let mut changed = lines.clone();
-        changed[3] = line;
+        changed[i] = line;
         let error = read_all(&joined(&changed)).unwrap_err();
         assert!(
             matches!(
                 error,
                 JournalError::Frame(
-                    ascetic_ddd_command_log::frame::FrameError::NotCanonical { line: 4 }
-                        | ascetic_ddd_command_log::frame::FrameError::Malformed { line: 4, .. }
+                    ascetic_ddd_command_log::frame::FrameError::NotCanonical { .. }
+                        | ascetic_ddd_command_log::frame::FrameError::Malformed { .. }
                 )
-            ),
+            ) && error_line(&error) == number,
             "{name}: {error:?}"
         );
+    }
+}
+
+fn error_line(e: &JournalError) -> u64 {
+    match e {
+        JournalError::Frame(
+            ascetic_ddd_command_log::frame::FrameError::NotCanonical { line }
+            | ascetic_ddd_command_log::frame::FrameError::Malformed { line, .. },
+        ) => *line,
+        _ => 0,
     }
 }
 

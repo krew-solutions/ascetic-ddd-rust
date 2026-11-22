@@ -1,0 +1,698 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/krew-solutions/ascetic-ddd-rust/crates/scheduler/schema/journal.schema.json",
+  "title": "A line of a scheduler's journal (ADR-0047 decision 14), version 2",
+  "description": "Normative. Every object's properties are listed in the order a line writes them: the canonical order. A line is the compact JSON of one of these, then a newline; the first line is a header and only it, the last a trailer, whose sha256 is of every line before it and events the number of lines between the two. Every u64 is a decimal string.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "header": {
+          "$ref": "#/$defs/header"
+        }
+      },
+      "required": [
+        "header"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "read": {
+          "$ref": "#/$defs/read"
+        }
+      },
+      "required": [
+        "read"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "released": {
+          "$ref": "#/$defs/released"
+        }
+      },
+      "required": [
+        "released"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "dispatch": {
+          "$ref": "#/$defs/dispatch"
+        }
+      },
+      "required": [
+        "dispatch"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "sent": {
+          "$ref": "#/$defs/sent"
+        }
+      },
+      "required": [
+        "sent"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "answer": {
+          "$ref": "#/$defs/answer"
+        }
+      },
+      "required": [
+        "answer"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "end": {
+          "$ref": "#/$defs/ended"
+        }
+      },
+      "required": [
+        "end"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "fault": {
+          "$ref": "#/$defs/fault"
+        }
+      },
+      "required": [
+        "fault"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "trailer": {
+          "$ref": "#/$defs/trailer"
+        }
+      },
+      "required": [
+        "trailer"
+      ],
+      "additionalProperties": false
+    }
+  ],
+  "$defs": {
+    "u64": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$"
+    },
+    "u32": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "b64": {
+      "type": "string",
+      "pattern": "^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+    },
+    "name": {
+      "type": "string"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "on": {
+      "enum": [
+        "sent",
+        "expected",
+        "settled"
+      ]
+    },
+    "action": {
+      "enum": [
+        "rest",
+        "bus",
+        "observe",
+        "host"
+      ]
+    },
+    "judged": {
+      "enum": [
+        "expected",
+        "unexpected",
+        "not_taken",
+        "unknown"
+      ]
+    },
+    "ignored": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "enum": [
+            "ended",
+            "stale",
+            "late"
+          ]
+        }
+      ]
+    },
+    "fault_class": {
+      "enum": [
+        "backstop"
+      ]
+    },
+    "key": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/name"
+        },
+        "scope": {
+          "$ref": "#/$defs/b64"
+        },
+        "label": {
+          "$ref": "#/$defs/name"
+        },
+        "n": {
+          "$ref": "#/$defs/u32"
+        }
+      },
+      "required": [
+        "kind",
+        "scope",
+        "label",
+        "n"
+      ],
+      "additionalProperties": false
+    },
+    "dep": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "step": {
+              "type": "object",
+              "properties": {
+                "on": {
+                  "$ref": "#/$defs/on"
+                },
+                "line": {
+                  "$ref": "#/$defs/u64"
+                }
+              },
+              "required": [
+                "on",
+                "line"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "step"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "each": {
+              "type": "object",
+              "properties": {
+                "on": {
+                  "$ref": "#/$defs/on"
+                },
+                "key": {
+                  "$ref": "#/$defs/key"
+                },
+                "members": {
+                  "$ref": "#/$defs/u64"
+                }
+              },
+              "required": [
+                "on",
+                "key",
+                "members"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "each"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "subject": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/name"
+        },
+        "scope": {
+          "$ref": "#/$defs/b64"
+        },
+        "index": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "kind",
+        "scope",
+        "index"
+      ],
+      "additionalProperties": false
+    },
+    "slot": {
+      "type": "object",
+      "properties": {
+        "subject": {
+          "$ref": "#/$defs/subject"
+        },
+        "slot": {
+          "$ref": "#/$defs/name"
+        }
+      },
+      "required": [
+        "subject",
+        "slot"
+      ],
+      "additionalProperties": false
+    },
+    "skip": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "dependency": {
+              "$ref": "#/$defs/u64"
+            }
+          },
+          "required": [
+            "dependency"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "member": {
+              "$ref": "#/$defs/u64"
+            }
+          },
+          "required": [
+            "member"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "missing_capture": {
+              "$ref": "#/$defs/u64"
+            }
+          },
+          "required": [
+            "missing_capture"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "end": {
+      "oneOf": [
+        {
+          "enum": [
+            "expected",
+            "unexpected",
+            "unknown"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "skipped": {
+              "$ref": "#/$defs/skip"
+            }
+          },
+          "required": [
+            "skipped"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "critical": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "step": {
+              "$ref": "#/$defs/u64"
+            }
+          },
+          "required": [
+            "step"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "member": {
+              "$ref": "#/$defs/u64"
+            }
+          },
+          "required": [
+            "member"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "header": {
+      "type": "object",
+      "properties": {
+        "journal": {
+          "const": 2
+        },
+        "machine": {
+          "$ref": "#/$defs/u32"
+        },
+        "source": {
+          "type": "string"
+        },
+        "log": {
+          "$ref": "#/$defs/sha256"
+        },
+        "validator": {
+          "type": "string"
+        },
+        "read_ahead": {
+          "$ref": "#/$defs/u64"
+        },
+        "jitter": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "journal",
+        "machine",
+        "source",
+        "log",
+        "validator",
+        "read_ahead",
+        "jitter"
+      ],
+      "additionalProperties": false
+    },
+    "read": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/u64"
+        },
+        "line": {
+          "$ref": "#/$defs/u64"
+        },
+        "key": {
+          "$ref": "#/$defs/key"
+        },
+        "action": {
+          "$ref": "#/$defs/action"
+        },
+        "cause": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "after": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dep"
+          }
+        }
+      },
+      "required": [
+        "at",
+        "line",
+        "key",
+        "action",
+        "cause",
+        "after"
+      ],
+      "additionalProperties": false
+    },
+    "released": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/u64"
+        },
+        "line": {
+          "$ref": "#/$defs/u64"
+        },
+        "intended": {
+          "$ref": "#/$defs/u64"
+        },
+        "released": {
+          "$ref": "#/$defs/u64"
+        },
+        "deadline": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "at",
+        "line",
+        "intended",
+        "released",
+        "deadline"
+      ],
+      "additionalProperties": false
+    },
+    "dispatch": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/u64"
+        },
+        "line": {
+          "$ref": "#/$defs/u64"
+        },
+        "attempt": {
+          "$ref": "#/$defs/u32"
+        },
+        "deadline": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "at",
+        "line",
+        "attempt",
+        "deadline"
+      ],
+      "additionalProperties": false
+    },
+    "sent": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/u64"
+        },
+        "line": {
+          "$ref": "#/$defs/u64"
+        },
+        "attempt": {
+          "$ref": "#/$defs/u32"
+        }
+      },
+      "required": [
+        "at",
+        "line",
+        "attempt"
+      ],
+      "additionalProperties": false
+    },
+    "answer": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/u64"
+        },
+        "line": {
+          "$ref": "#/$defs/u64"
+        },
+        "attempt": {
+          "$ref": "#/$defs/u32"
+        },
+        "judged": {
+          "$ref": "#/$defs/judged"
+        },
+        "captured": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/slot"
+          }
+        },
+        "ignored": {
+          "$ref": "#/$defs/ignored"
+        }
+      },
+      "required": [
+        "at",
+        "line",
+        "attempt",
+        "judged",
+        "captured",
+        "ignored"
+      ],
+      "additionalProperties": false
+    },
+    "ended": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/u64"
+        },
+        "line": {
+          "$ref": "#/$defs/u64"
+        },
+        "end": {
+          "$ref": "#/$defs/end"
+        },
+        "read": {
+          "$ref": "#/$defs/u64"
+        },
+        "ready": {
+          "$ref": "#/$defs/u64"
+        },
+        "intended": {
+          "$ref": "#/$defs/u64"
+        },
+        "released": {
+          "$ref": "#/$defs/u64"
+        },
+        "dispatched": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "sent": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "ended": {
+          "$ref": "#/$defs/u64"
+        },
+        "attempts": {
+          "$ref": "#/$defs/u32"
+        },
+        "critical": {
+          "$ref": "#/$defs/critical"
+        },
+        "bound": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/u64"
+          }
+        },
+        "fault": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "at",
+        "line",
+        "end",
+        "read",
+        "ready",
+        "intended",
+        "released",
+        "dispatched",
+        "sent",
+        "ended",
+        "attempts",
+        "critical",
+        "bound",
+        "fault"
+      ],
+      "additionalProperties": false
+    },
+    "fault": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/u64"
+        },
+        "class": {
+          "$ref": "#/$defs/fault_class"
+        },
+        "line": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "at",
+        "class",
+        "line"
+      ],
+      "additionalProperties": false
+    },
+    "trailer": {
+      "type": "object",
+      "properties": {
+        "events": {
+          "$ref": "#/$defs/u64"
+        },
+        "steps": {
+          "$ref": "#/$defs/u64"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "required": [
+        "events",
+        "steps",
+        "sha256"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

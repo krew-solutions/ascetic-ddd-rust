@@ -587,6 +587,24 @@ barrier instance re-pinned at 115,196 distinct states, every mutant breaking wha
   machine; a variant dropped from the golden with the golden and its pin regenerated alike. A vacuous assertion in the silent
   handler's twin (`… || true`) now asserts that nothing ends before the grace.
 
+**K1e-3c-1 — journal version 2, its schema and its independent reader** (2026-11-22). The fold reads the journal
+alone (decision 14), and two of its rules need what version 1 did not say: an observation's Undecided runs from its
+cause's lateness, not its own polls', and the cause amendment asks whether its cause ended expected — so a `read`
+names its action (`rest`, `bus`, `observe`, `host`) and an observation's cause's line, its own if it is its own
+(`Output::Bound` carries the cause the machine bound). `JOURNAL_VERSION` 2; the machine decides as it did,
+`MACHINE_REVISION` stays 1, and the differential's pins are by journal version and machine revision: (1, 1) kept,
+(2, 1) appended. The normative schema (`schema/journal.schema.json`) and `vectors/journal.py` — the command log's
+validator of the schema's subset, given the journal's schema as its root — check the golden's every line, its keys'
+order, its canonical bytes, the header's place and the trailer, in `make vectors`.
+- **Executors**: the golden holds the four actions and a cause both ways; the differential asserts every read's
+  action is its record's and an observation's cause the step its log names, read before it or itself; fourteen
+  golden copies, each resealed so that only the changed line is wrong — keys out of order, an unknown field, a number
+  for a `u64`, a field missing, an action, end or skip unknown, a cause not a `u64`, version 1, a log identity not a
+  digest, a miscounted trailer, a line after it, the header second, a space — each refused by `journal.py`; three
+  mutants of the machine and `events` — a cause lost, a cause taken for the observation's own, a bus step journaled
+  as a REST call — each killed by the differential's own check (the action's first check went through `From` itself,
+  so that only the pinned digest saw the third: the test now names each action by its own match).
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -652,3 +670,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   K5); K1e-3a built (§ Measured): a holder failed by a member past its prefix.
 - 2026-11-22: K1e-3b built (§ Measured): the journal's bytes, `command-log::frame` and `wire` public, the machine's
   bindings, releases and ignored answers told, `MACHINE_REVISION` 1.
+- 2026-11-22: K1e-3c-1 built (§ Measured): journal version 2 — a read's action and an observation's cause — its
+  normative schema and `vectors/journal.py`.

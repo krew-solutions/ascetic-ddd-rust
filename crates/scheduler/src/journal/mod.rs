@@ -13,7 +13,7 @@ use std::fmt;
 use std::io::{BufRead, Write};
 
 use ascetic_ddd_command_log::frame::{self, Digest, FrameError};
-use ascetic_ddd_command_log::record::{Name, On, Subject};
+use ascetic_ddd_command_log::record::{self, Name, On, Subject};
 use ascetic_ddd_command_log::wire::{b64, u64s, u64s_option, u64s_vec};
 use serde::{Deserialize, Serialize};
 
@@ -22,13 +22,13 @@ use crate::machine::{self, Binding, Input, Judgement, Line as Number, Output};
 pub mod sample;
 
 /// The version a reader accepts and a writer writes: exactly this one.
-pub const JOURNAL_VERSION: u32 = 1;
+pub const JOURNAL_VERSION: u32 = 2;
 
 /// The byte form's identity: the SHA-256 of the golden journal
 /// (`golden/journal.jsonl`, [`sample`]), which holds every line and variant. A
 /// change to how any line is written changes the golden journal, and so this,
 /// in the same edit.
-pub const JOURNAL: &str = "654824248bf5c0d6fb061e34c598c96d941a74ac2c7aa25cd476fcd85449988e";
+pub const JOURNAL: &str = "1015cde6fda7f91d4ee314597ac8772ef43ebdd3a53880b18d0d90d0319d5268";
 
 /// A journal's line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +115,31 @@ pub enum Dep {
     },
 }
 
+/// What a step does, as its line names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Action {
+    /// A REST call.
+    Rest,
+    /// A message published on the bus.
+    Bus,
+    /// An effect awaited.
+    Observe,
+    /// A call of the stand's own.
+    Host,
+}
+
+impl From<&record::Action> for Action {
+    fn from(a: &record::Action) -> Action {
+        match a {
+            record::Action::Rest(_) => Action::Rest,
+            record::Action::Bus(_) => Action::Bus,
+            record::Action::Observe(_) => Action::Observe,
+            record::Action::Host(_) => Action::Host,
+        }
+    }
+}
+
 /// A line of the log read.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -127,6 +152,12 @@ pub struct Read {
     pub line: Number,
     /// The barrier key it is a member of.
     pub key: Key,
+    /// What it does.
+    pub action: Action,
+    /// An observation's cause's line — its own if it is its own; none for
+    /// another action (version 2: the fold reads the journal alone).
+    #[serde(with = "u64s_option")]
+    pub cause: Option<Number>,
     /// Its dependencies, in its `after`'s order.
     pub after: Vec<Dep>,
 }
@@ -425,12 +456,17 @@ pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
     let mut lines = Vec::new();
     match input {
         Input::Line { line, record } => {
-            let after = outputs
-                .iter()
-                .find_map(|o| match o {
-                    Output::Bound { line: l, after } if l == line => Some(after),
-                    _ => None,
-                })
+            let bound = outputs.iter().find_map(|o| match o {
+                Output::Bound {
+                    line: l,
+                    after,
+                    cause,
+                } if l == line => Some((after, *cause)),
+                _ => None,
+            });
+            let cause = bound.and_then(|b| b.1);
+            let after = bound
+                .map(|b| b.0)
                 .into_iter()
                 .flatten()
                 .map(|b| match b {
@@ -454,6 +490,8 @@ pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
                 at,
                 line: *line,
                 key: key_of(&record.step),
+                action: (&record.action).into(),
+                cause,
                 after,
             }));
         }
