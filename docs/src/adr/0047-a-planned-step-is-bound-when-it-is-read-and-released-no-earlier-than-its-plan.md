@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a and K2b-7b built (§ Measured), K2b-7c next. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b and K2b-7c-1 built (§ Measured), K2b-7c-2 next. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -37,7 +37,8 @@ To be built in slices, each a commit of its own:
   mechanisms and the live composition, **K2b-6b** the real clock's evidence (K2-3, the lateness drill, the timed wait);
   **K2b-7** the gates before T0 and the shell's memory (decision 18), in five: **K2b-7a** the defects the gate found
   in the built shell; **K2b-7b** journal version 6 — a run's stop, the source thread's lag, the stages' evidence —
-  in the pure fold; **K2b-7c** the shell's stop and its lag; **K2b-7d** the three stages before T0; **K2b-7e** the
+  in the pure fold; **K2b-7c** the shell's stop and its lag, in two: **K2b-7c-1** the stop, **K2b-7c-2** the source
+  thread's lag, its park detector measured first; **K2b-7d** the three stages before T0; **K2b-7e** the
   shell's memory; **K2b-8** connections kept and abandoned.
 - **The first host run:** REST only, on the compose stand, `sources = 1` — a correctness run.
 - **K3** facts and the bus; **K4** shaping and the emulated client's retries; **K5** the report.
@@ -663,6 +664,7 @@ Considered keeps what each refuted):
 | K2b-6b | K2b | on the real clock over TCP from a `Live` source: forty calls, a third refused certified and resent, every attempt the journal holds one request the stand saw and none other; a request the stand read and closed on unknown, not resent; an answer in 500 µs before its deadline judged on a thread held 5 ms past it expected; the lateness drill, its state placed past T0's reading — a burst read across a held floor, sends below it, a wake and a line due under it — every line ended, the machine's own work stamped when taken (a stamp below `now` a harness fault); the timed wait measured | lines not held by a floor (each sweep); wakes not held by a floor (two sweeps of three) |
 | K2b-7a | K2b | a connect and a decorator that never answer: the attempt unsent, censored at its deadline, the run ended; a pooled connection the stand closed while it sat idle, seen once the next request wakes it: no `Sent` until a byte of the request left — on the next connection, at the instant the stub saw it | the decorator's await not raced; the connect not raced; an empty flush taken for `Sent` |
 | K2b-7b | K2b | journal version 6, folded by Rust and `verdict.py` alike, the definition naming the same stop: a send's lag the harness's — a censored call's at J a root, at J + 1 undecided, with a hand-off h at J − h and J − h + 1; an observation's cause's likewise; a lag past its path incoherent; a run's stop the last line — stopped mid-run, once every step ended, after a backstop's fault: void, no classes; a gate's refusal the only line, at 0, under a header with no T0; each breach incoherent by its own rule; every golden run cut after any line (but inside a backstop's pair) and stopped: void, never incoherent; uncut, version 6's classes version 5's (the differential's digest unchanged); every fault class and both sides of each option in the golden, every header variant read back | the lag not added, added after the first send's, past its path accepted; a line after a stop accepted; the second pass after one; a stopped run's reads all its log's; unended steps refused after a stop; a gate after lines, past 0, under a T0; no T0 without a gate; a stop before its lines, naming a line not read, an attempt not out; the backstop a stop; the definition's: a line after the stop, the lag, the reads, the stop unnamed |
+| K2b-7c-1 | K2b | a run's fault stops it in its journal — the lines taken, the fault, the trailer — `run` returning the journal and why: a dropped attempt, a stuck hold (virtual and real clock), a carrier's refusal by its dotted name, a log failing mid-run (truncated, diverged), a lock poisoned by a panic under it, a saturated source, a record from a source with no runtime; every harness fault and log error mapped to its class; a decorator's error — the host's text — out of the journal; no request of an aborted attempt reaches the stand, connecting or mid-write, then or after the run returned, none left running; a run's future dropped takes its attempts with it; a journal dropped unfinished has no trailer; a failing writer heard within its lag, its own error | the stop's fault unwritten; the trailer on drop; a dead writer unheard; the stop's abort, the guard's, the wait skipped; saturation unchecked; a class mapped wrong; connection tasks, attempt tasks unkept; a carrier's name dropped |
 | K2-1 | K2 | the shell against an in-memory transport (hyper over `tokio::io::duplex`) under paused time reproduces `sim`'s journal | `std::time::Instant` in a handler |
 | K2-2 | K2 | each cause delayed alone — the reader, the token, the pool, the connect, the write, the dependency — moves exactly one gap of the chain | a gap merged |
 | K2-3 | K2 | on the real clock, multi-thread: chain order, no release before its stamped met instants, the stub's requests per correlation id equal the journal's attempts — a keep-alive connection closed as it is reused included; a request processed then reset before the answer is Unknown; a response stamped 1 µs before its deadline delivered after the tick is Expected | hyper's hidden retry; Unknown read as not taken; deadlines by arrival |
@@ -1378,6 +1380,21 @@ K2b-7c and K2b-7d produce them; the fold's stop; `verdict.py` written from decis
 - The sweep left one mutant alive — a gate's refusal accepted after a run's lines — because the twin put the gate at
   the lines' latest instant, which the at-0 rule refused alone; a twin of lines all at 0 then a gate at 0 isolates it.
 
+**K2b-7c-1 — the shell's stop** (2026-11-23): `run` returns `Ran { end: Ended | Stopped(Stop), running }` with the
+journal finished; `RunError` keeps what leaves no journal to fold. Every task the shell spawns — an attempt's, a
+connection's, through `Attempt::spawn` — is kept, reaped as the list grows, aborted by a stop and by a guard when the
+run goes; a stop waits for them at most 1 s. A carrier's fault is a dotted name and a detail for the caller only.
+- **K2b-7a's owed model, by construction instead**: the count of attempt handles is private to the frontier's state,
+  read only through `alive()`, which gives the fault first, and left only through `leave(fault)`, one critical
+  section — the two mutants K2b-7a left alive (the fault raised after leaving the count; the count read without the
+  fault) no longer compile. A model checker would prove what the types now state.
+- **What the twins found**: the log twin's first assertion — line 3 read before the stop — was wrong, not the code:
+  the loop reads the next record as it takes a line, so the log failing on the read after line 3 stops the run with
+  line 3 queued, never taken, at its read instant. A stop's instant is read after its wait for the aborted tasks, so
+  with tasks in flight it is later than the fault's cause.
+- **Still K2b-8's**: zero linger on an aborted connection — bytes the kernel accepted before the abort may still reach
+  the stand; the stopped journal says a dispatched, unended attempt may have.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -1561,3 +1578,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   the armed request, a dropped attempt's fault raised before it leaves the count; the judging time measured.
 - 2026-11-23: K2b-7b built (§ Measured): journal version 6 — a send's lag, a run's stop, a gate's refusal, the
   stages' evidence — in the pure fold and its definition; FOLD_REVISION 6, MACHINE_REVISION 4 kept.
+- 2026-11-23: K2b-7c cut into K2b-7c-1 and K2b-7c-2; K2b-7c-1 built (§ Measured): the shell's stop in its journal,
+  the run's tasks kept and aborted, the journal's trailer only when finished.

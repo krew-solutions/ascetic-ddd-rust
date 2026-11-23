@@ -51,29 +51,60 @@ impl JournalSink for Lines {
     }
 }
 
+/// What the machine hands its journal's thread.
+enum Message {
+    Line(Line),
+    /// The journal whole: its trailer, and only then (decision 18).
+    Finish,
+}
+
 /// The journal written to `W` on a thread of its own, at most `behind` lines
 /// after the machine: a full channel blocks the machine, whose lateness then
-/// shows.
+/// shows. Its trailer is written only when it is finished: dropped
+/// unfinished — a run that errs or is dropped — it has none, and reads as
+/// truncated.
 pub struct Written<W: Write + Send + 'static> {
-    tx: mpsc::SyncSender<Line>,
-    thread: JoinHandle<Result<(W, Trailer), JournalError>>,
+    tx: mpsc::SyncSender<Message>,
+    thread: Option<JoinHandle<Ended<W>>>,
 }
+
+/// What the journal's thread leaves: the journal finished, none if it was
+/// dropped unfinished, or its writer's error.
+type Ended<W> = Result<Option<(W, Trailer)>, JournalError>;
 
 impl<W: Write + Send + 'static> Written<W> {
     /// The header written to `out` at once, then its writing thread started.
     pub fn start(out: W, header: Header, behind: usize) -> Result<Written<W>, JournalError> {
         let mut writer = Writer::new(out, header)?;
-        let (tx, rx) = mpsc::sync_channel::<Line>(behind.max(1));
+        let (tx, rx) = mpsc::sync_channel::<Message>(behind.max(1));
         let thread = std::thread::Builder::new()
             .name("load-run-journal".to_owned())
             .spawn(move || {
-                for line in rx {
-                    writer.line(&line)?;
+                for w in rx {
+                    match w {
+                        Message::Line(line) => writer.line(&line)?,
+                        Message::Finish => return writer.finish().map(Some),
+                    }
                 }
-                writer.finish()
+                // Dropped unfinished: no trailer.
+                Ok(None)
             })
             .map_err(io)?;
-        Ok(Written { tx, thread })
+        Ok(Written {
+            tx,
+            thread: Some(thread),
+        })
+    }
+
+    /// The thread's end: its error, or the journal.
+    fn join(&mut self) -> Ended<W> {
+        match self.thread.take().map(JoinHandle::join) {
+            Some(Ok(r)) => r,
+            Some(Err(_)) => Err(io(std::io::Error::other(
+                "the journal's writing thread panicked",
+            ))),
+            None => Err(io(std::io::Error::other("the journal's writer is gone"))),
+        }
     }
 }
 
@@ -81,17 +112,24 @@ impl<W: Write + Send + 'static> JournalSink for Written<W> {
     type Finished = (W, Trailer);
 
     fn line(&mut self, line: Line) -> Result<(), JournalError> {
-        // A writer gone failed on its last line: its error is the finish's.
-        let _ = self.tx.send(line);
+        // A writer gone failed on a line before: its error, now, so the run
+        // stops within `behind` lines of it rather than at its end.
+        if self.tx.send(Message::Line(line)).is_err() {
+            return Err(match self.join() {
+                Err(e) => e,
+                Ok(_) => io(std::io::Error::other("the journal's writer stopped")),
+            });
+        }
         Ok(())
     }
 
-    fn finish(self) -> Result<(W, Trailer), JournalError> {
-        drop(self.tx);
-        match self.thread.join() {
-            Ok(r) => r,
-            Err(_) => Err(io(std::io::Error::other(
-                "the journal's writing thread panicked",
+    fn finish(mut self) -> Result<(W, Trailer), JournalError> {
+        // A writer already gone has no trailer to write.
+        let _ = self.tx.send(Message::Finish);
+        match self.join()? {
+            Some(done) => Ok(done),
+            None => Err(io(std::io::Error::other(
+                "the journal's writer ended unfinished",
             ))),
         }
     }

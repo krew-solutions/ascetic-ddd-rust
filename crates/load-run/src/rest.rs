@@ -260,16 +260,22 @@ fn build(
 }
 
 impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
-    async fn connect(&self, source: u32, route: &Route) -> io::Result<Conn> {
+    async fn connect<C: Clock>(
+        &self,
+        a: &Attempt<C>,
+        source: u32,
+        route: &Route,
+    ) -> io::Result<Conn> {
         let stream = self.egress.connect(source, route).await?;
         let probe = Arc::new(Probe::default());
         let (sender, connection) = http1::handshake(Io::new(stream, probe.clone()))
             .await
             .map_err(io::Error::other)?;
-        // The connection's own task, on the source's runtime: the attempt's.
-        drop(tokio::spawn(async move {
+        // The connection's own task, on the source's runtime: the attempt's,
+        // kept with the run's for a stop to abort (decision 18).
+        a.spawn(async move {
             let _ = connection.await;
-        }));
+        });
         Ok(Conn {
             sender,
             probe,
@@ -280,17 +286,17 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
     async fn attempt<C: Clock>(&self, mut a: Attempt<C>) {
         let record = a.shared_record();
         let Some(rest) = request::rest_of(&record.action) else {
-            return a.fault("not a REST call".to_owned());
+            return a.fault("rest.action", "not a REST call".to_owned());
         };
         let header = &self.header;
         let Some(op) = header.operations.iter().find(|o| o.name == rest.op) else {
-            return a.fault(format!("no operation {}", rest.op));
+            return a.fault("rest.operation", format!("no operation {}", rest.op));
         };
         let Some(pool) = usize::try_from(rest.source)
             .ok()
             .and_then(|s| self.pools.get(s))
         else {
-            return a.fault(format!("no source {}", rest.source));
+            return a.fault("rest.source", format!("no source {}", rest.source));
         };
         let captured = a.captured().to_vec();
         let wall = |at: u64| {
@@ -313,11 +319,11 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
         };
         let frame = match request::frame(op, rest, &fills, &header.profile.correlation) {
             Ok(f) => f,
-            Err(e) => return a.fault(format!("its frame: {e}")),
+            Err(e) => return a.fault("rest.frame", e.to_string()),
         };
         let route = match self.stand.route(&record, rest) {
             Ok(r) => r,
-            Err(why) => return a.fault(format!("its route: {why}")),
+            Err(why) => return a.fault("rest.route", why),
         };
         let id = render::correlation(self.config.namespace, &record.step, a.attempt());
         // Decorated once an attempt (decision 16): only the operation's
@@ -340,20 +346,24 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
             biased;
             d = self.decorator.decorate(view) => match d {
                 Ok(d) => d,
-                Err(why) => return a.fault(format!("its decorator: {why}")),
+                Err(why) => return a.fault("rest.decorator", why),
             },
             () = a.clock().sleep_until(past) => return a.unanswered(),
         };
         for (name, value) in &decorated {
             if !op.decorated.iter().any(|d| d.eq_ignore_ascii_case(name)) {
-                return a.fault(format!(
-                    "a decorated header {name} its operation does not declare"
-                ));
+                return a.fault(
+                    "rest.undeclared_header",
+                    format!("a decorated header {name} its operation does not declare"),
+                );
             }
             if http::HeaderName::from_bytes(name.as_bytes()).is_err()
                 || http::HeaderValue::from_str(value).is_err()
             {
-                return a.fault(format!("a decorated header {name} not a header"));
+                return a.fault(
+                    "rest.bad_header",
+                    format!("a decorated header {name} not a header"),
+                );
             }
         }
         // Ready to connect: its frame built and decorated — the harness's
@@ -387,7 +397,7 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
                         a.clock().sleep_until(next).await;
                     }
                     connected_last = Some(a.clock().now());
-                    let connecting = self.connect(rest.source, &route);
+                    let connecting = self.connect(&a, rest.source, &route);
                     match tokio::select! {
                         biased;
                         c = connecting => c,
@@ -413,7 +423,7 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
                 &decorated,
             ) {
                 Ok(r) => r,
-                Err(e) => return a.fault(format!("its request: {e}")),
+                Err(e) => return a.fault("rest.request", e.to_string()),
             };
             // Handed to a ready connection: the connect's lateness, the
             // stand's, ends here (decision 17).
@@ -535,7 +545,7 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
                 let seen = j.seen();
                 a.ended(j.judgement, seen);
             }
-            Err(e) => a.fault(format!("its predicate: {e}")),
+            Err(e) => a.fault("rest.predicate", e.to_string()),
         }
     }
 }

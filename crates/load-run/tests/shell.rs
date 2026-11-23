@@ -17,9 +17,9 @@ use ascetic_ddd_command_log::validate::NoHost;
 use ascetic_ddd_faker::{Key, Seed};
 use ascetic_ddd_load_run::carrier::Carrier;
 use ascetic_ddd_load_run::clock::{Clock, VirtualClock};
-use ascetic_ddd_load_run::run::{Ran, RunError, Runtimes, run};
+use ascetic_ddd_load_run::run::{Ran, RunEnd, RunError, Runtimes, Stop, run};
 use ascetic_ddd_load_run::sink::Lines;
-use ascetic_ddd_load_run::source::Records;
+use ascetic_ddd_load_run::source::{LineSource, Records};
 use ascetic_ddd_load_run::stamps::{Attempt, Harness};
 use ascetic_ddd_scheduler::journal;
 use ascetic_ddd_scheduler::machine::{Captured, Judgement, Seen};
@@ -30,9 +30,37 @@ mod common;
 
 use common::{Script, Scripted};
 
+/// A run stopped (decision 18): why, and its journal, whose last line is
+/// its fault's class.
+fn stopped(ran: Ran<Vec<journal::Line>>) -> (Stop, Vec<journal::Line>) {
+    let RunEnd::Stopped(stop) = ran.end else {
+        panic!("ended: {:?}", ran.journal.last())
+    };
+    match ran.journal.last() {
+        Some(journal::Line::Fault(f)) => assert_eq!(f.class, stop.class()),
+        other => panic!("{other:?}"),
+    }
+    (stop, ran.journal)
+}
+
 fn shell<X: Carrier<VirtualClock>>(
     header: &Header,
     records: &[Record],
+    read_ahead: u64,
+    carrier: X,
+) -> Result<Ran<Vec<journal::Line>>, RunError> {
+    shell_from(
+        header,
+        Records::new(records.iter().cloned()),
+        read_ahead,
+        carrier,
+    )
+}
+
+/// [`shell`] over a line source of its own.
+fn shell_from<S: LineSource, X: Carrier<VirtualClock>>(
+    header: &Header,
+    source: S,
     read_ahead: u64,
     carrier: X,
 ) -> Result<Ran<Vec<journal::Line>>, RunError> {
@@ -46,13 +74,12 @@ fn shell<X: Carrier<VirtualClock>>(
         let runtimes = Runtimes {
             sources: vec![tokio::runtime::Handle::current(); sources],
         };
-        let records = Records::new(records.iter().cloned());
         clock
             .within(run(
                 Arc::new(header.clone()),
                 read_ahead,
                 clock.clone(),
-                records,
+                source,
                 Lines::new(),
                 Arc::new(carrier),
                 &runtimes,
@@ -216,16 +243,16 @@ impl Carrier<VirtualClock> for Forgetful {
 fn an_attempt_dropped_unended_is_a_harness_fault() {
     let records = vec![call("read", 1, 0, 0, 0)];
     for panics in [false, true] {
-        let err = shell(&header(), &records, W, Forgetful { panics }).unwrap_err();
+        let (stop, _) = stopped(shell(&header(), &records, W, Forgetful { panics }).unwrap());
         assert!(
             matches!(
-                err,
-                RunError::Harness(Harness::Dropped {
+                stop,
+                Stop::Harness(Harness::Dropped {
                     line: 2,
                     attempt: 1
                 })
             ),
-            "{err:?}"
+            "{stop:?}"
         );
     }
 }
@@ -590,25 +617,28 @@ fn a_hold_past_the_route_timeout_is_a_harness_fault() {
         judging: None,
         block: 0,
     };
-    let err = shell(&h, &records, W, never).unwrap_err();
+    let (stop, _) = stopped(shell(&h, &records, W, never).unwrap());
     assert!(
         matches!(
-            err,
-            RunError::Harness(Harness::Held {
+            stop,
+            Stop::Harness(Harness::Held {
                 line: 2,
                 attempt: 1,
                 since: 10,
                 at: 1_000_010
             })
         ),
-        "{err:?}"
+        "{stop:?}"
     );
     let just = Judging {
         arrive: 10,
         judging: Some(999_999),
         block: 0,
     };
-    assert!(shell(&h, &records, W, just).is_ok());
+    assert!(matches!(
+        shell(&h, &records, W, just).unwrap().end,
+        RunEnd::Ended
+    ));
 }
 
 /// Decision 17, on the real clock: a carrier stuck on its source's thread —
@@ -642,10 +672,10 @@ fn a_carrier_stuck_on_its_thread_is_a_harness_fault() {
             },
         )
         .await
-        .unwrap_err()
+        .unwrap()
     });
-    match err {
-        RunError::Harness(Harness::Held { since, at, .. }) => {
+    match stopped(err).0 {
+        Stop::Harness(Harness::Held { since, at, .. }) => {
             assert!(at >= since + 20_000, "{since} {at}")
         }
         other => panic!("{other:?}"),
@@ -755,5 +785,328 @@ fn a_source_not_on_a_current_thread_runtime_is_refused() {
     assert!(
         matches!(err, RunError::Refused(ref why) if why.contains("current_thread")),
         "{err:?}"
+    );
+}
+
+/// Decision 18: every fault's class in the journal — numbers and dotted
+/// names, a carrier's detail left out.
+#[test]
+fn every_fault_has_its_class() {
+    use ascetic_ddd_command_log::LogError;
+    use ascetic_ddd_scheduler::frontier::Below;
+    use journal::{Code, FaultClass as F, LogFault as L};
+    let harness = [
+        (
+            Harness::Below(Below { at: 1, released: 2 }),
+            F::Below {
+                stamp: 1,
+                released: 2,
+            },
+        ),
+        (
+            Harness::Dropped {
+                line: 3,
+                attempt: 4,
+            },
+            F::Dropped {
+                line: 3,
+                attempt: 4,
+            },
+        ),
+        (Harness::Poisoned, F::Poisoned),
+        (Harness::Stalled { at: 5 }, F::Stalled),
+        (
+            Harness::Carrier {
+                line: 6,
+                attempt: 7,
+                cannot: "rest.route",
+                detail: "the host's own words".to_owned(),
+            },
+            F::Carrier {
+                line: 6,
+                attempt: 7,
+                cannot: Code::Named("rest.route".to_owned()),
+            },
+        ),
+        (Harness::Saturated { alive: 8 }, F::Saturated { alive: 8 }),
+        (
+            Harness::Held {
+                line: 9,
+                attempt: 10,
+                since: 11,
+                at: 12,
+            },
+            F::Held {
+                line: 9,
+                attempt: 10,
+                since: 11,
+            },
+        ),
+        (
+            Harness::Backdated { at: 13, now: 14 },
+            F::Backdated { stamp: 13, now: 14 },
+        ),
+        (
+            Harness::Disordered { at: 15, last: 16 },
+            F::Disordered {
+                stamp: 15,
+                last: 16,
+            },
+        ),
+    ];
+    for (h, class) in harness {
+        assert_eq!(Stop::Harness(h.clone()).class(), class, "{h:?}");
+    }
+    let logs = [
+        (LogError::Io(std::io::Error::other("x")), L::Io),
+        (
+            LogError::Space {
+                path: "/".into(),
+                needed: 1,
+                free: 0,
+            },
+            L::Io,
+        ),
+        (
+            LogError::Hot {
+                part: "x",
+                held: 1,
+                line: 2,
+            },
+            L::Io,
+        ),
+        (LogError::Truncated, L::Truncated),
+        (
+            LogError::Diverged {
+                what: "x".to_owned(),
+            },
+            L::Diverged,
+        ),
+        (LogError::Encode("x".to_owned()), L::Malformed),
+        (
+            LogError::Malformed {
+                line: 1,
+                reason: "x".to_owned(),
+            },
+            L::Malformed,
+        ),
+        (LogError::NotCanonical { line: 1 }, L::Malformed),
+        (LogError::Header { line: 1 }, L::Malformed),
+        (LogError::Format(9), L::Malformed),
+        (LogError::AfterTrailer, L::Malformed),
+    ];
+    for (e, kind) in logs {
+        assert_eq!(Stop::Log(e).class(), F::Log(kind));
+    }
+}
+
+/// The log's records, then its error in place of its end.
+struct Failing {
+    records: std::vec::IntoIter<Record>,
+    error: Option<ascetic_ddd_command_log::LogError>,
+}
+
+impl LineSource for Failing {
+    fn poll_next(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<Option<Arc<Record>>, ascetic_ddd_command_log::LogError>> {
+        std::task::Poll::Ready(match self.records.next() {
+            Some(r) => Ok(Some(Arc::new(r))),
+            None => match self.error.take() {
+                Some(e) => Err(e),
+                None => Ok(None),
+            },
+        })
+    }
+}
+
+/// Decision 18: a log failing mid-run stops it — the lines taken, its fault,
+/// the trailer; no task left running.
+#[test]
+fn a_log_failing_mid_run_stops_it() {
+    use ascetic_ddd_command_log::LogError;
+    let records = vec![call("read", 1, 0, 0, 0), call("read", 2, 0, 50_000, 0)];
+    for (error, kind) in [
+        (LogError::Truncated, journal::LogFault::Truncated),
+        (
+            LogError::Diverged {
+                what: "chunk 2".to_owned(),
+            },
+            journal::LogFault::Diverged,
+        ),
+    ] {
+        let source = Failing {
+            records: records.clone().into_iter(),
+            error: Some(error),
+        };
+        let quick: Arc<Script> = Arc::new(|_, _, _| sim::Attempt {
+            after: None,
+            sent_after: 5,
+            answer_after: Some(20),
+            judgement: Judgement::Expected(vec![]),
+        });
+        let ran = shell_from(&header(), source, W, Scripted::new(quick)).unwrap();
+        assert_eq!(ran.running, 0);
+        let (stop, journal) = stopped(ran);
+        assert_eq!(stop.class(), journal::FaultClass::Log(kind));
+        // Line 2 ended; line 3 read from the log at its instant, the log
+        // failing on the read after it, before the machine took it.
+        assert!(
+            journal
+                .iter()
+                .any(|l| matches!(l, journal::Line::End(e) if e.line == 2))
+        );
+        assert!(matches!(
+            journal.last(),
+            Some(journal::Line::Fault(f)) if f.at == 50_000 - W
+        ));
+    }
+}
+
+/// A clock whose next reading on a thread armed for it panics: under the
+/// frontier's lock, it poisons it.
+struct Poisoning(Arc<VirtualClock>);
+
+thread_local! {
+    static ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+impl Clock for Poisoning {
+    fn now(&self) -> u64 {
+        if ARMED.with(|a| a.replace(false)) {
+            panic!("a clock's reading under the lock");
+        }
+        self.0.now()
+    }
+
+    fn wall(&self) -> i64 {
+        self.0.wall()
+    }
+
+    fn sleep_until(&self, at: u64) -> impl Future<Output = ()> + Send + '_ {
+        self.0.sleep_until(at)
+    }
+
+    fn settled(&self, at: u64) -> impl Future<Output = ()> + Send + '_ {
+        self.0.settled(at)
+    }
+}
+
+/// Reports its send on a thread armed to panic under the lock.
+struct Poisoner;
+
+impl Carrier<Poisoning> for Poisoner {
+    fn carries(&self, _: &Header) -> Result<(), String> {
+        Ok(())
+    }
+
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "the task must not borrow its carrier: it is 'static"
+    )]
+    fn carry(&self, a: Attempt<Poisoning>) -> impl Future<Output = ()> + Send + 'static {
+        async move {
+            ARMED.with(|x| x.set(true));
+            a.sent();
+            a.unanswered();
+        }
+    }
+}
+
+/// Decision 18: a lock poisoned by a panic under it stops the run, its class
+/// the poison's, not the attempt the panic dropped.
+#[test]
+fn a_poisoned_lock_stops_the_run() {
+    let records = vec![call("read", 1, 0, 0, 0)];
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let ran = rt.block_on(async {
+        let virtual_clock = Arc::new(VirtualClock::start(0));
+        let clock = Arc::new(Poisoning(virtual_clock.clone()));
+        let runtimes = Runtimes {
+            sources: vec![tokio::runtime::Handle::current()],
+        };
+        virtual_clock
+            .within(run(
+                Arc::new(header()),
+                W,
+                clock,
+                Records::new(records.into_iter()),
+                Lines::new(),
+                Arc::new(Poisoner),
+                &runtimes,
+            ))
+            .await
+    });
+    let (stop, _) = stopped(ran.unwrap());
+    assert!(matches!(stop, Stop::Harness(Harness::Poisoned)), "{stop:?}");
+}
+
+/// Holds its attempt past its censor, then leaves it unanswered.
+struct Lingering;
+
+impl Carrier<VirtualClock> for Lingering {
+    fn carries(&self, _: &Header) -> Result<(), String> {
+        Ok(())
+    }
+
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "the task must not borrow its carrier: it is 'static"
+    )]
+    fn carry(&self, a: Attempt<VirtualClock>) -> impl Future<Output = ()> + Send + 'static {
+        async move {
+            let until = a.deadline() + 60_000_000;
+            a.clock().sleep_until(until).await;
+            a.unanswered();
+        }
+    }
+}
+
+/// Decision 18: attempts outliving their steps past the margin — a source
+/// that cannot keep up — stop the run; the stop aborts them, none left
+/// running.
+#[test]
+fn a_saturated_source_stops_the_run() {
+    let mut h = header();
+    h.operations.iter_mut().for_each(|o| o.timeout = 1_000);
+    let lines = ascetic_ddd_load_run::run::SATURATION as u64 + 100;
+    let records: Vec<Record> = (0..lines).map(|i| call("read", i + 1, 0, 0, 0)).collect();
+    let ran = shell(&h, &records, W, Lingering).unwrap();
+    assert_eq!(ran.running, 0);
+    let (stop, _) = stopped(ran);
+    assert!(
+        matches!(stop, Stop::Harness(Harness::Saturated { alive }) if alive > ascetic_ddd_load_run::run::SATURATION),
+        "{stop:?}"
+    );
+}
+
+/// A record sent from a source with no runtime — a log no validator read —
+/// stops the run at its dispatch, a carrier fault named, never a refusal
+/// after the journal began.
+#[test]
+fn a_source_with_no_runtime_stops_the_run_at_its_dispatch() {
+    let records = vec![call("read", 1, 0, 0, 1)];
+    let quick: Arc<Script> = Arc::new(|_, _, _| sim::Attempt {
+        after: None,
+        sent_after: 5,
+        answer_after: Some(20),
+        judgement: Judgement::Expected(vec![]),
+    });
+    let (stop, _) = stopped(shell(&header(), &records, W, Scripted::new(quick)).unwrap());
+    assert!(
+        matches!(
+            stop,
+            Stop::Harness(Harness::Carrier {
+                line: 2,
+                attempt: 1,
+                cannot: "run.source",
+                ..
+            })
+        ),
+        "{stop:?}"
     );
 }

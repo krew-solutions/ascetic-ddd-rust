@@ -17,7 +17,7 @@ use std::task::{Context, Poll, Waker};
 
 use ascetic_ddd_command_log::LogError;
 use ascetic_ddd_command_log::record::{Action, Header, Probe, Record};
-use ascetic_ddd_scheduler::journal::{self, JournalError};
+use ascetic_ddd_scheduler::journal::{self, FaultClass, JournalError, LogFault};
 use ascetic_ddd_scheduler::machine::{Input, Line, Machine, Output};
 use ascetic_ddd_scheduler::order::Ordered;
 use tokio::runtime::Handle;
@@ -37,17 +37,17 @@ pub struct Runtimes {
     pub sources: Vec<Handle>,
 }
 
-/// A run that did not end.
+/// A run that left no journal to fold: refused before it began, or its
+/// journal's own sink failed (a failed write may leave a line cut short, so
+/// nothing may follow it).
 #[derive(Debug)]
 pub enum RunError {
-    /// Refused before T0: no journal.
+    /// Refused before T0.
     Refused(String),
-    /// The log, or the machine on it.
+    /// The log, refused before T0.
     Log(LogError),
     /// The journal's sink.
     Journal(JournalError),
-    /// The harness.
-    Harness(Harness),
 }
 
 impl fmt::Display for RunError {
@@ -56,10 +56,106 @@ impl fmt::Display for RunError {
             RunError::Refused(why) => write!(f, "refused before T0: {why}"),
             RunError::Log(e) => write!(f, "{e}"),
             RunError::Journal(e) => write!(f, "{e}"),
-            RunError::Harness(h) => write!(f, "harness fault: {h}"),
         }
     }
 }
+
+/// Why a run stopped short (decision 18): its class journaled, the whole —
+/// a host's text included — told here, for the caller only.
+#[derive(Debug)]
+pub enum Stop {
+    /// The harness.
+    Harness(Harness),
+    /// The log, or the machine on it.
+    Log(LogError),
+}
+
+impl Stop {
+    /// Its class in the journal.
+    pub fn class(&self) -> FaultClass {
+        match self {
+            Stop::Harness(h) => h.class(),
+            Stop::Log(e) => FaultClass::Log(log_fault(e)),
+        }
+    }
+}
+
+impl fmt::Display for Stop {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Stop::Harness(h) => write!(f, "harness fault: {h}"),
+            Stop::Log(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// How the log failed the run, as the journal holds it.
+fn log_fault(e: &LogError) -> LogFault {
+    match e {
+        LogError::Diverged { .. } => LogFault::Diverged,
+        LogError::Truncated => LogFault::Truncated,
+        LogError::Io(_) | LogError::Space { .. } | LogError::Hot { .. } => LogFault::Io,
+        LogError::Encode(_)
+        | LogError::Malformed { .. }
+        | LogError::NotCanonical { .. }
+        | LogError::Header { .. }
+        | LogError::Format(_)
+        | LogError::Trailer { .. }
+        | LogError::AfterTrailer => LogFault::Malformed,
+    }
+}
+
+/// How a run ended: through its log, or stopped by a fault — its journal
+/// whole either way, and its verdict the fold's.
+#[derive(Debug)]
+pub enum RunEnd {
+    /// Every line ended.
+    Ended,
+    /// Stopped: the journal's last line its fault.
+    Stopped(Stop),
+}
+
+/// What halts the loop: a stop, journaled, or the sink, which cannot be.
+enum Halt {
+    Stop(Stop),
+    Journal(JournalError),
+}
+
+impl From<Harness> for Halt {
+    fn from(h: Harness) -> Halt {
+        Halt::Stop(Stop::Harness(h))
+    }
+}
+
+impl From<LogError> for Halt {
+    fn from(e: LogError) -> Halt {
+        Halt::Stop(Stop::Log(e))
+    }
+}
+
+impl From<JournalError> for Halt {
+    fn from(e: JournalError) -> Halt {
+        Halt::Journal(e)
+    }
+}
+
+/// Aborts the run's tasks when the run goes — ended, stopped, or dropped
+/// (decision 18).
+struct Aborts<C: Clock>(Arc<Stamps<C>>);
+
+impl<C: Clock> Drop for Aborts<C> {
+    fn drop(&mut self) {
+        self.0.tasks().abort();
+    }
+}
+
+/// Microseconds a stop waits for its aborted tasks to end: one stuck in its
+/// judging never does.
+const QUIESCE: u64 = 1_000_000;
+
+/// Attempt handles alive past the steps not ended, beyond which a source is
+/// saturated: its tasks outlive their steps (decision 18).
+pub const SATURATION: usize = 1_024;
 
 impl std::error::Error for RunError {}
 
@@ -75,13 +171,8 @@ impl From<JournalError> for RunError {
     }
 }
 
-impl From<Harness> for RunError {
-    fn from(h: Harness) -> RunError {
-        RunError::Harness(h)
-    }
-}
-
-/// A run's end: what its journal left, and the machine's last counts.
+/// A run's end: what its journal left, the machine's last counts, and how it
+/// ended.
 #[derive(Debug)]
 pub struct Ran<F> {
     /// The journal's sink, finished.
@@ -90,6 +181,11 @@ pub struct Ran<F> {
     pub held: usize,
     /// Cells kept for their dependents.
     pub kept: usize,
+    /// Ended, or stopped and why.
+    pub end: RunEnd,
+    /// The run's tasks still running: after a stop, those its wait did not
+    /// see end — one stuck in its judging.
+    pub running: usize,
 }
 
 /// Turns at one instant with work due and none done, past which the loop is
@@ -168,6 +264,8 @@ where
     let mut last = 0u64;
     let mut exhausted = false;
     let mut stalled: Option<(u64, u32)> = None;
+    let aborts = Aborts(stamps.clone());
+    let halted: Result<(), Halt> = async {
     queue.push(0, Input::Wake);
     loop {
         if let Some(fault) = stamps.raised() {
@@ -190,24 +288,19 @@ where
         // go between them, and the run end with its answer unread. A fault
         // is read with them: an attempt raises its own before it leaves the
         // count (decision 18), so none alive is never read without it.
-        let (now, work, floor, oldest, alive, fault) = {
+        let (now, work, floor, oldest, alive) = {
             let (g, now) = stamps.lock();
             let f = &g.frontier;
             let work = [f.next_pushed(), f.next_deadline()]
                 .into_iter()
                 .flatten()
                 .min();
-            (
-                now,
-                work,
-                f.floor(),
-                f.oldest_hold(),
-                g.alive,
-                g.fault.clone(),
-            )
+            (now, work, f.floor(), f.oldest_hold(), g.alive())
         };
-        if let Some(fault) = fault {
-            return Err(fault.into());
+        let alive = alive?;
+        // Attempts outliving their steps: a source that cannot keep up.
+        if alive > live.len().saturating_add(SATURATION) {
+            return Err(Harness::Saturated { alive }.into());
         }
         // A hold older than the route timeout: a carrier stuck in its
         // judging — a fault, never a hang (decision 17).
@@ -342,9 +435,13 @@ where
                             let first = *first.get_or_insert(at);
                             let source = usize::try_from(source_of(record)).unwrap_or(usize::MAX);
                             let Some(handle) = runtimes.sources.get(source) else {
-                                return Err(RunError::Refused(format!(
-                                    "line {line}: source {source} has no runtime"
-                                )));
+                                return Err(Harness::Carrier {
+                                    line,
+                                    attempt,
+                                    cannot: "run.source",
+                                    detail: format!("source {source} has no runtime"),
+                                }
+                                .into());
                             };
                             let a = Attempt::new(
                                 stamps.clone(),
@@ -360,11 +457,11 @@ where
                             // runtime, is when it was handed (decision 17):
                             // stamped here, so no carrier can forget it.
                             let carrier = carrier.clone();
-                            drop(handle.spawn(async move {
+                            stamps.spawn_on(handle, async move {
                                 let mut a = a;
                                 a.handed();
                                 carrier.carry(a).await;
-                            }));
+                            });
                         }
                     }
                     Output::Ended(e) => {
@@ -393,12 +490,38 @@ where
             stalled = Some((t, n));
         }
     }
-    let held = machine.held();
-    let kept = machine.kept();
+    Ok(())
+    }
+    .await;
+    let stop = match halted {
+        Ok(()) => None,
+        Err(Halt::Stop(stop)) => Some(stop),
+        Err(Halt::Journal(e)) => return Err(e.into()),
+    };
+    if let Some(stop) = &stop {
+        // Decision 18: no more dispatches; every task aborted and awaited,
+        // bounded; then the fault — no earlier than any line — and the
+        // trailer.
+        stamps.tasks().abort();
+        let until = clock.now().saturating_add(QUIESCE);
+        while stamps.tasks().running() > 0 && clock.now() < until {
+            let next = clock.now().saturating_add(1_000).min(until);
+            clock.sleep_until(next).await;
+        }
+        let at = clock.now().max(machine.now());
+        sink.line(journal::Line::Fault(journal::Fault {
+            at,
+            class: stop.class(),
+        }))?;
+    }
+    let running = stamps.tasks().running();
+    drop(aborts);
     Ok(Ran {
         journal: sink.finish()?,
-        held,
-        kept,
+        held: machine.held(),
+        kept: machine.kept(),
+        end: stop.map_or(RunEnd::Ended, RunEnd::Stopped),
+        running,
     })
 }
 

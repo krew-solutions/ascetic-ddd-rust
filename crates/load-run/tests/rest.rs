@@ -1183,6 +1183,12 @@ impl Decorator for Proofs {
         let until = self.clock.now() + self.takes;
         self.clock.sleep_until(until).await;
         let n = self.minted.fetch_add(1, Ordering::SeqCst) + 1;
+        // Told to fail: its error, the host's own text.
+        if let Some((name, why)) = &self.give
+            && name == "!fail"
+        {
+            return Err(why.clone());
+        }
         Ok(vec![self.give.clone().unwrap_or((
             "dpop".to_owned(),
             format!("SECRET-proof-{n}"),
@@ -1393,19 +1399,24 @@ fn the_decorator_s_time_is_the_harness_s() {
 fn what_a_decorator_may_give_is_the_operation_s() {
     let records = vec![call("read", 1, 0, 0, 0)];
     let answers = || vec![(id(&records[0], 1), ok(10, 0))];
-    for (give, what) in [
-        (("authorization", "x"), "does not declare"),
-        (("dpop", "a\nb"), "not a header"),
+    // The run stops, its fault the journal's last line, named, no value in it
+    // (decision 18).
+    for (give, cannot) in [
+        (("authorization", "x"), "rest.undeclared_header"),
+        (("dpop", "a\nb"), "rest.bad_header"),
     ] {
         let give = Some((give.0.to_owned(), give.1.to_owned()));
         let (journal, _, _) = run_decorated(decorating(), &records, answers(), 0, give);
-        match journal {
-            Err(RunError::Harness(ascetic_ddd_load_run::stamps::Harness::Carrier {
-                what: w,
+        match journal.unwrap().last() {
+            Some(Line::Fault(journal::Fault {
+                class:
+                    journal::FaultClass::Carrier {
+                        line: 2,
+                        attempt: 1,
+                        cannot: journal::Code::Named(c),
+                    },
                 ..
-            })) => {
-                assert!(w.contains(what), "{w}")
-            }
+            })) => assert_eq!(c, cannot),
             other => panic!("{other:?}"),
         }
     }
@@ -1790,4 +1801,210 @@ fn a_connect_or_a_decorator_that_never_answers_ends_at_the_deadline() {
         assert!(sent(&journal, 2).is_empty(), "{what}");
         assert_eq!(end(&journal, 2).map(|e| e.0), Some(End::Unknown), "{what}");
     }
+}
+
+/// Decision 18: a decorator's error is the host's text — it may carry a proof
+/// — and stays out of the journal; the stop journals only its name.
+#[test]
+fn a_carrier_s_detail_stays_out_of_the_journal() {
+    let records = vec![call("read", 1, 0, 0, 0)];
+    let answers = vec![(id(&records[0], 1), ok(10, 0))];
+    let give = Some(("!fail".to_owned(), "secret.proof_abc".to_owned()));
+    let (journal, _, _) = run_decorated(decorating(), &records, answers, 0, give);
+    let journal = journal.unwrap();
+    let text: String = journal
+        .iter()
+        .map(|l| serde_json::to_string(l).unwrap())
+        .collect();
+    assert!(!text.contains("secret"), "{text}");
+    assert!(matches!(
+        journal.last(),
+        Some(Line::Fault(journal::Fault {
+            class: journal::FaultClass::Carrier {
+                cannot: journal::Code::Named(c),
+                ..
+            },
+            ..
+        })) if c == "rest.decorator"
+    ));
+}
+
+/// The log's records, then its error in place of its end.
+struct Failing {
+    records: std::vec::IntoIter<Record>,
+    error: Option<ascetic_ddd_command_log::LogError>,
+}
+
+impl ascetic_ddd_load_run::source::LineSource for Failing {
+    fn poll_next(
+        &mut self,
+        _: &mut Context<'_>,
+    ) -> Poll<Result<Option<Arc<Record>>, ascetic_ddd_command_log::LogError>> {
+        Poll::Ready(match self.records.next() {
+            Some(r) => Ok(Some(Arc::new(r))),
+            None => match self.error.take() {
+                Some(e) => Err(e),
+                None => Ok(None),
+            },
+        })
+    }
+}
+
+/// Decision 18: a stop aborts the run's attempts and their connections'
+/// tasks — three connecting until 5,000 µs, or handed to hyper and written
+/// at 5,000, when the log fails at 2,000 — so no request of theirs reaches
+/// the stand, then or after the run returned; none is left running.
+#[test]
+fn a_stop_leaves_no_request_behind() {
+    let held = Throttle {
+        first: 5_000,
+        chunk: usize::MAX,
+        gap: 0,
+    };
+    for (connect, throttle) in [(5_000, AT_ONCE), (0, held)] {
+        stop_leaves_no_request(connect, throttle);
+    }
+}
+
+fn stop_leaves_no_request(connect: u64, throttle: Throttle) {
+    use ascetic_ddd_load_run::run::{RunEnd, Stop};
+    let records = vec![
+        call("read", 1, 0, 0, 0),
+        call("read", 2, 0, 0, 0),
+        call("read", 3, 0, 0, 0),
+        call("read", 4, 0, 3_000, 0),
+    ];
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let (ran, at_return, after) = rt.block_on(async {
+        let clock = Arc::new(VirtualClock::start(1_763_640_000_000_000));
+        let stub = Arc::new(Stub {
+            clock: clock.clone(),
+            answers: records
+                .iter()
+                .map(|r| id(r, 1))
+                .zip(vec![ok(10, 0); 4])
+                .collect(),
+            connections: AtomicUsize::new(0),
+            came: Mutex::new(Vec::new()),
+        });
+        let header = Arc::new(rest_header());
+        let carrier = RestCarrier::new(
+            header.clone(),
+            OneStand,
+            Pipe {
+                stub: stub.clone(),
+                throttle,
+                holds: None,
+                connect,
+                refuse: Arc::new(AtomicUsize::new(0)),
+                fail: None,
+                requests: Arc::new(AtomicUsize::new(0)),
+                eof: None,
+                connects: Arc::new(AtomicUsize::new(0)),
+            },
+            Config::new(NAMESPACE, RunSecret::new([7; 32]), clock.wall()),
+        );
+        let runtimes = Runtimes {
+            sources: vec![tokio::runtime::Handle::current()],
+        };
+        let source = Failing {
+            records: records.clone().into_iter(),
+            error: Some(ascetic_ddd_command_log::LogError::Truncated),
+        };
+        let ran = clock
+            .within(run(
+                header,
+                W,
+                clock.clone(),
+                source,
+                Lines::new(),
+                Arc::new(carrier),
+                &runtimes,
+            ))
+            .await
+            .unwrap();
+        let at_return = stub.came.lock().unwrap().len();
+        clock.sleep_until(clock.now() + 1_000_000).await;
+        let after = stub.came.lock().unwrap().len();
+        (ran, at_return, after)
+    });
+    assert_eq!((at_return, after), (0, 0), "connect {connect}");
+    assert_eq!(ran.running, 0);
+    assert!(
+        matches!(ran.end, RunEnd::Stopped(Stop::Log(_))),
+        "{:?}",
+        ran.end
+    );
+    assert!(matches!(
+        ran.journal.last(),
+        Some(Line::Fault(f)) if f.at >= 3_000 - W
+    ));
+}
+
+/// Decision 18: a run's future dropped — its caller gone — takes its
+/// attempts with it: none of the three connecting reaches the stand after.
+#[test]
+fn a_run_dropped_takes_its_attempts_with_it() {
+    let records = vec![
+        call("read", 1, 0, 0, 0),
+        call("read", 2, 0, 0, 0),
+        call("read", 3, 0, 0, 0),
+    ];
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let came = rt.block_on(async {
+        let clock = Arc::new(VirtualClock::start(1_763_640_000_000_000));
+        let stub = Arc::new(Stub {
+            clock: clock.clone(),
+            answers: records
+                .iter()
+                .map(|r| id(r, 1))
+                .zip(vec![ok(10, 0); 3])
+                .collect(),
+            connections: AtomicUsize::new(0),
+            came: Mutex::new(Vec::new()),
+        });
+        let header = Arc::new(rest_header());
+        let carrier = RestCarrier::new(
+            header.clone(),
+            OneStand,
+            Pipe {
+                stub: stub.clone(),
+                throttle: AT_ONCE,
+                holds: None,
+                connect: 5_000,
+                refuse: Arc::new(AtomicUsize::new(0)),
+                fail: None,
+                requests: Arc::new(AtomicUsize::new(0)),
+                eof: None,
+                connects: Arc::new(AtomicUsize::new(0)),
+            },
+            Config::new(NAMESPACE, RunSecret::new([7; 32]), clock.wall()),
+        );
+        let runtimes = Runtimes {
+            sources: vec![tokio::runtime::Handle::current()],
+        };
+        let running = run(
+            header,
+            W,
+            clock.clone(),
+            Records::new(records.clone().into_iter()),
+            Lines::new(),
+            Arc::new(carrier),
+            &runtimes,
+        );
+        tokio::select! {
+            biased;
+            _ = running => panic!("the run ended before its connects"),
+            () = clock.sleep_until(2_000) => {}
+        }
+        clock.sleep_until(clock.now() + 1_000_000).await;
+        stub.came.lock().unwrap().len()
+    });
+    assert_eq!(came, 0);
 }

@@ -9,12 +9,15 @@
 //! the machine's loop, never the system's Unknown.
 
 use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::future::Future;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use ascetic_ddd_command_log::record::Record;
 use ascetic_ddd_scheduler::frontier::{Below, Frontier, Hold};
+use ascetic_ddd_scheduler::journal::{Code, FaultClass};
 use ascetic_ddd_scheduler::machine::{Captured, Found, Judgement, Line, Seen};
 use tokio::sync::Notify;
+use tokio::task::AbortHandle;
 
 use crate::clock::Clock;
 
@@ -45,8 +48,18 @@ pub enum Harness {
         line: Line,
         /// Which attempt.
         attempt: u32,
-        /// What, never a value.
-        what: String,
+        /// What it could not do: a dotted name the carrier chooses, the only
+        /// part journaled (decision 18).
+        cannot: &'static str,
+        /// Why, for the caller only: it may hold a host's text — a route's
+        /// reason, a decorator's error — never the journal's.
+        detail: String,
+    },
+    /// Attempt handles alive past the steps not ended and a margin: a source
+    /// that cannot keep up, its tasks outliving their steps (decision 18).
+    Saturated {
+        /// Attempt handles alive.
+        alive: usize,
     },
     /// An answer judged for the route timeout and still not ended (ADR-0047
     /// decision 17): a carrier stuck, never an OS slice.
@@ -90,8 +103,12 @@ impl fmt::Display for Harness {
             Harness::Carrier {
                 line,
                 attempt,
-                what,
-            } => write!(f, "attempt {attempt} of line {line}: {what}"),
+                cannot,
+                detail,
+            } => write!(f, "attempt {attempt} of line {line}: {cannot}: {detail}"),
+            Harness::Saturated { alive } => {
+                write!(f, "{alive} attempts alive, past the steps not ended")
+            }
             Harness::Held {
                 line,
                 attempt,
@@ -116,12 +133,130 @@ impl fmt::Display for Harness {
 
 impl std::error::Error for Harness {}
 
+impl Harness {
+    /// Its class in the journal (decision 18): numbers and dotted names, no
+    /// host text.
+    pub fn class(&self) -> FaultClass {
+        match self {
+            Harness::Below(b) => FaultClass::Below {
+                stamp: b.at,
+                released: b.released,
+            },
+            Harness::Dropped { line, attempt } => FaultClass::Dropped {
+                line: *line,
+                attempt: *attempt,
+            },
+            Harness::Poisoned => FaultClass::Poisoned,
+            Harness::Stalled { .. } => FaultClass::Stalled,
+            Harness::Carrier {
+                line,
+                attempt,
+                cannot,
+                ..
+            } => FaultClass::Carrier {
+                line: *line,
+                attempt: *attempt,
+                cannot: Code::from(&ascetic_ddd_scheduler::machine::Code::of(cannot)),
+            },
+            Harness::Saturated { alive } => FaultClass::Saturated {
+                alive: u64::try_from(*alive).unwrap_or(u64::MAX),
+            },
+            Harness::Held {
+                line,
+                attempt,
+                since,
+                ..
+            } => FaultClass::Held {
+                line: *line,
+                attempt: *attempt,
+                since: *since,
+            },
+            Harness::Backdated { at, now } => FaultClass::Backdated {
+                stamp: *at,
+                now: *now,
+            },
+            Harness::Disordered { at, last } => FaultClass::Disordered {
+                stamp: *at,
+                last: *last,
+            },
+        }
+    }
+}
+
 pub(crate) struct State {
     pub(crate) frontier: Frontier,
-    pub(crate) fault: Option<Harness>,
+    /// The first fault raised: read only with the count, by
+    /// [`State::alive`].
+    fault: Option<Harness>,
     /// Attempt handles alive: an attempt pushes its end before its handle
     /// goes, so none alive, read with the frontier, is none to come.
-    pub(crate) alive: usize,
+    alive: usize,
+}
+
+impl State {
+    /// Raises `fault`: the first one stands.
+    pub(crate) fn raise(&mut self, fault: Harness) {
+        self.fault.get_or_insert(fault);
+    }
+
+    /// The first fault raised.
+    pub(crate) fn raised(&self) -> Option<&Harness> {
+        self.fault.as_ref()
+    }
+
+    /// The fault raised, or else how many attempt handles are alive: the
+    /// count is never read without the fault (decision 18).
+    pub(crate) fn alive(&self) -> Result<usize, Harness> {
+        match &self.fault {
+            Some(f) => Err(f.clone()),
+            None => Ok(self.alive),
+        }
+    }
+
+    fn enter(&mut self) {
+        self.alive = self.alive.saturating_add(1);
+    }
+
+    /// An attempt's handle gone, raising its fault if it went unended, in one
+    /// critical section with the count: none alive is never read without it
+    /// (decision 18).
+    fn leave(&mut self, fault: Option<Harness>) {
+        if let Some(f) = fault {
+            self.raise(f);
+        }
+        self.alive = self.alive.saturating_sub(1);
+    }
+}
+
+/// Every task the shell spawns for a run, so that a stop aborts them all, and
+/// a run dropped with them (decision 18): reaped as the list grows.
+#[derive(Default)]
+pub(crate) struct Tasks {
+    handles: Mutex<Vec<AbortHandle>>,
+}
+
+impl Tasks {
+    fn keep(&self, h: AbortHandle) {
+        let mut v = self.handles.lock().unwrap_or_else(PoisonError::into_inner);
+        if v.len() == v.capacity() {
+            v.retain(|h| !h.is_finished());
+        }
+        v.push(h);
+    }
+
+    /// Aborts every task still running.
+    pub(crate) fn abort(&self) {
+        let v = self.handles.lock().unwrap_or_else(PoisonError::into_inner);
+        for h in v.iter() {
+            h.abort();
+        }
+    }
+
+    /// Tasks not finished.
+    pub(crate) fn running(&self) -> usize {
+        let v = self.handles.lock().unwrap_or_else(PoisonError::into_inner);
+        v.iter().filter(|h| !h.is_finished()).count()
+    }
 }
 
 /// The frontier under its lock, the clock it stamps by, and the machine's
@@ -130,6 +265,7 @@ pub(crate) struct Stamps<C> {
     clock: Arc<C>,
     state: Mutex<State>,
     notify: Notify,
+    tasks: Tasks,
 }
 
 impl<C: Clock> Stamps<C> {
@@ -142,6 +278,7 @@ impl<C: Clock> Stamps<C> {
                 alive: 0,
             }),
             notify: Notify::new(),
+            tasks: Tasks::default(),
         }
     }
 
@@ -156,7 +293,7 @@ impl<C: Clock> Stamps<C> {
             Ok(g) => g,
             Err(p) => {
                 let mut g = p.into_inner();
-                g.fault.get_or_insert(Harness::Poisoned);
+                g.raise(Harness::Poisoned);
                 g
             }
         };
@@ -167,13 +304,26 @@ impl<C: Clock> Stamps<C> {
 
     /// Raises a fault (the first one stands) and wakes the machine.
     pub(crate) fn fault(&self, fault: Harness) {
-        self.lock().0.fault.get_or_insert(fault);
+        self.lock().0.raise(fault);
         self.notify.notify_one();
     }
 
     /// The fault raised, if any.
     pub(crate) fn raised(&self) -> Option<Harness> {
-        self.lock().0.fault.clone()
+        self.lock().0.raised().cloned()
+    }
+
+    /// The run's tasks.
+    pub(crate) fn tasks(&self) -> &Tasks {
+        &self.tasks
+    }
+
+    /// Spawns `task` on `on`, kept for the stop to abort.
+    pub(crate) fn spawn_on<F>(&self, on: &tokio::runtime::Handle, task: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.tasks.keep(on.spawn(task).abort_handle());
     }
 
     pub(crate) fn notify(&self) {
@@ -227,7 +377,7 @@ impl<C: Clock> Attempt<C> {
         (first, dispatched): (u64, u64),
         deadline: u64,
     ) -> Attempt<C> {
-        stamps.lock().0.alive += 1;
+        stamps.lock().0.enter();
         Attempt {
             line,
             attempt,
@@ -368,35 +518,38 @@ impl<C: Clock> Attempt<C> {
         self.done = true;
     }
 
-    /// Its carrier could not carry it: a harness fault, `what` naming no
-    /// value.
-    pub fn fault(mut self, what: String) {
+    /// Its carrier could not carry it: a harness fault, `cannot` a dotted
+    /// name the journal holds, `detail` the caller's only.
+    pub fn fault(mut self, cannot: &'static str, detail: String) {
         let (line, attempt) = (self.line, self.attempt);
         self.hold = None;
         self.done = true;
         self.stamps.fault(Harness::Carrier {
             line,
             attempt,
-            what,
+            cannot,
+            detail,
         });
+    }
+
+    /// Spawns a task of its carrier's — a connection's — on the runtime it
+    /// runs on, kept with the run's for a stop to abort (decision 18).
+    pub fn spawn<F>(&self, task: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.stamps
+            .spawn_on(&tokio::runtime::Handle::current(), task);
     }
 }
 
 impl<C: Clock> Drop for Attempt<C> {
     fn drop(&mut self) {
-        let dropped = !self.done || self.hold.is_some();
-        {
-            let (mut g, _) = self.stamps.lock();
-            // Raised before it leaves the count, under the one lock: the loop
-            // that reads none alive reads the fault with it (decision 18).
-            if dropped {
-                g.fault.get_or_insert(Harness::Dropped {
-                    line: self.line,
-                    attempt: self.attempt,
-                });
-            }
-            g.alive = g.alive.saturating_sub(1);
-        }
+        let dropped = (!self.done || self.hold.is_some()).then_some(Harness::Dropped {
+            line: self.line,
+            attempt: self.attempt,
+        });
+        self.stamps.lock().0.leave(dropped);
         self.stamps.notify();
     }
 }
