@@ -105,6 +105,7 @@ impl Judged {
             status: self.status,
             code: self.code.clone(),
             after: self.retry_after,
+            censored: false,
         }
     }
 }

@@ -47,6 +47,9 @@ pub struct Seen {
     pub code: Option<Code>,
     /// Microseconds its `Retry-After` asks for.
     pub after: Option<u64>,
+    /// The frontier's censor at the deadline, not an answer (ADR-0047
+    /// decision 17): the harness's lateness may excuse only it.
+    pub censored: bool,
 }
 
 /// A problem's code as the journal may carry it: the server's text only if it
@@ -113,6 +116,12 @@ pub enum Input {
         line: Line,
         /// The attempt, from 1.
         attempt: u32,
+        /// When its task first ran: the hand-off's lateness from the dispatch
+        /// is the harness's (ADR-0047 decision 17).
+        handed: u64,
+        /// When its request was handed to a ready connection: the connect's
+        /// lateness from `handed` is the stand's.
+        connected: u64,
     },
     /// An attempt ended.
     Ended {
@@ -215,6 +224,9 @@ pub struct Entry {
     pub bound: Vec<Line>,
     /// Whether it ended only at the machine's backstop: a harness fault.
     pub fault: bool,
+    /// When the wake whose taking ended it was due; none for an end an input
+    /// made, or a skip (ADR-0047 decision 17).
+    pub wake: Option<u64>,
 }
 
 /// What the machine asks.
@@ -231,6 +243,9 @@ pub enum Output {
         captured: Vec<Captured>,
         /// When its handler gives up on it.
         deadline: u64,
+        /// When the wake that dispatched it was due: its lateness to the
+        /// dispatch is the machine's (ADR-0047 decision 17).
+        due: u64,
     },
     /// Wake me at this instant.
     WakeAt(u64),
@@ -309,7 +324,7 @@ pub enum Ignored {
 /// for the same inputs changes, which the differential's journals pin beside
 /// it (ADR-0047 K1e-3). A journal's header names it, so that a verdict is read
 /// against the machine that made it.
-pub const MACHINE_REVISION: u32 = 3;
+pub const MACHINE_REVISION: u32 = 4;
 
 /// How long past a deadline the machine waits for a handler that does not
 /// report: then the step ends unknown, and it is the harness's fault.
@@ -481,7 +496,7 @@ impl Machine {
         self.now = self.now.max(at);
         match input {
             Input::Line { line, record } => self.read(line, record, &mut out)?,
-            Input::Sent { line, attempt } => self.sent(line, attempt, &mut out),
+            Input::Sent { line, attempt, .. } => self.sent(line, attempt, &mut out),
             Input::Ended {
                 line,
                 attempt,
@@ -684,7 +699,7 @@ impl Machine {
         });
         self.forget(gone);
         match skip {
-            Some((why, t)) => self.finish(line, End::Skipped(why), t.max(self.now), out),
+            Some((why, t)) => self.finish(line, End::Skipped(why), t.max(self.now), None, out),
             None => self.ready_if_met(line, out),
         }
         Ok(())
@@ -785,7 +800,7 @@ impl Machine {
             }
             c.wake = None;
             match c.phase.clone() {
-                Phase::Due => self.dispatch(line, 1, out),
+                Phase::Due => self.dispatch(line, 1, t, out),
                 Phase::Flight {
                     attempt,
                     outstanding,
@@ -795,10 +810,10 @@ impl Machine {
                         if let Some(c) = self.cells.get_mut(&line) {
                             c.fault = true;
                         }
-                        self.finish(line, End::Unknown, self.now, out);
+                        self.finish(line, End::Unknown, self.now, Some(t), out);
                     } else if !outstanding && t >= deadline {
                         // An observation not yet satisfied by its deadline.
-                        self.finish(line, End::Unknown, deadline, out);
+                        self.finish(line, End::Unknown, deadline, Some(t), out);
                     } else if !outstanding {
                         // Taken at `now`, which a real timer leaves past `t`
                         // (ADR-0047 decision 16): a resend leaves only if
@@ -809,10 +824,12 @@ impl Machine {
                         let fallback = self.cells.get_mut(&line).and_then(|c| c.fallback.take());
                         match fallback {
                             Some(end) if now.saturating_add(jitter) >= deadline => {
-                                self.finish(line, end, now, out);
+                                self.finish(line, end, now, Some(t), out);
                             }
-                            None if now >= deadline => self.finish(line, End::Unknown, now, out),
-                            _ => self.dispatch(line, attempt.saturating_add(1), out),
+                            None if now >= deadline => {
+                                self.finish(line, End::Unknown, now, Some(t), out);
+                            }
+                            _ => self.dispatch(line, attempt.saturating_add(1), t, out),
                         }
                     }
                 }
@@ -821,7 +838,8 @@ impl Machine {
         }
     }
 
-    fn dispatch(&mut self, line: Line, attempt: u32, out: &mut Vec<Output>) {
+    /// Dispatches `attempt` of `line`, by a wake due at `due`.
+    fn dispatch(&mut self, line: Line, attempt: u32, due: u64, out: &mut Vec<Output>) {
         let now = self.now;
         let Some(c) = self.cells.get(&line) else {
             return;
@@ -829,7 +847,9 @@ impl Machine {
         // The values taken when its release was decided; a resend sends
         // them again.
         if let Some(producer) = c.missing {
-            self.finish(line, End::Skipped(Skip::MissingCapture(producer)), now, out);
+            // A skip: its producer's doing, not a wake's (decision 17).
+            let skip = End::Skipped(Skip::MissingCapture(producer));
+            self.finish(line, skip, now, None, out);
             return;
         }
         let captured = c.captured.clone();
@@ -837,7 +857,7 @@ impl Machine {
         // Released past its deadline — an observation whose cause's window
         // closed before it could start — it ends unknown, never sent.
         if attempt == 1 && now >= deadline {
-            self.finish(line, End::Unknown, now, out);
+            self.finish(line, End::Unknown, now, Some(due), out);
             return;
         }
         let Some(c) = self.cells.get_mut(&line) else {
@@ -856,6 +876,7 @@ impl Machine {
             attempt,
             captured,
             deadline,
+            due,
         });
     }
 
@@ -935,7 +956,7 @@ impl Machine {
         match judgement {
             Judgement::Expected(captures) => {
                 c.captures = captures;
-                self.finish(line, End::Expected, now, out);
+                self.finish(line, End::Expected, now, None, out);
             }
             Judgement::Unexpected | Judgement::NotTaken | Judgement::Unknown if poll => {
                 // Not yet, or no telling: the next poll on its grid, no sooner
@@ -961,9 +982,9 @@ impl Machine {
                 self.resend(line, attempt, after, End::Unknown, out);
             }
             Judgement::Unexpected | Judgement::NotTaken => {
-                self.finish(line, End::Unexpected, now, out);
+                self.finish(line, End::Unexpected, now, None, out);
             }
-            Judgement::Unknown => self.finish(line, End::Unknown, now, out),
+            Judgement::Unknown => self.finish(line, End::Unknown, now, None, out),
         }
     }
 
@@ -993,7 +1014,7 @@ impl Machine {
             c.fallback = Some(otherwise);
             self.wake(line, at);
         } else {
-            self.finish(line, otherwise, now, out);
+            self.finish(line, otherwise, now, None, out);
         }
     }
 
@@ -1007,7 +1028,10 @@ impl Machine {
     }
 
     /// A step ends: journaled, and its dependents and barriers told.
-    fn finish(&mut self, line: Line, end: End, at: u64, out: &mut Vec<Output>) {
+    /// Ends `line` at `at`; `wake` the due instant of the wake whose taking
+    /// ended it, none for an input's end or a skip — never ambient, so the
+    /// cascade of skips it notifies carries none (ADR-0047 decision 17).
+    fn finish(&mut self, line: Line, end: End, at: u64, wake: Option<u64>, out: &mut Vec<Output>) {
         let Some(c) = self.cells.get_mut(&line) else {
             return;
         };
@@ -1038,6 +1062,7 @@ impl Machine {
             critical: c.critical,
             bound: c.bound.clone(),
             fault: c.fault,
+            wake,
         })));
         // It lets go of its producers before its barrier may free it.
         self.release(line);
@@ -1118,7 +1143,13 @@ impl Machine {
                     self.ready_if_met(dependent, out);
                 }
                 Met::Never(t) => {
-                    self.finish(dependent, End::Skipped(Skip::Dependency(line)), t, out);
+                    self.finish(
+                        dependent,
+                        End::Skipped(Skip::Dependency(line)),
+                        t,
+                        None,
+                        out,
+                    );
                 }
                 Met::Not => still.push((dependent, on)),
             }
@@ -1214,7 +1245,7 @@ impl Machine {
             self.ready_if_met(holder, out);
         }
         for (holder, first, t) in skipped {
-            self.finish(holder, End::Skipped(Skip::Member(first)), t, out);
+            self.finish(holder, End::Skipped(Skip::Member(first)), t, None, out);
         }
         for m in passed {
             self.free_if_done(m);

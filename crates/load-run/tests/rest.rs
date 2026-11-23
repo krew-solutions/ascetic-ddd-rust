@@ -249,6 +249,8 @@ struct Pipe {
     stub: Arc<Stub>,
     throttle: Throttle,
     holds: Option<Arc<BTreeMap<String, u64>>>,
+    /// Microseconds a connect takes: the stand's accept.
+    connect: u64,
 }
 
 impl Egress for Pipe {
@@ -258,7 +260,10 @@ impl Egress for Pipe {
         let stub = self.stub.clone();
         let t = self.throttle;
         let holds = self.holds.clone();
+        let connect = self.connect;
         async move {
+            let until = stub.clock.now() + connect;
+            stub.clock.sleep_until(until).await;
             let (client, server) = tokio::io::duplex(1 << 16);
             drop(tokio::spawn(stub.clone().serve(server)));
             Ok(Throttled {
@@ -306,6 +311,17 @@ fn run_rest(
     answers: Vec<Answer>,
     throttle: Throttle,
 ) -> (Result<Vec<Line>, RunError>, Vec<Came>, usize) {
+    run_rest_connecting(header, records, answers, throttle, 0)
+}
+
+/// [`run_rest`] with each connect taking `connect` µs.
+fn run_rest_connecting(
+    header: Header,
+    records: &[Record],
+    answers: Vec<Answer>,
+    throttle: Throttle,
+    connect: u64,
+) -> (Result<Vec<Line>, RunError>, Vec<Came>, usize) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
@@ -326,6 +342,7 @@ fn run_rest(
                 stub: stub.clone(),
                 throttle,
                 holds: None,
+                connect,
             },
             Config {
                 namespace: NAMESPACE,
@@ -785,6 +802,7 @@ fn over_rest_the_shell_journals_what_sim_journals() {
                             stub,
                             throttle: AT_ONCE,
                             holds: Some(Arc::new(holds)),
+                            connect: 0,
                         },
                         Config {
                             namespace: NAMESPACE,
@@ -909,4 +927,28 @@ fn an_answer_at_its_deadline_is_taken() {
     let (journal, _, _) = run_rest(header, &records, vec![ok(5_000, 0)], AT_ONCE);
     let journal = journal.unwrap();
     assert_eq!(end(&journal, 2), Some((End::Expected, 5_000)));
+}
+
+/// Decision 17: the stand's connect and write, journaled where they end — a
+/// connect of 70 µs from the attempt's hand-off to its request handed to a
+/// ready connection; a write held 30 µs from there to its last byte.
+#[test]
+fn the_connect_and_the_write_are_journaled_apart() {
+    let records = vec![call("read", 1, 0, 0, 0)];
+    let throttle = Throttle {
+        first: 30,
+        chunk: usize::MAX,
+        gap: 0,
+    };
+    let (journal, _, _) =
+        run_rest_connecting(rest_header(), &records, vec![ok(10, 0)], throttle, 70);
+    let journal = journal.unwrap();
+    let s = journal
+        .iter()
+        .find_map(|l| match l {
+            Line::Sent(s) if s.line == 2 => Some(s.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!((s.handed, s.connected, s.at), (0, 70, 100));
 }

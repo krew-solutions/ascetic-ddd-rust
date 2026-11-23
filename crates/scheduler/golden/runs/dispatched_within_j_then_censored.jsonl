@@ -1,0 +1,8 @@
+{"header":{"journal":4,"machine":4,"source":"verdict","log":"ebd777fe97d5973e5cf2e76e83d77de7364708a96477c1c97cb86e7cdb0d9f84","validator":"8: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent frame predicate expect secret","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000"}}
+{"read":{"at":"0","line":"2","key":{"kind":"device","scope":"Bw==","label":"read","n":0},"action":"rest","safety":"never","cause":null,"after":[],"planned":"1000"}}
+{"released":{"at":"0","line":"2","intended":"1000","released":"1000","deadline":"3000"}}
+{"dispatch":{"at":"1200","line":"2","attempt":1,"deadline":"3000","due":"1000"}}
+{"sent":{"at":"1200","line":"2","attempt":1,"handed":"1200","connected":"1200"}}
+{"answer":{"at":"3000","line":"2","attempt":1,"judged":"unknown","captured":[],"ignored":null,"status":null,"code":null,"after":null,"censored":true}}
+{"end":{"at":"3000","line":"2","end":"unknown","read":"0","ready":"0","intended":"1000","released":"1000","dispatched":"1200","sent":"1200","ended":"3000","attempts":1,"critical":null,"bound":[],"fault":false,"wake":null}}
+{"trailer":{"events":"6","steps":"1","sha256":"3aa92b9fc82207c3e83f5058683de1f196071d7781a2d26d366b07013537120a"}}

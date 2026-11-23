@@ -142,6 +142,8 @@ where
             header.profile.sources
         )));
     }
+    // A hold that outlives it is a stuck carrier (decision 17).
+    let route_timeout = header.profile.route_timeout;
     let mut machine = Machine::new(header, read_ahead)?;
     let stamps = Arc::new(Stamps::new(clock.clone()));
     let mut queue = Ordered::new();
@@ -173,15 +175,31 @@ where
         }
         // The instant, read under the frontier's lock with what it holds: an
         // answer that arrives after it is stamped no earlier.
-        let (now, work, floor) = {
+        let (now, work, floor, oldest) = {
             let (g, now) = stamps.lock();
             let f = &g.frontier;
             let work = [f.next_pushed(), f.next_deadline()]
                 .into_iter()
                 .flatten()
                 .min();
-            (now, work, f.floor())
+            (now, work, f.floor(), f.oldest_hold())
         };
+        // A hold older than the route timeout: a carrier stuck in its
+        // judging — a fault, never a hang (decision 17).
+        let stuck = oldest.map(|(since, line, attempt)| {
+            (since.saturating_add(route_timeout), line, attempt, since)
+        });
+        if let Some((at, line, attempt, since)) = stuck
+            && now >= at
+        {
+            return Err(Harness::Held {
+                line,
+                attempt,
+                since,
+                at: now,
+            }
+            .into());
+        }
         // An answer being judged holds a floor, no later than now: nothing at
         // or past it is taken until it ends — neither the frontier's inputs
         // nor the machine's own lines and wakes, stamped at the instant taken
@@ -203,10 +221,14 @@ where
                 break;
             }
             let reads = pending.is_none() && !exhausted;
-            // Held, the floor's end is a push: nothing to sleep until. Not
-            // held, nothing due means the next is later than now; a sleep to
-            // an instant passed would return at once, and turn forever.
-            let sleep = next.filter(|_| !held);
+            // Held, the floor's end is a push, and its stuck instant the only
+            // one to sleep until. Not held, nothing due means the next is
+            // later than now; a sleep to an instant passed would return at
+            // once, and turn forever.
+            let sleep = match stuck {
+                Some((at, ..)) => Some(at),
+                None => next,
+            };
             if sleep.is_some_and(|s| s <= now) {
                 return Err(Harness::Stalled { at: now }.into());
             }
@@ -277,8 +299,9 @@ where
                         attempt,
                         deadline,
                         captured,
+                        ..
                     } => {
-                        let censor = stamps.lock().0.frontier.open(line, attempt, deadline);
+                        let censor = stamps.lock().0.frontier.open(at, line, attempt, deadline);
                         if let Some((at, censor)) = censor {
                             queue.push(at, censor);
                         }
@@ -300,8 +323,14 @@ where
                                 deadline,
                             );
                             // Open loop: spawned, never queued (a queue hides
-                            // lateness).
-                            drop(handle.spawn(carrier.carry(a)));
+                            // lateness). Its first poll, on its source's
+                            // runtime, is when it was handed (decision 17):
+                            // stamped here, so no carrier can forget it.
+                            let carrier = carrier.clone();
+                            drop(handle.spawn(async move {
+                                a.handed();
+                                carrier.carry(a).await;
+                            }));
                         }
                     }
                     Output::Ended(e) => {

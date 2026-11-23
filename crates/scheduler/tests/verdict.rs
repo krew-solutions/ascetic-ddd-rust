@@ -14,10 +14,10 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use ascetic_ddd_command_log::record::{Dep, Header, On, Record, Safety, StepId};
-use ascetic_ddd_scheduler::journal::{self, JOURNAL_VERSION, Line, Reader, Writer};
+use ascetic_ddd_scheduler::journal::{self, Ended, JOURNAL_VERSION, Line, Reader, Writer};
 use ascetic_ddd_scheduler::machine::{Input, Judgement, MACHINE_REVISION, Machine, Output};
 use ascetic_ddd_scheduler::sim::{Attempt, run_waking_late};
-use ascetic_ddd_scheduler::verdict::{Class, FOLD_REVISION, Folded, Log, Verdict, fold};
+use ascetic_ddd_scheduler::verdict::{Class, FOLD_REVISION, Folded, Log, Verdict, Void, fold};
 use fixture::*;
 
 const J: u64 = 200;
@@ -350,14 +350,16 @@ fn goldens() -> Vec<Golden> {
         vec![Passed, Root, Passed, Inconclusive],
         "fail",
     );
-    // An observation's cause sent past J after its intended start, the
-    // observation unknown: the harness's lateness, not the system's.
+    // An observation's cause sent 1,000 µs past its intended start, the
+    // observation unknown (decision 17): late by the stand's send — its
+    // connect and write — the system's, a root; late by the harness — its
+    // release wake taken late — undecided.
     let c = call("update", 1, 0, 0, 0);
     let o = watched(1, 100, &c.step, 2_000);
     add(
-        "late_cause",
+        "late_cause_by_the_stand",
         header_j(),
-        vec![c, o],
+        vec![c.clone(), o.clone()],
         Box::new(|line, _| {
             if line == 2 {
                 answer(1_000, Some(100), Judgement::Expected(vec![]))
@@ -365,8 +367,8 @@ fn goldens() -> Vec<Golden> {
                 answer(0, None, Judgement::Unknown)
             }
         }),
-        vec![Passed, Undecided],
-        "void:undecided",
+        vec![Passed, Root],
+        "fail",
     );
     // An observation read past its cause's window: released at its deadline
     // though intended before it.
@@ -382,6 +384,27 @@ fn goldens() -> Vec<Golden> {
         classes: vec![Passed, Undecided],
         verdict: "void:undecided",
     });
+    // Planned at 1,000 and read ahead: its release is a wake of its own,
+    // taken 1,000 µs late (a step released at its read is dispatched in that
+    // step, with no wake to take late).
+    let lc = call("update", 1, 0, 1_000, 0);
+    let lo = watched(1, 1_100, &lc.step, 2_000);
+    out.push(Golden {
+        name: "late_cause",
+        header: header_j(),
+        records: vec![lc, lo],
+        script: Box::new(|line, _| {
+            if line == 2 {
+                answer(0, Some(100), Judgement::Expected(vec![]))
+            } else {
+                answer(0, None, Judgement::Unknown)
+            }
+        }),
+        lag: Box::new(|_| 0),
+        wake_lag: Box::new(|w| if w == 1_000 { 1_000 } else { 0 }),
+        classes: vec![Passed, Undecided],
+        verdict: "void:undecided",
+    });
     // Decision 16: a poll sent on time, its next poll (due at 1,000) taken
     // 1 µs past the observation's deadline (2,500): whatever its lateness,
     // the harness ate the step's last poll.
@@ -392,6 +415,167 @@ fn goldens() -> Vec<Golden> {
         script: Box::new(|_, _| answer(0, Some(10), Judgement::Unexpected)),
         lag: Box::new(|_| 0),
         wake_lag: Box::new(|w| if w == 1_000 { 1_501 } else { 0 }),
+        classes: vec![Undecided],
+        verdict: "void:undecided",
+    });
+    // Decision 17: a poll's next due at 2,499, its deadline 2,500, taken 1 µs
+    // late — at its deadline: the harness ate it; untaken, the poll's
+    // unsatisfied end at its deadline is the system's.
+    for (name, every, lag, class, verdict) in [
+        (
+            "poll_wake_at_its_deadline",
+            2_499,
+            1,
+            Undecided,
+            "void:undecided",
+        ),
+        ("poll_unsatisfied_at_its_deadline", 1_000, 0, Root, "fail"),
+    ] {
+        out.push(Golden {
+            name,
+            header: header_j(),
+            records: vec![polling(1, 0, 0, every, 2_500)],
+            script: Box::new(|_, _| answer(0, Some(10), Judgement::Unexpected)),
+            lag: Box::new(|_| 0),
+            wake_lag: Box::new(move |w| if w == 2_499 { lag } else { 0 }),
+            classes: vec![class],
+            verdict,
+        });
+    }
+    // Decision 17: a call planned at 1,000, read ahead, its deadline 1,300:
+    // its release wake taken 500 µs late, at or past its deadline, it ends
+    // never sent — the harness's.
+    let mut short = header_j();
+    short.operations.iter_mut().for_each(|o| o.timeout = 300);
+    out.push(Golden {
+        name: "first_dispatch_taken_past_its_deadline",
+        header: short,
+        records: vec![call("read", 1, 0, 1_000, 0)],
+        script: Box::new(|_, _| expected()),
+        lag: Box::new(|_| 0),
+        wake_lag: Box::new(|w| if w == 1_000 { 500 } else { 0 }),
+        classes: vec![Undecided],
+        verdict: "void:undecided",
+    });
+    // Decision 17: dispatched late by the machine and censored at the
+    // deadline — past J the harness's, at J the system's; an answer the
+    // system gave (a 500) its own however late the harness sent it.
+    let mut window = header_j();
+    window.operations.iter_mut().for_each(|o| o.timeout = 2_000);
+    for (name, op, lag, answered, class, verdict) in [
+        (
+            "dispatched_late_then_censored",
+            "read",
+            J + 1,
+            None,
+            Undecided,
+            "void:undecided",
+        ),
+        (
+            "dispatched_within_j_then_censored",
+            "read",
+            J,
+            None,
+            Root,
+            "fail",
+        ),
+        (
+            "answered_unknown_dispatched_late",
+            "update",
+            J + 1,
+            Some(100),
+            Root,
+            "fail",
+        ),
+    ] {
+        out.push(Golden {
+            name,
+            header: window.clone(),
+            records: vec![call(op, 1, 0, 1_000, 0)],
+            script: Box::new(move |_, _| answer(0, answered, Judgement::Unknown)),
+            lag: Box::new(|_| 0),
+            wake_lag: Box::new(move |w| if w == 1_000 { lag } else { 0 }),
+            classes: vec![class],
+            verdict,
+        });
+    }
+    // Decision 17: the harness's lateness summed over attempts — a refusal's
+    // first attempt and its resend each dispatched J/2 + 1 late, the resend
+    // censored: J + 2, undecided; the first alone late, within J, a root.
+    let mut certified = header_j();
+    for o in &mut certified.operations {
+        o.safety = Safety::NotTaken;
+        o.not_run = vec!["service.unavailable".into()];
+        o.timeout = 3_000;
+    }
+    let late = J / 2 + 1;
+    for (name, both, class, verdict) in [
+        (
+            "harness_late_over_attempts",
+            true,
+            Undecided,
+            "void:undecided",
+        ),
+        ("harness_late_on_one_attempt", false, Root, "fail"),
+    ] {
+        // Attempt 1 at 1,000 + late, refused 10 µs later; its resend due at
+        // that answer plus the floor.
+        let resend_due = 1_000 + late + 10 + RESEND;
+        out.push(Golden {
+            name,
+            header: certified.clone(),
+            records: vec![call("update", 1, 0, 1_000, 0)],
+            script: Box::new(|_, attempt| {
+                if attempt == 1 {
+                    answer(0, Some(10), Judgement::NotTaken)
+                } else {
+                    answer(0, None, Judgement::Unknown)
+                }
+            }),
+            lag: Box::new(|_| 0),
+            wake_lag: Box::new(move |w| {
+                if w == 1_000 || (both && w == resend_due) {
+                    late
+                } else {
+                    0
+                }
+            }),
+            classes: vec![class],
+            verdict,
+        });
+    }
+    // Decision 17: an observation read 500 µs past its intended start, its
+    // window shortened by the reader: its last poll censored, undecided; its
+    // last poll answered "not yet", the effect absent — a root.
+    for (name, answered, class, verdict) in [
+        (
+            "observation_read_late_then_censored",
+            None,
+            Undecided,
+            "void:undecided",
+        ),
+        ("observation_read_late_not_yet", Some(10), Root, "fail"),
+    ] {
+        out.push(Golden {
+            name,
+            header: header_j(),
+            records: vec![polling(1, 0, 1_000, 400, 1_000)],
+            script: Box::new(move |_, _| answer(0, answered, Judgement::Unexpected)),
+            lag: Box::new(|line| if line == 2 { 1_500 } else { 0 }),
+            wake_lag: Box::new(|_| 0),
+            classes: vec![class],
+            verdict,
+        });
+    }
+    // Decision 17: a poll read past its deadline — released after it, never
+    // sent, its wake its release: coherent, the reader's (`read_late`).
+    out.push(Golden {
+        name: "poll_released_past_its_deadline",
+        header: header_j(),
+        records: vec![polling(1, 0, 1_000, 400, 500)],
+        script: Box::new(|_, _| answer(0, Some(10), Judgement::Unexpected)),
+        lag: Box::new(|line| if line == 2 { 2_000 } else { 0 }),
+        wake_lag: Box::new(|_| 0),
         classes: vec![Undecided],
         verdict: "void:undecided",
     });
@@ -456,6 +640,8 @@ fn backstop() -> (Header, Vec<Record>, Vec<Line>) {
         Input::Sent {
             line: 2,
             attempt: 1,
+            handed: 0,
+            connected: 0,
         },
     );
     step(
@@ -554,12 +740,11 @@ fn every_golden_run_folds_as_the_hand_wrote() {
         "conditional_amended",
         "conditional_and_expected",
         "conditional_ended_before_its_dependency",
-        "undecided_call",
+        "undecided_censor",
         "undecided_read",
         "undecided_cause",
         "undecided_backstop",
-        "undecided_ended_late",
-        "undecided_resend",
+        "undecided_wake",
         "producer_root",
         "consequent",
         "root",
@@ -781,6 +966,26 @@ fn broken_evidence_is_void() {
             Box::new(|_, _, log| log.records += 1),
             "void:another_log",
         ),
+        // Decision 17: the hand-off is the harness's — a dispatch J late,
+        // its task first run a microsecond later, censored: J + 1, undecided.
+        (
+            "a hand-off J + 1 late, censored",
+            "dispatched_within_j_then_censored",
+            Box::new(|_, l, _| {
+                for x in l.iter_mut() {
+                    match x {
+                        Line::Sent(t) => {
+                            t.handed += 1;
+                            t.connected += 1;
+                            t.at += 1;
+                        }
+                        Line::End(e) => e.sent = e.sent.map(|s| s + 1),
+                        _ => {}
+                    }
+                }
+            }),
+            "void:undecided",
+        ),
     ];
     let mut cases = Vec::new();
     for (name, from, edit, expected) in edits {
@@ -796,6 +1001,221 @@ fn broken_evidence_is_void() {
             "{name}: {:?}",
             folded.verdict
         );
+        cases.push(case(name, &bytes, &log, &folded));
+    }
+    // Decision 17's coherence, a twin a rule: each edit breaks that rule
+    // alone, and the fold names it.
+    let at_attempt = |l: &mut Vec<Line>, attempt: u32, f: &dyn Fn(&mut Line)| {
+        for x in l.iter_mut() {
+            let hit = match x {
+                Line::Dispatch(d) => d.attempt == attempt,
+                Line::Sent(t) => t.attempt == attempt,
+                Line::Answer(a) => a.attempt == attempt && a.ignored.is_none(),
+                _ => false,
+            };
+            if hit {
+                f(x);
+            }
+        }
+    };
+    let on_end = |l: &mut Vec<Line>, f: &dyn Fn(&mut Ended)| {
+        for x in l.iter_mut() {
+            if let Line::End(e) = x {
+                f(e);
+            }
+        }
+    };
+    let rules: Vec<(&str, &str, Edit, &str)> = vec![
+        (
+            "a poll's resend dispatched before its wake",
+            "poll_unsatisfied_at_its_deadline",
+            Box::new(move |_, l, _| {
+                at_attempt(l, 2, &|x| {
+                    if let Line::Dispatch(d) = x {
+                        d.due = d.at + 1;
+                    }
+                })
+            }),
+            "a dispatch before its wake",
+        ),
+        (
+            "a first attempt's wake before its release",
+            "dispatched_late_then_censored",
+            Box::new(move |_, l, _| {
+                at_attempt(l, 1, &|x| {
+                    if let Line::Dispatch(d) = x {
+                        d.due -= 1;
+                    }
+                })
+            }),
+            "a first attempt's wake not its release",
+        ),
+        (
+            "a resend's wake off its answer's wait",
+            "harness_late_over_attempts",
+            Box::new(move |_, l, _| {
+                at_attempt(l, 2, &|x| {
+                    if let Line::Dispatch(d) = x {
+                        d.due += 1;
+                    }
+                })
+            }),
+            "a resend against its wake",
+        ),
+        (
+            "a poll's resend due before its answer",
+            "poll_unsatisfied_at_its_deadline",
+            Box::new(move |_, l, _| {
+                at_attempt(l, 2, &|x| {
+                    if let Line::Dispatch(d) = x {
+                        d.due = 9;
+                    }
+                })
+            }),
+            "a resend against its wake",
+        ),
+        (
+            "a send handed after it connected",
+            "dispatched_late_then_censored",
+            Box::new(move |_, l, _| {
+                at_attempt(l, 1, &|x| {
+                    if let Line::Sent(t) = x {
+                        t.handed = t.connected + 1;
+                        t.at = t.handed;
+                    }
+                })
+            }),
+            "a send against its path",
+        ),
+        (
+            "a send connected after it left",
+            "dispatched_late_then_censored",
+            Box::new(move |_, l, _| {
+                at_attempt(l, 1, &|x| {
+                    if let Line::Sent(t) = x {
+                        t.connected = t.at + 1;
+                    }
+                })
+            }),
+            "a send against its path",
+        ),
+        (
+            "a send handed before its dispatch",
+            "dispatched_late_then_censored",
+            Box::new(move |_, l, _| {
+                at_attempt(l, 1, &|x| {
+                    if let Line::Sent(t) = x {
+                        t.handed -= 1;
+                        t.connected -= 1;
+                    }
+                })
+            }),
+            "a send handed before its dispatch",
+        ),
+        (
+            "a censor with a status",
+            "dispatched_late_then_censored",
+            Box::new(move |_, l, _| {
+                at_attempt(l, 1, &|x| {
+                    if let Line::Answer(a) = x {
+                        a.status = Some(500);
+                    }
+                })
+            }),
+            "a censor with an answer's content",
+        ),
+        (
+            "a censor off its deadline",
+            "dispatched_late_then_censored",
+            Box::new(move |_, l, _| {
+                at_attempt(l, 1, &|x| {
+                    if let Line::Answer(a) = x {
+                        a.at -= 1;
+                    }
+                })
+            }),
+            "a censor off its deadline",
+        ),
+        (
+            "a wake on an expected end",
+            "clean",
+            Box::new(move |_, l, _| on_end(l, &|e| e.wake = Some(0))),
+            "a wake on an end an input or a skip made",
+        ),
+        (
+            "a wake after the end it made",
+            "poll_wake_at_its_deadline",
+            Box::new(move |_, l, _| on_end(l, &|e| e.wake = Some(e.ended + 1))),
+            "a wake after its end",
+        ),
+        (
+            "a first dispatch's wake off its release",
+            "first_dispatch_taken_past_its_deadline",
+            Box::new(move |_, l, _| on_end(l, &|e| e.wake = e.wake.map(|w| w + 1))),
+            "a first dispatch's wake against its release",
+        ),
+        (
+            "a first dispatch ended before its deadline",
+            "first_dispatch_taken_past_its_deadline",
+            Box::new(move |_, l, _| on_end(l, &|e| e.ended = 1_299)),
+            "a first dispatch's wake against its release",
+        ),
+        (
+            "a poll's wake past its deadline",
+            "poll_taken_late",
+            Box::new(move |_, l, _| on_end(l, &|e| e.wake = Some(2_501))),
+            "a poll's wake against its deadline",
+        ),
+        (
+            "a poll's wake at its deadline, its end past it",
+            "poll_taken_late",
+            Box::new(move |_, l, _| on_end(l, &|e| e.wake = Some(2_500))),
+            "a poll's wake against its deadline",
+        ),
+        (
+            "a poll's wake before its deadline, its end before it",
+            "poll_wake_at_its_deadline",
+            Box::new(move |_, l, _| on_end(l, &|e| e.ended = 2_499)),
+            "a poll's wake against its deadline",
+        ),
+        (
+            "a fallback's wake off its licence",
+            "resend_taken_late",
+            Box::new(move |_, l, _| on_end(l, &|e| e.wake = e.wake.map(|w| w + 1))),
+            "a fallback's wake against its licence",
+        ),
+        (
+            "a fallback's wake within J of its deadline",
+            "resend_taken_late",
+            Box::new(|h, _, _| h.jitter = 201),
+            "a fallback's wake against its licence",
+        ),
+        (
+            "an intended start before its plan",
+            "clean",
+            Box::new(move |_, l, _| {
+                for x in l.iter_mut() {
+                    if let Line::Read(r) = x
+                        && r.line == 2
+                    {
+                        r.planned = 1;
+                    }
+                }
+            }),
+            "an intended start before its plan",
+        ),
+    ];
+    for (name, from, edit, why) in rules {
+        let g = by_name(from);
+        let (mut h, mut lines) = lines_of(&g.bytes);
+        let mut log = g.log.clone();
+        edit(&mut h, &mut lines, &mut log);
+        let bytes = write(&h, &lines);
+        let folded = fold_bytes(&bytes, &log);
+        match &folded.verdict {
+            Verdict::Void(Void::Incoherent { why: w, .. }) => assert_eq!(*w, why, "{name}"),
+            other => panic!("{name}: {other:?}"),
+        }
         cases.push(case(name, &bytes, &log, &folded));
     }
     by_definition(&cases);

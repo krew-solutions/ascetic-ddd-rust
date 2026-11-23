@@ -22,7 +22,7 @@ use ascetic_ddd_load_run::sink::Lines;
 use ascetic_ddd_load_run::source::Records;
 use ascetic_ddd_load_run::stamps::{Attempt, Harness};
 use ascetic_ddd_scheduler::journal;
-use ascetic_ddd_scheduler::machine::{Captured, Judgement};
+use ascetic_ddd_scheduler::machine::{Captured, Judgement, Seen};
 use ascetic_ddd_scheduler::sim::{self, run_reading};
 use fixture::*;
 
@@ -533,4 +533,190 @@ fn judging_that_takes_time_never_reorders_the_machine_s_inputs() {
         }
     }
     assert!(runs > 50, "{runs} runs");
+}
+
+/// A carrier that reports its answer arrived after `arrive` µs, then judges
+/// for `judging` µs of its clock — forever, if none — or blocks its thread
+/// for `block` real µs before ending.
+struct Judging {
+    arrive: u64,
+    judging: Option<u64>,
+    block: u64,
+}
+
+impl<C: Clock> Carrier<C> for Judging {
+    fn carries(&self, _: &Header) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn carry(&self, mut a: Attempt<C>) -> impl Future<Output = ()> + Send + 'static {
+        let (arrive, judging, block) = (self.arrive, self.judging, self.block);
+        async move {
+            a.sent();
+            let at = a.dispatched() + arrive;
+            a.clock().sleep_until(at).await;
+            a.arrived();
+            if block > 0 {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "a carrier stuck on its thread, on purpose"
+                )]
+                std::thread::sleep(std::time::Duration::from_micros(block));
+            }
+            match judging {
+                Some(j) => {
+                    let until = a.clock().now() + j;
+                    a.clock().sleep_until(until).await;
+                    a.ended(Judgement::Expected(vec![]), Seen::default());
+                }
+                None => std::future::pending::<()>().await,
+            }
+        }
+    }
+}
+
+/// Decision 17: an answer judged for the route timeout, still not ended, is
+/// a harness fault at exactly the oldest hold plus the route timeout — not
+/// the virtual clock's idle panic, not a hang; one judged a microsecond less
+/// ends the run cleanly.
+#[test]
+fn a_hold_past_the_route_timeout_is_a_harness_fault() {
+    let mut h = header();
+    h.profile.route_timeout = 1_000_000;
+    let records = vec![call("read", 1, 0, 0, 0), call("read", 2, 0, 5, 0)];
+    let never = Judging {
+        arrive: 10,
+        judging: None,
+        block: 0,
+    };
+    let err = shell(&h, &records, W, never).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RunError::Harness(Harness::Held {
+                line: 2,
+                attempt: 1,
+                since: 10,
+                at: 1_000_010
+            })
+        ),
+        "{err:?}"
+    );
+    let just = Judging {
+        arrive: 10,
+        judging: Some(999_999),
+        block: 0,
+    };
+    assert!(shell(&h, &records, W, just).is_ok());
+}
+
+/// Decision 17, on the real clock: a carrier stuck on its source's thread —
+/// its judging synchronous, the virtual clock blind to it — is caught by the
+/// machine's own loop, on its own thread, past the route timeout.
+#[test]
+fn a_carrier_stuck_on_its_thread_is_a_harness_fault() {
+    use ascetic_ddd_load_run::clock::RealClock;
+    let (runtimes, stops) = source_runtimes();
+    let mut h = header();
+    h.profile.route_timeout = 20_000;
+    let records = [call("read", 1, 0, 0, 0)];
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let err = rt.block_on(async {
+        let clock = Arc::new(RealClock::start(2_000).unwrap());
+        run(
+            Arc::new(h.clone()),
+            W,
+            clock,
+            Records::new(records.iter().cloned()),
+            Lines::new(),
+            Arc::new(Judging {
+                arrive: 0,
+                judging: Some(0),
+                block: 200_000,
+            }),
+            &Runtimes {
+                sources: vec![runtimes.sources[0].clone()],
+            },
+        )
+        .await
+        .unwrap_err()
+    });
+    match err {
+        RunError::Harness(Harness::Held { since, at, .. }) => {
+            assert!(at >= since + 20_000, "{since} {at}")
+        }
+        other => panic!("{other:?}"),
+    }
+    for stop in stops {
+        let _ = stop.send(());
+    }
+}
+
+/// Decision 17, on the real clock: an attempt handed to its task late — the
+/// task before it on its source's runtime blocking the thread 5 ms — carries
+/// that lateness in its `Sent`'s `handed`: the harness's, from the dispatch.
+#[test]
+fn a_late_hand_off_is_journaled() {
+    use ascetic_ddd_load_run::clock::RealClock;
+    let (runtimes, stops) = source_runtimes();
+    let records = [call("read", 1, 0, 0, 0), call("read", 2, 0, 0, 0)];
+    struct Blocking;
+    impl<C: Clock> Carrier<C> for Blocking {
+        fn carries(&self, _: &Header) -> Result<(), String> {
+            Ok(())
+        }
+        #[expect(
+            clippy::manual_async_fn,
+            reason = "the task must not borrow its carrier: it is 'static"
+        )]
+        fn carry(&self, mut a: Attempt<C>) -> impl Future<Output = ()> + Send + 'static {
+            async move {
+                if a.line() == 2 {
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "a task holding its thread, on purpose"
+                    )]
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                a.sent();
+                a.arrived();
+                a.ended(Judgement::Expected(vec![]), Seen::default());
+            }
+        }
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let journal = rt.block_on(async {
+        let clock = Arc::new(RealClock::start(2_000).unwrap());
+        run(
+            Arc::new(header()),
+            W,
+            clock,
+            Records::new(records.iter().cloned()),
+            Lines::new(),
+            Arc::new(Blocking),
+            &Runtimes {
+                sources: vec![runtimes.sources[0].clone()],
+            },
+        )
+        .await
+        .unwrap()
+        .journal
+    });
+    let dispatched = journal.iter().find_map(|l| match l {
+        journal::Line::Dispatch(d) if d.line == 3 => Some(d.at),
+        _ => None,
+    });
+    let handed = journal.iter().find_map(|l| match l {
+        journal::Line::Sent(s) if s.line == 3 => Some(s.handed),
+        _ => None,
+    });
+    let (d, h) = (dispatched.unwrap(), handed.unwrap());
+    assert!(h >= d + 5_000, "handed at {h}, dispatched at {d}");
+    for stop in stops {
+        let _ = stop.send(());
+    }
 }

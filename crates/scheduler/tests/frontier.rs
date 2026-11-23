@@ -46,7 +46,7 @@ fn expected() -> Judgement {
 #[test]
 fn an_answer_at_its_deadline_is_taken() {
     let mut f = Frontier::new();
-    assert_eq!(f.open(2, 1, 100), None);
+    assert_eq!(f.open(0, 2, 1, 100), None);
     f.sent(10, 2, 1).unwrap();
     let h = f.arrived(100, 2, 1).unwrap();
     // While it is judged, nothing at or past it is released, and it is not
@@ -60,7 +60,7 @@ fn an_answer_at_its_deadline_is_taken() {
 #[test]
 fn an_answer_past_its_deadline_follows_its_censor() {
     let mut f = Frontier::new();
-    f.open(2, 1, 100);
+    f.open(0, 2, 1, 100);
     f.sent(10, 2, 1).unwrap();
     let h = f.arrived(101, 2, 1).unwrap();
     assert!(h.late());
@@ -75,7 +75,7 @@ fn an_answer_past_its_deadline_follows_its_censor() {
 #[test]
 fn a_send_at_its_deadline_is_not_pushed() {
     let mut f = Frontier::new();
-    f.open(2, 1, 100);
+    f.open(0, 2, 1, 100);
     f.sent(100, 2, 1).unwrap();
     let out = f.drain(200, false);
     assert!(sent(&out, 2).is_empty());
@@ -87,7 +87,7 @@ fn a_deadline_already_released_is_censored_at_once() {
     let mut f = Frontier::new();
     f.drain(300, false);
     // Released through 299: an attempt whose deadline lies within it.
-    let censor = f.open(2, 1, 250).expect("censored at once");
+    let censor = f.open(0, 2, 1, 250).expect("censored at once");
     assert_eq!(censor.0, 250);
     assert!(matches!(
         censor.1,
@@ -98,13 +98,13 @@ fn a_deadline_already_released_is_censored_at_once() {
     ));
     assert_eq!(f.open_attempts(), 0);
     // One just past it is open.
-    assert_eq!(f.open(3, 1, 300), None);
+    assert_eq!(f.open(0, 3, 1, 300), None);
 }
 
 #[test]
 fn an_early_reply_is_sent_first() {
     let mut f = Frontier::new();
-    f.open(2, 1, 100);
+    f.open(0, 2, 1, 100);
     // The gateway answered before the request's last byte left.
     let h = f.arrived(40, 2, 1).unwrap();
     f.ended(h, Judgement::Unexpected, Seen::default()).unwrap();
@@ -119,7 +119,7 @@ fn an_early_reply_is_sent_first() {
 #[test]
 fn nothing_is_released_unsettled_at_t0() {
     let mut f = Frontier::new();
-    f.open(2, 1, 0);
+    f.open(0, 2, 1, 0);
     assert!(f.drain(0, false).is_empty());
     assert_eq!(f.released(), None);
     // Settled, the instant itself.
@@ -129,7 +129,7 @@ fn nothing_is_released_unsettled_at_t0() {
 #[test]
 fn a_push_below_what_was_released_is_refused() {
     let mut f = Frontier::new();
-    f.open(2, 1, 1_000);
+    f.open(0, 2, 1, 1_000);
     f.drain(500, false);
     assert!(f.sent(400, 2, 1).is_err());
     assert!(f.sent(499, 2, 1).is_ok());
@@ -194,7 +194,7 @@ proptest! {
                 Op::Open(ahead) => {
                     let line = attempts.len() as u64 + 2;
                     let deadline = now + ahead;
-                    let censor = f.open(line, 1, deadline);
+                    let censor = f.open(now, line, 1, deadline);
                     attempts.push(Attempt { line, deadline, sent: None, arrived: None, in_time: false, censored_at_once: censor.is_some() });
                     if let Some(c) = censor {
                         prop_assert_eq!(c.0, deadline);
@@ -275,4 +275,47 @@ proptest! {
             }
         }
     }
+}
+
+/// Decision 17: an attempt's path — its task's first poll, its request handed
+/// to a ready connection — rides on whichever `Sent` is pushed: its own, or
+/// the one an early reply makes; `handed` also its `connected` until reported.
+#[test]
+fn a_send_carries_the_path_its_attempt_reported() {
+    let path = |out: &[(u64, Input)]| {
+        out.iter()
+            .find_map(|(_, i)| match i {
+                Input::Sent {
+                    handed, connected, ..
+                } => Some((*handed, *connected)),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let mut f = Frontier::new();
+    f.open(5, 2, 1, 1_000);
+    f.handed(7, 2, 1);
+    f.sent(30, 2, 1).unwrap();
+    assert_eq!(path(&f.drain(40, false)), (7, 7));
+    // An early reply: the `Sent` the frontier makes carries the path too.
+    let mut f = Frontier::new();
+    f.open(5, 2, 1, 1_000);
+    f.handed(7, 2, 1);
+    f.connected(9, 2, 1);
+    let h = f.arrived(20, 2, 1).unwrap();
+    f.ended(h, Judgement::Unexpected, Seen::default()).unwrap();
+    assert_eq!(path(&f.drain(30, false)), (7, 9));
+    // Never reported: the dispatch's instant.
+    let mut f = Frontier::new();
+    f.open(5, 2, 1, 1_000);
+    f.sent(30, 2, 1).unwrap();
+    assert_eq!(path(&f.drain(40, false)), (5, 5));
+    // A censor is marked as one.
+    let mut f = Frontier::new();
+    f.open(5, 2, 1, 50);
+    let censored = f
+        .drain(100, false)
+        .iter()
+        .any(|(_, i)| matches!(i, Input::Ended { seen, .. } if seen.censored));
+    assert!(censored);
 }

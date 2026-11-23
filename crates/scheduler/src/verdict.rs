@@ -27,7 +27,7 @@ use crate::machine::Line as Number;
 /// What the fold decides, as a number: raised whenever the classes or the
 /// verdict it gives a journal change, which the goldens' and the differential's
 /// classes pin beside it.
-pub const FOLD_REVISION: u32 = 3;
+pub const FOLD_REVISION: u32 = 4;
 
 /// A line's class (decision 14), by precedence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -184,6 +184,17 @@ struct Live {
     taken: Option<Judged>,
     /// That answer: its attempt, its instant, the wait it asked for.
     answered: Option<(u32, u64, Option<u64>)>,
+    /// That answer was the frontier's censor at the deadline (decision 17).
+    censored: bool,
+    /// The plan's `at`.
+    planned: u64,
+    /// The last attempt's deadline.
+    last_deadline: u64,
+    /// The harness's lateness over its attempts (decision 17): each one's
+    /// machine (`dispatch.at − due`) and hand-off (`handed − dispatch.at`).
+    harness: u64,
+    /// That lateness by its first send: the cause's, for its observation.
+    harness_sent: Option<u64>,
 }
 
 struct First {
@@ -266,6 +277,11 @@ impl First {
                         sent: None,
                         taken: None,
                         answered: None,
+                        censored: false,
+                        planned: r.planned,
+                        last_deadline: 0,
+                        harness: 0,
+                        harness_sent: None,
                     },
                 );
                 Ok(())
@@ -287,6 +303,14 @@ impl First {
                 };
                 if Some(d.attempt) != lv.attempts.checked_add(1) || d.at < released {
                     return Err(incoherent(d.line, "an attempt dispatched out of turn"));
+                }
+                // Decision 17: dispatched by a wake no later than it, the first
+                // at its release.
+                if d.due > d.at {
+                    return Err(incoherent(d.line, "a dispatch before its wake"));
+                }
+                if d.attempt == 1 && d.due != released {
+                    return Err(incoherent(d.line, "a first attempt's wake not its release"));
                 }
                 // A resend its predecessor's answer licensed (ADR-0047
                 // decision 15): a poll's next after an answer not expected, no
@@ -318,8 +342,20 @@ impl First {
                     if attempt != lv.attempts || !licensed {
                         return Err(incoherent(d.line, "a resend its answer did not license"));
                     }
+                    // Its wake: a poll's after its answer (before its deadline
+                    // as its dispatch is); a call's at its answer and its wait.
+                    let due = match lv.action {
+                        Action::Poll => d.due >= at,
+                        _ => d.due == at.saturating_add(after.unwrap_or(0).max(floor)),
+                    };
+                    if !due {
+                        return Err(incoherent(d.line, "a resend against its wake"));
+                    }
                 }
                 lv.attempts = d.attempt;
+                lv.last_deadline = d.deadline;
+                lv.harness = lv.harness.saturating_add(d.at.saturating_sub(d.due));
+                lv.censored = false;
                 lv.first_dispatch.get_or_insert(d.at);
                 lv.last_dispatch = d.at;
                 lv.last_sent = None;
@@ -334,6 +370,22 @@ impl First {
                         if t.attempt > lv.attempts || t.attempt == 0 {
                             return Err(incoherent(t.line, "a send of an attempt not dispatched"));
                         }
+                        if t.handed > t.connected || t.connected > t.at {
+                            return Err(incoherent(t.line, "a send against its path"));
+                        }
+                        if t.attempt == lv.attempts && lv.last_sent.is_none() {
+                            if t.handed < lv.last_dispatch {
+                                return Err(incoherent(
+                                    t.line,
+                                    "a send handed before its dispatch",
+                                ));
+                            }
+                            // The hand-off, the harness's (decision 17).
+                            lv.harness = lv
+                                .harness
+                                .saturating_add(t.handed.saturating_sub(lv.last_dispatch));
+                            lv.harness_sent.get_or_insert(lv.harness);
+                        }
                         if t.attempt == lv.attempts {
                             lv.last_sent.get_or_insert(t.at);
                             lv.sent.get_or_insert(t.at);
@@ -346,6 +398,10 @@ impl First {
             }
             Line::Answer(a) => {
                 let next = self.next;
+                // The frontier's censor: unknown, no answer's status.
+                if a.censored && (a.judged != Judged::Unknown || a.status.is_some()) {
+                    return Err(incoherent(a.line, "a censor with an answer's content"));
+                }
                 match (self.live.get_mut(&a.line), a.ignored) {
                     (Some(lv), None) => {
                         if a.attempt != lv.attempts || lv.attempts == 0 {
@@ -354,8 +410,12 @@ impl First {
                                 "an answer taken from an attempt not out",
                             ));
                         }
+                        if a.censored && a.at != lv.last_deadline {
+                            return Err(incoherent(a.line, "a censor off its deadline"));
+                        }
                         lv.taken = Some(a.judged);
                         lv.answered = Some((a.attempt, a.at, a.after));
+                        lv.censored = a.censored;
                         Ok(())
                     }
                     (Some(lv), Some(_)) => {
@@ -397,6 +457,9 @@ impl First {
             || !released
         {
             return Err(incoherent(e.line, "an end against its events"));
+        }
+        if lv.released.is_some() && lv.planned > e.intended {
+            return Err(incoherent(e.line, "an intended start before its plan"));
         }
         let answered = match e.end {
             End::Expected => lv.taken == Some(Judged::Expected) && !e.fault,
@@ -441,52 +504,96 @@ impl First {
             End::Expected | End::Unexpected | End::Unknown => {}
         }
         let j = self.jitter;
-        let late = e.sent.is_none_or(|s| s.saturating_sub(e.intended) > j);
-        let call_late = lv.action != Action::Observe
+        self.wake(e, &lv)?;
+        // Decision 17: the harness's lateness is the machine's and the
+        // hand-off's over the attempts, and an observation's reader's; the
+        // stand's connect and write are not the harness's.
+        let reader = match lv.action {
+            Action::Poll | Action::Observe => {
+                lv.released.map_or(0, |(i, r, _)| r.saturating_sub(i))
+            }
+            _ => 0,
+        };
+        // An observation's cause sent late by the harness, or never.
+        let late = e.sent.is_none()
+            || lv
+                .released
+                .map_or(0, |(i, r, _)| r.saturating_sub(i))
+                .saturating_add(lv.harness_sent.unwrap_or(0))
+                > j;
+        // Only an end the harness could have caused: the last attempt
+        // censored at its deadline, or never sent — an answer the system gave
+        // is its own, however late it was sent.
+        let censor_late = e.end == End::Unknown
             && lv.attempts >= 1
-            && lv
-                .last_sent
-                .is_none_or(|s| s.saturating_sub(lv.last_dispatch) > j);
+            && lv.censored
+            && (lv.last_sent.is_none() || lv.harness.saturating_add(reader) > j);
         let read_late = lv
             .released
             .is_some_and(|(i, r, d)| r >= d && i < d && r.saturating_sub(i) > j);
-        // A wake the harness took too late (ADR-0047 decision 16), whatever
-        // its lateness: an unknown ended past its deadline, released before it
-        // — only a wake due before the deadline and taken past it ends a step
-        // there; a resend its last answer licensed, due more than J before the
-        // deadline, the step ended without it — the machine schedules no other
-        // and, taken on time, it leaves.
-        let ended_late = e.end == End::Unknown
-            && lv.attempts >= 1
-            && lv.released.is_some_and(|(_, r, d)| r < d && e.ended > d);
-        let resend_late = lv.action != Action::Poll
-            && match (lv.taken, lv.answered, lv.released) {
-                (Some(taken), Some((_, at, after)), Some((_, _, d))) => {
-                    let licensed = match taken {
-                        Judged::NotTaken => lv.safety != Safety::Never,
-                        Judged::Unknown => lv.safety == Safety::Idempotent,
-                        Judged::Expected | Judged::Unexpected => false,
-                    };
-                    licensed
-                        && at
-                            .saturating_add(after.unwrap_or(0).max(self.floor))
-                            .saturating_add(j)
-                            < d
-                }
-                _ => false,
-            };
+        // An end by a wake the harness took late (decision 17): due before
+        // the deadline — a poll's, a call's fallback, a first dispatch's.
+        let wake_late = matches!(e.end, End::Unknown | End::Unexpected)
+            && !e.fault
+            && e.wake
+                .is_some_and(|w| lv.released.is_some_and(|(_, _, d)| w < d));
         let mut byte = end_code(e.end);
         if late {
             byte |= LATE;
         }
-        if (e.end == End::Unknown && (e.fault || call_late || read_late || ended_late))
-            || (matches!(e.end, End::Unknown | End::Unexpected) && resend_late)
-        {
+        if (e.end == End::Unknown && (e.fault || censor_late || read_late)) || wake_late {
             byte |= UNDECIDED;
         }
         self.mark(e.line, byte);
         if e.fault {
             self.owed = Some(e.line);
+        }
+        Ok(())
+    }
+
+    /// An end's wake, against what it ended (decision 17): none for an input's
+    /// end or a skip; with attempts, no later than the end — a poll's at most
+    /// its deadline, there only for an end there, before it only for an end at
+    /// or past it; a call's fallback its answer plus its wait, more than J
+    /// before its deadline; with none, its release, the end at or past its
+    /// deadline. A backstop's end is exempt.
+    fn wake(&self, e: &Ended, lv: &Live) -> Result<(), Void> {
+        let Some(w) = e.wake else {
+            return Ok(());
+        };
+        if e.fault {
+            return Ok(());
+        }
+        let bad = |why| Err(incoherent(e.line, why));
+        if matches!(e.end, End::Expected | End::Skipped(_)) {
+            return bad("a wake on an end an input or a skip made");
+        }
+        let Some((_, released, d)) = lv.released else {
+            return bad("a wake on an end never released");
+        };
+        if w > e.ended {
+            return bad("a wake after its end");
+        }
+        if lv.attempts == 0 {
+            if w != released || e.ended < d {
+                return bad("a first dispatch's wake against its release");
+            }
+            return Ok(());
+        }
+        match lv.action {
+            Action::Poll => {
+                if w > d || (w == d && e.ended != d) || (w < d && e.ended < d) {
+                    return bad("a poll's wake against its deadline");
+                }
+            }
+            _ => {
+                let fallback = lv
+                    .answered
+                    .map(|(_, at, after)| at.saturating_add(after.unwrap_or(0).max(self.floor)));
+                if fallback != Some(w) || w.saturating_add(self.jitter) >= d {
+                    return bad("a fallback's wake against its licence");
+                }
+            }
         }
         Ok(())
     }
@@ -585,7 +692,10 @@ impl Second {
             if cause != r.line && b & END != EXPECTED {
                 conditional = true;
             }
-            late_cause = b & LATE != 0;
+            // A cause the harness sent late delays the effect itself; an
+            // observation's own late start removes only polls whose effect
+            // was absent anyway, and is the censor's to excuse (decision 17).
+            late_cause = cause != r.line && b & LATE != 0;
         }
         if must_skip && end != SKIPPED {
             return Err(incoherent(

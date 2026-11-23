@@ -54,6 +54,7 @@ fn ended(line: u64, end: End, critical: Option<Critical>, fault: bool) -> Ended 
         critical,
         bound: vec![2, u64::MAX],
         fault,
+        wake: fault.then_some(u64::MAX),
     }
 }
 
@@ -76,6 +77,7 @@ pub fn lines() -> Vec<Line> {
             safety: Safety::NotTaken,
             cause: None,
             after: vec![],
+            planned: 0,
         }),
         Line::Read(Read {
             at: u64::MAX,
@@ -99,6 +101,7 @@ pub fn lines() -> Vec<Line> {
                     line: u64::MAX,
                 },
             ],
+            planned: u64::MAX,
         }),
         Line::Read(Read {
             at: 1,
@@ -108,6 +111,7 @@ pub fn lines() -> Vec<Line> {
             safety: Safety::Idempotent,
             cause: None,
             after: vec![],
+            planned: 1,
         }),
         Line::Read(Read {
             at: 1,
@@ -117,6 +121,7 @@ pub fn lines() -> Vec<Line> {
             safety: Safety::Idempotent,
             cause: None,
             after: vec![],
+            planned: 1,
         }),
         Line::Read(Read {
             at: 2,
@@ -126,6 +131,7 @@ pub fn lines() -> Vec<Line> {
             safety: Safety::Never,
             cause: Some(2),
             after: vec![],
+            planned: 2,
         }),
         Line::Released(Released {
             at: 1,
@@ -139,11 +145,14 @@ pub fn lines() -> Vec<Line> {
             line: 2,
             attempt: 1,
             deadline: u64::MAX,
+            due: 2,
         }),
         Line::Sent(Sent {
             at: 4,
             line: 2,
             attempt: u32::MAX,
+            handed: 3,
+            connected: u64::MAX,
         }),
         Line::Answer(Answer {
             at: 5,
@@ -155,6 +164,7 @@ pub fn lines() -> Vec<Line> {
             status: Some(201),
             code: None,
             after: None,
+            censored: false,
         }),
     ];
     let judged = [
@@ -185,6 +195,7 @@ pub fn lines() -> Vec<Line> {
             status,
             code,
             after,
+            censored: judged == Judged::Unknown,
         }));
     }
     let ends = [

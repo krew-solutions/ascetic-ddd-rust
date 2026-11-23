@@ -207,7 +207,7 @@ fn input_json(at: u64, input: &Input, records: &[Record]) -> Json {
         Input::Line { line, .. } => {
             json!({"observer": "scheduler", "event": "input", "input": "read", "at": at, "line": line})
         }
-        Input::Sent { line, attempt } => json!({
+        Input::Sent { line, attempt, .. } => json!({
             "observer": "scheduler", "event": "input", "input": "sent",
             "at": at, "line": line, "attempt": attempt,
         }),

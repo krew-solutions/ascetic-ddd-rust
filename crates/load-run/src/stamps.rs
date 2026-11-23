@@ -48,6 +48,18 @@ pub enum Harness {
         /// What, never a value.
         what: String,
     },
+    /// An answer judged for the route timeout and still not ended (ADR-0047
+    /// decision 17): a carrier stuck, never an OS slice.
+    Held {
+        /// Its step's line.
+        line: Line,
+        /// Which attempt.
+        attempt: u32,
+        /// When it arrived.
+        since: u64,
+        /// When the loop gave up on it.
+        at: u64,
+    },
     /// An input taken stamped below one taken before it: the machine's
     /// clock would go back.
     Disordered {
@@ -72,6 +84,15 @@ impl fmt::Display for Harness {
                 attempt,
                 what,
             } => write!(f, "attempt {attempt} of line {line}: {what}"),
+            Harness::Held {
+                line,
+                attempt,
+                since,
+                at,
+            } => write!(
+                f,
+                "attempt {attempt} of line {line} judged since {since} µs, still at {at} µs"
+            ),
             Harness::Disordered { at, last } => {
                 write!(f, "an input stamped {at} µs taken after one at {last} µs")
             }
@@ -257,6 +278,23 @@ impl<C: Clock> Attempt<C> {
     pub fn sent(&self) {
         let (line, attempt) = (self.line, self.attempt);
         self.stamps.push(|f, now| f.sent(now, line, attempt));
+    }
+
+    /// Its task's first instant, now: the hand-off's lateness from the
+    /// dispatch is the harness's (ADR-0047 decision 17). The loop stamps it
+    /// as the task starts.
+    pub(crate) fn handed(&self) {
+        let (line, attempt) = (self.line, self.attempt);
+        let (mut g, now) = self.stamps.lock();
+        g.frontier.handed(now, line, attempt);
+    }
+
+    /// Its request handed to a ready connection, now: the connect's lateness
+    /// from `handed` is the stand's. The last such instant stands.
+    pub fn connected(&self) {
+        let (line, attempt) = (self.line, self.attempt);
+        let (mut g, now) = self.stamps.lock();
+        g.frontier.connected(now, line, attempt);
     }
 
     /// What reports its bytes left, for a task that sees them leave

@@ -262,6 +262,9 @@ impl<S: Stand, E: Egress> Inner<S, E> {
                 Ok(r) => r,
                 Err(e) => return a.fault(format!("its request: {e}")),
             };
+            // Handed to a ready connection: the connect's lateness, the
+            // stand's, ends here (decision 17).
+            a.connected();
             // Armed and handed over in this one poll: no flush between.
             conn.probe.arm(Box::new(a.sent_hook()));
             let sent = conn.sender.try_send_request(req);

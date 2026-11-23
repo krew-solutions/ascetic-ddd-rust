@@ -436,8 +436,9 @@ fn drive(
                         attempt,
                         deadline,
                         captured,
+                        ..
                     } => {
-                        if let Some((at, censor)) = frontier.open(line, attempt, deadline) {
+                        if let Some((at, censor)) = frontier.open(at, line, attempt, deadline) {
                             queue.push(at, censor);
                         }
                         if let Some(record) = live.get(&line) {

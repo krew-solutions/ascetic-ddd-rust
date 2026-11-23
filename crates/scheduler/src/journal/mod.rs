@@ -26,13 +26,13 @@ use crate::machine::{self, Binding, Input, Judgement, Line as Number, Output};
 pub mod sample;
 
 /// The version a reader accepts and a writer writes: exactly this one.
-pub const JOURNAL_VERSION: u32 = 3;
+pub const JOURNAL_VERSION: u32 = 4;
 
 /// The byte form's identity: the SHA-256 of the golden journal
 /// (`golden/journal.jsonl`, [`sample`]), which holds every line and variant. A
 /// change to how any line is written changes the golden journal, and so this,
 /// in the same edit.
-pub const JOURNAL: &str = "23b060df21aa882fed1ce1101c224100e97b1b937e91100bb0ef32d144aa7f2e";
+pub const JOURNAL: &str = "0110468df74b4be30da6336ca4c52b68cceaec54f7c51f82fd67e3c825a204c1";
 
 /// A journal's line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,6 +192,10 @@ pub struct Read {
     pub cause: Option<Number>,
     /// Its dependencies, in its `after`'s order.
     pub after: Vec<Dep>,
+    /// When the plan has it (version 4): the dependencies' lateness is its
+    /// intended start's from it (ADR-0047 decision 17).
+    #[serde(with = "u64s")]
+    pub planned: u64,
 }
 
 /// A step's release decided.
@@ -230,6 +234,10 @@ pub struct Dispatch {
     /// When its handler gives up on it.
     #[serde(with = "u64s")]
     pub deadline: u64,
+    /// When the wake that dispatched it was due (version 4): the machine's
+    /// lateness is `at` from it (ADR-0047 decision 17).
+    #[serde(with = "u64s")]
+    pub due: u64,
 }
 
 /// An attempt's bytes left.
@@ -244,6 +252,14 @@ pub struct Sent {
     pub line: Number,
     /// The attempt.
     pub attempt: u32,
+    /// When its task first ran (version 4): the hand-off's lateness from the
+    /// dispatch, the harness's (ADR-0047 decision 17).
+    #[serde(with = "u64s")]
+    pub handed: u64,
+    /// When its request was handed to a ready connection: the connect's
+    /// lateness from `handed`, the stand's; the write's to `at`, the stand's.
+    #[serde(with = "u64s")]
+    pub connected: u64,
 }
 
 /// How an attempt ended, as its handler judged it.
@@ -307,6 +323,9 @@ pub struct Answer {
     /// Microseconds its `Retry-After` asked for.
     #[serde(with = "u64s_option")]
     pub after: Option<u64>,
+    /// The frontier's censor at the deadline, not an answer (version 4):
+    /// the harness's lateness may excuse only it (ADR-0047 decision 17).
+    pub censored: bool,
 }
 
 /// A problem's code: a short dotted name as the server wrote it, or `other`
@@ -407,6 +426,10 @@ pub struct Ended {
     pub bound: Vec<Number>,
     /// Whether it ended only at the machine's backstop.
     pub fault: bool,
+    /// When the wake whose taking ended it was due (version 4); none for an
+    /// end an input made, or a skip (ADR-0047 decision 17).
+    #[serde(with = "u64s_option")]
+    pub wake: Option<u64>,
 }
 
 /// A harness fault: the run is void (decision 14).
@@ -505,6 +528,7 @@ fn ended(at: u64, e: &machine::Entry) -> Ended {
         }),
         bound: e.bound.clone(),
         fault: e.fault,
+        wake: e.wake,
     }
 }
 
@@ -555,12 +579,20 @@ pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
                 safety,
                 cause,
                 after,
+                planned: record.at,
             }));
         }
-        Input::Sent { line, attempt } => lines.push(Line::Sent(Sent {
+        Input::Sent {
+            line,
+            attempt,
+            handed,
+            connected,
+        } => lines.push(Line::Sent(Sent {
             at,
             line: *line,
             attempt: *attempt,
+            handed: *handed,
+            connected: *connected,
         })),
         Input::Ended {
             line,
@@ -600,6 +632,7 @@ pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
                 status: seen.status,
                 code: seen.code.as_ref().map(Code::from),
                 after: seen.after,
+                censored: seen.censored,
             }));
         }
         Input::Wake => {}
@@ -622,12 +655,14 @@ pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
                 line,
                 attempt,
                 deadline,
+                due,
                 ..
             } => lines.push(Line::Dispatch(Dispatch {
                 at,
                 line: *line,
                 attempt: *attempt,
                 deadline: *deadline,
+                due: *due,
             })),
             Output::Ended(e) => {
                 lines.push(Line::End(Box::new(ended(at, e))));

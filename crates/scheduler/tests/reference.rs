@@ -171,6 +171,11 @@ const JOURNALS: &[(u32, u32, &str)] = &[
         3,
         "8ece1efca5fed0268ad6d4a4c2ba8821130805cf7538d5bb30210dccd238e34f",
     ),
+    (
+        4,
+        4,
+        "1a26d118700766afe7d805b210702f38d9ce41414b7e78a3539c15e66f5bf727",
+    ),
 ];
 
 /// What the fold decided of the differential's runs, the digest of their
@@ -201,6 +206,12 @@ const CLASSES: &[(u32, u32, u32, &str)] = &[
         3,
         3,
         "b4690f124fe6bbb392ec46b476af57a0f43f4e7b0c589e92ea44af817d79be1b",
+    ),
+    (
+        4,
+        4,
+        4,
+        "913215b9afa0c80eb6dea3ab53f603b501fad921c62bfd1066e5cfd7afffec1d",
     ),
 ];
 
@@ -353,7 +364,7 @@ fn journal_of(
         .iter()
         .map(|(at, input)| match input {
             Input::Line { line, .. } => (*at, *line, 0, None),
-            Input::Sent { line, attempt } => (*at, *line, *attempt, None),
+            Input::Sent { line, attempt, .. } => (*at, *line, *attempt, None),
             Input::Ended {
                 line,
                 attempt,
@@ -436,6 +447,7 @@ fn journal_entry(e: &Entry) -> journal::Ended {
         }),
         bound: e.bound.clone(),
         fault: e.fault,
+        wake: e.wake,
     }
 }
 
@@ -699,7 +711,7 @@ fn the_machine_is_the_scheduler_by_definition() {
         "conditional_transitive",
         "conditional_and_expected",
         "conditional_ended_before_its_dependency",
-        "undecided_call",
+        "undecided_censor",
         "undecided_cause",
         "undecided_read",
         "producer_root",
@@ -716,13 +728,12 @@ fn the_machine_is_the_scheduler_by_definition() {
             "{counter}: {reached}"
         );
     }
-    // Decision 16's rules see only a wake taken late: with none, neither fires.
-    for counter in ["fired_resend", "fired_ended_late"] {
-        assert!(
-            !reached.contains(&format!("'{counter}'")),
-            "{counter} with no wake late: {reached}"
-        );
-    }
+    // Decision 17's wake rule sees only a wake taken late: with none, it never
+    // fires.
+    assert!(
+        !reached.contains("'fired_wake'"),
+        "the wake rule with no wake late: {reached}"
+    );
     let classes: String = sha2::Digest::finalize(classes)
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -899,11 +910,6 @@ fn late_wakes_are_the_harness_s_lateness() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(runs > 100, "{runs} runs");
-    for counter in ["undecided_resend", "undecided_ended_late"] {
-        assert!(
-            reached.contains(&format!("'{counter}'")),
-            "{counter}: {reached}"
-        );
-    }
+    assert!(reached.contains("'undecided_wake'"), "{reached}");
     eprintln!("{reached}");
 }

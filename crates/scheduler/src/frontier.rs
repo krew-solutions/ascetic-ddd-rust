@@ -82,6 +82,11 @@ struct Open {
     sent: bool,
     /// Its answer arrived in time: no longer censorable.
     arrived: bool,
+    /// When its task first ran, and when its request was handed to a ready
+    /// connection: carried by whichever `Sent` is pushed (ADR-0047 decision
+    /// 17).
+    handed: u64,
+    connected: u64,
 }
 
 /// See the [module documentation](self).
@@ -97,12 +102,16 @@ pub struct Frontier {
     released: Option<u64>,
 }
 
+/// The frontier's censor at a deadline: marked as such, not an answer.
 fn unknown(line: Line, attempt: u32) -> Input {
     Input::Ended {
         line,
         attempt,
         judgement: Judgement::Unknown,
-        seen: Seen::default(),
+        seen: Seen {
+            censored: true,
+            ..Seen::default()
+        },
     }
 }
 
@@ -132,6 +141,11 @@ impl Frontier {
         self.floors.first().map(|f| f.0)
     }
 
+    /// The oldest answer being judged: its instant, line and attempt.
+    pub fn oldest_hold(&self) -> Option<(u64, Line, u32)> {
+        self.floors.first().copied()
+    }
+
     /// Attempts out and not censored.
     pub fn open_attempts(&self) -> usize {
         self.open.len()
@@ -147,10 +161,17 @@ impl Frontier {
         Ok(())
     }
 
-    /// Attempt `attempt` of `line` dispatched, to end by `deadline`. If its
+    /// Attempt `attempt` of `line` dispatched at `at`, to end by `deadline`:
+    /// handed to its task and connected then, until reported later. If its
     /// deadline was already released, it is censored at once: the censor is
     /// returned, for the caller's own buffer, and nothing of it is kept.
-    pub fn open(&mut self, line: Line, attempt: u32, deadline: u64) -> Option<(u64, Input)> {
+    pub fn open(
+        &mut self,
+        at: u64,
+        line: Line,
+        attempt: u32,
+        deadline: u64,
+    ) -> Option<(u64, Input)> {
         if self.released.is_some_and(|r| deadline <= r) {
             return Some((deadline, unknown(line, attempt)));
         }
@@ -160,10 +181,28 @@ impl Frontier {
                 deadline,
                 sent: false,
                 arrived: false,
+                handed: at,
+                connected: at,
             },
         );
         self.deadlines.insert((deadline, line, attempt));
         None
+    }
+
+    /// Its task first ran at `now`: connected then too, until reported.
+    pub fn handed(&mut self, now: u64, line: Line, attempt: u32) {
+        if let Some(o) = self.open.get_mut(&(line, attempt)) {
+            o.handed = now;
+            o.connected = now;
+        }
+    }
+
+    /// Its request handed to a ready connection at `now`: the last such
+    /// instant stands, a reconnect's.
+    pub fn connected(&mut self, now: u64, line: Line, attempt: u32) {
+        if let Some(o) = self.open.get_mut(&(line, attempt)) {
+            o.connected = now;
+        }
     }
 
     /// Its bytes left at `now`: pushed if before its deadline, once.
@@ -175,7 +214,16 @@ impl Frontier {
             return Ok(());
         }
         o.sent = true;
-        self.push(now, Input::Sent { line, attempt })
+        let (handed, connected) = (o.handed, o.connected);
+        self.push(
+            now,
+            Input::Sent {
+                line,
+                attempt,
+                handed,
+                connected,
+            },
+        )
     }
 
     /// Its answer arrived at `now`: held until it is judged. Past its deadline
@@ -220,7 +268,14 @@ impl Frontier {
             && let Some(o) = self.open.remove(&(line, attempt))
             && !o.sent
         {
-            self.push(at, Input::Sent { line, attempt })?;
+            // An early reply's: its path as reported, at the reply.
+            let sent = Input::Sent {
+                line,
+                attempt,
+                handed: o.handed,
+                connected: o.connected,
+            };
+            self.push(at, sent)?;
         }
         self.push(
             at,

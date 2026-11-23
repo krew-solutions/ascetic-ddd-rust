@@ -561,6 +561,7 @@ fn an_answer_journals_what_came_back() {
                 status: Some(503),
                 code: Some(Taken::Named("service.unavailable".into())),
                 after: Some(5_000_000),
+                censored: false,
             },
             (
                 Some(503),
@@ -573,6 +574,7 @@ fn an_answer_journals_what_came_back() {
                 status: Some(400),
                 code: Some(Taken::Other),
                 after: None,
+                censored: false,
             },
             (Some(400), Some(Code::Other), None),
         ),

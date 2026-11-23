@@ -469,11 +469,15 @@ fn inputs_of_one_instant_are_taken_in_one_order() {
             Input::Sent {
                 line: 3,
                 attempt: 1,
+                handed: 0,
+                connected: 0,
             },
             Input::Wake,
             Input::Sent {
                 line: 2,
                 attempt: 1,
+                handed: 0,
+                connected: 0,
             },
         ];
         let mut q = Ordered::new();

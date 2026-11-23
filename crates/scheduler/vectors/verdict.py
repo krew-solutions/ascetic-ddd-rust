@@ -52,6 +52,7 @@ class Run:
         self.floor = int(header["resend"])
         body = lines[1:-1]
         self.reads, self.ends, self.released = {}, {}, {}
+        self.facts = {}
         self.events = collections.defaultdict(list)  # line -> [(index, kind, value)]
         self.faults = {}
         for i, l in enumerate(body):
@@ -105,6 +106,11 @@ class Run:
         last_dispatch, last_sent = None, None
         answered = None  # the last taken answer: (attempt, at, after)
         rel = None
+        # Decision 17: the harness's lateness over the attempts — each one's
+        # machine (dispatch at its wake's due) and hand-off (its task's first
+        # poll after its dispatch); the last attempt's deadline; whether the
+        # taken answer was the frontier's censor.
+        harness, harness_sent, deadline, censored = 0, None, None, False
         for i, kind, v in self.events[l]:
             if i < ri:
                 raise Incoherent("an event before its read")
@@ -125,21 +131,48 @@ class Run:
                     raise Incoherent("an attempt out of turn")
                 if v["attempt"] > 1 and not self.licensed(r, rel, taken, answered, u(v["at"])):
                     raise Incoherent("a resend its answer did not license")
+                due = u(v["due"])
+                if due > u(v["at"]):
+                    raise Incoherent("dispatched before its wake was due")
+                if v["attempt"] == 1 and due != u(rel["released"]):
+                    raise Incoherent("a first attempt's wake not its release")
+                if v["attempt"] > 1:
+                    _, then, after = answered
+                    if r["action"] == "poll":
+                        if due < then:
+                            raise Incoherent("a poll's wake before its answer")
+                    elif due != then + max(after or 0, self.floor):
+                        raise Incoherent("a resend's wake not its answer's wait")
+                harness += u(v["at"]) - due
+                deadline = u(v["deadline"])
+                censored = False
                 attempts = v["attempt"]
                 first_dispatch = u(v["at"]) if first_dispatch is None else first_dispatch
                 last_dispatch, last_sent, taken, answered = u(v["at"]), None, None, None
             elif kind == "sent":
                 if v["attempt"] > attempts or v["attempt"] == 0:
                     raise Incoherent("a send of an attempt not dispatched")
+                if not (u(v["handed"]) <= u(v["connected"]) <= u(v["at"])):
+                    raise Incoherent("handed, connected and sent out of order")
+                if v["attempt"] == attempts and last_sent is None:
+                    if u(v["handed"]) < last_dispatch:
+                        raise Incoherent("handed before its dispatch")
+                    harness += u(v["handed"]) - last_dispatch
+                    harness_sent = harness if harness_sent is None else harness_sent
                 if v["attempt"] == attempts:
                     last_sent = u(v["at"]) if last_sent is None else last_sent
                     sent = u(v["at"]) if sent is None else sent
             elif kind == "answer":
+                if v["censored"] and (v["judged"] != "unknown" or v["status"] is not None):
+                    raise Incoherent("a censor that says more than unknown")
                 if v["ignored"] is None:
                     if v["attempt"] != attempts or attempts == 0:
                         raise Incoherent("an answer taken from an attempt not out")
+                    if v["censored"] and u(v["at"]) != deadline:
+                        raise Incoherent("a censor not at its attempt's deadline")
                     taken = v["judged"]
                     answered = (v["attempt"], u(v["at"]), u(v["after"]))
+                    censored = v["censored"]
                 elif v["attempt"] > attempts:
                     raise Incoherent("an answer of an attempt not dispatched")
         if (
@@ -152,6 +185,8 @@ class Run:
         if rel is not None:
             if (u(e["intended"]), u(e["released"])) != (u(rel["intended"]), u(rel["released"])):
                 raise Incoherent("an end against its release")
+            if u(r["planned"]) > u(e["intended"]):
+                raise Incoherent("intended before its plan")
         elif e["dispatched"] is not None:
             raise Incoherent("dispatched, never released")
         kind = end_kind(e)
@@ -180,7 +215,43 @@ class Run:
                     raise Incoherent("skipped for a member that did not fail it")
             elif not (2 <= d < l):
                 raise Incoherent("skipped for a producer not read before it")
+        self.woke(l, r, rel, e, attempts, answered)
         self.taken_attempts = attempts
+        self.facts[l] = {
+            "harness": harness,
+            "harness_sent": harness_sent,
+            "censored": censored,
+            "last_sent": last_sent,
+        }
+
+    def woke(self, l, r, rel, e, attempts, answered):
+        """Decision 17: the wake that ended a step. None for an input's end or a
+        skip; a backstop's exempt. With no attempt, its release, the end at or
+        past its deadline. A poll's at most its deadline, at it only for an end
+        there, before it only for an end at or past it. A call's fallback at its
+        answer and its wait, more than J before its deadline. Never after the
+        end."""
+        w = u(e["wake"])
+        if w is None or e["fault"]:
+            return
+        kind = end_kind(e)
+        if kind in ("expected", "skipped"):
+            raise Incoherent("an expected or skipped end by a wake")
+        if rel is None:
+            raise Incoherent("a wake on a step never released")
+        d, ended = u(rel["deadline"]), u(e["ended"])
+        if w > ended:
+            raise Incoherent("a wake after the end it made")
+        if attempts == 0:
+            if w != u(rel["released"]) or ended < d:
+                raise Incoherent("a first dispatch's wake not its release past the deadline")
+        elif r["action"] == "poll":
+            if w > d or (w == d and ended != d) or (w < d and ended < d):
+                raise Incoherent("a poll's wake against its deadline")
+        else:
+            _, then, after = answered
+            if w != then + max(after or 0, self.floor) or w + self.j >= d:
+                raise Incoherent("a fallback's wake against its licence")
 
     def licensed(self, r, rel, taken, answered, at):
         """Decision 15: a poll's next after an answer not expected, no sooner
@@ -243,61 +314,52 @@ class Run:
         memo[l] = why
         return why
 
-    def resend_late(self, l):
-        """Decision 16: a resend its last answer licensed, due more than J
-        before the deadline, the step ended without it — a call's, not a
-        poll's; the machine schedules it only then, and on time it leaves."""
-        r = self.read(l)
-        if r["action"] == "poll":
-            return False
-        e, ei = self.end(l), self.ends[l][0]
-        dispatches = [i for i, k, _ in self.events[l] if k == "dispatch"]
-        after_last = dispatches[-1] if dispatches else -1
-        taken = [v for i, k, v in self.events[l]
-                 if k == "answer" and v["ignored"] is None and after_last < i < ei]
-        if not taken:
-            return False
-        v = taken[-1]
-        licensed = (v["judged"] == "not_taken" and r["safety"] != "never") or (
-            v["judged"] == "unknown" and r["safety"] == "idempotent")
+    def harness_late(self, l):
+        """Decision 17: the harness's lateness on a step — its attempts'
+        machine and hand-off, and for an observation its reader's — past J."""
+        r, f = self.read(l), self.facts[l]
         rel = self.released.get(l)
-        if rel is None:
-            return False
-        due = u(v["at"]) + max(u(v["after"]) or 0, self.floor)
-        return licensed and due + self.j < u(rel["deadline"])
+        reader = 0
+        if r["action"] in ("observe", "poll") and rel is not None:
+            reader = u(rel["released"]) - u(rel["intended"])
+        return f["harness"] + reader > self.j
+
+    def cause_late(self, c):
+        """An observation's cause sent late by the harness, or never: its
+        reader's lateness and its first send's harness lateness, past J."""
+        e = self.end(c)
+        if e["sent"] is None:
+            return True
+        rel = self.released.get(c)
+        reader = u(rel["released"]) - u(rel["intended"]) if rel else 0
+        return reader + (self.facts[c]["harness_sent"] or 0) > self.j
 
     def undecided(self, l):
-        """An unknown whose deadline the harness ate past J; decision 16: an
-        end a late wake made, unknown or a refusal."""
-        e = self.end(l)
-        if end_kind(e) == "unexpected":
-            return "resend" if self.resend_late(l) else None
-        if end_kind(e) != "unknown":
+        """Decision 17: undecided only what the harness could have caused —
+        an end by a wake it took past the wake's deadline; an unknown censored
+        at its deadline, or never sent, its harness late; an unknown read past
+        its deadline; an observation whose cause the harness sent late; a
+        backstop's end."""
+        e, r, f = self.end(l), self.read(l), self.facts[l]
+        kind = end_kind(e)
+        if kind not in ("unexpected", "unknown"):
+            return None
+        rel = self.released.get(l)
+        if not e["fault"] and e["wake"] is not None and rel is not None and u(e["wake"]) < u(rel["deadline"]):
+            return "wake"
+        if kind == "unexpected":
             return None
         if e["fault"]:
             return "backstop"
-        r = self.read(l)
-        j = self.j
-        if r["action"] != "observe" and e["attempts"] >= 1:
-            last = e["attempts"]
-            _, ei = None, self.ends[l][0]
-            dispatched = [u(v["at"]) for i, k, v in self.events[l] if k == "dispatch" and v["attempt"] == last]
-            sends = [u(v["at"]) for i, k, v in self.events[l] if k == "sent" and v["attempt"] == last and i < ei]
-            if not sends or sends[0] - dispatched[0] > j:
-                return "call"
-        rel = self.released.get(l)
+        if e["attempts"] >= 1 and f["censored"] and (f["last_sent"] is None or self.harness_late(l)):
+            return "censor"
         if rel:
             i, rr, d = u(rel["intended"]), u(rel["released"]), u(rel["deadline"])
-            if rr >= d and i < d and rr - i > j:
+            if rr >= d and i < d and rr - i > self.j:
                 return "read"
-            if e["attempts"] >= 1 and rr < d and u(e["ended"]) > d:
-                return "ended_late"
-        if r["action"] in ("observe", "poll"):
-            c = self.end(u(r["cause"]))
-            if c["sent"] is None or u(c["sent"]) - u(c["intended"]) > j:
-                return "cause"
-        if self.resend_late(l):
-            return "resend"
+        cause = u(r["cause"]) if r["action"] in ("observe", "poll") else None
+        if cause is not None and cause != l and self.cause_late(cause):
+            return "cause"
         return None
 
     def producer(self, l):
