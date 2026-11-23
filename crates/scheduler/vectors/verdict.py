@@ -43,6 +43,15 @@ def skip_of(e):
     return why, int(line)
 
 
+def fault_class(v):
+    """A fault line's class and its fields (version 6)."""
+    c = v["class"]
+    if isinstance(c, dict):
+        (name, fields), = c.items()
+        return name, fields if isinstance(fields, dict) else {"kind": fields}
+    return c, {}
+
+
 class Run:
     def __init__(self, lines, log):
         header = lines[0]["header"]
@@ -50,13 +59,31 @@ class Run:
             raise AnotherLog()
         self.j = int(header["jitter"])
         self.floor = int(header["resend"])
+        # Decision 18: no T0 only for a run a gate refused before it began.
+        unstarted = header["t0"] is None
         body = lines[1:-1]
         self.reads, self.ends, self.released = {}, {}, {}
         self.facts = {}
         self.events = collections.defaultdict(list)  # line -> [(index, kind, value)]
         self.faults = {}
+        # Decision 18: a run's stop — any fault but the backstop's — is the
+        # journal's last line; a gate's refusal its only one, at 0.
+        self.stop = None
+        latest = 0
         for i, l in enumerate(body):
             (kind, v), = l.items()
+            if kind == "fault":
+                name, fields = fault_class(v)
+                if name == "backstop":
+                    self.faults[int(fields["line"])] = i
+                else:
+                    if i != len(body) - 1:
+                        raise Incoherent("a line after the run's stop")
+                    self.stop_coherent(name, fields, i, u(v["at"]), latest, unstarted)
+                    self.stop = name
+                latest = max(latest, u(v["at"]))
+                continue
+            latest = max(latest, u(v["at"]))
             line = int(v["line"])
             if kind == "read":
                 if line in self.reads:
@@ -79,16 +106,41 @@ class Run:
             raise Incoherent("reads not in line order")
         if order != list(range(2, 2 + len(order))):
             raise Incoherent("reads not one a line")
-        if set(self.ends) != set(self.reads):
-            raise Incoherent("a read without its end, or an end without its read")
+        if unstarted and self.stop != "gate":
+            raise Incoherent("no T0, and no gate's refusal")
+        # Stopped, a step read need not have ended.
+        if set(self.ends) - set(self.reads):
+            raise Incoherent("an end without its read")
+        if self.stop is None and set(self.ends) != set(self.reads):
+            raise Incoherent("a read without its end")
         if set(self.faults) - set(self.reads):
             raise Incoherent("a fault of a line not read")
         self.order = order
         for l in order:
             self.coherent(l)
-        # The journal sound, it must be all of its log's run.
-        if len(order) != log["records"]:
+        # The journal sound, it must be all of its log's run — a stopped one,
+        # at most all of it.
+        if len(order) > log["records"] or (self.stop is None and len(order) != log["records"]):
             raise AnotherLog()
+
+    def stop_coherent(self, name, fields, i, at, latest, unstarted):
+        """Decision 18: a gate's refusal the journal's only line, at 0, with no
+        T0; any other stop no earlier than every line before it, the step it
+        names read, and its attempt dispatched while the step is not ended."""
+        if name == "gate":
+            if i != 0 or at != 0 or not unstarted:
+                raise Incoherent("a gate's refusal not the journal's only line")
+            return
+        if at < latest:
+            raise Incoherent("a stop before the line above it")
+        if "line" in fields:
+            line = int(fields["line"])
+            if line not in self.reads:
+                raise Incoherent("a stop naming a line not read")
+            if "attempt" in fields and line not in self.ends:
+                out = sum(1 for _, kind, _ in self.events[line] if kind == "dispatch")
+                if not (1 <= fields["attempt"] <= out):
+                    raise Incoherent("a stop naming an attempt not out")
 
     def read(self, l):
         return self.reads[l][1]
@@ -97,9 +149,10 @@ class Run:
         return self.ends[l][1]
 
     def coherent(self, l):
-        """Every end agrees with its step's events (decision 14: evidence)."""
+        """Every end agrees with its step's events (decision 14: evidence); a
+        step a stop left unended, its events so far (decision 18)."""
         ri, r = self.reads[l]
-        ei, e = self.ends[l]
+        ei, e = self.ends.get(l, (float("inf"), None))
         if ei < ri:
             raise Incoherent("ended before read")
         attempts, first_dispatch, sent, taken = 0, None, None, None
@@ -158,10 +211,14 @@ class Run:
                     raise Incoherent("a send of an attempt not dispatched")
                 if not (u(v["handed"]) <= u(v["connected"]) <= u(v["at"])):
                     raise Incoherent("handed, connected and sent out of order")
+                # Decision 18: the source thread's lag lies inside its path,
+                # and is the harness's.
+                if u(v["lag"]) > u(v["at"]) - u(v["handed"]):
+                    raise Incoherent("a send's lag past its path")
                 if v["attempt"] == attempts and last_sent is None:
                     if u(v["handed"]) < last_dispatch:
                         raise Incoherent("handed before its dispatch")
-                    harness += u(v["handed"]) - last_dispatch
+                    harness += u(v["handed"]) - last_dispatch + u(v["lag"])
                     harness_sent = harness if harness_sent is None else harness_sent
                 if v["attempt"] == attempts:
                     last_sent = u(v["at"]) if last_sent is None else last_sent
@@ -182,6 +239,8 @@ class Run:
                     censored = v["censored"]
                 elif v["attempt"] > attempts:
                     raise Incoherent("an answer of an attempt not dispatched")
+        if e is None:
+            return
         if (
             u(e["read"]) != u(r["at"])
             or e["attempts"] != attempts
@@ -443,12 +502,16 @@ class Run:
 def verdict(lines, log):
     try:
         run = Run(lines, log)
-        classes = run.classes()
+        # Decision 18: a stopped run is classed not at all.
+        classes = [] if run.stop else run.classes()
     except AnotherLog:
-        return "void:another_log", []
+        return "void:another_log", [], None
     except Incoherent:
-        return "void:incoherent", []
-    if run.faults:
+        return "void:incoherent", [], None
+    if run.stop:
+        REACHED[f"stop_{run.stop}"] += 1
+        v = "void:fault"
+    elif run.faults:
         v = "void:fault"
     elif "root" in classes:
         v = "fail"
@@ -459,17 +522,17 @@ def verdict(lines, log):
     else:
         v = "void:incoherent"
     REACHED[v] += 1
-    return v, classes
+    return v, classes, run.stop
 
 
 def main():
     runs = 0
     for raw in sys.stdin:
         case = json.loads(raw)
-        v, classes = verdict(case["journal"], case["log"])
-        got = (case["verdict"], case["classes"])
-        if (v, classes) != got:
-            print(f"{case['name']}: by definition {v} {classes}, the fold {got[0]} {got[1]}")
+        v, classes, stop = verdict(case["journal"], case["log"])
+        got = (case["verdict"], case["classes"], case.get("stop"))
+        if (v, classes, stop) != got:
+            print(f"{case['name']}: by definition {v} {classes} {stop}, the fold {got[0]} {got[1]} {got[2]}")
             sys.exit(1)
         runs += 1
     print(f"{runs} verdicts agree; reached {dict(REACHED)}")

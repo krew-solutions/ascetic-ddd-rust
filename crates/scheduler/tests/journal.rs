@@ -14,7 +14,7 @@ use std::io::Cursor;
 use ascetic_ddd_command_log::record::{On, Safety};
 use ascetic_ddd_scheduler::journal::{
     self, Action, Code, Critical, Dep, End, FaultClass, Header, Ignored, JOURNAL, JOURNAL_VERSION,
-    JournalError, Judged, Line, Reader, Skip, Writer, sample,
+    JournalError, Judged, Judging, Line, LogFault, Reader, Shape, Skip, Writer, sample,
 };
 use sha2::{Digest, Sha256};
 
@@ -157,9 +157,24 @@ fn code_kind(c: &Option<Code>) -> usize {
     }
 }
 
-fn fault_kind(f: FaultClass) -> usize {
+fn fault_kind(f: &FaultClass) -> usize {
     match f {
-        FaultClass::Backstop => 0,
+        FaultClass::Backstop { .. } => 0,
+        FaultClass::Below { .. } => 1,
+        FaultClass::Disordered { .. } => 2,
+        FaultClass::Backdated { .. } => 3,
+        FaultClass::Dropped { .. } => 4,
+        FaultClass::Carrier { .. } => 5,
+        FaultClass::Held { .. } => 6,
+        FaultClass::Stalled => 7,
+        FaultClass::Poisoned => 8,
+        FaultClass::Saturated { .. } => 9,
+        FaultClass::Clock => 10,
+        FaultClass::Log(LogFault::Diverged) => 11,
+        FaultClass::Log(LogFault::Truncated) => 12,
+        FaultClass::Log(LogFault::Malformed) => 13,
+        FaultClass::Log(LogFault::Io) => 14,
+        FaultClass::Gate { .. } => 15,
     }
 }
 
@@ -202,13 +217,18 @@ fn the_golden_holds_every_variant() {
                 options.insert(("fault", e.fault));
             }
             Line::Fault(f) => {
-                seen[7].insert(fault_kind(f.class));
+                seen[7].insert(fault_kind(&f.class));
+                if let FaultClass::Carrier { cannot: c, .. } | FaultClass::Gate { name: c } =
+                    &f.class
+                {
+                    seen[11].insert(code_kind(&Some(c.clone())) - 1);
+                }
             }
             Line::Header(_) | Line::Released(_) | Line::Dispatch(_) | Line::Sent(_) => {}
             Line::Trailer(_) => unreachable!("the reader hands no trailer out"),
         }
     }
-    let counts = [9, 2, 3, 4, 4, 6, 3, 1, 5, 3, 3];
+    let counts = [9, 2, 3, 4, 4, 6, 3, 16, 5, 3, 3, 2];
     for (i, n) in counts.iter().enumerate() {
         assert_eq!(seen[i], (0..*n).collect(), "enum {i}");
     }
@@ -239,6 +259,14 @@ fn the_golden_holds_every_variant() {
         "cause",
         "after",
         "namespace",
+        "lag",
+        "released",
+        "last",
+        "now",
+        "since",
+        "alive",
+        "took",
+        "cap",
     ] {
         assert!(
             text.contains(&format!(r#""{field}":"18446744073709551615""#)),
@@ -597,5 +625,42 @@ fn an_answer_journals_what_came_back() {
             })
             .unwrap();
         assert_eq!((answer.status, answer.code, answer.after), journaled);
+    }
+}
+
+/// Version 6's header, each side of its options and every shape, written and
+/// read back: a journal has one header, so the golden holds only one.
+#[test]
+fn every_header_variant_reads_back() {
+    let shapes = [Shape::Flat, Shape::Objects, Shape::Numbers, Shape::Strings];
+    let mut headers: Vec<Header> = shapes
+        .iter()
+        .map(|shape| Header {
+            judging: Some(Judging {
+                cap: 1 << 20,
+                took: 189_678,
+                shape: *shape,
+            }),
+            ..sample::header()
+        })
+        .collect();
+    headers.push(Header {
+        t0: None,
+        gates: Vec::new(),
+        judging: None,
+        ..sample::header()
+    });
+    for h in headers {
+        let mut w = Writer::new(Vec::new(), h.clone()).unwrap();
+        w.line(&Line::Fault(journal::Fault {
+            at: 0,
+            class: FaultClass::Gate {
+                name: Code::Named("stand.namespace_unseen".to_owned()),
+            },
+        }))
+        .unwrap();
+        let bytes = w.finish().unwrap().0;
+        let (read, _) = read_all(&bytes).unwrap();
+        assert_eq!(read, h);
     }
 }

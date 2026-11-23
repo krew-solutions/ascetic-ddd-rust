@@ -1,5 +1,5 @@
-{"header":{"journal":5,"machine":4,"source":"verdict","log":"69ac4628b830ffe6c9f8f5b108dd3c36f5f789a5ff98586224a72ff39c505266","validator":"8: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent frame predicate expect secret","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000"}}
+{"header":{"journal":6,"machine":4,"source":"verdict","log":"69ac4628b830ffe6c9f8f5b108dd3c36f5f789a5ff98586224a72ff39c505266","validator":"8: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent frame predicate expect secret","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000","gates":[],"judging":null}}
 {"read":{"at":"0","line":"2","key":{"kind":"device","scope":"Bw==","label":"read","n":0},"action":"rest","safety":"never","cause":null,"after":[],"planned":"1000"}}
 {"released":{"at":"0","line":"2","intended":"1000","released":"1000","deadline":"1300"}}
 {"end":{"at":"1500","line":"2","end":"unknown","read":"0","ready":"0","intended":"1000","released":"1000","dispatched":null,"sent":null,"ended":"1500","attempts":0,"critical":null,"bound":[],"fault":false,"wake":"1000"}}
-{"trailer":{"events":"3","steps":"1","sha256":"cd4d68a31412826db81ee66339e2d195c758690c338afd959cdc7c5448e0dd57"}}
+{"trailer":{"events":"3","steps":"1","sha256":"c049c97432825bc5d4ae7c83ba5c76dbd555f293f077f946958e950db5a0a73d"}}

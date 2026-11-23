@@ -101,6 +101,30 @@ pub mod i64s {
     }
 }
 
+/// An optional `i64` as a decimal string or `null`.
+pub mod i64s_option {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    /// Writes it.
+    pub fn serialize<S: Serializer>(v: &Option<i64>, s: S) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(v) => s.collect_str(v),
+            None => s.serialize_none(),
+        }
+    }
+
+    /// Reads it, only in its canonical text.
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+        match Option::<String>::deserialize(d)? {
+            None => Ok(None),
+            Some(text) => match text.parse::<i64>() {
+                Ok(v) if v.to_string() == text => Ok(Some(v)),
+                _ => Err(D::Error::custom(format!("not a canonical i64: {text:?}"))),
+            },
+        }
+    }
+}
+
 /// Bytes as standard padded base64.
 pub mod b64 {
     use base64::Engine;

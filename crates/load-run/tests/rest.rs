@@ -1519,7 +1519,9 @@ fn folded(
         jitter: header.profile.jitter,
         resend: header.profile.resend,
         namespace: 1,
-        t0: 0,
+        t0: Some(0),
+        gates: Vec::new(),
+        judging: None,
     };
     let mut w = Writer::new(Vec::new(), h.clone()).unwrap();
     for l in lines {

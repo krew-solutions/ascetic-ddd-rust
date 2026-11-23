@@ -87,6 +87,9 @@ struct Open {
     /// 17).
     handed: u64,
     connected: u64,
+    /// Its source thread's scheduling lag on its send path (decision 18),
+    /// carried likewise.
+    lag: u64,
 }
 
 /// See the [module documentation](self).
@@ -183,6 +186,7 @@ impl Frontier {
                 arrived: false,
                 handed: at,
                 connected: at,
+                lag: 0,
             },
         );
         self.deadlines.insert((deadline, line, attempt));
@@ -205,6 +209,14 @@ impl Frontier {
         }
     }
 
+    /// The scheduling lag its source's thread kept its send path waiting,
+    /// in microseconds (decision 18): carried by whichever `Sent` is pushed.
+    pub fn lag(&mut self, line: Line, attempt: u32, lag: u64) {
+        if let Some(o) = self.open.get_mut(&(line, attempt)) {
+            o.lag = lag;
+        }
+    }
+
     /// Its bytes left at `now`: pushed if before its deadline, once.
     pub fn sent(&mut self, now: u64, line: Line, attempt: u32) -> Result<(), Below> {
         let Some(o) = self.open.get_mut(&(line, attempt)) else {
@@ -214,7 +226,7 @@ impl Frontier {
             return Ok(());
         }
         o.sent = true;
-        let (handed, connected) = (o.handed, o.connected);
+        let (handed, connected, lag) = (o.handed, o.connected, o.lag);
         self.push(
             now,
             Input::Sent {
@@ -222,6 +234,7 @@ impl Frontier {
                 attempt,
                 handed,
                 connected,
+                lag,
             },
         )
     }
@@ -274,6 +287,7 @@ impl Frontier {
                 attempt,
                 handed: o.handed,
                 connected: o.connected,
+                lag: o.lag,
             };
             self.push(at, sent)?;
         }

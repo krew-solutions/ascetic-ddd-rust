@@ -400,7 +400,9 @@ fn stress<C: Clock>(make: impl Fn(u64) -> C, seeds: u64, calls: u64) {
                 jitter: header.profile.jitter,
                 resend: header.profile.resend,
                 namespace: 1,
-                t0: clock.wall(),
+                t0: Some(clock.wall()),
+                gates: Vec::new(),
+                judging: None,
             };
             let sink = Written::start(Vec::new(), journal_header, 1_024).unwrap();
             let ran = run(

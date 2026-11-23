@@ -135,8 +135,12 @@ pub enum Input {
         /// is the harness's (ADR-0047 decision 17).
         handed: u64,
         /// When its request was handed to a ready connection: the connect's
-        /// lateness from `handed` is the stand's.
+        /// lateness from `handed` is the stand's, less `lag`.
         connected: u64,
+        /// Microseconds its source's thread kept its send path's wakes
+        /// waiting between `handed` and its last byte: the harness's
+        /// (ADR-0047 decision 18).
+        lag: u64,
     },
     /// An attempt ended.
     Ended {

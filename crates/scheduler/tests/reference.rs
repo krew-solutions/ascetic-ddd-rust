@@ -181,6 +181,11 @@ const JOURNALS: &[(u32, u32, &str)] = &[
         4,
         "3f95c013e077896ca4f17fb32b7a54dbba0586a1ca35ef35d69f2f3d742f3b15",
     ),
+    (
+        6,
+        4,
+        "6ccc3b983c3c56c3ff2df17f8902eb01f114f071c320bbd6c2ee90fb5241d9c9",
+    ),
 ];
 
 /// What the fold decided of the differential's runs, the digest of their
@@ -222,6 +227,14 @@ const CLASSES: &[(u32, u32, u32, &str)] = &[
         5,
         4,
         5,
+        "913215b9afa0c80eb6dea3ab53f603b501fad921c62bfd1066e5cfd7afffec1d",
+    ),
+    // Version 6 (decision 18): a run's stop, a send's lag; no differential
+    // run stops or lags, so their classes are version 5's.
+    (
+        6,
+        4,
+        6,
         "913215b9afa0c80eb6dea3ab53f603b501fad921c62bfd1066e5cfd7afffec1d",
     ),
 ];
@@ -328,7 +341,11 @@ fn journal_of(
                     e.line
                 );
             }
-            Line::Fault(f) => faults.push(f.line),
+            Line::Fault(f) => {
+                if let Some((line, _)) = f.class.struck() {
+                    faults.push(line);
+                }
+            }
             Line::Header(_) | Line::Trailer(_) => panic!("{name}: a header or trailer amid"),
         }
     }
@@ -638,7 +655,9 @@ fn the_machine_is_the_scheduler_by_definition() {
                         jitter: header.profile.jitter,
                         resend: header.profile.resend,
                         namespace: 1,
-                        t0: 1_763_640_000_000_000,
+                        t0: Some(1_763_640_000_000_000),
+                        gates: Vec::new(),
+                        judging: None,
                     };
                     let journal_bytes =
                         journal_of(&run_name, journal_header.clone(), &header, &ran, &records);
@@ -874,7 +893,9 @@ fn late_wakes_are_the_harness_s_lateness() {
                 jitter: j,
                 resend: header.profile.resend,
                 namespace: 1,
-                t0: 1_763_640_000_000_000,
+                t0: Some(1_763_640_000_000_000),
+                gates: Vec::new(),
+                judging: None,
             };
             let mut w = journal::Writer::new(Vec::new(), journal_header.clone()).unwrap();
             for l in &ran.journal {

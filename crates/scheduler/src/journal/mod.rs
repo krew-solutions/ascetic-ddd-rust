@@ -18,7 +18,7 @@ use std::io::{BufRead, Write};
 
 use ascetic_ddd_command_log::frame::{self, Digest, FrameError};
 use ascetic_ddd_command_log::record::{self, Name, On, Safety, Subject};
-use ascetic_ddd_command_log::wire::{b64, i64s, u64s, u64s_option, u64s_vec};
+use ascetic_ddd_command_log::wire::{b64, i64s_option, u64s, u64s_option, u64s_vec};
 use serde::{Deserialize, Serialize};
 
 use crate::machine::{self, Binding, Input, Judgement, Line as Number, Output};
@@ -26,13 +26,13 @@ use crate::machine::{self, Binding, Input, Judgement, Line as Number, Output};
 pub mod sample;
 
 /// The version a reader accepts and a writer writes: exactly this one.
-pub const JOURNAL_VERSION: u32 = 5;
+pub const JOURNAL_VERSION: u32 = 6;
 
 /// The byte form's identity: the SHA-256 of the golden journal
 /// (`golden/journal.jsonl`, [`sample`]), which holds every line and variant. A
 /// change to how any line is written changes the golden journal, and so this,
 /// in the same edit.
-pub const JOURNAL: &str = "4ffb293d1d5f8eb5b799d8ca42a85c62ff6b4b5de2eb4f67c92b003123833dfa";
+pub const JOURNAL: &str = "538145b24f3ba5f6350a48d96cd886eee79e3169154fcd6b92baed3665c0d9f2";
 
 /// A journal's line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,9 +87,56 @@ pub struct Header {
     #[serde(with = "u64s")]
     pub namespace: u64,
     /// T0's wall instant, microseconds since the Unix epoch: the base of the
-    /// run's times.
-    #[serde(with = "i64s")]
-    pub t0: i64,
+    /// run's times; none when a gate refused the run before its clock started
+    /// (version 6, ADR-0047 decision 18).
+    #[serde(with = "i64s_option")]
+    pub t0: Option<i64>,
+    /// The stand's gates the run passed before T0, in order (version 6).
+    pub gates: Vec<Gate>,
+    /// The judging time measured before T0 (version 6): evidence, not a
+    /// refusal, until a plan claims J's precision.
+    pub judging: Option<Judging>,
+}
+
+/// A stand's gate passed before T0 (decision 18).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Gate {
+    /// Its name, a dotted name the host chooses.
+    pub name: Code,
+    /// Microseconds it took, waits included.
+    #[serde(with = "u64s")]
+    pub took: u64,
+}
+
+/// The judging time at the profile's cap, measured before T0 (decision 18):
+/// a document of each shape filling the cap, read, judged and dropped on a
+/// source's runtime; the worst shape's median.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Judging {
+    /// The cap, in bytes.
+    #[serde(with = "u64s")]
+    pub cap: u64,
+    /// The worst shape's median, in microseconds.
+    #[serde(with = "u64s")]
+    pub took: u64,
+    /// That shape.
+    pub shape: Shape,
+}
+
+/// A JSON document's shape, by what judging it costs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Shape {
+    /// One object of scalar members.
+    Flat,
+    /// An object of small objects.
+    Objects,
+    /// An array of numbers.
+    Numbers,
+    /// An array of strings of escapes.
+    Strings,
 }
 
 /// A barrier key: the kind, scope, label and occurrence its members share.
@@ -257,9 +304,15 @@ pub struct Sent {
     #[serde(with = "u64s")]
     pub handed: u64,
     /// When its request was handed to a ready connection: the connect's
-    /// lateness from `handed`, the stand's; the write's to `at`, the stand's.
+    /// lateness from `handed`, the stand's; the write's to `at`, the stand's —
+    /// less `lag`.
     #[serde(with = "u64s")]
     pub connected: u64,
+    /// Microseconds its source's thread kept its send path's wakes waiting
+    /// between `handed` and `at` (version 6): the harness's, not the stand's
+    /// (ADR-0047 decision 18).
+    #[serde(with = "u64s")]
+    pub lag: u64,
 }
 
 /// How an attempt ended, as its handler judged it.
@@ -447,12 +500,135 @@ pub struct Ended {
     pub wake: Option<u64>,
 }
 
-/// A harness fault: the run is void (decision 14).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A harness fault: the run is void (decisions 14, 18). A step's — the
+/// backstop's — after which the run goes on; or a run's, which stops it: the
+/// journal's last line before its trailer. No host text: names are dotted
+/// names, the rest numbers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FaultClass {
     /// A handler that never reported: the machine's backstop ended its step.
-    Backstop,
+    Backstop {
+        /// The step.
+        #[serde(with = "u64s")]
+        line: Number,
+    },
+    /// An input stamped below what the frontier released.
+    Below {
+        /// Its stamp.
+        #[serde(with = "u64s")]
+        stamp: u64,
+        /// What was released.
+        #[serde(with = "u64s")]
+        released: u64,
+    },
+    /// An input taken stamped below one taken before it.
+    Disordered {
+        /// Its stamp.
+        #[serde(with = "u64s")]
+        stamp: u64,
+        /// The last taken.
+        #[serde(with = "u64s")]
+        last: u64,
+    },
+    /// The machine's own work stamped below the instant it was taken.
+    Backdated {
+        /// Its stamp.
+        #[serde(with = "u64s")]
+        stamp: u64,
+        /// When it was taken.
+        #[serde(with = "u64s")]
+        now: u64,
+    },
+    /// An attempt's handle dropped before it ended.
+    Dropped {
+        /// Its step.
+        #[serde(with = "u64s")]
+        line: Number,
+        /// The attempt.
+        attempt: u32,
+    },
+    /// A carrier could not carry an attempt.
+    Carrier {
+        /// Its step.
+        #[serde(with = "u64s")]
+        line: Number,
+        /// The attempt.
+        attempt: u32,
+        /// What it could not do, a dotted name the carrier chooses.
+        cannot: Code,
+    },
+    /// An answer judged for the route timeout and still not ended.
+    Held {
+        /// Its step.
+        #[serde(with = "u64s")]
+        line: Number,
+        /// The attempt.
+        attempt: u32,
+        /// When it arrived.
+        #[serde(with = "u64s")]
+        since: u64,
+    },
+    /// Work due at an instant and no progress on it.
+    Stalled,
+    /// A lock poisoned by a panic.
+    Poisoned,
+    /// Attempt tasks alive past the steps not ended and a margin: a source
+    /// that cannot keep up.
+    Saturated {
+        /// Attempt tasks alive.
+        #[serde(with = "u64s")]
+        alive: u64,
+    },
+    /// The clock failed.
+    Clock,
+    /// The log, as the run read it.
+    Log(LogFault),
+    /// A stand's gate refused the run before T0: the journal's only line.
+    Gate {
+        /// Its name, a dotted name the host chooses.
+        name: Code,
+    },
+}
+
+/// How the log failed the run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogFault {
+    /// Its bytes against its commitment.
+    Diverged,
+    /// It ended before its records.
+    Truncated,
+    /// A record it could not read.
+    Malformed,
+    /// Its file.
+    Io,
+}
+
+impl FaultClass {
+    /// Whether it stops the run: every class but the backstop's.
+    pub fn stops(&self) -> bool {
+        !matches!(self, FaultClass::Backstop { .. })
+    }
+
+    /// The step it names, and the attempt, if any.
+    pub fn struck(&self) -> Option<(Number, Option<u32>)> {
+        match self {
+            FaultClass::Backstop { line } => Some((*line, None)),
+            FaultClass::Dropped { line, attempt }
+            | FaultClass::Carrier { line, attempt, .. }
+            | FaultClass::Held { line, attempt, .. } => Some((*line, Some(*attempt))),
+            FaultClass::Below { .. }
+            | FaultClass::Disordered { .. }
+            | FaultClass::Backdated { .. }
+            | FaultClass::Stalled
+            | FaultClass::Poisoned
+            | FaultClass::Saturated { .. }
+            | FaultClass::Clock
+            | FaultClass::Log(_)
+            | FaultClass::Gate { .. } => None,
+        }
+    }
 }
 
 /// A harness fault.
@@ -464,9 +640,6 @@ pub struct Fault {
     pub at: u64,
     /// Which.
     pub class: FaultClass,
-    /// The step it struck.
-    #[serde(with = "u64s")]
-    pub line: Number,
 }
 
 /// The last line: the lines and steps before it, and their digest.
@@ -602,12 +775,14 @@ pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
             attempt,
             handed,
             connected,
+            lag,
         } => lines.push(Line::Sent(Sent {
             at,
             line: *line,
             attempt: *attempt,
             handed: *handed,
             connected: *connected,
+            lag: *lag,
         })),
         Input::Ended {
             line,
@@ -688,8 +863,7 @@ pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
                 if e.fault {
                     lines.push(Line::Fault(Fault {
                         at,
-                        class: FaultClass::Backstop,
-                        line: e.line,
+                        class: FaultClass::Backstop { line: e.line },
                     }));
                 }
             }

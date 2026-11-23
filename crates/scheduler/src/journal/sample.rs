@@ -6,8 +6,9 @@
 use ascetic_ddd_command_log::record::{On, Safety, Subject};
 
 use super::{
-    Action, Answer, Code, Critical, Dep, Dispatch, End, Ended, Fault, FaultClass, Found, Header,
-    Ignored, JOURNAL_VERSION, Judged, Key, Line, Read, Released, Sent, Skip, Slot,
+    Action, Answer, Code, Critical, Dep, Dispatch, End, Ended, Fault, FaultClass, Found, Gate,
+    Header, Ignored, JOURNAL_VERSION, Judged, Judging, Key, Line, LogFault, Read, Released, Sent,
+    Shape, Skip, Slot,
 };
 use crate::machine::MACHINE_REVISION;
 
@@ -24,7 +25,22 @@ pub fn header() -> Header {
         resend: 100_000,
         namespace: u64::MAX,
         // Before the epoch, past what a float holds exactly.
-        t0: i64::MIN,
+        t0: Some(i64::MIN),
+        gates: vec![
+            Gate {
+                name: Code::Named("gateway.buckets_refilled".into()),
+                took: u64::MAX,
+            },
+            Gate {
+                name: Code::Other,
+                took: 0,
+            },
+        ],
+        judging: Some(Judging {
+            cap: u64::MAX,
+            took: 0,
+            shape: Shape::Numbers,
+        }),
     }
 }
 
@@ -153,6 +169,7 @@ pub fn lines() -> Vec<Line> {
             attempt: u32::MAX,
             handed: 3,
             connected: u64::MAX,
+            lag: u64::MAX,
         }),
         Line::Answer(Answer {
             at: 5,
@@ -216,8 +233,7 @@ pub fn lines() -> Vec<Line> {
         if fault {
             lines.push(Line::Fault(Fault {
                 at: line.saturating_mul(1_000),
-                class: FaultClass::Backstop,
-                line,
+                class: FaultClass::Backstop { line },
             }));
         }
     }
@@ -229,5 +245,55 @@ pub fn lines() -> Vec<Line> {
         bound: vec![],
         ..ended(8, End::Expected, None, false)
     })));
+    // Every class of a run's fault (decision 18): in a run, only one, the
+    // last line; here, the byte form of each.
+    let stops = [
+        FaultClass::Below {
+            stamp: 0,
+            released: u64::MAX,
+        },
+        FaultClass::Disordered {
+            stamp: 1,
+            last: u64::MAX,
+        },
+        FaultClass::Backdated {
+            stamp: 2,
+            now: u64::MAX,
+        },
+        FaultClass::Dropped {
+            line: u64::MAX,
+            attempt: u32::MAX,
+        },
+        FaultClass::Carrier {
+            line: 2,
+            attempt: 1,
+            cannot: Code::Named("rest.decorator".to_owned()),
+        },
+        FaultClass::Carrier {
+            line: 3,
+            attempt: 2,
+            cannot: Code::Other,
+        },
+        FaultClass::Held {
+            line: 4,
+            attempt: 1,
+            since: u64::MAX,
+        },
+        FaultClass::Stalled,
+        FaultClass::Poisoned,
+        FaultClass::Saturated { alive: u64::MAX },
+        FaultClass::Clock,
+        FaultClass::Log(LogFault::Diverged),
+        FaultClass::Log(LogFault::Truncated),
+        FaultClass::Log(LogFault::Malformed),
+        FaultClass::Log(LogFault::Io),
+        FaultClass::Gate {
+            name: Code::Named("stand.namespace_unseen".to_owned()),
+        },
+        FaultClass::Gate { name: Code::Other },
+    ];
+    for (at, class) in (9_000u64..).zip(stops) {
+        lines.push(Line::Fault(Fault { at, class }));
+    }
     lines
 }

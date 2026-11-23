@@ -1,11 +1,11 @@
-{"header":{"journal":5,"machine":4,"source":"verdict","log":"376927ed99df2541cf2224aca052b3d051dd3241d23b415238461d9bd65a1d66","validator":"8: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent frame predicate expect secret","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000"}}
+{"header":{"journal":6,"machine":4,"source":"verdict","log":"376927ed99df2541cf2224aca052b3d051dd3241d23b415238461d9bd65a1d66","validator":"8: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent frame predicate expect secret","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000","gates":[],"judging":null}}
 {"read":{"at":"1500","line":"2","key":{"kind":"device","scope":"Bw==","label":"watched","n":0},"action":"poll","safety":"never","cause":"2","after":[],"planned":"1000"}}
 {"released":{"at":"1500","line":"2","intended":"1000","released":"1500","deadline":"2000"}}
 {"dispatch":{"at":"1500","line":"2","attempt":1,"deadline":"2000","due":"1500"}}
-{"sent":{"at":"1500","line":"2","attempt":1,"handed":"1500","connected":"1500"}}
+{"sent":{"at":"1500","line":"2","attempt":1,"handed":"1500","connected":"1500","lag":"0"}}
 {"answer":{"at":"1510","line":"2","attempt":1,"judged":"unexpected","captured":[],"ignored":null,"status":null,"code":null,"after":null,"censored":false,"found":null}}
 {"dispatch":{"at":"1900","line":"2","attempt":2,"deadline":"2000","due":"1900"}}
-{"sent":{"at":"1900","line":"2","attempt":2,"handed":"1900","connected":"1900"}}
+{"sent":{"at":"1900","line":"2","attempt":2,"handed":"1900","connected":"1900","lag":"0"}}
 {"answer":{"at":"1910","line":"2","attempt":2,"judged":"unexpected","captured":[],"ignored":null,"status":null,"code":null,"after":null,"censored":false,"found":null}}
 {"end":{"at":"2000","line":"2","end":"unknown","read":"1500","ready":"0","intended":"1000","released":"1500","dispatched":"1500","sent":"1500","ended":"2000","attempts":2,"critical":null,"bound":[],"fault":false,"wake":"2000"}}
-{"trailer":{"events":"9","steps":"1","sha256":"c8055d36bf242d611b585865fd674d4bc03ce86422ade4cf5ba9841945257748"}}
+{"trailer":{"events":"9","steps":"1","sha256":"1d14f554bc60db1acb218030439538d930c455e45c00ed68d1b9865ac71251d7"}}

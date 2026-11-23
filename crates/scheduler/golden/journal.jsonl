@@ -1,4 +1,4 @@
-{"header":{"journal":5,"machine":4,"source":"golden — every variant","log":"34d0604f25ecb8d0fa280db8b55837ff0ba21e52e3ab4d0ceb89b1e5ba24149d","validator":"6: golden","read_ahead":"18446744073709551615","jitter":"200","resend":"100000","namespace":"18446744073709551615","t0":"-9223372036854775808"}}
+{"header":{"journal":6,"machine":4,"source":"golden — every variant","log":"34d0604f25ecb8d0fa280db8b55837ff0ba21e52e3ab4d0ceb89b1e5ba24149d","validator":"6: golden","read_ahead":"18446744073709551615","jitter":"200","resend":"100000","namespace":"18446744073709551615","t0":"-9223372036854775808","gates":[{"name":{"named":"gateway.buckets_refilled"},"took":"18446744073709551615"},{"name":"other","took":"0"}],"judging":{"cap":"18446744073709551615","took":"0","shape":"numbers"}}}
 {"read":{"at":"0","line":"2","key":{"kind":"device","scope":"AP8i","label":"enroll","n":0},"action":"rest","safety":"not_taken","cause":null,"after":[],"planned":"0"}}
 {"read":{"at":"18446744073709551615","line":"3","key":{"kind":"device","scope":"AP8i","label":"report","n":1},"action":"observe","safety":"never","cause":"18446744073709551615","after":[{"step":{"on":"sent","line":"2"}},{"each":{"on":"expected","key":{"kind":"device","scope":"AP8i","label":"read","n":4294967295},"members":"18446744073709551615"}},{"step":{"on":"settled","line":"18446744073709551615"}}],"planned":"18446744073709551615"}}
 {"read":{"at":"1","line":"4","key":{"kind":"device","scope":"AP8i","label":"publish","n":0},"action":"bus","safety":"idempotent","cause":null,"after":[],"planned":"1"}}
@@ -6,7 +6,7 @@
 {"read":{"at":"2","line":"6","key":{"kind":"device","scope":"AP8i","label":"watched","n":0},"action":"poll","safety":"never","cause":"2","after":[],"planned":"2"}}
 {"released":{"at":"1","line":"2","intended":"2","released":"3","deadline":"18446744073709551615"}}
 {"dispatch":{"at":"3","line":"2","attempt":1,"deadline":"18446744073709551615","due":"2"}}
-{"sent":{"at":"4","line":"2","attempt":4294967295,"handed":"3","connected":"18446744073709551615"}}
+{"sent":{"at":"4","line":"2","attempt":4294967295,"handed":"3","connected":"18446744073709551615","lag":"18446744073709551615"}}
 {"answer":{"at":"5","line":"2","attempt":1,"judged":"expected","captured":[{"subject":{"kind":"device","scope":"AQID","index":"18446744073709551615"},"slot":"id"},{"subject":{"kind":"device","scope":"AQID","index":"18446744073709551615"},"slot":"token"}],"ignored":null,"status":201,"code":null,"after":null,"censored":false,"found":null}}
 {"answer":{"at":"6","line":"3","attempt":2,"judged":"unexpected","captured":[],"ignored":"ended","status":65535,"code":"other","after":null,"censored":false,"found":{"absent":"0","deadline":"18446744073709551615"}}}
 {"answer":{"at":"7","line":"3","attempt":2,"judged":"not_taken","captured":[],"ignored":"stale","status":503,"code":{"named":"service.session_failed"},"after":"18446744073709551615","censored":false,"found":null}}
@@ -14,9 +14,26 @@
 {"end":{"at":"2000","line":"2","end":"expected","read":"10","ready":"20","intended":"30","released":"40","dispatched":"50","sent":null,"ended":"2000","attempts":1,"critical":{"step":"2"},"bound":["2","18446744073709551615"],"fault":false,"wake":null}}
 {"end":{"at":"3000","line":"3","end":"unexpected","read":"10","ready":"20","intended":"30","released":"40","dispatched":"50","sent":null,"ended":"3000","attempts":1,"critical":{"member":"4"},"bound":["2","18446744073709551615"],"fault":false,"wake":null}}
 {"end":{"at":"4000","line":"4","end":"unknown","read":"10","ready":"20","intended":"30","released":"40","dispatched":"50","sent":null,"ended":"4000","attempts":1,"critical":null,"bound":["2","18446744073709551615"],"fault":true,"wake":"18446744073709551615"}}
-{"fault":{"at":"4000","class":"backstop","line":"4"}}
+{"fault":{"at":"4000","class":{"backstop":{"line":"4"}}}}
 {"end":{"at":"5000","line":"5","end":{"skipped":{"dependency":"2"}},"read":"10","ready":"20","intended":"30","released":"40","dispatched":"50","sent":null,"ended":"5000","attempts":1,"critical":null,"bound":["2","18446744073709551615"],"fault":false,"wake":null}}
 {"end":{"at":"6000","line":"6","end":{"skipped":{"member":"4"}},"read":"10","ready":"20","intended":"30","released":"40","dispatched":"50","sent":null,"ended":"6000","attempts":1,"critical":null,"bound":["2","18446744073709551615"],"fault":false,"wake":null}}
 {"end":{"at":"7000","line":"7","end":{"skipped":{"missing_capture":"18446744073709551615"}},"read":"10","ready":"20","intended":"30","released":"40","dispatched":"50","sent":null,"ended":"7000","attempts":1,"critical":null,"bound":["2","18446744073709551615"],"fault":false,"wake":null}}
 {"end":{"at":"8000","line":"8","end":"expected","read":"10","ready":"20","intended":"30","released":"40","dispatched":null,"sent":"18446744073709551615","ended":"8000","attempts":4294967295,"critical":null,"bound":[],"fault":false,"wake":null}}
-{"trailer":{"events":"20","steps":"7","sha256":"60e4fdd2835b5b68f6b76e3855a871a43d40e527e4d3dad9cc4d694bf3302ab2"}}
+{"fault":{"at":"9000","class":{"below":{"stamp":"0","released":"18446744073709551615"}}}}
+{"fault":{"at":"9001","class":{"disordered":{"stamp":"1","last":"18446744073709551615"}}}}
+{"fault":{"at":"9002","class":{"backdated":{"stamp":"2","now":"18446744073709551615"}}}}
+{"fault":{"at":"9003","class":{"dropped":{"line":"18446744073709551615","attempt":4294967295}}}}
+{"fault":{"at":"9004","class":{"carrier":{"line":"2","attempt":1,"cannot":{"named":"rest.decorator"}}}}}
+{"fault":{"at":"9005","class":{"carrier":{"line":"3","attempt":2,"cannot":"other"}}}}
+{"fault":{"at":"9006","class":{"held":{"line":"4","attempt":1,"since":"18446744073709551615"}}}}
+{"fault":{"at":"9007","class":"stalled"}}
+{"fault":{"at":"9008","class":"poisoned"}}
+{"fault":{"at":"9009","class":{"saturated":{"alive":"18446744073709551615"}}}}
+{"fault":{"at":"9010","class":"clock"}}
+{"fault":{"at":"9011","class":{"log":"diverged"}}}
+{"fault":{"at":"9012","class":{"log":"truncated"}}}
+{"fault":{"at":"9013","class":{"log":"malformed"}}}
+{"fault":{"at":"9014","class":{"log":"io"}}}
+{"fault":{"at":"9015","class":{"gate":{"name":{"named":"stand.namespace_unseen"}}}}}
+{"fault":{"at":"9016","class":{"gate":{"name":"other"}}}}
+{"trailer":{"events":"37","steps":"7","sha256":"0b4dc3f7cb75354190854d1fdaaa97df9171bd6d846d5db73e2fbc8b8c40cbc5"}}

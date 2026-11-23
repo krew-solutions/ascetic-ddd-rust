@@ -20,14 +20,15 @@ use std::collections::BTreeMap;
 use ascetic_ddd_command_log::record::{On, Safety};
 
 use crate::journal::{
-    Action, Answer, Dep, End, Ended, Found, Header, JournalError, Judged, Key, Line, Read, Skip,
+    Action, Answer, Dep, End, Ended, Fault, FaultClass, Found, Header, JournalError, Judged, Key,
+    Line, Read, Skip,
 };
 use crate::machine::Line as Number;
 
 /// What the fold decides, as a number: raised whenever the classes or the
 /// verdict it gives a journal change, which the goldens' and the differential's
 /// classes pin beside it.
-pub const FOLD_REVISION: u32 = 5;
+pub const FOLD_REVISION: u32 = 6;
 
 /// A line's class (decision 14), by precedence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -70,10 +71,10 @@ pub enum Void {
         /// What the run was to run.
         log: String,
     },
-    /// A harness fault.
+    /// A harness fault: the run's stop, or else the first backstop.
     Fault {
-        /// The first step it struck.
-        line: Number,
+        /// Its class.
+        class: FaultClass,
     },
     /// The journal disagrees with itself.
     Incoherent {
@@ -220,6 +221,13 @@ struct First {
     /// A backstop's end, its fault line still to come.
     owed: Option<Number>,
     fault: Option<Number>,
+    /// The run's stop (decision 18): the journal's last line.
+    stop: Option<FaultClass>,
+    /// Lines taken, and the latest instant among them.
+    taken: u64,
+    latest: u64,
+    /// The header holds no T0: only a gate's refusal may follow.
+    unstarted: bool,
     /// Steps ended by a censor, their late answer not yet found.
     censors: BTreeMap<Number, Censor>,
 }
@@ -250,9 +258,29 @@ impl First {
     }
 
     fn take(&mut self, l: &Line) -> Result<(), Void> {
+        if self.stop.is_some() {
+            return Err(incoherent(0, "a line after the run's stop"));
+        }
+        let at = match l {
+            Line::Read(x) => x.at,
+            Line::Released(x) => x.at,
+            Line::Dispatch(x) => x.at,
+            Line::Sent(x) => x.at,
+            Line::Answer(x) => x.at,
+            Line::End(x) => x.at,
+            Line::Fault(x) => x.at,
+            Line::Header(_) | Line::Trailer(_) => 0,
+        };
+        let taken = self.step(l);
+        self.taken = self.taken.saturating_add(1);
+        self.latest = self.latest.max(at);
+        taken
+    }
+
+    fn step(&mut self, l: &Line) -> Result<(), Void> {
         if let Some(owed) = self.owed.take() {
             return match l {
-                Line::Fault(f) if f.line == owed => {
+                Line::Fault(f) if f.class == (FaultClass::Backstop { line: owed }) => {
                     self.fault.get_or_insert(owed);
                     Ok(())
                 }
@@ -390,6 +418,10 @@ impl First {
                         if t.handed > t.connected || t.connected > t.at {
                             return Err(incoherent(t.line, "a send against its path"));
                         }
+                        // Its thread's lag lies inside its path (decision 18).
+                        if t.lag > t.at.saturating_sub(t.handed) {
+                            return Err(incoherent(t.line, "a send's lag past its path"));
+                        }
                         if t.attempt == lv.attempts && lv.last_sent.is_none() {
                             if t.handed < lv.last_dispatch {
                                 return Err(incoherent(
@@ -397,10 +429,13 @@ impl First {
                                     "a send handed before its dispatch",
                                 ));
                             }
-                            // The hand-off, the harness's (decision 17).
+                            // The hand-off, the harness's (decision 17), and
+                            // its source thread's lag on the send path
+                            // (decision 18).
                             lv.harness = lv
                                 .harness
-                                .saturating_add(t.handed.saturating_sub(lv.last_dispatch));
+                                .saturating_add(t.handed.saturating_sub(lv.last_dispatch))
+                                .saturating_add(t.lag);
                             lv.harness_sent.get_or_insert(lv.harness);
                         }
                         if t.attempt == lv.attempts {
@@ -455,8 +490,44 @@ impl First {
                 }
             }
             Line::End(e) => self.end(e),
-            Line::Fault(f) => Err(incoherent(f.line, "a fault without its backstop's end")),
+            Line::Fault(f) => self.stopped(f),
         }
+    }
+
+    /// A run's stop (decision 18): a gate's refusal, the journal's only line,
+    /// at 0, under a header with no T0; any other no earlier than the lines
+    /// before it, the step it names read and its attempt dispatched.
+    fn stopped(&mut self, f: &Fault) -> Result<(), Void> {
+        match &f.class {
+            FaultClass::Backstop { line } => {
+                return Err(incoherent(*line, "a fault without its backstop's end"));
+            }
+            FaultClass::Gate { .. } => {
+                if self.taken != 0 || f.at != 0 || !self.unstarted {
+                    return Err(incoherent(
+                        0,
+                        "a gate's refusal not the journal's only line",
+                    ));
+                }
+            }
+            class => {
+                if f.at < self.latest {
+                    return Err(incoherent(0, "a stop before the line above it"));
+                }
+                if let Some((line, attempt)) = class.struck() {
+                    if !First::read_before(line, self.next) {
+                        return Err(incoherent(line, "a stop naming a line not read"));
+                    }
+                    if let (Some(a), Some(lv)) = (attempt, self.live.get(&line))
+                        && (a == 0 || a > lv.attempts)
+                    {
+                        return Err(incoherent(line, "a stop naming an attempt not out"));
+                    }
+                }
+            }
+        }
+        self.stop = Some(f.class.clone());
+        Ok(())
     }
 
     /// A late answer and its bracket (decision 17, version 5): ignored, for
@@ -674,6 +745,13 @@ impl First {
         if let Some(owed) = self.owed {
             return Err(incoherent(owed, "a backstop's end without its fault"));
         }
+        if self.unstarted && !matches!(self.stop, Some(FaultClass::Gate { .. })) {
+            return Err(incoherent(0, "no T0, and no gate's refusal"));
+        }
+        // Stopped, the run's steps need not all have ended.
+        if self.stop.is_some() {
+            return Ok(());
+        }
         match self.live.keys().next() {
             Some(line) => Err(incoherent(*line, "a step read and never ended")),
             None => Ok(()),
@@ -831,6 +909,10 @@ where
         next: 2,
         owed: None,
         fault: None,
+        stop: None,
+        taken: 0,
+        latest: 0,
+        unstarted: header.t0.is_none(),
     };
     for l in first {
         let step = l
@@ -843,7 +925,22 @@ where
     if let Err(v) = one.finish() {
         return void(v, Vec::new());
     }
-    if u64::try_from(one.bytes.len()).ok() != Some(log.records) {
+    let read = u64::try_from(one.bytes.len()).unwrap_or(u64::MAX);
+    // A stopped run read at most its log; its classes are none: the second
+    // pass reads a whole run (decision 18).
+    if let Some(class) = one.stop {
+        if read > log.records {
+            return void(
+                Void::AnotherLog {
+                    journal: format!("{read} lines read"),
+                    log: format!("{} steps", log.records),
+                },
+                Vec::new(),
+            );
+        }
+        return void(Void::Fault { class }, Vec::new());
+    }
+    if read != log.records {
         return void(
             Void::AnotherLog {
                 journal: format!("{} lines read", one.bytes.len()),
@@ -877,7 +974,9 @@ where
     }
     let classes = two.classes;
     let verdict = if let Some(line) = fault {
-        Verdict::Void(Void::Fault { line })
+        Verdict::Void(Void::Fault {
+            class: FaultClass::Backstop { line },
+        })
     } else if classes.contains(&Class::Root) {
         Verdict::Fail
     } else if classes.contains(&Class::Undecided) {

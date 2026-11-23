@@ -75,7 +75,9 @@ fn folded(
         jitter: header.profile.jitter,
         resend: header.profile.resend,
         namespace: 1,
-        t0: 1_763_640_000_000_000,
+        t0: Some(1_763_640_000_000_000),
+        gates: Vec::new(),
+        judging: None,
     };
     let lines = || ran.journal.iter().cloned().map(Ok);
     ascetic_ddd_scheduler::verdict::fold(&h, &log, lines(), lines())

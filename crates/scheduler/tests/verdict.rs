@@ -48,7 +48,9 @@ fn journal_header(header: &Header, log: &Log) -> journal::Header {
         jitter: header.profile.jitter,
         resend: header.profile.resend,
         namespace: 1,
-        t0: 1_763_640_000_000_000,
+        t0: Some(1_763_640_000_000_000),
+        gates: Vec::new(),
+        judging: None,
     }
 }
 
@@ -78,12 +80,25 @@ fn case(name: &str, bytes: &[u8], log: &Log, folded: &Folded) -> serde_json::Val
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
+    // The run's stop, by its class's name (decision 18): the definition must
+    // name the same.
+    let stop = match &folded.verdict {
+        Verdict::Void(Void::Fault { class }) if class.stops() => {
+            match serde_json::to_value(class).unwrap() {
+                serde_json::Value::String(s) => Some(s),
+                serde_json::Value::Object(o) => o.keys().next().cloned(),
+                other => panic!("a class written as {other}"),
+            }
+        }
+        _ => None,
+    };
     serde_json::json!({
         "name": name,
         "log": {"sha256": log.sha256, "records": log.records},
         "journal": lines,
         "verdict": verdict_name(&folded.verdict),
         "classes": folded.classes.iter().map(|c| c.name()).collect::<Vec<_>>(),
+        "stop": stop,
     })
 }
 
@@ -368,6 +383,17 @@ fn goldens() -> Vec<Golden> {
             }
         }),
         vec![Passed, Root],
+        "fail",
+    );
+    // A call the stand was slow to take — its write 1,000 µs — then silent:
+    // censored, the system's (decision 17), as long as its source's thread
+    // did not keep the write waiting (decision 18: `lag`).
+    add(
+        "censored_written_slowly",
+        header_j(),
+        vec![call("read", 1, 0, 0, 0)],
+        Box::new(|_, _| answer(1_000, None, Judgement::Unknown)),
+        vec![Root],
         "fail",
     );
     // An observation read past its cause's window: released at its deadline
@@ -667,6 +693,7 @@ fn backstop() -> (Header, Vec<Record>, Vec<Line>) {
             attempt: 1,
             handed: 0,
             connected: 0,
+            lag: 0,
         },
     );
     step(
@@ -973,8 +1000,7 @@ fn broken_evidence_is_void() {
             Box::new(|_, l, _| {
                 l.push(Line::Fault(journal::Fault {
                     at: 1_000_000,
-                    class: journal::FaultClass::Backstop,
-                    line: 2,
+                    class: journal::FaultClass::Backstop { line: 2 },
                 }))
             }),
             "void:incoherent",
@@ -1649,4 +1675,404 @@ fn the_receive_side_s_guarantees_hold_over_the_looks() {
         "P1 {p1}, P2 {p2}, P3 {p3}"
     );
     by_definition(&defined);
+}
+
+/// A journal's header and lines, as its reader gives them.
+fn read_lines(bytes: &[u8]) -> (journal::Header, Vec<Line>) {
+    let r = Reader::new(Cursor::new(bytes.to_vec())).unwrap();
+    let h = r.header().clone();
+    (h, r.collect::<Result<_, _>>().unwrap())
+}
+
+/// The latest instant among `lines`.
+fn latest(lines: &[Line]) -> u64 {
+    lines
+        .iter()
+        .map(|l| match l {
+            Line::Read(x) => x.at,
+            Line::Released(x) => x.at,
+            Line::Dispatch(x) => x.at,
+            Line::Sent(x) => x.at,
+            Line::Answer(x) => x.at,
+            Line::End(x) => x.at,
+            Line::Fault(x) => x.at,
+            Line::Header(_) | Line::Trailer(_) => 0,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn stop_at(at: u64, class: journal::FaultClass) -> Line {
+    Line::Fault(journal::Fault { at, class })
+}
+
+/// Decision 18: the source thread's lag on a send path is the harness's — a
+/// censored call's, and an observation's cause's — past J undecided, at J
+/// the system's; and it lies inside its path.
+#[test]
+fn a_send_s_lag_is_the_harness_s() {
+    use Class::*;
+    let goldens = golden_journals();
+    let by_name = |n: &str| goldens.iter().find(|g| g.name == n).unwrap();
+    // The send of `line`, its hand-off and lag set.
+    let lagged = |from: &str, line: u64, handed: u64, lag: u64| {
+        let g = by_name(from);
+        let (h, mut lines) = read_lines(&g.bytes);
+        for x in lines.iter_mut() {
+            if let Line::Sent(t) = x
+                && t.line == line
+            {
+                t.handed = handed;
+                t.connected = t.connected.max(handed);
+                t.lag = lag;
+            }
+        }
+        (write(&h, &lines), g.log.clone())
+    };
+    let mut cases = Vec::new();
+    let classed = [
+        // A censored call: its lag alone, then with a hand-off.
+        ("censored_written_slowly", 2, 0, J, vec![Root], "fail"),
+        (
+            "censored_written_slowly",
+            2,
+            0,
+            J + 1,
+            vec![Undecided],
+            "void:undecided",
+        ),
+        (
+            "censored_written_slowly",
+            2,
+            100,
+            J - 100,
+            vec![Root],
+            "fail",
+        ),
+        (
+            "censored_written_slowly",
+            2,
+            100,
+            J - 99,
+            vec![Undecided],
+            "void:undecided",
+        ),
+        // An observation whose cause's send its thread held.
+        (
+            "late_cause_by_the_stand",
+            2,
+            0,
+            J,
+            vec![Passed, Root],
+            "fail",
+        ),
+        (
+            "late_cause_by_the_stand",
+            2,
+            0,
+            J + 1,
+            vec![Passed, Undecided],
+            "void:undecided",
+        ),
+    ];
+    for (from, line, handed, lag, classes, verdict) in classed {
+        let (bytes, log) = lagged(from, line, handed, lag);
+        let folded = fold_bytes(&bytes, &log);
+        assert_eq!(
+            (verdict_name(&folded.verdict), &folded.classes),
+            (verdict, &classes),
+            "{from}: hand-off {handed}, lag {lag}"
+        );
+        cases.push(case(
+            &format!("{from} {handed} {lag}"),
+            &bytes,
+            &log,
+            &folded,
+        ));
+    }
+    // Its lag past its path: the send left 1,000 µs after it was handed.
+    let (bytes, log) = lagged("censored_written_slowly", 2, 0, 1_001);
+    let folded = fold_bytes(&bytes, &log);
+    match &folded.verdict {
+        Verdict::Void(Void::Incoherent { why, .. }) => {
+            assert_eq!(*why, "a send's lag past its path")
+        }
+        other => panic!("{other:?}"),
+    }
+    cases.push(case("a lag past its path", &bytes, &log, &folded));
+    let reached = by_definition(&cases);
+    assert!(reached.contains("'undecided_censor'") && reached.contains("'undecided_cause'"));
+}
+
+/// Decision 18: a run's stop is its journal's last line — void, no classes,
+/// whatever its steps had shown; a gate's refusal the journal's only line,
+/// under a header with no T0; and each rule's breach incoherent.
+#[test]
+fn a_run_s_stop_is_its_journal_s_last_line() {
+    use journal::FaultClass as F;
+    let goldens = golden_journals();
+    let by_name = |n: &str| goldens.iter().find(|g| g.name == n).unwrap();
+    let clean = by_name("clean");
+    let (h, lines) = read_lines(&clean.bytes);
+    let first_end = lines
+        .iter()
+        .position(|l| matches!(l, Line::End(_)))
+        .unwrap();
+    let mut cases = Vec::new();
+    let mut check = |name: &str, h: &journal::Header, lines: &[Line], log: &Log, want: &str| {
+        let bytes = write(h, lines);
+        let folded = fold_bytes(&bytes, log);
+        match &folded.verdict {
+            Verdict::Void(Void::Incoherent { why, .. }) => assert_eq!(*why, want, "{name}"),
+            Verdict::Void(Void::Fault { class }) => {
+                assert!(class.stops(), "{name}");
+                assert_eq!("stopped", want, "{name}");
+                assert!(folded.classes.is_empty(), "{name}");
+            }
+            other => panic!("{name}: {other:?}"),
+        }
+        cases.push(case(name, &bytes, log, &folded));
+    };
+    let at = latest(&lines);
+    // Stopped mid-run, and after every step ended: void, not pass.
+    let mut mid = lines[..=first_end].to_vec();
+    mid.push(stop_at(latest(&mid), F::Stalled));
+    check("stopped mid-run", &h, &mid, &clean.log, "stopped");
+    let mut all = lines.clone();
+    all.push(stop_at(at, F::Poisoned));
+    check(
+        "stopped once every step ended",
+        &h,
+        &all,
+        &clean.log,
+        "stopped",
+    );
+    // A stop after a backstop's fault, naming the struck step.
+    let backstop = by_name("backstop");
+    let (bh, mut bl) = read_lines(&backstop.bytes);
+    bl.push(stop_at(
+        latest(&bl),
+        F::Dropped {
+            line: 2,
+            attempt: 1,
+        },
+    ));
+    check(
+        "a stop after a backstop",
+        &bh,
+        &bl,
+        &backstop.log,
+        "stopped",
+    );
+    // A gate's refusal: the header with no T0, the fault at 0, alone.
+    let unstarted = journal::Header {
+        t0: None,
+        ..h.clone()
+    };
+    let gate = stop_at(
+        0,
+        F::Gate {
+            name: journal::Code::Named("stand.namespace_unseen".to_owned()),
+        },
+    );
+    check(
+        "a gate refused",
+        &unstarted,
+        std::slice::from_ref(&gate),
+        &clean.log,
+        "stopped",
+    );
+    // The rules' breaches.
+    let mut after = mid.clone();
+    after.push(lines[first_end + 1].clone());
+    check(
+        "a line after the run's stop",
+        &h,
+        &after,
+        &clean.log,
+        "a line after the run's stop",
+    );
+    let mut late_gate = lines.clone();
+    late_gate.push(stop_at(
+        at,
+        F::Gate {
+            name: journal::Code::Other,
+        },
+    ));
+    check(
+        "a gate's refusal after a run's lines",
+        &unstarted,
+        &late_gate,
+        &clean.log,
+        "a gate's refusal not the journal's only line",
+    );
+    // At 0 after lines at 0: only its place breaks the rule.
+    let mut at_zero: Vec<Line> = lines
+        .iter()
+        .take_while(|l| latest(std::slice::from_ref(l)) == 0)
+        .cloned()
+        .collect();
+    assert!(!at_zero.is_empty());
+    at_zero.push(stop_at(
+        0,
+        F::Gate {
+            name: journal::Code::Other,
+        },
+    ));
+    check(
+        "a gate's refusal after lines at 0",
+        &unstarted,
+        &at_zero,
+        &clean.log,
+        "a gate's refusal not the journal's only line",
+    );
+    check(
+        "a gate's refusal under a T0",
+        &h,
+        &[gate],
+        &clean.log,
+        "a gate's refusal not the journal's only line",
+    );
+    check(
+        "a gate's refusal past 0",
+        &unstarted,
+        &[stop_at(
+            1,
+            F::Gate {
+                name: journal::Code::Other,
+            },
+        )],
+        &clean.log,
+        "a gate's refusal not the journal's only line",
+    );
+    check(
+        "no T0 and no gate's refusal",
+        &unstarted,
+        &lines,
+        &clean.log,
+        "no T0, and no gate's refusal",
+    );
+    let mut before = lines.clone();
+    before.push(stop_at(at - 1, F::Stalled));
+    check(
+        "a stop before the line above it",
+        &h,
+        &before,
+        &clean.log,
+        "a stop before the line above it",
+    );
+    let mut unread = mid.clone();
+    unread.pop();
+    unread.push(stop_at(
+        latest(&unread),
+        F::Held {
+            line: 9,
+            attempt: 1,
+            since: 0,
+        },
+    ));
+    check(
+        "a stop naming a line not read",
+        &h,
+        &unread,
+        &clean.log,
+        "a stop naming a line not read",
+    );
+    // Line 3 read and dispatched once, not ended, in the first end's prefix.
+    let live = lines[..first_end]
+        .iter()
+        .rposition(|l| matches!(l, Line::Dispatch(d) if d.line == 3))
+        .map(|i| lines[..=i].to_vec())
+        .unwrap_or_else(|| lines[..first_end].to_vec());
+    let mut out = live.clone();
+    out.push(stop_at(
+        latest(&out),
+        F::Dropped {
+            line: 3,
+            attempt: 2,
+        },
+    ));
+    check(
+        "a stop naming an attempt not out",
+        &h,
+        &out,
+        &clean.log,
+        "a stop naming an attempt not out",
+    );
+    let mut owed = bl.clone();
+    owed.pop();
+    let fault = owed
+        .iter()
+        .rposition(|l| matches!(l, Line::Fault(_)))
+        .unwrap();
+    owed[fault] = stop_at(latest(&owed), F::Stalled);
+    check(
+        "a backstop's end, a stop for its fault",
+        &bh,
+        &owed,
+        &backstop.log,
+        "a backstop's end without its fault",
+    );
+    let reached = by_definition(&cases);
+    for stop in ["stop_stalled", "stop_poisoned", "stop_dropped", "stop_gate"] {
+        assert!(reached.contains(&format!("'{stop}'")), "{stop}: {reached}");
+    }
+}
+
+/// Decision 18: every golden run cut after any of its lines — but between a
+/// backstop's end and its fault — and stopped there is void, classed not at
+/// all, never incoherent; the definition names the same stop.
+#[test]
+fn every_run_cut_and_stopped_is_void() {
+    use journal::FaultClass as F;
+    let mut cases = Vec::new();
+    for g in golden_journals() {
+        let (h, lines) = read_lines(&g.bytes);
+        for cut in 0..=lines.len() {
+            let prefix = &lines[..cut];
+            if matches!(prefix.last(), Some(Line::End(e)) if e.fault) {
+                continue;
+            }
+            let at = latest(prefix);
+            // A step read and dispatched in the prefix, for a class that names
+            // one.
+            let named = prefix.iter().rev().find_map(|l| match l {
+                Line::Dispatch(d) => Some((d.line, d.attempt)),
+                _ => None,
+            });
+            let mut classes = vec![F::Stalled, F::Log(journal::LogFault::Diverged)];
+            if let Some((line, attempt)) = named {
+                classes.push(F::Held {
+                    line,
+                    attempt,
+                    since: at,
+                });
+            }
+            for class in classes {
+                let mut cut_lines = prefix.to_vec();
+                cut_lines.push(stop_at(at, class.clone()));
+                let bytes = write(&h, &cut_lines);
+                let folded = fold_bytes(&bytes, &g.log);
+                assert_eq!(
+                    folded.verdict,
+                    Verdict::Void(Void::Fault {
+                        class: class.clone()
+                    }),
+                    "{} cut at {cut}",
+                    g.name
+                );
+                assert!(folded.classes.is_empty());
+                cases.push(case(
+                    &format!("{} cut at {cut}", g.name),
+                    &bytes,
+                    &g.log,
+                    &folded,
+                ));
+            }
+        }
+    }
+    let reached = by_definition(&cases);
+    for stop in ["stop_stalled", "stop_log", "stop_held"] {
+        assert!(reached.contains(&format!("'{stop}'")), "{stop}: {reached}");
+    }
 }
