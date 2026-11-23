@@ -1079,3 +1079,302 @@ fn a_late_answer_carries_where_it_was_not() {
     // In time, no bracket.
     assert_eq!(found(&looked(&[(10_001, 5_000)], at(9_500))), None);
 }
+
+use ascetic_ddd_command_log::record::{Field, Hole, Safety, TimeBase, TimeRendering, Value};
+use ascetic_ddd_load_run::decorate::{Decoration, Decorator};
+
+/// The host's decorator in a test: a fresh proof an attempt, minted in
+/// `takes` µs of the clock; or the header it is told to give.
+struct Proofs {
+    clock: Arc<VirtualClock>,
+    takes: u64,
+    minted: AtomicUsize,
+    give: Option<(String, String)>,
+}
+
+impl Decorator for Proofs {
+    async fn decorate<'a>(&'a self, _: Decoration<'a>) -> Result<Vec<(String, String)>, String> {
+        let until = self.clock.now() + self.takes;
+        self.clock.sleep_until(until).await;
+        let n = self.minted.fetch_add(1, Ordering::SeqCst) + 1;
+        Ok(vec![self.give.clone().unwrap_or((
+            "dpop".to_owned(),
+            format!("SECRET-proof-{n}"),
+        ))])
+    }
+}
+
+/// Operations that decorate `dpop`, a refusal certified, a resend's floor.
+fn decorating() -> Header {
+    let mut h = rest_header();
+    for o in &mut h.operations {
+        o.decorated = vec!["dpop".into()];
+        o.safety = Safety::NotTaken;
+        o.not_run = vec!["service.unavailable".into()];
+    }
+    h
+}
+
+/// `r` with a header its send's wall time fills.
+fn stamped(mut r: Record) -> Record {
+    let field = Field {
+        name: "x-sent".into(),
+        value: Value::Hole(Hole::Time {
+            base: TimeBase::Sent,
+            offset: 0,
+            rendering: TimeRendering::EpochMillis,
+        }),
+    };
+    match &mut r.action {
+        Action::Rest(rest) => rest.headers.push(field),
+        Action::Observe(o) => {
+            if let Probe::Rest(rest) = &mut o.probe {
+                rest.headers.push(field);
+            }
+        }
+        _ => {}
+    }
+    r
+}
+
+fn refused_503() -> Answer {
+    Answer::Ok {
+        head: 10,
+        body: 0,
+        status: 503,
+        // A second's wait: the resend's own instant renders a millisecond
+        // apart, so only the first attempt's keeps its bytes.
+        headers: vec![
+            ("content-type".into(), "application/problem+json".into()),
+            ("retry-after".into(), "1".into()),
+        ],
+        bytes: br#"{"code":"service.unavailable"}"#.to_vec(),
+        close: false,
+    }
+}
+
+/// A run decorated by `proofs`; every attempt's answer by its id.
+fn run_decorated(
+    header: Header,
+    records: &[Record],
+    answers: Vec<(String, Answer)>,
+    takes: u64,
+    give: Option<(String, String)>,
+) -> (Result<Vec<Line>, RunError>, Vec<Came>, usize) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let clock = Arc::new(VirtualClock::start(1_763_640_000_000_000));
+        let stub = Arc::new(Stub {
+            clock: clock.clone(),
+            answers: answers.into_iter().collect(),
+            connections: AtomicUsize::new(0),
+            came: Mutex::new(Vec::new()),
+        });
+        let proofs = Proofs {
+            clock: clock.clone(),
+            takes,
+            minted: AtomicUsize::new(0),
+            give,
+        };
+        let header = Arc::new(header);
+        let carrier = RestCarrier::decorated(
+            header.clone(),
+            OneStand,
+            Pipe {
+                stub: stub.clone(),
+                throttle: AT_ONCE,
+                holds: None,
+                connect: 0,
+            },
+            proofs,
+            Config {
+                namespace: NAMESPACE,
+                secret: RunSecret::new([7; 32]),
+                run_start: clock.wall(),
+            },
+        );
+        let runtimes = Runtimes {
+            sources: vec![tokio::runtime::Handle::current()],
+        };
+        let ran = clock
+            .within(run(
+                header,
+                W,
+                clock.clone(),
+                Records::new(records.iter().cloned()),
+                Lines::new(),
+                Arc::new(carrier),
+                &runtimes,
+            ))
+            .await;
+        let came = stub.came.lock().unwrap().clone();
+        (ran.map(|r| r.journal), came, 0)
+    })
+}
+
+/// A request's lines but those an attempt makes its own.
+fn planned_lines(bytes: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(bytes)
+        .split("\r\n")
+        .filter(|l| {
+            let l = l.to_ascii_lowercase();
+            !l.starts_with("dpop:") && !l.starts_with("x-correlation-id:")
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// K2-5 (ADR-0047 decision 16): decorated once an attempt — a fresh proof
+/// each — and every other byte of a resend its first attempt's, the time its
+/// first was sent among them; a correlation id an attempt.
+#[test]
+fn a_resend_is_its_first_attempt_s_bytes_but_its_own_proof() {
+    let records = vec![stamped(call("update", 1, 0, 0, 0))];
+    let answers = vec![
+        (id(&records[0], 1), refused_503()),
+        (id(&records[0], 2), ok(10, 0)),
+    ];
+    let (journal, came, _) = run_decorated(decorating(), &records, answers, 0, None);
+    assert_eq!(end(&journal.unwrap(), 2).map(|e| e.0), Some(End::Expected));
+    assert_eq!(came.len(), 2);
+    let text = |c: &Came| String::from_utf8_lossy(&c.bytes).into_owned();
+    assert_eq!(
+        field(&text(&came[0]), "dpop").as_deref(),
+        Some("SECRET-proof-1")
+    );
+    assert_eq!(
+        field(&text(&came[1]), "dpop").as_deref(),
+        Some("SECRET-proof-2")
+    );
+    assert_ne!(came[0].id, came[1].id);
+    assert!(field(&text(&came[0]), "x-sent").is_some());
+    assert_eq!(planned_lines(&came[0].bytes), planned_lines(&came[1].bytes));
+}
+
+/// K2-5: each poll's frame its own — the time it was sent its own dispatch's.
+#[test]
+fn each_poll_s_frame_is_its_own() {
+    let records = vec![stamped(polling(1, 0, 0, 5_000, 20_000))];
+    let not_yet = Answer::Ok {
+        head: 10,
+        body: 0,
+        status: 409,
+        headers: vec![],
+        bytes: vec![],
+        close: false,
+    };
+    let answers = vec![
+        (id(&records[0], 1), not_yet),
+        (id(&records[0], 2), ok(10, 0)),
+    ];
+    let (journal, came, _) = run_decorated(decorating(), &records, answers, 0, None);
+    journal.unwrap();
+    assert_eq!(came.len(), 2);
+    let sent = |c: &Came| field(&String::from_utf8_lossy(&c.bytes), "x-sent").unwrap();
+    assert_ne!(sent(&came[0]), sent(&came[1]));
+}
+
+/// The decorator's time is the harness's (decision 17): the attempt handed,
+/// ready to connect, only once it is decorated.
+#[test]
+fn the_decorator_s_time_is_the_harness_s() {
+    let records = vec![call("read", 1, 0, 0, 0)];
+    let (journal, _, _) = run_decorated(
+        decorating(),
+        &records,
+        vec![(id(&records[0], 1), ok(10, 0))],
+        100,
+        None,
+    );
+    let s = journal
+        .unwrap()
+        .iter()
+        .find_map(|l| match l {
+            Line::Sent(s) => Some(s.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!((s.handed, s.connected, s.at), (100, 100, 100));
+}
+
+/// A decorated header its operation does not declare, a value no header
+/// takes, a decorating operation without a decorator: each refused.
+#[test]
+fn what_a_decorator_may_give_is_the_operation_s() {
+    let records = vec![call("read", 1, 0, 0, 0)];
+    let answers = || vec![(id(&records[0], 1), ok(10, 0))];
+    for (give, what) in [
+        (("authorization", "x"), "does not declare"),
+        (("dpop", "a\nb"), "not a header"),
+    ] {
+        let give = Some((give.0.to_owned(), give.1.to_owned()));
+        let (journal, _, _) = run_decorated(decorating(), &records, answers(), 0, give);
+        match journal {
+            Err(RunError::Harness(ascetic_ddd_load_run::stamps::Harness::Carrier {
+                what: w,
+                ..
+            })) => {
+                assert!(w.contains(what), "{w}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    let (journal, _, _) = run_rest(decorating(), &records, vec![ok(10, 0)], AT_ONCE);
+    assert!(
+        matches!(journal, Err(RunError::Refused(ref why)) if why.contains("decorates")),
+        "{journal:?}"
+    );
+}
+
+/// K2-5: no secret in the journal — a decorator's proof, the run's secret —
+/// raw, nor in base64, base64url or hex.
+#[test]
+fn no_secret_reaches_the_journal() {
+    let records = vec![stamped(call("update", 1, 0, 0, 0))];
+    let answers = vec![
+        (id(&records[0], 1), refused_503()),
+        (id(&records[0], 2), ok(10, 0)),
+    ];
+    let (journal, _, _) = run_decorated(decorating(), &records, answers, 0, None);
+    let text: String = journal
+        .unwrap()
+        .iter()
+        .map(|l| serde_json::to_string(l).unwrap())
+        .collect();
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let b64 = |b: &[u8], url: bool| {
+        const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in b.chunks(3) {
+            let n =
+                chunk.iter().fold(0u32, |n, x| (n << 8) | u32::from(*x)) << (8 * (3 - chunk.len()));
+            for i in 0..=chunk.len() {
+                let c = A[((n >> (18 - 6 * i)) & 63) as usize];
+                out.push(match (url, c) {
+                    (true, b'+') => '-',
+                    (true, b'/') => '_',
+                    (_, c) => c as char,
+                });
+            }
+        }
+        out
+    };
+    for secret in [
+        b"SECRET-proof-1".as_slice(),
+        b"SECRET-proof-2".as_slice(),
+        &[7u8; 32],
+    ] {
+        for form in [
+            String::from_utf8_lossy(secret).into_owned(),
+            hex(secret),
+            b64(secret, false),
+            b64(secret, true),
+        ] {
+            assert!(!text.contains(&form), "{form} in the journal");
+        }
+    }
+    assert!(text.contains("\"line\""));
+}

@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) and K2b-3 (K2b-3a, K2b-3b) built (§ Measured), K2b-4 next. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b) and K2b-4 built (§ Measured), K2b-5 next. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -390,7 +390,9 @@ Distributed Systems, Verifiability, Performance — on Opus; it amends decision 
   deadline and taken past it ends a step there. A poll's wake taken exactly at its deadline ends the step there, as an
   unsatisfied observation ends; journal version 3 cannot tell the two, so the fold counts it a root — a false failure,
   never a false pass — until version 4 journals a wake's due instant (§ Owed).
-- **An attempt**: the frame from a cache (a call's built once and resent byte for byte, a poll's its own); the
+- **An attempt**: the frame from its fills — a call's at its first dispatch, so a resend's is the same bytes, a poll's
+  at its own (K2b-4: rebuilt, not cached — a cache would save only its building, worth having if building shows in the
+  hand-off) — (originally: from a cache, a call's built once and resent byte for byte, a poll's its own); the
   correlation and decorated headers; `try_send_request`, never once `now` reached the deadline. Two write instants,
   by the shell's own `Io` counting accepted bytes: the first byte is the commit point (no reconnect after it);
   `Sent` is the first flush of the socket once the request is handed over — hyper encodes the head and the body, one
@@ -445,7 +447,8 @@ each refuted):
   and taken at or past it, which no version-3 rule reached. Version 3's slack of J for a fallback is dead — a fallback
   is scheduled only when its wake is more than J before the deadline — and is now a coherence rule.
 - **Journal version 4**: `read.planned` (the plan's `at`), `dispatch.due` (the instant the wake that dispatched it was
-  due), `sent.handed` and `sent.connected` (the attempt task's first poll; the request handed to a ready connection,
+  due), `sent.handed` and `sent.connected` (the attempt ready to connect — its task run, and for REST its frame built
+  and decorated, a decorator being the host's own work, K2b-4 — then the request handed to a ready connection,
   the last if it reconnected; both the dispatch's instant in `sim`, `connected` at least `handed` in the shell),
   `answer.censored`, `end.wake` (the due instant of the wake whose taking ended the step, none through the cascade of
   skips). No new line kind: `journal::events`, pure, writes them from the machine's inputs and outputs, the same bytes
@@ -573,6 +576,7 @@ each refuted):
 | K2b-2b | K2b | over REST, the shell journals what `sim` journals on every clean corpus log with a REST step, under two seeds of a script an answer can carry (a refusal certified only where its operation lists a code, `Retry-After` in whole seconds on it alone, an unexpected answer only where one can be, each captured value in its source's form), its REST attempts over hyper to a stub inverting the judge and every other action scripted — status and code, which `sim` cannot know, projected out and checked against what the stub sent; expected, unexpected, certified, unknown, resent, captured and waited answers each reached; an answer at its deadline taken | the attempt leaving at the deadline; no code certifying a refusal; what an answer showed dropped; one correlation id a step; no captured value filled |
 | K2b-3a | K2b | goldens, each class by hand, folded by Rust and `verdict.py`: a poll's wake taken at its deadline undecided, its unsatisfied end there a root; a first dispatch taken past its deadline undecided; a dispatch J + 1 late then censored undecided, J late a root, and a 500 answered on a dispatch J + 1 late a root; the harness's lateness summed over a refusal and its resend undecided, on one attempt a root; an observation read late then censored undecided, its "not yet" a root; a poll released past its deadline coherent and undecided; a cause late by the harness's release undecided, by the stand's send a root; a twin a coherence rule, each naming it; the corpus and late-wake differentials coherent with the definition agreeing; a send's path from a frontier twin; the shell's hold past the route timeout a fault at exactly its instant, a microsecond short none, a carrier stuck on its thread caught on the real clock; a late hand-off journaled; the connect and the write journaled apart | a censor not required; the hand-off or the machine not the harness's; the last attempt alone; no reader for an observation; the lateness at J; a wake at its deadline late; no wake rule; a cause late by the stand; an observation its own late cause; the definition's three; a censor unmarked; an early reply's path the dispatch's; `handed` not `connected`; a first dispatch's end without its wake; a dispatch's due its dispatch; `handed` at the spawn; `connected` never reported; no stuck timer; the newest hold |
 | K2b-3b | K2b | on the real clock over loopback TCP, the source's runtime turning its driver only idle and held by a spinner from before the answer's bytes came to past the look, the bytes seen in the socket by `peek` before the deadline: the answer read at the look past the deadline and journaled late with where it was not — a run whose preconditions failed retried, not counted; under the virtual clock the bracket's bookkeeping — absent from the early look, from the deadline when that look came there, none when the look found nothing, none in time; a source not on a `current_thread` runtime refused; edited goldens — blind J + 1 undecided, blind J, absent at the deadline and no bracket roots, a poll's found before its end — and a twin a coherence rule; the guarantees over a model of the looks with the true arrival the oracle, 20,000 draws, the definition agreeing | the look without its turn; no early look; absent never advanced; a bracket on every answer; any runtime a source; found late at J, or whatever its absence; a live found without its censor; two founds a censor; the definition's two |
+| K2b-4 | K2b | K2-5's part over hyper to the stub: decorated once an attempt — a fresh proof each, a correlation id each — every other byte of a resend its first attempt's, the instant it was first sent among them (the resend a second later); each poll's frame its own instant; a decorator's minting time the harness's — `handed` after it; a decorated name the operation does not declare, a value no header takes, a decorating operation and no decorator, each refused; no decorator's proof nor the run's secret in the journal, raw, base64, base64url or hex | a call's frame its own dispatch's; a poll's its first's; an undeclared name given; a value not checked; `handed` before its decoration; a decorating operation without a decorator; the decoration not sent |
 | K2-1 | K2 | the shell against an in-memory transport (hyper over `tokio::io::duplex`) under paused time reproduces `sim`'s journal | `std::time::Instant` in a handler |
 | K2-2 | K2 | each cause delayed alone — the reader, the token, the pool, the connect, the write, the dependency — moves exactly one gap of the chain | a gap merged |
 | K2-3 | K2 | on the real clock, multi-thread: chain order, no release before its stamped met instants, the stub's requests per correlation id equal the journal's attempts — a keep-alive connection closed as it is reused included; a request processed then reset before the answer is Unknown; a response stamped 1 µs before its deadline delivered after the tick is Expected | hyper's hidden retry; Unknown read as not taken; deadlines by arrival |
@@ -1209,6 +1213,17 @@ dispatch until its late answer is found — what a `found` must agree with — a
 - **Executors**: the executor row; journals under (5, 4) `3f95c013…`, classes under (5, 4, 5) equal to (4, 4, 4)'s — no
   differential reaches a late answer — and the golden journal `4ffb293d…`. Twelve mutants, each killed (the row's).
 
+**K2b-4 — frames, correlation, decorators** (2026-11-23): `decorate`, the host's `Decorator` port — once an attempt,
+seeing the step, the attempt, the caller, the operation, the route, the final frame, the correlation id, the deadline
+and the wall time; its headers only the operation's `decorated` names, each a header's value, or a harness fault; an
+`Undecorated` default that declares it decorates nothing, so an operation that decorates is refused before T0 without
+one. `handed` is stamped again once the attempt is decorated: the decorator's time is the harness's.
+- **What it found**: the resend twin first came 110 µs after its first attempt, inside the millisecond the `Sent` hole
+  renders, and a call's frame rebuilt at its own dispatch passed it; a second's `Retry-After` separates them. A frame
+  cache is not needed for a resend's bytes — its fills hold its first dispatch — and is left out.
+- **Executors**: the executor row. Seven mutants, each killed (the row's); "one correlation id a step" stays killed by
+  the REST differential (K2b-2b).
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -1373,3 +1388,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   amending decisions 9, 14 and 16; cut into K2b-3a and K2b-3b; K2b-3a built (§ Measured): journal version 4.
 - 2026-11-23: K2b-3b built (§ Measured): journal version 5, the receive side. Decision 17 refined: the fold keeps a
   censored step's attempt until its late answer is found, rather than a bit; the looks in a head's wait and a body's.
+- 2026-11-23: K2b-4 built (§ Measured): the decorator port, frames rebuilt from their fills; decision 16 refined (no
+  frame cache) and decision 17 (`handed` once the attempt is decorated).

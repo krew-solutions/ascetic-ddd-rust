@@ -31,6 +31,7 @@ use hyper::client::conn::http1::{self, SendRequest};
 
 use crate::carrier::Carrier;
 use crate::clock::Clock;
+use crate::decorate::{Decoration, Decorator, Undecorated};
 use crate::io::{Io, Probe};
 use crate::stamps::Attempt;
 use crate::stand::{Egress, Route, Stand};
@@ -129,24 +130,38 @@ impl Pool {
     }
 }
 
-struct Inner<S, E> {
+struct Inner<S, E, D> {
     header: Arc<Header>,
     stand: S,
     egress: E,
+    decorator: D,
     config: Config,
     /// By source.
     pools: Vec<Pool>,
 }
 
 /// The REST carrier: see the [module documentation](self).
-pub struct RestCarrier<S, E> {
-    inner: Arc<Inner<S, E>>,
+pub struct RestCarrier<S, E, D = Undecorated> {
+    inner: Arc<Inner<S, E, D>>,
 }
 
-impl<S: Stand, E: Egress> RestCarrier<S, E> {
+impl<S: Stand, E: Egress> RestCarrier<S, E, Undecorated> {
     /// Carries the calls of the log `header` heads to `stand`'s routes,
-    /// connecting by `egress`.
+    /// connecting by `egress`, decorating none.
     pub fn new(header: Arc<Header>, stand: S, egress: E, config: Config) -> RestCarrier<S, E> {
+        RestCarrier::decorated(header, stand, egress, Undecorated, config)
+    }
+}
+
+impl<S: Stand, E: Egress, D: Decorator> RestCarrier<S, E, D> {
+    /// [`RestCarrier::new`], each attempt decorated by `decorator`.
+    pub fn decorated(
+        header: Arc<Header>,
+        stand: S,
+        egress: E,
+        decorator: D,
+        config: Config,
+    ) -> RestCarrier<S, E, D> {
         let sources = usize::try_from(header.profile.sources.max(1)).unwrap_or(1);
         let pools = (0..sources).map(|_| Pool::default()).collect();
         RestCarrier {
@@ -154,6 +169,7 @@ impl<S: Stand, E: Egress> RestCarrier<S, E> {
                 header,
                 stand,
                 egress,
+                decorator,
                 config,
                 pools,
             }),
@@ -161,13 +177,18 @@ impl<S: Stand, E: Egress> RestCarrier<S, E> {
     }
 }
 
-impl<C: Clock, S: Stand, E: Egress> Carrier<C> for RestCarrier<S, E> {
+impl<C: Clock, S: Stand, E: Egress, D: Decorator> Carrier<C> for RestCarrier<S, E, D> {
     fn carries(&self, header: &Header) -> Result<(), String> {
         if !header.channels.is_empty() {
             return Err("a log with channels: the bus is K3's".to_owned());
         }
         if !header.calls.is_empty() {
             return Err("a log with host calls: they are K3's".to_owned());
+        }
+        if !self.inner.decorator.decorates()
+            && let Some(op) = header.operations.iter().find(|o| !o.decorated.is_empty())
+        {
+            return Err(format!("operation {} decorates, and no decorator", op.name));
         }
         Ok(())
     }
@@ -178,11 +199,13 @@ impl<C: Clock, S: Stand, E: Egress> Carrier<C> for RestCarrier<S, E> {
     }
 }
 
-/// The request of `frame` to `route`, its correlation header set.
+/// The request of `frame` to `route`, its correlation header and its
+/// decorated ones set.
 fn build(
     frame: &Frame,
     route: &Route,
     correlation: (&str, &str),
+    decorated: &[(String, String)],
 ) -> Result<http::Request<Outgoing>, http::Error> {
     let mut b = http::Request::builder()
         .method(frame.method.as_str())
@@ -192,12 +215,15 @@ fn build(
         b = b.header(name.as_str(), value.as_str());
     }
     b = b.header(correlation.0, correlation.1);
+    for (name, value) in decorated {
+        b = b.header(name.as_str(), value.as_str());
+    }
     b.body(Outgoing {
         data: frame.body.clone().map(Bytes::from),
     })
 }
 
-impl<S: Stand, E: Egress> Inner<S, E> {
+impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
     async fn connect(&self, source: u32, route: &Route) -> io::Result<Conn> {
         let stream = self.egress.connect(source, route).await?;
         let probe = Arc::new(Probe::default());
@@ -254,6 +280,38 @@ impl<S: Stand, E: Egress> Inner<S, E> {
             Err(why) => return a.fault(format!("its route: {why}")),
         };
         let id = render::correlation(self.config.namespace, &record.step, a.attempt());
+        // Decorated once an attempt (decision 16): only the operation's
+        // declared names, each a header's value.
+        let view = Decoration {
+            record: &record,
+            attempt: a.attempt(),
+            caller: rest.caller.as_ref(),
+            operation: op,
+            route: &route,
+            frame: &frame,
+            correlation: &id,
+            deadline: a.deadline(),
+            wall: wall(a.clock().now()),
+        };
+        let decorated = match self.decorator.decorate(view).await {
+            Ok(d) => d,
+            Err(why) => return a.fault(format!("its decorator: {why}")),
+        };
+        for (name, value) in &decorated {
+            if !op.decorated.iter().any(|d| d.eq_ignore_ascii_case(name)) {
+                return a.fault(format!(
+                    "a decorated header {name} its operation does not declare"
+                ));
+            }
+            if http::HeaderName::from_bytes(name.as_bytes()).is_err()
+                || http::HeaderValue::from_str(value).is_err()
+            {
+                return a.fault(format!("a decorated header {name} not a header"));
+            }
+        }
+        // Ready to connect: its frame built and decorated — the harness's
+        // from the dispatch (decision 17).
+        a.handed();
         let deadline = a.deadline();
         // An answer stamped at the deadline is taken: the attempt leaves only
         // past it, and the frontier censors at it what had none.
@@ -284,7 +342,12 @@ impl<S: Stand, E: Egress> Inner<S, E> {
             if !ready {
                 continue;
             }
-            let req = match build(&frame, &route, (&header.profile.correlation, &id)) {
+            let req = match build(
+                &frame,
+                &route,
+                (&header.profile.correlation, &id),
+                &decorated,
+            ) {
                 Ok(r) => r,
                 Err(e) => return a.fault(format!("its request: {e}")),
             };

@@ -9,6 +9,7 @@
 
 pub mod carrier;
 pub mod clock;
+pub mod decorate;
 mod io;
 pub mod rest;
 pub mod run;

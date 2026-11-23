@@ -11,6 +11,9 @@ time and carries its attempts.
   read and a push under it; an attempt dropped unended a harness fault.
 - `run` — the machine's loop, `sim`'s with time read from the clock.
 - `rest` — the REST carrier: an attempt over hyper's own HTTP/1.1 connection,
-  its bytes counted (`Sent` at the last), pooled by source and endpoint.
+  its bytes counted (`Sent` at the last), pooled by source and endpoint; its
+  looks around the deadline, each a verified turn of its runtime's driver
+  (`turn`).
+- `decorate` — the host's decorator: what only it can mint, once an attempt.
 - `source`, `sink`, `carrier`, `stand` — the ports: the log's lines, the
   journal, what carries an attempt, and the stand's routes and connections.
