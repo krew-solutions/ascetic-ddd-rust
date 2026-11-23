@@ -10,7 +10,10 @@
 
 use std::fmt;
 use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::{Context, Poll};
 
 use ascetic_ddd_command_log::record::Record;
 use ascetic_ddd_scheduler::frontier::{Below, Frontier, Hold};
@@ -20,6 +23,7 @@ use tokio::sync::Notify;
 use tokio::task::AbortHandle;
 
 use crate::clock::Clock;
+use crate::io::Probe;
 
 /// A harness fault: the shell, not the system under test, failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -228,6 +232,88 @@ impl State {
     }
 }
 
+/// Where a send path stands (decision 18): off; on its attempt's task, from
+/// `handed`; on its connection's task, from `connected`.
+const OFF: u8 = 0;
+const ATTEMPT: u8 = 1;
+const CONNECTION: u8 = 2;
+
+/// A send path's lag (decision 18): the scheduling lag of its wakes, summed
+/// over the polls of the task that carries it — each from the later of the
+/// task's last pending and the path's start on that task, at most since its
+/// thread's last park that blocked. Its windows are disjoint inside
+/// `[handed, Sent]`.
+#[derive(Debug, Default)]
+pub(crate) struct Path {
+    on: AtomicU8,
+    start: AtomicU64,
+    lag: AtomicU64,
+}
+
+impl Path {
+    /// Moved to `on` at `at`: where it was.
+    fn move_to(&self, on: u8, at: u64) -> u8 {
+        self.start.store(at, Ordering::SeqCst);
+        self.on.swap(on, Ordering::SeqCst)
+    }
+
+    /// Its lag so far, in microseconds.
+    pub(crate) fn lag(&self) -> u64 {
+        self.lag.load(Ordering::SeqCst)
+    }
+
+    /// A poll at `p` of the task `on`, pending since `w`, its thread idle
+    /// since `u`.
+    fn polled(&self, on: u8, p: u64, w: u64, u: u64) {
+        if self.on.load(Ordering::SeqCst) == on {
+            let since = w.max(self.start.load(Ordering::SeqCst));
+            let lag = p.saturating_sub(since).min(p.saturating_sub(u));
+            self.lag.fetch_add(lag, Ordering::SeqCst);
+        }
+    }
+}
+
+/// What a task's polls feed.
+pub(crate) enum Feeds {
+    /// Nothing: a task of its own.
+    Nothing,
+    /// Its attempt's path, while on the attempt's task.
+    Attempt(Arc<Path>),
+    /// The path of whichever request its connection carries.
+    Connection(Arc<Probe>),
+}
+
+/// A task timed at each poll (decision 18).
+struct Timed<C, F> {
+    clock: Arc<C>,
+    feeds: Feeds,
+    /// Its last poll's end: pending since.
+    pending: u64,
+    task: Pin<Box<F>>,
+}
+
+impl<C: Clock, F: Future<Output = ()>> Future for Timed<C, F> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let this = self.get_mut();
+        let p = this.clock.now();
+        let u = this.clock.idle_since();
+        match &this.feeds {
+            Feeds::Nothing => {}
+            Feeds::Attempt(path) => path.polled(ATTEMPT, p, this.pending, u),
+            Feeds::Connection(probe) => {
+                if let Some(path) = probe.path() {
+                    path.polled(CONNECTION, p, this.pending, u);
+                }
+            }
+        }
+        let done = this.task.as_mut().poll(cx);
+        this.pending = this.clock.now();
+        done
+    }
+}
+
 /// Every task the shell spawns for a run, so that a stop aborts them all, and
 /// a run dropped with them (decision 18): reaped as the list grows.
 #[derive(Default)]
@@ -318,12 +404,20 @@ impl<C: Clock> Stamps<C> {
         &self.tasks
     }
 
-    /// Spawns `task` on `on`, kept for the stop to abort.
-    pub(crate) fn spawn_on<F>(&self, on: &tokio::runtime::Handle, task: F)
+    /// Spawns `task` on `on`, timed at each poll for what it `feeds`, kept
+    /// for the stop to abort: the one place the shell spawns a task.
+    pub(crate) fn spawn_on<F>(&self, on: &tokio::runtime::Handle, feeds: Feeds, task: F)
     where
+        C: Clock,
         F: Future<Output = ()> + Send + 'static,
     {
-        self.tasks.keep(on.spawn(task).abort_handle());
+        let timed = Timed {
+            clock: self.clock.clone(),
+            feeds,
+            pending: self.clock.now(),
+            task: Box::pin(task),
+        };
+        self.tasks.keep(on.spawn(timed).abort_handle());
     }
 
     pub(crate) fn notify(&self) {
@@ -361,6 +455,8 @@ pub struct Attempt<C: Clock> {
     stamps: Arc<Stamps<C>>,
     hold: Option<Hold>,
     done: bool,
+    /// Its send path's lag (decision 18).
+    path: Arc<Path>,
     /// The last instant it knew its answer had not come (decision 17): its
     /// hand-off, its request's hand-over, a look that found the answer
     /// incomplete.
@@ -389,6 +485,7 @@ impl<C: Clock> Attempt<C> {
             stamps,
             hold: None,
             done: false,
+            path: Arc::new(Path::default()),
             absent: dispatched,
         }
     }
@@ -441,27 +538,54 @@ impl<C: Clock> Attempt<C> {
 
     /// Its bytes left, now: pushed if before its deadline, once.
     pub fn sent(&self) {
-        let (line, attempt) = (self.line, self.attempt);
-        self.stamps.push(|f, now| f.sent(now, line, attempt));
+        sent(&self.stamps, &self.path, self.line, self.attempt);
     }
 
     /// Its task's first instant, now: the hand-off's lateness from the
     /// dispatch is the harness's (ADR-0047 decision 17). The loop stamps it
-    /// as the task starts.
+    /// as the task starts, and the REST carrier again once the attempt is
+    /// decorated: its send path's lag counted from the last.
     pub(crate) fn handed(&mut self) {
         let (line, attempt) = (self.line, self.attempt);
         let (mut g, now) = self.stamps.lock();
         g.frontier.handed(now, line, attempt);
+        let _ = self.path.move_to(ATTEMPT, now);
         self.absent = now;
     }
 
     /// Its request handed to a ready connection, now: the connect's lateness
-    /// from `handed` is the stand's. The last such instant stands.
+    /// from `handed` is the stand's, less its thread's lag. The last such
+    /// instant stands; the path's lag goes on on the connection's task.
     pub fn connected(&mut self) {
         let (line, attempt) = (self.line, self.attempt);
-        let (mut g, now) = self.stamps.lock();
-        g.frontier.connected(now, line, attempt);
-        self.absent = now;
+        let was = {
+            let (mut g, now) = self.stamps.lock();
+            g.frontier.connected(now, line, attempt);
+            self.absent = now;
+            self.path.move_to(CONNECTION, now)
+        };
+        // Only a path on its attempt is handed to a connection: one handed
+        // back is moved back first, or its lag would go uncounted.
+        if was != ATTEMPT {
+            self.stamps.fault(Harness::Carrier {
+                line,
+                attempt,
+                cannot: "path.connected",
+                detail: "connected while not on its attempt".to_owned(),
+            });
+        }
+    }
+
+    /// Its request handed back unsent: the path's lag goes on on its own
+    /// task, until the next connection takes it.
+    pub(crate) fn back(&mut self) {
+        let now = self.stamps.clock().now();
+        let _ = self.path.move_to(ATTEMPT, now);
+    }
+
+    /// Its send path, for the connection that carries its request.
+    pub(crate) fn path(&self) -> Arc<Path> {
+        self.path.clone()
     }
 
     /// A look found its answer incomplete; `at`, the clock read before it,
@@ -473,8 +597,9 @@ impl<C: Clock> Attempt<C> {
     /// What reports its bytes left, for a task that sees them leave
     /// (a connection's, not the attempt's).
     pub(crate) fn sent_hook(&self) -> impl FnOnce() + Send + 'static {
-        let (stamps, line, attempt) = (self.stamps.clone(), self.line, self.attempt);
-        move || stamps.push(|f, now| f.sent(now, line, attempt))
+        let (stamps, path) = (self.stamps.clone(), self.path.clone());
+        let (line, attempt) = (self.line, self.attempt);
+        move || sent(&stamps, &path, line, attempt)
     }
 
     /// Its answer arrived, now: a floor held there until it is judged.
@@ -485,6 +610,9 @@ impl<C: Clock> Attempt<C> {
         let (line, attempt) = (self.line, self.attempt);
         let held = {
             let (mut g, now) = self.stamps.lock();
+            // An early reply's `Sent`, made at its end, carries the lag so
+            // far.
+            g.frontier.lag(line, attempt, self.path.lag());
             g.frontier.arrived(now, line, attempt)
         };
         match held {
@@ -532,15 +660,38 @@ impl<C: Clock> Attempt<C> {
         });
     }
 
-    /// Spawns a task of its carrier's — a connection's — on the runtime it
-    /// runs on, kept with the run's for a stop to abort (decision 18).
+    /// Spawns a task of its carrier's on the runtime it runs on, kept with
+    /// the run's for a stop to abort (decision 18).
     pub fn spawn<F>(&self, task: F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
         self.stamps
-            .spawn_on(&tokio::runtime::Handle::current(), task);
+            .spawn_on(&tokio::runtime::Handle::current(), Feeds::Nothing, task);
     }
+
+    /// Spawns a connection's task, its polls feeding the path of whichever
+    /// request it carries (decision 18).
+    pub(crate) fn spawn_connection<F>(&self, probe: Arc<Probe>, task: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.stamps.spawn_on(
+            &tokio::runtime::Handle::current(),
+            Feeds::Connection(probe),
+            task,
+        );
+    }
+}
+
+/// Its bytes left, now: its path's lag with it, pushed if before its
+/// deadline, once; the path off.
+fn sent<C: Clock>(stamps: &Stamps<C>, path: &Path, line: Line, attempt: u32) {
+    stamps.push(|f, now| {
+        f.lag(line, attempt, path.lag());
+        let _ = path.move_to(OFF, now);
+        f.sent(now, line, attempt)
+    });
 }
 
 impl<C: Clock> Drop for Attempt<C> {
@@ -563,5 +714,34 @@ impl<C: Clock> fmt::Debug for Attempt<C> {
             .field("dispatched", &self.dispatched)
             .field("deadline", &self.deadline)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ATTEMPT, CONNECTION, OFF, Path};
+
+    /// A poll's lag (decision 18): from the later of the task's last pending
+    /// and the path's start on it, at most since its thread last blocked;
+    /// none for a task the path is not on.
+    #[test]
+    fn a_poll_s_lag() {
+        let path = Path::default();
+        let _ = path.move_to(ATTEMPT, 100);
+        // Pending since before the path's start: from the start.
+        path.polled(ATTEMPT, 150, 0, 0);
+        assert_eq!(path.lag(), 50);
+        // The thread blocked since: from then.
+        path.polled(ATTEMPT, 300, 200, 290);
+        assert_eq!(path.lag(), 60);
+        // A connection's poll while the path is on its attempt: nothing.
+        path.polled(CONNECTION, 400, 300, 0);
+        assert_eq!(path.lag(), 60);
+        assert_eq!(path.move_to(CONNECTION, 400), ATTEMPT);
+        path.polled(CONNECTION, 450, 0, 0);
+        assert_eq!(path.lag(), 110);
+        assert_eq!(path.move_to(OFF, 450), CONNECTION);
+        path.polled(CONNECTION, 900, 0, 0);
+        assert_eq!(path.lag(), 110);
     }
 }

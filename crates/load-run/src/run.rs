@@ -457,7 +457,8 @@ where
                             // runtime, is when it was handed (decision 17):
                             // stamped here, so no carrier can forget it.
                             let carrier = carrier.clone();
-                            stamps.spawn_on(handle, async move {
+                            let path = crate::stamps::Feeds::Attempt(a.path());
+                            stamps.spawn_on(handle, path, async move {
                                 let mut a = a;
                                 a.handed();
                                 carrier.carry(a).await;

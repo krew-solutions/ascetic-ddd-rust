@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b and K2b-7c-1 built (§ Measured), K2b-7c-2 next. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b and K2b-7c (K2b-7c-1, K2b-7c-2) built (§ Measured), K2b-7d next. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -500,7 +500,9 @@ Considered keeps what each refuted):
   `(handed, connected]` and of its connection's task on `(connected, Sent]`, `min(p − w, p − u)` — w the task's last
   pending, no earlier than its path's start; u the end of the thread's last park that blocked (a park's driver turn
   delivers every event ready before it; tokio 1.53.1 also parks with a zero timeout when work is pending, so a park
-  that returned at once may deliver an event ready since the thread's busy stretch began). The windows are disjoint
+  that returned at once may deliver an event ready since the thread's busy stretch began — whether one blocked is told
+  by the thread's voluntary context switches across it, measured exact, never by its length; K2b-7c-2's `nix`, Linux
+  only, joins the shell's allowlist for it, and elsewhere no park counts as blocked). The windows are disjoint
   inside `[handed, Sent]`. Journal version 6's `sent.lag` is their sum; the fold adds it to the harness's lateness
   (and its `harness_sent`); coherence `lag ≤ sent.at − handed`. What it cannot see — the OS waking an idle thread, a
   driver turn's own dispatch — is J's, by J's definition (the client side's send delay). Parks are seen through
@@ -665,6 +667,7 @@ Considered keeps what each refuted):
 | K2b-7a | K2b | a connect and a decorator that never answer: the attempt unsent, censored at its deadline, the run ended; a pooled connection the stand closed while it sat idle, seen once the next request wakes it: no `Sent` until a byte of the request left — on the next connection, at the instant the stub saw it | the decorator's await not raced; the connect not raced; an empty flush taken for `Sent` |
 | K2b-7b | K2b | journal version 6, folded by Rust and `verdict.py` alike, the definition naming the same stop: a send's lag the harness's — a censored call's at J a root, at J + 1 undecided, with a hand-off h at J − h and J − h + 1; an observation's cause's likewise; a lag past its path incoherent; a run's stop the last line — stopped mid-run, once every step ended, after a backstop's fault: void, no classes; a gate's refusal the only line, at 0, under a header with no T0; each breach incoherent by its own rule; every golden run cut after any line (but inside a backstop's pair) and stopped: void, never incoherent; uncut, version 6's classes version 5's (the differential's digest unchanged); every fault class and both sides of each option in the golden, every header variant read back | the lag not added, added after the first send's, past its path accepted; a line after a stop accepted; the second pass after one; a stopped run's reads all its log's; unended steps refused after a stop; a gate after lines, past 0, under a T0; no T0 without a gate; a stop before its lines, naming a line not read, an attempt not out; the backstop a stop; the definition's: a line after the stop, the lag, the reads, the stop unnamed |
 | K2b-7c-1 | K2b | a run's fault stops it in its journal — the lines taken, the fault, the trailer — `run` returning the journal and why: a dropped attempt, a stuck hold (virtual and real clock), a carrier's refusal by its dotted name, a log failing mid-run (truncated, diverged), a lock poisoned by a panic under it, a saturated source, a record from a source with no runtime; every harness fault and log error mapped to its class; a decorator's error — the host's text — out of the journal; no request of an aborted attempt reaches the stand, connecting or mid-write, then or after the run returned, none left running; a run's future dropped takes its attempts with it; a journal dropped unfinished has no trailer; a failing writer heard within its lag, its own error | the stop's fault unwritten; the trailer on drop; a dead writer unheard; the stop's abort, the guard's, the wait skipped; saturation unchecked; a class mapped wrong; connection tasks, attempt tasks unkept; a carrier's name dropped |
+| K2b-7c-2 | K2b | on the real clock, `Live`'s runtimes seeing whether each park blocked: a wait ending inside a 100 ms hog of the source's thread — the lag at least half the hog; ending after it and an idle stretch — under half; a connection's flush held by the stand's window past the hog's start — its lag the hog's rest, and an early answer's `Sent`, the frontier's at it, carrying it; a poll's lag from the later of its task's last pending and the path's start, at most since its thread blocked; a path connected off its attempt a fault; every task spawned at the one place that times it; on the virtual clock none — every differential unchanged | the thread's busy time; any park ending the idleness; the lag from the task's last pending; the connection's, the attempt's polls unfed; the lag not pushed with its send, at an answer; a request handed back not moved back; connected off its attempt accepted; the park hooks uninstalled; the virtual clock lagging |
 | K2-1 | K2 | the shell against an in-memory transport (hyper over `tokio::io::duplex`) under paused time reproduces `sim`'s journal | `std::time::Instant` in a handler |
 | K2-2 | K2 | each cause delayed alone — the reader, the token, the pool, the connect, the write, the dependency — moves exactly one gap of the chain | a gap merged |
 | K2-3 | K2 | on the real clock, multi-thread: chain order, no release before its stamped met instants, the stub's requests per correlation id equal the journal's attempts — a keep-alive connection closed as it is reused included; a request processed then reset before the answer is Unknown; a response stamped 1 µs before its deadline delivered after the tick is Expected | hyper's hidden retry; Unknown read as not taken; deadlines by arrival |
@@ -1395,6 +1398,21 @@ run goes; a stop waits for them at most 1 s. A carrier's fault is a dotted name 
 - **Still K2b-8's**: zero linger on an aborted connection — bytes the kernel accepted before the abort may still reach
   the stand; the stopped journal says a dispatched, unended attempt may have.
 
+**K2b-7c-2 — the source thread's lag** (2026-11-23): every task on a source runtime is timed at each poll, its send
+path's lag journaled on `sent`; `Live` installs the park hooks.
+- **The park detector, measured first** (a probe outside the repository, this laptop, tokio 1.53.1): of 6,000 parks
+  that blocked — a message every 500 µs from another thread — every one switched its thread out of its own accord; of
+  120,006 that returned at once — a byte in the socket before the park, nothing runnable — none did, idle and beside
+  eight CPU hogs. Beside the hogs 0.1–0.15 % of those returned at once lasted 1 ms or more, to 11 ms, preempted: a
+  length threshold would take them for idleness and under-count — the false Root's direction. And a park after
+  deferred tasks is tokio's `park_yield`, which runs no hook: a yield's driver turn never ends an idleness (an
+  over-count, never an under-count).
+- **What the twins found**: the connection twin's first gate held all but a request's first 16 bytes, so the stub
+  never saw a head and never answered — the early case read as a censor; gated at the head's end, the request given a
+  body, it reaches both cases. The hog's decorator spun for every attempt at first: the carrier decorates every one.
+- **Hand-back** is executed by construction: a path is handed to a connection only from its attempt — `connected`
+  otherwise a carrier fault — so a request handed back and not moved back fails the idle-close twins.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -1580,3 +1598,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   stages' evidence — in the pure fold and its definition; FOLD_REVISION 6, MACHINE_REVISION 4 kept.
 - 2026-11-23: K2b-7c cut into K2b-7c-1 and K2b-7c-2; K2b-7c-1 built (§ Measured): the shell's stop in its journal,
   the run's tasks kept and aborted, the journal's trailer only when finished.
+- 2026-11-23: K2b-7c-2 built (§ Measured): the source thread's lag on a send path, its park detector measured; `nix`
+  joins the shell's allowlist (Linux).

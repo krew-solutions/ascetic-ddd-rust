@@ -1,7 +1,8 @@
 //! The shell's gates that its lints cannot hold alone (ADR-0047 decision 16):
 //! its dependencies an allowlist; the clocks `clippy.toml` refuses allowed by
 //! the `clock` module alone; every `select!` biased, so that the order a loop
-//! takes its branches in is the order written.
+//! takes its branches in is the order written; every task spawned at the one
+//! place that times it (decision 18).
 
 const SOURCES: [(&str, &str); 14] = [
     ("carrier.rs", include_str!("../src/carrier.rs")),
@@ -31,7 +32,8 @@ fn the_shell_depends_on_its_allowlist_alone() {
             section = line;
             continue;
         }
-        if section == "[dependencies]" && !line.is_empty() && !line.starts_with('#') {
+        let listed = section == "[dependencies]" || section.ends_with(".dependencies]");
+        if listed && !line.is_empty() && !line.starts_with('#') {
             deps.push(line.split('=').next().unwrap_or("").trim().to_owned());
         }
     }
@@ -44,9 +46,43 @@ fn the_shell_depends_on_its_allowlist_alone() {
             "http",
             "http-body",
             "hyper",
-            "tokio"
+            "tokio",
+            // Linux's voluntary context switches: whether a park blocked
+            // (decision 18).
+            "nix"
         ]
     );
+}
+
+/// Decision 18: a task's polls are timed for its send path's lag only if it
+/// is spawned where they are — one place, `Stamps::spawn_on`.
+#[test]
+fn every_task_is_spawned_where_it_is_timed() {
+    for (name, text) in SOURCES {
+        let code: String = text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let spawns = [
+            "tokio::spawn",
+            "task::spawn",
+            "spawn_local",
+            ".spawn(async",
+            "spawn_blocking",
+        ]
+        .iter()
+        .chain(std::iter::once(&"on.spawn("))
+        .filter(|p| code.contains(**p))
+        .count();
+        let one = code.matches("on.spawn(").count();
+        match name {
+            "stamps.rs" => assert_eq!((spawns, one), (1, 1), "{name}"),
+            // The virtual clock's own task, its timer: no attempt's.
+            "clock.rs" => assert_eq!(code.matches("tokio::spawn").count(), 1, "{name}"),
+            _ => assert_eq!(spawns, 0, "{name}"),
+        }
+    }
 }
 
 #[test]

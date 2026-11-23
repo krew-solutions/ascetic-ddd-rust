@@ -25,9 +25,12 @@ impl Live {
         let mut stops = Vec::with_capacity(sources);
         let mut threads = Vec::with_capacity(sources);
         for i in 0..sources {
+            // Its parks seen: whether each blocked (decision 18).
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_io()
                 .max_io_events_per_tick(events.max(1))
+                .on_thread_park(crate::clock::idle::parking)
+                .on_thread_unpark(crate::clock::idle::unparked)
                 .build()?;
             handles.push(rt.handle().clone());
             let (stop, stopped) = oneshot::channel::<()>();

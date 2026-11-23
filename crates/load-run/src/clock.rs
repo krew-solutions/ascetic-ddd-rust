@@ -34,6 +34,13 @@ pub trait Clock: Send + Sync + 'static {
     /// T0's wall instant: microseconds since the Unix epoch.
     fn wall(&self) -> i64;
 
+    /// When the calling thread last ended a park that blocked — its runtime
+    /// idle, nothing ready (ADR-0047 decision 18): a wake ready before it was
+    /// runnable at it. The virtual clock's now: its time passes only while
+    /// every task is idle. A thread whose parks no hook saw: T0, so its lag is
+    /// over-counted, never under.
+    fn idle_since(&self) -> u64;
+
     /// Ready once [`Clock::now`] reached `at`.
     fn sleep_until(&self, at: u64) -> impl Future<Output = ()> + Send + '_;
 
@@ -100,6 +107,58 @@ struct Timer {
     t0: Instant,
     sleepers: Mutex<Sleepers>,
     thread: OnceLock<Thread>,
+}
+
+/// A thread's idleness, as its runtime's park hooks see it (decision 18): a
+/// park that blocked — its thread switched out of its own accord, as only a
+/// wait in the driver's poll does — ends at an instant every event ready
+/// before it was delivered; one that returned at once proves nothing, and a
+/// park's length cannot tell them apart (measured: beside CPU hogs, one park
+/// in a thousand that returned at once lasted past a millisecond, preempted).
+/// `Live` installs these on every source runtime.
+pub mod idle {
+    use std::cell::Cell;
+    use std::time::Instant;
+
+    thread_local! {
+        static PARKING: Cell<Option<i64>> = const { Cell::new(None) };
+        static IDLE: Cell<Option<Instant>> = const { Cell::new(None) };
+    }
+
+    /// The thread's voluntary context switches so far.
+    #[cfg(target_os = "linux")]
+    fn switches() -> Option<i64> {
+        nix::sys::resource::getrusage(nix::sys::resource::UsageWho::RUSAGE_THREAD)
+            .ok()
+            .map(|u| u.voluntary_context_switches())
+    }
+
+    /// Unknown off Linux: no park counts as blocked, and the lag is
+    /// over-counted.
+    #[cfg(not(target_os = "linux"))]
+    fn switches() -> Option<i64> {
+        None
+    }
+
+    /// The runtime's thread about to park.
+    pub fn parking() {
+        PARKING.with(|p| p.set(switches()));
+    }
+
+    /// Its park over: the instant it ended, if it blocked.
+    pub fn unparked() {
+        let before = PARKING.with(Cell::take);
+        if let (Some(before), Some(after)) = (before, switches())
+            && after > before
+        {
+            IDLE.with(|i| i.set(Some(Instant::now())));
+        }
+    }
+
+    /// When the calling thread last ended a park that blocked.
+    pub(crate) fn last() -> Option<Instant> {
+        IDLE.with(Cell::get)
+    }
 }
 
 /// The monotonic clock from T0 (see the [module documentation](self)).
@@ -250,6 +309,10 @@ impl Clock for RealClock {
 
     fn wall(&self) -> i64 {
         self.wall
+    }
+
+    fn idle_since(&self) -> u64 {
+        idle::last().map_or(0, |at| micros(at.saturating_duration_since(self.timer.t0)))
     }
 
     fn sleep_until(&self, at: u64) -> impl Future<Output = ()> + Send + '_ {
@@ -502,6 +565,10 @@ mod virtual_clock {
 
         fn wall(&self) -> i64 {
             self.inner.wall
+        }
+
+        fn idle_since(&self) -> u64 {
+            self.now()
         }
 
         fn sleep_until(&self, at: u64) -> impl Future<Output = ()> + Send + '_ {

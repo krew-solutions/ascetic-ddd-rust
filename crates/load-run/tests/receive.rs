@@ -90,6 +90,10 @@ impl Clock for Prodding {
         self.inner.wall()
     }
 
+    fn idle_since(&self) -> u64 {
+        self.inner.idle_since()
+    }
+
     async fn sleep_until(&self, at: u64) {
         self.inner.sleep_until(at).await;
         if at == self.prod {

@@ -30,6 +30,8 @@ struct Armed {
     /// Bytes of the armed request accepted.
     written: u64,
     hook: Option<Hook>,
+    /// Its send path, fed by the connection's task (decision 18).
+    path: Option<Arc<crate::stamps::Path>>,
 }
 
 /// One connection's request in flight, as its bytes go.
@@ -45,11 +47,17 @@ impl Probe {
 
     /// A request about to be handed to hyper: none of its bytes accepted
     /// yet, `hook` called once its last is.
-    pub(crate) fn arm(&self, hook: Hook) {
+    pub(crate) fn arm(&self, hook: Hook, path: Arc<crate::stamps::Path>) {
         *self.lock() = Armed {
             written: 0,
             hook: Some(hook),
+            path: Some(path),
         };
+    }
+
+    /// The send path of the request it carries, if any.
+    pub(crate) fn path(&self) -> Option<Arc<crate::stamps::Path>> {
+        self.lock().path.clone()
     }
 
     /// Bytes of the armed request accepted.

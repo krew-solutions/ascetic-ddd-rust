@@ -1051,6 +1051,10 @@ impl Clock for Lagging {
         self.inner.wall()
     }
 
+    fn idle_since(&self) -> u64 {
+        self.inner.idle_since()
+    }
+
     fn sleep_until(&self, at: u64) -> impl Future<Output = ()> + Send + '_ {
         self.inner
             .sleep_until(at + self.lags.get(&at).copied().unwrap_or(0))

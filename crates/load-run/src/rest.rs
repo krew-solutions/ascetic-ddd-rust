@@ -273,7 +273,7 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
             .map_err(io::Error::other)?;
         // The connection's own task, on the source's runtime: the attempt's,
         // kept with the run's for a stop to abort (decision 18).
-        a.spawn(async move {
+        a.spawn_connection(probe.clone(), async move {
             let _ = connection.await;
         });
         Ok(Conn {
@@ -429,7 +429,7 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
             // stand's, ends here (decision 17).
             a.connected();
             // Armed and handed over in this one poll: no flush between.
-            conn.probe.arm(Box::new(a.sent_hook()));
+            conn.probe.arm(Box::new(a.sent_hook()), a.path());
             let mut sent = pin!(conn.sender.try_send_request(req));
             let outcome = loop {
                 tokio::select! {
@@ -453,8 +453,10 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
             match outcome {
                 Ok(response) => break (response, conn),
                 Err(mut e) => {
-                    // Handed back, or no byte of it accepted: no end.
+                    // Handed back, or no byte of it accepted: no end; its
+                    // path's lag goes on on this task (decision 18).
                     if e.take_message().is_some() || conn.probe.written() == 0 {
+                        a.back();
                         continue;
                     }
                     return self.judged(a, &record, op, &fills, &Transport::Broken);

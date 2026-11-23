@@ -30,6 +30,11 @@ http-body = "1.1.0"
 hyper = { version = "1.11.1", features = ["client", "http1"] }
 tokio = { version = "1.53.1", features = ["macros", "net", "rt", "sync", "time"] }
 
+# A thread's voluntary context switches: whether a runtime's park blocked
+# (ADR-0047 decision 18). Linux only; elsewhere the lag is over-counted.
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.30.1", default-features = false, features = ["resource"] }
+
 [dev-dependencies]
 # The command log's test fixture and corpus, shared by path.
 ascetic-ddd-faker = { path = "../faker" }

@@ -330,6 +330,10 @@ impl<C: Clock> Clock for Sluggish<C> {
         self.0.wall()
     }
 
+    fn idle_since(&self) -> u64 {
+        self.0.idle_since()
+    }
+
     fn sleep_until(&self, at: u64) -> impl Future<Output = ()> + Send + '_ {
         self.0.sleep_until(at)
     }
@@ -984,6 +988,10 @@ impl Clock for Poisoning {
         self.0.wall()
     }
 
+    fn idle_since(&self) -> u64 {
+        self.0.idle_since()
+    }
+
     fn sleep_until(&self, at: u64) -> impl Future<Output = ()> + Send + '_ {
         self.0.sleep_until(at)
     }
@@ -1104,6 +1112,46 @@ fn a_source_with_no_runtime_stops_the_run_at_its_dispatch() {
                 line: 2,
                 attempt: 1,
                 cannot: "run.source",
+                ..
+            })
+        ),
+        "{stop:?}"
+    );
+}
+
+/// Reports its request connected twice, never handed back between.
+struct Twice;
+
+impl Carrier<VirtualClock> for Twice {
+    fn carries(&self, _: &Header) -> Result<(), String> {
+        Ok(())
+    }
+
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "the task must not borrow its carrier: it is 'static"
+    )]
+    fn carry(&self, mut a: Attempt<VirtualClock>) -> impl Future<Output = ()> + Send + 'static {
+        async move {
+            a.connected();
+            a.connected();
+            a.unanswered();
+        }
+    }
+}
+
+/// Decision 18: a send path is handed to a connection only from its attempt
+/// — a request handed back is moved back first, or its lag would go
+/// uncounted; a carrier that reports otherwise is a fault.
+#[test]
+fn a_path_connected_off_its_attempt_is_a_fault() {
+    let records = vec![call("read", 1, 0, 0, 0)];
+    let (stop, _) = stopped(shell(&header(), &records, W, Twice).unwrap());
+    assert!(
+        matches!(
+            stop,
+            Stop::Harness(Harness::Carrier {
+                cannot: "path.connected",
                 ..
             })
         ),
