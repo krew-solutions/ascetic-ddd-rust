@@ -266,6 +266,11 @@ where
                 break;
             }
             progressed = true;
+            // The machine's own work is stamped at the instant taken: never
+            // below it, as a floor less one would put it (decision 16).
+            if t != now {
+                return Err(Harness::Backdated { at: t, now }.into());
+            }
             live.insert(line, (r.clone(), None));
             queue.push(t, Input::Line { line, record: r });
             line = line.saturating_add(1);
@@ -280,6 +285,9 @@ where
             }
         }
         if !held && machine.next_wake().is_some_and(|w| w <= t) {
+            if t != now {
+                return Err(Harness::Backdated { at: t, now }.into());
+            }
             queue.push(t, Input::Wake);
             progressed = true;
         }

@@ -60,6 +60,14 @@ pub enum Harness {
         /// When the loop gave up on it.
         at: u64,
     },
+    /// The machine's own work — a line read, a wake — stamped below the
+    /// instant it was taken: its lateness hidden.
+    Backdated {
+        /// Its stamp.
+        at: u64,
+        /// When it was taken.
+        now: u64,
+    },
     /// An input taken stamped below one taken before it: the machine's
     /// clock would go back.
     Disordered {
@@ -93,6 +101,12 @@ impl fmt::Display for Harness {
                 f,
                 "attempt {attempt} of line {line} judged since {since} µs, still at {at} µs"
             ),
+            Harness::Backdated { at, now } => {
+                write!(
+                    f,
+                    "the machine's own work stamped {at} µs, taken at {now} µs"
+                )
+            }
             Harness::Disordered { at, last } => {
                 write!(f, "an input stamped {at} µs taken after one at {last} µs")
             }
