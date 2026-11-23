@@ -285,26 +285,37 @@ impl<C: Clock, S: Stand, E: Egress, D: Decorator> Carrier<C> for RestCarrier<S, 
 enum Place {
     /// Under the cap: taken.
     Taken(Slot),
-    /// One is freed soon: a dying socket's, or the idle connection evicted.
-    Wait,
-    /// Every socket in flight: the harness's.
+    /// A dying socket's place, freed soon — or the idle connection evicted,
+    /// once it drops.
+    Dying,
+    /// Every socket in flight: a place freed, or a connection idled, awaited.
     Full,
+}
+
+impl Place {
+    /// An attempt that left waiting for it: where it stood.
+    fn code(&self) -> &'static str {
+        match self {
+            Place::Taken(_) | Place::Dying => "rest.cap.dying",
+            Place::Full => "rest.cap.full",
+        }
+    }
 }
 
 /// A place for a new socket of `sockets`: under the cap, taken; at it, a
 /// dying socket awaited, else the connection idle longest evicted — reset,
-/// its place freed once it drops.
+/// its place freed once it drops; none idle, full.
 fn place(sockets: &Arc<Sockets>, pool: &Pool) -> Place {
     if let Some(slot) = sockets.take() {
         return Place::Taken(slot);
     }
     if sockets.dying() > 0 {
-        return Place::Wait;
+        return Place::Dying;
     }
     match pool.evict() {
         Some(idle) => {
             idle.reset();
-            Place::Wait
+            Place::Dying
         }
         None => Place::Full,
     }
@@ -513,7 +524,10 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
             }
             let mut fresh = false;
             let mut conn = match pool.checkout(&route.endpoint, a.clock().now(), retire) {
-                Some(c) => c,
+                Some(c) => {
+                    sockets.served();
+                    c
+                }
                 None => {
                     fresh = true;
                     // Connects a floor apart, the first at once: a stand
@@ -526,34 +540,45 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
                         }
                         a.sleep_until(next).await;
                     }
-                    // Its socket's place under the source's cap: a dying
-                    // one awaited, else the longest idle evicted; every
-                    // socket in flight, the harness's (decision 19).
-                    let slot = loop {
-                        let mut freed = pin!(sockets.freed());
-                        freed.as_mut().enable();
-                        match place(sockets, pool) {
-                            Place::Taken(slot) => break slot,
-                            Place::Full => {
+                    // Its socket's place under the source's cap (decision
+                    // 19): a dying one awaited, else the longest idle
+                    // evicted; every socket in flight, a place freed or a
+                    // connection idled awaited — then its endpoint's pool
+                    // again. The wait is the harness's, on the path's lag;
+                    // a source whose waiters got nothing for the route
+                    // timeout, a stuck cap, stops the run.
+                    let mut freed = pin!(sockets.freed());
+                    freed.as_mut().enable();
+                    let slot = match place(sockets, pool) {
+                        Place::Taken(slot) => slot,
+                        waiting => {
+                            let from = a.clock().now();
+                            let since = sockets.starving(from);
+                            if from.saturating_sub(since) >= header.profile.route_timeout {
                                 return a.fault(
                                     "egress.cap",
                                     format!(
-                                        "{} sockets open, the cap {}, every one in flight",
+                                        "no connection for {} µs, {} sockets open, the cap {}",
+                                        from.saturating_sub(since),
                                         sockets.open(),
                                         sockets.cap()
                                     ),
                                 );
                             }
-                            Place::Wait => {}
-                        }
-                        tokio::select! {
-                            biased;
-                            () = freed => {}
-                            () = a.sleep_until(past) => {
-                                return leave(a, refusals, "rest.cap").await;
+                            let before = a.lag();
+                            tokio::select! {
+                                biased;
+                                () = freed => {}
+                                () = a.sleep_until(past) => {
+                                    a.waited(from, before);
+                                    return leave(a, refusals, waiting.code()).await;
+                                }
                             }
+                            a.waited(from, before);
+                            continue;
                         }
                     };
+                    sockets.served();
                     connected_last = Some(a.clock().now());
                     let connecting = self.connect(&a, rest.source, &route, slot);
                     match tokio::select! {
@@ -591,6 +616,7 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
             // connection back unused.
             if a.clock().now() >= deadline {
                 pool.put(&route.endpoint, conn);
+                sockets.idled();
                 return leave(a, refusals, "rest.pooling").await;
             }
             let req = match build(
@@ -709,6 +735,7 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
         self.judged(a, &record, op, &fills, &Transport::Answered(read));
         if whole && !conn.sender.is_closed() {
             pool.checkin(&route.endpoint, conn, idle_since);
+            sockets.idled();
         }
     }
 
@@ -789,14 +816,14 @@ mod tests {
             // A second socket, its connection gone, its own still open.
             let dying = sockets.take().unwrap();
             drop(dying.held());
-            assert!(matches!(place(&sockets, &pool), Place::Wait));
+            assert!(matches!(place(&sockets, &pool), Place::Dying));
             assert!(pool.lock().get("gateway").is_some_and(|c| c.len() == 1));
             // Dropped: under the cap again.
             drop(dying);
             let taken = place(&sockets, &pool);
             assert!(matches!(taken, Place::Taken(_)));
             // At the cap, none dying: the idle evicted.
-            assert!(matches!(place(&sockets, &pool), Place::Wait));
+            assert!(matches!(place(&sockets, &pool), Place::Dying));
             assert!(pool.lock().get("gateway").is_some_and(Vec::is_empty));
             // Its task aborted, its socket drops: a place, then none left.
             tokio::task::yield_now().await;

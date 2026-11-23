@@ -18,7 +18,7 @@
 
 use std::io;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, ready};
 
@@ -35,7 +35,12 @@ pub(crate) struct Sockets {
     /// Of them, their connection gone, their `Io` not yet dropped: freed
     /// soon.
     dying: AtomicUsize,
+    /// A place freed or a connection idled: one waiter woken, first come
+    /// first.
     freed: Notify,
+    /// Since when its waiters have got no connection (decision 19); none
+    /// waiting since the last that did, `u64::MAX`.
+    starved: AtomicU64,
 }
 
 /// Where a socket's place stands.
@@ -51,7 +56,31 @@ impl Sockets {
             open: AtomicUsize::new(0),
             dying: AtomicUsize::new(0),
             freed: Notify::new(),
+            starved: AtomicU64::new(u64::MAX),
         })
+    }
+
+    /// A connection idled in its source's pool: a waiter woken to take it
+    /// (decision 19).
+    pub(crate) fn idled(&self) {
+        self.freed.notify_one();
+    }
+
+    /// A waiter at the cap, now: since when the source's waiters have got
+    /// none — its own wait the first, if none was starving.
+    pub(crate) fn starving(&self, now: u64) -> u64 {
+        match self
+            .starved
+            .compare_exchange(u64::MAX, now, Ordering::SeqCst, Ordering::SeqCst)
+        {
+            Ok(_) => now,
+            Err(since) => since,
+        }
+    }
+
+    /// An attempt got a connection: the source's waiters starve no more.
+    pub(crate) fn served(&self) {
+        self.starved.store(u64::MAX, Ordering::SeqCst);
     }
 
     /// A place for a new socket, if under the cap.
@@ -82,8 +111,8 @@ impl Sockets {
         self.cap
     }
 
-    /// Ready once a place is freed: enabled before the count is read, it
-    /// misses none freed after.
+    /// Ready once a place is freed or a connection idled: enabled before the
+    /// count is read, it misses none after.
     pub(crate) fn freed(&self) -> Notified<'_> {
         self.freed.notified()
     }
@@ -123,7 +152,7 @@ impl Drop for Slot {
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                 Some(n.saturating_sub(1))
             });
-        self.sockets.freed.notify_waiters();
+        self.sockets.freed.notify_one();
     }
 }
 

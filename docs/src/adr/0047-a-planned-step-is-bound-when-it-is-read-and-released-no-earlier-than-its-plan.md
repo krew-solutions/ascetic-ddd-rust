@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2) and K2b-8c-1 built (§ Measured), K2b-8c-2 next — K2b-8 before K2b-7e, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c-1 and K2b-8c-2 built (§ Measured), K2b-8c-3 next — K2b-8 before K2b-7e, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -43,9 +43,10 @@ To be built in slices, each a commit of its own:
   four: **K2b-8a** journal version 7 in the pure fold; **K2b-8b** the shell's censor, report and connect errors, in two — **K2b-8b-1** a connect's failure classed, zero
   linger, no shutdown, saturation by age; **K2b-8b-2** the reset at the censor, no byte or hand-over at the deadline,
   an unused connection pooled, a timer's exact lag;
-  **K2b-8c** ports, the cap, admission's bound, the connect probe, in two — **K2b-8c-1** the egress's ports and
-  the cap over each socket's life; **K2b-8c-2** `Live` from the cap, admission's bound and the descriptors' limit,
-  endpoints and sources at admission, the connect probe; **K2b-8d** the real clock's twins.
+  **K2b-8c** ports, the cap, admission's bound, the connect probe (decision 20), in seven — **K2b-8c-1** the
+  egress's ports and the cap over each socket's life; **K2b-8c-2** a wait at the cap; **K2b-8c-3** the plan, the
+  carrier's needs and the events; **K2b-8c-4** the descriptors; **K2b-8c-5** endpoints and sources; **K2b-8c-6** the
+  probe; **K2b-8c-7** the chain and the evidence; **K2b-8d** the real clock's twins.
 - **The first host run:** REST only, on the compose stand, `sources = 1` — a correctness run.
 - **K3** facts and the bus; **K4** shaping and the emulated client's retries; **K5** the report.
 
@@ -601,6 +602,48 @@ Considered keeps what each refuted):
   alive past their censors, awaiting their look a microsecond later — a false `saturated`. A source is saturated when
   an attempt outlives its deadline by the route timeout.
 
+### 20. Admission's bound kept apart from its soundness; a wait at the cap is the harness's
+
+*Decided for K2b-8c-2 onward* (2026-11-24, under the gate: a blind solver on Opus, a discriminator on Fable, then
+three roles — Operability, Verifiability, Software Design — on Opus; it amends decision 19's cap and decision 18's
+stage 1; § Alternatives Considered keeps what each refuted):
+- **A wait at the cap is the harness's, and a full cap waits** (amending decision 19's `egress.cap`). The wait lies
+  between `handed` and `connected`, which decision 17 gives the stand; its whole span goes on the path's lag (a
+  window's lag at least its length), so an attempt placed late is no Root — two roles found the false Root
+  independently, and in the built dying and evict waits too. A connection idled (checked in, or put back unused)
+  wakes one waiter, which tries its endpoint's pool first; a freed place wakes one. A never-placed attempt leaves at
+  `D + 1`, its report `rest.cap.full` or `rest.cap.dying`. `egress.cap` stops the run only when a source's waiters
+  have got no connection for the route timeout — every socket in flight frees within its step's timeout, so only a
+  leak or a cap of nothing does it. `Peaks.pending` bounds the sockets only while the harness's lateness stays under
+  the read-ahead (the discriminator): past it, waits, never a stop.
+- **Two invariants, kept apart.** I1, soundness whatever the run does: `cap(s) + driver events ≤ events(s)` (tokio
+  registers a waker, and a signal receiver when its `signal` feature is unified in — 2, an upper bound) and `Σ cap +
+  open + reserve ≤ soft`. I2, the prediction under the plan's bound: `needed(s) ≤ cap(s)`. Admission checks both and
+  mutates nothing; the library offers each derivation as a constructor — `Live` from the caps, the soft limit raised
+  to the hard, a cap from the descriptors' share taken as its minimum with the ports.
+- **Owners** (Software Design): I2 is the carrier's — it alone maps attempts to sockets (one an HTTP/1.1 attempt; an
+  h2 carrier would multiplex) — stated by a method with no default, an unknown source an error, not none; the events
+  are the runtimes' (`Runtimes` private, events per source, made by `Live`); the descriptors the process's, read after
+  the runtimes exist and re-read as stage 3's last gate.
+- **Endpoints per source**, `Stand::endpoints(&Header, source)` — pairs, not a product (a shard in maintenance, a v6
+  source and a v6 gateway); a route outside its source's set a harness fault at the attempt. A stand routing by
+  operation is the case whose sets are the image of its operations. The egress admits a source and a pair apart:
+  the index, the family, distinct addresses (the unbound's routed address too, by a UDP connect and its local name —
+  no packet), a throwaway local bind.
+- **The probe** at stage 3: every (source, endpoint) at once, each its own bound, on its source's runtime, aborted
+  when raced out; journaled as gates its numbers name — source, endpoint's index, kind — never the host's text.
+- **The chain** (decision 18's owed typestate): `Admitted → Measured → Gated → Ready`, `run` taking only `Ready`; the
+  library opening the journal from the evidence and building T0's clock after stage 3; the run's header and
+  namespace reaching the carrier from the chain, not from its own construction (a reused carrier certified one
+  namespace and sent another: 409s, false Roots); `testing`'s constructors held to their feature by the lint.
+- **Evidence**: admission's numbers (per source needed, cap and its origin, events; soft, hard, open; assumed or not)
+  in the journal's header; the refusal named `Inadmissible` (`Refusal` is the peer's, decision 19), its numbers
+  typed, a host carrier's own error its own.
+- **Cut**: K2b-8c-2 the wait at the cap; K2b-8c-3 the plan, the carrier's needs, I2, `Runtimes` and I1's events (an
+  epoll twin on the real clock: `events = k` misses a ready socket, `k + 2` reads it); K2b-8c-4 the descriptors (a
+  test binary of their own); K2b-8c-5 endpoints and sources; K2b-8c-6 the probe; K2b-8c-7 the chain and the
+  evidence.
+
 ## Consequences
 
 - A load run is judged against the plan the validator checked, with every lateness the run's and every failure
@@ -694,6 +737,16 @@ Considered keeps what each refuted):
   second pass is unsound on a prefix; **aborting the attempts' tasks alone** (the synthesis): hyper's detached
   connection task flushes what it took; **the stand's text in a fault** (the main position's `what`): a decorator's
   error can carry a proof.
+- **K2b-8c** (decision 20): **a full cap stopping the run** (K2b-8c-1): the harness's lateness past the read-ahead —
+  a burst's looks on a busy source — turns into `void:fault` what a wait keeps; **the cap lowered at admission** to
+  fit the events and descriptors (the solver): an admission that mutates, the egress's setting overridden behind its
+  back — kept as constructors the root calls; **`Peaks.pending` plus a constant reserve against the events** (the
+  main position): the look's soundness is the cap's, not the prediction's; **the endpoints a function of the
+  operation** (the solver): no per-source gateway, no shard per tenant — kept as a special case; **a declared list
+  crossed with every source** (the main position): false refusals of pairs no step uses; **the probe as the
+  carrier's first gates** (the main position): awaited on the root's runtime, which has no I/O driver, and counted
+  against the stand's 64 gates; **waking every waiter on a free** (K2b-8c-1's `notify_waiters`): O(waiters) of
+  `place` a free on the source's thread (Operability).
 - **One SHA-256 a pass and a hashing thread**, **a partitioned machine for telemetry**, **ABBA and snapshots**,
   **TLA+ trace validation of the shell**: later, each on its own trigger (§ Owed).
 
@@ -738,6 +791,7 @@ Considered keeps what each refuted):
 | K2b-8b-1 | K2b | `Connect::of_connect` classing each kind — refused, reset, aborted, timed out, unreachable the stand's; exhausted ports and anything unknown the harness's; `TcpEgress` naming an unknown endpoint, a source address not this host's (TEST-NET-1), a closed port refused; a dropped connection read by its peer as a reset, not an end; the carrier stopping the run on the harness's, its name journaled, and counting only the peer's own refusals of the stand's — a reset and an abort each one, a timeout and an unreachable none; `Io` forwarding no shutdown, the peer reading no end until the drop; a source saturated when an attempt outlives its deadline by the route timeout, stopped there (the stamp within the quiesce's step), five thousand sharing a deadline no saturation | a refusal classed timed out; exhausted ports the connect's; an unknown error the stand's; a foreign source the bind's; no zero linger; the harness's connect retried; a reset uncounted; a timeout counted; a shutdown forwarded; aged past the limit, by the deadline alone, the newest deadline; no wake at the age; a deadline never left |
 | K2b-8b-2 | K2b | a request's write held by the stand to its deadline refused by the shell — the stand reading none of it, the attempt never sent, its report `rest.writing`, its connection reset (the stand's end closed); `Io` refusing an armed request's plain and vectored writes once its attempt may send no more, and nothing once its last byte left; a connection ready only at the deadline handed nothing, back to the pool idle since its connect, the next step's; on the real clock: the floor's timer woken late with the thread parked throughout — its lateness the send's lag; a connect pending across the deadline, its race's timer due and dropped — the report's lag; a timer never registered no lag; a decoration's wait held by a sibling no send's lag; the path's timer rule — beyond the bound once, from the window's start, nothing on a connection's task or for a timer due after the poll | a write, a vectored write not refused; refused once sent; bytes at the deadline; handed at the deadline; the unused dropped; a fresh one idle since 0; a completed timer, a dropped one unnoted; an unregistered timer noted; a timer on any task; a re-hand unseen; the bound counted twice; the floor, the connect race on the raw clock; the decoration's lag kept (K2b-8a's survivor) |
 | K2b-8c-1 | K2b | a source's sockets under its cap — a connection gone before its socket dying until the socket drops, a waiter enabled before the count woken when a place is freed; the place at the cap — a dying socket awaited and the idle kept, none dying the idle evicted, none idle full; through the carrier at a cap of one: a read's idle connection evicted, reset, for a list to another endpoint; two reads at once, the second the harness's `egress.cap`; at a cap of two, idle on two endpoints and a call to a third, the one idle longest evicted and the other kept for the next list; `TcpEgress`'s ports — a bound source's its own, the unbound sharing the rest, the host's range read | no cap; a slot never freed; a freed place untold (a hang); a connection gone, its socket not dying; evicted though one dies; never evicted; the latest evicted; full, left unsent; the unbound unshared |
+| K2b-8c-2 | K2b | at a cap of one, two reads at once: the second woken when the first's connection idles and sent on it, its wait on its send's lag; the first's connection closed at its answer, the second placed late and answered past its deadline — censored, folded undecided, not a Root; a cap of nothing: the read leaving `rest.cap.full`, its wait on its report's lag, one waiting the route timeout later the harness's `egress.cap`; waiters served at the start and the route timeout later — by the pool, and by a freed place — no stop | the wait off the lag, off a report's lag; no wake at a checkin; never served at a place, from the pool; no stuck cap; stuck past the route timeout; the codes swapped; starving from each wait |
 | K2-1 | K2 | the shell against an in-memory transport (hyper over `tokio::io::duplex`) under paused time reproduces `sim`'s journal | `std::time::Instant` in a handler |
 | K2-2 | K2 | each cause delayed alone — the reader, the token, the pool, the connect, the write, the dependency — moves exactly one gap of the chain | a gap merged |
 | K2-3 | K2 | on the real clock, multi-thread: chain order, no release before its stamped met instants, the stub's requests per correlation id equal the journal's attempts — a keep-alive connection closed as it is reused included; a request processed then reset before the answer is Unknown; a response stamped 1 µs before its deadline delivered after the tick is Expected | hyper's hidden retry; Unknown read as not taken; deadlines by arrival |
@@ -1554,6 +1608,17 @@ carrier fault `egress.cap`; each wait races its deadline (`rest.cap`).
 - The sweep killed all 9 mutants. The latest evicted lived until a twin had idle connections on two endpoints and a
   call to a third: the pool keeps each endpoint's oldest first, so the choice shows only across endpoints.
 
+**K2b-8c-2 — a wait at the cap** (2026-11-24, decision 20): `place` tells a dying socket's place (or an evicted
+one's) from a cap full of sockets in flight; at either the attempt awaits one wake — a place freed or a connection
+idled, `Notify::notify_one`, first come first — and tries its endpoint's pool again; `Attempt::waited` puts the
+whole wait on the path's lag (`fetch_max` of its lag before and the wait). `Sockets` keeps since when its waiters
+have got no connection; any attempt served resets it; one waiting the route timeout after it stops the run.
+- Two mutants are equivalent here: `notify_one` for `notify_waiters` (each woken waiter checks again — a cost, not an
+  outcome) and the wait's `fetch_max` for an add (the virtual clock's polls count no lag inside the wait; on the real
+  clock the add would count the wait twice).
+- The sweep killed all 9 mutants; never served at a place lived until a case had every connection close at its
+  answer — served from the pool, the waiters reset the starvation as well.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -1650,6 +1715,16 @@ only and measures move to the 12-core box.
   refusing 5 ms in 100) counting Roots on sent censors as well as never-sent ones; on it red, or on a host whose
   harness runs under a CPU quota, a stall witness — a thread of its own whose gaps are charged to the paths whose
   windows they cover — or a stage-1 refusal of the quota, decided under the gate.
+- **Decision 20's owed** (K2b-8c): **the peaks bound to the log** (Verifiability) — the commitment's fields are
+  public and nothing digests `peaks`; trigger: a host writing its commitment other than from the validator's run;
+  **a per-source peak** (`Peaks.sockets`, a commitment format change), the refusal naming the peak's line and instant
+  (Operability) — trigger: a plan with sources > 1 refused on the total while its share fits; **a process-wide
+  descriptors' ledger** (Software Design) — trigger: a host running runs concurrently in one process; **a gateway's
+  per-address connection limit** (Operability) — refusals at it charged to the stand where real clients, spread over
+  addresses, meet none; trigger: a host gateway with such a limit; **exhausted ports measured** (`EADDRINUSE` at a
+  bound socket's bind, `EADDRNOTAVAIL` at an unbound one's connect; Verifiability) — K2b-8d, in a namespace with a
+  ten-port range; **a read-ahead floor against the looks' slack** — trigger: a run with `rest.cap.*` reports;
+  **the counts of reports by code** in `Ran` or the fold — with K2b-8c-7's evidence.
 - **A lag sampler per source** (decision 9, K2b-1): for measures' intervals, not the fold's rules — K5's report, with
   the machine's own runtime set apart from the sources' (`Live` runs the sources; the composition root runs the
   machine).
@@ -1768,3 +1843,8 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-24: K2b-8c-1 built (§ Measured): the egress's ports, a source's sockets capped over each socket's life, the
   idle evicted at the cap, `egress.cap` past it. K2b-8c cut in two. Revised: the cap's fault journals no numbers
   (Operability's minor finding) — open equals the cap when it fires, and the cap is the egress's setting.
+- 2026-11-24: decision 20 added under the gate (K2b-8c): a wait at the cap the harness's and a full cap waiting
+  (amending decision 19's `egress.cap`), admission's soundness and prediction kept apart, their owners, endpoints per
+  source, the probe, the stages' chain, admission's evidence; K2b-8c cut in seven.
+- 2026-11-24: K2b-8c-2 built (§ Measured): a wait at the cap on the path's lag, a connection idled waking a waiter,
+  a full cap waiting, `egress.cap` for a stuck cap alone.

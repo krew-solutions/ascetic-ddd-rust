@@ -859,6 +859,21 @@ impl<C: Clock> Attempt<C> {
         }
     }
 
+    /// Its send path's lag so far.
+    pub(crate) fn lag(&self) -> u64 {
+        self.path.lag()
+    }
+
+    /// It waited, from `from`, its path's lag then `before`, for a place at
+    /// its source's cap (decision 19): the harness's, the whole wait on its
+    /// path's lag — the polls inside it counted no more than the wait.
+    pub(crate) fn waited(&self, from: u64, before: u64) {
+        let wait = self.clock().now().saturating_sub(from);
+        self.path
+            .lag
+            .fetch_max(before.saturating_add(wait), Ordering::SeqCst);
+    }
+
     /// Whether its request's bytes may still leave: before its deadline
     /// (decision 19) — a connection holding one at it gives it no byte.
     pub(crate) fn sending(&self) -> Box<dyn Fn() -> bool + Send> {

@@ -2118,26 +2118,163 @@ fn a_source_s_sockets_are_capped() {
     assert_eq!(came.len(), 4, "{came:?}");
     assert_eq!(end(&journal, 5).map(|e| e.0), Some(End::Expected));
     assert_eq!(connections, 3);
-    // Two reads at once, the first's answer slow: the second at the cap.
+}
+
+/// The send of `line` in `journal`.
+fn sent_line(journal: &[Line], line: u64) -> Option<journal::Sent> {
+    journal.iter().find_map(|l| match l {
+        Line::Sent(s) if s.line == line => Some(s.clone()),
+        _ => None,
+    })
+}
+
+/// Decision 19: a wait at the cap is the harness's — on the path's lag, so
+/// an attempt placed late is no Root; it is woken by a connection idled, and
+/// takes it; a never-placed one leaves, full; a cap whose waiters get nothing
+/// for the route timeout is stuck, a stop — reset by any that got one.
+#[test]
+fn a_wait_at_the_cap_is_the_harness_s() {
+    use ascetic_ddd_scheduler::verdict::Class;
+    let mut header = rest_header();
+    header
+        .operations
+        .iter_mut()
+        .for_each(|o| o.timeout = 25_000);
+    let cap = |ports| Connects { ports, ..CONNECTS };
+    // Two reads at once at a cap of one: the second woken when the first's
+    // connection idles at 20 ms, and sent on it.
     let records = vec![call("read", 1, 0, 0, 0), call("read", 2, 0, 0, 0)];
-    let (journal, _, _) = run_rest_refused(
-        header,
+    let (journal, came, (connections, _)) = run_rest_refused(
+        header.clone(),
         &records,
         vec![ok(20_000, 0), ok(10, 0)],
         AT_ONCE,
         0,
-        one,
+        cap(1),
         None,
         None,
         &|_| {},
     );
     let journal = journal.unwrap();
+    assert_eq!(came.len(), 2, "{came:?}");
+    assert_eq!(connections, 1);
+    assert_eq!(end(&journal, 3).map(|e| e.0), Some(End::Expected));
+    let s = sent_line(&journal, 3).expect("the second sent");
+    assert!(s.lag >= 19_000, "its wait on its lag: {s:?}");
+    // The first's connection closed at its answer: the second placed late,
+    // its answer past its deadline — censored, and undecided, not a Root.
+    let closing = Answer::Ok {
+        head: 20_000,
+        body: 0,
+        status: 200,
+        headers: vec![],
+        bytes: b"{}".to_vec(),
+        close: true,
+    };
+    let (journal, _, _) = run_rest_refused(
+        header.clone(),
+        &records,
+        vec![closing, ok(6_000, 0)],
+        AT_ONCE,
+        0,
+        cap(1),
+        None,
+        None,
+        &|_| {},
+    );
+    let journal = journal.unwrap();
+    let s = sent_line(&journal, 3).expect("the second sent");
+    assert!(s.lag >= 19_000, "its wait on its lag: {s:?}");
+    assert_eq!(end(&journal, 3).map(|e| e.0), Some(End::Unknown));
+    let f = folded(&header, &records, &journal);
+    assert_eq!(
+        f.classes,
+        vec![Class::Passed, Class::Undecided],
+        "{:?}",
+        f.verdict
+    );
+    // No place ever: the first leaves full, its wait on its lag; one waiting
+    // the route timeout later finds the cap stuck — the harness's stop.
+    let route = header.profile.route_timeout;
+    let records = vec![call("read", 1, 0, 0, 0), call("read", 2, 0, route, 0)];
+    let (journal, came, _) = run_rest_refused(
+        header.clone(),
+        &records,
+        vec![ok(10, 0), ok(10, 0)],
+        AT_ONCE,
+        0,
+        cap(0),
+        None,
+        None,
+        &|_| {},
+    );
+    let journal = journal.unwrap();
+    assert!(came.is_empty());
+    let (_, u) = unsent(&journal, 2).expect("a closing report");
+    assert_eq!(u.code, journal::Code::Named("rest.cap.full".to_owned()));
+    assert!(u.lag >= 25_000, "{u:?}");
     match journal.last() {
         Some(Line::Fault(f)) => assert!(
-            matches!(&f.class, journal::FaultClass::Carrier { cannot, .. } if *cannot == journal::Code::Named("egress.cap".to_owned())),
+            matches!(&f.class, journal::FaultClass::Carrier { line: 3, cannot, .. } if *cannot == journal::Code::Named("egress.cap".to_owned())),
             "{f:?}"
         ),
         other => panic!("{other:?}"),
+    }
+    // Waiters served at the start and the route timeout later: no stop.
+    let later = route + 100_000;
+    let records = vec![
+        call("read", 1, 0, 0, 0),
+        call("read", 2, 0, 0, 0),
+        call("read", 3, 0, later, 0),
+        call("read", 4, 0, later, 0),
+    ];
+    let (journal, _, _) = run_rest_refused(
+        header.clone(),
+        &records,
+        vec![ok(20_000, 0), ok(10, 0), ok(20_000, 0), ok(10, 0)],
+        AT_ONCE,
+        0,
+        cap(1),
+        None,
+        None,
+        &|_| {},
+    );
+    let journal = journal.unwrap();
+    for line in 2..=5 {
+        assert_eq!(
+            end(&journal, line).map(|e| e.0),
+            Some(End::Expected),
+            "line {line}"
+        );
+    }
+    // The same, every connection closed at its answer: the waiters served by
+    // a freed place, never the pool.
+    let closing = |head| Answer::Ok {
+        head,
+        body: 0,
+        status: 200,
+        headers: vec![],
+        bytes: b"{}".to_vec(),
+        close: true,
+    };
+    let (journal, _, _) = run_rest_refused(
+        header,
+        &records,
+        vec![closing(20_000), closing(10), closing(20_000), closing(10)],
+        AT_ONCE,
+        0,
+        cap(1),
+        None,
+        None,
+        &|_| {},
+    );
+    let journal = journal.unwrap();
+    for line in 2..=5 {
+        assert_eq!(
+            end(&journal, line).map(|e| e.0),
+            Some(End::Expected),
+            "line {line}"
+        );
     }
 }
 
