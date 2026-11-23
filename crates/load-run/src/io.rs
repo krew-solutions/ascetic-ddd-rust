@@ -25,11 +25,16 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 /// What reports a request's last byte left.
 pub(crate) type Hook = Box<dyn FnOnce() + Send>;
 
+/// Whether an armed request's bytes may still leave.
+pub(crate) type Sending = Box<dyn Fn() -> bool + Send>;
+
 #[derive(Default)]
 struct Armed {
     /// Bytes of the armed request accepted.
     written: u64,
     hook: Option<Hook>,
+    /// Until its last byte left: whether another may (decision 19).
+    sending: Option<Sending>,
     /// Its send path, fed by the connection's task (decision 18).
     path: Option<Arc<crate::stamps::Path>>,
 }
@@ -47,12 +52,20 @@ impl Probe {
 
     /// A request about to be handed to hyper: none of its bytes accepted
     /// yet, `hook` called once its last is.
-    pub(crate) fn arm(&self, hook: Hook, path: Arc<crate::stamps::Path>) {
+    pub(crate) fn arm(&self, hook: Hook, path: Arc<crate::stamps::Path>, sending: Sending) {
         *self.lock() = Armed {
             written: 0,
             hook: Some(hook),
+            sending: Some(sending),
             path: Some(path),
         };
+    }
+
+    /// No byte of the armed request may leave (decision 19): its attempt's
+    /// deadline reached before its last one did.
+    fn refused(&self) -> bool {
+        let a = self.lock();
+        a.hook.is_some() && a.sending.as_ref().is_some_and(|may| !may())
     }
 
     /// The send path of the request it carries, if any.
@@ -132,6 +145,12 @@ impl<T: AsyncWrite + Unpin> hyper::rt::Write for Io<T> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        // Held, unwoken, until its attempt resets the connection at its last
+        // look (decision 19): a request's byte never leaves past its
+        // deadline.
+        if this.probe.refused() {
+            return Poll::Pending;
+        }
         let n = ready!(Pin::new(&mut this.inner).poll_write(cx, buf))?;
         this.probe.wrote(n);
         Poll::Ready(Ok(n))
@@ -143,6 +162,9 @@ impl<T: AsyncWrite + Unpin> hyper::rt::Write for Io<T> {
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        if this.probe.refused() {
+            return Poll::Pending;
+        }
         let n = ready!(Pin::new(&mut this.inner).poll_write_vectored(cx, bufs))?;
         this.probe.wrote(n);
         Poll::Ready(Ok(n))
@@ -199,5 +221,54 @@ mod tests {
             drop(io);
             assert_eq!(peer.read(&mut buf).await.unwrap(), 0);
         });
+    }
+
+    /// An armed request's bytes refused once its attempt may send no more
+    /// (decision 19) — plain and vectored writes alike, held unwoken; once
+    /// its last byte left, nothing of the connection's is refused.
+    #[test]
+    fn an_armed_request_s_bytes_are_refused_past_its_deadline() {
+        use std::io::IoSlice;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::{Context, Poll, Waker};
+
+        use hyper::rt::Write;
+
+        let (client, _peer) = tokio::io::duplex(64);
+        let probe = Arc::new(Probe::default());
+        let mut io = Io::new(client, probe.clone());
+        let may = Arc::new(AtomicBool::new(true));
+        let m = may.clone();
+        probe.arm(
+            Box::new(|| {}),
+            Arc::new(crate::stamps::Path::default()),
+            Box::new(move || m.load(Ordering::SeqCst)),
+        );
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut io = Pin::new(&mut io);
+        assert!(matches!(
+            io.as_mut().poll_write(&mut cx, b"ab"),
+            Poll::Ready(Ok(2))
+        ));
+        may.store(false, Ordering::SeqCst);
+        assert!(io.as_mut().poll_write(&mut cx, b"cd").is_pending());
+        let bufs = [IoSlice::new(b"cd")];
+        assert!(io.as_mut().poll_write_vectored(&mut cx, &bufs).is_pending());
+        assert_eq!(probe.written(), 2);
+        // Its last byte left (flushed after one was accepted): not refused.
+        may.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            io.as_mut().poll_flush(&mut cx),
+            Poll::Ready(Ok(()))
+        ));
+        may.store(false, Ordering::SeqCst);
+        assert!(matches!(
+            io.as_mut().poll_write(&mut cx, b"ef"),
+            Poll::Ready(Ok(2))
+        ));
+        assert!(matches!(
+            io.as_mut().poll_write_vectored(&mut cx, &bufs),
+            Poll::Ready(Ok(2))
+        ));
     }
 }

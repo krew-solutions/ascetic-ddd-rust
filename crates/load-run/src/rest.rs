@@ -29,6 +29,7 @@ use ascetic_ddd_scheduler::machine::Refusal;
 use bytes::Bytes;
 use http_body::{Body, Frame as BodyFrame, SizeHint};
 use hyper::client::conn::http1::{self, SendRequest};
+use tokio::task::AbortHandle;
 
 use crate::carrier::Carrier;
 use crate::clock::Clock;
@@ -125,6 +126,17 @@ struct Conn {
     probe: Arc<Probe>,
     /// Since when it waits in its pool.
     idle_since: u64,
+    /// Its task: aborted, its socket dropped — reset, at zero linger
+    /// (decision 19).
+    task: AbortHandle,
+}
+
+impl Conn {
+    /// Reset, as the emulated client's at its timeout (decision 19): the
+    /// gateway cancels upstream.
+    fn reset(self) {
+        self.task.abort();
+    }
 }
 
 /// A source's idle connections by endpoint, the latest used first.
@@ -153,6 +165,11 @@ impl Pool {
 
     fn checkin(&self, endpoint: &str, mut conn: Conn, now: u64) {
         conn.idle_since = now;
+        self.put(endpoint, conn);
+    }
+
+    /// Back unused, idle since when it was (decision 19).
+    fn put(&self, endpoint: &str, conn: Conn) {
         self.lock()
             .entry(endpoint.to_owned())
             .or_default()
@@ -280,7 +297,7 @@ async fn leave<C: Clock>(a: Attempt<C>, refusals: Refusals, code: &'static str) 
     }
     let past = a.deadline().saturating_add(1);
     if a.clock().now() < past {
-        a.clock().sleep_until(past).await;
+        a.sleep_until(past).await;
     }
     let report = a.report(code, refusals.count, refusals.last);
     a.left(report);
@@ -329,13 +346,14 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
             })?;
         // The connection's own task, on the source's runtime: the attempt's,
         // kept with the run's for a stop to abort (decision 18).
-        a.spawn_connection(probe.clone(), async move {
+        let task = a.spawn_connection(probe.clone(), async move {
             let _ = connection.await;
         });
         Ok(Conn {
             sender,
             probe,
-            idle_since: 0,
+            idle_since: a.clock().now(),
+            task,
         })
     }
 
@@ -401,7 +419,7 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
                 Ok(d) => d,
                 Err(why) => return a.fault("rest.decorator", why),
             },
-            () = a.clock().sleep_until(past) => {
+            () = a.sleep_until(past) => {
                 return leave(a, Refusals::default(), "rest.decorating").await;
             }
         };
@@ -453,14 +471,14 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
                         if next >= deadline {
                             return leave(a, refusals, "rest.floor").await;
                         }
-                        a.clock().sleep_until(next).await;
+                        a.sleep_until(next).await;
                     }
                     connected_last = Some(a.clock().now());
                     let connecting = self.connect(&a, rest.source, &route);
                     match tokio::select! {
                         biased;
                         c = connecting => c,
-                        () = a.clock().sleep_until(past) => {
+                        () = a.sleep_until(past) => {
                             return leave(a, refusals, "rest.connecting").await;
                         }
                     } {
@@ -481,12 +499,18 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
             let ready = tokio::select! {
                 biased;
                 r = poll_fn(|cx| conn.sender.poll_ready(cx)) => r.is_ok(),
-                () = a.clock().sleep_until(past) => {
+                () = a.sleep_until(past) => {
                     return leave(a, refusals, "rest.pooling").await;
                 }
             };
             if !ready {
                 continue;
+            }
+            // None handed at or past the deadline (decision 19): the
+            // connection back unused.
+            if a.clock().now() >= deadline {
+                pool.put(&route.endpoint, conn);
+                return leave(a, refusals, "rest.pooling").await;
             }
             let req = match build(
                 &frame,
@@ -501,7 +525,8 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
             // stand's, ends here (decision 17).
             a.connected();
             // Armed and handed over in this one poll: no flush between.
-            conn.probe.arm(Box::new(a.sent_hook()), a.path());
+            conn.probe
+                .arm(Box::new(a.sent_hook()), a.path(), a.sending());
             let mut sent = pin!(conn.sender.try_send_request(req));
             let outcome = loop {
                 tokio::select! {
@@ -514,8 +539,9 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
                         }
                         a.absent_before(b0);
                         // Censored by the frontier at the deadline; the
-                        // connection dropped, never pooled.
+                        // connection reset, no byte of it out since.
                         if looks.done() {
+                            conn.reset();
                             return leave(a, refusals, "rest.writing").await;
                         }
                     }
@@ -561,6 +587,7 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
                         None => {
                             a.absent_before(b0);
                             if looks.done() {
+                                conn.reset();
                                 return leave(a, refusals, "rest.reading").await;
                             }
                             continue;

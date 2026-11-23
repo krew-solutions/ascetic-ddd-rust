@@ -69,7 +69,18 @@ struct Stub {
     clock: Arc<VirtualClock>,
     answers: BTreeMap<String, Answer>,
     connections: AtomicUsize,
+    /// Connections whose client end went: closed, or reset.
+    closed: AtomicUsize,
     came: Mutex<Vec<Came>>,
+}
+
+/// Counts its connection closed when its serve ends.
+struct Closed<'a>(&'a AtomicUsize);
+
+impl Drop for Closed<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
@@ -88,6 +99,7 @@ fn field(head: &str, name: &str) -> Option<String> {
 impl Stub {
     async fn serve(self: Arc<Self>, mut io: DuplexStream) {
         self.connections.fetch_add(1, Ordering::SeqCst);
+        let _closed = Closed(&self.closed);
         let mut buf = Vec::new();
         loop {
             let head_end = loop {
@@ -412,7 +424,7 @@ fn run_rest_with(
     tune: &dyn Fn(&mut Config),
 ) -> (Result<Vec<Line>, RunError>, Vec<Came>, usize) {
     let refused = || Connect::Stand(StandConnect::Refused);
-    run_rest_refused(
+    let (journal, came, (connections, _)) = run_rest_refused(
         header,
         records,
         answers,
@@ -422,8 +434,13 @@ fn run_rest_with(
         fail,
         eof,
         tune,
-    )
+    );
+    (journal, came, connections)
 }
+
+/// A run's journal, what the stand read, and its connections opened and
+/// closed.
+type Refused = (Result<Vec<Line>, RunError>, Vec<Came>, (usize, usize));
 
 /// As [`run_rest_with`], its first `refuse.0` connects failed as `refuse.1`
 /// makes them.
@@ -438,7 +455,7 @@ fn run_rest_refused(
     fail: Option<usize>,
     eof: Option<u64>,
     tune: &dyn Fn(&mut Config),
-) -> (Result<Vec<Line>, RunError>, Vec<Came>, usize) {
+) -> Refused {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
@@ -449,6 +466,7 @@ fn run_rest_refused(
             clock: clock.clone(),
             answers: records.iter().map(|r| id(r, 1)).zip(answers).collect(),
             connections: AtomicUsize::new(0),
+            closed: AtomicUsize::new(0),
             came: Mutex::new(Vec::new()),
         });
         let header = Arc::new(header);
@@ -490,11 +508,19 @@ fn run_rest_refused(
             }
             Err(e) => Err(e),
         };
+        // A reset connection's end seen by the stub's task, which runs
+        // once the run's tasks have.
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
         let came = stub.came.lock().unwrap().clone();
         (
             ran.map(|r| r.journal),
             came,
-            stub.connections.load(Ordering::SeqCst),
+            (
+                stub.connections.load(Ordering::SeqCst),
+                stub.closed.load(Ordering::SeqCst),
+            ),
         )
     })
 }
@@ -917,6 +943,7 @@ fn over_rest_the_shell_journals_what_sim_journals() {
                     clock: clock.clone(),
                     answers,
                     connections: AtomicUsize::new(0),
+                    closed: AtomicUsize::new(0),
                     came: Mutex::new(Vec::new()),
                 });
                 let header = Arc::new(header.clone());
@@ -1133,6 +1160,7 @@ fn looked(lags: &[(u64, u64)], answer: Answer) -> Vec<Line> {
             clock: inner.clone(),
             answers: [(id(&records[0], 1), answer)].into_iter().collect(),
             connections: AtomicUsize::new(0),
+            closed: AtomicUsize::new(0),
             came: Mutex::new(Vec::new()),
         });
         let header = Arc::new(header);
@@ -1309,6 +1337,7 @@ fn run_decorated(
             clock: clock.clone(),
             answers: answers.into_iter().collect(),
             connections: AtomicUsize::new(0),
+            closed: AtomicUsize::new(0),
             came: Mutex::new(Vec::new()),
         });
         let proofs = Proofs {
@@ -1917,6 +1946,75 @@ fn a_connect_s_failure_is_the_stand_s_or_the_harness_s() {
     }
 }
 
+/// Decision 19: no byte of a request leaves at or past its deadline — a
+/// write the stand held to the deadline is refused by the shell, the attempt
+/// never sent, its report where it stood; its connection reset at the last
+/// look, the stand's end of it gone.
+#[test]
+fn no_byte_leaves_at_its_deadline_and_its_connection_is_reset() {
+    let records = vec![call("read", 1, 0, 0, 0)];
+    let mut header = rest_header();
+    header
+        .operations
+        .iter_mut()
+        .for_each(|o| o.timeout = 25_000);
+    // The first write held 25 ms past its first poll: to the deadline.
+    let held = Throttle {
+        first: 25_000,
+        chunk: usize::MAX,
+        gap: 0,
+    };
+    let (journal, came, (connections, closed)) = run_rest_refused(
+        header,
+        &records,
+        vec![ok(10, 0)],
+        held,
+        0,
+        (0, || Connect::Stand(StandConnect::Refused)),
+        None,
+        None,
+        &|_| {},
+    );
+    let journal = journal.unwrap();
+    assert!(came.is_empty(), "{came:?}");
+    assert!(sent(&journal, 2).is_empty());
+    let (_, u) = unsent(&journal, 2).expect("a closing report");
+    assert_eq!(u.code, journal::Code::Named("rest.writing".to_owned()));
+    assert_eq!((connections, closed), (1, 1));
+}
+
+/// Decision 19: a connection ready only at the deadline takes no request —
+/// back to the pool unused, the next step's.
+#[test]
+fn a_connection_ready_at_the_deadline_takes_no_request_and_is_pooled() {
+    let records = vec![call("read", 1, 0, 0, 0), call("read", 2, 0, 60_000, 0)];
+    let mut header = rest_header();
+    header
+        .operations
+        .iter_mut()
+        .for_each(|o| o.timeout = 25_000);
+    // Retired 50 ms idle: idle since its connect, it is the next step's.
+    let idle = header.profile.idle;
+    // Every connect takes 25 ms: the first ends at its attempt's deadline.
+    let (journal, came, (connections, _)) = run_rest_refused(
+        header,
+        &records,
+        vec![ok(10, 0), ok(10, 0)],
+        AT_ONCE,
+        25_000,
+        (0, || Connect::Stand(StandConnect::Refused)),
+        None,
+        None,
+        &|c| c.idle_margin = idle - 50_000,
+    );
+    let journal = journal.unwrap();
+    let (_, u) = unsent(&journal, 2).expect("a closing report");
+    assert_eq!(u.code, journal::Code::Named("rest.pooling".to_owned()));
+    assert_eq!(came.len(), 1, "{came:?}");
+    assert_eq!(connections, 1);
+    assert_eq!(end(&journal, 3).map(|e| e.0), Some(End::Expected));
+}
+
 /// Decision 18 (K2b-7a): every await of an attempt races its deadline — a
 /// connect or a decorator that never answers leaves the attempt unsent at its
 /// deadline, censored there, and the run ends with it.
@@ -2034,6 +2132,7 @@ fn stop_leaves_no_request(connect: u64, throttle: Throttle) {
                 .zip(vec![ok(10, 0); 4])
                 .collect(),
             connections: AtomicUsize::new(0),
+            closed: AtomicUsize::new(0),
             came: Mutex::new(Vec::new()),
         });
         let header = Arc::new(rest_header());
@@ -2111,6 +2210,7 @@ fn a_run_dropped_takes_its_attempts_with_it() {
                 .zip(vec![ok(10, 0); 3])
                 .collect(),
             connections: AtomicUsize::new(0),
+            closed: AtomicUsize::new(0),
             came: Mutex::new(Vec::new()),
         });
         let header = Arc::new(rest_header());
@@ -2192,6 +2292,7 @@ fn the_rest_carrier_s_gates_are_its_stand_s() {
             clock: clock.clone(),
             answers: BTreeMap::new(),
             connections: AtomicUsize::new(0),
+            closed: AtomicUsize::new(0),
             came: Mutex::new(Vec::new()),
         });
         let header = Arc::new(rest_header());

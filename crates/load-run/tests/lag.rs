@@ -32,7 +32,7 @@ use ascetic_ddd_load_run::run::{admit, run};
 use ascetic_ddd_load_run::sink::Lines;
 use ascetic_ddd_load_run::source::Records;
 use ascetic_ddd_load_run::stamps::Attempt;
-use ascetic_ddd_load_run::stand::{Connect, Egress, Route, Stand};
+use ascetic_ddd_load_run::stand::{Connect, Egress, Route, Stand, StandConnect};
 use ascetic_ddd_scheduler::journal::{self, Line};
 use ascetic_ddd_scheduler::machine::{Judgement, Seen};
 use fixture::*;
@@ -377,4 +377,389 @@ fn a_connection_s_wait_carries_its_path_s_lag() {
             .expect("line 2 connected before the hog, in some run");
         assert!(lag >= HOG / 2, "early {early}: lag {lag} µs");
     }
+}
+
+/// A loopback stub answering every request `200 {}`, keeping its
+/// connection: its address.
+fn answering() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for s in listener.incoming() {
+            let Ok(mut s) = s else { return };
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let Some(end) = buf.windows(4).position(|x| x == b"\r\n\r\n") else {
+                        match s.read(&mut chunk) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&buf[..end]).to_lowercase();
+                    let len: usize = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    while buf.len() < end + 4 + len {
+                        match s.read(&mut chunk) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    buf.drain(..end + 4 + len);
+                    if s.write_all(b"HTTP/1.1 200 X\r\ncontent-length: 2\r\n\r\n{}")
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+/// The real clock, its timers due within `[from, to]` firing `late` µs after
+/// their instant: a whole process stalled while they wait — the thread's
+/// park blocked throughout, its end at the timer's.
+struct LateTimers {
+    inner: Arc<RealClock>,
+    from: u64,
+    to: u64,
+    late: u64,
+}
+
+impl Clock for LateTimers {
+    fn now(&self) -> u64 {
+        self.inner.now()
+    }
+
+    fn wall(&self) -> i64 {
+        self.inner.wall()
+    }
+
+    fn idle_since(&self) -> u64 {
+        self.inner.idle_since()
+    }
+
+    fn sleep_until(&self, at: u64) -> impl Future<Output = ()> + Send + '_ {
+        let fires = if (self.from..=self.to).contains(&at) {
+            at + self.late
+        } else {
+            at
+        };
+        self.inner.sleep_until(fires)
+    }
+
+    fn settled(&self, at: u64) -> impl Future<Output = ()> + Send + '_ {
+        self.inner.settled(at)
+    }
+}
+
+/// Loopback TCP, its first connect refused by the stand.
+struct RefusingFirst {
+    addr: SocketAddr,
+    refused: AtomicBool,
+}
+
+impl Egress for RefusingFirst {
+    type Io = tokio::net::TcpStream;
+
+    fn connect(
+        &self,
+        _: u32,
+        _: &Route,
+    ) -> impl Future<Output = Result<tokio::net::TcpStream, Connect>> + Send {
+        let refuse = !self.refused.swap(true, Ordering::SeqCst);
+        let addr = self.addr;
+        async move {
+            if refuse {
+                return Err(Connect::Stand(StandConnect::Refused));
+            }
+            let s = tokio::net::TcpStream::connect(addr)
+                .await
+                .map_err(Connect::of_connect)?;
+            s.set_nodelay(true).map_err(Connect::of_connect)?;
+            Ok(s)
+        }
+    }
+}
+
+/// Decision 19 (F4): a refused connect, then the floor's timer firing
+/// `LATE` µs after its instant, the thread parked throughout — its last
+/// blocked park ending at the wake, the bound by it about nothing. The timer
+/// the attempt registered tells: its send's lag at least the timer's
+/// lateness. `None` if the connect after the floor was not that late.
+fn late_floor_lag() -> Option<u64> {
+    const LATE: u64 = 60_000;
+    let addr = answering();
+    let live = Live::start(1, 64).unwrap();
+    let clock = Arc::new(LateTimers {
+        inner: Arc::new(RealClock::start(2_000).unwrap()),
+        // The floor's instant, a connect floor past the first connect: no
+        // other timer of the run's is due there.
+        from: 1_000,
+        to: 1_000_000,
+        late: LATE,
+    });
+    let mut h = header();
+    h.channels.clear();
+    h.calls.clear();
+    h.operations.iter_mut().for_each(|o| o.timeout = 5_000_000);
+    let h = Arc::new(h);
+    let carrier = RestCarrier::new(
+        h.clone(),
+        OneStand,
+        RefusingFirst {
+            addr,
+            refused: AtomicBool::new(false),
+        },
+        Config::new(Namespace(1), RunSecret::new([7; 32])),
+    );
+    let records = [call("read", 1, 0, 0, 0)];
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let journal = rt
+        .block_on(run(
+            admit(h, W, Arc::new(carrier), live.runtimes()).unwrap(),
+            clock,
+            Records::new(records.iter().cloned()),
+            Lines::new(),
+        ))
+        .unwrap()
+        .journal;
+    let s = sent(&journal, 2)?;
+    (s.connected >= s.handed + ascetic_ddd_load_run::rest::CONNECT_FLOOR + LATE).then_some(s.lag)
+}
+
+#[test]
+fn a_timer_woken_late_is_its_path_s_lag() {
+    let lag = (0..5)
+        .find_map(|_| late_floor_lag())
+        .expect("the floor's timer late, in some run");
+    assert!(lag >= 50_000, "lag {lag} µs");
+}
+
+/// Its decoration awaits 5 ms, the thread held 50 ms by a sibling's: the
+/// lag its wake took is the hand-off's, not its send's — the path's start
+/// and lag reset once decorated (decision 19).
+struct Awaiting(Arc<RealClock>);
+
+impl Decorator for Awaiting {
+    async fn decorate<'a>(&'a self, d: Decoration<'a>) -> Result<Vec<(String, String)>, String> {
+        if d.record.at == 0 {
+            let until = self.0.now() + 5_000;
+            self.0.sleep_until(until).await;
+        } else {
+            spin(&self.0, HOG_AT + 50_000);
+        }
+        Ok(vec![("dpop".to_owned(), "proof".to_owned())])
+    }
+}
+
+/// Line 2's send: its decoration's wake held by line 3's from 5,000 µs;
+/// `None` if line 2's decoration did not end after the hog.
+fn decorated_lag() -> Option<journal::Sent> {
+    let addr = answering();
+    let clock = Arc::new(RealClock::start(2_000).unwrap());
+    let live = Live::start(1, 64).unwrap();
+    let mut h = header();
+    h.channels.clear();
+    h.calls.clear();
+    for o in &mut h.operations {
+        o.timeout = 5_000_000;
+        if o.name == "update" {
+            o.decorated = vec!["dpop".into()];
+        }
+    }
+    let h = Arc::new(h);
+    let carrier = RestCarrier::decorated(
+        h.clone(),
+        OneStand,
+        ascetic_ddd_load_run::tcp::TcpEgress::new(
+            std::collections::BTreeMap::from([("gateway".to_owned(), addr)]),
+            vec![None],
+        ),
+        Awaiting(clock.clone()),
+        Config::new(Namespace(1), RunSecret::new([7; 32])),
+    );
+    let records = [call("update", 1, 0, 0, 0), call("update", 2, 0, HOG_AT, 0)];
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let journal = rt
+        .block_on(run(
+            admit(h, W, Arc::new(carrier), live.runtimes()).unwrap(),
+            clock.clone(),
+            Records::new(records.iter().cloned()),
+            Lines::new(),
+        ))
+        .unwrap()
+        .journal;
+    let s = sent(&journal, 2)?;
+    (s.handed >= HOG_AT + 40_000).then_some(s)
+}
+
+#[test]
+fn a_decoration_s_lag_is_no_send_s() {
+    let s = (0..5)
+        .find_map(|_| decorated_lag())
+        .expect("line 2 decorated after the hog, in some run");
+    assert!(s.lag < 20_000, "lag {} µs: {s:?}", s.lag);
+}
+
+/// Loopback TCP, its first connect pending until `at` on the clock, then
+/// refused by the stand.
+struct RefusedAt {
+    addr: SocketAddr,
+    clock: Arc<RealClock>,
+    at: u64,
+    refused: AtomicBool,
+}
+
+impl Egress for RefusedAt {
+    type Io = tokio::net::TcpStream;
+
+    fn connect(
+        &self,
+        _: u32,
+        _: &Route,
+    ) -> impl Future<Output = Result<tokio::net::TcpStream, Connect>> + Send {
+        let refuse = !self.refused.swap(true, Ordering::SeqCst);
+        let (addr, clock, at) = (self.addr, self.clock.clone(), self.at);
+        async move {
+            if refuse {
+                clock.sleep_until(at).await;
+                return Err(Connect::Stand(StandConnect::Refused));
+            }
+            let s = tokio::net::TcpStream::connect(addr)
+                .await
+                .map_err(Connect::of_connect)?;
+            s.set_nodelay(true).map_err(Connect::of_connect)?;
+            Ok(s)
+        }
+    }
+}
+
+/// The closing report of `line` in `journal`, and when.
+fn report(journal: &[Line], line: u64) -> Option<(u64, journal::Unsent)> {
+    journal.iter().find_map(|l| match l {
+        Line::Answer(a) if a.line == line => a.unsent.clone().map(|u| (a.at, u)),
+        _ => None,
+    })
+}
+
+/// Decision 19: a connect pending over the deadline, its race's timer due at
+/// `D + 1` held back — a whole process stalled across the deadline — and the
+/// refusal then read with the thread's park ending at it: the timer the
+/// attempt dropped, due, is its lag. `None` if the report came before the
+/// refusal's instant.
+fn stalled_report() -> Option<journal::Unsent> {
+    const D: u64 = 30_000;
+    const REFUSED_AT: u64 = 80_000;
+    let addr = answering();
+    let live = Live::start(1, 64).unwrap();
+    let inner = Arc::new(RealClock::start(2_000).unwrap());
+    let clock = Arc::new(LateTimers {
+        inner: inner.clone(),
+        // `D + 1` and the machine's censor at `D`, both after the refusal.
+        from: D / 2,
+        to: D + D / 2,
+        late: 200_000,
+    });
+    let mut h = header();
+    h.channels.clear();
+    h.calls.clear();
+    h.operations.iter_mut().for_each(|o| o.timeout = D);
+    let h = Arc::new(h);
+    let carrier = RestCarrier::new(
+        h.clone(),
+        OneStand,
+        RefusedAt {
+            addr,
+            clock: inner,
+            at: REFUSED_AT,
+            refused: AtomicBool::new(false),
+        },
+        Config::new(Namespace(1), RunSecret::new([7; 32])),
+    );
+    let records = [call("read", 1, 0, 0, 0)];
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let journal = rt
+        .block_on(run(
+            admit(h, W, Arc::new(carrier), live.runtimes()).unwrap(),
+            clock,
+            Records::new(records.iter().cloned()),
+            Lines::new(),
+        ))
+        .unwrap()
+        .journal;
+    let (at, u) = report(&journal, 2)?;
+    (at >= REFUSED_AT && u.handed.is_some_and(|h| h < D / 2)).then_some(u)
+}
+
+#[test]
+fn a_timer_dropped_due_is_its_path_s_lag() {
+    let u = (0..5)
+        .find_map(|_| stalled_report())
+        .expect("the report after the refusal, in some run");
+    assert_eq!(u.refused, 1);
+    assert!(u.lag >= 40_000, "lag {} µs: {u:?}", u.lag);
+}
+
+/// Decision 19: a connect refused only after 80 ms leaves its floor's
+/// instant passed — a timer never registered is no wake of the task, its
+/// due no lag. Line 2's send; `None` if its connect after the refusal came
+/// before it.
+fn slow_refusal_sent() -> Option<journal::Sent> {
+    const REFUSED_AT: u64 = 80_000;
+    let addr = answering();
+    let live = Live::start(1, 64).unwrap();
+    let clock = Arc::new(RealClock::start(2_000).unwrap());
+    let mut h = header();
+    h.channels.clear();
+    h.calls.clear();
+    h.operations.iter_mut().for_each(|o| o.timeout = 5_000_000);
+    let h = Arc::new(h);
+    let carrier = RestCarrier::new(
+        h.clone(),
+        OneStand,
+        RefusedAt {
+            addr,
+            clock: clock.clone(),
+            at: REFUSED_AT,
+            refused: AtomicBool::new(false),
+        },
+        Config::new(Namespace(1), RunSecret::new([7; 32])),
+    );
+    let records = [call("read", 1, 0, 0, 0)];
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let journal = rt
+        .block_on(run(
+            admit(h, W, Arc::new(carrier), live.runtimes()).unwrap(),
+            clock,
+            Records::new(records.iter().cloned()),
+            Lines::new(),
+        ))
+        .unwrap()
+        .journal;
+    let s = sent(&journal, 2)?;
+    (s.connected >= REFUSED_AT && s.handed < 20_000).then_some(s)
+}
+
+#[test]
+fn a_timer_never_registered_is_no_lag() {
+    let s = (0..5)
+        .find_map(|_| slow_refusal_sent())
+        .expect("line 2 connected after the refusal, in some run");
+    assert!(s.lag < 20_000, "lag {} µs: {s:?}", s.lag);
 }

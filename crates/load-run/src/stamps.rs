@@ -263,6 +263,12 @@ pub(crate) struct Path {
     on: AtomicU8,
     start: AtomicU64,
     lag: AtomicU64,
+    /// Its task's current poll (decision 19): when it began, the window's
+    /// start, and the lag it counted — a timer due within the window adds
+    /// what the bound did not count.
+    poll_at: AtomicU64,
+    poll_since: AtomicU64,
+    poll_counted: AtomicU64,
     /// The frontier pushed its `Sent` (decision 19): a censor of it is the
     /// stand's to answer for, no report owed.
     sent: AtomicBool,
@@ -286,7 +292,72 @@ impl Path {
         if self.on.load(Ordering::SeqCst) == on {
             let since = w.max(self.start.load(Ordering::SeqCst));
             let lag = p.saturating_sub(since).min(p.saturating_sub(u));
+            self.poll_at.store(p, Ordering::SeqCst);
+            self.poll_since.store(since, Ordering::SeqCst);
+            self.poll_counted.store(lag, Ordering::SeqCst);
             self.lag.fetch_add(lag, Ordering::SeqCst);
+        }
+    }
+
+    /// A timer its attempt's task registered, due at `due`, found ready or
+    /// dropped in the task's poll (decision 19): the task was runnable from
+    /// it at the latest, so the poll's lag is at least `p − due` within its
+    /// window — exact where the bound by the last blocked park is not (a
+    /// whole process stalled ends in a park that blocked).
+    fn woken(&self, due: u64) {
+        if self.on.load(Ordering::SeqCst) != ATTEMPT {
+            return;
+        }
+        let p = self.poll_at.load(Ordering::SeqCst);
+        let since = self
+            .poll_since
+            .load(Ordering::SeqCst)
+            .max(self.start.load(Ordering::SeqCst));
+        let timer = p.saturating_sub(due.max(since));
+        let counted = self.poll_counted.load(Ordering::SeqCst);
+        if timer > counted {
+            self.lag
+                .fetch_add(timer.saturating_sub(counted), Ordering::SeqCst);
+            self.poll_counted.store(timer, Ordering::SeqCst);
+        }
+    }
+}
+
+/// A sleep of an attempt's task, its due noted on its path once it was
+/// registered and is found ready or dropped (decision 19).
+pub(crate) struct Due<'a, F> {
+    sleep: Pin<Box<F>>,
+    due: u64,
+    path: &'a Path,
+    pended: bool,
+    done: bool,
+}
+
+impl<F: Future<Output = ()>> Future for Due<'_, F> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let this = self.get_mut();
+        match this.sleep.as_mut().poll(cx) {
+            Poll::Ready(()) => {
+                this.done = true;
+                if this.pended {
+                    this.path.woken(this.due);
+                }
+                Poll::Ready(())
+            }
+            Poll::Pending => {
+                this.pended = true;
+                Poll::Pending
+            }
+        }
+    }
+}
+
+impl<F> Drop for Due<'_, F> {
+    fn drop(&mut self) {
+        if self.pended && !self.done {
+            self.path.woken(self.due);
         }
     }
 }
@@ -435,7 +506,12 @@ impl<C: Clock> Stamps<C> {
 
     /// Spawns `task` on `on`, timed at each poll for what it `feeds`, kept
     /// for the stop to abort: the one place the shell spawns a task.
-    pub(crate) fn spawn_on<F>(&self, on: &tokio::runtime::Handle, feeds: Feeds, task: F)
+    pub(crate) fn spawn_on<F>(
+        &self,
+        on: &tokio::runtime::Handle,
+        feeds: Feeds,
+        task: F,
+    ) -> AbortHandle
     where
         C: Clock,
         F: Future<Output = ()> + Send + 'static,
@@ -446,7 +522,9 @@ impl<C: Clock> Stamps<C> {
             pending: self.clock.now(),
             task: Box::pin(task),
         };
-        self.tasks.keep(on.spawn(timed).abort_handle());
+        let handle = on.spawn(timed).abort_handle();
+        self.tasks.keep(handle.clone());
+        handle
     }
 
     pub(crate) fn notify(&self) {
@@ -756,8 +834,9 @@ impl<C: Clock> Attempt<C> {
     }
 
     /// Spawns a connection's task, its polls feeding the path of whichever
-    /// request it carries (decision 18).
-    pub(crate) fn spawn_connection<F>(&self, probe: Arc<Probe>, task: F)
+    /// request it carries (decision 18): its handle, for the attempt that
+    /// resets it (decision 19).
+    pub(crate) fn spawn_connection<F>(&self, probe: Arc<Probe>, task: F) -> AbortHandle
     where
         F: Future<Output = ()> + Send + 'static,
     {
@@ -765,7 +844,26 @@ impl<C: Clock> Attempt<C> {
             &tokio::runtime::Handle::current(),
             Feeds::Connection(probe),
             task,
-        );
+        )
+    }
+
+    /// A sleep of its task until `at`, its due noted on its send path
+    /// (decision 19).
+    pub(crate) fn sleep_until(&self, at: u64) -> impl Future<Output = ()> + Send + '_ {
+        Due {
+            sleep: Box::pin(self.clock().sleep_until(at)),
+            due: at,
+            path: &self.path,
+            pended: false,
+            done: false,
+        }
+    }
+
+    /// Whether its request's bytes may still leave: before its deadline
+    /// (decision 19) — a connection holding one at it gives it no byte.
+    pub(crate) fn sending(&self) -> Box<dyn Fn() -> bool + Send> {
+        let (stamps, deadline) = (self.stamps.clone(), self.deadline);
+        Box::new(move || stamps.clock().now() < deadline)
     }
 }
 
@@ -832,5 +930,44 @@ mod tests {
         assert_eq!(path.move_to(OFF, 450), CONNECTION);
         path.polled(CONNECTION, 900, 0, 0);
         assert_eq!(path.lag(), 110);
+    }
+
+    /// A timer registered on the attempt's task, due within its poll's
+    /// window, makes the poll's lag at least `p − due` (decision 19): beyond
+    /// what the bound counted, once, never before the window; nothing on a
+    /// connection's task, nor for a timer due after the poll began.
+    #[test]
+    fn a_timer_s_due_is_exact() {
+        let path = Path::default();
+        let _ = path.move_to(ATTEMPT, 100);
+        // Pending since 50, the thread blocked until 990: the bound 10.
+        path.polled(ATTEMPT, 1_000, 50, 990);
+        assert_eq!(path.lag(), 10);
+        // A timer due at 200: the task runnable from it — 800 in all.
+        path.woken(200);
+        assert_eq!(path.lag(), 800);
+        // A later one, already counted; one due after the poll began.
+        path.woken(500);
+        path.woken(1_500);
+        assert_eq!(path.lag(), 800);
+        // Due before the path's start: from its start.
+        let fresh = Path::default();
+        let _ = fresh.move_to(ATTEMPT, 400);
+        fresh.polled(ATTEMPT, 1_000, 0, 1_000);
+        fresh.woken(0);
+        assert_eq!(fresh.lag(), 600);
+        // Re-handed in the poll, at 800: nothing before its new start.
+        let handed = Path::default();
+        let _ = handed.move_to(ATTEMPT, 0);
+        handed.polled(ATTEMPT, 1_000, 0, 1_000);
+        let _ = handed.move_to(ATTEMPT, 800);
+        handed.woken(100);
+        assert_eq!(handed.lag(), 200);
+        // On its connection: the attempt's timers are none of its.
+        assert_eq!(path.move_to(CONNECTION, 1_000), ATTEMPT);
+        // Its poll's window from 1,500, the bound 10.
+        path.polled(CONNECTION, 3_000, 1_500, 2_990);
+        path.woken(1_000);
+        assert_eq!(path.lag(), 810);
     }
 }
