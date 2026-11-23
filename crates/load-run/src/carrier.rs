@@ -2,6 +2,7 @@
 //! hyper's own connection (K2b-2), or a test's script.
 
 use std::future::Future;
+use std::sync::Arc;
 
 use ascetic_ddd_command_log::record::Header;
 use ascetic_ddd_command_log::validate::Peaks;
@@ -26,6 +27,17 @@ pub enum Needs {
     },
 }
 
+/// A probe's failure (decision 20): the declared endpoint's index, and how —
+/// a dotted part (`refused`, `unanswered`, `egress_local`, …), never the
+/// host's text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unprobed {
+    /// The endpoint's index among those its source declares.
+    pub endpoint: usize,
+    /// How.
+    pub kind: String,
+}
+
 /// Carries attempts: each in a task of its own, spawned on its source's
 /// runtime, reporting through its [`Attempt`].
 pub trait Carrier<C: Clock>: Send + Sync + 'static {
@@ -35,6 +47,17 @@ pub trait Carrier<C: Clock>: Send + Sync + 'static {
     /// What it needs of `source` under the plan's `peaks` (decision 20); a
     /// source it does not know, refused — never none.
     fn needs(&self, peaks: &Peaks, source: u32) -> Result<Needs, String>;
+
+    /// Its sockets of `source` probed before T0 (decision 20): one connect
+    /// to each endpoint it declares for it, all at once, each within `bound`
+    /// µs of `clock`, nothing sent — the failures; none, passed. Run on the
+    /// source's runtime.
+    fn probe(
+        &self,
+        source: u32,
+        clock: Arc<C>,
+        bound: u64,
+    ) -> impl Future<Output = Vec<Unprobed>> + Send + 'static;
 
     /// The task that carries one attempt.
     fn carry(&self, attempt: Attempt<C>) -> impl Future<Output = ()> + Send + 'static;

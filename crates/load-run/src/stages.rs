@@ -27,11 +27,12 @@ use ascetic_ddd_scheduler::journal::{
 use ascetic_ddd_scheduler::judge::{Contract, Transport, judge};
 use ascetic_ddd_scheduler::machine::{self, MACHINE_REVISION};
 
-use crate::carrier::Carrier;
+use crate::carrier::{Carrier, Unprobed};
 use crate::clock::Clock;
-use crate::run::{Admitted, RunError};
+use crate::live::Descriptors;
+use crate::run::{Admitted, RunError, descriptors_fit};
 use crate::sink::JournalSink;
-use crate::stamps::on_source;
+use crate::stamps::{on_source, on_source_task};
 use crate::stand::{Opening, Refused};
 
 /// The shapes a document of the cap is measured in: the worst of them by the
@@ -187,6 +188,89 @@ pub async fn measure<C: Clock, X>(
     on_source(on, move || judging(&header, &*stopwatch))
         .await
         .ok_or_else(|| RunError::Measure("the judging measurement failed".to_owned()))
+}
+
+/// The carrier's sockets probed (the third stage, decision 20): every
+/// source's at once, each on its own runtime — the root's may have no I/O
+/// driver — each connect within `bound` µs of `stopwatch`; one gate,
+/// `egress.probe`. A failure refused, named by its source, its endpoint's
+/// index and its kind (`egress.probe.s0.e1.refused`); every failure in its
+/// reason, the caller's.
+pub async fn probe<C: Clock, X: Carrier<C>>(
+    admitted: &Admitted<C, X>,
+    stopwatch: Arc<C>,
+    bound: u64,
+) -> Result<Gate, Refused> {
+    let start = stopwatch.now();
+    let sources = admitted.header().profile.sources.max(1);
+    let mut probes = Vec::new();
+    for source in 0..sources {
+        let Some(on) = usize::try_from(source)
+            .ok()
+            .and_then(|s| admitted.runtimes().sources().get(s))
+        else {
+            return Err(Refused {
+                gate: "egress.probe.runtime".to_owned(),
+                why: format!("no runtime for source {source}"),
+            });
+        };
+        let probe = admitted.carrier().probe(source, stopwatch.clone(), bound);
+        probes.push((source, on_source_task(on, probe)));
+    }
+    let mut failed: Vec<(u32, Unprobed)> = Vec::new();
+    // Each connect is bounded within its probe; a runtime that never runs
+    // it is bounded here, its task aborted.
+    let late = start.saturating_add(bound.saturating_mul(2));
+    for (source, mut task) in probes {
+        tokio::select! {
+            biased;
+            r = &mut task => match r {
+                Ok(unprobed) => failed.extend(unprobed.into_iter().map(|u| (source, u))),
+                Err(_) => failed.push((source, Unprobed { endpoint: 0, kind: "failed".to_owned() })),
+            },
+            () = stopwatch.sleep_until(late) => {
+                task.abort();
+                failed.push((source, Unprobed { endpoint: 0, kind: "unanswered".to_owned() }));
+            }
+        }
+    }
+    let Some((source, first)) = failed.first() else {
+        return Ok(Gate {
+            name: Code::from(&machine::Code::of("egress.probe")),
+            took: stopwatch.now().saturating_sub(start),
+        });
+    };
+    let why = failed
+        .iter()
+        .map(|(s, u)| format!("source {s} endpoint {}: {}", u.endpoint, u.kind))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(Refused {
+        gate: format!("egress.probe.s{source}.e{}.{}", first.endpoint, first.kind),
+        why,
+    })
+}
+
+/// The process's descriptors read again as the third stage's last gate
+/// (decision 20): what was opened since admission — a gate's client, the
+/// host's own — still within the soft limit with the caps and the reserve;
+/// one gate, `egress.descriptors`.
+pub fn descriptors<C, X>(admitted: &Admitted<C, X>) -> Result<Gate, Refused> {
+    let Some(caps) = admitted.caps() else {
+        return Ok(Gate {
+            name: Code::from(&machine::Code::of("egress.descriptors")),
+            took: 0,
+        });
+    };
+    descriptors_fit(caps, Descriptors::read().ok())
+        .map(|()| Gate {
+            name: Code::from(&machine::Code::of("egress.descriptors")),
+            took: 0,
+        })
+        .map_err(|why| Refused {
+            gate: "egress.descriptors".to_owned(),
+            why: why.to_string(),
+        })
 }
 
 /// The most gates a stand may have: past it, one that never says it is done.

@@ -139,6 +139,15 @@ fn a_run_at_the_descriptors_bound_hits_no_emfile() {
     setrlimit(Resource::RLIMIT_NOFILE, bound, hard).unwrap();
     let live = Live::for_caps(&[CAP]).unwrap();
     let admitted = admit(plan(), W, carrier(), live.runtimes()).unwrap();
+    // Stage 3's re-read: within; past the reserve once more were opened
+    // since admission (decision 20).
+    assert!(ascetic_ddd_load_run::stages::descriptors(&admitted).is_ok());
+    let opened: Vec<std::fs::File> = (0..=DESCRIPTORS_RESERVE)
+        .map(|_| std::fs::File::open("/proc/self/stat").unwrap())
+        .collect();
+    let refused = ascetic_ddd_load_run::stages::descriptors(&admitted).unwrap_err();
+    assert_eq!(refused.gate, "egress.descriptors");
+    drop(opened);
     let clock = Arc::new(RealClock::start(2_000).unwrap());
     let ran = machine
         .block_on(run(

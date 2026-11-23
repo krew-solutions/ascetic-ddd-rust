@@ -136,6 +136,16 @@ impl Carrier<VirtualClock> for Gated {
         Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
     }
 
+    fn probe(
+        &self,
+        _: u32,
+        _: std::sync::Arc<VirtualClock>,
+        _: u64,
+    ) -> impl std::future::Future<Output = Vec<ascetic_ddd_load_run::carrier::Unprobed>> + Send + 'static
+    {
+        std::future::ready(Vec::new())
+    }
+
     fn carry(&self, a: Attempt<VirtualClock>) -> impl Future<Output = ()> + Send + 'static {
         a.unanswered();
         std::future::ready(())

@@ -971,6 +971,15 @@ impl Carrier<VirtualClock> for Mixed {
         Carrier::<VirtualClock>::needs(&self.rest, peaks, source)
     }
 
+    fn probe(
+        &self,
+        source: u32,
+        clock: Arc<VirtualClock>,
+        bound: u64,
+    ) -> impl Future<Output = Vec<ascetic_ddd_load_run::carrier::Unprobed>> + Send + 'static {
+        Carrier::<VirtualClock>::probe(&self.rest, source, clock, bound)
+    }
+
     fn carry(&self, a: Attempt<VirtualClock>) -> impl Future<Output = ()> + Send + 'static {
         let f: Pin<Box<dyn Future<Output = ()> + Send>> = if over_rest(a.record()) {
             Box::pin(Carrier::<VirtualClock>::carry(&self.rest, a))

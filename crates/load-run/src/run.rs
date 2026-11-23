@@ -384,6 +384,8 @@ fn poll_now<S: LineSource>(source: &mut S) -> Poll<Result<Option<Arc<Record>>, L
 pub struct Admitted<C, X> {
     header: Arc<Header>,
     peaks: ascetic_ddd_command_log::validate::Peaks,
+    /// The caps of the sources needing sockets, summed (decision 20).
+    caps: Option<u64>,
     read_ahead: u64,
     carrier: Arc<X>,
     runtimes: Runtimes,
@@ -402,6 +404,11 @@ impl<C, X> Admitted<C, X> {
         &self.peaks
     }
 
+    /// The caps of its sources needing sockets, summed; none if none does.
+    pub fn caps(&self) -> Option<u64> {
+        self.caps
+    }
+
     /// Its read-ahead.
     pub fn read_ahead(&self) -> u64 {
         self.read_ahead
@@ -416,6 +423,23 @@ impl<C, X> Admitted<C, X> {
     pub fn runtimes(&self) -> &Runtimes {
         &self.runtimes
     }
+}
+
+/// The caps summed, with the descriptors open and the reserve, within the
+/// soft limit (decision 20's I1); unknown descriptors refused.
+pub(crate) fn descriptors_fit(
+    caps: u64,
+    descriptors: Option<Descriptors>,
+) -> Result<(), Inadmissible> {
+    let needed = caps.saturating_add(DESCRIPTORS_RESERVE);
+    let fits = descriptors.is_some_and(|d| needed.saturating_add(d.open()) <= d.soft());
+    if fits {
+        return Ok(());
+    }
+    Err(Inadmissible::Descriptors {
+        needed: needed.saturating_add(descriptors.map_or(0, |d| d.open())),
+        descriptors,
+    })
 }
 
 /// Admits `plan`, read `read_ahead` µs ahead, its attempts carried by
@@ -487,20 +511,14 @@ pub fn admit<C: Clock, X: Carrier<C>>(
     // soft limit — EMFILE never before a cap's own wait.
     if let Some(caps) = caps {
         let descriptors = runtimes.descriptors();
-        let needed = caps.saturating_add(DESCRIPTORS_RESERVE);
-        let fits = descriptors.is_some_and(|d| needed.saturating_add(d.open()) <= d.soft());
-        if !fits {
-            return Err(refused(Inadmissible::Descriptors {
-                needed: needed.saturating_add(descriptors.map_or(0, |d| d.open())),
-                descriptors,
-            }));
-        }
+        descriptors_fit(caps, descriptors).map_err(refused)?;
     }
     // The machine's own refusals: a read-ahead past the header's.
     drop(Machine::new(header.clone(), read_ahead)?);
     Ok(Admitted {
         header,
         peaks: *plan.peaks(),
+        caps,
         read_ahead,
         carrier,
         runtimes: runtimes.clone(),

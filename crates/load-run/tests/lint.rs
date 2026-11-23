@@ -77,13 +77,22 @@ fn every_task_is_spawned_where_it_is_timed() {
         .filter(|p| code.contains(**p))
         .count();
         let one = code.matches("on.spawn(").count();
+        // Any method spawn of a task, however its receiver is named — a
+        // thread's builder takes a closure, a task a future.
+        let any = code
+            .match_indices(".spawn(")
+            .filter(|(i, m)| {
+                let after = code[i + m.len()..].trim_start();
+                !after.starts_with("move ||") && !after.starts_with("||")
+            })
+            .count();
         match name {
-            // The run's timed spawn, and the measurement's before T0 (an
-            // `async` block: two patterns).
-            "stamps.rs" => assert_eq!((spawns, one), (2, 2), "{name}"),
+            // The run's timed spawn, the measurement's and the probe's
+            // before T0 (an `async` block: two patterns).
+            "stamps.rs" => assert_eq!((spawns, one, any), (2, 3, 3), "{name}"),
             // The virtual clock's own task, its timer: no attempt's.
             "clock.rs" => assert_eq!(code.matches("tokio::spawn").count(), 1, "{name}"),
-            _ => assert_eq!(spawns, 0, "{name}"),
+            _ => assert_eq!((spawns, any), (0, 0), "{name}"),
         }
     }
 }

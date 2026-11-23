@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c-1 to K2b-8c-5 built (§ Measured), K2b-8c-6 next — K2b-8 before K2b-7e, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c-1 to K2b-8c-6 built (§ Measured), K2b-8c-7 next — K2b-8 before K2b-7e, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -795,6 +795,7 @@ stage 1; § Alternatives Considered keeps what each refuted):
 | K2b-8c-3 | K2b | admission with the validator's own peaks of five reads at once: at a cap of the bound and events of the cap and the driver's two, admitted — every answer by its deadline, none waiting, five connections; a cap one short refused naming the source, the need and the cap; events one short refused naming the cap and the events; a cap past any events refused; a plan of two sources over a carrier of one refused naming source 1; `Live::for_caps` recording each cap and the driver's own, none past its sources, a cap no driver can take refused; a replayed log's plan its header and its commitment's peaks | no events check; events strictly past; no driver's own, one driver event; no bound check; the bound at the cap refused; needs nothing; an unknown source passed; the first source alone; `Live` without the driver's; a replay's peaks dropped |
 | K2b-8c-4 | K2b | admission with assumed descriptors: the cap, ten open and the reserve at the soft limit admitted, one below refused naming the need; two sources' caps summed; the process's unknown refused; in a test binary of its own, the process's: read as `/proc/self/fd` lists them, `Live`'s read once its runtimes exist, raised to the hard limit and marked; a soft limit one below admission's bound refused, at it a run filling its source's cap of twenty — every request out, none answered — with no `EMFILE` | no reserve; the open not counted; unknown passed; at the soft refused; the last cap alone; read before the runtimes; a raise unmarked; the listing's own counted |
 | K2b-8c-5 | K2b | `TcpEgress` admitting a bound source of its own and reaching its endpoint; refusing more sources than listed and one past the list, two sources bound to one address, an address not the host's, an endpoint with no address, a v4 source to a v6 endpoint, an unbound source routed from a bound one's address — the stand's listener accepting nothing; admission refusing an endpoint the stand declares and the egress does not reach, and a source not the host's, admitting it reached; a route outside its source's declared endpoints the harness's `rest.endpoint` | sources past the list; one address twice; no local bind; an unknown endpoint reached; any family; a shared route passed; the egress not admitted; no endpoint reached; a route outside passed |
+| K2b-8c-6 | K2b | two sources bound to their own addresses probed from a root runtime with no I/O driver: one gate `egress.probe`, the stand accepting two connections, each read as reset with no byte; a closed port refused as `egress.probe.s0.e0.refused`; a connect never answered refused as `…unanswered` within its bound, its future dropped; the harness's failure named by its own, `…egress_ports`; in the descriptors' own binary, stage 3's re-read within at admission's bound and refused once the reserve and one more were opened since; the lint counting every method spawn of a task, its receiver whatever | probed on the root; failures ignored; the harness's name kept dotted; a stream kept; no re-read |
 | K2-1 | K2 | the shell against an in-memory transport (hyper over `tokio::io::duplex`) under paused time reproduces `sim`'s journal | `std::time::Instant` in a handler |
 | K2-2 | K2 | each cause delayed alone — the reader, the token, the pool, the connect, the write, the dependency — moves exactly one gap of the chain | a gap merged |
 | K2-3 | K2 | on the real clock, multi-thread: chain order, no release before its stamped met instants, the stub's requests per correlation id equal the journal's attempts — a keep-alive connection closed as it is reused included; a request processed then reset before the answer is Unknown; a response stamped 1 µs before its deadline delivered after the tick is Expected | hyper's hidden retry; Unknown read as not taken; deadlines by arrival |
@@ -1656,6 +1657,21 @@ source's declared set, checking all of it in `carries` and every route against i
   K2b-8c-7's.
 - The sweep killed all 9 mutants; the egress not admitted lived until admission's twin carried a foreign source.
 
+**K2b-8c-6 — the probe; the descriptors read again** (2026-11-24, decision 20): `Carrier::probe(source, clock, bound)`,
+no default, and `carrier::Unprobed { endpoint, kind }`; the REST carrier's — one connect to each endpoint the source
+declares, all at once (a join of its own: no futures crate), each raced against the bound, a stream got dropped (a
+reset at zero linger), nothing sent; `stages::probe` — each source's probe spawned on its own runtime
+(`stamps::on_source_task`, before T0), a runtime that never runs it bounded at twice the bound and its task aborted;
+passed, one gate `egress.probe`; refused, named by the first failure — `egress.probe.s<source>.e<index>.<kind>`, the
+kind a stand's (`refused`, `reset`, …), `unanswered`, or the harness's own name with its dots as underscores — every
+failure in the caller's reason; `stages::descriptors` — the process's descriptors read again against admission's
+caps, one gate `egress.descriptors`. The spawn lint now counts any method spawn of a task (a thread's builder,
+given a closure, aside).
+- The inner bound and the outer one: a connect never answered is refused by either — the outer is the backstop of a
+  runtime that never runs the probe; a mutant dropping the inner bound is caught only by timing, which the twins do
+  not assert.
+- The sweep killed all 5 mutants; a stream kept first hung the twin — the stand's reads now time out, and it fails.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -1891,3 +1907,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   admission against the caps summed.
 - 2026-11-24: K2b-8c-5 built (§ Measured): the stand's endpoints per source, the egress's admission and reach with no
   packet, a route outside its source's set a harness fault.
+- 2026-11-24: K2b-8c-6 built (§ Measured): the probe at stage 3, every declared pair at once on its source's runtime;
+  the descriptors read again as stage 3's last gate; the spawn lint widened.

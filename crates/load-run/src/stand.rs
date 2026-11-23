@@ -102,6 +102,20 @@ pub enum StandConnect {
     Unreachable,
 }
 
+impl StandConnect {
+    /// Its dotted part: `refused`, `reset`, `aborted`, `timed_out`,
+    /// `unreachable`.
+    pub fn name(&self) -> &'static str {
+        match self {
+            StandConnect::Refused => "refused",
+            StandConnect::Reset => "reset",
+            StandConnect::Aborted => "aborted",
+            StandConnect::TimedOut => "timed_out",
+            StandConnect::Unreachable => "unreachable",
+        }
+    }
+}
+
 impl Connect {
     /// A connect's own error, classed: the peer's refusals and the network's
     /// losses the stand's; any other — ports exhausted at an unbound

@@ -261,3 +261,179 @@ fn admission_refuses_an_endpoint_unreached() {
     let why = refused("gateway", Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))));
     assert!(why.starts_with("egress.local"), "{why}");
 }
+
+/// A stand's endpoint that never answers a connect, or fails it as given;
+/// each connect future's drop counted.
+struct Fake {
+    fails: Option<fn() -> Connect>,
+    dropped: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+struct Dropped(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for Dropped {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Egress for Fake {
+    type Io = tokio::net::TcpStream;
+
+    fn ports(&self, _: u32) -> usize {
+        100
+    }
+
+    fn admits(&self, _: u32) -> Result<(), ascetic_ddd_load_run::stand::Unfit> {
+        Ok(())
+    }
+
+    fn reaches(&self, _: u32, _: &str) -> Result<(), ascetic_ddd_load_run::stand::Unfit> {
+        Ok(())
+    }
+
+    fn connect(
+        &self,
+        _: u32,
+        _: &Route,
+    ) -> impl std::future::Future<Output = Result<tokio::net::TcpStream, Connect>> + Send {
+        let (fails, guard) = (self.fails, Dropped(self.dropped.clone()));
+        async move {
+            let _guard = guard;
+            match fails {
+                Some(f) => Err(f()),
+                None => std::future::pending().await,
+            }
+        }
+    }
+}
+
+/// Admitted over `egress` for `sources` sources each declaring `gateway`,
+/// on `live`; the probe's outcome, the root's runtime without I/O.
+fn probed<E: Egress>(
+    egress: E,
+    sources: u32,
+    live: &ascetic_ddd_load_run::live::Live,
+    bound: u64,
+) -> Result<ascetic_ddd_scheduler::journal::Gate, ascetic_ddd_load_run::stand::Refused> {
+    use ascetic_ddd_load_run::clock::RealClock;
+    use ascetic_ddd_load_run::rest::{Config, RestCarrier};
+    use ascetic_ddd_load_run::run::admit;
+    use ascetic_ddd_load_run::source::Plan;
+    let mut h = fixture::header();
+    h.channels.clear();
+    h.calls.clear();
+    h.profile.sources = sources;
+    let h = std::sync::Arc::new(h);
+    let carrier = RestCarrier::new(
+        h.clone(),
+        Declaring("gateway"),
+        egress,
+        Config::new(
+            ascetic_ddd_command_log::fills::Namespace(1),
+            ascetic_ddd_command_log::render::RunSecret::new([7; 32]),
+        ),
+    );
+    let admitted = admit::<RealClock, _>(
+        Plan::assumed(h, Default::default()),
+        fixture::W,
+        std::sync::Arc::new(carrier),
+        live.runtimes(),
+    )
+    .unwrap();
+    let root = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let clock = std::sync::Arc::new(RealClock::start(2_000).unwrap());
+    root.block_on(ascetic_ddd_load_run::stages::probe(&admitted, clock, bound))
+}
+
+/// Decision 20: the probe connects once from each source to each endpoint it
+/// declares, on the source's runtime — the root's has no I/O driver — and
+/// sends nothing, each connection reset; a closed port refused by name; a
+/// connect that never answers bounded, its future dropped; the harness's
+/// failure named by its own.
+#[test]
+fn the_probe_connects_once_to_each_declared_pair_and_sends_nothing() {
+    use ascetic_ddd_load_run::live::Live;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    // Each connection: what it read before its end, and how it ended.
+    let stand = std::thread::spawn(move || {
+        (0..2)
+            .map(|_| {
+                let (mut s, _) = listener.accept().unwrap();
+                // A connection kept open fails the twin, never hangs it.
+                s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut buf = [0u8; 64];
+                match s.read(&mut buf) {
+                    Ok(n) => (n, None),
+                    Err(e) => (0, Some(e.kind())),
+                }
+            })
+            .collect::<Vec<_>>()
+    });
+    let local = |last: u8| Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, last)));
+    let live = Live::for_caps(&[100, 100]).unwrap();
+    let egress = TcpEgress::new(
+        BTreeMap::from([("gateway".to_owned(), addr)]),
+        vec![local(2), local(3)],
+    )
+    .with_ports(100);
+    let gate = probed(egress, 2, &live, 1_000_000).unwrap();
+    assert_eq!(
+        gate.name,
+        ascetic_ddd_scheduler::journal::Code::Named("egress.probe".to_owned())
+    );
+    let seen = stand.join().unwrap();
+    assert_eq!(
+        seen,
+        vec![(0, Some(io::ErrorKind::ConnectionReset)); 2],
+        "each reset, nothing sent"
+    );
+    // A closed port: refused, named.
+    let closed = {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+    let one = Live::for_caps(&[100]).unwrap();
+    let refused = probed(
+        TcpEgress::new(BTreeMap::from([("gateway".to_owned(), closed)]), vec![None])
+            .with_ports(100),
+        1,
+        &one,
+        1_000_000,
+    )
+    .unwrap_err();
+    assert_eq!(refused.gate, "egress.probe.s0.e0.refused");
+    // Never answered: bounded, its connect dropped.
+    let dropped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let refused = probed(
+        Fake {
+            fails: None,
+            dropped: dropped.clone(),
+        },
+        1,
+        &one,
+        50_000,
+    )
+    .unwrap_err();
+    assert_eq!(refused.gate, "egress.probe.s0.e0.unanswered");
+    assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // The harness's: named by its own.
+    let refused = probed(
+        Fake {
+            fails: Some(|| Connect::Harness {
+                cannot: "egress.ports",
+                detail: "none".to_owned(),
+            }),
+            dropped,
+        },
+        1,
+        &one,
+        50_000,
+    )
+    .unwrap_err();
+    assert_eq!(refused.gate, "egress.probe.s0.e0.egress_ports");
+}

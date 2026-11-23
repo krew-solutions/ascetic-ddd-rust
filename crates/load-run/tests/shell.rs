@@ -235,6 +235,16 @@ impl Carrier<VirtualClock> for Forgetful {
         Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
     }
 
+    fn probe(
+        &self,
+        _: u32,
+        _: std::sync::Arc<VirtualClock>,
+        _: u64,
+    ) -> impl std::future::Future<Output = Vec<ascetic_ddd_load_run::carrier::Unprobed>> + Send + 'static
+    {
+        std::future::ready(Vec::new())
+    }
+
     fn carry(&self, a: Attempt<VirtualClock>) -> impl Future<Output = ()> + Send + 'static {
         let panics = self.panics;
         async move {
@@ -278,6 +288,16 @@ impl Carrier<VirtualClock> for Refusing {
         _: u32,
     ) -> Result<ascetic_ddd_load_run::carrier::Needs, String> {
         Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
+    }
+
+    fn probe(
+        &self,
+        _: u32,
+        _: std::sync::Arc<VirtualClock>,
+        _: u64,
+    ) -> impl std::future::Future<Output = Vec<ascetic_ddd_load_run::carrier::Unprobed>> + Send + 'static
+    {
+        std::future::ready(Vec::new())
     }
 
     fn carry(&self, a: Attempt<VirtualClock>) -> impl Future<Output = ()> + Send + 'static {
@@ -606,6 +626,16 @@ impl<C: Clock> Carrier<C> for Judging {
         Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
     }
 
+    fn probe(
+        &self,
+        _: u32,
+        _: std::sync::Arc<C>,
+        _: u64,
+    ) -> impl std::future::Future<Output = Vec<ascetic_ddd_load_run::carrier::Unprobed>> + Send + 'static
+    {
+        std::future::ready(Vec::new())
+    }
+
     fn carry(&self, mut a: Attempt<C>) -> impl Future<Output = ()> + Send + 'static {
         let (arrive, judging, block) = (self.arrive, self.judging, self.block);
         async move {
@@ -738,6 +768,17 @@ fn a_late_hand_off_is_journaled() {
             _: u32,
         ) -> Result<ascetic_ddd_load_run::carrier::Needs, String> {
             Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
+        }
+
+        fn probe(
+            &self,
+            _: u32,
+            _: std::sync::Arc<C>,
+            _: u64,
+        ) -> impl std::future::Future<Output = Vec<ascetic_ddd_load_run::carrier::Unprobed>>
+        + Send
+        + 'static {
+            std::future::ready(Vec::new())
         }
         #[expect(
             clippy::manual_async_fn,
@@ -1051,6 +1092,16 @@ impl Carrier<Poisoning> for Poisoner {
         Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
     }
 
+    fn probe(
+        &self,
+        _: u32,
+        _: std::sync::Arc<Poisoning>,
+        _: u64,
+    ) -> impl std::future::Future<Output = Vec<ascetic_ddd_load_run::carrier::Unprobed>> + Send + 'static
+    {
+        std::future::ready(Vec::new())
+    }
+
     #[expect(
         clippy::manual_async_fn,
         reason = "the task must not borrow its carrier: it is 'static"
@@ -1113,6 +1164,16 @@ impl Carrier<VirtualClock> for Lingering {
         _: u32,
     ) -> Result<ascetic_ddd_load_run::carrier::Needs, String> {
         Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
+    }
+
+    fn probe(
+        &self,
+        _: u32,
+        _: std::sync::Arc<VirtualClock>,
+        _: u64,
+    ) -> impl std::future::Future<Output = Vec<ascetic_ddd_load_run::carrier::Unprobed>> + Send + 'static
+    {
+        std::future::ready(Vec::new())
     }
 
     #[expect(
@@ -1190,6 +1251,16 @@ impl Carrier<VirtualClock> for Leaving {
         Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
     }
 
+    fn probe(
+        &self,
+        _: u32,
+        _: std::sync::Arc<VirtualClock>,
+        _: u64,
+    ) -> impl std::future::Future<Output = Vec<ascetic_ddd_load_run::carrier::Unprobed>> + Send + 'static
+    {
+        std::future::ready(Vec::new())
+    }
+
     #[expect(
         clippy::manual_async_fn,
         reason = "the task must not borrow its carrier: it is 'static"
@@ -1244,6 +1315,16 @@ impl Carrier<VirtualClock> for Twice {
         _: u32,
     ) -> Result<ascetic_ddd_load_run::carrier::Needs, String> {
         Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
+    }
+
+    fn probe(
+        &self,
+        _: u32,
+        _: std::sync::Arc<VirtualClock>,
+        _: u64,
+    ) -> impl std::future::Future<Output = Vec<ascetic_ddd_load_run::carrier::Unprobed>> + Send + 'static
+    {
+        std::future::ready(Vec::new())
     }
 
     #[expect(

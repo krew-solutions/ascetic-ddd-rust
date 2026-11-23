@@ -23,7 +23,7 @@ use ascetic_ddd_scheduler::machine::{
     self, Captured, Found, Judgement, Line, Refusal, Seen, Unsent,
 };
 use tokio::sync::Notify;
-use tokio::task::AbortHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 
 use crate::clock::Clock;
 use crate::io::Probe;
@@ -411,6 +411,16 @@ where
     F: FnOnce() -> T + Send + 'static,
 {
     on.spawn(async move { f() }).await.ok()
+}
+
+/// Runs `task` on `on`'s runtime before T0 (decision 20): a probe, no run's
+/// task; its handle, to await or abort.
+pub(crate) fn on_source_task<T, F>(on: &tokio::runtime::Handle, task: F) -> JoinHandle<T>
+where
+    T: Send + 'static,
+    F: Future<Output = T> + Send + 'static,
+{
+    on.spawn(task)
 }
 
 /// Every task the shell spawns for a run, so that a stop aborts them all, and

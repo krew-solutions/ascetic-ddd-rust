@@ -31,7 +31,7 @@ use http_body::{Body, Frame as BodyFrame, SizeHint};
 use hyper::client::conn::http1::{self, SendRequest};
 use tokio::task::AbortHandle;
 
-use crate::carrier::{Carrier, Needs};
+use crate::carrier::{Carrier, Needs, Unprobed};
 use crate::clock::Clock;
 use crate::decorate::{Decoration, Decorator, Undecorated};
 use crate::io::{Held, Io, Probe, Slot, Sockets};
@@ -305,6 +305,54 @@ impl<C: Clock, S: Stand, E: Egress, D: Decorator> Carrier<C> for RestCarrier<S, 
         })
     }
 
+    /// One connect to each endpoint `source` declares, all at once, each
+    /// raced against the bound; a stream got, dropped — reset, no byte.
+    fn probe(
+        &self,
+        source: u32,
+        clock: Arc<C>,
+        bound: u64,
+    ) -> impl Future<Output = Vec<Unprobed>> + Send + 'static {
+        let inner = self.inner.clone();
+        async move {
+            let declared: Vec<String> = usize::try_from(source)
+                .ok()
+                .and_then(|s| inner.endpoints.get(s))
+                .map(|e| e.iter().cloned().collect())
+                .unwrap_or_default();
+            let until = clock.now().saturating_add(bound);
+            let probes = declared
+                .into_iter()
+                .enumerate()
+                .map(|(endpoint, name)| {
+                    let (inner, clock) = (inner.clone(), clock.clone());
+                    let probe: Pin<Box<dyn Future<Output = Option<Unprobed>> + Send>> =
+                        Box::pin(async move {
+                            let route = Route {
+                                authority: String::new(),
+                                endpoint: name,
+                            };
+                            let kind = tokio::select! {
+                                biased;
+                                c = inner.egress.connect(source, &route) => match c {
+                                    Ok(stream) => {
+                                        drop(stream);
+                                        return None;
+                                    }
+                                    Err(Connect::Stand(why)) => why.name().to_owned(),
+                                    Err(Connect::Harness { cannot, .. }) => cannot.replace('.', "_"),
+                                },
+                                () = clock.sleep_until(until) => "unanswered".to_owned(),
+                            };
+                            Some(Unprobed { endpoint, kind })
+                        });
+                    probe
+                })
+                .collect();
+            all(probes).await.into_iter().flatten().collect()
+        }
+    }
+
     fn carry(&self, attempt: Attempt<C>) -> impl Future<Output = ()> + Send + 'static {
         let inner = self.inner.clone();
         async move { inner.attempt(attempt).await }
@@ -317,6 +365,35 @@ impl<C: Clock, S: Stand, E: Egress, D: Decorator> Carrier<C> for RestCarrier<S, 
     ) -> impl Future<Output = Option<Result<String, Refused>>> + Send {
         self.inner.stand.gate(i, opening)
     }
+}
+
+/// Every future of `futures` to its end, polled together: their outputs in
+/// their order.
+async fn all<T>(futures: Vec<Pin<Box<dyn Future<Output = T> + Send>>>) -> Vec<T> {
+    let mut pending: Vec<Option<Pin<Box<dyn Future<Output = T> + Send>>>> =
+        futures.into_iter().map(Some).collect();
+    let mut done: Vec<Option<T>> = pending.iter().map(|_| None).collect();
+    poll_fn(|cx| {
+        let mut all_done = true;
+        for (slot, out) in pending.iter_mut().zip(done.iter_mut()) {
+            if let Some(f) = slot {
+                match f.as_mut().poll(cx) {
+                    Poll::Ready(v) => {
+                        *out = Some(v);
+                        *slot = None;
+                    }
+                    Poll::Pending => all_done = false,
+                }
+            }
+        }
+        if all_done {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
+    done.into_iter().flatten().collect()
 }
 
 /// A socket's place at its source's cap (decision 19).

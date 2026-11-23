@@ -42,6 +42,16 @@ impl<C: Clock> Carrier<C> for Scripted {
         Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
     }
 
+    fn probe(
+        &self,
+        _: u32,
+        _: std::sync::Arc<C>,
+        _: u64,
+    ) -> impl std::future::Future<Output = Vec<ascetic_ddd_load_run::carrier::Unprobed>> + Send + 'static
+    {
+        std::future::ready(Vec::new())
+    }
+
     fn carry(&self, mut a: Attempt<C>) -> impl Future<Output = ()> + Send + 'static {
         let script = self.script.clone();
         let judging = self.judging.clone();

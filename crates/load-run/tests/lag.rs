@@ -86,6 +86,16 @@ impl Carrier<RealClock> for Waiting {
         Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
     }
 
+    fn probe(
+        &self,
+        _: u32,
+        _: std::sync::Arc<RealClock>,
+        _: u64,
+    ) -> impl std::future::Future<Output = Vec<ascetic_ddd_load_run::carrier::Unprobed>> + Send + 'static
+    {
+        std::future::ready(Vec::new())
+    }
+
     fn carry(&self, mut a: Attempt<RealClock>) -> impl Future<Output = ()> + Send + 'static {
         let (clock, write_at) = (self.clock.clone(), self.write_at);
         async move {
