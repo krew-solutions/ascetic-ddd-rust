@@ -4,7 +4,7 @@
 //! takes its branches in is the order written; every task spawned at the one
 //! place that times it (decision 18).
 
-const SOURCES: [(&str, &str); 14] = [
+const SOURCES: [(&str, &str); 15] = [
     ("carrier.rs", include_str!("../src/carrier.rs")),
     ("clock.rs", include_str!("../src/clock.rs")),
     ("decorate.rs", include_str!("../src/decorate.rs")),
@@ -15,6 +15,7 @@ const SOURCES: [(&str, &str); 14] = [
     ("run.rs", include_str!("../src/run.rs")),
     ("sink.rs", include_str!("../src/sink.rs")),
     ("source.rs", include_str!("../src/source.rs")),
+    ("stages.rs", include_str!("../src/stages.rs")),
     ("stamps.rs", include_str!("../src/stamps.rs")),
     ("stand.rs", include_str!("../src/stand.rs")),
     ("tcp.rs", include_str!("../src/tcp.rs")),
@@ -77,7 +78,9 @@ fn every_task_is_spawned_where_it_is_timed() {
         .count();
         let one = code.matches("on.spawn(").count();
         match name {
-            "stamps.rs" => assert_eq!((spawns, one), (1, 1), "{name}"),
+            // The run's timed spawn, and the measurement's before T0 (an
+            // `async` block: two patterns).
+            "stamps.rs" => assert_eq!((spawns, one), (2, 2), "{name}"),
             // The virtual clock's own task, its timer: no attempt's.
             "clock.rs" => assert_eq!(code.matches("tokio::spawn").count(), 1, "{name}"),
             _ => assert_eq!(spawns, 0, "{name}"),

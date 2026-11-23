@@ -314,6 +314,16 @@ impl<C: Clock, F: Future<Output = ()>> Future for Timed<C, F> {
     }
 }
 
+/// Runs `f` on `on`'s thread and gives its value: a measurement before T0
+/// (decision 18), no run's task; none if its runtime failed it.
+pub(crate) async fn on_source<T, F>(on: &tokio::runtime::Handle, f: F) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    on.spawn(async move { f() }).await.ok()
+}
+
 /// Every task the shell spawns for a run, so that a stop aborts them all, and
 /// a run dropped with them (decision 18): reaped as the list grows.
 #[derive(Default)]

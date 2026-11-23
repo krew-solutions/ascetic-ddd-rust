@@ -27,7 +27,7 @@ use ascetic_ddd_command_log::record::{Record, Rest};
 use ascetic_ddd_command_log::render::RunSecret;
 use ascetic_ddd_load_run::clock::{Clock, RealClock};
 use ascetic_ddd_load_run::rest::{Config, RestCarrier};
-use ascetic_ddd_load_run::run::{Runtimes, run};
+use ascetic_ddd_load_run::run::{Runtimes, admit, run};
 use ascetic_ddd_load_run::sink::Lines;
 use ascetic_ddd_load_run::source::Records;
 use ascetic_ddd_load_run::stand::{Egress, Route, Stand};
@@ -42,6 +42,14 @@ impl Stand for OneStand {
             authority: "stand.test".to_owned(),
             endpoint: "gateway".to_owned(),
         })
+    }
+    fn gate(
+        &self,
+        _: usize,
+        _: ascetic_ddd_load_run::stand::Opening<'_>,
+    ) -> impl Future<Output = Option<Result<String, ascetic_ddd_load_run::stand::Refused>>> + Send
+    {
+        std::future::ready(None)
     }
 }
 
@@ -189,7 +197,7 @@ fn attempt_once(prodded: bool) -> Option<Vec<Line>> {
             addr,
             peer: peer.clone(),
         },
-        Config::new(Namespace(1), RunSecret::new([7; 32]), clock.wall()),
+        Config::new(Namespace(1), RunSecret::new([7; 32])),
     );
     // The spinner and the peek, from the test's own thread.
     let spun = Arc::new(AtomicU64::new(u64::MAX));
@@ -234,15 +242,18 @@ fn attempt_once(prodded: bool) -> Option<Vec<Line>> {
     });
     let journal = rt
         .block_on(run(
-            header,
-            W,
+            admit(
+                header,
+                W,
+                Arc::new(carrier),
+                &Runtimes {
+                    sources: vec![source],
+                },
+            )
+            .unwrap(),
             shell,
             Records::new(records.iter().cloned()),
             Lines::new(),
-            Arc::new(carrier),
-            &Runtimes {
-                sources: vec![source],
-            },
         ))
         .unwrap()
         .journal;
@@ -342,7 +353,7 @@ fn calls_over_tcp_from_a_live_source_are_answered() {
         header.clone(),
         OneStand,
         egress,
-        Config::new(Namespace(1), RunSecret::new([7; 32]), clock.wall()),
+        Config::new(Namespace(1), RunSecret::new([7; 32])),
     );
     let records = [
         call("read", 1, 0, 0, 0),
@@ -355,13 +366,10 @@ fn calls_over_tcp_from_a_live_source_are_answered() {
     let started = clock.now();
     let journal = rt
         .block_on(run(
-            header,
-            W,
+            admit(header, W, Arc::new(carrier), live.runtimes()).unwrap(),
             clock.clone(),
             Records::new(records.iter().cloned()),
             Lines::new(),
-            Arc::new(carrier),
-            live.runtimes(),
         ))
         .unwrap()
         .journal;

@@ -17,7 +17,7 @@ use ascetic_ddd_command_log::validate::NoHost;
 use ascetic_ddd_faker::{Key, Seed};
 use ascetic_ddd_load_run::carrier::Carrier;
 use ascetic_ddd_load_run::clock::{Clock, VirtualClock};
-use ascetic_ddd_load_run::run::{Ran, RunEnd, RunError, Runtimes, Stop, run};
+use ascetic_ddd_load_run::run::{Ran, RunEnd, RunError, Runtimes, Stop, admit, run};
 use ascetic_ddd_load_run::sink::Lines;
 use ascetic_ddd_load_run::source::{LineSource, Records};
 use ascetic_ddd_load_run::stamps::{Attempt, Harness};
@@ -74,16 +74,15 @@ fn shell_from<S: LineSource, X: Carrier<VirtualClock>>(
         let runtimes = Runtimes {
             sources: vec![tokio::runtime::Handle::current(); sources],
         };
+        // A refusal before T0 comes back as it is: no run, no journal.
+        let admitted = admit(
+            Arc::new(header.clone()),
+            read_ahead,
+            Arc::new(carrier),
+            &runtimes,
+        )?;
         clock
-            .within(run(
-                Arc::new(header.clone()),
-                read_ahead,
-                clock.clone(),
-                source,
-                Lines::new(),
-                Arc::new(carrier),
-                &runtimes,
-            ))
+            .within(run(admitted, clock.clone(), source, Lines::new()))
             .await
     })
 }
@@ -284,22 +283,19 @@ fn a_log_the_carrier_cannot_carry_is_refused_before_t0() {
         .enable_time()
         .build()
         .unwrap();
+    // Fewer runtimes than sources: refused at admission, no run begun.
     let err = rt.block_on(async {
-        let clock = Arc::new(VirtualClock::start(0));
         let runtimes = Runtimes {
             sources: vec![tokio::runtime::Handle::current()],
         };
-        run(
+        admit::<VirtualClock, _>(
             Arc::new(wide),
             W,
-            clock.clone(),
-            Records::new(records.clone().into_iter()),
-            Lines::new(),
             Arc::new(Scripted::new(Arc::new(script(1, "refused")))),
             &runtimes,
         )
-        .await
-        .unwrap_err()
+        .err()
+        .unwrap()
     });
     assert!(matches!(err, RunError::Refused(_)), "{err:?}");
 }
@@ -437,13 +433,16 @@ fn stress<C: Clock>(make: impl Fn(u64) -> C, seeds: u64, calls: u64) {
             };
             let sink = Written::start(Vec::new(), journal_header, 1_024).unwrap();
             let ran = run(
-                Arc::new(header.clone()),
-                W,
+                admit(
+                    Arc::new(header.clone()),
+                    W,
+                    Arc::new(Scripted::new(quick)),
+                    &runtimes,
+                )
+                .unwrap(),
                 clock,
                 Records::new(records.clone().into_iter()),
                 sink,
-                Arc::new(Scripted::new(quick)),
-                &runtimes,
             )
             .await
             .unwrap_or_else(|e| panic!("seed {seed}: {e}"));
@@ -661,19 +660,22 @@ fn a_carrier_stuck_on_its_thread_is_a_harness_fault() {
     let err = rt.block_on(async {
         let clock = Arc::new(RealClock::start(2_000).unwrap());
         run(
-            Arc::new(h.clone()),
-            W,
+            admit(
+                Arc::new(h.clone()),
+                W,
+                Arc::new(Judging {
+                    arrive: 0,
+                    judging: Some(0),
+                    block: 200_000,
+                }),
+                &Runtimes {
+                    sources: vec![runtimes.sources[0].clone()],
+                },
+            )
+            .unwrap(),
             clock,
             Records::new(records.iter().cloned()),
             Lines::new(),
-            Arc::new(Judging {
-                arrive: 0,
-                judging: Some(0),
-                block: 200_000,
-            }),
-            &Runtimes {
-                sources: vec![runtimes.sources[0].clone()],
-            },
         )
         .await
         .unwrap()
@@ -727,15 +729,18 @@ fn a_late_hand_off_is_journaled() {
     let journal = rt.block_on(async {
         let clock = Arc::new(RealClock::start(2_000).unwrap());
         run(
-            Arc::new(header()),
-            W,
+            admit(
+                Arc::new(header()),
+                W,
+                Arc::new(Blocking),
+                &Runtimes {
+                    sources: vec![runtimes.sources[0].clone()],
+                },
+            )
+            .unwrap(),
             clock,
             Records::new(records.iter().cloned()),
             Lines::new(),
-            Arc::new(Blocking),
-            &Runtimes {
-                sources: vec![runtimes.sources[0].clone()],
-            },
         )
         .await
         .unwrap()
@@ -769,22 +774,17 @@ fn a_source_not_on_a_current_thread_runtime_is_refused() {
         .enable_time()
         .build()
         .unwrap();
-    let records = [call("read", 1, 0, 0, 0)];
     let err = rt.block_on(async {
-        let clock = Arc::new(VirtualClock::start(0));
-        run(
+        admit::<VirtualClock, _>(
             Arc::new(header()),
             W,
-            clock,
-            Records::new(records.iter().cloned()),
-            Lines::new(),
             Arc::new(Scripted::new(Arc::new(script(1, "flavor")))),
             &Runtimes {
                 sources: vec![pool.handle().clone()],
             },
         )
-        .await
-        .unwrap_err()
+        .err()
+        .unwrap()
     });
     assert!(
         matches!(err, RunError::Refused(ref why) if why.contains("current_thread")),
@@ -1039,13 +1039,10 @@ fn a_poisoned_lock_stops_the_run() {
         };
         virtual_clock
             .within(run(
-                Arc::new(header()),
-                W,
+                admit(Arc::new(header()), W, Arc::new(Poisoner), &runtimes).unwrap(),
                 clock,
                 Records::new(records.into_iter()),
                 Lines::new(),
-                Arc::new(Poisoner),
-                &runtimes,
             ))
             .await
     });

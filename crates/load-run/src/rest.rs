@@ -34,7 +34,7 @@ use crate::clock::Clock;
 use crate::decorate::{Decoration, Decorator, Undecorated};
 use crate::io::{Io, Probe};
 use crate::stamps::Attempt;
-use crate::stand::{Egress, Route, Stand};
+use crate::stand::{Egress, Opening, Refused, Route, Stand};
 use crate::turn;
 
 /// An attempt's looks around its deadline (decision 17): one at `D − J/2`,
@@ -64,8 +64,6 @@ pub struct Config {
     pub namespace: Namespace,
     /// The run's secret.
     pub secret: RunSecret,
-    /// T0's wall instant, microseconds since the Unix epoch.
-    pub run_start: i64,
     /// The least microseconds between an attempt's consecutive connects,
     /// its first at once (decision 16): a refused stand is not hammered.
     pub connect_floor: u64,
@@ -81,13 +79,14 @@ pub const CONNECT_FLOOR: u64 = 10_000;
 pub const IDLE_MARGIN: u64 = 1_000_000;
 
 impl Config {
-    /// The run's namespace, secret and wall instant of T0; the connect floor
-    /// and the idle margin by default.
-    pub fn new(namespace: Namespace, secret: RunSecret, run_start: i64) -> Config {
+    /// The run's namespace and secret; the connect floor and the idle margin
+    /// by default. T0's wall instant is its clock's, read at each attempt: a
+    /// carrier built before T0 stamps no frame by an earlier one (decision
+    /// 18).
+    pub fn new(namespace: Namespace, secret: RunSecret) -> Config {
         Config {
             namespace,
             secret,
-            run_start,
             connect_floor: CONNECT_FLOOR,
             idle_margin: IDLE_MARGIN,
         }
@@ -233,6 +232,14 @@ impl<C: Clock, S: Stand, E: Egress, D: Decorator> Carrier<C> for RestCarrier<S, 
         let inner = self.inner.clone();
         async move { inner.attempt(attempt).await }
     }
+
+    fn gate(
+        &self,
+        i: usize,
+        opening: Opening<'_>,
+    ) -> impl Future<Output = Option<Result<String, Refused>>> + Send {
+        self.inner.stand.gate(i, opening)
+    }
 }
 
 /// The request of `frame` to `route`, its correlation header and its
@@ -299,15 +306,12 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
             return a.fault("rest.source", format!("no source {}", rest.source));
         };
         let captured = a.captured().to_vec();
-        let wall = |at: u64| {
-            self.config
-                .run_start
-                .saturating_add(i64::try_from(at).unwrap_or(i64::MAX))
-        };
+        let run_start = a.clock().wall();
+        let wall = |at: u64| run_start.saturating_add(i64::try_from(at).unwrap_or(i64::MAX));
         let fills = Fills {
             namespace: self.config.namespace,
             secret: &self.config.secret,
-            run_start: self.config.run_start,
+            run_start,
             // A call's frame is its first attempt's, resent byte for byte; a
             // poll's is its own (decision 16).
             sent: wall(if matches!(record.action, Action::Observe(_)) {

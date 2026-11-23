@@ -64,7 +64,8 @@ pub enum Rule {
     Profile,
     /// An operation not in the table, an observation that polls every 0, an
     /// idempotent call that sends a value of a slot its own first attempt
-    /// rewrites (ADR-0047 decision 15).
+    /// rewrites (ADR-0047 decision 15), a call from a source past the
+    /// profile's (decision 18).
     Operation,
     /// A dependency the host's domain requires, not awaited.
     Required,
@@ -1663,6 +1664,15 @@ impl<H: Host> Pass<'_, H> {
     fn operations(&mut self, line: u64, r: &Record) {
         let mut found = Vec::new();
         for rest in calls(r) {
+            // Sent from a source the profile has (ADR-0047 decision 18): the
+            // shell runs one per source, and has no other.
+            let sources = self.header.profile.sources;
+            if rest.source >= sources {
+                found.push(format!(
+                    "{}: from source {}, past the profile's {sources}",
+                    rest.op, rest.source
+                ));
+            }
             match self.header.operations.iter().find(|o| o.name == rest.op) {
                 None => found.push(format!("{:?} is not in the operations table", rest.op)),
                 // A repeat that answers the first attempt's outcome cannot send

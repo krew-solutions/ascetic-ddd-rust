@@ -24,7 +24,7 @@ use ascetic_ddd_command_log::record::{Action, Codec, Header, Payload, Record, Re
 use ascetic_ddd_command_log::render::{self, RunSecret};
 use ascetic_ddd_load_run::clock::{Clock, VirtualClock};
 use ascetic_ddd_load_run::rest::{Config, RestCarrier};
-use ascetic_ddd_load_run::run::{RunError, Runtimes, run};
+use ascetic_ddd_load_run::run::{RunError, Runtimes, admit, run};
 use ascetic_ddd_load_run::sink::Lines;
 use ascetic_ddd_load_run::source::Records;
 use ascetic_ddd_load_run::stand::{Egress, Route, Stand};
@@ -337,6 +337,14 @@ impl Stand for OneStand {
             endpoint: "gateway".to_owned(),
         })
     }
+    fn gate(
+        &self,
+        _: usize,
+        _: ascetic_ddd_load_run::stand::Opening<'_>,
+    ) -> impl Future<Output = Option<Result<String, ascetic_ddd_load_run::stand::Refused>>> + Send
+    {
+        std::future::ready(None)
+    }
 }
 
 fn rest_header() -> Header {
@@ -425,7 +433,7 @@ fn run_rest_with(
                 connects: Arc::new(AtomicUsize::new(0)),
             },
             {
-                let mut c = Config::new(NAMESPACE, RunSecret::new([7; 32]), clock.wall());
+                let mut c = Config::new(NAMESPACE, RunSecret::new([7; 32]));
                 tune(&mut c);
                 c
             },
@@ -433,17 +441,20 @@ fn run_rest_with(
         let runtimes = Runtimes {
             sources: vec![tokio::runtime::Handle::current()],
         };
-        let ran = clock
-            .within(run(
-                header,
-                W,
-                clock.clone(),
-                Records::new(records.iter().cloned()),
-                Lines::new(),
-                Arc::new(carrier),
-                &runtimes,
-            ))
-            .await;
+        // A refusal before T0 comes back as it is: no run, no journal.
+        let ran = match admit(header, W, Arc::new(carrier), &runtimes) {
+            Ok(admitted) => {
+                clock
+                    .within(run(
+                        admitted,
+                        clock.clone(),
+                        Records::new(records.iter().cloned()),
+                        Lines::new(),
+                    ))
+                    .await
+            }
+            Err(e) => Err(e),
+        };
         let came = stub.came.lock().unwrap().clone();
         (
             ran.map(|r| r.journal),
@@ -889,7 +900,7 @@ fn over_rest_the_shell_journals_what_sim_journals() {
                             eof: None,
                             connects: Arc::new(AtomicUsize::new(0)),
                         },
-                        Config::new(NAMESPACE, RunSecret::new([7; 32]), clock.wall()),
+                        Config::new(NAMESPACE, RunSecret::new([7; 32])),
                     ),
                     scripted: Scripted::new(script.clone()),
                 };
@@ -901,13 +912,10 @@ fn over_rest_the_shell_journals_what_sim_journals() {
                 };
                 clock
                     .within(run(
-                        header,
-                        W,
+                        admit(header, W, Arc::new(carrier), &runtimes).unwrap(),
                         clock.clone(),
                         Records::new(records.iter().cloned()),
                         Lines::new(),
-                        Arc::new(carrier),
-                        &runtimes,
                     ))
                     .await
                     .unwrap_or_else(|e| panic!("{name}/{seed}: {e}"))
@@ -1106,20 +1114,17 @@ fn looked(lags: &[(u64, u64)], answer: Answer) -> Vec<Line> {
                 eof: None,
                 connects: Arc::new(AtomicUsize::new(0)),
             },
-            Config::new(NAMESPACE, RunSecret::new([7; 32]), inner.wall()),
+            Config::new(NAMESPACE, RunSecret::new([7; 32])),
         );
         let runtimes = Runtimes {
             sources: vec![tokio::runtime::Handle::current()],
         };
         inner
             .within(run(
-                header,
-                W,
+                admit(header, W, Arc::new(carrier), &runtimes).unwrap(),
                 clock,
                 Records::new(records.iter().cloned()),
                 Lines::new(),
-                Arc::new(carrier),
-                &runtimes,
             ))
             .await
             .unwrap()
@@ -1291,20 +1296,17 @@ fn run_decorated(
                 connects: Arc::new(AtomicUsize::new(0)),
             },
             proofs,
-            Config::new(NAMESPACE, RunSecret::new([7; 32]), clock.wall()),
+            Config::new(NAMESPACE, RunSecret::new([7; 32])),
         );
         let runtimes = Runtimes {
             sources: vec![tokio::runtime::Handle::current()],
         };
         let ran = clock
             .within(run(
-                header,
-                W,
+                admit(header, W, Arc::new(carrier), &runtimes).unwrap(),
                 clock.clone(),
                 Records::new(records.iter().cloned()),
                 Lines::new(),
-                Arc::new(carrier),
-                &runtimes,
             ))
             .await;
         let came = stub.came.lock().unwrap().clone();
@@ -1347,7 +1349,12 @@ fn a_resend_is_its_first_attempt_s_bytes_but_its_own_proof() {
         Some("SECRET-proof-2")
     );
     assert_ne!(came[0].id, came[1].id);
-    assert!(field(&text(&came[0]), "x-sent").is_some());
+    // The time it was sent by T0's wall instant — the clock's, read at the
+    // attempt (decision 18) — its first dispatch at 0, in milliseconds.
+    assert_eq!(
+        field(&text(&came[0]), "x-sent").as_deref(),
+        Some("1763640000000")
+    );
     assert_eq!(planned_lines(&came[0].bytes), planned_lines(&came[1].bytes));
 }
 
@@ -1909,7 +1916,7 @@ fn stop_leaves_no_request(connect: u64, throttle: Throttle) {
                 eof: None,
                 connects: Arc::new(AtomicUsize::new(0)),
             },
-            Config::new(NAMESPACE, RunSecret::new([7; 32]), clock.wall()),
+            Config::new(NAMESPACE, RunSecret::new([7; 32])),
         );
         let runtimes = Runtimes {
             sources: vec![tokio::runtime::Handle::current()],
@@ -1920,13 +1927,10 @@ fn stop_leaves_no_request(connect: u64, throttle: Throttle) {
         };
         let ran = clock
             .within(run(
-                header,
-                W,
+                admit(header, W, Arc::new(carrier), &runtimes).unwrap(),
                 clock.clone(),
                 source,
                 Lines::new(),
-                Arc::new(carrier),
-                &runtimes,
             ))
             .await
             .unwrap();
@@ -1988,19 +1992,16 @@ fn a_run_dropped_takes_its_attempts_with_it() {
                 eof: None,
                 connects: Arc::new(AtomicUsize::new(0)),
             },
-            Config::new(NAMESPACE, RunSecret::new([7; 32]), clock.wall()),
+            Config::new(NAMESPACE, RunSecret::new([7; 32])),
         );
         let runtimes = Runtimes {
             sources: vec![tokio::runtime::Handle::current()],
         };
         let running = run(
-            header,
-            W,
+            admit(header, W, Arc::new(carrier), &runtimes).unwrap(),
             clock.clone(),
             Records::new(records.clone().into_iter()),
             Lines::new(),
-            Arc::new(carrier),
-            &runtimes,
         );
         tokio::select! {
             biased;
@@ -2011,4 +2012,79 @@ fn a_run_dropped_takes_its_attempts_with_it() {
         stub.came.lock().unwrap().len()
     });
     assert_eq!(came, 0);
+}
+
+/// A stand with gates of its own.
+struct Gating;
+
+impl Stand for Gating {
+    fn route(&self, _: &Record, _: &Rest) -> Result<Route, String> {
+        Ok(Route {
+            authority: "stand.test".to_owned(),
+            endpoint: "gateway".to_owned(),
+        })
+    }
+
+    fn gate(
+        &self,
+        i: usize,
+        _: ascetic_ddd_load_run::stand::Opening<'_>,
+    ) -> impl Future<Output = Option<Result<String, ascetic_ddd_load_run::stand::Refused>>> + Send
+    {
+        std::future::ready(match i {
+            0 => Some(Ok("stand.namespace_unseen".to_owned())),
+            1 => Some(Err(ascetic_ddd_load_run::stand::Refused {
+                gate: "gateway.buckets_refilled".to_owned(),
+                why: "a bucket still draining".to_owned(),
+            })),
+            _ => None,
+        })
+    }
+}
+
+/// Decision 18: the REST carrier's gates are its stand's, in turn.
+#[test]
+fn the_rest_carrier_s_gates_are_its_stand_s() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let refused = rt.block_on(async {
+        let clock = Arc::new(VirtualClock::start(0));
+        let stub = Arc::new(Stub {
+            clock: clock.clone(),
+            answers: BTreeMap::new(),
+            connections: AtomicUsize::new(0),
+            came: Mutex::new(Vec::new()),
+        });
+        let header = Arc::new(rest_header());
+        let carrier = RestCarrier::new(
+            header.clone(),
+            Gating,
+            Pipe {
+                stub,
+                throttle: AT_ONCE,
+                holds: None,
+                connect: 0,
+                refuse: Arc::new(AtomicUsize::new(0)),
+                fail: None,
+                requests: Arc::new(AtomicUsize::new(0)),
+                eof: None,
+                connects: Arc::new(AtomicUsize::new(0)),
+            },
+            Config::new(NAMESPACE, RunSecret::new([7; 32])),
+        );
+        let runtimes = Runtimes {
+            sources: vec![tokio::runtime::Handle::current()],
+        };
+        let admitted = admit(header.clone(), W, Arc::new(carrier), &runtimes).unwrap();
+        let opening = ascetic_ddd_load_run::stand::Opening {
+            header: &header,
+            namespace: NAMESPACE,
+        };
+        ascetic_ddd_load_run::stages::gates(&admitted, opening, &*clock, 1_000)
+            .await
+            .unwrap_err()
+    });
+    assert_eq!(refused.gate, "gateway.buckets_refilled");
 }

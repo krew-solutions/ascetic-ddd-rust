@@ -1,8 +1,8 @@
-{"header":{"journal":6,"machine":4,"source":"verdict","log":"8a92f6b7baf1d65bdc077084bdeebd07c9e2df587866f751d524218d8afe1d06","validator":"8: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent frame predicate expect secret","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000","gates":[],"judging":null}}
+{"header":{"journal":6,"machine":4,"source":"verdict","log":"8a92f6b7baf1d65bdc077084bdeebd07c9e2df587866f751d524218d8afe1d06","validator":"a test's validator","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000","gates":[],"judging":null}}
 {"read":{"at":"0","line":"2","key":{"kind":"device","scope":"Bw==","label":"read","n":0},"action":"rest","safety":"never","cause":null,"after":[],"planned":"0"}}
 {"released":{"at":"0","line":"2","intended":"0","released":"0","deadline":"10000000"}}
 {"dispatch":{"at":"0","line":"2","attempt":1,"deadline":"10000000","due":"0"}}
 {"sent":{"at":"0","line":"2","attempt":1,"handed":"0","connected":"0","lag":"0"}}
 {"end":{"at":"11000000","line":"2","end":"unknown","read":"0","ready":"0","intended":"0","released":"0","dispatched":"0","sent":"0","ended":"11000000","attempts":1,"critical":null,"bound":[],"fault":true,"wake":"11000000"}}
 {"fault":{"at":"11000000","class":{"backstop":{"line":"2"}}}}
-{"trailer":{"events":"6","steps":"1","sha256":"777a6e4d57ab1b0c6027395dbab35ab114dd2d98c85c34fc8c84662a87ba1f48"}}
+{"trailer":{"events":"6","steps":"1","sha256":"93122268a18a0386cf1f151025341f329d782ca35459eefa81a1079bd29cf64c"}}

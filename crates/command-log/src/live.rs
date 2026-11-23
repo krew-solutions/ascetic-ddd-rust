@@ -38,8 +38,8 @@ use crate::validate::{Host, Limits, Report, Rule, spill_need, validate_on};
 /// resend floor, answer cap and idle checked; 8: K2a-4b — `frame`,
 /// `predicate`, `expect`, `secret`, a not-taken resend's codes, an idempotent
 /// call's own slot, one producer a slot a record, no captured value in a raw
-/// span).
-pub const RULES_REVISION: u32 = 8;
+/// span; 9: ADR-0047 K2b-7d — a call's source within the profile's).
+pub const RULES_REVISION: u32 = 9;
 
 /// The validator's identity: its revision and its rules' names.
 pub fn validator() -> String {

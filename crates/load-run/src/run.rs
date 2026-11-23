@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::poll_fn;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
@@ -210,25 +211,51 @@ fn poll_now<S: LineSource>(source: &mut S) -> Poll<Result<Option<Arc<Record>>, L
     source.poll_next(&mut Context::from_waker(Waker::noop()))
 }
 
-/// Runs the log `header` heads, read from `source` `read_ahead` µs ahead of
-/// the clock, its attempts carried by `carrier` on `runtimes`, its journal's
-/// lines after the header into `sink`. Refused before T0 if the carrier
-/// cannot carry the log or a source has no runtime.
-pub async fn run<C, S, K, X>(
+/// A run admitted before T0 (decision 18, the first stage): the plan, the
+/// carrier that carries it and the runtimes it runs on, checked against each
+/// other with nothing touched outside the process. Only [`admit`] makes one,
+/// and only one runs.
+pub struct Admitted<C, X> {
     header: Arc<Header>,
     read_ahead: u64,
-    clock: Arc<C>,
-    mut source: S,
-    mut sink: K,
+    carrier: Arc<X>,
+    runtimes: Runtimes,
+    /// The clock it is carried by: the run's.
+    clock: PhantomData<fn() -> C>,
+}
+
+impl<C, X> Admitted<C, X> {
+    /// The log's header.
+    pub fn header(&self) -> &Arc<Header> {
+        &self.header
+    }
+
+    /// Its read-ahead.
+    pub fn read_ahead(&self) -> u64 {
+        self.read_ahead
+    }
+
+    /// Its carrier.
+    pub fn carrier(&self) -> &X {
+        &self.carrier
+    }
+
+    /// Where it runs.
+    pub fn runtimes(&self) -> &Runtimes {
+        &self.runtimes
+    }
+}
+
+/// Admits the log `header` heads, read `read_ahead` µs ahead, its attempts
+/// carried by `carrier` on `runtimes` — or refuses it, before any journal
+/// exists: a carrier that cannot carry it, a runtime not `current_thread`,
+/// fewer runtimes than sources, a read-ahead past the header's.
+pub fn admit<C: Clock, X: Carrier<C>>(
+    header: Arc<Header>,
+    read_ahead: u64,
     carrier: Arc<X>,
     runtimes: &Runtimes,
-) -> Result<Ran<K::Finished>, RunError>
-where
-    C: Clock,
-    S: LineSource,
-    K: JournalSink,
-    X: Carrier<C>,
-{
+) -> Result<Admitted<C, X>, RunError> {
     carrier.carries(&header).map_err(RunError::Refused)?;
     // A source's driver turns only between its tasks on a `current_thread`
     // runtime: what an attempt's look verifies (decision 17).
@@ -249,6 +276,40 @@ where
             header.profile.sources
         )));
     }
+    // The machine's own refusals: a read-ahead past the header's.
+    drop(Machine::new(header.clone(), read_ahead)?);
+    Ok(Admitted {
+        header,
+        read_ahead,
+        carrier,
+        runtimes: runtimes.clone(),
+        clock: PhantomData,
+    })
+}
+
+/// Runs the log `admitted` heads, read from `source` ahead of the clock —
+/// started at T0, after the stages before it (decision 18) — its journal's
+/// lines after the header into `sink`.
+pub async fn run<C, S, K, X>(
+    admitted: Admitted<C, X>,
+    clock: Arc<C>,
+    mut source: S,
+    mut sink: K,
+) -> Result<Ran<K::Finished>, RunError>
+where
+    C: Clock,
+    S: LineSource,
+    K: JournalSink,
+    X: Carrier<C>,
+{
+    let Admitted {
+        header,
+        read_ahead,
+        carrier,
+        runtimes,
+        ..
+    } = admitted;
+    let runtimes = &runtimes;
     // A hold that outlives it is a stuck carrier (decision 17).
     let route_timeout = header.profile.route_timeout;
     let mut machine = Machine::new(header, read_ahead)?;

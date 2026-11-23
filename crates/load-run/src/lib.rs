@@ -16,6 +16,7 @@ pub mod rest;
 pub mod run;
 pub mod sink;
 pub mod source;
+pub mod stages;
 pub mod stamps;
 pub mod stand;
 pub mod tcp;

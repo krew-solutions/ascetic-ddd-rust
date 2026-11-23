@@ -137,9 +137,11 @@ fn a_source_is_a_value_and_must_be_one_the_profile_has() {
         ),
         vec![]
     );
+    // A source the profile lacks breaks `operation` too (ADR-0047 decision
+    // 18), whatever limits key the call.
     assert_eq!(
         check(per_source(), &[call("read", 1, 0, 0, 2)]),
-        vec![(2, Rule::Key)]
+        vec![(2, Rule::Operation), (2, Rule::Key)]
     );
 }
 

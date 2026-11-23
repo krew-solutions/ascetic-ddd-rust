@@ -1,4 +1,4 @@
-{"header":{"journal":6,"machine":4,"source":"verdict","log":"6558aa547e59f6eb6af9007fcf209143980f5a405c607b549aab03ca0903e31e","validator":"8: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent frame predicate expect secret","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000","gates":[],"judging":null}}
+{"header":{"journal":6,"machine":4,"source":"verdict","log":"6558aa547e59f6eb6af9007fcf209143980f5a405c607b549aab03ca0903e31e","validator":"a test's validator","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000","gates":[],"judging":null}}
 {"read":{"at":"0","line":"2","key":{"kind":"device","scope":"Bw==","label":"watched","n":0},"action":"poll","safety":"never","cause":"2","after":[],"planned":"0"}}
 {"released":{"at":"0","line":"2","intended":"0","released":"0","deadline":"10000"}}
 {"dispatch":{"at":"0","line":"2","attempt":1,"deadline":"10000","due":"0"}}
@@ -7,4 +7,4 @@
 {"dispatch":{"at":"1000","line":"2","attempt":2,"deadline":"10000","due":"1000"}}
 {"answer":{"at":"10000","line":"2","attempt":2,"judged":"unknown","captured":[],"ignored":null,"status":null,"code":null,"after":null,"censored":true,"found":null}}
 {"end":{"at":"10000","line":"2","end":"unknown","read":"0","ready":"0","intended":"0","released":"0","dispatched":"0","sent":"0","ended":"10000","attempts":2,"critical":null,"bound":[],"fault":false,"wake":"10000"}}
-{"trailer":{"events":"8","steps":"1","sha256":"5cb64ce94ff31735ff72b6ab0db60e1782fcb95fe36c375a4e2c69b25b3934e4"}}
+{"trailer":{"events":"8","steps":"1","sha256":"3ab15242a1b8239072a08c351dd701e9a176e15971cefb0325973cd7d80f4179"}}

@@ -181,10 +181,13 @@ const JOURNALS: &[(u32, u32, &str)] = &[
         4,
         "3f95c013e077896ca4f17fb32b7a54dbba0586a1ca35ef35d69f2f3d742f3b15",
     ),
+    // Re-pinned once by K2b-7d, the journals unchanged but their header:
+    // it names a test's validator now, not the live one, so the digest no
+    // longer moves with the validator's revision.
     (
         6,
         4,
-        "6ccc3b983c3c56c3ff2df17f8902eb01f114f071c320bbd6c2ee90fb5241d9c9",
+        "1166c150f0271b295cf9a639180bdda6426ddb3142a9b6c1af9a5cb1b45ec42b",
     ),
 ];
 
@@ -650,7 +653,9 @@ fn the_machine_is_the_scheduler_by_definition() {
                         machine: MACHINE_REVISION,
                         source: "differential".to_owned(),
                         log: identity.clone(),
-                        validator: ascetic_ddd_command_log::live::validator(),
+                        // A test's input, not the machine's: pinned journals do not move
+                        // with the validator's revision.
+                        validator: "a test's validator".to_owned(),
                         read_ahead,
                         jitter: header.profile.jitter,
                         resend: header.profile.resend,
@@ -888,7 +893,9 @@ fn late_wakes_are_the_harness_s_lateness() {
                 machine: MACHINE_REVISION,
                 source: "late wakes".to_owned(),
                 log: identity.clone(),
-                validator: ascetic_ddd_command_log::live::validator(),
+                // A test's input, not the machine's: pinned journals do not move
+                // with the validator's revision.
+                validator: "a test's validator".to_owned(),
                 read_ahead: 1_000,
                 jitter: j,
                 resend: header.profile.resend,

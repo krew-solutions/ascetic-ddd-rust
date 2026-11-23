@@ -23,7 +23,7 @@ use ascetic_ddd_load_run::carrier::Carrier;
 use ascetic_ddd_load_run::clock::{Clock, RealClock};
 use ascetic_ddd_load_run::live::Live;
 use ascetic_ddd_load_run::rest::{Config, RestCarrier};
-use ascetic_ddd_load_run::run::{RunError, run};
+use ascetic_ddd_load_run::run::{RunError, admit, run};
 use ascetic_ddd_load_run::sink::Lines;
 use ascetic_ddd_load_run::source::Records;
 use ascetic_ddd_load_run::stamps::Attempt;
@@ -43,6 +43,14 @@ impl Stand for OneStand {
             authority: "stand.test".to_owned(),
             endpoint: "gateway".to_owned(),
         })
+    }
+    fn gate(
+        &self,
+        _: usize,
+        _: ascetic_ddd_load_run::stand::Opening<'_>,
+    ) -> impl Future<Output = Option<Result<String, ascetic_ddd_load_run::stand::Refused>>> + Send
+    {
+        std::future::ready(None)
     }
 }
 
@@ -142,19 +150,16 @@ fn over_tcp(
             [("gateway".to_owned(), addr)].into_iter().collect(),
             vec![None],
         ),
-        Config::new(NAMESPACE, RunSecret::new([7; 32]), clock.wall()),
+        Config::new(NAMESPACE, RunSecret::new([7; 32])),
     );
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
     rt.block_on(run(
-        header,
-        W,
+        admit(header, W, Arc::new(carrier), live.runtimes()).unwrap(),
         clock,
         Records::new(records.iter().cloned()),
         Lines::new(),
-        Arc::new(carrier),
-        live.runtimes(),
     ))
     .map(|r| r.journal)
 }
@@ -267,13 +272,10 @@ fn drill_timed(
         .build()
         .unwrap();
     let ran = rt.block_on(run(
-        Arc::new(header),
-        W,
+        admit(Arc::new(header), W, Arc::new(carrier), live.runtimes()).unwrap(),
         clock.clone(),
         Records::new(records.iter().cloned()),
         Lines::new(),
-        Arc::new(carrier),
-        live.runtimes(),
     ));
     ran.map(|r| (r.journal, clock.now()))
 }

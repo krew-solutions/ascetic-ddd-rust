@@ -43,7 +43,9 @@ fn journal_header(header: &Header, log: &Log) -> journal::Header {
         machine: MACHINE_REVISION,
         source: "verdict".to_owned(),
         log: log.sha256.clone(),
-        validator: ascetic_ddd_command_log::live::validator(),
+        // A test's input, not the machine's: pinned journals do not move
+        // with the validator's revision.
+        validator: "a test's validator".to_owned(),
         read_ahead: header.read_ahead,
         jitter: header.profile.jitter,
         resend: header.profile.resend,

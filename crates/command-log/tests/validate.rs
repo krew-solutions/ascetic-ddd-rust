@@ -914,6 +914,10 @@ fn the_rules_meaning_is_pinned_to_its_revision() {
             8,
             "2c611cc2ae7e1d1659f54eab2de6e2135cdcc06ec965d28a3f90053afb6812eb",
         ),
+        (
+            9,
+            "51db017cf90c7f7d6f1028b115bcf6fef9113a1e9cda11a5542979fb093d97c3",
+        ),
     ];
     let mut digest = Sha256::new();
     for line in fixture::corpus::lines() {
@@ -1769,4 +1773,25 @@ fn resends_producers_and_raw_spans() {
         &[w0.clone(), spanned(false)],
         &[w0.clone(), spanned(true)],
     );
+}
+
+/// ADR-0047 decision 18: a call, or an observation's poll, from a source past
+/// the profile's breaks `operation` — whatever limits its operation keys —
+/// and one within it does not.
+#[test]
+fn a_call_from_a_source_past_the_profile_s_breaks_operation() {
+    let sources = header().profile.sources;
+    let past = call("read", 1, 0, 10, sources);
+    let within = call("read", 1, 0, 10, sources - 1);
+    let report = run(&[past]);
+    assert_eq!(pairs(&report), vec![(2, Rule::Operation)]);
+    assert!(report.violations[0].detail.contains("past the profile's"));
+    assert!(pairs(&run(&[within])).is_empty());
+    let mut polling = polling(1, 0, 10, 1_000, 5_000);
+    if let Action::Observe(o) = &mut polling.action
+        && let ascetic_ddd_command_log::record::Probe::Rest(r) = &mut o.probe
+    {
+        r.source = sources;
+    }
+    assert!(pairs(&run(&[polling])).contains(&(2, Rule::Operation)));
 }

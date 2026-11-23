@@ -28,7 +28,7 @@ use ascetic_ddd_load_run::clock::{Clock, RealClock};
 use ascetic_ddd_load_run::decorate::{Decoration, Decorator};
 use ascetic_ddd_load_run::live::Live;
 use ascetic_ddd_load_run::rest::{Config, RestCarrier};
-use ascetic_ddd_load_run::run::run;
+use ascetic_ddd_load_run::run::{admit, run};
 use ascetic_ddd_load_run::sink::Lines;
 use ascetic_ddd_load_run::source::Records;
 use ascetic_ddd_load_run::stamps::Attempt;
@@ -115,16 +115,19 @@ fn waiting_lag(write_at: u64) -> Option<u64> {
         .unwrap();
     let journal = rt
         .block_on(run(
-            Arc::new(h),
-            W,
+            admit(
+                Arc::new(h),
+                W,
+                Arc::new(Waiting {
+                    clock: clock.clone(),
+                    write_at,
+                }),
+                live.runtimes(),
+            )
+            .unwrap(),
             clock.clone(),
             Records::new(records.iter().cloned()),
             Lines::new(),
-            Arc::new(Waiting {
-                clock: clock.clone(),
-                write_at,
-            }),
-            live.runtimes(),
         ))
         .unwrap()
         .journal;
@@ -159,6 +162,14 @@ impl Stand for OneStand {
             authority: "stand.test".to_owned(),
             endpoint: "gateway".to_owned(),
         })
+    }
+    fn gate(
+        &self,
+        _: usize,
+        _: ascetic_ddd_load_run::stand::Opening<'_>,
+    ) -> impl Future<Output = Option<Result<String, ascetic_ddd_load_run::stand::Refused>>> + Send
+    {
+        std::future::ready(None)
     }
 }
 
@@ -315,7 +326,7 @@ fn connection_lag(early: bool) -> Option<u64> {
         OneStand,
         GatedTcp { addr, open, waker },
         Hogging(clock.clone()),
-        Config::new(Namespace(1), RunSecret::new([7; 32]), clock.wall()),
+        Config::new(Namespace(1), RunSecret::new([7; 32])),
     );
     // Line 2's body is what the gate holds.
     let mut gated = call("update", 1, 0, 0, 0);
@@ -332,13 +343,10 @@ fn connection_lag(early: bool) -> Option<u64> {
         .unwrap();
     let journal = rt
         .block_on(run(
-            h,
-            W,
+            admit(h, W, Arc::new(carrier), live.runtimes()).unwrap(),
             clock.clone(),
             Records::new(records.iter().cloned()),
             Lines::new(),
-            Arc::new(carrier),
-            live.runtimes(),
         ))
         .unwrap()
         .journal;

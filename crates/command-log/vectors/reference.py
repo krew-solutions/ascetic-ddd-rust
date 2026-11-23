@@ -33,8 +33,9 @@ The rules (ADR-0046 decisions 5, 7, 9):
 - profile: a rendered `id` of a kind the profile does not render; a captured
   `id` of a kind it does not capture.
 - operation: a REST call (the action's, an observation's probe) of an operation
-  not in the table, or with path values other than its parameters; an
-  observation polling every 0.
+  not in the table, or with path values other than its parameters, or from a
+  source past the profile's (ADR-0047 decision 18); an observation polling
+  every 0.
 - deviation: a line's declared deviation exempts it from that rule; one naming
   no rule, or a rule the line keeps, is itself a violation. A `key`, `order`,
   `duplicate`, `edge`, `producer` or `deviation` violation is never exempt,
@@ -498,6 +499,8 @@ def verdict(text, clock="cursor"):
                 v.add("operation")
         subject_of = json.dumps(r["step"]["subject"], sort_keys=True)
         for c in calls:
+            if int(c["source"]) >= int(profile["sources"]):
+                v.add("operation")
             plain = c["path"] + [f["value"] for f in c["query"] + c["headers"]]
             if any("hole" in x and "rendered" in x["hole"] and x["hole"]["rendered"]["as"] in BYTES for x in plain):
                 v.add("frame")
