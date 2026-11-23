@@ -180,6 +180,10 @@ struct Throttled {
     /// Each request's write held this long after its first poll, by its
     /// correlation id: `sim`'s `sent_after`.
     holds: Option<Arc<BTreeMap<String, u64>>>,
+    /// The request whose first write fails, and the run's count of them.
+    fail: Option<usize>,
+    requests: Arc<AtomicUsize>,
+    broken: bool,
 }
 
 impl AsyncRead for Throttled {
@@ -198,6 +202,16 @@ impl AsyncWrite for Throttled {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        if self.broken {
+            return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+        }
+        if find(buf, b"x-correlation-id").is_some() || find(buf, b"X-Correlation-Id").is_some() {
+            let n = self.requests.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.fail == Some(n) {
+                self.broken = true;
+                return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+            }
+        }
         let now = self.clock.now();
         let hold = self.holds.as_ref().map(|h| {
             let text = String::from_utf8_lossy(buf);
@@ -251,6 +265,12 @@ struct Pipe {
     holds: Option<Arc<BTreeMap<String, u64>>>,
     /// Microseconds a connect takes: the stand's accept.
     connect: u64,
+    /// Connects refused before one is accepted.
+    refuse: Arc<AtomicUsize>,
+    /// The request, counted from 1 over the run, whose first write fails
+    /// with no byte accepted: its connection gone under it.
+    fail: Option<usize>,
+    requests: Arc<AtomicUsize>,
 }
 
 impl Egress for Pipe {
@@ -261,7 +281,15 @@ impl Egress for Pipe {
         let t = self.throttle;
         let holds = self.holds.clone();
         let connect = self.connect;
+        let refused = self
+            .refuse
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok();
+        let (fail, requests) = (self.fail, self.requests.clone());
         async move {
+            if refused {
+                return Err(io::Error::from(io::ErrorKind::ConnectionRefused));
+            }
             let until = stub.clock.now() + connect;
             stub.clock.sleep_until(until).await;
             let (client, server) = tokio::io::duplex(1 << 16);
@@ -275,6 +303,9 @@ impl Egress for Pipe {
                 next: None,
                 sleep: None,
                 holds,
+                fail,
+                requests,
+                broken: false,
             })
         }
     }
@@ -322,6 +353,31 @@ fn run_rest_connecting(
     throttle: Throttle,
     connect: u64,
 ) -> (Result<Vec<Line>, RunError>, Vec<Came>, usize) {
+    run_rest_with(
+        header,
+        records,
+        answers,
+        throttle,
+        connect,
+        0,
+        None,
+        &|_| {},
+    )
+}
+
+/// [`run_rest_connecting`] with the first `refuse` connects refused, the
+/// `fail`-th request's first write failing, and the carrier's config tuned.
+#[allow(clippy::too_many_arguments)]
+fn run_rest_with(
+    header: Header,
+    records: &[Record],
+    answers: Vec<Answer>,
+    throttle: Throttle,
+    connect: u64,
+    refuse: usize,
+    fail: Option<usize>,
+    tune: &dyn Fn(&mut Config),
+) -> (Result<Vec<Line>, RunError>, Vec<Came>, usize) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
@@ -343,11 +399,14 @@ fn run_rest_connecting(
                 throttle,
                 holds: None,
                 connect,
+                refuse: Arc::new(AtomicUsize::new(refuse)),
+                fail,
+                requests: Arc::new(AtomicUsize::new(0)),
             },
-            Config {
-                namespace: NAMESPACE,
-                secret: RunSecret::new([7; 32]),
-                run_start: clock.wall(),
+            {
+                let mut c = Config::new(NAMESPACE, RunSecret::new([7; 32]), clock.wall());
+                tune(&mut c);
+                c
             },
         );
         let runtimes = Runtimes {
@@ -803,12 +862,11 @@ fn over_rest_the_shell_journals_what_sim_journals() {
                             throttle: AT_ONCE,
                             holds: Some(Arc::new(holds)),
                             connect: 0,
+                            refuse: Arc::new(AtomicUsize::new(0)),
+                            fail: None,
+                            requests: Arc::new(AtomicUsize::new(0)),
                         },
-                        Config {
-                            namespace: NAMESPACE,
-                            secret: RunSecret::new([7; 32]),
-                            run_start: clock.wall(),
-                        },
+                        Config::new(NAMESPACE, RunSecret::new([7; 32]), clock.wall()),
                     ),
                     scripted: Scripted::new(script.clone()),
                 };
@@ -1015,12 +1073,11 @@ fn looked(lags: &[(u64, u64)], answer: Answer) -> Vec<Line> {
                 throttle: AT_ONCE,
                 holds: None,
                 connect: 0,
+                refuse: Arc::new(AtomicUsize::new(0)),
+                fail: None,
+                requests: Arc::new(AtomicUsize::new(0)),
             },
-            Config {
-                namespace: NAMESPACE,
-                secret: RunSecret::new([7; 32]),
-                run_start: inner.wall(),
-            },
+            Config::new(NAMESPACE, RunSecret::new([7; 32]), inner.wall()),
         );
         let runtimes = Runtimes {
             sources: vec![tokio::runtime::Handle::current()],
@@ -1188,13 +1245,12 @@ fn run_decorated(
                 throttle: AT_ONCE,
                 holds: None,
                 connect: 0,
+                refuse: Arc::new(AtomicUsize::new(0)),
+                fail: None,
+                requests: Arc::new(AtomicUsize::new(0)),
             },
             proofs,
-            Config {
-                namespace: NAMESPACE,
-                secret: RunSecret::new([7; 32]),
-                run_start: clock.wall(),
-            },
+            Config::new(NAMESPACE, RunSecret::new([7; 32]), clock.wall()),
         );
         let runtimes = Runtimes {
             sources: vec![tokio::runtime::Handle::current()],
@@ -1531,4 +1587,116 @@ fn a_call_never_resent_is_not_resent_on_its_timeout() {
     let journal = journal.unwrap();
     assert_eq!(came.len(), 1);
     assert_eq!(end(&journal, 2), Some((End::Unknown, 5_000)));
+}
+
+/// Decision 16: connects a floor apart, the first at once — two refused, the
+/// third made at two floors; refused until the deadline, never connected,
+/// the attempt censored there, never sent.
+#[test]
+fn refused_connects_are_tried_a_floor_apart() {
+    use ascetic_ddd_load_run::rest::CONNECT_FLOOR;
+    let records = vec![call("read", 1, 0, 0, 0)];
+    let (journal, _, _) = run_rest_with(
+        rest_header(),
+        &records,
+        vec![ok(10, 0)],
+        AT_ONCE,
+        0,
+        2,
+        None,
+        &|_| {},
+    );
+    let journal = journal.unwrap();
+    let s = journal
+        .iter()
+        .find_map(|l| match l {
+            Line::Sent(s) => Some(s.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!((s.handed, s.connected), (0, 2 * CONNECT_FLOOR));
+    assert_eq!(end(&journal, 2).map(|e| e.0), Some(End::Expected));
+    let mut header = rest_header();
+    header
+        .operations
+        .iter_mut()
+        .for_each(|o| o.timeout = 25_000);
+    let (journal, _, _) = run_rest_with(
+        header,
+        &records,
+        vec![ok(10, 0)],
+        AT_ONCE,
+        0,
+        100,
+        None,
+        &|_| {},
+    );
+    let journal = journal.unwrap();
+    assert!(sent(&journal, 2).is_empty());
+    assert_eq!(end(&journal, 2), Some((End::Unknown, 25_000)));
+}
+
+/// Decision 16: a connection idle less than the profile's idle less the
+/// margin reused; one idle longer retired unused; a profile whose idle lies
+/// within the margin refused before T0.
+#[test]
+fn an_idle_connection_is_retired_before_the_gateway_s_idle() {
+    let tune = |c: &mut Config| c.idle_margin = 2_000;
+    let mut header = rest_header();
+    header.profile.idle = 10_000;
+    for (later, connections) in [(5_000, 1), (20_000, 2)] {
+        let records = vec![call("read", 1, 0, 0, 0), call("read", 2, 0, later, 0)];
+        let (journal, _, opened) = run_rest_with(
+            header.clone(),
+            &records,
+            vec![ok(10, 0), ok(10, 0)],
+            AT_ONCE,
+            0,
+            0,
+            None,
+            &tune,
+        );
+        journal.unwrap();
+        assert_eq!(opened, connections, "a second call {later} µs on");
+    }
+    header.profile.idle = 2_000;
+    let records = vec![call("read", 1, 0, 0, 0)];
+    let (journal, _, _) = run_rest_with(
+        header,
+        &records,
+        vec![ok(10, 0)],
+        AT_ONCE,
+        0,
+        0,
+        None,
+        &tune,
+    );
+    assert!(
+        matches!(journal, Err(RunError::Refused(ref why)) if why.contains("idle")),
+        "{journal:?}"
+    );
+}
+
+/// Decision 16: a request whose connection is gone under it before a byte
+/// of it is accepted is no attempt's end — the next connection takes it, and
+/// the stand sees it once.
+#[test]
+fn a_request_no_byte_of_which_left_goes_on_the_next_connection() {
+    let records = vec![call("read", 1, 0, 0, 0), call("read", 2, 0, 1_000, 0)];
+    let (journal, came, opened) = run_rest_with(
+        rest_header(),
+        &records,
+        vec![ok(10, 0), ok(10, 0)],
+        AT_ONCE,
+        0,
+        0,
+        Some(2),
+        &|_| {},
+    );
+    let journal = journal.unwrap();
+    assert_eq!(opened, 2);
+    let ids: Vec<String> = came.iter().map(|c| c.id.clone()).collect();
+    assert_eq!(ids, vec![id(&records[0], 1), id(&records[1], 1)]);
+    assert_eq!(end(&journal, 2).map(|e| e.0), Some(End::Expected));
+    assert_eq!(end(&journal, 3).map(|e| e.0), Some(End::Expected));
 }

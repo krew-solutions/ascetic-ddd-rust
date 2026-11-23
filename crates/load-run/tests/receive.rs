@@ -185,11 +185,7 @@ fn attempt_once(prodded: bool) -> Option<Vec<Line>> {
             addr,
             peer: peer.clone(),
         },
-        Config {
-            namespace: Namespace(1),
-            secret: RunSecret::new([7; 32]),
-            run_start: clock.wall(),
-        },
+        Config::new(Namespace(1), RunSecret::new([7; 32]), clock.wall()),
     );
     // The spinner and the peek, from the test's own thread.
     let spun = Arc::new(AtomicU64::new(u64::MAX));
@@ -287,4 +283,102 @@ fn look(prodded: bool) {
         return;
     }
     panic!("no run held its preconditions: the box too loaded for the twin");
+}
+
+/// Decision 16, the live composition: calls over the library's own TCP
+/// egress, from a source bound to its address, on a source runtime of
+/// `Live`'s, each answered.
+#[test]
+fn calls_over_tcp_from_a_live_source_are_answered() {
+    use ascetic_ddd_load_run::live::Live;
+    use ascetic_ddd_load_run::tcp::TcpEgress;
+    use ascetic_ddd_scheduler::journal::End;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let peers = Arc::new(Mutex::new(Vec::new()));
+    let p = peers.clone();
+    std::thread::spawn(move || {
+        for s in listener.incoming() {
+            let Ok(mut s) = s else { return };
+            p.lock().unwrap().push(s.peer_addr().unwrap().ip());
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    while !buf.windows(4).any(|x| x == b"\r\n\r\n") {
+                        match s.read(&mut chunk) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    let end = buf.windows(4).position(|x| x == b"\r\n\r\n").unwrap() + 4;
+                    buf.drain(..end);
+                    if s.write_all(b"HTTP/1.1 200 X\r\ncontent-length: 2\r\n\r\n{}")
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    let live = Live::start(1, 64).unwrap();
+    let clock = Arc::new(RealClock::start(2_000).unwrap());
+    let mut header = header();
+    header.channels.clear();
+    header.calls.clear();
+    let header = Arc::new(header);
+    let egress = TcpEgress::new(
+        [("gateway".to_owned(), addr)].into_iter().collect(),
+        // Its own address, one the system would not choose (Linux routes all
+        // of 127.0.0.0/8 to the loopback).
+        vec![Some(std::net::IpAddr::from([127, 0, 0, 2]))],
+    );
+    let carrier = RestCarrier::new(
+        header.clone(),
+        OneStand,
+        egress,
+        Config::new(Namespace(1), RunSecret::new([7; 32]), clock.wall()),
+    );
+    let records = [
+        call("read", 1, 0, 0, 0),
+        call("read", 2, 0, 500, 0),
+        call("read", 3, 0, 1_000, 0),
+    ];
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let started = clock.now();
+    let journal = rt
+        .block_on(run(
+            header,
+            W,
+            clock.clone(),
+            Records::new(records.iter().cloned()),
+            Lines::new(),
+            Arc::new(carrier),
+            live.runtimes(),
+        ))
+        .unwrap()
+        .journal;
+    // Its last call ended within milliseconds, and the run with it — not at
+    // a backstop's wake its end had cancelled, its deadline and grace on.
+    let took = clock.now() - started;
+    assert!(took < 2_000_000, "the run took {took} µs");
+    let ends: Vec<End> = journal
+        .iter()
+        .filter_map(|l| match l {
+            Line::End(e) => Some(e.end),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends, vec![End::Expected; 3]);
+    let peers = peers.lock().unwrap();
+    assert!(!peers.is_empty());
+    assert!(
+        peers
+            .iter()
+            .all(|ip| *ip == std::net::IpAddr::from([127, 0, 0, 2])),
+        "{peers:?}"
+    );
 }

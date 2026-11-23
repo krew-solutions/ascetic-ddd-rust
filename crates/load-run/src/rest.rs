@@ -66,6 +66,32 @@ pub struct Config {
     pub secret: RunSecret,
     /// T0's wall instant, microseconds since the Unix epoch.
     pub run_start: i64,
+    /// The least microseconds between an attempt's consecutive connects,
+    /// its first at once (decision 16): a refused stand is not hammered.
+    pub connect_floor: u64,
+    /// How long before the profile's idle a connection is retired, unused:
+    /// the gateway closes it at its idle, perhaps as it is reused.
+    pub idle_margin: u64,
+}
+
+/// The least microseconds between an attempt's connects, by default.
+pub const CONNECT_FLOOR: u64 = 10_000;
+
+/// How long before the profile's idle a connection is retired, by default.
+pub const IDLE_MARGIN: u64 = 1_000_000;
+
+impl Config {
+    /// The run's namespace, secret and wall instant of T0; the connect floor
+    /// and the idle margin by default.
+    pub fn new(namespace: Namespace, secret: RunSecret, run_start: i64) -> Config {
+        Config {
+            namespace,
+            secret,
+            run_start,
+            connect_floor: CONNECT_FLOOR,
+            idle_margin: IDLE_MARGIN,
+        }
+    }
 }
 
 /// A request's body: its bytes in one frame, ready at once (`io`).
@@ -97,6 +123,8 @@ impl Body for Outgoing {
 struct Conn {
     sender: SendRequest<Outgoing>,
     probe: Arc<Probe>,
+    /// Since when it waits in its pool.
+    idle_since: u64,
 }
 
 /// A source's idle connections by endpoint, the latest used first.
@@ -110,19 +138,21 @@ impl Pool {
         self.idle.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The latest idle connection to `endpoint` its peer has not closed.
-    fn checkout(&self, endpoint: &str) -> Option<Conn> {
+    /// The latest idle connection to `endpoint` its peer has not closed and
+    /// idle less than `retire` µs at `now`; the others retired.
+    fn checkout(&self, endpoint: &str, now: u64, retire: u64) -> Option<Conn> {
         let mut idle = self.lock();
         let conns = idle.get_mut(endpoint)?;
         while let Some(c) = conns.pop() {
-            if !c.sender.is_closed() {
+            if !c.sender.is_closed() && now.saturating_sub(c.idle_since) < retire {
                 return Some(c);
             }
         }
         None
     }
 
-    fn checkin(&self, endpoint: &str, conn: Conn) {
+    fn checkin(&self, endpoint: &str, mut conn: Conn, now: u64) {
+        conn.idle_since = now;
         self.lock()
             .entry(endpoint.to_owned())
             .or_default()
@@ -185,6 +215,12 @@ impl<C: Clock, S: Stand, E: Egress, D: Decorator> Carrier<C> for RestCarrier<S, 
         if !header.calls.is_empty() {
             return Err("a log with host calls: they are K3's".to_owned());
         }
+        if header.profile.idle <= self.inner.config.idle_margin {
+            return Err(format!(
+                "the profile's idle {} µs within the idle margin {} µs",
+                header.profile.idle, self.inner.config.idle_margin
+            ));
+        }
         if !self.inner.decorator.decorates()
             && let Some(op) = header.operations.iter().find(|o| !o.decorated.is_empty())
         {
@@ -234,7 +270,11 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
         drop(tokio::spawn(async move {
             let _ = connection.await;
         }));
-        Ok(Conn { sender, probe })
+        Ok(Conn {
+            sender,
+            probe,
+            idle_since: 0,
+        })
     }
 
     async fn attempt<C: Clock>(&self, mut a: Attempt<C>) {
@@ -320,19 +360,32 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
             pre: Some(deadline.saturating_sub(header.profile.jitter / 2)),
             past,
         };
+        let retire = header.profile.idle.saturating_sub(self.config.idle_margin);
+        let mut connected_last: Option<u64> = None;
         // Until a byte of it leaves: a connection, the request handed to it.
         let (response, conn) = loop {
             if a.clock().now() >= deadline {
                 return a.unanswered();
             }
-            let mut conn = match pool.checkout(&route.endpoint) {
+            let mut conn = match pool.checkout(&route.endpoint, a.clock().now(), retire) {
                 Some(c) => c,
-                None => match self.connect(rest.source, &route).await {
-                    Ok(c) => c,
-                    // Refused connects and their floor are K2b-6's; until
-                    // then the frontier censors it, unsent.
-                    Err(_) => return a.unanswered(),
-                },
+                None => {
+                    // Connects a floor apart, the first at once: a stand
+                    // refusing them is not hammered, and the frontier censors
+                    // an attempt never connected (decision 16).
+                    if let Some(last) = connected_last {
+                        let next = last.saturating_add(self.config.connect_floor);
+                        if next >= deadline {
+                            return a.unanswered();
+                        }
+                        a.clock().sleep_until(next).await;
+                    }
+                    connected_last = Some(a.clock().now());
+                    match self.connect(rest.source, &route).await {
+                        Ok(c) => c,
+                        Err(_) => continue,
+                    }
+                }
             };
             let ready = tokio::select! {
                 biased;
@@ -445,9 +498,10 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
             body: whole.then_some(body.as_slice()),
         };
         let read = answer::read(&reply);
+        let idle_since = a.clock().now();
         self.judged(a, &record, op, &fills, &Transport::Answered(read));
         if whole && !conn.sender.is_closed() {
-            pool.checkin(&route.endpoint, conn);
+            pool.checkin(&route.endpoint, conn, idle_since);
         }
     }
 

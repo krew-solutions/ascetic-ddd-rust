@@ -292,7 +292,7 @@ impl<C: Clock> Clock for Sluggish<C> {
         )]
         if std::thread::current()
             .name()
-            .is_some_and(|n| n.starts_with("source-"))
+            .is_some_and(|n| n.contains("source-"))
         {
             std::thread::sleep(std::time::Duration::from_micros(200));
         }
@@ -348,7 +348,9 @@ fn stress<C: Clock>(make: impl Fn(u64) -> C, seeds: u64, calls: u64) {
     use ascetic_ddd_scheduler::machine::MACHINE_REVISION;
     use ascetic_ddd_scheduler::verdict::{Log, Verdict, Void, fold};
 
-    let (runtimes, stops) = source_runtimes();
+    // The live composition's runtimes, a source each.
+    let live = ascetic_ddd_load_run::live::Live::start(4, 1_024).unwrap();
+    let runtimes = live.runtimes().clone();
     let mut header = header();
     header.profile.sources = 4;
     header.profile.jitter = 2_000;
@@ -435,9 +437,6 @@ fn stress<C: Clock>(make: impl Fn(u64) -> C, seeds: u64, calls: u64) {
             records.len(),
             "seed {seed}: every line ended"
         );
-    }
-    for stop in stops {
-        let _ = stop.send(());
     }
 }
 

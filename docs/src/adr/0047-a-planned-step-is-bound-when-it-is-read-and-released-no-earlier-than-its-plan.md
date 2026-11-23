@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4 and K2b-5 built (§ Measured), K2b-6 next. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5 and K2b-6a built (§ Measured), K2b-6b next. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -33,7 +33,8 @@ To be built in slices, each a commit of its own:
   equal to `sim`'s over REST; **K2b-3** the harness's lateness attributed (decision 17), in two: **K2b-3a** journal
   version 4 — the machine's and the hand-off's lateness, the censor marked, the stuck hold; **K2b-3b** journal
   version 5 — the receive side;
-  **K2b-4** frames, correlation, decorators; **K2b-5** resends end to end; **K2b-6** connections on the real clock;
+  **K2b-4** frames, correlation, decorators; **K2b-5** resends end to end; **K2b-6** connections on the real clock, in two: **K2b-6a** the connection
+  mechanisms and the live composition, **K2b-6b** the real clock's evidence (K2-3, the lateness drill, the timed wait);
   **K2b-7** the gates before T0 and the shell's memory; **K2b-8** connections kept and abandoned.
 - **The first host run:** REST only, on the compose stand, `sources = 1` — a correctness run.
 - **K3** facts and the bus; **K4** shaping and the emulated client's retries; **K5** the report.
@@ -377,7 +378,10 @@ Distributed Systems, Verifiability, Performance — on Opus; it amends decision 
   it under one mutex, every stamp a clock read and a push under it; inputs are taken in (stamp, line, kind) order
   among those released, a stamp below the last taken a harness fault — an input caused at an instant may sort below one
   already taken there, as `sim` takes it (the frontier's property found the key-order rule the roles proposed wrong). The frontier decides a deadline; an attempt's timer only leaves the pool gap.
-  `sim` drives the same frontier. While an answer is judged the machine takes nothing at or past its floor — neither
+  `sim` drives the same frontier. The loop reads the machine's own pending wakes, never its outputs' copies — a step's
+  end cancels its backstop, and a run waits for no stale one (K2b-6a: a live run idled to its last call's deadline and
+  grace); and it ends on what the frontier holds and who may yet push to it read in one lock — read apart, an attempt
+  on another thread could push its end and go between them (K2b-6a: one run in fifteen lost an answer). While an answer is judged the machine takes nothing at or past its floor — neither
   the frontier's inputs nor its own lines and wakes, which are stamped at the instant taken; they are taken once it
   ends, late, the judging's lateness shown (K2b-1: taking them meanwhile put an input below the machine's clock, which
   `Machine::step` absorbs silently; the loop refuses one, a harness fault).
@@ -578,6 +582,7 @@ each refuted):
 | K2b-3b | K2b | on the real clock over loopback TCP, the source's runtime turning its driver only idle and held by a spinner from before the answer's bytes came to past the look, the bytes seen in the socket by `peek` before the deadline: the answer read at the look past the deadline and journaled late with where it was not — a run whose preconditions failed retried, not counted; under the virtual clock the bracket's bookkeeping — absent from the early look, from the deadline when that look came there, none when the look found nothing, none in time; a source not on a `current_thread` runtime refused; edited goldens — blind J + 1 undecided, blind J, absent at the deadline and no bracket roots, a poll's found before its end — and a twin a coherence rule; the guarantees over a model of the looks with the true arrival the oracle, 20,000 draws, the definition agreeing | the look without its turn; no early look; absent never advanced; a bracket on every answer; any runtime a source; found late at J, or whatever its absence; a live found without its censor; two founds a censor; the definition's two |
 | K2b-4 | K2b | K2-5's part over hyper to the stub: decorated once an attempt — a fresh proof each, a correlation id each — every other byte of a resend its first attempt's, the instant it was first sent among them (the resend a second later); each poll's frame its own instant; a decorator's minting time the harness's — `handed` after it; a decorated name the operation does not declare, a value no header takes, a decorating operation and no decorator, each refused; no decorator's proof nor the run's secret in the journal, raw, base64, base64url or hex | a call's frame its own dispatch's; a poll's its first's; an undeclared name given; a value not checked; `handed` before its decoration; a decorating operation without a decorator; the decoration not sent |
 | K2b-5 | K2b | K2-4 over hyper to the stub: a 503 whose code its operation does not list, its `Retry-After` notwithstanding, the system's unknown and not resent; `service.session_failed`, listed, resent after its wait and then expected; an Envoy-shaped 504 — a gateway's text, no problem document — unknown, the step awaiting it settled inconclusive in the fold; a call never resent, censored once at its deadline | not taken by status; an unknown resent whatever its safety |
+| K2b-6a | K2b | connects refused twice then made at two floors, and refused to the deadline, never sent; a connection idle under the profile's idle less the margin reused, one past it retired, a profile whose idle lies within the margin refused; a request whose connection is gone before a byte of it left taken by the next, the stand seeing it once; calls over the library's TCP egress from a source bound to 127.0.0.2, on a `Live` runtime, each answered, the run ending within two seconds of its last call; the real-clock stress on `Live`'s runtimes | no connect floor; the first connect floored; no idle retirement; an idle within the margin accepted; a request with no byte out judged broken; a source's address not bound |
 | K2-1 | K2 | the shell against an in-memory transport (hyper over `tokio::io::duplex`) under paused time reproduces `sim`'s journal | `std::time::Instant` in a handler |
 | K2-2 | K2 | each cause delayed alone — the reader, the token, the pool, the connect, the write, the dependency — moves exactly one gap of the chain | a gap merged |
 | K2-3 | K2 | on the real clock, multi-thread: chain order, no release before its stamped met instants, the stub's requests per correlation id equal the journal's attempts — a keep-alive connection closed as it is reused included; a request processed then reset before the answer is Unknown; a response stamped 1 µs before its deadline delivered after the tick is Expected | hyper's hidden retry; Unknown read as not taken; deadlines by arrival |
@@ -1230,6 +1235,21 @@ over REST by K2-4's shapes of the gateway's answers. A censored call is never re
 at its deadline, where no resend fits more than J before it, so the twin of a call never resent holds whatever its
 safety, and the safety's own executors are the certified and uncertified refusals. Two mutants, each killed.
 
+**K2b-6a — connections and the live composition** (2026-11-23): `Config`'s connect floor (10 ms by default, the first
+connect at once) and idle margin (1 s); the pool retiring an idle connection before the profile's idle less the
+margin; `tcp::TcpEgress`, endpoints by name, a source bound to its own address, `TCP_NODELAY`; `live::Live`, a
+`current_thread` runtime per source on a thread of its own, its driver taking a given number of events a turn;
+`Machine::next_wake`.
+- **What it found**: two defects of the loop since K2b-1, hidden by the virtual clock. The loop kept its own copies of
+  the machine's wakes; a step's end cancels its backstop in the machine, not the copy, so a live run waited to its
+  last call's deadline and grace — eleven seconds for three calls of three milliseconds. And it read what the
+  frontier holds and how many attempts live under two locks: on the real clock an attempt on its source's thread
+  pushed its end and went between them, and the run ended Ok with that answer unread — measured 2 of 30 runs before,
+  none of 60 after. The first is executed by the run's duration on the TCP twin; the second by that twin's repetition,
+  never deterministically — a twin that holds an attempt between its push and its going is owed.
+- **Executors**: the executor row. Six mutants, each killed. Not executed: a driver turn taking fewer events than the
+  sockets ready (more than 1,024 on one source) — K2b-8, with the ports' cap.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -1397,3 +1417,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-23: K2b-4 built (§ Measured): the decorator port, frames rebuilt from their fills; decision 16 refined (no
   frame cache) and decision 17 (`handed` once the attempt is decorated).
 - 2026-11-23: K2b-5 built (§ Measured): resends end to end over REST.
+- 2026-11-23: K2b-6 cut into K2b-6a and K2b-6b; K2b-6a built (§ Measured): connections and the live composition.
+  Decision 16 refined: the loop reads the machine's own wakes, and ends on one read of the frontier and the attempts.

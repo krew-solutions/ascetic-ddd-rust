@@ -9,7 +9,7 @@
 //! queued there, as `sim` takes it. Between instants it waits on the earliest
 //! of its own work, the frontier's, the next record, and a push.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::future::poll_fn;
 use std::sync::Arc;
@@ -158,7 +158,6 @@ where
     let mut machine = Machine::new(header, read_ahead)?;
     let stamps = Arc::new(Stamps::new(clock.clone()));
     let mut queue = Ordered::new();
-    let mut wakes: BTreeSet<u64> = BTreeSet::new();
     // The lines read and not ended, for their dispatches, and when each was
     // first dispatched.
     let mut live: BTreeMap<Line, (Arc<Record>, Option<u64>)> = BTreeMap::new();
@@ -186,14 +185,17 @@ where
         }
         // The instant, read under the frontier's lock with what it holds: an
         // answer that arrives after it is stamped no earlier.
-        let (now, work, floor, oldest) = {
+        // What the frontier holds and who may still push to it, in one read:
+        // read apart, an attempt on another thread could push its end and
+        // go between them, and the run end with its answer unread.
+        let (now, work, floor, oldest, alive) = {
             let (g, now) = stamps.lock();
             let f = &g.frontier;
             let work = [f.next_pushed(), f.next_deadline()]
                 .into_iter()
                 .flatten()
                 .min();
-            (now, work, f.floor(), f.oldest_hold())
+            (now, work, f.floor(), f.oldest_hold(), g.alive)
         };
         // A hold older than the route timeout: a carrier stuck in its
         // judging — a fault, never a hang (decision 17).
@@ -221,14 +223,16 @@ where
             None => Some(now),
         };
         let reading = pending.as_ref().map(|(when, _)| (*when).max(machine.now()));
-        let own = [wakes.first().copied(), reading]
+        // The machine's own pending wakes, not its outputs' copies: a step's
+        // end cancels its backstop, and a run waits for no stale one.
+        let own = [machine.next_wake(), reading]
             .into_iter()
             .flatten()
             .min()
             .filter(|_| !held);
         let next = [queue.first(), work, own].into_iter().flatten().min();
         let Some(t) = bound.filter(|b| next.is_some_and(|n| n <= *b)) else {
-            if next.is_none() && exhausted && stamps.alive() == 0 {
+            if next.is_none() && exhausted && alive == 0 {
                 break;
             }
             let reads = pending.is_none() && !exhausted;
@@ -275,8 +279,7 @@ where
                 Poll::Pending => {}
             }
         }
-        while !held && wakes.first().is_some_and(|w| *w <= t) {
-            wakes.pop_first();
+        if !held && machine.next_wake().is_some_and(|w| w <= t) {
             queue.push(t, Input::Wake);
             progressed = true;
         }
@@ -301,10 +304,9 @@ where
                     Output::Want(_)
                     | Output::Bound { .. }
                     | Output::Released { .. }
-                    | Output::Ignored { .. } => {}
-                    Output::WakeAt(w) => {
-                        wakes.insert(w.max(at));
-                    }
+                    | Output::Ignored { .. }
+                    // Its wakes are read back from the machine itself.
+                    | Output::WakeAt(_) => {}
                     Output::Dispatch {
                         line,
                         attempt,

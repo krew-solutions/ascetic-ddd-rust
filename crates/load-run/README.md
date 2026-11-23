@@ -15,5 +15,7 @@ time and carries its attempts.
   looks around the deadline, each a verified turn of its runtime's driver
   (`turn`).
 - `decorate` — the host's decorator: what only it can mint, once an attempt.
+- `tcp`, `live` — the library's TCP egress, a source bound to its own address;
+  the live composition, a `current_thread` runtime per source.
 - `source`, `sink`, `carrier`, `stand` — the ports: the log's lines, the
   journal, what carries an attempt, and the stand's routes and connections.

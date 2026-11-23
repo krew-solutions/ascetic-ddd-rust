@@ -105,8 +105,9 @@ impl std::error::Error for Harness {}
 pub(crate) struct State {
     pub(crate) frontier: Frontier,
     fault: Option<Harness>,
-    /// Attempt handles alive.
-    alive: usize,
+    /// Attempt handles alive: an attempt pushes its end before its handle
+    /// goes, so none alive, read with the frontier, is none to come.
+    pub(crate) alive: usize,
 }
 
 /// The frontier under its lock, the clock it stamps by, and the machine's
@@ -159,11 +160,6 @@ impl<C: Clock> Stamps<C> {
     /// The fault raised, if any.
     pub(crate) fn raised(&self) -> Option<Harness> {
         self.lock().0.fault.clone()
-    }
-
-    /// Attempt handles alive.
-    pub(crate) fn alive(&self) -> usize {
-        self.lock().0.alive
     }
 
     pub(crate) fn notify(&self) {

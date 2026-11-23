@@ -485,6 +485,12 @@ impl Machine {
         }
     }
 
+    /// The earliest wake it still awaits: one a step's end cancelled is gone
+    /// (a backstop's at its deadline and grace, say).
+    pub fn next_wake(&self) -> Option<u64> {
+        self.wakes.first().map(|(t, _)| *t)
+    }
+
     /// The machine's clock: the latest input's instant.
     pub fn now(&self) -> u64 {
         self.now
