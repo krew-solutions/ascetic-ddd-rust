@@ -3,7 +3,7 @@
 //! the `clock` module alone; every `select!` biased, so that the order a loop
 //! takes its branches in is the order written.
 
-const SOURCES: [(&str, &str); 10] = [
+const SOURCES: [(&str, &str); 11] = [
     ("carrier.rs", include_str!("../src/carrier.rs")),
     ("clock.rs", include_str!("../src/clock.rs")),
     ("io.rs", include_str!("../src/io.rs")),
@@ -14,6 +14,7 @@ const SOURCES: [(&str, &str); 10] = [
     ("source.rs", include_str!("../src/source.rs")),
     ("stamps.rs", include_str!("../src/stamps.rs")),
     ("stand.rs", include_str!("../src/stand.rs")),
+    ("turn.rs", include_str!("../src/turn.rs")),
 ];
 
 #[test]

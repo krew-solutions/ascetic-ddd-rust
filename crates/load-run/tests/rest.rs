@@ -952,3 +952,130 @@ fn the_connect_and_the_write_are_journaled_apart() {
         .unwrap();
     assert_eq!((s.handed, s.connected, s.at), (0, 70, 100));
 }
+
+/// The shell's clock with chosen sleeps put off: a sleep due at `at` ends
+/// `lags[at]` later — the source's runtime busy at that instant. The stub
+/// keeps the true clock.
+struct Lagging {
+    inner: Arc<VirtualClock>,
+    lags: BTreeMap<u64, u64>,
+}
+
+impl Clock for Lagging {
+    fn now(&self) -> u64 {
+        self.inner.now()
+    }
+
+    fn wall(&self) -> i64 {
+        self.inner.wall()
+    }
+
+    fn sleep_until(&self, at: u64) -> impl Future<Output = ()> + Send + '_ {
+        self.inner
+            .sleep_until(at + self.lags.get(&at).copied().unwrap_or(0))
+    }
+
+    fn settled(&self, at: u64) -> impl Future<Output = ()> + Send + '_ {
+        self.inner.settled(at)
+    }
+}
+
+/// A call at 0, its deadline 10,000, J 2,000: the looks due at 9,000 and
+/// 10,001, `lags` putting them off, the stub answering at `answer`.
+fn looked(lags: &[(u64, u64)], answer: Answer) -> Vec<Line> {
+    let mut header = rest_header();
+    header.profile.jitter = 2_000;
+    header
+        .operations
+        .iter_mut()
+        .for_each(|o| o.timeout = 10_000);
+    let records = [call("read", 1, 0, 0, 0)];
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let inner = Arc::new(VirtualClock::start(1_763_640_000_000_000));
+        let clock = Arc::new(Lagging {
+            inner: inner.clone(),
+            lags: lags.iter().copied().collect(),
+        });
+        let stub = Arc::new(Stub {
+            clock: inner.clone(),
+            answers: [(id(&records[0], 1), answer)].into_iter().collect(),
+            connections: AtomicUsize::new(0),
+            came: Mutex::new(Vec::new()),
+        });
+        let header = Arc::new(header);
+        let carrier = RestCarrier::new(
+            header.clone(),
+            OneStand,
+            Pipe {
+                stub,
+                throttle: AT_ONCE,
+                holds: None,
+                connect: 0,
+            },
+            Config {
+                namespace: NAMESPACE,
+                secret: RunSecret::new([7; 32]),
+                run_start: inner.wall(),
+            },
+        );
+        let runtimes = Runtimes {
+            sources: vec![tokio::runtime::Handle::current()],
+        };
+        inner
+            .within(run(
+                header,
+                W,
+                clock,
+                Records::new(records.iter().cloned()),
+                Lines::new(),
+                Arc::new(carrier),
+                &runtimes,
+            ))
+            .await
+            .unwrap()
+            .journal
+    })
+}
+
+fn found(journal: &[Line]) -> Option<(u64, journal::Found)> {
+    journal.iter().find_map(|l| match l {
+        Line::Answer(a) => a.found.map(|f| (a.at, f)),
+        _ => None,
+    })
+}
+
+/// Decision 17, version 5, its bookkeeping under the virtual clock: a late
+/// answer carries where it was not — the early look's instant, or the
+/// deadline if that look itself came late; none when the look past the
+/// deadline found nothing, the attempt then left. (The virtual runtime is never
+/// busy: a late look leaves the task waiting, and it reads the answer as it
+/// comes; a runtime that cannot read is the real-clock twin's.)
+#[test]
+fn a_late_answer_carries_where_it_was_not() {
+    let at = |t: u64| ok(t, 0);
+    let bracket = |absent, deadline| journal::Found { absent, deadline };
+    // The look past the deadline put off 5 ms: the answer, in at 13,000, is
+    // read as it comes, absent since the early look.
+    assert_eq!(
+        found(&looked(&[(10_001, 5_000)], at(13_000))),
+        Some((13_000, bracket(9_000, 10_000)))
+    );
+    // On time: the look at 10,001 finds nothing, and the attempt leaves.
+    assert_eq!(found(&looked(&[], at(13_000))), None);
+    // Put off 500 µs, the answer in at 10,200: found blind for 1,200.
+    assert_eq!(
+        found(&looked(&[(10_001, 500)], at(10_200))),
+        Some((10_200, bracket(9_000, 10_000)))
+    );
+    // The early look itself at the deadline: absent from there.
+    assert_eq!(
+        found(&looked(&[(9_000, 1_000), (10_001, 5_000)], at(13_000))),
+        Some((13_000, bracket(10_000, 10_000)))
+    );
+    // In time, no bracket.
+    assert_eq!(found(&looked(&[(10_001, 5_000)], at(9_500))), None);
+}

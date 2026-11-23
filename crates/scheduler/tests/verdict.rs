@@ -579,6 +579,31 @@ fn goldens() -> Vec<Golden> {
         classes: vec![Undecided],
         verdict: "void:undecided",
     });
+    // Decision 17, version 5: censored on time — a call, and a poll's second
+    // poll — the bases of the found answers' twins.
+    out.push(Golden {
+        name: "censored_on_time",
+        header: window.clone(),
+        records: vec![call("read", 1, 0, 1_000, 0)],
+        script: Box::new(|_, _| answer(0, None, Judgement::Unknown)),
+        lag: Box::new(|_| 0),
+        wake_lag: Box::new(|_| 0),
+        classes: vec![Root],
+        verdict: "fail",
+    });
+    out.push(Golden {
+        name: "poll_censored",
+        header: header_j(),
+        records: vec![polling(1, 0, 0, 1_000, 2_500)],
+        script: Box::new(|_, attempt| {
+            let after = (attempt == 1).then_some(10);
+            answer(0, after, Judgement::Unexpected)
+        }),
+        lag: Box::new(|_| 0),
+        wake_lag: Box::new(|_| 0),
+        classes: vec![Root],
+        verdict: "fail",
+    });
     // Decision 16: a certified refusal at 10, its resend due at 110, J + 1
     // before the deadline (311): taken 2 µs late it would leave within J of
     // it, so it never leaves and the step ends unexpected — the harness's
@@ -1248,4 +1273,380 @@ fn regenerate() {
     for g in golden_journals() {
         std::fs::write(format!("{GOLDEN_DIR}/{}.jsonl", g.name), &g.bytes).unwrap();
     }
+}
+
+/// Its step's end's place in a journal of one step.
+fn end_at(l: &[Line]) -> usize {
+    l.iter().position(|x| matches!(x, Line::End(_))).unwrap()
+}
+
+/// A late answer's bracket.
+fn bracket(absent: u64, deadline: u64) -> Option<journal::Found> {
+    Some(journal::Found { absent, deadline })
+}
+
+/// A late answer, found for its attempt's censor at `at` (version 5).
+fn found_answer(
+    line: u64,
+    attempt: u32,
+    at: u64,
+    found: Option<journal::Found>,
+    ignored: journal::Ignored,
+) -> Line {
+    Line::Answer(journal::Answer {
+        at,
+        line,
+        attempt,
+        judged: journal::Judged::Expected,
+        captured: vec![],
+        ignored: Some(ignored),
+        status: Some(200),
+        code: None,
+        after: None,
+        censored: false,
+        found,
+    })
+}
+
+/// Decision 17, version 5: a late answer's bracket. Censored at its deadline
+/// 3,000, a call's late answer found blind for J + 1 is the receive side's —
+/// undecided; for J, absent from the deadline on, or with no bracket, the
+/// system's; a poll's found before its end, as the hold of a late answer
+/// makes it, the same. And a twin a coherence rule.
+#[test]
+fn a_late_answer_found_is_the_receive_side_s() {
+    use journal::Ignored;
+    let goldens = golden_journals();
+    let by_name = |n: &str| goldens.iter().find(|g| g.name == n).unwrap();
+    let lines_of = |bytes: &[u8]| -> (journal::Header, Vec<Line>) {
+        let r = Reader::new(Cursor::new(bytes.to_vec())).unwrap();
+        let h = r.header().clone();
+        (h, r.collect::<Result<_, _>>().unwrap())
+    };
+    // (name, base, edit, the verdict, the reason if incoherent)
+    type Edit = Box<dyn Fn(&mut Vec<Line>)>;
+    let after_end = |answer: Line| -> Edit {
+        Box::new(move |l| {
+            let i = end_at(l);
+            l.insert(i + 1, answer.clone());
+        })
+    };
+
+    let cases: Vec<(&str, &str, Edit, &str, Option<&str>)> = vec![
+        (
+            "blind J + 1",
+            "censored_on_time",
+            after_end(found_answer(
+                2,
+                1,
+                2_999 + J + 1,
+                bracket(2_999, 3_000),
+                Ignored::Ended,
+            )),
+            "void:undecided",
+            None,
+        ),
+        (
+            "blind J",
+            "censored_on_time",
+            after_end(found_answer(
+                2,
+                1,
+                2_999 + J,
+                bracket(2_999, 3_000),
+                Ignored::Ended,
+            )),
+            "fail",
+            None,
+        ),
+        (
+            "absent at the deadline",
+            "censored_on_time",
+            after_end(found_answer(
+                2,
+                1,
+                3_500,
+                bracket(3_000, 3_000),
+                Ignored::Ended,
+            )),
+            "fail",
+            None,
+        ),
+        (
+            "a late answer without its bracket",
+            "censored_on_time",
+            after_end(found_answer(2, 1, 3_500, None, Ignored::Ended)),
+            "fail",
+            None,
+        ),
+        (
+            "a poll's found before its end",
+            "poll_censored",
+            Box::new(|l| {
+                let i = end_at(l);
+                l.insert(
+                    i,
+                    found_answer(2, 2, 2_500 + J + 10, bracket(2_400, 2_500), Ignored::Late),
+                );
+            }),
+            "void:undecided",
+            None,
+        ),
+        // Coherence.
+        (
+            "a found answer taken",
+            "censored_on_time",
+            Box::new(|l| {
+                let i = end_at(l);
+                let mut a = found_answer(2, 1, 3_500, bracket(2_999, 3_000), Ignored::Ended);
+                if let Line::Answer(x) = &mut a {
+                    x.ignored = None;
+                }
+                l.insert(i + 1, a);
+            }),
+            "void:incoherent",
+            Some("a found answer taken"),
+        ),
+        (
+            "a found answer within its bracket",
+            "censored_on_time",
+            after_end(found_answer(
+                2,
+                1,
+                2_999,
+                bracket(2_999, 3_000),
+                Ignored::Ended,
+            )),
+            "void:incoherent",
+            Some("a found answer within its bracket"),
+        ),
+        (
+            "a found answer without its censor",
+            "clean",
+            after_end(found_answer(2, 1, 3_500, bracket(10, 20), Ignored::Ended)),
+            "void:incoherent",
+            Some("a found answer without its censor"),
+        ),
+        (
+            "a found answer off its deadline",
+            "censored_on_time",
+            after_end(found_answer(
+                2,
+                1,
+                3_500,
+                bracket(2_999, 2_999),
+                Ignored::Ended,
+            )),
+            "void:incoherent",
+            Some("a found answer against its censor"),
+        ),
+        (
+            "a found answer absent before its dispatch",
+            "censored_on_time",
+            after_end(found_answer(
+                2,
+                1,
+                3_500,
+                bracket(999, 3_000),
+                Ignored::Ended,
+            )),
+            "void:incoherent",
+            Some("a found answer against its censor"),
+        ),
+        (
+            "a found answer of another attempt",
+            "censored_on_time",
+            after_end(found_answer(
+                2,
+                2,
+                3_500,
+                bracket(2_999, 3_000),
+                Ignored::Ended,
+            )),
+            "void:incoherent",
+            Some("a found answer against its censor"),
+        ),
+        (
+            "two found answers for one censor",
+            "censored_on_time",
+            Box::new(|l| {
+                let i = end_at(l);
+                l.insert(
+                    i + 1,
+                    found_answer(2, 1, 3_500, bracket(2_999, 3_000), Ignored::Ended),
+                );
+                l.insert(
+                    i + 2,
+                    found_answer(2, 1, 3_600, bracket(2_999, 3_000), Ignored::Ended),
+                );
+            }),
+            "void:incoherent",
+            Some("a found answer without its censor"),
+        ),
+        (
+            "two found answers before a poll's end",
+            "poll_censored",
+            Box::new(|l| {
+                let i = end_at(l);
+                l.insert(
+                    i,
+                    found_answer(2, 2, 2_600, bracket(2_400, 2_500), Ignored::Late),
+                );
+                l.insert(
+                    i + 1,
+                    found_answer(2, 2, 2_700, bracket(2_400, 2_500), Ignored::Late),
+                );
+            }),
+            "void:incoherent",
+            Some("a found answer against its censor"),
+        ),
+        (
+            "a poll's found before its censor",
+            "poll_censored",
+            Box::new(|l| {
+                // Right after attempt 2's dispatch: its taken answer not yet
+                // the censor.
+                let i = l
+                    .iter()
+                    .position(|x| matches!(x, Line::Dispatch(d) if d.attempt == 2))
+                    .unwrap();
+                l.insert(
+                    i + 1,
+                    found_answer(2, 2, 2_600, bracket(2_400, 2_500), Ignored::Late),
+                );
+            }),
+            "void:incoherent",
+            Some("a found answer against its censor"),
+        ),
+    ];
+    let mut defined = Vec::new();
+    for (name, from, edit, verdict, why) in cases {
+        let g = by_name(from);
+        let (h, mut lines) = lines_of(&g.bytes);
+        edit(&mut lines);
+        let bytes = write(&h, &lines);
+        let folded = fold_bytes(&bytes, &g.log);
+        assert_eq!(
+            verdict_name(&folded.verdict),
+            verdict,
+            "{name}: {:?}",
+            folded.verdict
+        );
+        if let Some(why) = why {
+            match &folded.verdict {
+                Verdict::Void(Void::Incoherent { why: w, .. }) => assert_eq!(*w, why, "{name}"),
+                other => panic!("{name}: {other:?}"),
+            }
+        }
+        defined.push(case(name, &bytes, &g.log, &folded));
+    }
+    by_definition(&defined);
+}
+
+/// Decision 17's guarantees over a model of the shell's looks, the true
+/// arrival the oracle. The source's runtime blocked over `[b0, b1)`; the
+/// attempt runs at its pre-look (`D − J/2`), at its answer's arrival `k`, and
+/// at its look (`D + 1`), each put off past the block; a look before `k`
+/// finds the answer absent, any run at or past `k` reads it. P2: an answer
+/// in the host by its deadline read more than J late is never a root. P1:
+/// both looks late by less than J/2, a late answer is never undecided for
+/// it. P3: an answer never found came after the look.
+#[test]
+fn the_receive_side_s_guarantees_hold_over_the_looks() {
+    use journal::{Found, Ignored};
+    let goldens = golden_journals();
+    let base = goldens
+        .iter()
+        .find(|g| g.name == "censored_on_time")
+        .unwrap();
+    let r = Reader::new(Cursor::new(base.bytes.clone())).unwrap();
+    let h = r.header().clone();
+    let lines: Vec<Line> = r.collect::<Result<_, _>>().unwrap();
+    let end = lines
+        .iter()
+        .position(|x| matches!(x, Line::End(_)))
+        .unwrap();
+    let (d, connected) = (3_000u64, 1_000u64);
+    let (pre, look) = (d - J / 2, d + 1);
+    let mut defined = Vec::new();
+    let (mut p1, mut p2, mut p3) = (0, 0, 0);
+    let root = ascetic_ddd_faker::Key::root(ascetic_ddd_faker::Seed(17)).child("looks");
+    for n in 0..20_000u64 {
+        let draw =
+            |label: &str, lo: u64, hi: u64| lo + root.at(n).child(label).unit().raw() % (hi - lo);
+        let k = draw("k", 2_500, 3_600);
+        let b0 = draw("b0", 2_400, 3_600);
+        let b1 = b0 + draw("len", 1, 1_200);
+        let run = |t: u64| if t >= b0 && t < b1 { b1 } else { t };
+        let (p, rk, u) = (run(pre), run(k), run(look));
+        // The looks and the answer's own wake, in the order the task runs.
+        let mut runs = [(p, true), (rk, false), (u, true)];
+        runs.sort();
+        let mut absent = connected;
+        let mut read = None;
+        for (t, is_look) in runs {
+            if t >= k {
+                read = Some(t);
+                break;
+            }
+            if is_look {
+                absent = absent.max(t);
+            }
+            if t >= u {
+                break;
+            }
+        }
+        // The look at `D + 1` gives up on what it did not find.
+        let read = match read {
+            Some(t) if t <= d => continue, // in time: answered, no censor
+            other => other,
+        };
+        let mut edited = lines.clone();
+        if let Some(t) = read {
+            edited.insert(
+                end + 1,
+                found_answer(
+                    2,
+                    1,
+                    t,
+                    Some(Found {
+                        absent,
+                        deadline: d,
+                    }),
+                    Ignored::Ended,
+                ),
+            );
+        }
+        let bytes = write(&h, &edited);
+        let folded = fold_bytes(&bytes, &base.log);
+        let class = folded.classes[0];
+        if k <= d && read.is_some_and(|t| t - k > J) {
+            assert_ne!(
+                class,
+                Class::Root,
+                "P2: k {k}, block [{b0}, {b1}), read {read:?}, absent {absent}"
+            );
+            p2 += 1;
+        }
+        if k > d && p - pre < J / 2 && u - look < J / 2 {
+            assert_eq!(
+                class,
+                Class::Root,
+                "P1: k {k}, block [{b0}, {b1}), read {read:?}, absent {absent}"
+            );
+            p1 += 1;
+        }
+        if read.is_none() {
+            assert!(k > u, "P3: k {k}, the look at {u}");
+            p3 += 1;
+        }
+        if n % 50 == 0 {
+            defined.push(case(&format!("looks {n}"), &bytes, &base.log, &folded));
+        }
+    }
+    assert!(
+        p1 > 500 && p2 > 500 && p3 > 500,
+        "P1 {p1}, P2 {p2}, P3 {p3}"
+    );
+    by_definition(&defined);
 }

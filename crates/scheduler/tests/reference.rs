@@ -176,6 +176,11 @@ const JOURNALS: &[(u32, u32, &str)] = &[
         4,
         "1a26d118700766afe7d805b210702f38d9ce41414b7e78a3539c15e66f5bf727",
     ),
+    (
+        5,
+        4,
+        "3f95c013e077896ca4f17fb32b7a54dbba0586a1ca35ef35d69f2f3d742f3b15",
+    ),
 ];
 
 /// What the fold decided of the differential's runs, the digest of their
@@ -211,6 +216,12 @@ const CLASSES: &[(u32, u32, u32, &str)] = &[
         4,
         4,
         4,
+        "913215b9afa0c80eb6dea3ab53f603b501fad921c62bfd1066e5cfd7afffec1d",
+    ),
+    (
+        5,
+        4,
+        5,
         "913215b9afa0c80eb6dea3ab53f603b501fad921c62bfd1066e5cfd7afffec1d",
     ),
 ];

@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) and K2b-3a built (§ Measured), K2b-3b next. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) and K2b-3 (K2b-3a, K2b-3b) built (§ Measured), K2b-4 next. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -572,6 +572,7 @@ each refuted):
 | K2b-2a | K2b | over hyper's connection to a stub on an in-memory pipe, under the virtual clock: `Sent` the instant the stub saw the last byte, writes held back and sixteen bytes at a time, and with a body eight at a time; the answer at its last body frame, not its head; a connection kept alive reused, one closed by `connection: close` not; a close once a byte left, and an answer cut short mid-body, each Unknown at the close; no answer censored at the deadline; an answer past the cap arrived at the cap, its connection closed; the frame as written — the route's `host`, the correlation id | `Sent` at the hand-off, or at the first write; the arrival at the head; no connection pooled; an answer past the cap read; a close after a byte unanswered, or retried; an answer cut short unanswered |
 | K2b-2b | K2b | over REST, the shell journals what `sim` journals on every clean corpus log with a REST step, under two seeds of a script an answer can carry (a refusal certified only where its operation lists a code, `Retry-After` in whole seconds on it alone, an unexpected answer only where one can be, each captured value in its source's form), its REST attempts over hyper to a stub inverting the judge and every other action scripted — status and code, which `sim` cannot know, projected out and checked against what the stub sent; expected, unexpected, certified, unknown, resent, captured and waited answers each reached; an answer at its deadline taken | the attempt leaving at the deadline; no code certifying a refusal; what an answer showed dropped; one correlation id a step; no captured value filled |
 | K2b-3a | K2b | goldens, each class by hand, folded by Rust and `verdict.py`: a poll's wake taken at its deadline undecided, its unsatisfied end there a root; a first dispatch taken past its deadline undecided; a dispatch J + 1 late then censored undecided, J late a root, and a 500 answered on a dispatch J + 1 late a root; the harness's lateness summed over a refusal and its resend undecided, on one attempt a root; an observation read late then censored undecided, its "not yet" a root; a poll released past its deadline coherent and undecided; a cause late by the harness's release undecided, by the stand's send a root; a twin a coherence rule, each naming it; the corpus and late-wake differentials coherent with the definition agreeing; a send's path from a frontier twin; the shell's hold past the route timeout a fault at exactly its instant, a microsecond short none, a carrier stuck on its thread caught on the real clock; a late hand-off journaled; the connect and the write journaled apart | a censor not required; the hand-off or the machine not the harness's; the last attempt alone; no reader for an observation; the lateness at J; a wake at its deadline late; no wake rule; a cause late by the stand; an observation its own late cause; the definition's three; a censor unmarked; an early reply's path the dispatch's; `handed` not `connected`; a first dispatch's end without its wake; a dispatch's due its dispatch; `handed` at the spawn; `connected` never reported; no stuck timer; the newest hold |
+| K2b-3b | K2b | on the real clock over loopback TCP, the source's runtime turning its driver only idle and held by a spinner from before the answer's bytes came to past the look, the bytes seen in the socket by `peek` before the deadline: the answer read at the look past the deadline and journaled late with where it was not — a run whose preconditions failed retried, not counted; under the virtual clock the bracket's bookkeeping — absent from the early look, from the deadline when that look came there, none when the look found nothing, none in time; a source not on a `current_thread` runtime refused; edited goldens — blind J + 1 undecided, blind J, absent at the deadline and no bracket roots, a poll's found before its end — and a twin a coherence rule; the guarantees over a model of the looks with the true arrival the oracle, 20,000 draws, the definition agreeing | the look without its turn; no early look; absent never advanced; a bracket on every answer; any runtime a source; found late at J, or whatever its absence; a live found without its censor; two founds a censor; the definition's two |
 | K2-1 | K2 | the shell against an in-memory transport (hyper over `tokio::io::duplex`) under paused time reproduces `sim`'s journal | `std::time::Instant` in a handler |
 | K2-2 | K2 | each cause delayed alone — the reader, the token, the pool, the connect, the write, the dependency — moves exactly one gap of the chain | a gap merged |
 | K2-3 | K2 | on the real clock, multi-thread: chain order, no release before its stamped met instants, the stub's requests per correlation id equal the journal's attempts — a keep-alive connection closed as it is reused included; a request processed then reset before the answer is Unknown; a response stamped 1 µs before its deadline delivered after the tick is Expected | hyper's hidden retry; Unknown read as not taken; deadlines by arrival |
@@ -1192,6 +1193,22 @@ and `connected` at the REST hand-over; a hold past the route timeout is `Harness
   coherent under every new rule, the definition agreeing — classes under (4, 4, 4) `913215b9…`, journals under (4, 4)
   `1a26d118…`, the golden journal `0110468d…`. Twenty-two mutants, each killed (the executor row's list).
 
+**K2b-3b — the receive side** (2026-11-23): journal version 5, `FOLD_REVISION` 5, `MACHINE_REVISION` 4 kept (the
+machine passes the bracket through, deciding nothing by it). `Seen.found` and `answer.found {absent, deadline}`; the
+attempt keeps `absent` — its hand-off, its request's hand-over, the clock read before a look that found the answer
+incomplete — and its end carries the bracket whenever its hold was late; `turn`, a yield polled under a flag waker that
+only tokio's defer list fires; the REST attempt's looks at `D − J/2` and `D + 1`, in its head's wait and its body's, a
+body's look repeating its turn while frames come; sources refused before T0 off a `current_thread` runtime; the
+`Egress::Io` contract on the port. The fold keeps, rather than a bit, each censored step's attempt, deadline and
+dispatch until its late answer is found — what a `found` must agree with — and `verdict.py` says the same.
+- **What it found**: the virtual runtime is never busy — an attempt whose look is put off reads its answer as it comes
+  — so a lagging clock executes the bracket's bookkeeping and nothing more; the turn's own executor is the real-clock
+  TCP twin, and the flag's needed a wake of the attempt between its yield and the driver's turn, which no state made
+  until a test clock, at the look's timer, woke a sibling queued behind the yielding attempt. A live found's once-check
+  survived its mutant: the twin of two founds had both after the end.
+- **Executors**: the executor row; journals under (5, 4) `3f95c013…`, classes under (5, 4, 5) equal to (4, 4, 4)'s — no
+  differential reaches a late answer — and the golden journal `4ffb293d…`. Twelve mutants, each killed (the row's).
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -1247,16 +1264,13 @@ only and measures move to the 12-core box.
   reference machine; `answer::read` + `judge` at the cap on an object-dense document; bytes per kept connection and
   open attempt (a counting allocator); a timed wait against a spin, the stand's p99 A/B on one machine; the probe of
   the virtual clock on the newest tokio (a library job) — each before the first host run.
-- **The receive side** (K2b-3b, decision 17, journal version 5), and what the roles found for it: one driver turn
-  sees at most tokio's events per tick (1024 by default) — sources built with more than their descriptors, refused
-  otherwise; a look's own duration (a cap-sized answer through hyper's want and its 16 KiB reads) counts against P1's
-  band and is measured before the rule is trusted at scale; `sim` must take an answer in `(D, D + 1]` as a late answer
-  with its `absent`, and a differential with deadlines among the answers' draws reaches that path; the virtual clock
-  executes the look's bookkeeping, never the turn-verified round — that is a real-clock TCP twin built causally (the
-  runtime's `event_interval` at its maximum, the answer's bytes confirmed in the receive queue by `peek`, a probe sleeper
-  past the look, a foreign wake between the yield and the turn for the flag's mutant, one-sided assertions, a run whose
-  precondition failed retried, not counted); a found answer on a live step, which one role holds unreachable, shown by
-  a journal or dropped; the `Egress::Io` contract (no relaying task) executed by a twin of its own.
+- **The receive side's remainder** (K2b-3b): one driver turn sees at most tokio's events per tick (1024 by default)
+  — the live composition (K2b-6) builds each source runtime with more than its descriptors; a look's own duration (a
+  cap-sized answer through hyper's want and its 16 KiB reads) counts against P1's band, measured on the reference
+  machine before the rule is trusted at scale; no differential reaches an answer within a microsecond past its
+  deadline, where `sim` gives none and the shell finds it — a differential with deadlines among the answers' draws is
+  owed with `sim` taking such an answer late; the `Egress::Io` contract (no relaying task) is stated on the port, its
+  twin owed with the first host's TLS or proxy egress.
 - **A never-sent attempt's path** (K2b-3a): with no `Sent` it carries no `handed` or `connected`; its class is undecided
   already, but attribution is lost, and refused connects are not told from the harness's lateness — K2b-6, with refused
   connects journaled.
@@ -1357,3 +1371,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   its deadline. `sim::Attempt.seen` replaced by a projection checked against the stub.
 - 2026-11-23: K2b-3 decided under the gate (decision 17: a solver and a discriminator on Fable, two roles on Opus),
   amending decisions 9, 14 and 16; cut into K2b-3a and K2b-3b; K2b-3a built (§ Measured): journal version 4.
+- 2026-11-23: K2b-3b built (§ Measured): journal version 5, the receive side. Decision 17 refined: the fold keeps a
+  censored step's attempt until its late answer is found, rather than a bit; the looks in a head's wait and a body's.

@@ -25,6 +25,12 @@ pub trait Stand: Send + Sync + 'static {
 
 /// How a source connects: TCP from the source's own address live, an
 /// in-memory pipe in tests; TLS, if any, is the host's.
+///
+/// Its bytes must reach hyper within one turn of the source runtime's driver
+/// and one poll of the connection's task — a stream polled in place, never
+/// copied through a task of its own (ADR-0047 decision 17): an attempt's look
+/// verifies a turn, and an answer a relaying task still holds would read as
+/// absent.
 pub trait Egress: Send + Sync + 'static {
     /// A connection's bytes.
     type Io: AsyncRead + AsyncWrite + Send + Unpin + 'static;

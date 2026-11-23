@@ -720,3 +720,39 @@ fn a_late_hand_off_is_journaled() {
         let _ = stop.send(());
     }
 }
+
+/// Decision 17: a source on a runtime that is not `current_thread` is refused
+/// before T0 — its driver may turn while another worker runs a task, and no
+/// look of an attempt could verify a turn.
+#[test]
+fn a_source_not_on_a_current_thread_runtime_is_refused() {
+    let pool = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .build()
+        .unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let records = [call("read", 1, 0, 0, 0)];
+    let err = rt.block_on(async {
+        let clock = Arc::new(VirtualClock::start(0));
+        run(
+            Arc::new(header()),
+            W,
+            clock,
+            Records::new(records.iter().cloned()),
+            Lines::new(),
+            Arc::new(Scripted::new(Arc::new(script(1, "flavor")))),
+            &Runtimes {
+                sources: vec![pool.handle().clone()],
+            },
+        )
+        .await
+        .unwrap_err()
+    });
+    assert!(
+        matches!(err, RunError::Refused(ref why) if why.contains("current_thread")),
+        "{err:?}"
+    );
+}

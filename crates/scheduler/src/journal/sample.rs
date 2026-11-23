@@ -6,8 +6,8 @@
 use ascetic_ddd_command_log::record::{On, Safety, Subject};
 
 use super::{
-    Action, Answer, Code, Critical, Dep, Dispatch, End, Ended, Fault, FaultClass, Header, Ignored,
-    JOURNAL_VERSION, Judged, Key, Line, Read, Released, Sent, Skip, Slot,
+    Action, Answer, Code, Critical, Dep, Dispatch, End, Ended, Fault, FaultClass, Found, Header,
+    Ignored, JOURNAL_VERSION, Judged, Key, Line, Read, Released, Sent, Skip, Slot,
 };
 use crate::machine::MACHINE_REVISION;
 
@@ -165,6 +165,7 @@ pub fn lines() -> Vec<Line> {
             code: None,
             after: None,
             censored: false,
+            found: None,
         }),
     ];
     let judged = [
@@ -196,6 +197,10 @@ pub fn lines() -> Vec<Line> {
             code,
             after,
             censored: judged == Judged::Unknown,
+            found: (judged == Judged::Unexpected).then_some(Found {
+                absent: 0,
+                deadline: u64::MAX,
+            }),
         }));
     }
     let ends = [

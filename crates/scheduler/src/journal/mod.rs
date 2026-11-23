@@ -26,13 +26,13 @@ use crate::machine::{self, Binding, Input, Judgement, Line as Number, Output};
 pub mod sample;
 
 /// The version a reader accepts and a writer writes: exactly this one.
-pub const JOURNAL_VERSION: u32 = 4;
+pub const JOURNAL_VERSION: u32 = 5;
 
 /// The byte form's identity: the SHA-256 of the golden journal
 /// (`golden/journal.jsonl`, [`sample`]), which holds every line and variant. A
 /// change to how any line is written changes the golden journal, and so this,
 /// in the same edit.
-pub const JOURNAL: &str = "0110468df74b4be30da6336ca4c52b68cceaec54f7c51f82fd67e3c825a204c1";
+pub const JOURNAL: &str = "4ffb293d1d5f8eb5b799d8ca42a85c62ff6b4b5de2eb4f67c92b003123833dfa";
 
 /// A journal's line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -326,6 +326,21 @@ pub struct Answer {
     /// The frontier's censor at the deadline, not an answer (version 4):
     /// the harness's lateness may excuse only it (ADR-0047 decision 17).
     pub censored: bool,
+    /// A late answer's bracket (version 5): it arrived after `absent`, its
+    /// attempt censored at `deadline` (ADR-0047 decision 17).
+    pub found: Option<Found>,
+}
+
+/// Where a late answer was not, and its attempt's deadline (version 5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Found {
+    /// The last instant the shell knew it had not come.
+    #[serde(with = "u64s")]
+    pub absent: u64,
+    /// Its attempt's deadline.
+    #[serde(with = "u64s")]
+    pub deadline: u64,
 }
 
 /// A problem's code: a short dotted name as the server wrote it, or `other`
@@ -633,6 +648,10 @@ pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
                 code: seen.code.as_ref().map(Code::from),
                 after: seen.after,
                 censored: seen.censored,
+                found: seen.found.map(|f| Found {
+                    absent: f.absent,
+                    deadline: f.deadline,
+                }),
             }));
         }
         Input::Wake => {}

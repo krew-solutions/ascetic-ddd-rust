@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::future::{Future, poll_fn};
 use std::io;
-use std::pin::Pin;
+use std::pin::{Pin, pin};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 
@@ -34,6 +34,28 @@ use crate::clock::Clock;
 use crate::io::{Io, Probe};
 use crate::stamps::Attempt;
 use crate::stand::{Egress, Route, Stand};
+use crate::turn;
+
+/// An attempt's looks around its deadline (decision 17): one at `D − J/2`,
+/// the last at `D + 1` — each a verified turn of its runtime's driver, so an
+/// answer already in the host is read, and the instant before a look that
+/// finds it incomplete is where it is known absent.
+struct Looks {
+    pre: Option<u64>,
+    past: u64,
+}
+
+impl Looks {
+    /// The next look's instant.
+    fn next(&self) -> u64 {
+        self.pre.unwrap_or(self.past)
+    }
+
+    /// The look done: whether it was the last.
+    fn done(&mut self) -> bool {
+        self.pre.take().is_none()
+    }
+}
 
 /// What every frame of a run is filled from beside its step.
 pub struct Config {
@@ -236,6 +258,10 @@ impl<S: Stand, E: Egress> Inner<S, E> {
         // An answer stamped at the deadline is taken: the attempt leaves only
         // past it, and the frontier censors at it what had none.
         let past = deadline.saturating_add(1);
+        let mut looks = Looks {
+            pre: Some(deadline.saturating_sub(header.profile.jitter / 2)),
+            past,
+        };
         // Until a byte of it leaves: a connection, the request handed to it.
         let (response, conn) = loop {
             if a.clock().now() >= deadline {
@@ -267,13 +293,25 @@ impl<S: Stand, E: Egress> Inner<S, E> {
             a.connected();
             // Armed and handed over in this one poll: no flush between.
             conn.probe.arm(Box::new(a.sent_hook()));
-            let sent = conn.sender.try_send_request(req);
-            let outcome = tokio::select! {
-                biased;
-                r = sent => r,
-                // Censored by the frontier at the deadline; the connection
-                // dropped, never pooled (keeping it is K2b-8's).
-                () = a.clock().sleep_until(past) => return a.unanswered(),
+            let mut sent = pin!(conn.sender.try_send_request(req));
+            let outcome = loop {
+                tokio::select! {
+                    biased;
+                    r = &mut sent => break r,
+                    () = a.clock().sleep_until(looks.next()) => {
+                        let b0 = a.clock().now();
+                        if let Some(r) = turn::after_turn(&mut sent).await {
+                            break r;
+                        }
+                        a.absent_before(b0);
+                        // Censored by the frontier at the deadline; the
+                        // connection dropped, never pooled (keeping it is
+                        // K2b-8's).
+                        if looks.done() {
+                            return a.unanswered();
+                        }
+                    }
+                }
             };
             match outcome {
                 Ok(response) => break (response, conn),
@@ -293,8 +331,27 @@ impl<S: Stand, E: Egress> Inner<S, E> {
         loop {
             let next = tokio::select! {
                 biased;
-                f = poll_fn(|cx| Pin::new(&mut incoming).poll_frame(cx)) => f,
-                () = a.clock().sleep_until(past) => return a.unanswered(),
+                f = poll_fn(|cx| Pin::new(&mut incoming).poll_frame(cx)) => Some(f),
+                () = a.clock().sleep_until(looks.next()) => None,
+            };
+            let next = match next {
+                Some(f) => f,
+                None => {
+                    // A look: a verified turn, then the body as it stands; a
+                    // frame it brings is read and the look stays due.
+                    let b0 = a.clock().now();
+                    let mut frame = poll_fn(|cx| Pin::new(&mut incoming).poll_frame(cx));
+                    match turn::after_turn(&mut frame).await {
+                        Some(f) => f,
+                        None => {
+                            a.absent_before(b0);
+                            if looks.done() {
+                                return a.unanswered();
+                            }
+                            continue;
+                        }
+                    }
+                }
             };
             match next {
                 None => break,

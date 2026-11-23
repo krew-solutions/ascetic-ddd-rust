@@ -111,6 +111,8 @@ class Run:
         # poll after its dispatch); the last attempt's deadline; whether the
         # taken answer was the frontier's censor.
         harness, harness_sent, deadline, censored = 0, None, None, False
+        # Version 5: the late answers found for the censor, and their brackets.
+        founds = []
         for i, kind, v in self.events[l]:
             if i < ri:
                 raise Incoherent("an event before its read")
@@ -119,6 +121,8 @@ class Run:
             if kind == "answer" and i > ei:
                 if v["ignored"] is None:
                     raise Incoherent("an answer taken after its end")
+                if v["found"] is not None:
+                    founds.append((v, None))
                 continue
             if i > ei:
                 raise Incoherent("an event after its end")
@@ -163,6 +167,9 @@ class Run:
                     last_sent = u(v["at"]) if last_sent is None else last_sent
                     sent = u(v["at"]) if sent is None else sent
             elif kind == "answer":
+                if v["found"] is not None:
+                    founds.append((v, (censored, attempts, deadline, last_dispatch)))
+                    continue
                 if v["censored"] and (v["judged"] != "unknown" or v["status"] is not None):
                     raise Incoherent("a censor that says more than unknown")
                 if v["ignored"] is None:
@@ -216,13 +223,43 @@ class Run:
             elif not (2 <= d < l):
                 raise Incoherent("skipped for a producer not read before it")
         self.woke(l, r, rel, e, attempts, answered)
+        found_late = self.founds(founds, e, censored, attempts, deadline, last_dispatch)
         self.taken_attempts = attempts
         self.facts[l] = {
             "harness": harness,
             "harness_sent": harness_sent,
             "censored": censored,
             "last_sent": last_sent,
+            "found_late": found_late,
         }
+
+    def founds(self, founds, e, censored, attempts, deadline, last_dispatch):
+        """Decision 17, version 5: a late answer found for its attempt's censor —
+        ignored, at most one a censor, absent after the attempt's dispatch and
+        before the answer, the deadline the attempt's; found before the step's
+        end only while its taken answer is that censor, after it only for an
+        end the censor made. Late if absent before the deadline and found more
+        than J after."""
+        if len(founds) > 1:
+            raise Incoherent("two late answers found for one censor")
+        late = False
+        for v, live in founds:
+            f = v["found"]
+            absent, fd, at = u(f["absent"]), u(f["deadline"]), u(v["at"])
+            if v["ignored"] is None:
+                raise Incoherent("a found answer taken")
+            if not (absent < at and fd < at):
+                raise Incoherent("a found answer inside its own bracket")
+            if live is not None:
+                c, n, d, dispatched = live
+            else:
+                c, n, d, dispatched = censored, attempts, deadline, last_dispatch
+                if end_kind(e) != "unknown":
+                    raise Incoherent("a found answer of a step its censor did not end")
+            if not c or v["attempt"] != n or fd != d or absent < dispatched:
+                raise Incoherent("a found answer against its censor")
+            late = absent < fd and at - absent > self.j
+        return late
 
     def woke(self, l, r, rel, e, attempts, answered):
         """Decision 17: the wake that ended a step. None for an input's end or a
@@ -351,6 +388,8 @@ class Run:
             return None
         if e["fault"]:
             return "backstop"
+        if f["found_late"]:
+            return "found"
         if e["attempts"] >= 1 and f["censored"] and (f["last_sent"] is None or self.harness_late(l)):
             return "censor"
         if rel:

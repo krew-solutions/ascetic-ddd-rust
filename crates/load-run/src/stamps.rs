@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use ascetic_ddd_command_log::record::Record;
 use ascetic_ddd_scheduler::frontier::{Below, Frontier, Hold};
-use ascetic_ddd_scheduler::machine::{Captured, Judgement, Line, Seen};
+use ascetic_ddd_scheduler::machine::{Captured, Found, Judgement, Line, Seen};
 use tokio::sync::Notify;
 
 use crate::clock::Clock;
@@ -201,6 +201,10 @@ pub struct Attempt<C: Clock> {
     stamps: Arc<Stamps<C>>,
     hold: Option<Hold>,
     done: bool,
+    /// The last instant it knew its answer had not come (decision 17): its
+    /// hand-off, its request's hand-over, a look that found the answer
+    /// incomplete.
+    absent: u64,
 }
 
 impl<C: Clock> Attempt<C> {
@@ -225,6 +229,7 @@ impl<C: Clock> Attempt<C> {
             stamps,
             hold: None,
             done: false,
+            absent: dispatched,
         }
     }
 
@@ -283,18 +288,26 @@ impl<C: Clock> Attempt<C> {
     /// Its task's first instant, now: the hand-off's lateness from the
     /// dispatch is the harness's (ADR-0047 decision 17). The loop stamps it
     /// as the task starts.
-    pub(crate) fn handed(&self) {
+    pub(crate) fn handed(&mut self) {
         let (line, attempt) = (self.line, self.attempt);
         let (mut g, now) = self.stamps.lock();
         g.frontier.handed(now, line, attempt);
+        self.absent = now;
     }
 
     /// Its request handed to a ready connection, now: the connect's lateness
     /// from `handed` is the stand's. The last such instant stands.
-    pub fn connected(&self) {
+    pub fn connected(&mut self) {
         let (line, attempt) = (self.line, self.attempt);
         let (mut g, now) = self.stamps.lock();
         g.frontier.connected(now, line, attempt);
+        self.absent = now;
+    }
+
+    /// A look found its answer incomplete; `at`, the clock read before it,
+    /// the last instant it is known to have been absent (decision 17).
+    pub fn absent_before(&mut self, at: u64) {
+        self.absent = self.absent.max(at);
     }
 
     /// What reports its bytes left, for a task that sees them leave
@@ -323,9 +336,17 @@ impl<C: Clock> Attempt<C> {
 
     /// Its answer judged: pushed at the instant it arrived — now, if it was
     /// not reported to have arrived.
-    pub fn ended(mut self, judgement: Judgement, seen: Seen) {
+    pub fn ended(mut self, judgement: Judgement, mut seen: Seen) {
         self.arrived();
         if let Some(hold) = self.hold.take() {
+            // A late answer carries where it was not (decision 17): nothing
+            // but its hold's lateness decides it.
+            if hold.late() {
+                seen.found = Some(Found {
+                    absent: self.absent,
+                    deadline: self.deadline,
+                });
+            }
             self.stamps.push(|f, _| f.ended(hold, judgement, seen));
         }
         self.done = true;

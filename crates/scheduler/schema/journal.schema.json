@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/krew-solutions/ascetic-ddd-rust/crates/scheduler/schema/journal.schema.json",
-  "title": "A line of a scheduler's journal (ADR-0047 decision 14), version 4",
+  "title": "A line of a scheduler's journal (ADR-0047 decision 14), version 5",
   "description": "Normative. Every object's properties are listed in the order a line writes them: the canonical order. A line is the compact JSON of one of these, then a newline; the first line is a header and only it, the last a trailer, whose sha256 is of every line before it and events the number of lines between the two. Every u64 is a decimal string.",
   "oneOf": [
     {
@@ -295,6 +295,22 @@
       ],
       "additionalProperties": false
     },
+    "found": {
+      "type": "object",
+      "properties": {
+        "absent": {
+          "$ref": "#/$defs/u64"
+        },
+        "deadline": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "absent",
+        "deadline"
+      ],
+      "additionalProperties": false
+    },
     "skip": {
       "oneOf": [
         {
@@ -393,7 +409,7 @@
       "type": "object",
       "properties": {
         "journal": {
-          "const": 4
+          "const": 5
         },
         "machine": {
           "$ref": "#/$defs/u32"
@@ -620,6 +636,16 @@
         },
         "censored": {
           "type": "boolean"
+        },
+        "found": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/found"
+            }
+          ]
         }
       },
       "required": [
@@ -632,7 +658,8 @@
         "status",
         "code",
         "after",
-        "censored"
+        "censored",
+        "found"
       ],
       "additionalProperties": false
     },

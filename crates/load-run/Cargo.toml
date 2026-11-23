@@ -37,4 +37,4 @@ ascetic-ddd-load-run = { path = ".", features = ["testing"] }
 serde_json = { workspace = true }
 sha2 = "0.10"
 tempfile = "3"
-tokio = { version = "1.53.1", features = ["io-util", "macros", "rt", "rt-multi-thread", "sync", "test-util", "time"] }
+tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "test-util", "time"] }

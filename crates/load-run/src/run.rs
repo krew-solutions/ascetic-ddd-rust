@@ -134,6 +134,17 @@ where
     X: Carrier<C>,
 {
     carrier.carries(&header).map_err(RunError::Refused)?;
+    // A source's driver turns only between its tasks on a `current_thread`
+    // runtime: what an attempt's look verifies (decision 17).
+    if let Some(i) = runtimes
+        .sources
+        .iter()
+        .position(|h| h.runtime_flavor() != tokio::runtime::RuntimeFlavor::CurrentThread)
+    {
+        return Err(RunError::Refused(format!(
+            "source {i}'s runtime is not current_thread"
+        )));
+    }
     let sources = usize::try_from(header.profile.sources).unwrap_or(usize::MAX);
     if runtimes.sources.len() < sources.max(1) {
         return Err(RunError::Refused(format!(
@@ -328,6 +339,7 @@ where
                             // stamped here, so no carrier can forget it.
                             let carrier = carrier.clone();
                             drop(handle.spawn(async move {
+                                let mut a = a;
                                 a.handed();
                                 carrier.carry(a).await;
                             }));

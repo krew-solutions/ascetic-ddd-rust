@@ -50,6 +50,21 @@ pub struct Seen {
     /// The frontier's censor at the deadline, not an answer (ADR-0047
     /// decision 17): the harness's lateness may excuse only it.
     pub censored: bool,
+    /// A late answer's bracket (ADR-0047 decision 17, journal version 5):
+    /// the last instant the shell knew it had not come, and its attempt's
+    /// deadline.
+    pub found: Option<Found>,
+}
+
+/// Where a late answer was not, and its attempt's deadline: it arrived in
+/// `(absent, at]`, `at` the instant the shell found it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Found {
+    /// The clock read before the last look that found it incomplete; its
+    /// request's hand-over if none did.
+    pub absent: u64,
+    /// Its attempt's deadline.
+    pub deadline: u64,
 }
 
 /// A problem's code as the journal may carry it: the server's text only if it

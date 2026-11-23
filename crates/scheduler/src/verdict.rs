@@ -20,14 +20,14 @@ use std::collections::BTreeMap;
 use ascetic_ddd_command_log::record::{On, Safety};
 
 use crate::journal::{
-    Action, Dep, End, Ended, Header, JournalError, Judged, Key, Line, Read, Skip,
+    Action, Answer, Dep, End, Ended, Found, Header, JournalError, Judged, Key, Line, Read, Skip,
 };
 use crate::machine::Line as Number;
 
 /// What the fold decides, as a number: raised whenever the classes or the
 /// verdict it gives a journal change, which the goldens' and the differential's
 /// classes pin beside it.
-pub const FOLD_REVISION: u32 = 4;
+pub const FOLD_REVISION: u32 = 5;
 
 /// A line's class (decision 14), by precedence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -195,6 +195,19 @@ struct Live {
     harness: u64,
     /// That lateness by its first send: the cause's, for its observation.
     harness_sent: Option<u64>,
+    /// A late answer found for its censor (version 5): once a censor.
+    found: bool,
+    /// That answer read more than J after the shell last knew it absent,
+    /// absent before the deadline: the receive side's lateness.
+    found_late: bool,
+}
+
+/// A step ended by its last attempt's censor, a late answer not yet found
+/// for it: what a `found` must agree with.
+struct Censor {
+    attempt: u32,
+    deadline: u64,
+    dispatched: u64,
 }
 
 struct First {
@@ -207,6 +220,8 @@ struct First {
     /// A backstop's end, its fault line still to come.
     owed: Option<Number>,
     fault: Option<Number>,
+    /// Steps ended by a censor, their late answer not yet found.
+    censors: BTreeMap<Number, Censor>,
 }
 
 impl First {
@@ -282,6 +297,8 @@ impl First {
                         last_deadline: 0,
                         harness: 0,
                         harness_sent: None,
+                        found: false,
+                        found_late: false,
                     },
                 );
                 Ok(())
@@ -397,6 +414,9 @@ impl First {
                 }
             }
             Line::Answer(a) => {
+                if let Some(f) = a.found {
+                    return self.found(a, f);
+                }
                 let next = self.next;
                 // The frontier's censor: unknown, no answer's status.
                 if a.censored && (a.judged != Judged::Unknown || a.status.is_some()) {
@@ -437,6 +457,45 @@ impl First {
             Line::End(e) => self.end(e),
             Line::Fault(f) => Err(incoherent(f.line, "a fault without its backstop's end")),
         }
+    }
+
+    /// A late answer and its bracket (decision 17, version 5): ignored, for
+    /// its attempt's censor — the step's taken answer if it is live, its end
+    /// if not — once; `absent` after its dispatch and before the answer, the
+    /// deadline its attempt's. Undecided if it was absent before the deadline
+    /// and found more than J after.
+    fn found(&mut self, a: &Answer, f: Found) -> Result<(), Void> {
+        let bad = |why| Err(incoherent(a.line, why));
+        if a.ignored.is_none() {
+            return bad("a found answer taken");
+        }
+        if f.absent >= a.at || f.deadline >= a.at {
+            return bad("a found answer within its bracket");
+        }
+        let late = f.absent < f.deadline && a.at.saturating_sub(f.absent) > self.jitter;
+        if let Some(lv) = self.live.get_mut(&a.line) {
+            if !lv.censored
+                || lv.found
+                || a.attempt != lv.attempts
+                || f.deadline != lv.last_deadline
+                || f.absent < lv.last_dispatch
+            {
+                return bad("a found answer against its censor");
+            }
+            lv.found = true;
+            lv.found_late = late;
+            return Ok(());
+        }
+        let Some(c) = self.censors.remove(&a.line) else {
+            return bad("a found answer without its censor");
+        };
+        if a.attempt != c.attempt || f.deadline != c.deadline || f.absent < c.dispatched {
+            return bad("a found answer against its censor");
+        }
+        if late {
+            self.mark(a.line, UNDECIDED);
+        }
+        Ok(())
     }
 
     fn end(&mut self, e: &Ended) -> Result<(), Void> {
@@ -541,8 +600,21 @@ impl First {
         if late {
             byte |= LATE;
         }
-        if (e.end == End::Unknown && (e.fault || censor_late || read_late)) || wake_late {
+        if (e.end == End::Unknown && (e.fault || censor_late || read_late || lv.found_late))
+            || wake_late
+        {
             byte |= UNDECIDED;
+        }
+        // A censor's late answer may yet be found (version 5).
+        if e.end == End::Unknown && lv.attempts >= 1 && lv.censored && !lv.found {
+            self.censors.insert(
+                e.line,
+                Censor {
+                    attempt: lv.attempts,
+                    deadline: lv.last_deadline,
+                    dispatched: lv.last_dispatch,
+                },
+            );
         }
         self.mark(e.line, byte);
         if e.fault {
@@ -755,6 +827,7 @@ where
         floor: header.resend,
         bytes: Vec::new(),
         live: BTreeMap::new(),
+        censors: BTreeMap::new(),
         next: 2,
         owed: None,
         fault: None,
