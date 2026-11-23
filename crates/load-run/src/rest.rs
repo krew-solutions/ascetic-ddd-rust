@@ -233,6 +233,9 @@ impl<S: Stand, E: Egress> Inner<S, E> {
         };
         let id = render::correlation(self.config.namespace, &record.step, a.attempt());
         let deadline = a.deadline();
+        // An answer stamped at the deadline is taken: the attempt leaves only
+        // past it, and the frontier censors at it what had none.
+        let past = deadline.saturating_add(1);
         // Until a byte of it leaves: a connection, the request handed to it.
         let (response, conn) = loop {
             if a.clock().now() >= deadline {
@@ -250,7 +253,7 @@ impl<S: Stand, E: Egress> Inner<S, E> {
             let ready = tokio::select! {
                 biased;
                 r = poll_fn(|cx| conn.sender.poll_ready(cx)) => r.is_ok(),
-                () = a.clock().sleep_until(deadline) => return a.unanswered(),
+                () = a.clock().sleep_until(past) => return a.unanswered(),
             };
             if !ready {
                 continue;
@@ -267,7 +270,7 @@ impl<S: Stand, E: Egress> Inner<S, E> {
                 r = sent => r,
                 // Censored by the frontier at the deadline; the connection
                 // dropped, never pooled (keeping it is K2b-8's).
-                () = a.clock().sleep_until(deadline) => return a.unanswered(),
+                () = a.clock().sleep_until(past) => return a.unanswered(),
             };
             match outcome {
                 Ok(response) => break (response, conn),
@@ -288,7 +291,7 @@ impl<S: Stand, E: Egress> Inner<S, E> {
             let next = tokio::select! {
                 biased;
                 f = poll_fn(|cx| Pin::new(&mut incoming).poll_frame(cx)) => f,
-                () = a.clock().sleep_until(deadline) => return a.unanswered(),
+                () = a.clock().sleep_until(past) => return a.unanswered(),
             };
             match next {
                 None => break,

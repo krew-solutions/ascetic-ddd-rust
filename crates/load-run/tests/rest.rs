@@ -43,6 +43,7 @@ enum Answer {
         head: u64,
         body: u64,
         status: u16,
+        headers: Vec<(String, String)>,
         bytes: Vec<u8>,
         close: bool,
     },
@@ -123,13 +124,18 @@ impl Stub {
                     head,
                     body,
                     status,
+                    headers,
                     bytes,
                     close,
                 } => {
                     self.clock.sleep_until(at + head).await;
                     let connection = if close { "connection: close\r\n" } else { "" };
+                    let fields: String = headers
+                        .iter()
+                        .map(|(n, v)| format!("{n}: {v}\r\n"))
+                        .collect();
                     let text = format!(
-                        "HTTP/1.1 {status} X\r\ncontent-length: {}\r\n{connection}\r\n",
+                        "HTTP/1.1 {status} X\r\ncontent-length: {}\r\n{fields}{connection}\r\n",
                         bytes.len()
                     );
                     if io.write_all(text.as_bytes()).await.is_err() {
@@ -171,6 +177,9 @@ struct Throttled {
     gap: u64,
     next: Option<u64>,
     sleep: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    /// Each request's write held this long after its first poll, by its
+    /// correlation id: `sim`'s `sent_after`.
+    holds: Option<Arc<BTreeMap<String, u64>>>,
 }
 
 impl AsyncRead for Throttled {
@@ -190,7 +199,13 @@ impl AsyncWrite for Throttled {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let now = self.clock.now();
-        let first = self.first;
+        let hold = self.holds.as_ref().map(|h| {
+            let text = String::from_utf8_lossy(buf);
+            field(&text, "x-correlation-id")
+                .and_then(|id| h.get(&id).copied())
+                .unwrap_or(0)
+        });
+        let first = hold.unwrap_or(self.first);
         let allowed = *self.next.get_or_insert(now + first);
         if now < allowed {
             if self.sleep.is_none() {
@@ -205,7 +220,12 @@ impl AsyncWrite for Throttled {
         let n = buf.len().min(self.chunk);
         let wrote = ready!(Pin::new(&mut self.inner).poll_write(cx, &buf[..n]))?;
         let gap = self.gap;
-        self.next = Some(self.clock.now() + gap);
+        // Held per request: the next one's hold starts at its own first poll.
+        self.next = if self.holds.is_some() {
+            None
+        } else {
+            Some(self.clock.now() + gap)
+        };
         Poll::Ready(Ok(wrote))
     }
 
@@ -228,6 +248,7 @@ struct Throttle {
 struct Pipe {
     stub: Arc<Stub>,
     throttle: Throttle,
+    holds: Option<Arc<BTreeMap<String, u64>>>,
 }
 
 impl Egress for Pipe {
@@ -236,6 +257,7 @@ impl Egress for Pipe {
     fn connect(&self, _: u32, _: &Route) -> impl Future<Output = io::Result<Throttled>> + Send {
         let stub = self.stub.clone();
         let t = self.throttle;
+        let holds = self.holds.clone();
         async move {
             let (client, server) = tokio::io::duplex(1 << 16);
             drop(tokio::spawn(stub.clone().serve(server)));
@@ -247,6 +269,7 @@ impl Egress for Pipe {
                 gap: t.gap,
                 next: None,
                 sleep: None,
+                holds,
             })
         }
     }
@@ -302,6 +325,7 @@ fn run_rest(
             Pipe {
                 stub: stub.clone(),
                 throttle,
+                holds: None,
             },
             Config {
                 namespace: NAMESPACE,
@@ -343,6 +367,7 @@ fn ok(head: u64, body: u64) -> Answer {
         head,
         body,
         status: 200,
+        headers: vec![],
         bytes: b"{}".to_vec(),
         close: false,
     }
@@ -431,6 +456,7 @@ fn a_connection_kept_alive_is_reused_and_one_closed_is_not() {
             head: 10,
             body: 0,
             status: 200,
+            headers: vec![],
             bytes: b"{}".to_vec(),
             close,
         };
@@ -484,6 +510,7 @@ fn an_answer_past_the_cap_is_unread_and_its_connection_closed() {
         head: 10,
         body: 20,
         status: 200,
+        headers: vec![],
         bytes: vec![b' '; 200],
         close: false,
     };
@@ -511,4 +538,375 @@ fn an_answer_cut_short_is_unknown_at_the_cut() {
         (came[0].at + 40, None, Judged::Unknown)
     );
     assert_eq!(end(&journal, 2).map(|e| e.0), Some(End::Unknown));
+}
+
+mod common;
+
+use ascetic_ddd_command_log::record::{Outcome, Probe, Source};
+use ascetic_ddd_command_log::request::rest_of;
+use ascetic_ddd_command_log::validate::NoHost;
+use ascetic_ddd_faker::{Key, Seed};
+use ascetic_ddd_load_run::carrier::Carrier;
+use ascetic_ddd_load_run::stamps::Attempt;
+use ascetic_ddd_scheduler::machine::{Captured, Judgement};
+use ascetic_ddd_scheduler::sim::{self, run_reading};
+use common::{Script, Scripted};
+
+const ATTEMPTS: u32 = 16;
+
+fn over_rest(r: &Record) -> bool {
+    matches!(&r.action, Action::Rest(_))
+        || matches!(&r.action, Action::Observe(o) if matches!(o.probe, Probe::Rest(_)))
+}
+
+/// The differential's script, as an answer over HTTP can carry it: a refusal
+/// certified only where the operation lists a code for it; `Retry-After` in
+/// whole seconds, on a certified refusal; an unexpected answer only where one
+/// can be; each captured value in the form its source yields it — a
+/// header's and a `Location`'s quoted, a body's number bare.
+fn rest_script(
+    seed: u64,
+    log: &str,
+    header: Header,
+) -> impl Fn(u64, u32, &Record) -> sim::Attempt + Send + Sync + use<> {
+    let root = Key::root(Seed(seed)).child("rest").child(log);
+    move |line, attempt, r| {
+        let k = root.at(line).at(u64::from(attempt));
+        let draw = |label: &str, m: u64| k.child(label).unit().raw() % m;
+        let certifiable = rest_of(&r.action)
+            .and_then(|rest| header.operations.iter().find(|o| o.name == rest.op))
+            .is_some_and(|o| !o.not_run.is_empty());
+        let value = |c: &ascetic_ddd_command_log::record::Capture| match c.source {
+            Source::Json(_) => line.to_string().into_bytes(),
+            Source::Header(_) | Source::Location => format!("\"{line}\"").into_bytes(),
+        };
+        // A call that expects nothing takes any answer below 500 as expected
+        // (the judge's sent-only rule): only a poll's or an expectation's can
+        // be unexpected.
+        let refusable = !r.expect.is_empty() || matches!(r.action, Action::Observe(_));
+        let judgement = match draw("judgement", 10) {
+            0 | 1 if refusable && !(certifiable && draw("certified", 2) == 0) => {
+                Judgement::Unexpected
+            }
+            0 | 1 if certifiable => Judgement::NotTaken,
+            2 => Judgement::Unknown,
+            _ if !r.capture.is_empty() && draw("bare", 6) == 0 => Judgement::Expected(vec![]),
+            _ => Judgement::Expected(
+                r.capture
+                    .iter()
+                    .map(|c| Captured {
+                        subject: c.subject.clone(),
+                        slot: c.slot.clone(),
+                        value: value(c),
+                    })
+                    .collect(),
+            ),
+        };
+        // The judge takes `Retry-After` from a certified refusal alone
+        // (decision 15): only one carries a wait.
+        let after = match (&judgement, draw("after", 3)) {
+            (Judgement::NotTaken, n) if n > 0 => Some(n * 1_000_000),
+            _ => None,
+        };
+        sim::Attempt {
+            after,
+            sent_after: draw("sent", 300),
+            answer_after: (draw("silent", 30) != 0).then(|| draw("answer", 3_000)),
+            judgement,
+        }
+    }
+}
+
+/// The answer whose judgement is `a`'s: the inverse of the judge, for the
+/// stub. Its status and its problem's code, for the journal.
+fn respond(
+    header: &Header,
+    r: &Record,
+    line: u64,
+    a: &sim::Attempt,
+) -> (Answer, u16, Option<String>) {
+    let mut headers = Vec::new();
+    if let Some(after) = a.after {
+        headers.push(("retry-after".to_owned(), (after / 1_000_000).to_string()));
+    }
+    let (status, bytes, code) = match &a.judgement {
+        Judgement::Expected(captured) => {
+            let status = r
+                .expect
+                .iter()
+                .find_map(|o| match o {
+                    Outcome::Response { status, .. } => Some(*status),
+                    _ => None,
+                })
+                .unwrap_or(200);
+            let mut body = serde_json::Map::new();
+            for c in captured {
+                let Some(capture) = r
+                    .capture
+                    .iter()
+                    .find(|x| x.subject == c.subject && x.slot == c.slot)
+                else {
+                    continue;
+                };
+                match &capture.source {
+                    Source::Header(name) => headers.push((name.clone(), line.to_string())),
+                    Source::Location => {
+                        headers.push(("location".to_owned(), format!("/things/{line}")))
+                    }
+                    Source::Json(pointer) => {
+                        body.insert(
+                            pointer.trim_start_matches('/').to_owned(),
+                            serde_json::json!(line),
+                        );
+                    }
+                }
+            }
+            (status, serde_json::to_vec(&body).unwrap(), None)
+        }
+        Judgement::Unexpected => (409, Vec::new(), None),
+        Judgement::NotTaken => {
+            let op = rest_of(&r.action)
+                .and_then(|rest| header.operations.iter().find(|o| o.name == rest.op))
+                .unwrap();
+            let code = op.not_run[0].clone();
+            headers.push((
+                "content-type".to_owned(),
+                "application/problem+json".to_owned(),
+            ));
+            (
+                503,
+                serde_json::to_vec(&serde_json::json!({ "code": code })).unwrap(),
+                Some(code),
+            )
+        }
+        Judgement::Unknown => (500, Vec::new(), None),
+    };
+    let answer = match a.answer_after {
+        Some(after) => Answer::Ok {
+            head: after,
+            body: 0,
+            status,
+            headers,
+            bytes,
+            close: false,
+        },
+        None => Answer::Silent,
+    };
+    (answer, status, code)
+}
+
+/// REST attempts over hyper to the stub, every other kind as `sim`'s script.
+struct Mixed {
+    rest: RestCarrier<OneStand, Pipe>,
+    scripted: Scripted,
+}
+
+impl Carrier<VirtualClock> for Mixed {
+    fn carries(&self, _: &Header) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn carry(&self, a: Attempt<VirtualClock>) -> impl Future<Output = ()> + Send + 'static {
+        let f: Pin<Box<dyn Future<Output = ()> + Send>> = if over_rest(a.record()) {
+            Box::pin(Carrier::<VirtualClock>::carry(&self.rest, a))
+        } else {
+            Box::pin(self.scripted.carry(a))
+        };
+        f
+    }
+}
+
+/// A journal with what `sim` cannot know of an answer — its status, its
+/// problem's code — left out.
+fn projected(journal: &[Line]) -> Vec<Line> {
+    journal
+        .iter()
+        .cloned()
+        .map(|l| match l {
+            Line::Answer(mut a) => {
+                a.status = None;
+                a.code = None;
+                Line::Answer(a)
+            }
+            other => other,
+        })
+        .collect()
+}
+
+#[test]
+fn over_rest_the_shell_journals_what_sim_journals() {
+    let mut runs = 0;
+    let mut kinds: BTreeMap<&str, u64> = BTreeMap::new();
+    for (name, records) in fixture::corpus::logs() {
+        let header = fixture::corpus::corpus_header();
+        let (report, _) = run_bounded(header.clone(), &records, &NoHost, 1_000);
+        if !report.violations.is_empty() || !records.iter().any(over_rest) {
+            continue;
+        }
+        for seed in 1..=2u64 {
+            let script: Arc<Script> = Arc::new(rest_script(seed, &name, header.clone()));
+            let ran = run_reading(header.clone(), &records, W, &|_| 0, &*script).unwrap();
+            // The stub's answers, the pipe's holds and the journal's status
+            // and code, by correlation id and by (line, attempt).
+            let mut answers = BTreeMap::new();
+            let mut holds = BTreeMap::new();
+            let mut sent: BTreeMap<(u64, u32), (u16, Option<String>)> = BTreeMap::new();
+            for (i, r) in records.iter().enumerate() {
+                let line = i as u64 + 2;
+                if !over_rest(r) {
+                    continue;
+                }
+                for attempt in 1..=ATTEMPTS {
+                    let a = script(line, attempt, r);
+                    let (answer, status, code) = respond(&header, r, line, &a);
+                    answers.insert(id(r, attempt), answer);
+                    holds.insert(id(r, attempt), a.sent_after);
+                    sent.insert((line, attempt), (status, code));
+                }
+            }
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap();
+            let shelled = rt.block_on(async {
+                let clock = Arc::new(VirtualClock::start(1_763_640_000_000_000));
+                let stub = Arc::new(Stub {
+                    clock: clock.clone(),
+                    answers,
+                    connections: AtomicUsize::new(0),
+                    came: Mutex::new(Vec::new()),
+                });
+                let header = Arc::new(header.clone());
+                let carrier = Mixed {
+                    rest: RestCarrier::new(
+                        header.clone(),
+                        OneStand,
+                        Pipe {
+                            stub,
+                            throttle: AT_ONCE,
+                            holds: Some(Arc::new(holds)),
+                        },
+                        Config {
+                            namespace: NAMESPACE,
+                            secret: RunSecret::new([7; 32]),
+                            run_start: clock.wall(),
+                        },
+                    ),
+                    scripted: Scripted::new(script.clone()),
+                };
+                let runtimes = Runtimes {
+                    sources: vec![
+                        tokio::runtime::Handle::current();
+                        header.profile.sources.max(1) as usize
+                    ],
+                };
+                clock
+                    .within(run(
+                        header,
+                        W,
+                        clock.clone(),
+                        Records::new(records.iter().cloned()),
+                        Lines::new(),
+                        Arc::new(carrier),
+                        &runtimes,
+                    ))
+                    .await
+                    .unwrap_or_else(|e| panic!("{name}/{seed}: {e}"))
+                    .journal
+            });
+            let (theirs, ours) = (projected(&ran.journal), projected(&shelled));
+            if let Some(i) =
+                (0..theirs.len().max(ours.len())).find(|&i| theirs.get(i) != ours.get(i))
+            {
+                panic!(
+                    "{name}/{seed}: line {i} differs: sim {:?}, the shell {:?}",
+                    theirs.get(i),
+                    ours.get(i)
+                );
+            }
+            // What `sim` cannot know, as the stub sent it — for an answer that
+            // came by its attempt's deadline; a censor carries none.
+            let dispatched: BTreeMap<(u64, u32), (u64, u64)> = shelled
+                .iter()
+                .filter_map(|l| match l {
+                    Line::Dispatch(d) => Some(((d.line, d.attempt), (d.at, d.deadline))),
+                    _ => None,
+                })
+                .collect();
+            for l in &shelled {
+                let Line::Answer(a) = l else { continue };
+                let Some((status, code)) = sent.get(&(a.line, a.attempt)) else {
+                    continue;
+                };
+                let (at, deadline) = dispatched[&(a.line, a.attempt)];
+                let r = &records[(a.line - 2) as usize];
+                let s = script(a.line, a.attempt, r);
+                let sent_at = at + s.sent_after;
+                let came = s
+                    .answer_after
+                    .map(|d| sent_at + d)
+                    .filter(|t| sent_at < deadline && *t <= deadline);
+                let (status, code) = match came {
+                    Some(_) => (Some(*status), code.clone()),
+                    None => (None, None),
+                };
+                assert_eq!(
+                    a.status, status,
+                    "{name}/{seed} line {} attempt {}",
+                    a.line, a.attempt
+                );
+                let journaled = a.code.as_ref().map(|c| serde_json::to_value(c).unwrap());
+                assert_eq!(
+                    journaled,
+                    code.as_ref().map(|c| serde_json::json!({ "named": c })),
+                    "{name}/{seed}"
+                );
+                *kinds
+                    .entry(match a.judged {
+                        Judged::Expected => "expected",
+                        Judged::Unexpected => "unexpected",
+                        Judged::NotTaken => "not taken",
+                        Judged::Unknown => "unknown",
+                    })
+                    .or_default() += 1;
+                if a.attempt > 1 {
+                    *kinds.entry("resent").or_default() += 1;
+                }
+                if !a.captured.is_empty() {
+                    *kinds.entry("captured").or_default() += 1;
+                }
+                if a.after.is_some() {
+                    *kinds.entry("retry-after").or_default() += 1;
+                }
+            }
+            runs += 1;
+        }
+    }
+    eprintln!("{runs} runs over REST, answers {kinds:?}");
+    for kind in [
+        "expected",
+        "unexpected",
+        "not taken",
+        "unknown",
+        "resent",
+        "captured",
+        "retry-after",
+    ] {
+        assert!(
+            kinds.get(kind).copied().unwrap_or(0) > 0,
+            "{kind} never reached: {kinds:?}"
+        );
+    }
+}
+
+/// An answer that came exactly at its deadline is taken, as `sim` takes it:
+/// the attempt leaves only past the deadline.
+#[test]
+fn an_answer_at_its_deadline_is_taken() {
+    let mut header = rest_header();
+    header.operations.iter_mut().for_each(|o| o.timeout = 5_000);
+    let records = vec![call("read", 1, 0, 0, 0)];
+    let (journal, _, _) = run_rest(header, &records, vec![ok(5_000, 0)], AT_ONCE);
+    let journal = journal.unwrap();
+    assert_eq!(end(&journal, 2), Some((End::Expected, 5_000)));
 }

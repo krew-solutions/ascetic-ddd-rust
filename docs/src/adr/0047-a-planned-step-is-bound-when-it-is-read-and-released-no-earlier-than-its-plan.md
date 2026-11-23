@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1 and K2b-2a built (§ Measured), K2b-2b next. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1 and K2b-2 (K2b-2a, K2b-2b) built (§ Measured), K2b-3 next. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -509,6 +509,7 @@ Distributed Systems, Verifiability, Performance — on Opus; it amends decision 
 | K2b-0b | K2b | `sim` with wakes taken late over the corpus, deadlines a few answers long: the fold never incoherent, the definition agreeing, both new rules reached; the machine's twin — a resend due at `D − J − 1` taken 1 or 2 µs late ends as it stood, a poll's next taken past the deadline ends unknown then; golden runs — a poll taken 1 µs past its deadline undecided, a resend due at `D − J − 1` taken 2 µs late undecided, one due at `D − J` never scheduled and a root; on the differential, with no wake late, neither rule fires | the wake's re-check removed, or without J; a late poll ended at its deadline; either rule dropped, at its edge, or with J; a late refusal a root; the definition's rules dropped |
 | K2b-1 | K2b | under the virtual clock and a scripted carrier, the shell journals what `sim` journals, line for line, on every clean corpus log under the differential's scripts at three read-aheads; a line after an idle gap read at `at − L`; an answer judged for 50 µs holding the machine's own work, the line due meanwhile read after it at the instant taken; judging drawn up to 400 µs on the corpus, no input taken below the last; the clock's probe — a 137 µs sleep woken at 137, an instant settled only after a chain of spawned yields, idle with nothing to wake said; a dropped and a panicking carrier faulted; a carrier refusing the log and a source with no runtime refused before T0; on the real clock across four threads, no push below the frontier, none taken out of order, no stall, every line ended, the fold coherent — and with every read on a carrier's thread slowed by 200 µs; the allowlist, the clock's confinement, every `select!` biased | the settle skipped; drained unsettled; the read-ahead ignored; own work not held by a floor, or lines or wakes alone; the bound at `now` while held; a stamp read outside the lock; a dropped attempt no fault; sleepers woken before settlers; settled at the instant; a real sleep woken early; a `select!` unbiased |
 | K2b-2a | K2b | over hyper's connection to a stub on an in-memory pipe, under the virtual clock: `Sent` the instant the stub saw the last byte, writes held back and sixteen bytes at a time, and with a body eight at a time; the answer at its last body frame, not its head; a connection kept alive reused, one closed by `connection: close` not; a close once a byte left, and an answer cut short mid-body, each Unknown at the close; no answer censored at the deadline; an answer past the cap arrived at the cap, its connection closed; the frame as written — the route's `host`, the correlation id | `Sent` at the hand-off, or at the first write; the arrival at the head; no connection pooled; an answer past the cap read; a close after a byte unanswered, or retried; an answer cut short unanswered |
+| K2b-2b | K2b | over REST, the shell journals what `sim` journals on every clean corpus log with a REST step, under two seeds of a script an answer can carry (a refusal certified only where its operation lists a code, `Retry-After` in whole seconds on it alone, an unexpected answer only where one can be, each captured value in its source's form), its REST attempts over hyper to a stub inverting the judge and every other action scripted — status and code, which `sim` cannot know, projected out and checked against what the stub sent; expected, unexpected, certified, unknown, resent, captured and waited answers each reached; an answer at its deadline taken | the attempt leaving at the deadline; no code certifying a refusal; what an answer showed dropped; one correlation id a step; no captured value filled |
 | K2-1 | K2 | the shell against an in-memory transport (hyper over `tokio::io::duplex`) under paused time reproduces `sim`'s journal | `std::time::Instant` in a handler |
 | K2-2 | K2 | each cause delayed alone — the reader, the token, the pool, the connect, the write, the dependency — moves exactly one gap of the chain | a gap merged |
 | K2-3 | K2 | on the real clock, multi-thread: chain order, no release before its stamped met instants, the stub's requests per correlation id equal the journal's attempts — a keep-alive connection closed as it is reused included; a request processed then reset before the answer is Unknown; a response stamped 1 µs before its deadline delivered after the tick is Expected | hyper's hidden retry; Unknown read as not taken; deadlines by arrival |
@@ -1090,6 +1091,23 @@ shell names no faker. A log whose header names channels or host calls is refused
   unsent, or with no byte accepted, taken by the next connection — only a reuse racing the peer's close makes one, K2-3's
   twin in K2b-6 (§ Owed).
 
+**K2b-2b — the shell's journal over REST** (2026-11-23): the REST differential: 390 runs, two seeds of every clean
+corpus log with a REST step, equal line for line to `sim`'s; answers expected 551, unexpected 104, certified 42, unknown
+239; 110 resent, 91 captured, 29 waited.
+- **What it found**: no corpus log is REST alone — every one onboards its Tenant by host calls, and most carry bus
+  steps — so the differential composes carriers by action kind, REST over hyper and every other action scripted, as
+  the shell will in K3. The judge takes `Retry-After` from a certified refusal alone (decision 15), and a call that
+  expects nothing takes any answer below 500 as expected: a script of `sim`'s draws what an answer cannot carry, so the
+  differential's draws only what one can. The attempt gave up at its deadline, and an answer arriving at that instant
+  races its timer: it now leaves only past it, the frontier censoring at the deadline what had no answer. `sim` is
+  left as it is — the plan's `sim::Attempt.seen` became a projection: status and code out of both journals, checked
+  against the stub's.
+- **Not reached**: a request whose last byte leaves exactly at its deadline answered in the same microsecond — `sim`
+  gives it no answer, the frontier takes it as an early reply; no run met it, and no wire answers within the
+  microsecond its request ended.
+- **Executors**: the executor row. Five mutants, each killed: the attempt leaving at the deadline; no code certifying
+  a refusal; what an answer showed dropped; one correlation id a step; no captured value filled.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -1238,3 +1256,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-23: K2b-2 cut into K2b-2a and K2b-2b; K2b-2a built (§ Measured): REST over hyper's own connection. Decision
   16 refined: `Sent` is the first flush after the hand-off, the guards of the body's end and a byte written dropped as
   dead, the twins holding hyper's order.
+- 2026-11-23: K2b-2b built (§ Measured): the shell's journal equal to `sim`'s over REST; an attempt leaves only past
+  its deadline. `sim::Attempt.seen` replaced by a projection checked against the stub.
