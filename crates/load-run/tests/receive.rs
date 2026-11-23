@@ -63,7 +63,7 @@ impl Egress for Tcp {
     type Io = tokio::net::TcpStream;
 
     fn ports(&self, _: u32) -> usize {
-        usize::MAX
+        62
     }
 
     fn connect(
@@ -250,12 +250,10 @@ fn attempt_once(prodded: bool) -> Option<Vec<Line>> {
     let journal = rt
         .block_on(run(
             admit(
-                header,
+                ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
                 W,
                 Arc::new(carrier),
-                &Runtimes {
-                    sources: vec![source],
-                },
+                &Runtimes::assumed(vec![source], 1_024),
             )
             .unwrap(),
             shell,
@@ -355,7 +353,8 @@ fn calls_over_tcp_from_a_live_source_are_answered() {
         // Its own address, one the system would not choose (Linux routes all
         // of 127.0.0.0/8 to the loopback).
         vec![Some(std::net::IpAddr::from([127, 0, 0, 2]))],
-    );
+    )
+    .with_ports(62);
     let carrier = RestCarrier::new(
         header.clone(),
         OneStand,
@@ -373,7 +372,13 @@ fn calls_over_tcp_from_a_live_source_are_answered() {
     let started = clock.now();
     let journal = rt
         .block_on(run(
-            admit(header, W, Arc::new(carrier), live.runtimes()).unwrap(),
+            admit(
+                ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
+                W,
+                Arc::new(carrier),
+                live.runtimes(),
+            )
+            .unwrap(),
             clock.clone(),
             Records::new(records.iter().cloned()),
             Lines::new(),

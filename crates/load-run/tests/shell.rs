@@ -71,12 +71,13 @@ fn shell_from<S: LineSource, X: Carrier<VirtualClock>>(
     rt.block_on(async {
         let clock = Arc::new(VirtualClock::start(0));
         let sources = header.profile.sources.max(1) as usize;
-        let runtimes = Runtimes {
-            sources: vec![tokio::runtime::Handle::current(); sources],
-        };
+        let runtimes = Runtimes::assumed(vec![tokio::runtime::Handle::current(); sources], 1_024);
         // A refusal before T0 comes back as it is: no run, no journal.
         let admitted = admit(
-            Arc::new(header.clone()),
+            ascetic_ddd_load_run::source::Plan::assumed(
+                Arc::new(header.clone()),
+                Default::default(),
+            ),
             read_ahead,
             Arc::new(carrier),
             &runtimes,
@@ -226,6 +227,14 @@ impl Carrier<VirtualClock> for Forgetful {
         Ok(())
     }
 
+    fn needs(
+        &self,
+        _: &ascetic_ddd_command_log::validate::Peaks,
+        _: u32,
+    ) -> Result<ascetic_ddd_load_run::carrier::Needs, String> {
+        Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
+    }
+
     fn carry(&self, a: Attempt<VirtualClock>) -> impl Future<Output = ()> + Send + 'static {
         let panics = self.panics;
         async move {
@@ -263,6 +272,14 @@ impl Carrier<VirtualClock> for Refusing {
         Err("no such transport".to_owned())
     }
 
+    fn needs(
+        &self,
+        _: &ascetic_ddd_command_log::validate::Peaks,
+        _: u32,
+    ) -> Result<ascetic_ddd_load_run::carrier::Needs, String> {
+        Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
+    }
+
     fn carry(&self, a: Attempt<VirtualClock>) -> impl Future<Output = ()> + Send + 'static {
         a.unanswered();
         std::future::ready(())
@@ -274,7 +291,7 @@ fn a_log_the_carrier_cannot_carry_is_refused_before_t0() {
     let records = vec![call("read", 1, 0, 0, 0)];
     let err = shell(&header(), &records, W, Refusing).unwrap_err();
     assert!(
-        matches!(err, RunError::Refused(ref why) if why == "no such transport"),
+        matches!(err, RunError::Inadmissible(ascetic_ddd_load_run::run::Inadmissible::Carrier(ref why)) if why == "no such transport"),
         "{err:?}"
     );
     let mut wide = header();
@@ -285,11 +302,9 @@ fn a_log_the_carrier_cannot_carry_is_refused_before_t0() {
         .unwrap();
     // Fewer runtimes than sources: refused at admission, no run begun.
     let err = rt.block_on(async {
-        let runtimes = Runtimes {
-            sources: vec![tokio::runtime::Handle::current()],
-        };
+        let runtimes = Runtimes::assumed(vec![tokio::runtime::Handle::current()], 1_024);
         admit::<VirtualClock, _>(
-            Arc::new(wide),
+            ascetic_ddd_load_run::source::Plan::assumed(Arc::new(wide), Default::default()),
             W,
             Arc::new(Scripted::new(Arc::new(script(1, "refused")))),
             &runtimes,
@@ -297,7 +312,7 @@ fn a_log_the_carrier_cannot_carry_is_refused_before_t0() {
         .err()
         .unwrap()
     });
-    assert!(matches!(err, RunError::Refused(_)), "{err:?}");
+    assert!(matches!(err, RunError::Inadmissible(_)), "{err:?}");
 }
 
 /// A clock whose every read on a carrier's thread takes 200 µs after the
@@ -361,7 +376,7 @@ fn source_runtimes() -> (Runtimes, Vec<tokio::sync::oneshot::Sender<()>>) {
         sources.push(rx.recv().unwrap());
         stops.push(stop);
     }
-    (Runtimes { sources }, stops)
+    (Runtimes::assumed(sources, 1_024), stops)
 }
 
 /// The shell on a clock of `make`'s, its attempts on four runtimes of their
@@ -434,7 +449,10 @@ fn stress<C: Clock>(make: impl Fn(u64) -> C, seeds: u64, calls: u64) {
             let sink = Written::start(Vec::new(), journal_header, 1_024).unwrap();
             let ran = run(
                 admit(
-                    Arc::new(header.clone()),
+                    ascetic_ddd_load_run::source::Plan::assumed(
+                        Arc::new(header.clone()),
+                        Default::default(),
+                    ),
                     W,
                     Arc::new(Scripted::new(quick)),
                     &runtimes,
@@ -580,6 +598,14 @@ impl<C: Clock> Carrier<C> for Judging {
         Ok(())
     }
 
+    fn needs(
+        &self,
+        _: &ascetic_ddd_command_log::validate::Peaks,
+        _: u32,
+    ) -> Result<ascetic_ddd_load_run::carrier::Needs, String> {
+        Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
+    }
+
     fn carry(&self, mut a: Attempt<C>) -> impl Future<Output = ()> + Send + 'static {
         let (arrive, judging, block) = (self.arrive, self.judging, self.block);
         async move {
@@ -661,16 +687,17 @@ fn a_carrier_stuck_on_its_thread_is_a_harness_fault() {
         let clock = Arc::new(RealClock::start(2_000).unwrap());
         run(
             admit(
-                Arc::new(h.clone()),
+                ascetic_ddd_load_run::source::Plan::assumed(
+                    Arc::new(h.clone()),
+                    Default::default(),
+                ),
                 W,
                 Arc::new(Judging {
                     arrive: 0,
                     judging: Some(0),
                     block: 200_000,
                 }),
-                &Runtimes {
-                    sources: vec![runtimes.sources[0].clone()],
-                },
+                &Runtimes::assumed(vec![runtimes.sources()[0].clone()], 1_024),
             )
             .unwrap(),
             clock,
@@ -704,6 +731,14 @@ fn a_late_hand_off_is_journaled() {
         fn carries(&self, _: &Header) -> Result<(), String> {
             Ok(())
         }
+
+        fn needs(
+            &self,
+            _: &ascetic_ddd_command_log::validate::Peaks,
+            _: u32,
+        ) -> Result<ascetic_ddd_load_run::carrier::Needs, String> {
+            Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
+        }
         #[expect(
             clippy::manual_async_fn,
             reason = "the task must not borrow its carrier: it is 'static"
@@ -730,12 +765,10 @@ fn a_late_hand_off_is_journaled() {
         let clock = Arc::new(RealClock::start(2_000).unwrap());
         run(
             admit(
-                Arc::new(header()),
+                ascetic_ddd_load_run::source::Plan::assumed(Arc::new(header()), Default::default()),
                 W,
                 Arc::new(Blocking),
-                &Runtimes {
-                    sources: vec![runtimes.sources[0].clone()],
-                },
+                &Runtimes::assumed(vec![runtimes.sources()[0].clone()], 1_024),
             )
             .unwrap(),
             clock,
@@ -776,18 +809,19 @@ fn a_source_not_on_a_current_thread_runtime_is_refused() {
         .unwrap();
     let err = rt.block_on(async {
         admit::<VirtualClock, _>(
-            Arc::new(header()),
+            ascetic_ddd_load_run::source::Plan::assumed(Arc::new(header()), Default::default()),
             W,
             Arc::new(Scripted::new(Arc::new(script(1, "flavor")))),
-            &Runtimes {
-                sources: vec![pool.handle().clone()],
-            },
+            &Runtimes::assumed(vec![pool.handle().clone()], 1_024),
         )
         .err()
         .unwrap()
     });
     assert!(
-        matches!(err, RunError::Refused(ref why) if why.contains("current_thread")),
+        matches!(
+            err,
+            RunError::Inadmissible(ascetic_ddd_load_run::run::Inadmissible::Flavour { .. })
+        ),
         "{err:?}"
     );
 }
@@ -1009,6 +1043,14 @@ impl Carrier<Poisoning> for Poisoner {
         Ok(())
     }
 
+    fn needs(
+        &self,
+        _: &ascetic_ddd_command_log::validate::Peaks,
+        _: u32,
+    ) -> Result<ascetic_ddd_load_run::carrier::Needs, String> {
+        Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
+    }
+
     #[expect(
         clippy::manual_async_fn,
         reason = "the task must not borrow its carrier: it is 'static"
@@ -1034,12 +1076,19 @@ fn a_poisoned_lock_stops_the_run() {
     let ran = rt.block_on(async {
         let virtual_clock = Arc::new(VirtualClock::start(0));
         let clock = Arc::new(Poisoning(virtual_clock.clone()));
-        let runtimes = Runtimes {
-            sources: vec![tokio::runtime::Handle::current()],
-        };
+        let runtimes = Runtimes::assumed(vec![tokio::runtime::Handle::current()], 1_024);
         virtual_clock
             .within(run(
-                admit(Arc::new(header()), W, Arc::new(Poisoner), &runtimes).unwrap(),
+                admit(
+                    ascetic_ddd_load_run::source::Plan::assumed(
+                        Arc::new(header()),
+                        Default::default(),
+                    ),
+                    W,
+                    Arc::new(Poisoner),
+                    &runtimes,
+                )
+                .unwrap(),
                 clock,
                 Records::new(records.into_iter()),
                 Lines::new(),
@@ -1056,6 +1105,14 @@ struct Lingering;
 impl Carrier<VirtualClock> for Lingering {
     fn carries(&self, _: &Header) -> Result<(), String> {
         Ok(())
+    }
+
+    fn needs(
+        &self,
+        _: &ascetic_ddd_command_log::validate::Peaks,
+        _: u32,
+    ) -> Result<ascetic_ddd_load_run::carrier::Needs, String> {
+        Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
     }
 
     #[expect(
@@ -1125,6 +1182,14 @@ impl Carrier<VirtualClock> for Leaving {
         Ok(())
     }
 
+    fn needs(
+        &self,
+        _: &ascetic_ddd_command_log::validate::Peaks,
+        _: u32,
+    ) -> Result<ascetic_ddd_load_run::carrier::Needs, String> {
+        Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
+    }
+
     #[expect(
         clippy::manual_async_fn,
         reason = "the task must not borrow its carrier: it is 'static"
@@ -1171,6 +1236,14 @@ struct Twice;
 impl Carrier<VirtualClock> for Twice {
     fn carries(&self, _: &Header) -> Result<(), String> {
         Ok(())
+    }
+
+    fn needs(
+        &self,
+        _: &ascetic_ddd_command_log::validate::Peaks,
+        _: u32,
+    ) -> Result<ascetic_ddd_load_run::carrier::Needs, String> {
+        Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
     }
 
     #[expect(

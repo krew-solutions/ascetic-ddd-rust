@@ -31,7 +31,7 @@ use http_body::{Body, Frame as BodyFrame, SizeHint};
 use hyper::client::conn::http1::{self, SendRequest};
 use tokio::task::AbortHandle;
 
-use crate::carrier::Carrier;
+use crate::carrier::{Carrier, Needs};
 use crate::clock::Clock;
 use crate::decorate::{Decoration, Decorator, Undecorated};
 use crate::io::{Held, Io, Probe, Slot, Sockets};
@@ -265,6 +265,23 @@ impl<C: Clock, S: Stand, E: Egress, D: Decorator> Carrier<C> for RestCarrier<S, 
             return Err(format!("operation {} decorates, and no decorator", op.name));
         }
         Ok(())
+    }
+
+    /// A socket an attempt not ended, under the plan's bound its pending
+    /// steps (one HTTP/1.1 request a connection); its cap the egress's.
+    fn needs(
+        &self,
+        peaks: &ascetic_ddd_command_log::validate::Peaks,
+        source: u32,
+    ) -> Result<Needs, String> {
+        let sockets = usize::try_from(source)
+            .ok()
+            .and_then(|s| self.inner.sockets.get(s))
+            .ok_or_else(|| format!("no source {source} in the carrier's own header"))?;
+        Ok(Needs::Sockets {
+            needed: peaks.pending,
+            cap: sockets.cap(),
+        })
     }
 
     fn carry(&self, attempt: Attempt<C>) -> impl Future<Output = ()> + Send + 'static {

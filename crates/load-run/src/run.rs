@@ -23,19 +23,127 @@ use ascetic_ddd_scheduler::machine::{Input, Line, Machine, Output};
 use ascetic_ddd_scheduler::order::Ordered;
 use tokio::runtime::Handle;
 
-use crate::carrier::Carrier;
+use crate::carrier::{Carrier, Needs};
 use crate::clock::Clock;
 use crate::sink::JournalSink;
-use crate::source::LineSource;
+use crate::source::{LineSource, Plan};
 use crate::stamps::{Attempt, Harness, Stamps};
 
 /// Where attempts run: a runtime handle per source, in the order of the
-/// profile's sources. Live, one `current_thread` runtime per source; in tests,
-/// one paused runtime behind every handle.
+/// profile's sources, and the I/O events each driver takes a turn (tokio's
+/// own setting cannot be read back from a handle). Made by `Live`; in tests,
+/// one paused runtime behind every handle, its events assumed.
 #[derive(Clone, Debug)]
 pub struct Runtimes {
+    sources: Vec<Handle>,
+    events: Vec<usize>,
+}
+
+impl Runtimes {
+    pub(crate) fn new(sources: Vec<Handle>, events: Vec<usize>) -> Runtimes {
+        Runtimes { sources, events }
+    }
+
+    /// A test's runtimes: `sources`, each taking `events` a driver turn.
+    #[cfg(feature = "testing")]
+    pub fn assumed(sources: Vec<Handle>, events: usize) -> Runtimes {
+        let n = sources.len();
+        Runtimes {
+            sources,
+            events: vec![events; n],
+        }
+    }
+
     /// By source.
-    pub sources: Vec<Handle>,
+    pub fn sources(&self) -> &[Handle] {
+        &self.sources
+    }
+
+    /// The I/O events source `s`'s driver takes a turn.
+    pub fn events(&self, s: u32) -> Option<usize> {
+        usize::try_from(s)
+            .ok()
+            .and_then(|s| self.events.get(s).copied())
+    }
+}
+
+/// The I/O events a source's driver spends a turn on its own (decision 20):
+/// its waker, and its signal receiver when tokio's `signal` feature is
+/// compiled in — an upper bound.
+pub const DRIVER_EVENTS: usize = 2;
+
+/// Why a run is not admitted (decision 20): each number its own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Inadmissible {
+    /// The carrier's own reason.
+    Carrier(String),
+    /// A source's runtime not `current_thread`.
+    Flavour {
+        /// The source.
+        source: usize,
+    },
+    /// Fewer runtimes than sources.
+    Runtimes {
+        /// Runtimes given.
+        have: usize,
+        /// The profile's sources.
+        sources: u32,
+    },
+    /// More sockets needed at once under the plan's bound than the source's
+    /// cap — the plan's bound over all its sources together.
+    Sockets {
+        /// The source.
+        source: u32,
+        /// Needed at once.
+        needed: u64,
+        /// Its cap.
+        cap: usize,
+    },
+    /// A source's cap with its driver's own past the events a turn takes:
+    /// a look's turn could miss a ready socket.
+    Events {
+        /// The source.
+        source: u32,
+        /// Its cap.
+        cap: usize,
+        /// The events a turn, if known.
+        events: Option<usize>,
+    },
+}
+
+impl fmt::Display for Inadmissible {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Inadmissible::Carrier(why) => write!(f, "{why}"),
+            Inadmissible::Flavour { source } => {
+                write!(f, "source {source}'s runtime is not current_thread")
+            }
+            Inadmissible::Runtimes { have, sources } => {
+                write!(f, "{have} runtimes for {sources} sources")
+            }
+            Inadmissible::Sockets {
+                source,
+                needed,
+                cap,
+            } => write!(
+                f,
+                "source {source} may hold {needed} sockets at once under the plan's bound (its \
+                 pending steps, over all sources), its cap {cap}"
+            ),
+            Inadmissible::Events {
+                source,
+                cap,
+                events,
+            } => match events {
+                Some(e) => write!(
+                    f,
+                    "source {source}'s cap {cap} and its driver's {DRIVER_EVENTS} past the {e} \
+                     events a turn"
+                ),
+                None => write!(f, "source {source}'s events a turn unknown, its cap {cap}"),
+            },
+        }
+    }
 }
 
 /// A run that left no journal to fold: refused before it began, or its
@@ -44,7 +152,9 @@ pub struct Runtimes {
 #[derive(Debug)]
 pub enum RunError {
     /// Refused before T0.
-    Refused(String),
+    Inadmissible(Inadmissible),
+    /// A measurement before T0 failed: the harness's.
+    Measure(String),
     /// The log, refused before T0.
     Log(LogError),
     /// The journal's sink.
@@ -54,7 +164,8 @@ pub enum RunError {
 impl fmt::Display for RunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RunError::Refused(why) => write!(f, "refused before T0: {why}"),
+            RunError::Inadmissible(why) => write!(f, "refused before T0: {why}"),
+            RunError::Measure(why) => write!(f, "not measured before T0: {why}"),
             RunError::Log(e) => write!(f, "{e}"),
             RunError::Journal(e) => write!(f, "{e}"),
         }
@@ -213,6 +324,7 @@ fn poll_now<S: LineSource>(source: &mut S) -> Poll<Result<Option<Arc<Record>>, L
 /// and only one runs.
 pub struct Admitted<C, X> {
     header: Arc<Header>,
+    peaks: ascetic_ddd_command_log::validate::Peaks,
     read_ahead: u64,
     carrier: Arc<X>,
     runtimes: Runtimes,
@@ -224,6 +336,11 @@ impl<C, X> Admitted<C, X> {
     /// The log's header.
     pub fn header(&self) -> &Arc<Header> {
         &self.header
+    }
+
+    /// What a run of it must hold: the validator's peaks.
+    pub fn peaks(&self) -> &ascetic_ddd_command_log::validate::Peaks {
+        &self.peaks
     }
 
     /// Its read-ahead.
@@ -242,40 +359,72 @@ impl<C, X> Admitted<C, X> {
     }
 }
 
-/// Admits the log `header` heads, read `read_ahead` µs ahead, its attempts
-/// carried by `carrier` on `runtimes` — or refuses it, before any journal
-/// exists: a carrier that cannot carry it, a runtime not `current_thread`,
-/// fewer runtimes than sources, a read-ahead past the header's.
+/// Admits `plan`, read `read_ahead` µs ahead, its attempts carried by
+/// `carrier` on `runtimes` — or refuses it, before any journal exists: a
+/// carrier that cannot carry it, a runtime not `current_thread`, fewer
+/// runtimes than sources, a read-ahead past the header's; a source whose cap
+/// with its driver's own exceeds the events a turn (decision 20's I1), or
+/// whose sockets needed under the plan's bound exceed its cap (I2).
 pub fn admit<C: Clock, X: Carrier<C>>(
-    header: Arc<Header>,
+    plan: Plan,
     read_ahead: u64,
     carrier: Arc<X>,
     runtimes: &Runtimes,
 ) -> Result<Admitted<C, X>, RunError> {
-    carrier.carries(&header).map_err(RunError::Refused)?;
+    let header = plan.header().clone();
+    let refused = |i| RunError::Inadmissible(i);
+    carrier
+        .carries(&header)
+        .map_err(|why| refused(Inadmissible::Carrier(why)))?;
     // A source's driver turns only between its tasks on a `current_thread`
     // runtime: what an attempt's look verifies (decision 17).
-    if let Some(i) = runtimes
+    if let Some(source) = runtimes
         .sources
         .iter()
         .position(|h| h.runtime_flavor() != tokio::runtime::RuntimeFlavor::CurrentThread)
     {
-        return Err(RunError::Refused(format!(
-            "source {i}'s runtime is not current_thread"
-        )));
+        return Err(refused(Inadmissible::Flavour { source }));
     }
-    let sources = usize::try_from(header.profile.sources).unwrap_or(usize::MAX);
-    if runtimes.sources.len() < sources.max(1) {
-        return Err(RunError::Refused(format!(
-            "{} runtimes for {} sources",
-            runtimes.sources.len(),
-            header.profile.sources
-        )));
+    let sources = header.profile.sources.max(1);
+    if runtimes.sources.len() < usize::try_from(sources).unwrap_or(usize::MAX) {
+        return Err(refused(Inadmissible::Runtimes {
+            have: runtimes.sources.len(),
+            sources: header.profile.sources,
+        }));
+    }
+    for source in 0..sources {
+        let needs = carrier
+            .needs(plan.peaks(), source)
+            .map_err(|why| refused(Inadmissible::Carrier(why)))?;
+        if let Needs::Sockets { needed, cap } = needs {
+            // I1: a look's verified turn sees every ready socket.
+            let events = runtimes.events(source);
+            let fits = cap
+                .checked_add(DRIVER_EVENTS)
+                .zip(events)
+                .is_some_and(|(want, have)| want <= have);
+            if !fits {
+                return Err(refused(Inadmissible::Events {
+                    source,
+                    cap,
+                    events,
+                }));
+            }
+            // I2: the plan's bound within the cap.
+            if u64::try_from(cap).is_ok_and(|c| needed > c) {
+                return Err(refused(Inadmissible::Sockets {
+                    source,
+                    needed,
+                    cap,
+                }));
+            }
+        }
     }
     // The machine's own refusals: a read-ahead past the header's.
     drop(Machine::new(header.clone(), read_ahead)?);
     Ok(Admitted {
         header,
+        peaks: *plan.peaks(),
         read_ahead,
         carrier,
         runtimes: runtimes.clone(),

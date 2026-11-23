@@ -78,6 +78,14 @@ impl Carrier<RealClock> for Waiting {
         Ok(())
     }
 
+    fn needs(
+        &self,
+        _: &ascetic_ddd_command_log::validate::Peaks,
+        _: u32,
+    ) -> Result<ascetic_ddd_load_run::carrier::Needs, String> {
+        Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
+    }
+
     fn carry(&self, mut a: Attempt<RealClock>) -> impl Future<Output = ()> + Send + 'static {
         let (clock, write_at) = (self.clock.clone(), self.write_at);
         async move {
@@ -116,7 +124,7 @@ fn waiting_lag(write_at: u64) -> Option<u64> {
     let journal = rt
         .block_on(run(
             admit(
-                Arc::new(h),
+                ascetic_ddd_load_run::source::Plan::assumed(Arc::new(h), Default::default()),
                 W,
                 Arc::new(Waiting {
                     clock: clock.clone(),
@@ -235,7 +243,7 @@ impl Egress for GatedTcp {
     type Io = Gated;
 
     fn ports(&self, _: u32) -> usize {
-        usize::MAX
+        62
     }
 
     fn connect(&self, _: u32, _: &Route) -> impl Future<Output = Result<Gated, Connect>> + Send {
@@ -349,7 +357,13 @@ fn connection_lag(early: bool) -> Option<u64> {
         .unwrap();
     let journal = rt
         .block_on(run(
-            admit(h, W, Arc::new(carrier), live.runtimes()).unwrap(),
+            admit(
+                ascetic_ddd_load_run::source::Plan::assumed(h, Default::default()),
+                W,
+                Arc::new(carrier),
+                live.runtimes(),
+            )
+            .unwrap(),
             clock.clone(),
             Records::new(records.iter().cloned()),
             Lines::new(),
@@ -474,7 +488,7 @@ impl Egress for RefusingFirst {
     type Io = tokio::net::TcpStream;
 
     fn ports(&self, _: u32) -> usize {
-        usize::MAX
+        62
     }
 
     fn connect(
@@ -534,7 +548,13 @@ fn late_floor_lag() -> Option<u64> {
         .unwrap();
     let journal = rt
         .block_on(run(
-            admit(h, W, Arc::new(carrier), live.runtimes()).unwrap(),
+            admit(
+                ascetic_ddd_load_run::source::Plan::assumed(h, Default::default()),
+                W,
+                Arc::new(carrier),
+                live.runtimes(),
+            )
+            .unwrap(),
             clock,
             Records::new(records.iter().cloned()),
             Lines::new(),
@@ -592,7 +612,8 @@ fn decorated_lag() -> Option<journal::Sent> {
         ascetic_ddd_load_run::tcp::TcpEgress::new(
             std::collections::BTreeMap::from([("gateway".to_owned(), addr)]),
             vec![None],
-        ),
+        )
+        .with_ports(62),
         Awaiting(clock.clone()),
         Config::new(Namespace(1), RunSecret::new([7; 32])),
     );
@@ -602,7 +623,13 @@ fn decorated_lag() -> Option<journal::Sent> {
         .unwrap();
     let journal = rt
         .block_on(run(
-            admit(h, W, Arc::new(carrier), live.runtimes()).unwrap(),
+            admit(
+                ascetic_ddd_load_run::source::Plan::assumed(h, Default::default()),
+                W,
+                Arc::new(carrier),
+                live.runtimes(),
+            )
+            .unwrap(),
             clock.clone(),
             Records::new(records.iter().cloned()),
             Lines::new(),
@@ -634,7 +661,7 @@ impl Egress for RefusedAt {
     type Io = tokio::net::TcpStream;
 
     fn ports(&self, _: u32) -> usize {
-        usize::MAX
+        62
     }
 
     fn connect(
@@ -706,7 +733,13 @@ fn stalled_report() -> Option<journal::Unsent> {
         .unwrap();
     let journal = rt
         .block_on(run(
-            admit(h, W, Arc::new(carrier), live.runtimes()).unwrap(),
+            admit(
+                ascetic_ddd_load_run::source::Plan::assumed(h, Default::default()),
+                W,
+                Arc::new(carrier),
+                live.runtimes(),
+            )
+            .unwrap(),
             clock,
             Records::new(records.iter().cloned()),
             Lines::new(),
@@ -757,7 +790,13 @@ fn slow_refusal_sent() -> Option<journal::Sent> {
         .unwrap();
     let journal = rt
         .block_on(run(
-            admit(h, W, Arc::new(carrier), live.runtimes()).unwrap(),
+            admit(
+                ascetic_ddd_load_run::source::Plan::assumed(h, Default::default()),
+                W,
+                Arc::new(carrier),
+                live.runtimes(),
+            )
+            .unwrap(),
             clock,
             Records::new(records.iter().cloned()),
             Lines::new(),

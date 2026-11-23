@@ -4,16 +4,37 @@
 use std::future::Future;
 
 use ascetic_ddd_command_log::record::Header;
+use ascetic_ddd_command_log::validate::Peaks;
 
 use crate::clock::Clock;
 use crate::stamps::Attempt;
 use crate::stand::{Opening, Refused};
+
+/// What a carrier needs of a source under the plan's bound (ADR-0047
+/// decision 20): its own to tell — it alone maps attempts to sockets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Needs {
+    /// No socket of its own on the source's runtime: a test's script.
+    Nothing,
+    /// Sockets on the source's runtime: `needed` at once under the plan's
+    /// bound, at most `cap` held.
+    Sockets {
+        /// At once, under the plan's bound.
+        needed: u64,
+        /// Its cap on the source.
+        cap: usize,
+    },
+}
 
 /// Carries attempts: each in a task of its own, spawned on its source's
 /// runtime, reporting through its [`Attempt`].
 pub trait Carrier<C: Clock>: Send + Sync + 'static {
     /// Refuses, before T0, a log it cannot carry: its reason.
     fn carries(&self, header: &Header) -> Result<(), String>;
+
+    /// What it needs of `source` under the plan's `peaks` (decision 20); a
+    /// source it does not know, refused — never none.
+    fn needs(&self, peaks: &Peaks, source: u32) -> Result<Needs, String>;
 
     /// The task that carries one attempt.
     fn carry(&self, attempt: Attempt<C>) -> impl Future<Output = ()> + Send + 'static;

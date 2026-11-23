@@ -128,6 +128,14 @@ impl Carrier<VirtualClock> for Gated {
         Ok(())
     }
 
+    fn needs(
+        &self,
+        _: &ascetic_ddd_command_log::validate::Peaks,
+        _: u32,
+    ) -> Result<ascetic_ddd_load_run::carrier::Needs, String> {
+        Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
+    }
+
     fn carry(&self, a: Attempt<VirtualClock>) -> impl Future<Output = ()> + Send + 'static {
         a.unanswered();
         std::future::ready(())
@@ -171,12 +179,10 @@ fn gated(
         .unwrap();
     rt.block_on(async {
         let clock = Arc::new(VirtualClock::start(0));
-        let runtimes = Runtimes {
-            sources: vec![tokio::runtime::Handle::current()],
-        };
+        let runtimes = Runtimes::assumed(vec![tokio::runtime::Handle::current()], 1_024);
         let h = Arc::new(header());
         let admitted = admit(
-            h.clone(),
+            ascetic_ddd_load_run::source::Plan::assumed(h.clone(), Default::default()),
             W,
             Arc::new(Gated {
                 clock: clock.clone(),
@@ -250,12 +256,10 @@ fn a_gate_s_refusal_is_journaled_alone() {
         .unwrap();
     let h = Arc::new(header());
     let admitted = rt.block_on(async {
-        let runtimes = Runtimes {
-            sources: vec![tokio::runtime::Handle::current()],
-        };
+        let runtimes = Runtimes::assumed(vec![tokio::runtime::Handle::current()], 1_024);
         let clock = Arc::new(VirtualClock::start(0));
         admit(
-            h.clone(),
+            ascetic_ddd_load_run::source::Plan::assumed(h.clone(), Default::default()),
             W,
             Arc::new(Gated {
                 clock,
@@ -310,13 +314,11 @@ fn the_judging_time_is_measured_on_a_source() {
         .unwrap();
     let judged = rt.block_on(async {
         let clock = Arc::new(VirtualClock::start(0));
-        let runtimes = Runtimes {
-            sources: vec![tokio::runtime::Handle::current()],
-        };
+        let runtimes = Runtimes::assumed(vec![tokio::runtime::Handle::current()], 1_024);
         let mut h = header();
         h.profile.answer_cap = 2_048;
         let admitted = admit(
-            Arc::new(h),
+            ascetic_ddd_load_run::source::Plan::assumed(Arc::new(h), Default::default()),
             W,
             Arc::new(Gated {
                 clock: clock.clone(),
@@ -341,13 +343,11 @@ fn a_read_ahead_past_the_header_s_is_refused_at_admission() {
         .unwrap();
     let refused = rt.block_on(async {
         let clock = Arc::new(VirtualClock::start(0));
-        let runtimes = Runtimes {
-            sources: vec![tokio::runtime::Handle::current()],
-        };
+        let runtimes = Runtimes::assumed(vec![tokio::runtime::Handle::current()], 1_024);
         let h = header();
         let past = h.read_ahead + 1;
         admit(
-            Arc::new(h),
+            ascetic_ddd_load_run::source::Plan::assumed(Arc::new(h), Default::default()),
             past,
             Arc::new(Gated {
                 clock,
@@ -361,4 +361,59 @@ fn a_read_ahead_past_the_header_s_is_refused_at_admission() {
         matches!(refused, Some(ascetic_ddd_load_run::run::RunError::Log(_))),
         "{refused:?}"
     );
+}
+
+/// Decision 20: `Live` takes each source's cap and its driver's own events a
+/// turn, recorded where admission reads them; a cap no driver can take is
+/// refused.
+#[test]
+fn live_takes_each_cap_and_its_driver_s_events() {
+    use ascetic_ddd_load_run::live::Live;
+    use ascetic_ddd_load_run::run::DRIVER_EVENTS;
+    let live = Live::for_caps(&[62, 1_000]).unwrap();
+    let r = live.runtimes();
+    assert_eq!(
+        (r.events(0), r.events(1), r.events(2)),
+        (Some(62 + DRIVER_EVENTS), Some(1_000 + DRIVER_EVENTS), None)
+    );
+    assert_eq!(r.sources().len(), 2);
+    assert!(Live::for_caps(&[usize::MAX]).is_err());
+    assert!(Live::for_caps(&[i32::MAX as usize]).is_err());
+    let uniform = Live::start(2, 64).unwrap();
+    assert_eq!(uniform.runtimes().events(1), Some(64));
+}
+
+/// Decision 20: a replayed log's plan is its header and its commitment's
+/// peaks, one commitment's.
+#[test]
+fn a_replayed_plan_carries_its_commitment_s_peaks() {
+    use ascetic_ddd_command_log::live::{Commitment, commit_file};
+    use ascetic_ddd_command_log::validate::NoHost;
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("plan.jsonl");
+    let records: Vec<_> = (1..=3).map(|g| call("read", g, 0, 0, 0)).collect();
+    ascetic_ddd_command_log::write_file(
+        &log,
+        header(),
+        records,
+        ascetic_ddd_command_log::Compression::None,
+    )
+    .unwrap();
+    let path = dir.path().join("plan.commitment");
+    let report = commit_file(
+        &log,
+        &NoHost,
+        &limits_in(dir.path()),
+        "build",
+        4,
+        &path,
+        &ascetic_ddd_command_log::disk::LocalDisk,
+    )
+    .unwrap();
+    assert!(report.violations.is_empty(), "{:?}", report.violations);
+    let commitment = Commitment::read(&path).unwrap();
+    assert!(commitment.peaks.pending >= 3, "{:?}", commitment.peaks);
+    let (plan, _) = ascetic_ddd_load_run::source::Replayed::open(&log, &commitment, 4).unwrap();
+    assert_eq!(*plan.peaks(), commitment.peaks);
+    assert_eq!(**plan.header(), header());
 }

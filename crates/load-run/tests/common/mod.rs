@@ -34,6 +34,14 @@ impl<C: Clock> Carrier<C> for Scripted {
         Ok(())
     }
 
+    fn needs(
+        &self,
+        _: &ascetic_ddd_command_log::validate::Peaks,
+        _: u32,
+    ) -> Result<ascetic_ddd_load_run::carrier::Needs, String> {
+        Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
+    }
+
     fn carry(&self, mut a: Attempt<C>) -> impl Future<Output = ()> + Send + 'static {
         let script = self.script.clone();
         let judging = self.judging.clone();

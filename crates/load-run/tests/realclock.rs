@@ -149,14 +149,21 @@ fn over_tcp(
         TcpEgress::new(
             [("gateway".to_owned(), addr)].into_iter().collect(),
             vec![None],
-        ),
+        )
+        .with_ports(1_000),
         Config::new(NAMESPACE, RunSecret::new([7; 32])),
     );
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
     rt.block_on(run(
-        admit(header, W, Arc::new(carrier), live.runtimes()).unwrap(),
+        admit(
+            ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
+            W,
+            Arc::new(carrier),
+            live.runtimes(),
+        )
+        .unwrap(),
         clock,
         Records::new(records.iter().cloned()),
         Lines::new(),
@@ -237,6 +244,14 @@ impl<C: Clock> Carrier<C> for Drill {
         Ok(())
     }
 
+    fn needs(
+        &self,
+        _: &ascetic_ddd_command_log::validate::Peaks,
+        _: u32,
+    ) -> Result<ascetic_ddd_load_run::carrier::Needs, String> {
+        Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
+    }
+
     fn carry(&self, mut a: Attempt<C>) -> impl Future<Output = ()> + Send + 'static {
         let (slow, answer, block) = (self.slow, self.answer, self.block);
         async move {
@@ -272,7 +287,13 @@ fn drill_timed(
         .build()
         .unwrap();
     let ran = rt.block_on(run(
-        admit(Arc::new(header), W, Arc::new(carrier), live.runtimes()).unwrap(),
+        admit(
+            ascetic_ddd_load_run::source::Plan::assumed(Arc::new(header), Default::default()),
+            W,
+            Arc::new(carrier),
+            live.runtimes(),
+        )
+        .unwrap(),
         clock.clone(),
         Records::new(records.iter().cloned()),
         Lines::new(),

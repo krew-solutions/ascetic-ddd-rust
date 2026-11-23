@@ -8,7 +8,7 @@ use std::thread::JoinHandle;
 
 use tokio::sync::oneshot;
 
-use crate::run::Runtimes;
+use crate::run::{DRIVER_EVENTS, Runtimes};
 
 /// The sources' runtimes, running until dropped.
 pub struct Live {
@@ -19,12 +19,38 @@ pub struct Live {
 
 impl Live {
     /// `sources` runtimes, each taking `events` a driver turn — no fewer than
-    /// the descriptors the source may hold.
+    /// the source's cap and its driver's own (decision 20).
     pub fn start(sources: usize, events: usize) -> io::Result<Live> {
+        Live::with_events(&vec![events; sources])
+    }
+
+    /// A runtime per source, each taking its cap and its driver's own events
+    /// a turn (decision 20): `caps` by source — a carrier's
+    /// [`Needs`](crate::carrier::Needs).
+    pub fn for_caps(caps: &[usize]) -> io::Result<Live> {
+        let events = caps
+            .iter()
+            .map(|cap| {
+                cap.checked_add(DRIVER_EVENTS)
+                    // mio sizes its buffer to an `i32`.
+                    .filter(|e| i32::try_from(*e).is_ok())
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("a cap of {cap} sockets: past a driver's events"),
+                        )
+                    })
+            })
+            .collect::<io::Result<Vec<usize>>>()?;
+        Live::with_events(&events)
+    }
+
+    fn with_events(events: &[usize]) -> io::Result<Live> {
+        let sources = events.len();
         let mut handles = Vec::with_capacity(sources);
         let mut stops = Vec::with_capacity(sources);
         let mut threads = Vec::with_capacity(sources);
-        for i in 0..sources {
+        for (i, &events) in events.iter().enumerate() {
             // Its parks seen: whether each blocked (decision 18).
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_io()
@@ -46,7 +72,7 @@ impl Live {
             );
         }
         Ok(Live {
-            runtimes: Runtimes { sources: handles },
+            runtimes: Runtimes::new(handles, events.to_vec()),
             stops,
             threads,
         })

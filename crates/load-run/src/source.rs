@@ -9,7 +9,35 @@ use std::task::{Context, Poll};
 use ascetic_ddd_command_log::LogError;
 use ascetic_ddd_command_log::live::{self, Commitment};
 use ascetic_ddd_command_log::record::{Header, Record};
+use ascetic_ddd_command_log::validate::Peaks;
 use tokio::sync::mpsc;
+
+/// The plan a run admits (ADR-0047 decision 20): its log's header and the
+/// validator's peaks, from one commitment — never a header beside another's
+/// peaks.
+#[derive(Clone, Debug)]
+pub struct Plan {
+    header: Arc<Header>,
+    peaks: Peaks,
+}
+
+impl Plan {
+    /// Its header.
+    pub fn header(&self) -> &Arc<Header> {
+        &self.header
+    }
+
+    /// What a run of it must hold.
+    pub fn peaks(&self) -> &Peaks {
+        &self.peaks
+    }
+
+    /// A test's plan: `header`, its peaks assumed.
+    #[cfg(feature = "testing")]
+    pub fn assumed(header: Arc<Header>, peaks: Peaks) -> Plan {
+        Plan { header, peaks }
+    }
+}
 
 /// The log's records in order, then its verified end. Polled by the machine's
 /// loop; a record not ready is waited for while everything else goes on.
@@ -46,14 +74,18 @@ pub struct Replayed {
 
 impl Replayed {
     /// Opens `path` through `commitment` — refused at once if the commitment
-    /// is of another format or validator — and starts its reading thread.
+    /// is of another format or validator — and starts its reading thread:
+    /// the plan, its header and the commitment's peaks, with it.
     pub fn open(
         path: &Path,
         commitment: &Commitment,
         ahead: usize,
-    ) -> Result<(Header, Replayed), LogError> {
+    ) -> Result<(Plan, Replayed), LogError> {
         let reader = live::replay(path, commitment)?;
-        let header = reader.header().clone();
+        let plan = Plan {
+            header: Arc::new(reader.header().clone()),
+            peaks: commitment.peaks,
+        };
         let (tx, rx) = mpsc::channel(ahead.max(1));
         std::thread::Builder::new()
             .name("load-run-lines".to_owned())
@@ -66,7 +98,7 @@ impl Replayed {
                     }
                 }
             })?;
-        Ok((header, Replayed { rx, done: false }))
+        Ok((plan, Replayed { rx, done: false }))
     }
 }
 

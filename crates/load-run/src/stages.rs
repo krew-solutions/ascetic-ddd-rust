@@ -180,13 +180,13 @@ pub async fn measure<C: Clock, X>(
     admitted: &Admitted<C, X>,
     stopwatch: Arc<C>,
 ) -> Result<Judging, RunError> {
-    let Some(on) = admitted.runtimes().sources.first() else {
-        return Err(RunError::Refused("no source's runtime".to_owned()));
+    let Some(on) = admitted.runtimes().sources().first() else {
+        return Err(RunError::Measure("no source's runtime".to_owned()));
     };
     let header = admitted.header().clone();
     on_source(on, move || judging(&header, &*stopwatch))
         .await
-        .ok_or_else(|| RunError::Refused("the judging measurement failed".to_owned()))
+        .ok_or_else(|| RunError::Measure("the judging measurement failed".to_owned()))
 }
 
 /// The most gates a stand may have: past it, one that never says it is done.
