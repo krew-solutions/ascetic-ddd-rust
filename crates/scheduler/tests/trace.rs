@@ -259,7 +259,13 @@ fn trace_text(h: &Header, records: &[Record], read_ahead: u64, ran: &Run) -> Str
         out.push('\n');
     };
     push(log_json(h, records, read_ahead));
+    // A never-sent censor's closing report (ADR-0047 decision 19) is the
+    // shell's evidence, an input the machine ignores; the model's
+    // `TraceScheduler` takes no input of a step already ended.
     for (at, input) in &ran.inputs {
+        if matches!(input, Input::Ended { seen, .. } if seen.unsent.is_some()) {
+            continue;
+        }
         push(input_json(*at, input, records));
     }
     for e in &ran.entries {

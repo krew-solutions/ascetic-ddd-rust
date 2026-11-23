@@ -26,13 +26,13 @@ use crate::machine::{self, Binding, Input, Judgement, Line as Number, Output};
 pub mod sample;
 
 /// The version a reader accepts and a writer writes: exactly this one.
-pub const JOURNAL_VERSION: u32 = 6;
+pub const JOURNAL_VERSION: u32 = 7;
 
 /// The byte form's identity: the SHA-256 of the golden journal
 /// (`golden/journal.jsonl`, [`sample`]), which holds every line and variant. A
 /// change to how any line is written changes the golden journal, and so this,
 /// in the same edit.
-pub const JOURNAL: &str = "538145b24f3ba5f6350a48d96cd886eee79e3169154fcd6b92baed3665c0d9f2";
+pub const JOURNAL: &str = "e514b32f9103c7ae3674604cc6137111de6245b3317b1565e055a6672f52f6ff";
 
 /// A journal's line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,6 +382,62 @@ pub struct Answer {
     /// A late answer's bracket (version 5): it arrived after `absent`, its
     /// attempt censored at `deadline` (ADR-0047 decision 17).
     pub found: Option<Found>,
+    /// A never-sent attempt's closing report (version 7, ADR-0047 decision
+    /// 19): not an answer — its path to its censor.
+    pub unsent: Option<Unsent>,
+}
+
+/// A never-sent attempt's path to its censor (version 7).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Unsent {
+    /// When it was ready to connect — decorated; none if it never was.
+    #[serde(with = "u64s_option")]
+    pub handed: Option<u64>,
+    /// When its request was handed to a connection, if ever.
+    #[serde(with = "u64s_option")]
+    pub connected: Option<u64>,
+    /// Its source thread's lag on its path, in microseconds.
+    #[serde(with = "u64s")]
+    pub lag: u64,
+    /// Connects the peer refused by its own act.
+    pub refused: u32,
+    /// The last of them, if any.
+    pub refused_by: Option<Refusal>,
+    /// Where it stood: a dotted name its carrier chooses.
+    pub code: Code,
+}
+
+/// How the peer refused a connect (version 7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Refusal {
+    /// No listener.
+    Refused,
+    /// Reset while connecting.
+    Reset,
+    /// Aborted while connecting.
+    Aborted,
+    /// A fresh connection closed before a byte of it was sent.
+    Closed,
+}
+
+impl From<&machine::Unsent> for Unsent {
+    fn from(u: &machine::Unsent) -> Unsent {
+        Unsent {
+            handed: u.handed,
+            connected: u.connected,
+            lag: u.lag,
+            refused: u.refused,
+            refused_by: u.refused_by.map(|r| match r {
+                machine::Refusal::Refused => Refusal::Refused,
+                machine::Refusal::Reset => Refusal::Reset,
+                machine::Refusal::Aborted => Refusal::Aborted,
+                machine::Refusal::Closed => Refusal::Closed,
+            }),
+            code: Code::from(&u.code),
+        }
+    }
 }
 
 /// Where a late answer was not, and its attempt's deadline (version 5).
@@ -827,6 +883,7 @@ pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
                     absent: f.absent,
                     deadline: f.deadline,
                 }),
+                unsent: seen.unsent.as_ref().map(Unsent::from),
             }));
         }
         Input::Wake => {}

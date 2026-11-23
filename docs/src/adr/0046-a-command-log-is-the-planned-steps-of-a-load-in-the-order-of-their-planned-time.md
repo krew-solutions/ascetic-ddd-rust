@@ -974,6 +974,12 @@ ADR-0002 (the outbox carries bytes), ADR-0006 (a message ahead of its dependency
 outbox, one value at the inbox), ADR-0045 (the faker); in the host: ADR-0071 (sealed payloads), ADR-0086 (a Device's
 condition and its clocks), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007.
 
+- **E6's twin is timing-dependent** (found 2026-11-23, under a full gate's load, one run): `a_refusal_stops_the_other_threads`
+  counts units that start after the refusing unit sets its own flag, which comes before the engine learns of the
+  refusal; a refusing thread descheduled between the two lets the other thread run all its thousand units first —
+  "1000 units started after the refusal". Not the engine's defect: its check before each unit holds once it knows.
+  Owed: a twin that observes the engine's own stop (a hook, or units counted only once the engine's refusal is
+  recorded), so that the bound is the engine's, not the scheduler's.
 ## Change Log
 
 - 2026-11-20: Proposed.

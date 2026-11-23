@@ -41,9 +41,13 @@ impl<C: Clock> Carrier<C> for Scripted {
             let s = script(a.line(), a.attempt(), a.record());
             let judging = judging(a.line(), a.attempt());
             let sent = a.dispatched().saturating_add(s.sent_after);
-            // An attempt whose bytes never left is answered by nobody.
+            // An attempt whose bytes never left is answered by nobody: past
+            // its deadline, its closing report, as `sim` draws it (decision
+            // 19).
             if sent >= a.deadline() {
-                a.unanswered();
+                a.clock().sleep_until(a.deadline().saturating_add(1)).await;
+                let report = sim::drawn_unsent(a.line(), a.attempt(), a.dispatched());
+                a.left(report);
                 return;
             }
             a.clock().sleep_until(sent).await;

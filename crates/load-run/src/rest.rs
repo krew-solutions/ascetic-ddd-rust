@@ -25,6 +25,7 @@ use ascetic_ddd_command_log::record::{Action, Header, Operation, Record};
 use ascetic_ddd_command_log::render::{self, RunSecret};
 use ascetic_ddd_command_log::request::{self, Frame};
 use ascetic_ddd_scheduler::judge::{Contract, Transport, judge};
+use ascetic_ddd_scheduler::machine::Refusal;
 use bytes::Bytes;
 use http_body::{Body, Frame as BodyFrame, SizeHint};
 use hyper::client::conn::http1::{self, SendRequest};
@@ -242,6 +243,48 @@ impl<C: Clock, S: Stand, E: Egress, D: Decorator> Carrier<C> for RestCarrier<S, 
     }
 }
 
+/// The peer's own refusals of an attempt's connects (decision 19): refused,
+/// reset, aborted, or a fresh connection closed before a byte — no other
+/// connect error is its act.
+#[derive(Clone, Copy, Debug, Default)]
+struct Refusals {
+    count: u32,
+    last: Option<Refusal>,
+}
+
+impl Refusals {
+    fn note(&mut self, e: &io::Error) {
+        let r = match e.kind() {
+            io::ErrorKind::ConnectionRefused => Refusal::Refused,
+            io::ErrorKind::ConnectionReset => Refusal::Reset,
+            io::ErrorKind::ConnectionAborted => Refusal::Aborted,
+            _ => return,
+        };
+        self.count = self.count.saturating_add(1);
+        self.last = Some(r);
+    }
+
+    fn closed(&mut self) {
+        self.count = self.count.saturating_add(1);
+        self.last = Some(Refusal::Closed);
+    }
+}
+
+/// Its last look passed with no answer (decision 19): sent, censored, nothing
+/// more; never sent, its closing report, pushed no earlier than a microsecond
+/// past its deadline — where it stood, `code`.
+async fn leave<C: Clock>(a: Attempt<C>, refusals: Refusals, code: &'static str) {
+    if a.was_sent() {
+        return a.unanswered();
+    }
+    let past = a.deadline().saturating_add(1);
+    if a.clock().now() < past {
+        a.clock().sleep_until(past).await;
+    }
+    let report = a.report(code, refusals.count, refusals.last);
+    a.left(report);
+}
+
 /// The request of `frame` to `route`, its correlation header and its
 /// decorated ones set.
 fn build(
@@ -352,7 +395,9 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
                 Ok(d) => d,
                 Err(why) => return a.fault("rest.decorator", why),
             },
-            () = a.clock().sleep_until(past) => return a.unanswered(),
+            () = a.clock().sleep_until(past) => {
+                return leave(a, Refusals::default(), "rest.decorating").await;
+            }
         };
         for (name, value) in &decorated {
             if !op.decorated.iter().any(|d| d.eq_ignore_ascii_case(name)) {
@@ -372,7 +417,7 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
         }
         // Ready to connect: its frame built and decorated — the harness's
         // from the dispatch (decision 17).
-        a.handed();
+        a.decorated();
         let deadline = a.deadline();
         // An answer stamped at the deadline is taken: the attempt leaves only
         // past it, and the frontier censors at it what had none.
@@ -382,21 +427,25 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
         };
         let retire = header.profile.idle.saturating_sub(self.config.idle_margin);
         let mut connected_last: Option<u64> = None;
+        // The peer's own refusals, for a never-sent attempt's report.
+        let mut refusals = Refusals::default();
         // Until a byte of it leaves: a connection, the request handed to it.
         let (response, conn) = loop {
             if a.clock().now() >= deadline {
-                return a.unanswered();
+                return leave(a, refusals, "rest.connecting").await;
             }
+            let mut fresh = false;
             let mut conn = match pool.checkout(&route.endpoint, a.clock().now(), retire) {
                 Some(c) => c,
                 None => {
+                    fresh = true;
                     // Connects a floor apart, the first at once: a stand
                     // refusing them is not hammered, and the frontier censors
                     // an attempt never connected (decision 16).
                     if let Some(last) = connected_last {
                         let next = last.saturating_add(self.config.connect_floor);
                         if next >= deadline {
-                            return a.unanswered();
+                            return leave(a, refusals, "rest.floor").await;
                         }
                         a.clock().sleep_until(next).await;
                     }
@@ -405,17 +454,24 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
                     match tokio::select! {
                         biased;
                         c = connecting => c,
-                        () = a.clock().sleep_until(past) => return a.unanswered(),
+                        () = a.clock().sleep_until(past) => {
+                            return leave(a, refusals, "rest.connecting").await;
+                        }
                     } {
                         Ok(c) => c,
-                        Err(_) => continue,
+                        Err(e) => {
+                            refusals.note(&e);
+                            continue;
+                        }
                     }
                 }
             };
             let ready = tokio::select! {
                 biased;
                 r = poll_fn(|cx| conn.sender.poll_ready(cx)) => r.is_ok(),
-                () = a.clock().sleep_until(past) => return a.unanswered(),
+                () = a.clock().sleep_until(past) => {
+                    return leave(a, refusals, "rest.pooling").await;
+                }
             };
             if !ready {
                 continue;
@@ -446,10 +502,9 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
                         }
                         a.absent_before(b0);
                         // Censored by the frontier at the deadline; the
-                        // connection dropped, never pooled (keeping it is
-                        // K2b-8's).
+                        // connection dropped, never pooled.
                         if looks.done() {
-                            return a.unanswered();
+                            return leave(a, refusals, "rest.writing").await;
                         }
                     }
                 }
@@ -460,6 +515,11 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
                     // Handed back, or no byte of it accepted: no end; its
                     // path's lag goes on on this task (decision 18).
                     if e.take_message().is_some() || conn.probe.written() == 0 {
+                        // A fresh connection the peer closed before a byte:
+                        // its refusal, by its own act (decision 19).
+                        if fresh {
+                            refusals.closed();
+                        }
                         a.back();
                         continue;
                     }
@@ -489,7 +549,7 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
                         None => {
                             a.absent_before(b0);
                             if looks.done() {
-                                return a.unanswered();
+                                return leave(a, refusals, "rest.reading").await;
                             }
                             continue;
                         }

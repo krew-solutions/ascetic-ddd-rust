@@ -166,6 +166,8 @@ class Run:
         harness, harness_sent, deadline, censored = 0, None, None, False
         # Version 5: the late answers found for the censor, and their brackets.
         founds = []
+        # Version 7: a never-sent censor's closing reports (decision 19).
+        reports = []
         for i, kind, v in self.events[l]:
             if i < ri:
                 raise Incoherent("an event before its read")
@@ -174,6 +176,9 @@ class Run:
             if kind == "answer" and i > ei:
                 if v["ignored"] is None:
                     raise Incoherent("an answer taken after its end")
+                if v["unsent"] is not None:
+                    reports.append(v)
+                    continue
                 if v["found"] is not None:
                     founds.append((v, None))
                 continue
@@ -224,6 +229,8 @@ class Run:
                     last_sent = u(v["at"]) if last_sent is None else last_sent
                     sent = u(v["at"]) if sent is None else sent
             elif kind == "answer":
+                if v["unsent"] is not None:
+                    raise Incoherent("a closing report before its step's end")
                 if v["found"] is not None:
                     founds.append((v, (censored, attempts, deadline, last_dispatch)))
                     continue
@@ -283,6 +290,14 @@ class Run:
                 raise Incoherent("skipped for a producer not read before it")
         self.woke(l, r, rel, e, attempts, answered)
         found_late = self.founds(founds, e, censored, attempts, deadline, last_dispatch)
+        reader = 0
+        if r["action"] in ("observe", "poll") and rel is not None:
+            reader = u(rel["released"]) - u(rel["intended"])
+        unsent_undecided = self.closing(
+            l, e, reports, founds, censored, attempts, deadline, last_dispatch, last_sent, harness,
+            reader)
+        if founds and unsent_undecided is not None:
+            found_late = True
         self.taken_attempts = attempts
         self.facts[l] = {
             "harness": harness,
@@ -290,7 +305,58 @@ class Run:
             "censored": censored,
             "last_sent": last_sent,
             "found_late": found_late,
+            "unsent_undecided": unsent_undecided,
         }
+
+    def closing(self, l, e, reports, founds, censored, attempts, deadline, dispatched, last_sent,
+                harness, reader):
+        """Decision 19, version 7: a never-sent censor — the last attempt
+        censored, no send — owes one closing report in a run that ended: its
+        path, after the deadline; or an answer found late for it. A Root iff
+        the attempt was ready, the peer refused it by its own act, and the
+        harness's lateness over the attempts, the hand-off, the thread's lag
+        and an observation's reader's is at most J. None for any other end."""
+        never_sent = (end_kind(e) == "unknown" and attempts >= 1 and censored
+                      and last_sent is None and not e["fault"])
+        if not never_sent:
+            if reports:
+                raise Incoherent("a closing report without its never-sent censor")
+            return None
+        if len(reports) + len(founds) > 1:
+            raise Incoherent("two closing reports for one censor")
+        if not reports and not founds:
+            if self.stop is None:
+                raise Incoherent("a never-sent censor without its closing report")
+            return True
+        if founds:
+            REACHED["unsent_found"] += 1
+            return True
+        v = reports[0]
+        un = v["unsent"]
+        if (v["judged"] != "unknown" or v["status"] is not None or v["censored"]
+                or v["found"] is not None):
+            raise Incoherent("a closing report with an answer's content")
+        if v["attempt"] != attempts or u(v["at"]) <= deadline:
+            raise Incoherent("a closing report against its censor")
+        handed, connected = u(un["handed"]), u(un["connected"])
+        ready = dispatched if handed is None else handed
+        if (ready < dispatched
+                or (connected is not None and (handed is None or connected < ready or connected > u(v["at"])))
+                or u(un["lag"]) > u(v["at"]) - ready
+                or (un["refused_by"] is not None) != (un["refused"] > 0)):
+            raise Incoherent("a closing report against its path")
+        late = harness + (ready - dispatched) + u(un["lag"]) + reader > self.j
+        if handed is None:
+            REACHED["unsent_unready"] += 1
+            return True
+        if un["refused"] == 0:
+            REACHED["unsent_unrefused"] += 1
+            return True
+        if late:
+            REACHED["unsent_late"] += 1
+            return True
+        REACHED["unsent_root"] += 1
+        return False
 
     def founds(self, founds, e, censored, attempts, deadline, last_dispatch):
         """Decision 17, version 5: a late answer found for its attempt's censor —
@@ -307,7 +373,7 @@ class Run:
             absent, fd, at = u(f["absent"]), u(f["deadline"]), u(v["at"])
             if v["ignored"] is None:
                 raise Incoherent("a found answer taken")
-            if not (absent < at and fd < at):
+            if not (absent <= at and fd < at):
                 raise Incoherent("a found answer inside its own bracket")
             if live is not None:
                 c, n, d, dispatched = live
@@ -449,8 +515,12 @@ class Run:
             return "backstop"
         if f["found_late"]:
             return "found"
-        if e["attempts"] >= 1 and f["censored"] and (f["last_sent"] is None or self.harness_late(l)):
-            return "censor"
+        if e["attempts"] >= 1 and f["censored"]:
+            if f["last_sent"] is None:
+                if f["unsent_undecided"]:
+                    return "censor"
+            elif self.harness_late(l):
+                return "censor"
         if rel:
             i, rr, d = u(rel["intended"]), u(rel["released"]), u(rel["deadline"])
             if rr >= d and i < d and rr - i > self.j:

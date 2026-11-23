@@ -7,8 +7,8 @@ use ascetic_ddd_command_log::record::{On, Safety, Subject};
 
 use super::{
     Action, Answer, Code, Critical, Dep, Dispatch, End, Ended, Fault, FaultClass, Found, Gate,
-    Header, Ignored, JOURNAL_VERSION, Judged, Judging, Key, Line, LogFault, Read, Released, Sent,
-    Shape, Skip, Slot,
+    Header, Ignored, JOURNAL_VERSION, Judged, Judging, Key, Line, LogFault, Read, Refusal,
+    Released, Sent, Shape, Skip, Slot, Unsent,
 };
 use crate::machine::MACHINE_REVISION;
 
@@ -183,6 +183,7 @@ pub fn lines() -> Vec<Line> {
             after: None,
             censored: false,
             found: None,
+            unsent: None,
         }),
     ];
     let judged = [
@@ -217,6 +218,43 @@ pub fn lines() -> Vec<Line> {
             found: (judged == Judged::Unexpected).then_some(Found {
                 absent: 0,
                 deadline: u64::MAX,
+            }),
+            unsent: None,
+        }));
+    }
+    // A never-sent attempt's closing reports (version 7): every refusal's
+    // kind, both sides of each option, at the top of each range.
+    let refusals = [
+        None,
+        Some(Refusal::Refused),
+        Some(Refusal::Reset),
+        Some(Refusal::Aborted),
+        Some(Refusal::Closed),
+    ];
+    for (i, refused_by) in (0u64..).zip(refusals) {
+        lines.push(Line::Answer(Answer {
+            at: i.saturating_add(9_500),
+            line: 3,
+            attempt: 2,
+            judged: Judged::Unknown,
+            captured: vec![],
+            ignored: Some(Ignored::Ended),
+            status: None,
+            code: None,
+            after: None,
+            censored: false,
+            found: None,
+            unsent: Some(Unsent {
+                handed: (i % 2 == 0).then_some(u64::MAX),
+                connected: (i % 2 == 1).then_some(u64::MAX),
+                lag: u64::MAX,
+                refused: if refused_by.is_some() { u32::MAX } else { 0 },
+                refused_by,
+                code: if i == 0 {
+                    Code::Other
+                } else {
+                    Code::Named("rest.connecting".to_owned())
+                },
             }),
         }));
     }

@@ -21,14 +21,14 @@ use ascetic_ddd_command_log::record::{On, Safety};
 
 use crate::journal::{
     Action, Answer, Dep, End, Ended, Fault, FaultClass, Found, Header, JournalError, Judged, Key,
-    Line, Read, Skip,
+    Line, Read, Skip, Unsent,
 };
 use crate::machine::Line as Number;
 
 /// What the fold decides, as a number: raised whenever the classes or the
 /// verdict it gives a journal change, which the goldens' and the differential's
 /// classes pin beside it.
-pub const FOLD_REVISION: u32 = 6;
+pub const FOLD_REVISION: u32 = 7;
 
 /// A line's class (decision 14), by precedence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -209,6 +209,9 @@ struct Censor {
     attempt: u32,
     deadline: u64,
     dispatched: u64,
+    /// Never sent (decision 19): the harness's lateness over the step's
+    /// attempts and an observation's reader's, its closing report owed.
+    unsent: Option<(u64, u64)>,
 }
 
 struct First {
@@ -449,6 +452,9 @@ impl First {
                 }
             }
             Line::Answer(a) => {
+                if let Some(u) = &a.unsent {
+                    return self.unsent(a, u);
+                }
                 if let Some(f) = a.found {
                     return self.found(a, f);
                 }
@@ -540,7 +546,9 @@ impl First {
         if a.ignored.is_none() {
             return bad("a found answer taken");
         }
-        if f.absent >= a.at || f.deadline >= a.at {
+        // Found in the microsecond of the look that last saw it absent: in
+        // the bracket's closed end (decision 19).
+        if f.absent > a.at || f.deadline >= a.at {
             return bad("a found answer within its bracket");
         }
         let late = f.absent < f.deadline && a.at.saturating_sub(f.absent) > self.jitter;
@@ -563,7 +571,54 @@ impl First {
         if a.attempt != c.attempt || f.deadline != c.deadline || f.absent < c.dispatched {
             return bad("a found answer against its censor");
         }
-        if late {
+        // Never sent and answered late — an early reply read past its
+        // deadline: its request never wholly left (decision 19).
+        if late || c.unsent.is_some() {
+            self.mark(a.line, UNDECIDED);
+        }
+        Ok(())
+    }
+
+    /// A never-sent censor's closing report (decision 19, version 7): after
+    /// its censor, of its attempt, once; its path ordered. A Root iff the
+    /// attempt was ready, the peer refused it by its own act, and the
+    /// harness's lateness — its attempts', the hand-off's, its thread's lag
+    /// and an observation's reader's — is at most J; else undecided.
+    fn unsent(&mut self, a: &Answer, u: &Unsent) -> Result<(), Void> {
+        let bad = |why| Err(incoherent(a.line, why));
+        if a.ignored.is_none()
+            || a.judged != Judged::Unknown
+            || a.status.is_some()
+            || a.censored
+            || a.found.is_some()
+        {
+            return bad("a closing report with an answer's content");
+        }
+        let Some(c) = self.censors.get(&a.line) else {
+            return bad("a closing report without its never-sent censor");
+        };
+        let Some((harness, reader)) = c.unsent else {
+            return bad("a closing report without its never-sent censor");
+        };
+        if a.attempt != c.attempt || a.at <= c.deadline {
+            return bad("a closing report against its censor");
+        }
+        let ready = u.handed.unwrap_or(c.dispatched);
+        if ready < c.dispatched
+            || u.connected
+                .is_some_and(|k| u.handed.is_none() || k < ready || k > a.at)
+            || u.lag > a.at.saturating_sub(ready)
+            || u.refused_by.is_some() != (u.refused > 0)
+        {
+            return bad("a closing report against its path");
+        }
+        let late = harness
+            .saturating_add(ready.saturating_sub(c.dispatched))
+            .saturating_add(u.lag)
+            .saturating_add(reader)
+            > self.jitter;
+        self.censors.remove(&a.line);
+        if u.handed.is_none() || u.refused == 0 || late {
             self.mark(a.line, UNDECIDED);
         }
         Ok(())
@@ -654,10 +709,13 @@ impl First {
         // Only an end the harness could have caused: the last attempt
         // censored at its deadline, or never sent — an answer the system gave
         // is its own, however late it was sent.
+        // A never-sent censor's is its closing report's to decide (decision
+        // 19).
         let censor_late = e.end == End::Unknown
             && lv.attempts >= 1
             && lv.censored
-            && (lv.last_sent.is_none() || lv.harness.saturating_add(reader) > j);
+            && lv.last_sent.is_some()
+            && lv.harness.saturating_add(reader) > j;
         let read_late = lv
             .released
             .is_some_and(|(i, r, d)| r >= d && i < d && r.saturating_sub(i) > j);
@@ -684,6 +742,7 @@ impl First {
                     attempt: lv.attempts,
                     deadline: lv.last_deadline,
                     dispatched: lv.last_dispatch,
+                    unsent: (lv.last_sent.is_none() && !e.fault).then_some((lv.harness, reader)),
                 },
             );
         }
@@ -748,9 +807,16 @@ impl First {
         if self.unstarted && !matches!(self.stop, Some(FaultClass::Gate { .. })) {
             return Err(incoherent(0, "no T0, and no gate's refusal"));
         }
-        // Stopped, the run's steps need not all have ended.
+        // Stopped, the run's steps need not all have ended, nor its censors
+        // be closed.
         if self.stop.is_some() {
             return Ok(());
+        }
+        if let Some((line, _)) = self.censors.iter().find(|(_, c)| c.unsent.is_some()) {
+            return Err(incoherent(
+                *line,
+                "a never-sent censor without its closing report",
+            ));
         }
         match self.live.keys().next() {
             Some(line) => Err(incoherent(*line, "a step read and never ended")),

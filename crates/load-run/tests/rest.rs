@@ -1691,6 +1691,23 @@ fn refused_connects_are_tried_a_floor_apart() {
     let journal = journal.unwrap();
     assert!(sent(&journal, 2).is_empty());
     assert_eq!(end(&journal, 2), Some((End::Unknown, 25_000)));
+    // Its closing report (decision 19): past the deadline, ready, every
+    // connect the peer's refusal, its last a floor short of the deadline.
+    let (at, u) = unsent(&journal, 2).expect("a closing report");
+    assert!(at > 25_000, "reported at {at}");
+    assert_eq!(u.handed, Some(0));
+    assert_eq!(u.connected, None);
+    assert_eq!(u.refused, 3);
+    assert_eq!(u.refused_by, Some(journal::Refusal::Refused));
+    assert_eq!(u.code, journal::Code::Named("rest.floor".to_owned()));
+}
+
+/// A never-sent attempt's closing report in `journal`, and when.
+fn unsent(journal: &[Line], line: u64) -> Option<(u64, journal::Unsent)> {
+    journal.iter().find_map(|l| match l {
+        Line::Answer(a) if a.line == line => a.unsent.clone().map(|u| (a.at, u)),
+        _ => None,
+    })
 }
 
 /// Decision 16: a connection idle less than the profile's idle less the
@@ -1806,11 +1823,20 @@ fn a_connect_or_a_decorator_that_never_answers_ends_at_the_deadline() {
         u64::MAX,
         None,
     );
-    for (what, (journal, came, _)) in [("connect", connecting), ("decorator", decorating)] {
+    for (what, (journal, came, _), ready, code) in [
+        ("connect", connecting, true, "rest.connecting"),
+        ("decorator", decorating, false, "rest.decorating"),
+    ] {
         let journal = journal.unwrap();
         assert!(came.is_empty(), "{what}");
         assert!(sent(&journal, 2).is_empty(), "{what}");
         assert_eq!(end(&journal, 2).map(|e| e.0), Some(End::Unknown), "{what}");
+        // Its closing report: ready only once decorated; no refusal — a
+        // connect left pending is no act of the peer's (decision 19).
+        let (_, u) = unsent(&journal, 2).expect("a closing report");
+        assert_eq!(u.handed.is_some(), ready, "{what}");
+        assert_eq!((u.refused, u.refused_by), (0, None), "{what}");
+        assert_eq!(u.code, journal::Code::Named(code.to_owned()), "{what}");
     }
 }
 

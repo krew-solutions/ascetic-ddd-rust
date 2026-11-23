@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2) and K2b-7d built (§ Measured), K2b-7e next. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d and K2b-8a built (§ Measured), K2b-8b next — K2b-8 before K2b-7e, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -39,7 +39,9 @@ To be built in slices, each a commit of its own:
   in the built shell; **K2b-7b** journal version 6 — a run's stop, the source thread's lag, the stages' evidence —
   in the pure fold; **K2b-7c** the shell's stop and its lag, in two: **K2b-7c-1** the stop, **K2b-7c-2** the source
   thread's lag, its park detector measured first; **K2b-7d** the three stages before T0; **K2b-7e** the
-  shell's memory; **K2b-8** connections kept and abandoned.
+  shell's memory; **K2b-8** a censored attempt's connection, its closing report and the ports (decision 19), in
+  four: **K2b-8a** journal version 7 in the pure fold; **K2b-8b** the shell's censor, report and connect errors;
+  **K2b-8c** ports, the cap, admission's bound, the connect probe; **K2b-8d** the real clock's twins.
 - **The first host run:** REST only, on the compose stand, `sources = 1` — a correctness run.
 - **K3** facts and the bus; **K4** shaping and the emulated client's retries; **K5** the report.
 
@@ -545,6 +547,56 @@ Considered keeps what each refuted):
   `Sent`; an attempt dropped at the run's end could decrement the live count before raising its fault, and the run end
   clean.
 
+### 19. A censored attempt's connection reset; a never-sent censor's closing report; ports
+
+*Decided for K2b-8* (2026-11-23, under the gate: a blind solver and a discriminator on Fable, then three roles —
+Distributed Systems, Verifiability, Operability — on Opus; it amends decisions 11, 16, 17 and 18; § Alternatives
+Considered keeps what each refuted):
+- **A censored attempt's connection is reset at its last look, as the emulated client's would be** (decision 11's keep
+  reversed, by two roles independently). A kept connection holds the gateway's upstream connection and the service's
+  handler to the route timeout (15 s on the host's routes), where a client timing out at its deadline disconnects and
+  the gateway cancels upstream: under a stall, requests a real client abandoned crowd out later steps — Roots the
+  harness made, a void run turned fail. Keeping bought no verdict (the machine ignores a late answer; the fold's `late`
+  is false past `D + 1`) and, under zero linger, no port: only a late answer's evidence, foregone — a keep within a
+  budget below the gateway's limits owed, on the trigger "a measure needs late answers' latency". Reset means the
+  connection's task aborted and its socket closed at zero linger; no byte of an armed request leaves once its clock
+  reached the deadline (the shell's `Io` refuses it), and no request is handed to a connection at or past the deadline
+  (decision 16's sentence, which had no code). A connection to which no request was handed goes back to the pool.
+- **A never-sent censor owes a closing report** — the attempt's, pushed at `D + 1` or later, after a verified driver
+  turn, riding `Seen` on an `Ended` the machine ignores (as `found` does: no new machine input, the same bytes in
+  `sim`); the frontier refuses a report at or before its attempt's deadline (a harness fault). The censor cannot carry
+  it: the censor is made on the machine's thread at the deadline, and a hog covering it is counted on the source's
+  thread only after (a false Root otherwise — the discriminator's scenarios A and B). Journal version 7: `unsent {
+  handed?, connected?, lag, refused, refused_by?, code }` — `handed` only once the attempt was ready (decorated),
+  `refused` the peer's explicit refusals (refused, reset, a fresh connection closed before a byte), `refused_by` the
+  last one's kind, `code` the carrier's dotted name. The fold holds a never-sent censor's end pending; its report
+  decides: a Root iff `handed` is present, `refused ≥ 1` — the peer's own act, positive evidence: a connect left
+  pending by the harness host's own network (conntrack, a local drop, the LAN) is elimination — and the harness's
+  lateness over the step's attempts and the report's lag is at most J; otherwise undecided — a `found` for it (an
+  early reply read late) undecided too. In a run that ended, every never-sent censor has exactly one report. A stand
+  dropping SYNs on overload is then undecided — void, never a false fail; stand-side evidence (its listen overflows,
+  the gateway's connection counts) bracketed before T0 and after the end, owed on the trigger "a host run voided by
+  never-sent connect censors".
+- **The source thread's lag, completed** (decision 18): a poll woken by the clock's own timer has an exact lag, `p −
+  due`, added beyond the poll's bound (a whole process stalled — a container's CPU throttle, a pause — ends in a park
+  that blocked, its bound ~0); the carrier's `handed` after decoration resets the path's lag (the decoration's delay is
+  the hand-off's gap; a hand-back keeps it).
+- **Connect errors are classed by the `Egress`**, which alone knows which step failed: `Connect::Stand(kind)` —
+  refused, reset, aborted, timed out, unreachable — retried a floor apart and counted; `Connect::Harness { cannot,
+  detail }` — a non-local address, exhausted ports (`EADDRINUSE` at a bound socket's bind, `EADDRNOTAVAIL` at an
+  unbound one's connect), descriptors, an unknown endpoint, anything unknown — a carrier fault, the run stopped.
+  `TcpEgress` sets zero linger at connect on every socket, and the shell forwards no shutdown (hyper's graceful close
+  would send a FIN first, and a peer's FIN in FIN_WAIT2 makes a TIME_WAIT a later reset cannot undo).
+- **Ports** (K2b-8c): `Egress::ports(source)`; the cap per source over each socket's life, from its creation to its
+  `Io`'s drop; at the cap an idle connection evicted, else `egress.cap`; `Live` built from the cap (`events ≥ cap + 1`,
+  exact: one event a descriptor a wait); admission's bound `pending` (one attempt out a step not ended, nothing kept)
+  plus a reserve against the ports, the events and the descriptors' soft limit — the library offers raising it to the
+  hard one; an unknown endpoint and a non-local source refused at admission (nothing outside touched); one TCP
+  connect per (source, endpoint) a stage-3 gate of its own, never an HTTP request.
+- **Saturation by age, not count** (a K2b-7c-1 defect): more than 1,024 steps sharing a deadline left their attempts
+  alive past their censors, awaiting their look a microsecond later — a false `saturated`. A source is saturated when
+  an attempt outlives its deadline by the route timeout.
+
 ## Consequences
 
 - A load run is judged against the plan the validator checked, with every lateness the run's and every failure
@@ -618,6 +670,15 @@ Considered keeps what each refuted):
   conclusive however late polling began.
 - **A fault for a hold older than J** (the synthesis, refuted by Performance): an OS slice exceeds J; **a spin before
   each timer**: a core for the run, and no push seen while spinning.
+- **K2b-8** (decision 19): **a connection kept past its censor to the route timeout** (decision 11; the synthesis,
+  refuted by Distributed Systems and Operability): the gateway's slots held where a real client disconnects — Roots
+  the harness made; **the censor carrying a never-sent attempt's path** (the main position, refuted by the solver and
+  the discriminator): the lag is the source thread's, counted after a hog covering the deadline; **a never-sent Root
+  by elimination** (`waited: stand` with no refusal; the synthesis, refuted by Operability): the harness host's own
+  network reads as the stand's; **connect errors classed by kind in the carrier** (Operability): a bind's
+  `EADDRNOTAVAIL` and a connect's mean different remedies; **zero linger only on abandoned connections** (the main
+  position): the stop's abort, a panic, a dropped run would each need a code path; **saturation by a count** (K2b-7c-1,
+  refuted by Verifiability): a deadline shared by more than the margin.
 - **K2b-7** (decision 18): **a long judgement can only make a run undecidable** (the main position, refuted by the
   discriminator): a sibling's flush waits on the same thread and was charged to the stand; **the thread's busy time
   over the send path** as the harness's part (the synthesis, refuted by Distributed Systems and Verifiability): the
@@ -669,6 +730,7 @@ Considered keeps what each refuted):
 | K2b-7c-1 | K2b | a run's fault stops it in its journal — the lines taken, the fault, the trailer — `run` returning the journal and why: a dropped attempt, a stuck hold (virtual and real clock), a carrier's refusal by its dotted name, a log failing mid-run (truncated, diverged), a lock poisoned by a panic under it, a saturated source, a record from a source with no runtime; every harness fault and log error mapped to its class; a decorator's error — the host's text — out of the journal; no request of an aborted attempt reaches the stand, connecting or mid-write, then or after the run returned, none left running; a run's future dropped takes its attempts with it; a journal dropped unfinished has no trailer; a failing writer heard within its lag, its own error | the stop's fault unwritten; the trailer on drop; a dead writer unheard; the stop's abort, the guard's, the wait skipped; saturation unchecked; a class mapped wrong; connection tasks, attempt tasks unkept; a carrier's name dropped |
 | K2b-7c-2 | K2b | on the real clock, `Live`'s runtimes seeing whether each park blocked: a wait ending inside a 100 ms hog of the source's thread — the lag at least half the hog; ending after it and an idle stretch — under half; a connection's flush held by the stand's window past the hog's start — its lag the hog's rest, and an early answer's `Sent`, the frontier's at it, carrying it; a poll's lag from the later of its task's last pending and the path's start, at most since its thread blocked; a path connected off its attempt a fault; every task spawned at the one place that times it; on the virtual clock none — every differential unchanged | the thread's busy time; any park ending the idleness; the lag from the task's last pending; the connection's, the attempt's polls unfed; the lag not pushed with its send, at an answer; a request handed back not moved back; connected off its attempt accepted; the park hooks uninstalled; the virtual clock lagging |
 | K2b-7d | K2b | admission refuses before any journal — a carrier that cannot carry the log, a runtime not `current_thread`, fewer runtimes than sources, a read-ahead past the header's — and `run` takes only what admission made; the judging time the worst shape's median of five after a warm-up (a scripted stopwatch: not its mean, its maximum, its warm-up, its first shape); each shape's document within its cap, JSON, its last member at its pointer; the stand's gates in turn, each passed named and timed, the first refusal stopping them, one unanswered within its bound refused, the REST carrier's its stand's; a gate's refusal journaled alone under a header with no T0 — void by its fault, its reason nowhere in it; a call from a source past the profile's breaks `operation`, the Python reference agreeing; a frame's time by the clock's wall instant | the source rule dropped (Rust, Python); admission skipping the carrier, the flavour, the count, the read-ahead; the mean, the maximum for the median; the warm-up counted; the first shape kept; a gate unbounded; a refusal passed over; a gate untimed; a refused gate unnamed; the carrier's gates not its stand's; frames stamped by a wall of 0 |
+| K2b-8a | K2b | journal version 7, folded by Rust and `verdict.py` alike: a never-sent censor's end decided by its closing report — ready, refused by the peer, on time a Root; never ready, never refused, its lag or a hand-off with it past J undecided, at J a Root; an early reply found late undecided, in its look's microsecond too; no report, two, one at its deadline, a refusal's kind with none counted, connected never ready, a lag past its path, a report with an answer's content — each incoherent, a sent censor's report too; the frontier refusing a report at its deadline and censoring first when the drain has not reached it; `sim` drawing every side of the rule (its counters reached in the differential); the REST carrier's report — the peer's refusals counted, ready only once decorated, where it stood | the report deciding nothing; a Root never ready, unrefused; the report's lag, its hand-off not added; totality dropped; a report at its deadline accepted (fold, frontier); an early reply found late decided by the stand; the bracket's end open; never sent undecided at its end; each path rule dropped; the censor not pushed first; the definition's report, totality, refusal; the shell reporting before its deadline, reporting a sent censor, never marking ready, not noting refusals |
 | K2-1 | K2 | the shell against an in-memory transport (hyper over `tokio::io::duplex`) under paused time reproduces `sim`'s journal | `std::time::Instant` in a handler |
 | K2-2 | K2 | each cause delayed alone — the reader, the token, the pool, the connect, the write, the dependency — moves exactly one gap of the chain | a gap merged |
 | K2-3 | K2 | on the real clock, multi-thread: chain order, no release before its stamped met instants, the stub's requests per correlation id equal the journal's attempts — a keep-alive connection closed as it is reused included; a request processed then reset before the answer is Unknown; a response stamped 1 µs before its deadline delivered after the tick is Expected | hyper's hidden retry; Unknown read as not taken; deadlines by arrival |
@@ -1430,6 +1492,17 @@ refusal. The carrier's `Config` has no wall instant: a frame's time is the clock
   validator's revision, their headers naming the live validator — a test's input, not the machine's: they name a
   test's validator now, and the pin moved once.
 
+**K2b-8a — a never-sent censor's closing report in the pure fold** (2026-11-23): `Seen.unsent`, `Frontier::left`,
+`Frontier::sent` telling whether it pushed (its dead `close` deleted); `sim` reporting a never-sent attempt at `D + 1`
+by a pure draw `sim::drawn_unsent` the shell's scripted carrier shares; the fold holding a never-sent censor pending in
+its censors' map and deciding it by its report; the TLA trace skipping a report (the model takes no input of an ended
+step); the REST carrier's basic report — every exit with no answer through one `leave`, no earlier than `D + 1`.
+- The differential's classes under (7, 4, 7) are version 6's digest, yet it reaches every branch of the rule — five
+  Roots among them: the never-sent censors it makes are undecided by another rule as well (a step read past its
+  deadline is never sent). So the rule's own executor is the hand-written goldens, not the differential.
+- One mutant lives: the decoration's lag kept past `decorated` (decision 19's reset) — the virtual clock's lag is 0;
+  its executor is K2b-8b's real-clock twin, a decorator awaiting on a thread a sibling holds.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -1619,3 +1692,9 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   joins the shell's allowlist (Linux).
 - 2026-11-23: K2b-7d built (§ Measured): admission, the judging measured, the stand's gates in turn, a gate's refusal
   journaled; the validator's rules at revision 9 (a call's source within the profile's).
+- 2026-11-23: decision 19 added under the gate (K2b-8): a censored attempt's connection reset, decision 11's keep
+  reversed; a never-sent censor's closing report and its Root on the peer's refusal; the source thread's lag
+  completed (timer lateness exact, a re-hand resetting it); connect errors classed by the egress; ports. K2b-8 cut in
+  four, before K2b-7e.
+- 2026-11-23: K2b-8a built (§ Measured): journal version 7 — a never-sent censor's closing report — in the fold, its
+  definition, `sim` and the REST carrier's basic report; FOLD_REVISION 7, MACHINE_REVISION 4 kept.

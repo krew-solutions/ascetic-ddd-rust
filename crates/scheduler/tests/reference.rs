@@ -189,6 +189,12 @@ const JOURNALS: &[(u32, u32, &str)] = &[
         4,
         "1166c150f0271b295cf9a639180bdda6426ddb3142a9b6c1af9a5cb1b45ec42b",
     ),
+    // Version 7 (decision 19): a never-sent censor's closing report.
+    (
+        7,
+        4,
+        "70f34e7ccb12926086d905de269f8fdbc7b303d50d3b94040ddfccadf9cc062b",
+    ),
 ];
 
 /// What the fold decided of the differential's runs, the digest of their
@@ -238,6 +244,12 @@ const CLASSES: &[(u32, u32, u32, &str)] = &[
         6,
         4,
         6,
+        "913215b9afa0c80eb6dea3ab53f603b501fad921c62bfd1066e5cfd7afffec1d",
+    ),
+    (
+        7,
+        4,
+        7,
         "913215b9afa0c80eb6dea3ab53f603b501fad921c62bfd1066e5cfd7afffec1d",
     ),
 ];
@@ -757,6 +769,12 @@ fn the_machine_is_the_scheduler_by_definition() {
         "pass",
         "fail",
         "void:undecided",
+        // Decision 19: a never-sent censor's closing report, every side of
+        // its rule.
+        "unsent_root",
+        "unsent_unready",
+        "unsent_unrefused",
+        "unsent_late",
     ] {
         assert!(
             reached.contains(&format!("'{counter}'")),

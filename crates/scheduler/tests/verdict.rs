@@ -1333,6 +1333,7 @@ fn found_answer(
         after: None,
         censored: false,
         found,
+        unsent: None,
     })
 }
 
@@ -2077,4 +2078,227 @@ fn every_run_cut_and_stopped_is_void() {
     for stop in ["stop_stalled", "stop_log", "stop_held"] {
         assert!(reached.contains(&format!("'{stop}'")), "{stop}: {reached}");
     }
+}
+
+/// A never-sent censor's golden journal: a call whose bytes never left, its
+/// closing report as `sim` draws it — ready, refused once, on time.
+fn never_sent() -> (journal::Header, Vec<Line>, Log) {
+    let h = header_j();
+    let records = vec![call("read", 1, 0, 0, 0)];
+    let ran = run_waking_late(h.clone(), &records, W, &|_| 0, &|_| 0, &|_, _, _| {
+        answer(TIMEOUT, None, Judgement::Unknown)
+    })
+    .unwrap();
+    let log = log_of(&h, &records);
+    (journal_header(&h, &log), ran.journal, log)
+}
+
+/// The report of `lines`, edited.
+fn reported(lines: &mut [Line], edit: &dyn Fn(&mut journal::Answer)) {
+    for l in lines.iter_mut() {
+        if let Line::Answer(a) = l
+            && a.unsent.is_some()
+        {
+            edit(a);
+        }
+    }
+}
+
+/// Decision 19: a never-sent censor's end is its closing report's to decide
+/// — a Root iff the attempt was ready, the peer refused it by its own act,
+/// and the harness's lateness with the report's hand-off and lag is at most
+/// J; undecided otherwise, or for an early reply found late; and the report's
+/// own rules, each broken alone, incoherent.
+#[test]
+fn a_never_sent_censor_is_its_report_s_to_decide() {
+    use Class::*;
+    let (h, lines, log) = never_sent();
+    let report = lines
+        .iter()
+        .find_map(|l| match l {
+            Line::Answer(a) => a.unsent.clone().map(|u| (a.at, u)),
+            _ => None,
+        })
+        .expect("sim's closing report");
+    let dispatched = lines
+        .iter()
+        .find_map(|l| match l {
+            Line::Dispatch(d) => Some(d.at),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        report.1.handed.is_some() && report.1.refused >= 1,
+        "{report:?}"
+    );
+    let mut cases = Vec::new();
+    let mut check =
+        |name: &str, edit: &dyn Fn(&mut Vec<Line>), want: Result<(&str, Class), &str>| {
+            let mut l = lines.clone();
+            edit(&mut l);
+            let bytes = write(&h, &l);
+            let folded = fold_bytes(&bytes, &log);
+            match (want, &folded.verdict) {
+                (Ok((verdict, class)), _) => assert_eq!(
+                    (verdict_name(&folded.verdict), folded.classes.as_slice()),
+                    (verdict, [class].as_slice()),
+                    "{name}"
+                ),
+                (Err(why), Verdict::Void(Void::Incoherent { why: w, .. })) => {
+                    assert_eq!(*w, why, "{name}")
+                }
+                (Err(why), other) => panic!("{name}: wanted {why}, folded {other:?}"),
+            }
+            cases.push(case(name, &bytes, &log, &folded));
+        };
+    let edited = |e: &'static dyn Fn(&mut journal::Answer)| move |l: &mut Vec<Line>| reported(l, e);
+    check("ready, refused, on time", &|_| {}, Ok(("fail", Root)));
+    check(
+        "never ready",
+        &edited(&|a| a.unsent.as_mut().unwrap().handed = None),
+        Ok(("void:undecided", Undecided)),
+    );
+    check(
+        "never refused",
+        &edited(&|a| {
+            let u = a.unsent.as_mut().unwrap();
+            u.refused = 0;
+            u.refused_by = None;
+        }),
+        Ok(("void:undecided", Undecided)),
+    );
+    check(
+        "its lag at J",
+        &edited(&|a| a.unsent.as_mut().unwrap().lag = J),
+        Ok(("fail", Root)),
+    );
+    check(
+        "its lag past J",
+        &edited(&|a| a.unsent.as_mut().unwrap().lag = J + 1),
+        Ok(("void:undecided", Undecided)),
+    );
+    check(
+        "a hand-off and its lag at J",
+        &move |l: &mut Vec<Line>| {
+            reported(l, &move |a| {
+                let u = a.unsent.as_mut().unwrap();
+                u.handed = Some(dispatched + 100);
+                u.lag = J - 100;
+            })
+        },
+        Ok(("fail", Root)),
+    );
+    check(
+        "a hand-off and its lag past J",
+        &move |l: &mut Vec<Line>| {
+            reported(l, &move |a| {
+                let u = a.unsent.as_mut().unwrap();
+                u.handed = Some(dispatched + 100);
+                u.lag = J - 99;
+            })
+        },
+        Ok(("void:undecided", Undecided)),
+    );
+    check(
+        "an early reply found late",
+        &edited(&|a| {
+            a.found = Some(journal::Found {
+                absent: a.at - 1,
+                deadline: a.at - 1,
+            });
+            a.unsent = None;
+        }),
+        Ok(("void:undecided", Undecided)),
+    );
+    check(
+        "an early reply found in its look's microsecond",
+        &edited(&|a| {
+            a.found = Some(journal::Found {
+                absent: a.at,
+                deadline: a.at - 1,
+            });
+            a.unsent = None;
+        }),
+        Ok(("void:undecided", Undecided)),
+    );
+    check(
+        "no report",
+        &|l: &mut Vec<Line>| l.retain(|x| !matches!(x, Line::Answer(a) if a.unsent.is_some())),
+        Err("a never-sent censor without its closing report"),
+    );
+    check(
+        "two reports",
+        &|l: &mut Vec<Line>| {
+            let r = l
+                .iter()
+                .find(|x| matches!(x, Line::Answer(a) if a.unsent.is_some()))
+                .cloned()
+                .unwrap();
+            l.push(r);
+        },
+        Err("a closing report without its never-sent censor"),
+    );
+    check(
+        "a report at its deadline",
+        &edited(&|a| a.at -= 1),
+        Err("a closing report against its censor"),
+    );
+    check(
+        "a refusal's kind with none counted",
+        &edited(&|a| a.unsent.as_mut().unwrap().refused = 0),
+        Err("a closing report against its path"),
+    );
+    check(
+        "connected, never ready",
+        &edited(&|a| {
+            let u = a.unsent.as_mut().unwrap();
+            u.connected = u.handed;
+            u.handed = None;
+        }),
+        Err("a closing report against its path"),
+    );
+    check(
+        "a lag past its path",
+        &edited(&|a| a.unsent.as_mut().unwrap().lag = a.at + 1),
+        Err("a closing report against its path"),
+    );
+    check(
+        "a report with an answer's content",
+        &edited(&|a| a.status = Some(200)),
+        Err("a closing report with an answer's content"),
+    );
+    let reached = by_definition(&cases);
+    for counter in [
+        "unsent_root",
+        "unsent_unready",
+        "unsent_unrefused",
+        "unsent_late",
+        "unsent_found",
+    ] {
+        assert!(
+            reached.contains(&format!("'{counter}'")),
+            "{counter}: {reached}"
+        );
+    }
+    // A report of a sent censor has none to close.
+    let sent = golden_journals()
+        .into_iter()
+        .find(|g| g.name == "censored_written_slowly")
+        .unwrap();
+    let (sh, mut sl) = read_lines(&sent.bytes);
+    let mut r = lines
+        .iter()
+        .find(|x| matches!(x, Line::Answer(a) if a.unsent.is_some()))
+        .cloned()
+        .unwrap();
+    if let Line::Answer(a) = &mut r {
+        a.at = latest(&sl) + 1;
+    }
+    sl.push(r);
+    let folded = fold_bytes(&write(&sh, &sl), &sent.log);
+    assert!(
+        matches!(&folded.verdict, Verdict::Void(Void::Incoherent { why, .. }) if *why == "a closing report without its never-sent censor"),
+        "{:?}",
+        folded.verdict
+    );
 }

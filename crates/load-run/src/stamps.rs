@@ -11,14 +11,16 @@
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 
 use ascetic_ddd_command_log::record::Record;
-use ascetic_ddd_scheduler::frontier::{Below, Frontier, Hold};
+use ascetic_ddd_scheduler::frontier::{Below, Frontier, Hold, Left};
 use ascetic_ddd_scheduler::journal::{Code, FaultClass};
-use ascetic_ddd_scheduler::machine::{Captured, Found, Judgement, Line, Seen};
+use ascetic_ddd_scheduler::machine::{
+    self, Captured, Found, Judgement, Line, Refusal, Seen, Unsent,
+};
 use tokio::sync::Notify;
 use tokio::task::AbortHandle;
 
@@ -248,6 +250,9 @@ pub(crate) struct Path {
     on: AtomicU8,
     start: AtomicU64,
     lag: AtomicU64,
+    /// The frontier pushed its `Sent` (decision 19): a censor of it is the
+    /// stand's to answer for, no report owed.
+    sent: AtomicBool,
 }
 
 impl Path {
@@ -467,6 +472,10 @@ pub struct Attempt<C: Clock> {
     done: bool,
     /// Its send path's lag (decision 18).
     path: Arc<Path>,
+    /// When it was ready to connect, decorated, and handed to a connection:
+    /// a never-sent attempt's report (decision 19).
+    ready: Option<u64>,
+    connected_at: Option<u64>,
     /// The last instant it knew its answer had not come (decision 17): its
     /// hand-off, its request's hand-over, a look that found the answer
     /// incomplete.
@@ -496,6 +505,8 @@ impl<C: Clock> Attempt<C> {
             hold: None,
             done: false,
             path: Arc::new(Path::default()),
+            ready: None,
+            connected_at: None,
             absent: dispatched,
         }
     }
@@ -572,6 +583,7 @@ impl<C: Clock> Attempt<C> {
             let (mut g, now) = self.stamps.lock();
             g.frontier.connected(now, line, attempt);
             self.absent = now;
+            self.connected_at = Some(now);
             self.path.move_to(CONNECTION, now)
         };
         // Only a path on its attempt is handed to a connection: one handed
@@ -584,6 +596,55 @@ impl<C: Clock> Attempt<C> {
                 detail: "connected while not on its attempt".to_owned(),
             });
         }
+    }
+
+    /// Ready to connect, its frame built and decorated (decision 19): its
+    /// hand-off, the path's start — the lag before it, the decoration's, the
+    /// hand-off's gap already (decision 19 resets it).
+    pub(crate) fn decorated(&mut self) {
+        self.handed();
+        self.path.lag.store(0, Ordering::SeqCst);
+        self.ready = Some(self.absent);
+    }
+
+    /// Whether the frontier pushed its `Sent`.
+    pub fn was_sent(&self) -> bool {
+        self.path.sent.load(Ordering::SeqCst)
+    }
+
+    /// Its closing report, never sent (decision 19): its path as it stands,
+    /// the peer's refusals, where it stood — `code` a dotted name.
+    pub fn report(&self, code: &str, refused: u32, refused_by: Option<Refusal>) -> Unsent {
+        Unsent {
+            handed: self.ready,
+            connected: self.connected_at,
+            lag: self.path.lag(),
+            refused,
+            refused_by,
+            code: machine::Code::of(code),
+        }
+    }
+
+    /// Censored and never sent, its closing report pushed (decision 19):
+    /// after its deadline — at or before it, a fault.
+    pub fn left(mut self, unsent: Unsent) {
+        let (line, attempt) = (self.line, self.attempt);
+        self.done = true;
+        let refused = {
+            let (mut g, now) = self.stamps.lock();
+            g.frontier.left(now, line, attempt, unsent).err()
+        };
+        match refused {
+            None => {}
+            Some(Left::Below(b)) => self.stamps.fault(Harness::Below(b)),
+            Some(Left::Early { at, deadline }) => self.stamps.fault(Harness::Carrier {
+                line,
+                attempt,
+                cannot: "path.early_report",
+                detail: format!("reported at {at} µs, its deadline {deadline} µs"),
+            }),
+        }
+        self.stamps.notify();
     }
 
     /// Its request handed back unsent: the path's lag goes on on its own
@@ -700,7 +761,11 @@ fn sent<C: Clock>(stamps: &Stamps<C>, path: &Path, line: Line, attempt: u32) {
     stamps.push(|f, now| {
         f.lag(line, attempt, path.lag());
         let _ = path.move_to(OFF, now);
-        f.sent(now, line, attempt)
+        let pushed = f.sent(now, line, attempt)?;
+        if pushed {
+            path.sent.store(true, Ordering::SeqCst);
+        }
+        Ok(())
     });
 }
 

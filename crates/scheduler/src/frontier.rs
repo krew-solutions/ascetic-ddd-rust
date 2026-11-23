@@ -29,7 +29,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use crate::machine::{Input, Judgement, Line, Seen};
+use crate::machine::{Input, Judgement, Line, Seen, Unsent};
 use crate::order::Ordered;
 
 /// An answer being read and judged: its attempt, the instant it arrived, and
@@ -62,6 +62,31 @@ pub struct Below {
     pub at: u64,
     /// What was released.
     pub released: u64,
+}
+
+/// Why a closing report was refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Left {
+    /// Stamped below what was released.
+    Below(Below),
+    /// At or before its attempt's deadline: it would be taken for its answer.
+    Early {
+        /// Its stamp.
+        at: u64,
+        /// The attempt's deadline.
+        deadline: u64,
+    },
+}
+
+impl fmt::Display for Left {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Left::Below(b) => write!(f, "{b}"),
+            Left::Early { at, deadline } => {
+                write!(f, "a closing report at {at} µs, its deadline {deadline} µs")
+            }
+        }
+    }
 }
 
 impl fmt::Display for Below {
@@ -217,13 +242,14 @@ impl Frontier {
         }
     }
 
-    /// Its bytes left at `now`: pushed if before its deadline, once.
-    pub fn sent(&mut self, now: u64, line: Line, attempt: u32) -> Result<(), Below> {
+    /// Its bytes left at `now`: pushed if before its deadline, once —
+    /// whether it was.
+    pub fn sent(&mut self, now: u64, line: Line, attempt: u32) -> Result<bool, Below> {
         let Some(o) = self.open.get_mut(&(line, attempt)) else {
-            return Ok(());
+            return Ok(false);
         };
         if o.sent || o.arrived || now >= o.deadline {
-            return Ok(());
+            return Ok(false);
         }
         o.sent = true;
         let (handed, connected, lag) = (o.handed, o.connected, o.lag);
@@ -237,6 +263,7 @@ impl Frontier {
                 lag,
             },
         )
+        .map(|()| true)
     }
 
     /// Its answer arrived at `now`: held until it is judged. Past its deadline
@@ -302,12 +329,34 @@ impl Frontier {
         )
     }
 
-    /// Forgets an attempt nothing more will come of: its connection abandoned
-    /// after its censor.
-    pub fn close(&mut self, line: Line, attempt: u32) {
-        if let Some(o) = self.open.remove(&(line, attempt)) {
-            self.deadlines.remove(&(o.deadline, line, attempt));
+    /// A never-sent attempt's closing report at `now` (ADR-0047 decision 19):
+    /// after its censor — censored first if the drain has not reached its
+    /// deadline — never at or before the deadline, where it would be taken
+    /// for the attempt's answer.
+    pub fn left(&mut self, now: u64, line: Line, attempt: u32, unsent: Unsent) -> Result<(), Left> {
+        if let Some(o) = self.open.get(&(line, attempt)) {
+            let deadline = o.deadline;
+            if now <= deadline {
+                return Err(Left::Early { at: now, deadline });
+            }
+            self.deadlines.remove(&(deadline, line, attempt));
+            self.open.remove(&(line, attempt));
+            self.push(deadline, unknown(line, attempt))
+                .map_err(Left::Below)?;
         }
+        self.push(
+            now,
+            Input::Ended {
+                line,
+                attempt,
+                judgement: Judgement::Unknown,
+                seen: Seen {
+                    unsent: Some(unsent),
+                    ..Seen::default()
+                },
+            },
+        )
+        .map_err(Left::Below)
     }
 
     /// What may be taken: everything pushed through the least of `now − 1` —

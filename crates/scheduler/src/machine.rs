@@ -54,6 +54,41 @@ pub struct Seen {
     /// the last instant the shell knew it had not come, and its attempt's
     /// deadline.
     pub found: Option<Found>,
+    /// A never-sent attempt's closing report, pushed after its censor
+    /// (decision 19, journal version 7): no answer, its path.
+    pub unsent: Option<Unsent>,
+}
+
+/// A never-sent attempt's path to its censor (ADR-0047 decision 19): what
+/// tells the stand's refusal from the harness's lateness, read once its
+/// source's thread could tell — never at the censor, made on the machine's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unsent {
+    /// When it was ready to connect — decorated; none if it never was.
+    pub handed: Option<u64>,
+    /// When its request was handed to a connection, if ever.
+    pub connected: Option<u64>,
+    /// Its source thread's lag on its path, in microseconds (decision 18).
+    pub lag: u64,
+    /// Connects the peer refused by its own act.
+    pub refused: u32,
+    /// The last of them, if any.
+    pub refused_by: Option<Refusal>,
+    /// Where it stood: a dotted name its carrier chooses.
+    pub code: Code,
+}
+
+/// How the peer refused a connect, by its own act.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// No listener: refused.
+    Refused,
+    /// Reset while connecting.
+    Reset,
+    /// Aborted while connecting.
+    Aborted,
+    /// A fresh connection closed by the peer before a byte of it was sent.
+    Closed,
 }
 
 /// Where a late answer was not, and its attempt's deadline: it arrived in

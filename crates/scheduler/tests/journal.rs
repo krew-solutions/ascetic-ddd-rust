@@ -183,7 +183,7 @@ fn fault_kind(f: &FaultClass) -> usize {
 #[test]
 fn the_golden_holds_every_variant() {
     let (_, lines) = read_all(GOLDEN).unwrap();
-    let mut seen: [BTreeSet<usize>; 12] = Default::default();
+    let mut seen: [BTreeSet<usize>; 13] = Default::default();
     // The header and the trailer are lines of every journal.
     seen[0].extend([0, 8]);
     let mut options = BTreeSet::new();
@@ -207,6 +207,20 @@ fn the_golden_holds_every_variant() {
                 seen[10].insert(code_kind(&a.code));
                 options.insert(("status", a.status.is_some()));
                 options.insert(("after", a.after.is_some()));
+                // Version 7's closing report, each of its options, every
+                // refusal's kind.
+                options.insert(("unsent", a.unsent.is_some()));
+                if let Some(u) = &a.unsent {
+                    options.insert(("handed", u.handed.is_some()));
+                    options.insert(("connected", u.connected.is_some()));
+                    seen[12].insert(match u.refused_by {
+                        None => 0,
+                        Some(journal::Refusal::Refused) => 1,
+                        Some(journal::Refusal::Reset) => 2,
+                        Some(journal::Refusal::Aborted) => 3,
+                        Some(journal::Refusal::Closed) => 4,
+                    });
+                }
             }
             Line::End(e) => {
                 seen[5].insert(end_kind(e.end));
@@ -228,7 +242,7 @@ fn the_golden_holds_every_variant() {
             Line::Trailer(_) => unreachable!("the reader hands no trailer out"),
         }
     }
-    let counts = [9, 2, 3, 4, 4, 6, 3, 16, 5, 3, 3, 2];
+    let counts = [9, 2, 3, 4, 4, 6, 3, 16, 5, 3, 3, 2, 5];
     for (i, n) in counts.iter().enumerate() {
         assert_eq!(seen[i], (0..*n).collect(), "enum {i}");
     }
@@ -241,6 +255,9 @@ fn the_golden_holds_every_variant() {
         "cause",
         "status",
         "after",
+        "unsent",
+        "handed",
+        "connected",
     ] {
         assert!(
             options.contains(&(name, true)) && options.contains(&(name, false)),
@@ -591,6 +608,7 @@ fn an_answer_journals_what_came_back() {
                 after: Some(5_000_000),
                 censored: false,
                 found: None,
+                unsent: None,
             },
             (
                 Some(503),
@@ -605,6 +623,7 @@ fn an_answer_journals_what_came_back() {
                 after: None,
                 censored: false,
                 found: None,
+                unsent: None,
             },
             (Some(400), Some(Code::Other), None),
         ),

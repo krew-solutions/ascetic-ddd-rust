@@ -319,3 +319,63 @@ fn a_send_carries_the_path_its_attempt_reported() {
         .any(|(_, i)| matches!(i, Input::Ended { seen, .. } if seen.censored));
     assert!(censored);
 }
+
+/// Decision 19: a never-sent attempt's closing report — refused at or before
+/// its deadline, where the machine would take it for the attempt's answer;
+/// past it, after its censor: the censor pushed first if the drain has not
+/// reached the deadline, and none twice.
+#[test]
+fn a_closing_report_follows_its_censor() {
+    use ascetic_ddd_scheduler::frontier::Left;
+    use ascetic_ddd_scheduler::machine::{Code, Unsent};
+    let unsent = || Unsent {
+        handed: Some(5),
+        connected: None,
+        lag: 0,
+        refused: 0,
+        refused_by: None,
+        code: Code::Named("rest.connecting".to_owned()),
+    };
+    let censors = |out: &[(u64, Input)]| -> Vec<u64> {
+        out.iter()
+            .filter_map(|(at, i)| match i {
+                Input::Ended { seen, .. } if seen.censored => Some(*at),
+                _ => None,
+            })
+            .collect()
+    };
+    let report = |out: &[(u64, Input)]| -> Vec<u64> {
+        out.iter()
+            .filter_map(|(at, i)| match i {
+                Input::Ended { seen, .. } if seen.unsent.is_some() => Some(*at),
+                _ => None,
+            })
+            .collect()
+    };
+    // At its deadline: refused.
+    let mut f = Frontier::new();
+    f.open(0, 2, 1, 1_000);
+    assert_eq!(
+        f.left(1_000, 2, 1, unsent()),
+        Err(Left::Early {
+            at: 1_000,
+            deadline: 1_000
+        })
+    );
+    // Past it, the drain not there: the censor first, then the report.
+    let mut f = Frontier::new();
+    f.open(0, 2, 1, 1_000);
+    f.left(1_001, 2, 1, unsent()).unwrap();
+    let out = f.drain(2_000, true);
+    assert_eq!(censors(&out), vec![1_000]);
+    assert_eq!(report(&out), vec![1_001]);
+    // Past a censor already drained: the report alone.
+    let mut f = Frontier::new();
+    f.open(0, 2, 1, 1_000);
+    let censored = f.drain(1_000, true);
+    assert_eq!(censors(&censored), vec![1_000]);
+    f.left(1_001, 2, 1, unsent()).unwrap();
+    let out = f.drain(2_000, true);
+    assert!(censors(&out).is_empty());
+    assert_eq!(report(&out), vec![1_001]);
+}

@@ -11,7 +11,9 @@ use ascetic_ddd_command_log::record::{Action, Dep, Header, Hole, Probe, Record, 
 
 use crate::frontier::Frontier;
 use crate::journal;
-use crate::machine::{Captured, End, Entry, Input, Judgement, Line, Machine, Output, Seen};
+use crate::machine::{
+    Captured, Code, End, Entry, Input, Judgement, Line, Machine, Output, Refusal, Seen, Unsent,
+};
 use crate::order::Ordered;
 
 /// What becomes of one attempt.
@@ -187,6 +189,47 @@ enum Event {
         judgement: Judgement,
         after: Option<u64>,
     },
+    /// A never-sent attempt's closing report (ADR-0047 decision 19).
+    Left {
+        line: Line,
+        attempt: u32,
+        unsent: Unsent,
+    },
+}
+
+/// The closing report `sim` draws for a never-sent attempt dispatched at
+/// `dispatched` — and the shell's scripted carrier, so that both write the
+/// same bytes: every side of the fold's rule over the lines, by their numbers
+/// (ADR-0047 decision 19). No lag: `sim`'s time is virtual.
+pub fn drawn_unsent(line: Line, attempt: u32, dispatched: u64) -> Unsent {
+    let a = u64::from(attempt);
+    let refused = u32::try_from(line.wrapping_add(a.wrapping_mul(2)) % 3).unwrap_or(0);
+    Unsent {
+        handed: (line.wrapping_add(a) % 4 != 0).then_some(dispatched),
+        connected: None,
+        lag: 0,
+        refused,
+        refused_by: (refused > 0).then_some(match line % 4 {
+            0 => Refusal::Refused,
+            1 => Refusal::Reset,
+            2 => Refusal::Aborted,
+            _ => Refusal::Closed,
+        }),
+        code: Code::Named("sim.unsent".to_owned()),
+    }
+}
+
+/// A never-sent attempt's report, a microsecond past its deadline: after
+/// its censor, as the shell's.
+fn left(timeline: &mut Timeline, line: Line, attempt: u32, dispatched: u64, deadline: u64) {
+    timeline.add(
+        deadline.saturating_add(1),
+        Event::Left {
+            line,
+            attempt,
+            unsent: drawn_unsent(line, attempt, dispatched),
+        },
+    );
 }
 
 /// The handlers' events to come, given to the frontier as their instants come
@@ -219,7 +262,19 @@ impl Timeline {
                 break;
             }
             match entry.remove() {
-                Event::Sent { line, attempt } => frontier.sent(at, line, attempt).map_err(below)?,
+                Event::Sent { line, attempt } => {
+                    frontier.sent(at, line, attempt).map_err(below)?;
+                }
+                Event::Left {
+                    line,
+                    attempt,
+                    unsent,
+                } => frontier
+                    .left(at, line, attempt, unsent)
+                    .map_err(|e| LogError::Malformed {
+                        line: 0,
+                        reason: e.to_string(),
+                    })?,
                 Event::Answer {
                     line,
                     attempt,
@@ -285,6 +340,8 @@ impl Handler for Scripted<'_> {
         let sent = at.saturating_add(a.sent_after);
         if sent < deadline {
             timeline.add(sent, Event::Sent { line, attempt });
+        } else {
+            left(timeline, line, attempt, at, deadline);
         }
         // An attempt whose bytes never left is answered by nobody.
         let answered = (sent < deadline)
@@ -679,15 +736,7 @@ impl Handler for Stand<'_> {
         let (sent_after, there, back) = (self.delays)(line, attempt);
         let sent = at.saturating_add(sent_after);
         if sent >= deadline {
-            answer(
-                timeline,
-                line,
-                attempt,
-                None,
-                deadline,
-                Judgement::Unknown,
-                None,
-            );
+            left(timeline, line, attempt, at, deadline);
             return;
         }
         timeline.add(sent, Event::Sent { line, attempt });

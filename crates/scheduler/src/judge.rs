@@ -107,6 +107,7 @@ impl Judged {
             after: self.retry_after,
             censored: false,
             found: None,
+            unsent: None,
         }
     }
 }
