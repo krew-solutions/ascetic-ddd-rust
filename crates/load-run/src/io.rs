@@ -7,7 +7,9 @@
 //! runtime, so no flush comes between. The first flush of the socket that
 //! succeeds after the request is armed is therefore the instant its last byte
 //! left: `Sent` (the REST twins hold hyper to it: `Sent` is the instant the
-//! stub saw the last byte, writes held back and cut short). The first byte
+//! stub saw the last byte, writes held back and cut short) — once a byte of
+//! it was accepted: hyper flushes an empty buffer too, on a connection the
+//! stand closed while it sat idle, before it hands the request back. The first byte
 //! accepted is the commit point: before it, a request handed back is no
 //! attempt's end and goes on another connection; after it, an error is the
 //! system's Unknown. Reads fill hyper's buffer by copy, never by an
@@ -63,7 +65,14 @@ impl Probe {
     }
 
     fn flushed(&self) {
-        let hook = self.lock().hook.take();
+        // hyper flushes an empty buffer too — a connection the stand closed
+        // while it sat idle, before it hands the request back (decision 18):
+        // only a flush after a byte of the armed request was accepted is its
+        // last byte's.
+        let hook = {
+            let mut a = self.lock();
+            if a.written == 0 { None } else { a.hook.take() }
+        };
         if let Some(hook) = hook {
             hook();
         }

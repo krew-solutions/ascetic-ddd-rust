@@ -408,3 +408,117 @@ fn the_timed_wait_s_lateness() {
         late[late.len() - 1]
     );
 }
+
+/// The judge's time on answers of a cap (decision 16's owed measurement):
+/// documents of four shapes — a flat object, an object of small objects, an
+/// array of zeros, an array of strings of escapes — filling each cap, a
+/// capture at the last member making each parsed; read, judged and dropped
+/// on the real clock, the median of five after one warm-up, and the parse
+/// alone.
+#[test]
+#[ignore]
+fn the_judge_s_time_at_the_cap() {
+    use ascetic_ddd_command_log::answer::{self, Reply};
+    use ascetic_ddd_command_log::fills::Fills;
+    use ascetic_ddd_command_log::record::{Capture, Source, Subject};
+    use ascetic_ddd_scheduler::judge::{Contract, Transport, judge};
+    // A document of `cap` bytes at most, and the pointer to its last member.
+    fn shape(kind: &str, cap: usize) -> (String, String) {
+        let (open, close) = if kind.starts_with("array") {
+            ("[", "]")
+        } else {
+            ("{", "}")
+        };
+        let mut body = String::from(open);
+        let mut last = String::new();
+        for i in 0u64.. {
+            let member = match kind {
+                "flat" => format!("\"k{i}\":{i}"),
+                "objects" => format!("\"k{i}\":{{\"v\":{i},\"s\":\"x{i}\"}}"),
+                "array of zeros" => "0".to_owned(),
+                _ => "\"\\u00e9\\n\\t\\\"\\\\\"".to_owned(),
+            };
+            let sep = if i == 0 { "" } else { "," };
+            if body.len() + sep.len() + member.len() + close.len() > cap {
+                break;
+            }
+            body.push_str(sep);
+            body.push_str(&member);
+            last = match kind {
+                "flat" => format!("/k{i}"),
+                "objects" => format!("/k{i}/v"),
+                _ => format!("/{i}"),
+            };
+        }
+        body.push_str(close);
+        (body, last)
+    }
+    let headers = vec![("content-type".to_owned(), b"application/json".to_vec())];
+    let clock = RealClock::start(2_000).unwrap();
+    let secret = RunSecret::new([7; 32]);
+    let fills = Fills {
+        namespace: NAMESPACE,
+        secret: &secret,
+        run_start: 0,
+        sent: 0,
+        captured: &[],
+    };
+    let median = |mut v: Vec<u64>| {
+        v.sort_unstable();
+        v[v.len() / 2]
+    };
+    for cap in [4usize << 10, 16 << 10, 64 << 10, 256 << 10, 1 << 20] {
+        for kind in ["flat", "objects", "array of zeros", "array of escapes"] {
+            let (body, last) = shape(kind, cap);
+            let mut r = call("read", 1, 0, 0, 0);
+            r.capture.push(Capture {
+                subject: Subject {
+                    kind: "device".into(),
+                    scope: vec![],
+                    index: 0,
+                },
+                slot: "group".into(),
+                source: Source::Json(last.as_str().into()),
+                secret: false,
+            });
+            let (mut parse, mut took) = (Vec::new(), Vec::new());
+            for n in 0..6 {
+                let start = clock.now();
+                drop(ascetic_ddd_command_log::json::parse(body.as_bytes()).unwrap());
+                let parsed = clock.now() - start;
+                let start = clock.now();
+                let reply = Reply {
+                    status: 200,
+                    headers: &headers,
+                    body: Some(body.as_bytes()),
+                };
+                let judged = judge(
+                    &r,
+                    Contract {
+                        not_run: &[],
+                        problem: "/code",
+                    },
+                    &fills,
+                    &Transport::Answered(answer::read(&reply)),
+                )
+                .unwrap();
+                let expected = matches!(judged.judgement, Judgement::Expected(_));
+                drop(judged);
+                let t = clock.now() - start;
+                assert!(expected, "{kind} at {cap}");
+                if n > 0 {
+                    parse.push(parsed);
+                    took.push(t);
+                }
+            }
+            eprintln!(
+                "judge: cap {:>4} KiB {kind:>16} ({:>7} bytes): read+judge+drop p50 {:>6} µs, parse p50 {:>6} µs, {:.1} ns/B",
+                cap >> 10,
+                body.len(),
+                median(took.clone()),
+                median(parse),
+                median(took) as f64 * 1_000.0 / body.len() as f64
+            );
+        }
+    }
+}

@@ -333,9 +333,16 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
             deadline: a.deadline(),
             wall: wall(a.clock().now()),
         };
-        let decorated = match self.decorator.decorate(view).await {
-            Ok(d) => d,
-            Err(why) => return a.fault(format!("its decorator: {why}")),
+        // Every await of an attempt races its deadline: a decorator that
+        // never answers ends it unsent, censored, never past it (decision 18).
+        let past = a.deadline().saturating_add(1);
+        let decorated = tokio::select! {
+            biased;
+            d = self.decorator.decorate(view) => match d {
+                Ok(d) => d,
+                Err(why) => return a.fault(format!("its decorator: {why}")),
+            },
+            () = a.clock().sleep_until(past) => return a.unanswered(),
         };
         for (name, value) in &decorated {
             if !op.decorated.iter().any(|d| d.eq_ignore_ascii_case(name)) {
@@ -355,7 +362,6 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
         let deadline = a.deadline();
         // An answer stamped at the deadline is taken: the attempt leaves only
         // past it, and the frontier censors at it what had none.
-        let past = deadline.saturating_add(1);
         let mut looks = Looks {
             pre: Some(deadline.saturating_sub(header.profile.jitter / 2)),
             past,
@@ -381,7 +387,12 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
                         a.clock().sleep_until(next).await;
                     }
                     connected_last = Some(a.clock().now());
-                    match self.connect(rest.source, &route).await {
+                    let connecting = self.connect(rest.source, &route);
+                    match tokio::select! {
+                        biased;
+                        c = connecting => c,
+                        () = a.clock().sleep_until(past) => return a.unanswered(),
+                    } {
                         Ok(c) => c,
                         Err(_) => continue,
                     }

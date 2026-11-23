@@ -118,7 +118,7 @@ impl std::error::Error for Harness {}
 
 pub(crate) struct State {
     pub(crate) frontier: Frontier,
-    fault: Option<Harness>,
+    pub(crate) fault: Option<Harness>,
     /// Attempt handles alive: an attempt pushes its end before its handle
     /// goes, so none alive, read with the frontier, is none to come.
     pub(crate) alive: usize,
@@ -384,15 +384,18 @@ impl<C: Clock> Attempt<C> {
 
 impl<C: Clock> Drop for Attempt<C> {
     fn drop(&mut self) {
+        let dropped = !self.done || self.hold.is_some();
         {
             let (mut g, _) = self.stamps.lock();
+            // Raised before it leaves the count, under the one lock: the loop
+            // that reads none alive reads the fault with it (decision 18).
+            if dropped {
+                g.fault.get_or_insert(Harness::Dropped {
+                    line: self.line,
+                    attempt: self.attempt,
+                });
+            }
             g.alive = g.alive.saturating_sub(1);
-        }
-        if !self.done || self.hold.is_some() {
-            self.stamps.fault(Harness::Dropped {
-                line: self.line,
-                attempt: self.attempt,
-            });
         }
         self.stamps.notify();
     }

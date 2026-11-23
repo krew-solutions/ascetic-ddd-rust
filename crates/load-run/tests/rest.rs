@@ -184,6 +184,9 @@ struct Throttled {
     fail: Option<usize>,
     requests: Arc<AtomicUsize>,
     broken: bool,
+    /// From this instant its reads end, with no wake of their own: a close
+    /// by the stand of an idle connection, seen when the client next polls.
+    eof: Option<u64>,
 }
 
 impl AsyncRead for Throttled {
@@ -192,6 +195,9 @@ impl AsyncRead for Throttled {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        if self.eof.is_some_and(|at| self.clock.now() >= at) {
+            return Poll::Ready(Ok(()));
+        }
         Pin::new(&mut self.inner).poll_read(cx, buf)
     }
 }
@@ -271,6 +277,9 @@ struct Pipe {
     /// with no byte accepted: its connection gone under it.
     fail: Option<usize>,
     requests: Arc<AtomicUsize>,
+    /// The first connection's reads end at this instant, unwoken.
+    eof: Option<u64>,
+    connects: Arc<AtomicUsize>,
 }
 
 impl Egress for Pipe {
@@ -286,9 +295,16 @@ impl Egress for Pipe {
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
             .is_ok();
         let (fail, requests) = (self.fail, self.requests.clone());
+        let eof = self
+            .eof
+            .filter(|_| self.connects.fetch_add(1, Ordering::SeqCst) == 0);
         async move {
             if refused {
                 return Err(io::Error::from(io::ErrorKind::ConnectionRefused));
+            }
+            // Never, for `u64::MAX`: a stand dropping every SYN.
+            if connect == u64::MAX {
+                std::future::pending::<()>().await;
             }
             let until = stub.clock.now() + connect;
             stub.clock.sleep_until(until).await;
@@ -306,6 +322,7 @@ impl Egress for Pipe {
                 fail,
                 requests,
                 broken: false,
+                eof,
             })
         }
     }
@@ -361,6 +378,7 @@ fn run_rest_connecting(
         connect,
         0,
         None,
+        None,
         &|_| {},
     )
 }
@@ -376,6 +394,7 @@ fn run_rest_with(
     connect: u64,
     refuse: usize,
     fail: Option<usize>,
+    eof: Option<u64>,
     tune: &dyn Fn(&mut Config),
 ) -> (Result<Vec<Line>, RunError>, Vec<Came>, usize) {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -402,6 +421,8 @@ fn run_rest_with(
                 refuse: Arc::new(AtomicUsize::new(refuse)),
                 fail,
                 requests: Arc::new(AtomicUsize::new(0)),
+                eof,
+                connects: Arc::new(AtomicUsize::new(0)),
             },
             {
                 let mut c = Config::new(NAMESPACE, RunSecret::new([7; 32]), clock.wall());
@@ -865,6 +886,8 @@ fn over_rest_the_shell_journals_what_sim_journals() {
                             refuse: Arc::new(AtomicUsize::new(0)),
                             fail: None,
                             requests: Arc::new(AtomicUsize::new(0)),
+                            eof: None,
+                            connects: Arc::new(AtomicUsize::new(0)),
                         },
                         Config::new(NAMESPACE, RunSecret::new([7; 32]), clock.wall()),
                     ),
@@ -1076,6 +1099,8 @@ fn looked(lags: &[(u64, u64)], answer: Answer) -> Vec<Line> {
                 refuse: Arc::new(AtomicUsize::new(0)),
                 fail: None,
                 requests: Arc::new(AtomicUsize::new(0)),
+                eof: None,
+                connects: Arc::new(AtomicUsize::new(0)),
             },
             Config::new(NAMESPACE, RunSecret::new([7; 32]), inner.wall()),
         );
@@ -1151,6 +1176,10 @@ struct Proofs {
 
 impl Decorator for Proofs {
     async fn decorate<'a>(&'a self, _: Decoration<'a>) -> Result<Vec<(String, String)>, String> {
+        // Never, for `u64::MAX`: a host's minting over a dead IdP.
+        if self.takes == u64::MAX {
+            std::future::pending::<()>().await;
+        }
         let until = self.clock.now() + self.takes;
         self.clock.sleep_until(until).await;
         let n = self.minted.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1248,6 +1277,8 @@ fn run_decorated(
                 refuse: Arc::new(AtomicUsize::new(0)),
                 fail: None,
                 requests: Arc::new(AtomicUsize::new(0)),
+                eof: None,
+                connects: Arc::new(AtomicUsize::new(0)),
             },
             proofs,
             Config::new(NAMESPACE, RunSecret::new([7; 32]), clock.wall()),
@@ -1604,6 +1635,7 @@ fn refused_connects_are_tried_a_floor_apart() {
         0,
         2,
         None,
+        None,
         &|_| {},
     );
     let journal = journal.unwrap();
@@ -1628,6 +1660,7 @@ fn refused_connects_are_tried_a_floor_apart() {
         AT_ONCE,
         0,
         100,
+        None,
         None,
         &|_| {},
     );
@@ -1654,6 +1687,7 @@ fn an_idle_connection_is_retired_before_the_gateway_s_idle() {
             0,
             0,
             None,
+            None,
             &tune,
         );
         journal.unwrap();
@@ -1668,6 +1702,7 @@ fn an_idle_connection_is_retired_before_the_gateway_s_idle() {
         AT_ONCE,
         0,
         0,
+        None,
         None,
         &tune,
     );
@@ -1691,6 +1726,7 @@ fn a_request_no_byte_of_which_left_goes_on_the_next_connection() {
         0,
         0,
         Some(2),
+        None,
         &|_| {},
     );
     let journal = journal.unwrap();
@@ -1699,4 +1735,57 @@ fn a_request_no_byte_of_which_left_goes_on_the_next_connection() {
     assert_eq!(ids, vec![id(&records[0], 1), id(&records[1], 1)]);
     assert_eq!(end(&journal, 2).map(|e| e.0), Some(End::Expected));
     assert_eq!(end(&journal, 3).map(|e| e.0), Some(End::Expected));
+}
+
+/// Decision 18 (K2b-7a): a pooled connection the stand closed while it sat
+/// idle, seen only once the next request wakes it — hyper flushes its empty
+/// buffer, then hands the request back. No byte of it left, so no `Sent`:
+/// the request goes on the next connection and is sent when it leaves there.
+#[test]
+fn a_connection_closed_while_idle_sends_nothing() {
+    let records = vec![call("read", 1, 0, 0, 0), call("read", 2, 0, 10_000, 0)];
+    let (journal, came, opened) = run_rest_with(
+        rest_header(),
+        &records,
+        vec![ok(10, 0), ok(10, 0)],
+        AT_ONCE,
+        100,
+        0,
+        None,
+        Some(5_000),
+        &|_| {},
+    );
+    let journal = journal.unwrap();
+    assert_eq!(opened, 2);
+    let came: Vec<u64> = came
+        .iter()
+        .filter(|c| c.id == id(&records[1], 1))
+        .map(|c| c.at)
+        .collect();
+    assert_eq!(came.len(), 1);
+    assert_eq!(sent(&journal, 3), came);
+    assert_eq!(end(&journal, 3).map(|e| e.0), Some(End::Expected));
+}
+
+/// Decision 18 (K2b-7a): every await of an attempt races its deadline — a
+/// connect or a decorator that never answers leaves the attempt unsent at its
+/// deadline, censored there, and the run ends with it.
+#[test]
+fn a_connect_or_a_decorator_that_never_answers_ends_at_the_deadline() {
+    let records = vec![call("read", 1, 0, 0, 0)];
+    let connecting =
+        run_rest_connecting(rest_header(), &records, vec![ok(10, 0)], AT_ONCE, u64::MAX);
+    let decorating = run_decorated(
+        decorating(),
+        &records,
+        vec![(id(&records[0], 1), ok(10, 0))],
+        u64::MAX,
+        None,
+    );
+    for (what, (journal, came, _)) in [("connect", connecting), ("decorator", decorating)] {
+        let journal = journal.unwrap();
+        assert!(came.is_empty(), "{what}");
+        assert!(sent(&journal, 2).is_empty(), "{what}");
+        assert_eq!(end(&journal, 2).map(|e| e.0), Some(End::Unknown), "{what}");
+    }
 }

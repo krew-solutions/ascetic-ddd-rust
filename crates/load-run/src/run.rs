@@ -187,16 +187,28 @@ where
         // answer that arrives after it is stamped no earlier.
         // What the frontier holds and who may still push to it, in one read:
         // read apart, an attempt on another thread could push its end and
-        // go between them, and the run end with its answer unread.
-        let (now, work, floor, oldest, alive) = {
+        // go between them, and the run end with its answer unread. A fault
+        // is read with them: an attempt raises its own before it leaves the
+        // count (decision 18), so none alive is never read without it.
+        let (now, work, floor, oldest, alive, fault) = {
             let (g, now) = stamps.lock();
             let f = &g.frontier;
             let work = [f.next_pushed(), f.next_deadline()]
                 .into_iter()
                 .flatten()
                 .min();
-            (now, work, f.floor(), f.oldest_hold(), g.alive)
+            (
+                now,
+                work,
+                f.floor(),
+                f.oldest_hold(),
+                g.alive,
+                g.fault.clone(),
+            )
         };
+        if let Some(fault) = fault {
+            return Err(fault.into());
+        }
         // A hold older than the route timeout: a carrier stuck in its
         // judging — a fault, never a hang (decision 17).
         let stuck = oldest.map(|(since, line, attempt)| {
