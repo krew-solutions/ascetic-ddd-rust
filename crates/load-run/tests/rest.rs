@@ -1378,3 +1378,157 @@ fn no_secret_reaches_the_journal() {
     }
     assert!(text.contains("\"line\""));
 }
+
+use ascetic_ddd_command_log::record::On;
+
+/// An answer of `status`, its problem's code `code`, its wait a second.
+fn refusal(status: u16, code: &str) -> Answer {
+    Answer::Ok {
+        head: 10,
+        body: 0,
+        status,
+        headers: vec![
+            ("content-type".into(), "application/problem+json".into()),
+            ("retry-after".into(), "1".into()),
+        ],
+        bytes: format!(r#"{{"code":"{code}"}}"#).into_bytes(),
+        close: false,
+    }
+}
+
+/// The operations' safety and the codes that certify a refusal of them.
+fn certified(safety: Safety, not_run: &[&str]) -> Header {
+    let mut h = decorating();
+    for o in &mut h.operations {
+        o.safety = safety;
+        o.not_run = not_run.iter().map(|c| (*c).to_owned()).collect();
+    }
+    h
+}
+
+/// The journal of `lines` folded against `records`' log, under `header`.
+fn folded(
+    header: &Header,
+    records: &[Record],
+    lines: &[Line],
+) -> ascetic_ddd_scheduler::verdict::Folded {
+    use ascetic_ddd_scheduler::journal::{JOURNAL_VERSION, Reader, Writer};
+    use ascetic_ddd_scheduler::machine::MACHINE_REVISION;
+    use ascetic_ddd_scheduler::verdict::{Log, fold};
+    let log = String::from_utf8(bytes(header.clone(), records)).unwrap();
+    let sha256 =
+        serde_json::from_str::<serde_json::Value>(log.lines().last().unwrap()).unwrap()["trailer"]
+            ["sha256"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+    let h = journal::Header {
+        journal: JOURNAL_VERSION,
+        machine: MACHINE_REVISION,
+        source: "load-run rest".to_owned(),
+        log: sha256.clone(),
+        validator: ascetic_ddd_command_log::live::validator(),
+        read_ahead: W,
+        jitter: header.profile.jitter,
+        resend: header.profile.resend,
+        namespace: 1,
+        t0: 0,
+    };
+    let mut w = Writer::new(Vec::new(), h.clone()).unwrap();
+    for l in lines {
+        w.line(l).unwrap();
+    }
+    let bytes = w.finish().unwrap().0;
+    let open = || Reader::new(std::io::Cursor::new(bytes.clone())).unwrap();
+    fold(
+        &h,
+        &Log {
+            sha256,
+            records: records.len() as u64,
+        },
+        open(),
+        open(),
+    )
+}
+
+/// K2-4 (ADR-0047 decisions 11, 15): a refusal resent only when its code
+/// certifies it not run — a 503 with any other code, its `Retry-After`
+/// notwithstanding, is the system's unknown; `service.session_failed`, where
+/// the operation lists it, resent after its wait.
+#[test]
+fn only_a_certified_refusal_is_resent() {
+    let records = vec![call("update", 1, 0, 0, 0)];
+    let header = certified(Safety::NotTaken, &["service.session_failed"]);
+    let (journal, came, _) = run_decorated(
+        header.clone(),
+        &records,
+        vec![(id(&records[0], 1), refusal(503, "service.unavailable"))],
+        0,
+        None,
+    );
+    let journal = journal.unwrap();
+    assert_eq!(came.len(), 1, "an uncertified 503 resent");
+    let a = answer(&journal, 2).unwrap();
+    assert_eq!((a.status, a.judged), (Some(503), Judged::Unknown));
+    let (journal, came, _) = run_decorated(
+        header,
+        &records,
+        vec![
+            (id(&records[0], 1), refusal(503, "service.session_failed")),
+            (id(&records[0], 2), ok(10, 0)),
+        ],
+        0,
+        None,
+    );
+    assert_eq!(came.len(), 2);
+    assert_eq!(end(&journal.unwrap(), 2).map(|e| e.0), Some(End::Expected));
+}
+
+/// K2-4: an Envoy-shaped 504 — no problem document, a gateway's text — is the
+/// system's unknown, and the step awaiting it settled stands on doubt.
+#[test]
+fn a_gateway_s_504_leaves_its_settled_dependent_conditional() {
+    let a = call("update", 1, 0, 0, 0);
+    let b = after(call("read", 2, 0, 10, 0), &a.step, On::Settled);
+    let records = vec![a, b];
+    let header = certified(Safety::NotTaken, &["service.unavailable"]);
+    let envoy = Answer::Ok {
+        head: 10,
+        body: 0,
+        status: 504,
+        headers: vec![("content-type".into(), "text/plain".into())],
+        bytes: b"upstream request timeout".to_vec(),
+        close: false,
+    };
+    let (journal, came, _) = run_decorated(
+        header.clone(),
+        &records,
+        vec![(id(&records[0], 1), envoy), (id(&records[1], 1), ok(10, 0))],
+        0,
+        None,
+    );
+    let journal = journal.unwrap();
+    assert_eq!(came.len(), 2);
+    let f = folded(&header, &records, &journal);
+    use ascetic_ddd_scheduler::verdict::Class;
+    assert_eq!(f.classes, vec![Class::Root, Class::Inconclusive]);
+}
+
+/// K2-4: a call that is never resent, its bytes out and no answer by its
+/// deadline, is not resent: censored once, unknown.
+#[test]
+fn a_call_never_resent_is_not_resent_on_its_timeout() {
+    let mut header = certified(Safety::Never, &[]);
+    header.operations.iter_mut().for_each(|o| o.timeout = 5_000);
+    let records = vec![call("update", 1, 0, 0, 0)];
+    let (journal, came, _) = run_decorated(
+        header,
+        &records,
+        vec![(id(&records[0], 1), Answer::Silent)],
+        0,
+        None,
+    );
+    let journal = journal.unwrap();
+    assert_eq!(came.len(), 1);
+    assert_eq!(end(&journal, 2), Some((End::Unknown, 5_000)));
+}
