@@ -159,7 +159,45 @@ impl<T: AsyncWrite + Unpin> hyper::rt::Write for Io<T> {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    /// Not forwarded (decision 19): hyper's graceful close would send a FIN
+    /// first, and the peer's FIN after it leaves a TIME_WAIT on the source's
+    /// port that the reset of the socket's drop, at zero linger, cannot undo.
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::pin::Pin;
+    use std::sync::Arc;
+
+    use tokio::io::AsyncReadExt;
+
+    use super::{Io, Probe};
+
+    /// hyper's graceful close reaches no socket (decision 19): its peer
+    /// reads no end — the socket's drop, at zero linger, its only close.
+    #[test]
+    fn a_shutdown_is_not_forwarded() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (client, mut peer) = tokio::io::duplex(64);
+            let mut io = Io::new(client, Arc::new(Probe::default()));
+            std::future::poll_fn(|cx| hyper::rt::Write::poll_shutdown(Pin::new(&mut io), cx))
+                .await
+                .unwrap();
+            let mut buf = [0u8; 1];
+            tokio::select! {
+                biased;
+                r = peer.read(&mut buf) => panic!("the peer read {r:?}"),
+                () = std::future::ready(()) => {}
+            }
+            // Dropped, it closes.
+            drop(io);
+            assert_eq!(peer.read(&mut buf).await.unwrap(), 0);
+        });
     }
 }

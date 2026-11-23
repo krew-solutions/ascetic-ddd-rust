@@ -8,6 +8,7 @@
 //! unended, a poisoned lock — each is a harness fault, raised here and taken by
 //! the machine's loop, never the system's Unknown.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -197,6 +198,9 @@ pub(crate) struct State {
     /// Attempt handles alive: an attempt pushes its end before its handle
     /// goes, so none alive, read with the frontier, is none to come.
     alive: usize,
+    /// The alive handles' deadlines, counted: the oldest outliving its
+    /// deadline by the route timeout is a source saturated (decision 19).
+    deadlines: BTreeMap<u64, usize>,
 }
 
 impl State {
@@ -210,27 +214,36 @@ impl State {
         self.fault.as_ref()
     }
 
-    /// The fault raised, or else how many attempt handles are alive: the
-    /// count is never read without the fault (decision 18).
-    pub(crate) fn alive(&self) -> Result<usize, Harness> {
+    /// The fault raised, or else how many attempt handles are alive and the
+    /// earliest deadline among them: the count is never read without the
+    /// fault (decision 18).
+    pub(crate) fn alive(&self) -> Result<(usize, Option<u64>), Harness> {
         match &self.fault {
             Some(f) => Err(f.clone()),
-            None => Ok(self.alive),
+            None => Ok((self.alive, self.deadlines.keys().next().copied())),
         }
     }
 
-    fn enter(&mut self) {
+    fn enter(&mut self, deadline: u64) {
         self.alive = self.alive.saturating_add(1);
+        let n = self.deadlines.entry(deadline).or_insert(0);
+        *n = n.saturating_add(1);
     }
 
     /// An attempt's handle gone, raising its fault if it went unended, in one
     /// critical section with the count: none alive is never read without it
     /// (decision 18).
-    fn leave(&mut self, fault: Option<Harness>) {
+    fn leave(&mut self, deadline: u64, fault: Option<Harness>) {
         if let Some(f) = fault {
             self.raise(f);
         }
         self.alive = self.alive.saturating_sub(1);
+        if let Some(n) = self.deadlines.get_mut(&deadline) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                self.deadlines.remove(&deadline);
+            }
+        }
     }
 }
 
@@ -377,6 +390,7 @@ impl<C: Clock> Stamps<C> {
                 frontier: Frontier::new(),
                 fault: None,
                 alive: 0,
+                deadlines: BTreeMap::new(),
             }),
             notify: Notify::new(),
             tasks: Tasks::default(),
@@ -492,7 +506,7 @@ impl<C: Clock> Attempt<C> {
         (first, dispatched): (u64, u64),
         deadline: u64,
     ) -> Attempt<C> {
-        stamps.lock().0.enter();
+        stamps.lock().0.enter(deadline);
         Attempt {
             line,
             attempt,
@@ -775,7 +789,7 @@ impl<C: Clock> Drop for Attempt<C> {
             line: self.line,
             attempt: self.attempt,
         });
-        self.stamps.lock().0.leave(dropped);
+        self.stamps.lock().0.leave(self.deadline, dropped);
         self.stamps.notify();
     }
 }

@@ -9,7 +9,35 @@ use std::net::{IpAddr, SocketAddr};
 
 use tokio::net::{TcpSocket, TcpStream};
 
-use crate::stand::{Egress, Route};
+use crate::stand::{Connect, Egress, Route};
+
+/// A socket's own error: descriptors exhausted, or another.
+fn socket_error(e: io::Error) -> Connect {
+    // EMFILE, ENFILE: no `ErrorKind` of their own.
+    let cannot = if matches!(e.raw_os_error(), Some(23 | 24)) {
+        "egress.descriptors"
+    } else {
+        "egress.socket"
+    };
+    Connect::Harness {
+        cannot,
+        detail: e.to_string(),
+    }
+}
+
+/// A bind's error: a source address not this host's, or its ports exhausted
+/// (a bound socket's port is chosen at the bind).
+fn bind_error(e: io::Error) -> Connect {
+    let cannot = match e.kind() {
+        io::ErrorKind::AddrNotAvailable => "egress.local",
+        io::ErrorKind::AddrInUse => "egress.ports",
+        _ => "egress.bind",
+    };
+    Connect::Harness {
+        cannot,
+        detail: e.to_string(),
+    }
+}
 
 /// TCP to each endpoint's address, from each source's own.
 #[derive(Clone, Debug)]
@@ -33,7 +61,7 @@ impl Egress for TcpEgress {
         &self,
         source: u32,
         route: &Route,
-    ) -> impl Future<Output = io::Result<TcpStream>> + Send {
+    ) -> impl Future<Output = Result<TcpStream, Connect>> + Send {
         let addr = self.endpoints.get(&route.endpoint).copied();
         let local = usize::try_from(source)
             .ok()
@@ -41,22 +69,26 @@ impl Egress for TcpEgress {
         let endpoint = route.endpoint.clone();
         async move {
             let Some(addr) = addr else {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("no address for endpoint {endpoint}"),
-                ));
+                return Err(Connect::Harness {
+                    cannot: "egress.endpoint",
+                    detail: format!("no address for endpoint {endpoint}"),
+                });
             };
             let socket = if addr.is_ipv4() {
-                TcpSocket::new_v4()?
+                TcpSocket::new_v4()
             } else {
-                TcpSocket::new_v6()?
-            };
-            if let Some(ip) = local {
-                socket.bind(SocketAddr::new(ip, 0))?;
+                TcpSocket::new_v6()
             }
-            let stream = socket.connect(addr).await?;
+            .map_err(socket_error)?;
+            // Dropped, it resets (decision 19): no TIME_WAIT on the source's
+            // port, nothing queued delivered after.
+            socket.set_zero_linger().map_err(socket_error)?;
+            if let Some(ip) = local {
+                socket.bind(SocketAddr::new(ip, 0)).map_err(bind_error)?;
+            }
+            let stream = socket.connect(addr).await.map_err(Connect::of_connect)?;
             // A request's bytes leave as hyper flushes them.
-            stream.set_nodelay(true)?;
+            stream.set_nodelay(true).map_err(socket_error)?;
             Ok(stream)
         }
     }

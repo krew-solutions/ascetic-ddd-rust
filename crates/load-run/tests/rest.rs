@@ -27,7 +27,7 @@ use ascetic_ddd_load_run::rest::{Config, RestCarrier};
 use ascetic_ddd_load_run::run::{RunError, Runtimes, admit, run};
 use ascetic_ddd_load_run::sink::Lines;
 use ascetic_ddd_load_run::source::Records;
-use ascetic_ddd_load_run::stand::{Egress, Route, Stand};
+use ascetic_ddd_load_run::stand::{Connect, Egress, Route, Stand, StandConnect};
 use ascetic_ddd_scheduler::journal::{self, End, Judged, Line};
 use fixture::*;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
@@ -273,6 +273,8 @@ struct Pipe {
     connect: u64,
     /// Connects refused before one is accepted.
     refuse: Arc<AtomicUsize>,
+    /// How each is refused.
+    refusal: fn() -> Connect,
     /// The request, counted from 1 over the run, whose first write fails
     /// with no byte accepted: its connection gone under it.
     fail: Option<usize>,
@@ -285,7 +287,11 @@ struct Pipe {
 impl Egress for Pipe {
     type Io = Throttled;
 
-    fn connect(&self, _: u32, _: &Route) -> impl Future<Output = io::Result<Throttled>> + Send {
+    fn connect(
+        &self,
+        _: u32,
+        _: &Route,
+    ) -> impl Future<Output = Result<Throttled, Connect>> + Send {
         let stub = self.stub.clone();
         let t = self.throttle;
         let holds = self.holds.clone();
@@ -294,13 +300,13 @@ impl Egress for Pipe {
             .refuse
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
             .is_ok();
-        let (fail, requests) = (self.fail, self.requests.clone());
+        let (fail, requests, refusal) = (self.fail, self.requests.clone(), self.refusal);
         let eof = self
             .eof
             .filter(|_| self.connects.fetch_add(1, Ordering::SeqCst) == 0);
         async move {
             if refused {
-                return Err(io::Error::from(io::ErrorKind::ConnectionRefused));
+                return Err(refusal());
             }
             // Never, for `u64::MAX`: a stand dropping every SYN.
             if connect == u64::MAX {
@@ -405,6 +411,34 @@ fn run_rest_with(
     eof: Option<u64>,
     tune: &dyn Fn(&mut Config),
 ) -> (Result<Vec<Line>, RunError>, Vec<Came>, usize) {
+    let refused = || Connect::Stand(StandConnect::Refused);
+    run_rest_refused(
+        header,
+        records,
+        answers,
+        throttle,
+        connect,
+        (refuse, refused),
+        fail,
+        eof,
+        tune,
+    )
+}
+
+/// As [`run_rest_with`], its first `refuse.0` connects failed as `refuse.1`
+/// makes them.
+#[expect(clippy::too_many_arguments, reason = "a test's whole scenario")]
+fn run_rest_refused(
+    header: Header,
+    records: &[Record],
+    answers: Vec<Answer>,
+    throttle: Throttle,
+    connect: u64,
+    (refuse, refusal): (usize, fn() -> Connect),
+    fail: Option<usize>,
+    eof: Option<u64>,
+    tune: &dyn Fn(&mut Config),
+) -> (Result<Vec<Line>, RunError>, Vec<Came>, usize) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
@@ -427,6 +461,7 @@ fn run_rest_with(
                 holds: None,
                 connect,
                 refuse: Arc::new(AtomicUsize::new(refuse)),
+                refusal,
                 fail,
                 requests: Arc::new(AtomicUsize::new(0)),
                 eof,
@@ -895,6 +930,7 @@ fn over_rest_the_shell_journals_what_sim_journals() {
                             holds: Some(Arc::new(holds)),
                             connect: 0,
                             refuse: Arc::new(AtomicUsize::new(0)),
+                            refusal: || Connect::Stand(StandConnect::Refused),
                             fail: None,
                             requests: Arc::new(AtomicUsize::new(0)),
                             eof: None,
@@ -1109,6 +1145,7 @@ fn looked(lags: &[(u64, u64)], answer: Answer) -> Vec<Line> {
                 holds: None,
                 connect: 0,
                 refuse: Arc::new(AtomicUsize::new(0)),
+                refusal: || Connect::Stand(StandConnect::Refused),
                 fail: None,
                 requests: Arc::new(AtomicUsize::new(0)),
                 eof: None,
@@ -1290,6 +1327,7 @@ fn run_decorated(
                 holds: None,
                 connect: 0,
                 refuse: Arc::new(AtomicUsize::new(0)),
+                refusal: || Connect::Stand(StandConnect::Refused),
                 fail: None,
                 requests: Arc::new(AtomicUsize::new(0)),
                 eof: None,
@@ -1808,6 +1846,77 @@ fn a_connection_closed_while_idle_sends_nothing() {
     assert_eq!(end(&journal, 3).map(|e| e.0), Some(End::Expected));
 }
 
+/// Decision 19: a connect's failure as the egress classes it — the
+/// harness's stops the run, its name journaled; the stand's retried a floor
+/// apart, only the peer's own refusals counted: a reset as one, a timeout
+/// none.
+#[test]
+fn a_connect_s_failure_is_the_stand_s_or_the_harness_s() {
+    let records = vec![call("read", 1, 0, 0, 0)];
+    let ports = || Connect::Harness {
+        cannot: "egress.ports",
+        detail: "no port".to_owned(),
+    };
+    let (journal, came, _) = run_rest_refused(
+        rest_header(),
+        &records,
+        vec![ok(10, 0)],
+        AT_ONCE,
+        0,
+        (1, ports),
+        None,
+        None,
+        &|_| {},
+    );
+    let journal = journal.unwrap();
+    assert!(came.is_empty());
+    match journal.last() {
+        Some(Line::Fault(f)) => assert_eq!(
+            f.class,
+            journal::FaultClass::Carrier {
+                line: 2,
+                attempt: 1,
+                cannot: journal::Code::Named("egress.ports".to_owned()),
+            }
+        ),
+        other => panic!("{other:?}"),
+    }
+    let mut header = rest_header();
+    header
+        .operations
+        .iter_mut()
+        .for_each(|o| o.timeout = 25_000);
+    for (refusal, refused, by) in [
+        (
+            (|| Connect::Stand(StandConnect::Reset)) as fn() -> Connect,
+            3,
+            Some(journal::Refusal::Reset),
+        ),
+        (
+            || Connect::Stand(StandConnect::Aborted),
+            3,
+            Some(journal::Refusal::Aborted),
+        ),
+        (|| Connect::Stand(StandConnect::TimedOut), 0, None),
+        (|| Connect::Stand(StandConnect::Unreachable), 0, None),
+    ] {
+        let (journal, _, _) = run_rest_refused(
+            header.clone(),
+            &records,
+            vec![ok(10, 0)],
+            AT_ONCE,
+            0,
+            (100, refusal),
+            None,
+            None,
+            &|_| {},
+        );
+        let journal = journal.unwrap();
+        let (_, u) = unsent(&journal, 2).expect("a closing report");
+        assert_eq!((u.refused, u.refused_by), (refused, by), "{by:?}");
+    }
+}
+
 /// Decision 18 (K2b-7a): every await of an attempt races its deadline — a
 /// connect or a decorator that never answers leaves the attempt unsent at its
 /// deadline, censored there, and the run ends with it.
@@ -1937,6 +2046,7 @@ fn stop_leaves_no_request(connect: u64, throttle: Throttle) {
                 holds: None,
                 connect,
                 refuse: Arc::new(AtomicUsize::new(0)),
+                refusal: || Connect::Stand(StandConnect::Refused),
                 fail: None,
                 requests: Arc::new(AtomicUsize::new(0)),
                 eof: None,
@@ -2013,6 +2123,7 @@ fn a_run_dropped_takes_its_attempts_with_it() {
                 holds: None,
                 connect: 5_000,
                 refuse: Arc::new(AtomicUsize::new(0)),
+                refusal: || Connect::Stand(StandConnect::Refused),
                 fail: None,
                 requests: Arc::new(AtomicUsize::new(0)),
                 eof: None,
@@ -2093,6 +2204,7 @@ fn the_rest_carrier_s_gates_are_its_stand_s() {
                 holds: None,
                 connect: 0,
                 refuse: Arc::new(AtomicUsize::new(0)),
+                refusal: || Connect::Stand(StandConnect::Refused),
                 fail: None,
                 requests: Arc::new(AtomicUsize::new(0)),
                 eof: None,

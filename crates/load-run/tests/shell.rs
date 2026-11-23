@@ -1071,22 +1071,71 @@ impl Carrier<VirtualClock> for Lingering {
     }
 }
 
-/// Decision 18: attempts outliving their steps past the margin — a source
-/// that cannot keep up — stop the run; the stop aborts them, none left
-/// running.
+/// Decision 19: an attempt outliving its deadline by the route timeout — a
+/// source that cannot keep up — stops the run there, by age, not count; the
+/// stop aborts them, none left running. Thousands alive at one deadline,
+/// each leaving at its last look, are no saturation.
 #[test]
 fn a_saturated_source_stops_the_run() {
     let mut h = header();
     h.operations.iter_mut().for_each(|o| o.timeout = 1_000);
-    let lines = ascetic_ddd_load_run::run::SATURATION as u64 + 100;
-    let records: Vec<Record> = (0..lines).map(|i| call("read", i + 1, 0, 0, 0)).collect();
+    // Three at once, a fourth five seconds later: the oldest ages first.
+    let mut records: Vec<Record> = (0..3).map(|i| call("read", i + 1, 0, 0, 0)).collect();
+    records.push(call("read", 4, 0, 5_000_000, 0));
     let ran = shell(&h, &records, W, Lingering).unwrap();
     assert_eq!(ran.running, 0);
-    let (stop, _) = stopped(ran);
+    let route_timeout = h.profile.route_timeout;
+    let (stop, journal) = stopped(ran);
     assert!(
-        matches!(stop, Stop::Harness(Harness::Saturated { alive }) if alive > ascetic_ddd_load_run::run::SATURATION),
+        matches!(stop, Stop::Harness(Harness::Saturated { alive: 4 })),
         "{stop:?}"
     );
+    // The first attempt's deadline, its dispatch's plus its timeout, then
+    // the route timeout: not before, nor long after.
+    let dispatched = journal
+        .iter()
+        .find_map(|l| match l {
+            journal::Line::Dispatch(d) => Some(d.at),
+            _ => None,
+        })
+        .unwrap();
+    let Some(journal::Line::Fault(f)) = journal.last() else {
+        panic!("{:?}", journal.last())
+    };
+    // Its fault stamped once the stop's aborted tasks went: a step of the
+    // quiesce's later.
+    let saturated = dispatched + 1_000 + route_timeout;
+    assert!(
+        (saturated..=saturated + 1_000).contains(&f.at),
+        "stopped at {}, saturated at {saturated}",
+        f.at
+    );
+    // Five thousand attempts sharing a deadline, each leaving a microsecond
+    // past it: no saturation.
+    let records: Vec<Record> = (0..5_000).map(|i| call("read", i + 1, 0, 0, 0)).collect();
+    let ran = shell(&h, &records, W, Leaving).unwrap();
+    assert!(matches!(ran.end, RunEnd::Ended), "{:?}", ran.journal.last());
+}
+
+/// Leaves each attempt a microsecond past its deadline, unanswered.
+struct Leaving;
+
+impl Carrier<VirtualClock> for Leaving {
+    fn carries(&self, _: &Header) -> Result<(), String> {
+        Ok(())
+    }
+
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "the task must not borrow its carrier: it is 'static"
+    )]
+    fn carry(&self, a: Attempt<VirtualClock>) -> impl Future<Output = ()> + Send + 'static {
+        async move {
+            a.clock().sleep_until(a.deadline() + 1).await;
+            let report = sim::drawn_unsent(a.line(), a.attempt(), a.dispatched());
+            a.left(report);
+        }
+    }
 }
 
 /// A record sent from a source with no runtime — a log no validator read —

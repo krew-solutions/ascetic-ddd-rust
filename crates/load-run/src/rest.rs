@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::future::{Future, poll_fn};
-use std::io;
+
 use std::pin::{Pin, pin};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
@@ -35,7 +35,7 @@ use crate::clock::Clock;
 use crate::decorate::{Decoration, Decorator, Undecorated};
 use crate::io::{Io, Probe};
 use crate::stamps::Attempt;
-use crate::stand::{Egress, Opening, Refused, Route, Stand};
+use crate::stand::{Connect, Egress, Opening, Refused, Route, Stand, StandConnect};
 use crate::turn;
 
 /// An attempt's looks around its deadline (decision 17): one at `D − J/2`,
@@ -244,8 +244,9 @@ impl<C: Clock, S: Stand, E: Egress, D: Decorator> Carrier<C> for RestCarrier<S, 
 }
 
 /// The peer's own refusals of an attempt's connects (decision 19): refused,
-/// reset, aborted, or a fresh connection closed before a byte — no other
-/// connect error is its act.
+/// reset, aborted, or a fresh connection closed before a byte — a connect
+/// timed out or unreachable is no act of its, perhaps the harness's own
+/// network.
 #[derive(Clone, Copy, Debug, Default)]
 struct Refusals {
     count: u32,
@@ -253,12 +254,12 @@ struct Refusals {
 }
 
 impl Refusals {
-    fn note(&mut self, e: &io::Error) {
-        let r = match e.kind() {
-            io::ErrorKind::ConnectionRefused => Refusal::Refused,
-            io::ErrorKind::ConnectionReset => Refusal::Reset,
-            io::ErrorKind::ConnectionAborted => Refusal::Aborted,
-            _ => return,
+    fn note(&mut self, why: StandConnect) {
+        let r = match why {
+            StandConnect::Refused => Refusal::Refused,
+            StandConnect::Reset => Refusal::Reset,
+            StandConnect::Aborted => Refusal::Aborted,
+            StandConnect::TimedOut | StandConnect::Unreachable => return,
         };
         self.count = self.count.saturating_add(1);
         self.last = Some(r);
@@ -315,12 +316,17 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
         a: &Attempt<C>,
         source: u32,
         route: &Route,
-    ) -> io::Result<Conn> {
+    ) -> Result<Conn, Connect> {
         let stream = self.egress.connect(source, route).await?;
         let probe = Arc::new(Probe::default());
+        // hyper's HTTP/1.1 handshake does no I/O: its failure is the
+        // harness's.
         let (sender, connection) = http1::handshake(Io::new(stream, probe.clone()))
             .await
-            .map_err(io::Error::other)?;
+            .map_err(|e| Connect::Harness {
+                cannot: "rest.handshake",
+                detail: e.to_string(),
+            })?;
         // The connection's own task, on the source's runtime: the attempt's,
         // kept with the run's for a stop to abort (decision 18).
         a.spawn_connection(probe.clone(), async move {
@@ -459,9 +465,15 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
                         }
                     } {
                         Ok(c) => c,
-                        Err(e) => {
-                            refusals.note(&e);
+                        // The stand's: retried a floor apart, the peer's own
+                        // refusals counted (decision 19).
+                        Err(Connect::Stand(why)) => {
+                            refusals.note(why);
                             continue;
+                        }
+                        // The harness's: the run stopped.
+                        Err(Connect::Harness { cannot, detail }) => {
+                            return a.fault(cannot, detail);
                         }
                     }
                 }

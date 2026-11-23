@@ -154,10 +154,6 @@ impl<C: Clock> Drop for Aborts<C> {
 /// judging never does.
 const QUIESCE: u64 = 1_000_000;
 
-/// Attempt handles alive past the steps not ended, beyond which a source is
-/// saturated: its tasks outlive their steps (decision 18).
-pub const SATURATION: usize = 1_024;
-
 impl std::error::Error for RunError {}
 
 impl From<LogError> for RunError {
@@ -358,9 +354,11 @@ where
                 .min();
             (now, work, f.floor(), f.oldest_hold(), g.alive())
         };
-        let alive = alive?;
-        // Attempts outliving their steps: a source that cannot keep up.
-        if alive > live.len().saturating_add(SATURATION) {
+        let (alive, oldest_deadline) = alive?;
+        // An attempt outliving its deadline by the route timeout: a source
+        // that cannot keep up (decision 19) — by age, not count: any number
+        // of steps may share a deadline, each alive until its last look.
+        if oldest_deadline.is_some_and(|d| now >= d.saturating_add(route_timeout)) {
             return Err(Harness::Saturated { alive }.into());
         }
         // A hold older than the route timeout: a carrier stuck in its
@@ -406,10 +404,14 @@ where
             // one to sleep until. Not held, nothing due means the next is
             // later than now; a sleep to an instant passed would return at
             // once, and turn forever.
+            // An attempt alive is aged at its deadline plus the route
+            // timeout, the loop awake to see it (decision 19).
+            let aged = oldest_deadline.map(|d| d.saturating_add(route_timeout));
             let sleep = match stuck {
                 Some((at, ..)) => Some(at),
                 None => next,
             };
+            let sleep = [sleep, aged].into_iter().flatten().min();
             if sleep.is_some_and(|s| s <= now) {
                 return Err(Harness::Stalled { at: now }.into());
             }

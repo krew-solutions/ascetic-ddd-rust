@@ -30,7 +30,7 @@ use ascetic_ddd_load_run::rest::{Config, RestCarrier};
 use ascetic_ddd_load_run::run::{Runtimes, admit, run};
 use ascetic_ddd_load_run::sink::Lines;
 use ascetic_ddd_load_run::source::Records;
-use ascetic_ddd_load_run::stand::{Egress, Route, Stand};
+use ascetic_ddd_load_run::stand::{Connect, Egress, Route, Stand};
 use ascetic_ddd_scheduler::journal::Line;
 use fixture::*;
 
@@ -66,12 +66,15 @@ impl Egress for Tcp {
         &self,
         _: u32,
         _: &Route,
-    ) -> impl Future<Output = std::io::Result<tokio::net::TcpStream>> + Send {
+    ) -> impl Future<Output = Result<tokio::net::TcpStream, Connect>> + Send {
         let (addr, peer) = (self.addr, self.peer.clone());
         async move {
-            let s = tokio::net::TcpStream::connect(addr).await?.into_std()?;
-            *peer.lock().unwrap() = Some(s.try_clone()?);
-            tokio::net::TcpStream::from_std(s)
+            let connected = async {
+                let s = tokio::net::TcpStream::connect(addr).await?.into_std()?;
+                *peer.lock().unwrap() = Some(s.try_clone()?);
+                tokio::net::TcpStream::from_std(s)
+            };
+            connected.await.map_err(Connect::of_connect)
         }
     }
 }

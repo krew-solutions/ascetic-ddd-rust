@@ -53,6 +53,69 @@ pub trait Stand: Send + Sync + 'static {
     ) -> impl Future<Output = Option<Result<String, Refused>>> + Send;
 }
 
+/// Why a connect failed (ADR-0047 decision 19), as only the egress can tell
+/// — a bind's failure from a connect's: the stand's, retried a floor apart,
+/// a refusal by the peer's own act counted; or the harness's, which stops
+/// the run.
+#[derive(Debug)]
+pub enum Connect {
+    /// The stand's.
+    Stand(StandConnect),
+    /// The harness's: what it could not do, a dotted name; why, the caller's
+    /// only.
+    Harness {
+        /// A dotted name: `egress.ports`, `egress.local`, ….
+        cannot: &'static str,
+        /// Why, never journaled.
+        detail: String,
+    },
+}
+
+/// How the stand failed a connect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StandConnect {
+    /// Refused: no listener.
+    Refused,
+    /// Reset while connecting.
+    Reset,
+    /// Aborted while connecting.
+    Aborted,
+    /// Timed out: no answer to the connect — no act of the peer's.
+    TimedOut,
+    /// Unreachable — the stand down as often as the harness's own route.
+    Unreachable,
+}
+
+impl Connect {
+    /// A connect's own error, classed: the peer's refusals and the network's
+    /// losses the stand's; any other — ports exhausted at an unbound
+    /// socket's connect, anything unknown — the harness's.
+    pub fn of_connect(e: io::Error) -> Connect {
+        let stand = match e.kind() {
+            io::ErrorKind::ConnectionRefused => StandConnect::Refused,
+            io::ErrorKind::ConnectionReset => StandConnect::Reset,
+            io::ErrorKind::ConnectionAborted => StandConnect::Aborted,
+            io::ErrorKind::TimedOut => StandConnect::TimedOut,
+            io::ErrorKind::HostUnreachable | io::ErrorKind::NetworkUnreachable => {
+                StandConnect::Unreachable
+            }
+            io::ErrorKind::AddrNotAvailable => {
+                return Connect::Harness {
+                    cannot: "egress.ports",
+                    detail: e.to_string(),
+                };
+            }
+            _ => {
+                return Connect::Harness {
+                    cannot: "egress.connect",
+                    detail: e.to_string(),
+                };
+            }
+        };
+        Connect::Stand(stand)
+    }
+}
+
 /// How a source connects: TCP from the source's own address live, an
 /// in-memory pipe in tests; TLS, if any, is the host's.
 ///
@@ -65,10 +128,12 @@ pub trait Egress: Send + Sync + 'static {
     /// A connection's bytes.
     type Io: AsyncRead + AsyncWrite + Send + Unpin + 'static;
 
-    /// A new connection from `source` to `route`'s endpoint.
+    /// A new connection from `source` to `route`'s endpoint, or why not —
+    /// the stand's or the harness's (decision 19). Dropped, it resets: its
+    /// socket closed at zero linger, nothing it queued delivered after.
     fn connect(
         &self,
         source: u32,
         route: &Route,
-    ) -> impl Future<Output = io::Result<Self::Io>> + Send;
+    ) -> impl Future<Output = Result<Self::Io, Connect>> + Send;
 }

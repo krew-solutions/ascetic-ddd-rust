@@ -32,7 +32,7 @@ use ascetic_ddd_load_run::run::{admit, run};
 use ascetic_ddd_load_run::sink::Lines;
 use ascetic_ddd_load_run::source::Records;
 use ascetic_ddd_load_run::stamps::Attempt;
-use ascetic_ddd_load_run::stand::{Egress, Route, Stand};
+use ascetic_ddd_load_run::stand::{Connect, Egress, Route, Stand};
 use ascetic_ddd_scheduler::journal::{self, Line};
 use ascetic_ddd_scheduler::machine::{Judgement, Seen};
 use fixture::*;
@@ -234,11 +234,13 @@ struct GatedTcp {
 impl Egress for GatedTcp {
     type Io = Gated;
 
-    fn connect(&self, _: u32, _: &Route) -> impl Future<Output = std::io::Result<Gated>> + Send {
+    fn connect(&self, _: u32, _: &Route) -> impl Future<Output = Result<Gated, Connect>> + Send {
         let (addr, open, waker) = (self.addr, self.open.clone(), self.waker.clone());
         async move {
-            let inner = tokio::net::TcpStream::connect(addr).await?;
-            inner.set_nodelay(true)?;
+            let inner = tokio::net::TcpStream::connect(addr)
+                .await
+                .map_err(Connect::of_connect)?;
+            inner.set_nodelay(true).map_err(Connect::of_connect)?;
             Ok(Gated {
                 inner,
                 open,
