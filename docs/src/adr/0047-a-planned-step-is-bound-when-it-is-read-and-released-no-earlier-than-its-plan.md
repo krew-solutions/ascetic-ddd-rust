@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a and K2b-8b (K2b-8b-1, K2b-8b-2) built (§ Measured), K2b-8c next — K2b-8 before K2b-7e, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2) and K2b-8c-1 built (§ Measured), K2b-8c-2 next — K2b-8 before K2b-7e, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -43,7 +43,9 @@ To be built in slices, each a commit of its own:
   four: **K2b-8a** journal version 7 in the pure fold; **K2b-8b** the shell's censor, report and connect errors, in two — **K2b-8b-1** a connect's failure classed, zero
   linger, no shutdown, saturation by age; **K2b-8b-2** the reset at the censor, no byte or hand-over at the deadline,
   an unused connection pooled, a timer's exact lag;
-  **K2b-8c** ports, the cap, admission's bound, the connect probe; **K2b-8d** the real clock's twins.
+  **K2b-8c** ports, the cap, admission's bound, the connect probe, in two — **K2b-8c-1** the egress's ports and
+  the cap over each socket's life; **K2b-8c-2** `Live` from the cap, admission's bound and the descriptors' limit,
+  endpoints and sources at admission, the connect probe; **K2b-8d** the real clock's twins.
 - **The first host run:** REST only, on the compose stand, `sources = 1` — a correctness run.
 - **K3** facts and the bus; **K4** shaping and the emulated client's retries; **K5** the report.
 
@@ -735,6 +737,7 @@ Considered keeps what each refuted):
 | K2b-8a | K2b | journal version 7, folded by Rust and `verdict.py` alike: a never-sent censor's end decided by its closing report — ready, refused by the peer, on time a Root; never ready, never refused, its lag or a hand-off with it past J undecided, at J a Root; an early reply found late undecided, in its look's microsecond too; no report, two, one at its deadline, a refusal's kind with none counted, connected never ready, a lag past its path, a report with an answer's content — each incoherent, a sent censor's report too; the frontier refusing a report at its deadline and censoring first when the drain has not reached it; `sim` drawing every side of the rule (its counters reached in the differential); the REST carrier's report — the peer's refusals counted, ready only once decorated, where it stood | the report deciding nothing; a Root never ready, unrefused; the report's lag, its hand-off not added; totality dropped; a report at its deadline accepted (fold, frontier); an early reply found late decided by the stand; the bracket's end open; never sent undecided at its end; each path rule dropped; the censor not pushed first; the definition's report, totality, refusal; the shell reporting before its deadline, reporting a sent censor, never marking ready, not noting refusals |
 | K2b-8b-1 | K2b | `Connect::of_connect` classing each kind — refused, reset, aborted, timed out, unreachable the stand's; exhausted ports and anything unknown the harness's; `TcpEgress` naming an unknown endpoint, a source address not this host's (TEST-NET-1), a closed port refused; a dropped connection read by its peer as a reset, not an end; the carrier stopping the run on the harness's, its name journaled, and counting only the peer's own refusals of the stand's — a reset and an abort each one, a timeout and an unreachable none; `Io` forwarding no shutdown, the peer reading no end until the drop; a source saturated when an attempt outlives its deadline by the route timeout, stopped there (the stamp within the quiesce's step), five thousand sharing a deadline no saturation | a refusal classed timed out; exhausted ports the connect's; an unknown error the stand's; a foreign source the bind's; no zero linger; the harness's connect retried; a reset uncounted; a timeout counted; a shutdown forwarded; aged past the limit, by the deadline alone, the newest deadline; no wake at the age; a deadline never left |
 | K2b-8b-2 | K2b | a request's write held by the stand to its deadline refused by the shell — the stand reading none of it, the attempt never sent, its report `rest.writing`, its connection reset (the stand's end closed); `Io` refusing an armed request's plain and vectored writes once its attempt may send no more, and nothing once its last byte left; a connection ready only at the deadline handed nothing, back to the pool idle since its connect, the next step's; on the real clock: the floor's timer woken late with the thread parked throughout — its lateness the send's lag; a connect pending across the deadline, its race's timer due and dropped — the report's lag; a timer never registered no lag; a decoration's wait held by a sibling no send's lag; the path's timer rule — beyond the bound once, from the window's start, nothing on a connection's task or for a timer due after the poll | a write, a vectored write not refused; refused once sent; bytes at the deadline; handed at the deadline; the unused dropped; a fresh one idle since 0; a completed timer, a dropped one unnoted; an unregistered timer noted; a timer on any task; a re-hand unseen; the bound counted twice; the floor, the connect race on the raw clock; the decoration's lag kept (K2b-8a's survivor) |
+| K2b-8c-1 | K2b | a source's sockets under its cap — a connection gone before its socket dying until the socket drops, a waiter enabled before the count woken when a place is freed; the place at the cap — a dying socket awaited and the idle kept, none dying the idle evicted, none idle full; through the carrier at a cap of one: a read's idle connection evicted, reset, for a list to another endpoint; two reads at once, the second the harness's `egress.cap`; at a cap of two, idle on two endpoints and a call to a third, the one idle longest evicted and the other kept for the next list; `TcpEgress`'s ports — a bound source's its own, the unbound sharing the rest, the host's range read | no cap; a slot never freed; a freed place untold (a hang); a connection gone, its socket not dying; evicted though one dies; never evicted; the latest evicted; full, left unsent; the unbound unshared |
 | K2-1 | K2 | the shell against an in-memory transport (hyper over `tokio::io::duplex`) under paused time reproduces `sim`'s journal | `std::time::Instant` in a handler |
 | K2-2 | K2 | each cause delayed alone — the reader, the token, the pool, the connect, the write, the dependency — moves exactly one gap of the chain | a gap merged |
 | K2-3 | K2 | on the real clock, multi-thread: chain order, no release before its stamped met instants, the stub's requests per correlation id equal the journal's attempts — a keep-alive connection closed as it is reused included; a request processed then reset before the answer is Unknown; a response stamped 1 µs before its deadline delivered after the tick is Expected | hyper's hidden retry; Unknown read as not taken; deadlines by arrival |
@@ -1538,6 +1541,19 @@ ready or dropped, the path keeping its task's poll — its instant, its window's
   read". Its request leaves long before its deadline and its look reads through a verified turn; nothing of K2b-8b-2
   is on its path. Owed: on a second sighting, the run's journal kept and the twin's turn diagnosed.
 
+**K2b-8c-1 — a source's sockets under its cap** (2026-11-24): `Egress::ports(source)`; `TcpEgress` holding Linux's
+default range (`tcp::PORTS`, the host's own read by `tcp::local_ports`), a bound source its own, the unbound sharing
+the rest. The REST carrier keeps per source a `Sockets` count: a place taken before each connect — before the socket
+exists — and held by its `Io`, freed at the `Io`'s drop or the connect's failure; the connection's own hold dropped
+unpooled marks the socket dying, freed once the runtime drops its aborted task. At the cap the attempt awaits a dying
+socket, else evicts — resets — the connection idle longest of its source, to any endpoint, else stops the run with the
+carrier fault `egress.cap`; each wait races its deadline (`rest.cap`).
+- The cap's fault is a carrier fault, its numbers in the detail, not the journal: open equals the cap when it fires,
+  and the cap is the egress's setting — admission's inputs (the ports, the events, the descriptors' limit) belong in
+  the journal's header with K2b-8c-2's bound, if a report needs them (Operability's minor finding, revised).
+- The sweep killed all 9 mutants. The latest evicted lived until a twin had idle connections on two endpoints and a
+  call to a third: the pool keeps each endpoint's oldest first, so the choice shows only across endpoints.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -1749,3 +1765,6 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-23: K2b-8b-2 built (§ Measured): a censored attempt's connection reset at its last look, no byte of a
   request past its deadline, none handed at it and an unused connection pooled, a registered timer's due its poll's
   lag. K2b-8b built.
+- 2026-11-24: K2b-8c-1 built (§ Measured): the egress's ports, a source's sockets capped over each socket's life, the
+  idle evicted at the cap, `egress.cap` past it. K2b-8c cut in two. Revised: the cap's fault journals no numbers
+  (Operability's minor finding) — open equals the cap when it fires, and the cap is the egress's setting.

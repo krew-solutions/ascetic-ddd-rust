@@ -62,6 +62,10 @@ struct Tcp {
 impl Egress for Tcp {
     type Io = tokio::net::TcpStream;
 
+    fn ports(&self, _: u32) -> usize {
+        usize::MAX
+    }
+
     fn connect(
         &self,
         _: u32,

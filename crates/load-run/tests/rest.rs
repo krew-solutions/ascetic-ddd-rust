@@ -287,6 +287,8 @@ struct Pipe {
     refuse: Arc<AtomicUsize>,
     /// How each is refused.
     refusal: fn() -> Connect,
+    /// Its sources' cap.
+    ports: usize,
     /// The request, counted from 1 over the run, whose first write fails
     /// with no byte accepted: its connection gone under it.
     fail: Option<usize>,
@@ -298,6 +300,10 @@ struct Pipe {
 
 impl Egress for Pipe {
     type Io = Throttled;
+
+    fn ports(&self, _: u32) -> usize {
+        self.ports
+    }
 
     fn connect(
         &self,
@@ -349,10 +355,23 @@ impl Egress for Pipe {
 struct OneStand;
 
 impl Stand for OneStand {
-    fn route(&self, _: &Record, _: &Rest) -> Result<Route, String> {
+    /// Every call to the gateway; a list to another endpoint, group 99's to
+    /// a third.
+    fn route(&self, _: &Record, rest: &Rest) -> Result<Route, String> {
+        let third = matches!(
+            rest.path.first(),
+            Some(ascetic_ddd_command_log::record::Value::Literal(g)) if g == "99"
+        );
+        let endpoint = if third {
+            "third"
+        } else if rest.op == "list" {
+            "other"
+        } else {
+            "gateway"
+        };
         Ok(Route {
             authority: "stand.test".to_owned(),
-            endpoint: "gateway".to_owned(),
+            endpoint: endpoint.to_owned(),
         })
     }
     fn gate(
@@ -423,14 +442,13 @@ fn run_rest_with(
     eof: Option<u64>,
     tune: &dyn Fn(&mut Config),
 ) -> (Result<Vec<Line>, RunError>, Vec<Came>, usize) {
-    let refused = || Connect::Stand(StandConnect::Refused);
     let (journal, came, (connections, _)) = run_rest_refused(
         header,
         records,
         answers,
         throttle,
         connect,
-        (refuse, refused),
+        Connects { refuse, ..CONNECTS },
         fail,
         eof,
         tune,
@@ -442,8 +460,22 @@ fn run_rest_with(
 /// closed.
 type Refused = (Result<Vec<Line>, RunError>, Vec<Came>, (usize, usize));
 
-/// As [`run_rest_with`], its first `refuse.0` connects failed as `refuse.1`
-/// makes them.
+/// How a pipe's connects go: the first `refuse` failed as `refusal` makes
+/// them, a source's sockets at most `ports`.
+#[derive(Clone, Copy)]
+struct Connects {
+    refuse: usize,
+    refusal: fn() -> Connect,
+    ports: usize,
+}
+
+const CONNECTS: Connects = Connects {
+    refuse: 0,
+    refusal: || Connect::Stand(StandConnect::Refused),
+    ports: usize::MAX,
+};
+
+/// As [`run_rest_with`], its connects as `connects` has them.
 #[expect(clippy::too_many_arguments, reason = "a test's whole scenario")]
 fn run_rest_refused(
     header: Header,
@@ -451,7 +483,7 @@ fn run_rest_refused(
     answers: Vec<Answer>,
     throttle: Throttle,
     connect: u64,
-    (refuse, refusal): (usize, fn() -> Connect),
+    connects: Connects,
     fail: Option<usize>,
     eof: Option<u64>,
     tune: &dyn Fn(&mut Config),
@@ -478,8 +510,9 @@ fn run_rest_refused(
                 throttle,
                 holds: None,
                 connect,
-                refuse: Arc::new(AtomicUsize::new(refuse)),
-                refusal,
+                refuse: Arc::new(AtomicUsize::new(connects.refuse)),
+                refusal: connects.refusal,
+                ports: connects.ports,
                 fail,
                 requests: Arc::new(AtomicUsize::new(0)),
                 eof,
@@ -958,6 +991,7 @@ fn over_rest_the_shell_journals_what_sim_journals() {
                             connect: 0,
                             refuse: Arc::new(AtomicUsize::new(0)),
                             refusal: || Connect::Stand(StandConnect::Refused),
+                            ports: usize::MAX,
                             fail: None,
                             requests: Arc::new(AtomicUsize::new(0)),
                             eof: None,
@@ -1174,6 +1208,7 @@ fn looked(lags: &[(u64, u64)], answer: Answer) -> Vec<Line> {
                 connect: 0,
                 refuse: Arc::new(AtomicUsize::new(0)),
                 refusal: || Connect::Stand(StandConnect::Refused),
+                ports: usize::MAX,
                 fail: None,
                 requests: Arc::new(AtomicUsize::new(0)),
                 eof: None,
@@ -1357,6 +1392,7 @@ fn run_decorated(
                 connect: 0,
                 refuse: Arc::new(AtomicUsize::new(0)),
                 refusal: || Connect::Stand(StandConnect::Refused),
+                ports: usize::MAX,
                 fail: None,
                 requests: Arc::new(AtomicUsize::new(0)),
                 eof: None,
@@ -1892,7 +1928,11 @@ fn a_connect_s_failure_is_the_stand_s_or_the_harness_s() {
         vec![ok(10, 0)],
         AT_ONCE,
         0,
-        (1, ports),
+        Connects {
+            refuse: 1,
+            refusal: ports,
+            ..CONNECTS
+        },
         None,
         None,
         &|_| {},
@@ -1935,7 +1975,11 @@ fn a_connect_s_failure_is_the_stand_s_or_the_harness_s() {
             vec![ok(10, 0)],
             AT_ONCE,
             0,
-            (100, refusal),
+            Connects {
+                refuse: 100,
+                refusal,
+                ..CONNECTS
+            },
             None,
             None,
             &|_| {},
@@ -1970,7 +2014,7 @@ fn no_byte_leaves_at_its_deadline_and_its_connection_is_reset() {
         vec![ok(10, 0)],
         held,
         0,
-        (0, || Connect::Stand(StandConnect::Refused)),
+        CONNECTS,
         None,
         None,
         &|_| {},
@@ -2002,7 +2046,7 @@ fn a_connection_ready_at_the_deadline_takes_no_request_and_is_pooled() {
         vec![ok(10, 0), ok(10, 0)],
         AT_ONCE,
         25_000,
-        (0, || Connect::Stand(StandConnect::Refused)),
+        CONNECTS,
         None,
         None,
         &|c| c.idle_margin = idle - 50_000,
@@ -2013,6 +2057,88 @@ fn a_connection_ready_at_the_deadline_takes_no_request_and_is_pooled() {
     assert_eq!(came.len(), 1, "{came:?}");
     assert_eq!(connections, 1);
     assert_eq!(end(&journal, 3).map(|e| e.0), Some(End::Expected));
+}
+
+/// Decision 19: a source's sockets under its cap — at the cap, the
+/// connection idle longest evicted, reset, for another endpoint's; every one
+/// in flight, the harness's fault.
+#[test]
+fn a_source_s_sockets_are_capped() {
+    let mut header = rest_header();
+    header
+        .operations
+        .iter_mut()
+        .for_each(|o| o.timeout = 25_000);
+    let one = Connects {
+        ports: 1,
+        ..CONNECTS
+    };
+    // A read answered and pooled; a list, later, to another endpoint.
+    let records = vec![call("read", 1, 0, 0, 0), call("list", 2, 0, 10_000, 0)];
+    let (journal, came, (connections, closed)) = run_rest_refused(
+        header.clone(),
+        &records,
+        vec![ok(10, 0), ok(10, 0)],
+        AT_ONCE,
+        0,
+        one,
+        None,
+        None,
+        &|_| {},
+    );
+    let journal = journal.unwrap();
+    assert_eq!(came.len(), 2, "{came:?}");
+    assert_eq!(end(&journal, 2).map(|e| e.0), Some(End::Expected));
+    assert_eq!(end(&journal, 3).map(|e| e.0), Some(End::Expected));
+    assert_eq!(connections, 2);
+    assert!(closed >= 1, "the idle one evicted: {closed}");
+    // Idle on two endpoints, a call to a third at the cap of two: the one
+    // idle longest evicted, the other kept for the next list.
+    let records = vec![
+        call("read", 1, 0, 0, 0),
+        call("list", 2, 0, 5_000, 0),
+        call("read", 99, 0, 10_000, 0),
+        call("list", 4, 0, 20_000, 0),
+    ];
+    let (journal, came, (connections, _)) = run_rest_refused(
+        header.clone(),
+        &records,
+        vec![ok(10, 0), ok(10, 0), ok(10, 0), ok(10, 0)],
+        AT_ONCE,
+        0,
+        Connects {
+            ports: 2,
+            ..CONNECTS
+        },
+        None,
+        None,
+        &|_| {},
+    );
+    let journal = journal.unwrap();
+    assert_eq!(came.len(), 4, "{came:?}");
+    assert_eq!(end(&journal, 5).map(|e| e.0), Some(End::Expected));
+    assert_eq!(connections, 3);
+    // Two reads at once, the first's answer slow: the second at the cap.
+    let records = vec![call("read", 1, 0, 0, 0), call("read", 2, 0, 0, 0)];
+    let (journal, _, _) = run_rest_refused(
+        header,
+        &records,
+        vec![ok(20_000, 0), ok(10, 0)],
+        AT_ONCE,
+        0,
+        one,
+        None,
+        None,
+        &|_| {},
+    );
+    let journal = journal.unwrap();
+    match journal.last() {
+        Some(Line::Fault(f)) => assert!(
+            matches!(&f.class, journal::FaultClass::Carrier { cannot, .. } if *cannot == journal::Code::Named("egress.cap".to_owned())),
+            "{f:?}"
+        ),
+        other => panic!("{other:?}"),
+    }
 }
 
 /// Decision 18 (K2b-7a): every await of an attempt races its deadline — a
@@ -2146,6 +2272,7 @@ fn stop_leaves_no_request(connect: u64, throttle: Throttle) {
                 connect,
                 refuse: Arc::new(AtomicUsize::new(0)),
                 refusal: || Connect::Stand(StandConnect::Refused),
+                ports: usize::MAX,
                 fail: None,
                 requests: Arc::new(AtomicUsize::new(0)),
                 eof: None,
@@ -2224,6 +2351,7 @@ fn a_run_dropped_takes_its_attempts_with_it() {
                 connect: 5_000,
                 refuse: Arc::new(AtomicUsize::new(0)),
                 refusal: || Connect::Stand(StandConnect::Refused),
+                ports: usize::MAX,
                 fail: None,
                 requests: Arc::new(AtomicUsize::new(0)),
                 eof: None,
@@ -2306,6 +2434,7 @@ fn the_rest_carrier_s_gates_are_its_stand_s() {
                 connect: 0,
                 refuse: Arc::new(AtomicUsize::new(0)),
                 refusal: || Connect::Stand(StandConnect::Refused),
+                ports: usize::MAX,
                 fail: None,
                 requests: Arc::new(AtomicUsize::new(0)),
                 eof: None,

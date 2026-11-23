@@ -114,3 +114,21 @@ fn a_dropped_connection_resets() {
         "{read:?}"
     );
 }
+
+/// A bound source's ports are its own; the sources the system binds share
+/// the rest.
+#[test]
+fn a_source_s_ports() {
+    let ip = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let egress = TcpEgress::new(BTreeMap::new(), vec![ip, None, None]).with_ports(100);
+    assert_eq!(
+        (egress.ports(0), egress.ports(1), egress.ports(2)),
+        (100, 50, 50)
+    );
+    assert_eq!(
+        TcpEgress::new(BTreeMap::new(), vec![None]).ports(0),
+        ascetic_ddd_load_run::tcp::PORTS
+    );
+    let ports = ascetic_ddd_load_run::tcp::local_ports().unwrap();
+    assert!((1..=65_536).contains(&ports), "{ports}");
+}

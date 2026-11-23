@@ -1,4 +1,5 @@
-//! A connection's bytes, counted (ADR-0047 decision 16).
+//! A connection's bytes, counted (ADR-0047 decision 16), and its socket's
+//! place under its source's cap (decision 19).
 //!
 //! hyper encodes a request's head and its body — one frame, ready at once —
 //! into its buffer, and flushes the socket only once that buffer is empty
@@ -17,10 +18,140 @@
 
 use std::io;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, ready};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::sync::Notify;
+use tokio::sync::futures::Notified;
+
+/// A source's sockets under its cap (decision 19): each counted from before
+/// its creation to its `Io`'s drop — a reset connection's socket until the
+/// runtime drops its aborted task.
+pub(crate) struct Sockets {
+    cap: usize,
+    open: AtomicUsize,
+    /// Of them, their connection gone, their `Io` not yet dropped: freed
+    /// soon.
+    dying: AtomicUsize,
+    freed: Notify,
+}
+
+/// Where a socket's place stands.
+const HELD: u8 = 0;
+const DYING: u8 = 1;
+const GONE: u8 = 2;
+
+impl Sockets {
+    /// At most `cap` sockets at once.
+    pub(crate) fn new(cap: usize) -> Arc<Sockets> {
+        Arc::new(Sockets {
+            cap,
+            open: AtomicUsize::new(0),
+            dying: AtomicUsize::new(0),
+            freed: Notify::new(),
+        })
+    }
+
+    /// A place for a new socket, if under the cap.
+    pub(crate) fn take(self: &Arc<Self>) -> Option<Slot> {
+        self.open
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n < self.cap).then_some(n.saturating_add(1))
+            })
+            .ok()?;
+        Some(Slot {
+            sockets: self.clone(),
+            state: Arc::new(AtomicU8::new(HELD)),
+        })
+    }
+
+    /// Sockets open.
+    pub(crate) fn open(&self) -> usize {
+        self.open.load(Ordering::SeqCst)
+    }
+
+    /// Of them, dying.
+    pub(crate) fn dying(&self) -> usize {
+        self.dying.load(Ordering::SeqCst)
+    }
+
+    /// The cap.
+    pub(crate) fn cap(&self) -> usize {
+        self.cap
+    }
+
+    /// Ready once a place is freed: enabled before the count is read, it
+    /// misses none freed after.
+    pub(crate) fn freed(&self) -> Notified<'_> {
+        self.freed.notified()
+    }
+}
+
+/// A socket's place, held by its `Io`: freed when dropped — the `Io`'s drop,
+/// or its connect's failure.
+pub(crate) struct Slot {
+    sockets: Arc<Sockets>,
+    state: Arc<AtomicU8>,
+}
+
+impl Slot {
+    /// Its connection's side: dropped while the socket is open, the socket
+    /// is dying.
+    pub(crate) fn held(&self) -> Held {
+        Held {
+            sockets: self.sockets.clone(),
+            state: self.state.clone(),
+        }
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        if self.state.swap(GONE, Ordering::SeqCst) == DYING {
+            let _ = self
+                .sockets
+                .dying
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                    Some(n.saturating_sub(1))
+                });
+        }
+        let _ = self
+            .sockets
+            .open
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                Some(n.saturating_sub(1))
+            });
+        self.sockets.freed.notify_waiters();
+    }
+}
+
+/// A connection's hold on its socket's place.
+pub(crate) struct Held {
+    sockets: Arc<Sockets>,
+    state: Arc<AtomicU8>,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        // Counted first: a slot dropped between the two sees it dying, or
+        // gone before it, and the count comes back.
+        self.sockets.dying.fetch_add(1, Ordering::SeqCst);
+        if self
+            .state
+            .compare_exchange(HELD, DYING, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            let _ = self
+                .sockets
+                .dying
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                    Some(n.saturating_sub(1))
+                });
+        }
+    }
+}
 
 /// What reports a request's last byte left.
 pub(crate) type Hook = Box<dyn FnOnce() + Send>;
@@ -100,22 +231,25 @@ impl Probe {
     }
 }
 
-/// A connection's bytes for hyper, counted by its probe.
+/// A connection's bytes for hyper, counted by its probe; its socket's place
+/// freed when it drops.
 pub(crate) struct Io<T> {
     inner: T,
     probe: Arc<Probe>,
     scratch: Vec<u8>,
+    _slot: Slot,
 }
 
 /// The most a read copies at once.
 const SCRATCH: usize = 16 * 1024;
 
 impl<T> Io<T> {
-    pub(crate) fn new(inner: T, probe: Arc<Probe>) -> Io<T> {
+    pub(crate) fn new(inner: T, probe: Arc<Probe>, slot: Slot) -> Io<T> {
         Io {
             inner,
             probe,
             scratch: vec![0; SCRATCH],
+            _slot: slot,
         }
     }
 }
@@ -207,7 +341,8 @@ mod tests {
             .unwrap();
         rt.block_on(async {
             let (client, mut peer) = tokio::io::duplex(64);
-            let mut io = Io::new(client, Arc::new(Probe::default()));
+            let slot = super::Sockets::new(1).take().unwrap();
+            let mut io = Io::new(client, Arc::new(Probe::default()), slot);
             std::future::poll_fn(|cx| hyper::rt::Write::poll_shutdown(Pin::new(&mut io), cx))
                 .await
                 .unwrap();
@@ -236,7 +371,8 @@ mod tests {
 
         let (client, _peer) = tokio::io::duplex(64);
         let probe = Arc::new(Probe::default());
-        let mut io = Io::new(client, probe.clone());
+        let slot = super::Sockets::new(1).take().unwrap();
+        let mut io = Io::new(client, probe.clone(), slot);
         let may = Arc::new(AtomicBool::new(true));
         let m = may.clone();
         probe.arm(
@@ -270,5 +406,37 @@ mod tests {
             io.as_mut().poll_write_vectored(&mut cx, &bufs),
             Poll::Ready(Ok(2))
         ));
+    }
+
+    /// A source's sockets (decision 19): no more than its cap at once; a
+    /// connection gone before its socket, the socket dying until it drops;
+    /// a waiter enabled before the count woken when a place is freed.
+    #[test]
+    fn a_source_s_sockets_under_its_cap() {
+        use super::Sockets;
+        let sockets = Sockets::new(2);
+        let a = sockets.take().unwrap();
+        let b = sockets.take().unwrap();
+        assert!(sockets.take().is_none());
+        assert_eq!((sockets.open(), sockets.dying(), sockets.cap()), (2, 0, 2));
+        // Its connection dropped, its socket not yet: dying.
+        drop(a.held());
+        assert_eq!(sockets.dying(), 1);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut freed = std::pin::pin!(sockets.freed());
+            freed.as_mut().enable();
+            drop(a);
+            freed.await;
+        });
+        assert_eq!((sockets.open(), sockets.dying()), (1, 0));
+        // Its socket gone first: never dying.
+        let held = b.held();
+        drop(b);
+        drop(held);
+        assert_eq!((sockets.open(), sockets.dying()), (0, 0));
+        assert!(sockets.take().is_some());
     }
 }

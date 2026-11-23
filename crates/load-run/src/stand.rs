@@ -128,6 +128,11 @@ pub trait Egress: Send + Sync + 'static {
     /// A connection's bytes.
     type Io: AsyncRead + AsyncWrite + Send + Unpin + 'static;
 
+    /// The most sockets `source` may hold at once (decision 19): its ports,
+    /// its share of the descriptors — the shell's cap on it, over each
+    /// socket's life.
+    fn ports(&self, source: u32) -> usize;
+
     /// A new connection from `source` to `route`'s endpoint, or why not —
     /// the stand's or the harness's (decision 19). Dropped, it resets: its
     /// socket closed at zero linger, nothing it queued delivered after.

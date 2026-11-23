@@ -44,18 +44,58 @@ fn bind_error(e: io::Error) -> Connect {
 pub struct TcpEgress {
     endpoints: BTreeMap<String, SocketAddr>,
     sources: Vec<Option<IpAddr>>,
+    ports: usize,
 }
+
+/// Linux's default local port range, 32768 to 60999: its size.
+pub const PORTS: usize = 28_232;
 
 impl TcpEgress {
     /// Connections to `endpoints` by name, source `i` bound to `sources[i]`
-    /// (or the system's choice).
+    /// (or the system's choice); the ports Linux's default range.
     pub fn new(endpoints: BTreeMap<String, SocketAddr>, sources: Vec<Option<IpAddr>>) -> TcpEgress {
-        TcpEgress { endpoints, sources }
+        TcpEgress {
+            endpoints,
+            sources,
+            ports: PORTS,
+        }
+    }
+
+    /// The same, a bound source holding at most `ports` sockets; the
+    /// sources the system binds share them.
+    pub fn with_ports(self, ports: usize) -> TcpEgress {
+        TcpEgress { ports, ..self }
+    }
+}
+
+/// The host's local port range's size, from the kernel's setting.
+pub fn local_ports() -> io::Result<usize> {
+    let range = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")?;
+    let mut bounds = range.split_whitespace().map(str::parse::<usize>);
+    match (bounds.next(), bounds.next()) {
+        (Some(Ok(low)), Some(Ok(high))) if high >= low => {
+            Ok(high.saturating_sub(low).saturating_add(1))
+        }
+        _ => Err(io::Error::other(format!("a port range not read: {range}"))),
     }
 }
 
 impl Egress for TcpEgress {
     type Io = TcpStream;
+
+    /// A bound source's ports are its own; the unbound share the system's.
+    fn ports(&self, source: u32) -> usize {
+        let bound = usize::try_from(source)
+            .ok()
+            .and_then(|s| self.sources.get(s).copied().flatten())
+            .is_some();
+        if bound {
+            self.ports
+        } else {
+            let unbound = self.sources.iter().filter(|s| s.is_none()).count().max(1);
+            self.ports / unbound
+        }
+    }
 
     fn connect(
         &self,

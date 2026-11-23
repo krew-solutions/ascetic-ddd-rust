@@ -34,7 +34,7 @@ use tokio::task::AbortHandle;
 use crate::carrier::Carrier;
 use crate::clock::Clock;
 use crate::decorate::{Decoration, Decorator, Undecorated};
-use crate::io::{Io, Probe};
+use crate::io::{Held, Io, Probe, Slot, Sockets};
 use crate::stamps::Attempt;
 use crate::stand::{Connect, Egress, Opening, Refused, Route, Stand, StandConnect};
 use crate::turn;
@@ -129,6 +129,8 @@ struct Conn {
     /// Its task: aborted, its socket dropped — reset, at zero linger
     /// (decision 19).
     task: AbortHandle,
+    /// Its hold on its socket's place: dropped unpooled, the socket dying.
+    _held: Held,
 }
 
 impl Conn {
@@ -168,6 +170,19 @@ impl Pool {
         self.put(endpoint, conn);
     }
 
+    /// The connection idle longest, to any endpoint: evicted at the cap
+    /// (decision 19).
+    fn evict(&self) -> Option<Conn> {
+        let mut idle = self.lock();
+        let endpoint = idle
+            .iter()
+            .filter_map(|(e, conns)| conns.first().map(|c| (c.idle_since, e.clone())))
+            .min()?
+            .1;
+        let conns = idle.get_mut(&endpoint)?;
+        (!conns.is_empty()).then(|| conns.remove(0))
+    }
+
     /// Back unused, idle since when it was (decision 19).
     fn put(&self, endpoint: &str, conn: Conn) {
         self.lock()
@@ -185,6 +200,8 @@ struct Inner<S, E, D> {
     config: Config,
     /// By source.
     pools: Vec<Pool>,
+    /// By source: its sockets under its cap (decision 19).
+    sockets: Vec<Arc<Sockets>>,
 }
 
 /// The REST carrier: see the [module documentation](self).
@@ -211,6 +228,9 @@ impl<S: Stand, E: Egress, D: Decorator> RestCarrier<S, E, D> {
     ) -> RestCarrier<S, E, D> {
         let sources = usize::try_from(header.profile.sources.max(1)).unwrap_or(1);
         let pools = (0..sources).map(|_| Pool::default()).collect();
+        let sockets = (0..sources)
+            .map(|s| Sockets::new(egress.ports(u32::try_from(s).unwrap_or(u32::MAX))))
+            .collect();
         RestCarrier {
             inner: Arc::new(Inner {
                 header,
@@ -219,6 +239,7 @@ impl<S: Stand, E: Egress, D: Decorator> RestCarrier<S, E, D> {
                 decorator,
                 config,
                 pools,
+                sockets,
             }),
         }
     }
@@ -257,6 +278,35 @@ impl<C: Clock, S: Stand, E: Egress, D: Decorator> Carrier<C> for RestCarrier<S, 
         opening: Opening<'_>,
     ) -> impl Future<Output = Option<Result<String, Refused>>> + Send {
         self.inner.stand.gate(i, opening)
+    }
+}
+
+/// A socket's place at its source's cap (decision 19).
+enum Place {
+    /// Under the cap: taken.
+    Taken(Slot),
+    /// One is freed soon: a dying socket's, or the idle connection evicted.
+    Wait,
+    /// Every socket in flight: the harness's.
+    Full,
+}
+
+/// A place for a new socket of `sockets`: under the cap, taken; at it, a
+/// dying socket awaited, else the connection idle longest evicted — reset,
+/// its place freed once it drops.
+fn place(sockets: &Arc<Sockets>, pool: &Pool) -> Place {
+    if let Some(slot) = sockets.take() {
+        return Place::Taken(slot);
+    }
+    if sockets.dying() > 0 {
+        return Place::Wait;
+    }
+    match pool.evict() {
+        Some(idle) => {
+            idle.reset();
+            Place::Wait
+        }
+        None => Place::Full,
     }
 }
 
@@ -333,12 +383,14 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
         a: &Attempt<C>,
         source: u32,
         route: &Route,
+        slot: Slot,
     ) -> Result<Conn, Connect> {
         let stream = self.egress.connect(source, route).await?;
+        let held = slot.held();
         let probe = Arc::new(Probe::default());
         // hyper's HTTP/1.1 handshake does no I/O: its failure is the
         // harness's.
-        let (sender, connection) = http1::handshake(Io::new(stream, probe.clone()))
+        let (sender, connection) = http1::handshake(Io::new(stream, probe.clone(), slot))
             .await
             .map_err(|e| Connect::Harness {
                 cannot: "rest.handshake",
@@ -354,6 +406,7 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
             probe,
             idle_since: a.clock().now(),
             task,
+            _held: held,
         })
     }
 
@@ -366,9 +419,9 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
         let Some(op) = header.operations.iter().find(|o| o.name == rest.op) else {
             return a.fault("rest.operation", format!("no operation {}", rest.op));
         };
-        let Some(pool) = usize::try_from(rest.source)
+        let Some((pool, sockets)) = usize::try_from(rest.source)
             .ok()
-            .and_then(|s| self.pools.get(s))
+            .and_then(|s| self.pools.get(s).zip(self.sockets.get(s)))
         else {
             return a.fault("rest.source", format!("no source {}", rest.source));
         };
@@ -473,8 +526,36 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
                         }
                         a.sleep_until(next).await;
                     }
+                    // Its socket's place under the source's cap: a dying
+                    // one awaited, else the longest idle evicted; every
+                    // socket in flight, the harness's (decision 19).
+                    let slot = loop {
+                        let mut freed = pin!(sockets.freed());
+                        freed.as_mut().enable();
+                        match place(sockets, pool) {
+                            Place::Taken(slot) => break slot,
+                            Place::Full => {
+                                return a.fault(
+                                    "egress.cap",
+                                    format!(
+                                        "{} sockets open, the cap {}, every one in flight",
+                                        sockets.open(),
+                                        sockets.cap()
+                                    ),
+                                );
+                            }
+                            Place::Wait => {}
+                        }
+                        tokio::select! {
+                            biased;
+                            () = freed => {}
+                            () = a.sleep_until(past) => {
+                                return leave(a, refusals, "rest.cap").await;
+                            }
+                        }
+                    };
                     connected_last = Some(a.clock().now());
-                    let connecting = self.connect(&a, rest.source, &route);
+                    let connecting = self.connect(&a, rest.source, &route, slot);
                     match tokio::select! {
                         biased;
                         c = connecting => c,
@@ -652,5 +733,77 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
             }
             Err(e) => a.fault("rest.predicate", e.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use hyper::client::conn::http1;
+
+    use super::{Conn, Outgoing, Place, Pool, place};
+    use crate::clock::RealClock;
+    use crate::io::{Io, Probe, Sockets};
+    use crate::stamps::{Feeds, Stamps};
+
+    /// An idle connection over a pipe, its place one of `sockets`'; its task
+    /// spawned where tasks are.
+    async fn idle(stamps: &Stamps<RealClock>, sockets: &Arc<Sockets>, since: u64) -> Conn {
+        let (client, _server) = tokio::io::duplex(64);
+        let slot = sockets.take().unwrap();
+        let held = slot.held();
+        let probe = Arc::new(Probe::default());
+        let (sender, connection) =
+            http1::handshake::<_, Outgoing>(Io::new(client, probe.clone(), slot))
+                .await
+                .unwrap();
+        let task = stamps.spawn_on(
+            &tokio::runtime::Handle::current(),
+            Feeds::Nothing,
+            async move {
+                let _ = connection.await;
+            },
+        );
+        Conn {
+            sender,
+            probe,
+            idle_since: since,
+            task,
+            _held: held,
+        }
+    }
+
+    /// At the cap (decision 19): a dying socket awaited, the idle kept; none
+    /// dying, the idle evicted; none idle, full.
+    #[test]
+    fn a_place_at_the_cap() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let stamps = Stamps::new(Arc::new(RealClock::start(1_000_000).unwrap()));
+            let sockets = Sockets::new(2);
+            let pool = Pool::default();
+            pool.put("gateway", idle(&stamps, &sockets, 5).await);
+            // A second socket, its connection gone, its own still open.
+            let dying = sockets.take().unwrap();
+            drop(dying.held());
+            assert!(matches!(place(&sockets, &pool), Place::Wait));
+            assert!(pool.lock().get("gateway").is_some_and(|c| c.len() == 1));
+            // Dropped: under the cap again.
+            drop(dying);
+            let taken = place(&sockets, &pool);
+            assert!(matches!(taken, Place::Taken(_)));
+            // At the cap, none dying: the idle evicted.
+            assert!(matches!(place(&sockets, &pool), Place::Wait));
+            assert!(pool.lock().get("gateway").is_some_and(Vec::is_empty));
+            // Its task aborted, its socket drops: a place, then none left.
+            tokio::task::yield_now().await;
+            let held = place(&sockets, &pool);
+            assert!(matches!(held, Place::Taken(_)));
+            assert!(matches!(place(&sockets, &pool), Place::Full));
+            drop((taken, held));
+        });
     }
 }

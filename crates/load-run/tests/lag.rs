@@ -234,6 +234,10 @@ struct GatedTcp {
 impl Egress for GatedTcp {
     type Io = Gated;
 
+    fn ports(&self, _: u32) -> usize {
+        usize::MAX
+    }
+
     fn connect(&self, _: u32, _: &Route) -> impl Future<Output = Result<Gated, Connect>> + Send {
         let (addr, open, waker) = (self.addr, self.open.clone(), self.waker.clone());
         async move {
@@ -469,6 +473,10 @@ struct RefusingFirst {
 impl Egress for RefusingFirst {
     type Io = tokio::net::TcpStream;
 
+    fn ports(&self, _: u32) -> usize {
+        usize::MAX
+    }
+
     fn connect(
         &self,
         _: u32,
@@ -624,6 +632,10 @@ struct RefusedAt {
 
 impl Egress for RefusedAt {
     type Io = tokio::net::TcpStream;
+
+    fn ports(&self, _: u32) -> usize {
+        usize::MAX
+    }
 
     fn connect(
         &self,
