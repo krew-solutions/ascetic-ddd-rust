@@ -47,6 +47,10 @@ impl Stand for OneStand {
     {
         std::future::ready(None)
     }
+
+    fn endpoints(&self, _: &ascetic_ddd_command_log::record::Header, _: u32) -> Vec<String> {
+        vec!["gateway".to_owned()]
+    }
 }
 
 /// The sockets a source may hold.

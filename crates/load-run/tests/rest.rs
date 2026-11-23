@@ -350,9 +350,21 @@ impl Egress for Pipe {
             })
         }
     }
+
+    fn admits(&self, _: u32) -> Result<(), ascetic_ddd_load_run::stand::Unfit> {
+        Ok(())
+    }
+
+    fn reaches(&self, _: u32, _: &str) -> Result<(), ascetic_ddd_load_run::stand::Unfit> {
+        Ok(())
+    }
 }
 
-struct OneStand;
+/// Every endpoint its routes name.
+const DECLARED: &[&str] = &["gateway", "other", "third"];
+
+/// Routes as `route` says, declaring the endpoints it holds.
+struct OneStand(&'static [&'static str]);
 
 impl Stand for OneStand {
     /// Every call to the gateway; a list to another endpoint, group 99's to
@@ -381,6 +393,10 @@ impl Stand for OneStand {
     ) -> impl Future<Output = Option<Result<String, ascetic_ddd_load_run::stand::Refused>>> + Send
     {
         std::future::ready(None)
+    }
+
+    fn endpoints(&self, _: &ascetic_ddd_command_log::record::Header, _: u32) -> Vec<String> {
+        self.0.iter().map(|e| (*e).to_owned()).collect()
     }
 }
 
@@ -475,6 +491,8 @@ struct Connects {
     carrier_sources: Option<u32>,
     /// The process's descriptors, if bounded: none within, unknown.
     descriptors: Option<Option<ascetic_ddd_load_run::live::Descriptors>>,
+    /// The endpoints the stand declares.
+    declared: &'static [&'static str],
 }
 
 const CONNECTS: Connects = Connects {
@@ -485,6 +503,7 @@ const CONNECTS: Connects = Connects {
     events: 1_024,
     carrier_sources: None,
     descriptors: None,
+    declared: DECLARED,
 };
 
 /// As [`run_rest_with`], its connects as `connects` has them.
@@ -525,7 +544,7 @@ fn run_rest_refused(
         };
         let carrier = RestCarrier::new(
             own,
-            OneStand,
+            OneStand(connects.declared),
             Pipe {
                 stub: stub.clone(),
                 throttle,
@@ -1027,7 +1046,7 @@ fn over_rest_the_shell_journals_what_sim_journals() {
                 let carrier = Mixed {
                     rest: RestCarrier::new(
                         header.clone(),
-                        OneStand,
+                        OneStand(DECLARED),
                         Pipe {
                             stub,
                             throttle: AT_ONCE,
@@ -1248,7 +1267,7 @@ fn looked(lags: &[(u64, u64)], answer: Answer) -> Vec<Line> {
         let header = Arc::new(header);
         let carrier = RestCarrier::new(
             header.clone(),
-            OneStand,
+            OneStand(DECLARED),
             Pipe {
                 stub,
                 throttle: AT_ONCE,
@@ -1436,7 +1455,7 @@ fn run_decorated(
         let header = Arc::new(header);
         let carrier = RestCarrier::decorated(
             header.clone(),
-            OneStand,
+            OneStand(DECLARED),
             Pipe {
                 stub: stub.clone(),
                 throttle: AT_ONCE,
@@ -2500,6 +2519,36 @@ fn admission_holds_a_source_s_sockets() {
     );
 }
 
+/// Decision 20: a route to an endpoint its source's stand did not declare —
+/// neither admitted nor probed — is the harness's fault at its attempt.
+#[test]
+fn a_route_outside_its_declared_endpoints_stops_the_run() {
+    let records = vec![call("list", 1, 0, 0, 0)];
+    let (journal, came, _) = run_rest_refused(
+        rest_header(),
+        &records,
+        vec![ok(10, 0)],
+        AT_ONCE,
+        0,
+        Connects {
+            declared: &["gateway"],
+            ..CONNECTS
+        },
+        None,
+        None,
+        &|_| {},
+    );
+    let journal = journal.unwrap();
+    assert!(came.is_empty());
+    match journal.last() {
+        Some(Line::Fault(f)) => assert!(
+            matches!(&f.class, journal::FaultClass::Carrier { cannot, .. } if *cannot == journal::Code::Named("rest.endpoint".to_owned())),
+            "{f:?}"
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
 /// Decision 18 (K2b-7a): every await of an attempt races its deadline — a
 /// connect or a decorator that never answers leaves the attempt unsent at its
 /// deadline, censored there, and the run ends with it.
@@ -2623,7 +2672,7 @@ fn stop_leaves_no_request(connect: u64, throttle: Throttle) {
         let header = Arc::new(rest_header());
         let carrier = RestCarrier::new(
             header.clone(),
-            OneStand,
+            OneStand(DECLARED),
             Pipe {
                 stub: stub.clone(),
                 throttle,
@@ -2706,7 +2755,7 @@ fn a_run_dropped_takes_its_attempts_with_it() {
         let header = Arc::new(rest_header());
         let carrier = RestCarrier::new(
             header.clone(),
-            OneStand,
+            OneStand(DECLARED),
             Pipe {
                 stub: stub.clone(),
                 throttle: AT_ONCE,
@@ -2771,6 +2820,10 @@ impl Stand for Gating {
             })),
             _ => None,
         })
+    }
+
+    fn endpoints(&self, _: &ascetic_ddd_command_log::record::Header, _: u32) -> Vec<String> {
+        vec!["gateway".to_owned()]
     }
 }
 

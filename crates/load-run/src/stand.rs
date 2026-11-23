@@ -38,10 +38,26 @@ pub struct Refused {
     pub why: String,
 }
 
+/// Why an egress cannot carry a source, or reach an endpoint from it
+/// (ADR-0047 decision 20): told before T0, no packet sent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unfit {
+    /// A dotted name: `egress.source`, `egress.local`, ….
+    pub cannot: &'static str,
+    /// Why, the caller's only.
+    pub detail: String,
+}
+
 /// The stand: a route per step, and its gates before T0.
 pub trait Stand: Send + Sync + 'static {
     /// The route of `record`'s call `rest`; its reason if the stand has none.
     fn route(&self, record: &Record, rest: &Rest) -> Result<Route, String>;
+
+    /// The endpoints `source`'s routes may name in a run of `header`
+    /// (decision 20): each one admitted and probed before T0, a route
+    /// outside them the harness's fault — pairs, not every source with every
+    /// endpoint.
+    fn endpoints(&self, header: &Header, source: u32) -> Vec<String>;
 
     /// Its gate `i` before T0, none once past its last (decision 18): the
     /// gate's name once it passed, or its refusal. A gate may wait — the
@@ -132,6 +148,14 @@ pub trait Egress: Send + Sync + 'static {
     /// its share of the descriptors — the shell's cap on it, over each
     /// socket's life.
     fn ports(&self, source: u32) -> usize;
+
+    /// Whether it carries `sources` sources at all (decision 20), no packet
+    /// sent: each one's own, its address the host's and no other's.
+    fn admits(&self, sources: u32) -> Result<(), Unfit>;
+
+    /// Whether `source` reaches `endpoint`, no packet sent: an address for
+    /// it, of the source's family, its route not another source's.
+    fn reaches(&self, source: u32, endpoint: &str) -> Result<(), Unfit>;
 
     /// A new connection from `source` to `route`'s endpoint, or why not —
     /// the stand's or the harness's (decision 19). Dropped, it resets: its

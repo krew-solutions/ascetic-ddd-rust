@@ -36,7 +36,7 @@ use crate::clock::Clock;
 use crate::decorate::{Decoration, Decorator, Undecorated};
 use crate::io::{Held, Io, Probe, Slot, Sockets};
 use crate::stamps::Attempt;
-use crate::stand::{Connect, Egress, Opening, Refused, Route, Stand, StandConnect};
+use crate::stand::{Connect, Egress, Opening, Refused, Route, Stand, StandConnect, Unfit};
 use crate::turn;
 
 /// An attempt's looks around its deadline (decision 17): one at `D − J/2`,
@@ -202,6 +202,8 @@ struct Inner<S, E, D> {
     pools: Vec<Pool>,
     /// By source: its sockets under its cap (decision 19).
     sockets: Vec<Arc<Sockets>>,
+    /// By source: the endpoints its stand declares (decision 20).
+    endpoints: Vec<std::collections::BTreeSet<String>>,
 }
 
 /// The REST carrier: see the [module documentation](self).
@@ -231,6 +233,14 @@ impl<S: Stand, E: Egress, D: Decorator> RestCarrier<S, E, D> {
         let sockets = (0..sources)
             .map(|s| Sockets::new(egress.ports(u32::try_from(s).unwrap_or(u32::MAX))))
             .collect();
+        let endpoints = (0..sources)
+            .map(|s| {
+                stand
+                    .endpoints(&header, u32::try_from(s).unwrap_or(u32::MAX))
+                    .into_iter()
+                    .collect()
+            })
+            .collect();
         RestCarrier {
             inner: Arc::new(Inner {
                 header,
@@ -240,6 +250,7 @@ impl<S: Stand, E: Egress, D: Decorator> RestCarrier<S, E, D> {
                 config,
                 pools,
                 sockets,
+                endpoints,
             }),
         }
     }
@@ -263,6 +274,16 @@ impl<C: Clock, S: Stand, E: Egress, D: Decorator> Carrier<C> for RestCarrier<S, 
             && let Some(op) = header.operations.iter().find(|o| !o.decorated.is_empty())
         {
             return Err(format!("operation {} decorates, and no decorator", op.name));
+        }
+        // The egress carries every source, and each reaches every endpoint
+        // its stand declares for it — no packet sent (decision 20).
+        let told = |u: Unfit| format!("{}: {}", u.cannot, u.detail);
+        let sources = u32::try_from(self.inner.endpoints.len()).unwrap_or(u32::MAX);
+        self.inner.egress.admits(sources).map_err(told)?;
+        for (source, endpoints) in (0..sources).zip(&self.inner.endpoints) {
+            for endpoint in endpoints {
+                self.inner.egress.reaches(source, endpoint).map_err(told)?;
+            }
         }
         Ok(())
     }
@@ -477,6 +498,20 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
             Ok(r) => r,
             Err(why) => return a.fault("rest.route", why),
         };
+        // Only an endpoint admitted and probed for its source (decision 20).
+        if !self
+            .endpoints
+            .get(usize::try_from(rest.source).unwrap_or(usize::MAX))
+            .is_some_and(|e| e.contains(&route.endpoint))
+        {
+            return a.fault(
+                "rest.endpoint",
+                format!(
+                    "endpoint {} not among source {}'s declared",
+                    route.endpoint, rest.source
+                ),
+            );
+        }
         let id = render::correlation(self.config.namespace, &record.step, a.attempt());
         // Decorated once an attempt (decision 16): only the operation's
         // declared names, each a header's value.

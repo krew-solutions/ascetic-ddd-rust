@@ -2,14 +2,18 @@
 //! `Egress` for a plaintext stand, its endpoints by name, each source bound
 //! to an address of its own; TLS, if any, is the host's own egress.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 
 use tokio::net::{TcpSocket, TcpStream};
 
-use crate::stand::{Connect, Egress, Route};
+use crate::stand::{Connect, Egress, Route, Unfit};
+
+fn unfit(cannot: &'static str, detail: String) -> Unfit {
+    Unfit { cannot, detail }
+}
 
 /// A socket's own error: descriptors exhausted, or another.
 fn socket_error(e: io::Error) -> Connect {
@@ -82,6 +86,81 @@ pub fn local_ports() -> io::Result<usize> {
 
 impl Egress for TcpEgress {
     type Io = TcpStream;
+
+    /// Every source listed; the bound ones on addresses of their own, each
+    /// the host's — a throwaway socket bound to it, no packet sent.
+    fn admits(&self, sources: u32) -> Result<(), Unfit> {
+        let n = usize::try_from(sources).unwrap_or(usize::MAX);
+        if n > self.sources.len() {
+            return Err(unfit(
+                "egress.source",
+                format!("{sources} sources, {} listed", self.sources.len()),
+            ));
+        }
+        let mut bound = BTreeSet::new();
+        for ip in self.sources.iter().take(n).flatten() {
+            if !bound.insert(*ip) {
+                return Err(unfit(
+                    "egress.distinct",
+                    format!("two sources bound to {ip}: one port space"),
+                ));
+            }
+        }
+        for ip in bound {
+            std::net::UdpSocket::bind(SocketAddr::new(ip, 0)).map_err(|e| {
+                let cannot = if e.kind() == io::ErrorKind::AddrNotAvailable {
+                    "egress.local"
+                } else {
+                    "egress.bind"
+                };
+                unfit(cannot, format!("{ip}: {e}"))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// An address for `endpoint`; a bound source of its family; an unbound
+    /// one routed from no bound source's address — its local name after a
+    /// UDP connect, which sends nothing.
+    fn reaches(&self, source: u32, endpoint: &str) -> Result<(), Unfit> {
+        let Some(addr) = self.endpoints.get(endpoint).copied() else {
+            return Err(unfit(
+                "egress.endpoint",
+                format!("no address for endpoint {endpoint}"),
+            ));
+        };
+        let Some(local) = usize::try_from(source)
+            .ok()
+            .and_then(|s| self.sources.get(s).copied())
+        else {
+            return Err(unfit("egress.source", format!("no source {source}")));
+        };
+        match local {
+            Some(ip) if ip.is_ipv4() != addr.is_ipv4() => Err(unfit(
+                "egress.family",
+                format!("source {ip} to endpoint {endpoint} at {addr}"),
+            )),
+            Some(_) => Ok(()),
+            None => {
+                let any = if addr.is_ipv4() {
+                    SocketAddr::from(([0, 0, 0, 0], 0))
+                } else {
+                    SocketAddr::from(([0u16; 8], 0))
+                };
+                let routed = std::net::UdpSocket::bind(any)
+                    .and_then(|u| u.connect(addr).and_then(|()| u.local_addr()))
+                    .map_err(|e| unfit("egress.route", format!("{endpoint} at {addr}: {e}")))?
+                    .ip();
+                if self.sources.iter().flatten().any(|b| *b == routed) {
+                    return Err(unfit(
+                        "egress.shared",
+                        format!("source {source} routed from {routed}, a bound source's address"),
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
 
     /// A bound source's ports are its own; the unbound share the system's.
     fn ports(&self, source: u32) -> usize {

@@ -179,6 +179,10 @@ impl Stand for OneStand {
     {
         std::future::ready(None)
     }
+
+    fn endpoints(&self, _: &ascetic_ddd_command_log::record::Header, _: u32) -> Vec<String> {
+        vec!["gateway".to_owned()]
+    }
 }
 
 /// A connection whose writes past a request's head wait for a thread of the
@@ -260,6 +264,14 @@ impl Egress for GatedTcp {
                 headed: false,
             })
         }
+    }
+
+    fn admits(&self, _: u32) -> Result<(), ascetic_ddd_load_run::stand::Unfit> {
+        Ok(())
+    }
+
+    fn reaches(&self, _: u32, _: &str) -> Result<(), ascetic_ddd_load_run::stand::Unfit> {
+        Ok(())
     }
 }
 
@@ -509,6 +521,14 @@ impl Egress for RefusingFirst {
             Ok(s)
         }
     }
+
+    fn admits(&self, _: u32) -> Result<(), ascetic_ddd_load_run::stand::Unfit> {
+        Ok(())
+    }
+
+    fn reaches(&self, _: u32, _: &str) -> Result<(), ascetic_ddd_load_run::stand::Unfit> {
+        Ok(())
+    }
 }
 
 /// Decision 19 (F4): a refused connect, then the floor's timer firing
@@ -682,6 +702,14 @@ impl Egress for RefusedAt {
             s.set_nodelay(true).map_err(Connect::of_connect)?;
             Ok(s)
         }
+    }
+
+    fn admits(&self, _: u32) -> Result<(), ascetic_ddd_load_run::stand::Unfit> {
+        Ok(())
+    }
+
+    fn reaches(&self, _: u32, _: &str) -> Result<(), ascetic_ddd_load_run::stand::Unfit> {
+        Ok(())
     }
 }
 

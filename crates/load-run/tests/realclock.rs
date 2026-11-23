@@ -52,6 +52,10 @@ impl Stand for OneStand {
     {
         std::future::ready(None)
     }
+
+    fn endpoints(&self, _: &ascetic_ddd_command_log::record::Header, _: u32) -> Vec<String> {
+        vec!["gateway".to_owned()]
+    }
 }
 
 /// What the TCP stub does with a request, by its correlation id.

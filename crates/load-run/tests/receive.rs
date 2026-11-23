@@ -51,6 +51,10 @@ impl Stand for OneStand {
     {
         std::future::ready(None)
     }
+
+    fn endpoints(&self, _: &ascetic_ddd_command_log::record::Header, _: u32) -> Vec<String> {
+        vec!["gateway".to_owned()]
+    }
 }
 
 /// Loopback TCP, a clone of each connection's socket kept for `peek`.
@@ -80,6 +84,14 @@ impl Egress for Tcp {
             };
             connected.await.map_err(Connect::of_connect)
         }
+    }
+
+    fn admits(&self, _: u32) -> Result<(), ascetic_ddd_load_run::stand::Unfit> {
+        Ok(())
+    }
+
+    fn reaches(&self, _: u32, _: &str) -> Result<(), ascetic_ddd_load_run::stand::Unfit> {
+        Ok(())
     }
 }
 
