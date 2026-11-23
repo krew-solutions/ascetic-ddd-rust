@@ -25,6 +25,7 @@ use tokio::runtime::Handle;
 
 use crate::carrier::{Carrier, Needs};
 use crate::clock::Clock;
+use crate::live::Descriptors;
 use crate::sink::JournalSink;
 use crate::source::{LineSource, Plan};
 use crate::stamps::{Attempt, Harness, Stamps};
@@ -37,21 +38,47 @@ use crate::stamps::{Attempt, Harness, Stamps};
 pub struct Runtimes {
     sources: Vec<Handle>,
     events: Vec<usize>,
+    descriptors: Option<Descriptors>,
 }
 
 impl Runtimes {
-    pub(crate) fn new(sources: Vec<Handle>, events: Vec<usize>) -> Runtimes {
-        Runtimes { sources, events }
+    pub(crate) fn new(
+        sources: Vec<Handle>,
+        events: Vec<usize>,
+        descriptors: Option<Descriptors>,
+    ) -> Runtimes {
+        Runtimes {
+            sources,
+            events,
+            descriptors,
+        }
     }
 
-    /// A test's runtimes: `sources`, each taking `events` a driver turn.
+    /// A test's runtimes: `sources`, each taking `events` a driver turn; the
+    /// process's descriptors unbounded.
     #[cfg(feature = "testing")]
     pub fn assumed(sources: Vec<Handle>, events: usize) -> Runtimes {
         let n = sources.len();
         Runtimes {
             sources,
             events: vec![events; n],
+            descriptors: Some(Descriptors::assumed(u64::MAX, u64::MAX, 0)),
         }
+    }
+
+    /// The same, the process's descriptors `descriptors` — none, unknown.
+    #[cfg(feature = "testing")]
+    pub fn with_descriptors(self, descriptors: Option<Descriptors>) -> Runtimes {
+        Runtimes {
+            descriptors,
+            ..self
+        }
+    }
+
+    /// The process's descriptors, read once the runtimes existed; none if
+    /// they could not be.
+    pub fn descriptors(&self) -> Option<Descriptors> {
+        self.descriptors
     }
 
     /// By source.
@@ -66,6 +93,10 @@ impl Runtimes {
             .and_then(|s| self.events.get(s).copied())
     }
 }
+
+/// Descriptors kept for what is opened after they are read (decision 20):
+/// the journal's file, a gate's client, the host's own.
+pub const DESCRIPTORS_RESERVE: u64 = 16;
 
 /// The I/O events a source's driver spends a turn on its own (decision 20):
 /// its waker, and its signal receiver when tokio's `signal` feature is
@@ -99,6 +130,14 @@ pub enum Inadmissible {
         /// Its cap.
         cap: usize,
     },
+    /// The sources' caps with the descriptors open and the reserve past the
+    /// process's soft limit — or the descriptors unknown.
+    Descriptors {
+        /// The caps summed, the open and the reserve.
+        needed: u64,
+        /// The process's, if read.
+        descriptors: Option<Descriptors>,
+    },
     /// A source's cap with its driver's own past the events a turn takes:
     /// a look's turn could miss a ready socket.
     Events {
@@ -130,6 +169,26 @@ impl fmt::Display for Inadmissible {
                 "source {source} may hold {needed} sockets at once under the plan's bound (its \
                  pending steps, over all sources), its cap {cap}"
             ),
+            Inadmissible::Descriptors {
+                needed,
+                descriptors: Some(d),
+            } => write!(
+                f,
+                "{needed} descriptors needed (the caps, {} open, {DESCRIPTORS_RESERVE} kept), \
+                 the soft limit {} of a hard {}{}",
+                d.open(),
+                d.soft(),
+                d.hard(),
+                if d.raised() {
+                    ", raised"
+                } else {
+                    " — `Descriptors::raise` lifts it"
+                }
+            ),
+            Inadmissible::Descriptors {
+                needed,
+                descriptors: None,
+            } => write!(f, "{needed} descriptors needed, the process's unknown"),
             Inadmissible::Events {
                 source,
                 cap,
@@ -392,6 +451,8 @@ pub fn admit<C: Clock, X: Carrier<C>>(
             sources: header.profile.sources,
         }));
     }
+    // The caps of the sources needing sockets, summed: the process's share.
+    let mut caps: Option<u64> = None;
     for source in 0..sources {
         let needs = carrier
             .needs(plan.peaks(), source)
@@ -418,6 +479,21 @@ pub fn admit<C: Clock, X: Carrier<C>>(
                     cap,
                 }));
             }
+            let cap = u64::try_from(cap).unwrap_or(u64::MAX);
+            caps = Some(caps.unwrap_or(0).saturating_add(cap));
+        }
+    }
+    // I1: every cap's sockets, with those open and the reserve, within the
+    // soft limit — EMFILE never before a cap's own wait.
+    if let Some(caps) = caps {
+        let descriptors = runtimes.descriptors();
+        let needed = caps.saturating_add(DESCRIPTORS_RESERVE);
+        let fits = descriptors.is_some_and(|d| needed.saturating_add(d.open()) <= d.soft());
+        if !fits {
+            return Err(refused(Inadmissible::Descriptors {
+                needed: needed.saturating_add(descriptors.map_or(0, |d| d.open())),
+                descriptors,
+            }));
         }
     }
     // The machine's own refusals: a read-ahead past the header's.

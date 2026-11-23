@@ -4,11 +4,110 @@
 //! attempt's look verifies one turn, which must see every socket ready.
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
 use tokio::sync::oneshot;
 
 use crate::run::{DRIVER_EVENTS, Runtimes};
+
+/// The process's descriptors (ADR-0047 decision 20): its soft and hard
+/// limits and those open — read by `Live` once its runtimes exist, so their
+/// own are counted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Descriptors {
+    soft: u64,
+    hard: u64,
+    open: u64,
+    raised: bool,
+}
+
+/// Whether the process raised its soft limit to its hard one.
+static RAISED: AtomicBool = AtomicBool::new(false);
+
+impl Descriptors {
+    /// The soft limit: what the process may hold open.
+    pub fn soft(&self) -> u64 {
+        self.soft
+    }
+
+    /// The hard limit: what the soft one may be raised to.
+    pub fn hard(&self) -> u64 {
+        self.hard
+    }
+
+    /// Those open when read.
+    pub fn open(&self) -> u64 {
+        self.open
+    }
+
+    /// Whether the soft limit was raised to the hard one before.
+    pub fn raised(&self) -> bool {
+        self.raised
+    }
+
+    /// The process's, now (Linux: its limits and `/proc/self/fd`).
+    #[cfg(target_os = "linux")]
+    pub fn read() -> io::Result<Descriptors> {
+        use nix::sys::resource::{Resource, getrlimit};
+        let (soft, hard) = getrlimit(Resource::RLIMIT_NOFILE).map_err(io::Error::from)?;
+        // The listing's own descriptor is open while it is read.
+        let listed = std::fs::read_dir("/proc/self/fd")?.count();
+        let open = u64::try_from(listed.saturating_sub(1)).unwrap_or(u64::MAX);
+        Ok(Descriptors {
+            soft,
+            hard,
+            open,
+            raised: RAISED.load(Ordering::SeqCst),
+        })
+    }
+
+    /// Unknown off Linux: a run needing sockets is refused.
+    #[cfg(not(target_os = "linux"))]
+    pub fn read() -> io::Result<Descriptors> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the process's descriptors are read on Linux alone",
+        ))
+    }
+
+    /// The soft limit raised to the hard one — or to the kernel's own
+    /// ceiling, an infinite hard limit taking none (decision 20): the
+    /// process's, and its children's, a choice of the composition root's.
+    #[cfg(target_os = "linux")]
+    pub fn raise() -> io::Result<Descriptors> {
+        use nix::sys::resource::{RLIM_INFINITY, Resource, getrlimit, setrlimit};
+        let (_, hard) = getrlimit(Resource::RLIMIT_NOFILE).map_err(io::Error::from)?;
+        let to = if hard == RLIM_INFINITY {
+            std::fs::read_to_string("/proc/sys/fs/nr_open")?
+                .trim()
+                .parse::<u64>()
+                .map_err(io::Error::other)?
+        } else {
+            hard
+        };
+        setrlimit(Resource::RLIMIT_NOFILE, to, hard).map_err(io::Error::from)?;
+        RAISED.store(true, Ordering::SeqCst);
+        Descriptors::read()
+    }
+
+    /// Unknown off Linux.
+    #[cfg(not(target_os = "linux"))]
+    pub fn raise() -> io::Result<Descriptors> {
+        Descriptors::read()
+    }
+
+    /// A test's descriptors: `soft`, `hard`, `open`, assumed.
+    #[cfg(feature = "testing")]
+    pub fn assumed(soft: u64, hard: u64, open: u64) -> Descriptors {
+        Descriptors {
+            soft,
+            hard,
+            open,
+            raised: false,
+        }
+    }
+}
 
 /// The sources' runtimes, running until dropped.
 pub struct Live {
@@ -71,8 +170,10 @@ impl Live {
                     })?,
             );
         }
+        // Read once the runtimes exist: their own counted (decision 20).
+        let descriptors = Descriptors::read().ok();
         Ok(Live {
-            runtimes: Runtimes::new(handles, events.to_vec()),
+            runtimes: Runtimes::new(handles, events.to_vec(), descriptors),
             stops,
             threads,
         })

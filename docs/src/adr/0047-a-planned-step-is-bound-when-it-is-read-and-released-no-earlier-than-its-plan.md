@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c-1, K2b-8c-2 and K2b-8c-3 built (§ Measured), K2b-8c-4 next — K2b-8 before K2b-7e, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c-1 to K2b-8c-4 built (§ Measured), K2b-8c-5 next — K2b-8 before K2b-7e, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -793,6 +793,7 @@ stage 1; § Alternatives Considered keeps what each refuted):
 | K2b-8c-1 | K2b | a source's sockets under its cap — a connection gone before its socket dying until the socket drops, a waiter enabled before the count woken when a place is freed; the place at the cap — a dying socket awaited and the idle kept, none dying the idle evicted, none idle full; through the carrier at a cap of one: a read's idle connection evicted, reset, for a list to another endpoint; two reads at once, the second the harness's `egress.cap`; at a cap of two, idle on two endpoints and a call to a third, the one idle longest evicted and the other kept for the next list; `TcpEgress`'s ports — a bound source's its own, the unbound sharing the rest, the host's range read | no cap; a slot never freed; a freed place untold (a hang); a connection gone, its socket not dying; evicted though one dies; never evicted; the latest evicted; full, left unsent; the unbound unshared |
 | K2b-8c-2 | K2b | at a cap of one, two reads at once: the second woken when the first's connection idles and sent on it, its wait on its send's lag; the first's connection closed at its answer, the second placed late and answered past its deadline — censored, folded undecided, not a Root; a cap of nothing: the read leaving `rest.cap.full`, its wait on its report's lag, one waiting the route timeout later the harness's `egress.cap`; waiters served at the start and the route timeout later — by the pool, and by a freed place — no stop | the wait off the lag, off a report's lag; no wake at a checkin; never served at a place, from the pool; no stuck cap; stuck past the route timeout; the codes swapped; starving from each wait |
 | K2b-8c-3 | K2b | admission with the validator's own peaks of five reads at once: at a cap of the bound and events of the cap and the driver's two, admitted — every answer by its deadline, none waiting, five connections; a cap one short refused naming the source, the need and the cap; events one short refused naming the cap and the events; a cap past any events refused; a plan of two sources over a carrier of one refused naming source 1; `Live::for_caps` recording each cap and the driver's own, none past its sources, a cap no driver can take refused; a replayed log's plan its header and its commitment's peaks | no events check; events strictly past; no driver's own, one driver event; no bound check; the bound at the cap refused; needs nothing; an unknown source passed; the first source alone; `Live` without the driver's; a replay's peaks dropped |
+| K2b-8c-4 | K2b | admission with assumed descriptors: the cap, ten open and the reserve at the soft limit admitted, one below refused naming the need; two sources' caps summed; the process's unknown refused; in a test binary of its own, the process's: read as `/proc/self/fd` lists them, `Live`'s read once its runtimes exist, raised to the hard limit and marked; a soft limit one below admission's bound refused, at it a run filling its source's cap of twenty — every request out, none answered — with no `EMFILE` | no reserve; the open not counted; unknown passed; at the soft refused; the last cap alone; read before the runtimes; a raise unmarked; the listing's own counted |
 | K2-1 | K2 | the shell against an in-memory transport (hyper over `tokio::io::duplex`) under paused time reproduces `sim`'s journal | `std::time::Instant` in a handler |
 | K2-2 | K2 | each cause delayed alone — the reader, the token, the pool, the connect, the write, the dependency — moves exactly one gap of the chain | a gap merged |
 | K2-3 | K2 | on the real clock, multi-thread: chain order, no release before its stamped met instants, the stub's requests per correlation id equal the journal's attempts — a keep-alive connection closed as it is reused included; a request processed then reset before the answer is Unknown; a response stamped 1 µs before its deadline delivered after the tick is Expected | hyper's hidden retry; Unknown read as not taken; deadlines by arrival |
@@ -1632,6 +1633,17 @@ I2 — the need within the cap; `RunError::Inadmissible(Inadmissible)`, each num
   builds the runtime it records is K2b-8d's epoll twin (Verifiability).
 - The sweep killed all 11 mutants.
 
+**K2b-8c-4 — the descriptors** (2026-11-24, decision 20): `live::Descriptors { soft, hard, open, raised }` —
+`read()` (Linux: `getrlimit` and `/proc/self/fd`, the listing's own less; unknown elsewhere), `raise()` (the soft
+limit to the hard one, an infinite hard one to the kernel's `nr_open`), `assumed()` under `testing`; `Live` reads them
+once its runtimes exist and `Runtimes` carries them, so admission reads them itself; admission refuses when the caps
+of the sources needing sockets, the descriptors open and `run::DESCRIPTORS_RESERVE` (16: what is opened after the
+read — the journal's file, a gate's client, the host's own) pass the soft limit, or when the descriptors are unknown.
+- The reserve is a constant, its use the executor: a twin at the bound less one is refused only with it counted.
+  What is opened after the read is stage 3's re-read (K2b-8c-6).
+- The sweep killed all 8 mutants; read before the runtimes lives against a twin whose bound comes from `Live`'s own
+  count — the twin counts `/proc/self/fd` itself, as Verifiability required.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -1863,3 +1875,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   a full cap waiting, `egress.cap` for a stuck cap alone.
 - 2026-11-24: K2b-8c-3 built (§ Measured): the plan from its commitment, the carrier's needs, `Runtimes` with its
   events made by `Live`, admission's I1 and I2, `Inadmissible`.
+- 2026-11-24: K2b-8c-4 built (§ Measured): the process's descriptors read by `Live`, raised by the root, checked at
+  admission against the caps summed.

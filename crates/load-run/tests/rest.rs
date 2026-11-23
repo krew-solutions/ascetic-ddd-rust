@@ -473,6 +473,8 @@ struct Connects {
     events: usize,
     /// The sources the carrier's own header has, if not the plan's.
     carrier_sources: Option<u32>,
+    /// The process's descriptors, if bounded: none within, unknown.
+    descriptors: Option<Option<ascetic_ddd_load_run::live::Descriptors>>,
 }
 
 const CONNECTS: Connects = Connects {
@@ -482,6 +484,7 @@ const CONNECTS: Connects = Connects {
     pending: 0,
     events: 1_024,
     carrier_sources: None,
+    descriptors: None,
 };
 
 /// As [`run_rest_with`], its connects as `connects` has them.
@@ -542,10 +545,13 @@ fn run_rest_refused(
                 c
             },
         );
-        let runtimes = Runtimes::assumed(
+        let mut runtimes = Runtimes::assumed(
             vec![tokio::runtime::Handle::current(); header.profile.sources.max(1) as usize],
             connects.events,
         );
+        if let Some(d) = connects.descriptors {
+            runtimes = runtimes.with_descriptors(d);
+        }
         // A refusal before T0 comes back as it is: no run, no journal.
         let ran = match admit(
             ascetic_ddd_load_run::source::Plan::assumed(
@@ -2444,6 +2450,54 @@ fn admission_holds_a_source_s_sockets() {
         other => panic!("{:?}", other.map(|j| j.len())),
     };
     assert!(why.contains("source 1"), "{why}");
+    // The process's descriptors: the caps, those open and the reserve within
+    // the soft limit, one source or two summed.
+    use ascetic_ddd_load_run::live::Descriptors;
+    use ascetic_ddd_load_run::run::DESCRIPTORS_RESERVE;
+    let caps = |n: u64| n * pending + DESCRIPTORS_RESERVE + 10;
+    let bounded = |soft| Connects {
+        descriptors: Some(Some(Descriptors::assumed(soft, 4_096, 10))),
+        ..exact
+    };
+    assert!(admitted(bounded(caps(1))).0.is_ok());
+    assert_eq!(
+        refused(bounded(caps(1) - 1)),
+        Inadmissible::Descriptors {
+            needed: caps(1),
+            descriptors: Some(Descriptors::assumed(caps(1) - 1, 4_096, 10)),
+        }
+    );
+    let mut two = header.clone();
+    two.profile.sources = 2;
+    let both = |soft| {
+        run_rest_refused(
+            two.clone(),
+            &[call("read", 1, 0, 0, 0)],
+            vec![ok(10, 0)],
+            AT_ONCE,
+            0,
+            bounded(soft),
+            None,
+            None,
+            &|_| {},
+        )
+        .0
+    };
+    assert!(both(caps(2)).is_ok());
+    assert!(
+        matches!(both(caps(2) - 1), Err(RunError::Inadmissible(Inadmissible::Descriptors { needed, .. })) if needed == caps(2)),
+    );
+    // The process's descriptors unknown: refused, never passed.
+    assert_eq!(
+        refused(Connects {
+            descriptors: Some(None),
+            ..exact
+        }),
+        Inadmissible::Descriptors {
+            needed: pending + DESCRIPTORS_RESERVE,
+            descriptors: None,
+        }
+    );
 }
 
 /// Decision 18 (K2b-7a): every await of an attempt races its deadline — a
