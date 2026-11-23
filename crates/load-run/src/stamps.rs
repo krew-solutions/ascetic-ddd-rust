@@ -38,6 +38,16 @@ pub enum Harness {
         /// The instant.
         at: u64,
     },
+    /// A carrier could not carry an attempt: a frame, a route or a
+    /// predicate the plan's checks should have refused.
+    Carrier {
+        /// Its step's line.
+        line: Line,
+        /// Which attempt.
+        attempt: u32,
+        /// What, never a value.
+        what: String,
+    },
     /// An input taken stamped below one taken before it: the machine's
     /// clock would go back.
     Disordered {
@@ -57,6 +67,11 @@ impl fmt::Display for Harness {
             }
             Harness::Poisoned => write!(f, "the frontier's lock poisoned"),
             Harness::Stalled { at } => write!(f, "no progress on what was due at {at} µs"),
+            Harness::Carrier {
+                line,
+                attempt,
+                what,
+            } => write!(f, "attempt {attempt} of line {line}: {what}"),
             Harness::Disordered { at, last } => {
                 write!(f, "an input stamped {at} µs taken after one at {last} µs")
             }
@@ -159,6 +174,7 @@ pub struct Attempt<C: Clock> {
     attempt: u32,
     record: Arc<Record>,
     captured: Vec<Captured>,
+    first: u64,
     dispatched: u64,
     deadline: u64,
     stamps: Arc<Stamps<C>>,
@@ -173,7 +189,7 @@ impl<C: Clock> Attempt<C> {
         attempt: u32,
         record: Arc<Record>,
         captured: Vec<Captured>,
-        dispatched: u64,
+        (first, dispatched): (u64, u64),
         deadline: u64,
     ) -> Attempt<C> {
         stamps.lock().0.alive += 1;
@@ -182,6 +198,7 @@ impl<C: Clock> Attempt<C> {
             attempt,
             record,
             captured,
+            first,
             dispatched,
             deadline,
             stamps,
@@ -205,6 +222,11 @@ impl<C: Clock> Attempt<C> {
         &self.record
     }
 
+    /// Its step, shared: for a task that reports while it reads it.
+    pub fn shared_record(&self) -> Arc<Record> {
+        self.record.clone()
+    }
+
     /// The values its step's producers captured.
     pub fn captured(&self) -> &[Captured] {
         &self.captured
@@ -213,6 +235,12 @@ impl<C: Clock> Attempt<C> {
     /// When the machine dispatched it.
     pub fn dispatched(&self) -> u64 {
         self.dispatched
+    }
+
+    /// When the machine dispatched its step's first attempt: a call's frame
+    /// is built from it, so a resend's is the same bytes.
+    pub fn first_dispatched(&self) -> u64 {
+        self.first
     }
 
     /// When the frontier censors it, unanswered.
@@ -229,6 +257,13 @@ impl<C: Clock> Attempt<C> {
     pub fn sent(&self) {
         let (line, attempt) = (self.line, self.attempt);
         self.stamps.push(|f, now| f.sent(now, line, attempt));
+    }
+
+    /// What reports its bytes left, for a task that sees them leave
+    /// (a connection's, not the attempt's).
+    pub(crate) fn sent_hook(&self) -> impl FnOnce() + Send + 'static {
+        let (stamps, line, attempt) = (self.stamps.clone(), self.line, self.attempt);
+        move || stamps.push(|f, now| f.sent(now, line, attempt))
     }
 
     /// Its answer arrived, now: a floor held there until it is judged.
@@ -262,6 +297,19 @@ impl<C: Clock> Attempt<C> {
     /// deadline.
     pub fn unanswered(mut self) {
         self.done = true;
+    }
+
+    /// Its carrier could not carry it: a harness fault, `what` naming no
+    /// value.
+    pub fn fault(mut self, what: String) {
+        let (line, attempt) = (self.line, self.attempt);
+        self.hold = None;
+        self.done = true;
+        self.stamps.fault(Harness::Carrier {
+            line,
+            attempt,
+            what,
+        });
     }
 }
 

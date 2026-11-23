@@ -146,8 +146,9 @@ where
     let stamps = Arc::new(Stamps::new(clock.clone()));
     let mut queue = Ordered::new();
     let mut wakes: BTreeSet<u64> = BTreeSet::new();
-    // The lines read and not ended, for their dispatches.
-    let mut live: BTreeMap<Line, Arc<Record>> = BTreeMap::new();
+    // The lines read and not ended, for their dispatches, and when each was
+    // first dispatched.
+    let mut live: BTreeMap<Line, (Arc<Record>, Option<u64>)> = BTreeMap::new();
     let mut line: Line = 2;
     // The next record and when it may be read: `at − L`, not before the line
     // above it.
@@ -228,7 +229,7 @@ where
                 break;
             }
             progressed = true;
-            live.insert(line, r.clone());
+            live.insert(line, (r.clone(), None));
             queue.push(t, Input::Line { line, record: r });
             line = line.saturating_add(1);
             last = when;
@@ -281,7 +282,8 @@ where
                         if let Some((at, censor)) = censor {
                             queue.push(at, censor);
                         }
-                        if let Some(record) = live.get(&line) {
+                        if let Some((record, first)) = live.get_mut(&line) {
+                            let first = *first.get_or_insert(at);
                             let source = usize::try_from(source_of(record)).unwrap_or(usize::MAX);
                             let Some(handle) = runtimes.sources.get(source) else {
                                 return Err(RunError::Refused(format!(
@@ -294,7 +296,7 @@ where
                                 attempt,
                                 record.clone(),
                                 captured,
-                                at,
+                                (first, at),
                                 deadline,
                             );
                             // Open loop: spawned, never queued (a queue hides

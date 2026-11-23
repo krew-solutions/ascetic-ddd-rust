@@ -23,6 +23,11 @@ testing = ["tokio/test-util"]
 [dependencies]
 ascetic-ddd-command-log = { path = "../command-log" }
 ascetic-ddd-scheduler = { path = "../scheduler" }
+bytes = "1.12.1"
+http = "1.5.0"
+http-body = "1.1.0"
+# hyper's own HTTP/1.1 connection: no client, no pool, no TLS of its.
+hyper = { version = "1.11.1", features = ["client", "http1"] }
 tokio = { version = "1.53.1", features = ["macros", "rt", "sync", "time"] }
 
 [dev-dependencies]
@@ -32,4 +37,4 @@ ascetic-ddd-load-run = { path = ".", features = ["testing"] }
 serde_json = { workspace = true }
 sha2 = "0.10"
 tempfile = "3"
-tokio = { version = "1.53.1", features = ["macros", "rt", "rt-multi-thread", "sync", "test-util", "time"] }
+tokio = { version = "1.53.1", features = ["io-util", "macros", "rt", "rt-multi-thread", "sync", "test-util", "time"] }

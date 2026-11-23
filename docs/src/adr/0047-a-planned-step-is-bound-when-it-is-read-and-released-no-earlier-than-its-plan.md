@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b and K2b-1 built (§ Measured), K2b-2 next. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1 and K2b-2a built (§ Measured), K2b-2b next. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -28,7 +28,9 @@ To be built in slices, each a commit of its own:
 - **K2b** (the shell, decision 16), in parts: **K2b-0a** the frontier in the scheduler, `sim` driven through it;
   **K2b-0b** the machine re-checking a wake at the instant taken, the fold seeing a resend taken late; **K2b-1** the
   `load-run` crate — the clock, the frontier's lock, the machine loop, the line source and the journal sink, a scripted
-  carrier; **K2b-2** REST over hyper; **K2b-3** journal version 4's `attempt` line and the receive side's lateness;
+  carrier; **K2b-2** REST over hyper, in two: **K2b-2a** the transport — the counting `Io`, the connection, the pool, the
+  attempt, the `Stand` and `Egress` ports; **K2b-2b** the inverse-judge stub, `sim::Attempt.seen`, the shell's journal
+  equal to `sim`'s over REST; **K2b-3** journal version 4's `attempt` line and the receive side's lateness;
   **K2b-4** frames, correlation, decorators; **K2b-5** resends end to end; **K2b-6** connections on the real clock;
   **K2b-7** the gates before T0 and the shell's memory; **K2b-8** connections kept and abandoned.
 - **The first host run:** REST only, on the compose stand, `sources = 1` — a correctness run.
@@ -389,7 +391,10 @@ Distributed Systems, Verifiability, Performance — on Opus; it amends decision 
 - **An attempt**: the frame from a cache (a call's built once and resent byte for byte, a poll's its own); the
   correlation and decorated headers; `try_send_request`, never once `now` reached the deadline. Two write instants,
   by the shell's own `Io` counting accepted bytes: the first byte is the commit point (no reconnect after it);
-  `Sent` is the first flush once the body ended. A request handed back unstarted, or with no byte accepted, is no end:
+  `Sent` is the first flush of the socket once the request is handed over — hyper encodes the head and the body, one
+  frame ready at once, before it flushes, and flushes only with its buffer empty; the attempt arms and hands over in one
+  poll, so no flush comes between (K2b-2a: the body's end and a byte written, first guards of it, are dead there, and the
+  twins hold hyper to it). A request handed back unstarted, or with no byte accepted, is no end:
   the next connection, connects a floor apart, until a byte leaves or the frontier censors. The answer arrives at its
   last body frame (or at the cap passed: unreadable, the connection closed); it is read lazily — JSON only when a
   predicate, a capture or a problem needs it — and judged under the hold. Past a censored deadline a connection is kept
@@ -503,6 +508,7 @@ Distributed Systems, Verifiability, Performance — on Opus; it amends decision 
 | K2b-0a | K2b | the frontier's properties under drawn interleavings with monotone clocks and ties — drains nondecreasing, no input released below a released bound, an arrival by its deadline keeping its judgement, an attempt with none censored once at its deadline before anything later, `Sent` only before the deadline, nothing at or past a live floor, nothing at T0 unsettled; twins: an answer at D, at D + 1 (the censor, then the late answer), a send at D, a deadline inside a released batch, an early local reply; `sim` through it with every digest unchanged | censor at `<`; `Sent` at `<=`; a floor ignored; `through = now` unsettled; an arrival past D uncensored; a double censor; an answer stamped at its end |
 | K2b-0b | K2b | `sim` with wakes taken late over the corpus, deadlines a few answers long: the fold never incoherent, the definition agreeing, both new rules reached; the machine's twin — a resend due at `D − J − 1` taken 1 or 2 µs late ends as it stood, a poll's next taken past the deadline ends unknown then; golden runs — a poll taken 1 µs past its deadline undecided, a resend due at `D − J − 1` taken 2 µs late undecided, one due at `D − J` never scheduled and a root; on the differential, with no wake late, neither rule fires | the wake's re-check removed, or without J; a late poll ended at its deadline; either rule dropped, at its edge, or with J; a late refusal a root; the definition's rules dropped |
 | K2b-1 | K2b | under the virtual clock and a scripted carrier, the shell journals what `sim` journals, line for line, on every clean corpus log under the differential's scripts at three read-aheads; a line after an idle gap read at `at − L`; an answer judged for 50 µs holding the machine's own work, the line due meanwhile read after it at the instant taken; judging drawn up to 400 µs on the corpus, no input taken below the last; the clock's probe — a 137 µs sleep woken at 137, an instant settled only after a chain of spawned yields, idle with nothing to wake said; a dropped and a panicking carrier faulted; a carrier refusing the log and a source with no runtime refused before T0; on the real clock across four threads, no push below the frontier, none taken out of order, no stall, every line ended, the fold coherent — and with every read on a carrier's thread slowed by 200 µs; the allowlist, the clock's confinement, every `select!` biased | the settle skipped; drained unsettled; the read-ahead ignored; own work not held by a floor, or lines or wakes alone; the bound at `now` while held; a stamp read outside the lock; a dropped attempt no fault; sleepers woken before settlers; settled at the instant; a real sleep woken early; a `select!` unbiased |
+| K2b-2a | K2b | over hyper's connection to a stub on an in-memory pipe, under the virtual clock: `Sent` the instant the stub saw the last byte, writes held back and sixteen bytes at a time, and with a body eight at a time; the answer at its last body frame, not its head; a connection kept alive reused, one closed by `connection: close` not; a close once a byte left, and an answer cut short mid-body, each Unknown at the close; no answer censored at the deadline; an answer past the cap arrived at the cap, its connection closed; the frame as written — the route's `host`, the correlation id | `Sent` at the hand-off, or at the first write; the arrival at the head; no connection pooled; an answer past the cap read; a close after a byte unanswered, or retried; an answer cut short unanswered |
 | K2-1 | K2 | the shell against an in-memory transport (hyper over `tokio::io::duplex`) under paused time reproduces `sim`'s journal | `std::time::Instant` in a handler |
 | K2-2 | K2 | each cause delayed alone — the reader, the token, the pool, the connect, the write, the dependency — moves exactly one gap of the chain | a gap merged |
 | K2-3 | K2 | on the real clock, multi-thread: chain order, no release before its stamped met instants, the stub's requests per correlation id equal the journal's attempts — a keep-alive connection closed as it is reused included; a request processed then reset before the answer is Unknown; a response stamped 1 µs before its deadline delivered after the tick is Expected | hyper's hidden retry; Unknown read as not taken; deadlines by arrival |
@@ -1062,6 +1068,28 @@ loop waits rather than turns while an answer is judged.
   floor less one, understating its lateness without breaking the order. Their executor is a lateness drill on the real
   clock, K2b-6's (§ Owed).
 
+**K2b-2a — REST over hyper's connection** (2026-11-23): `stand` (the host's `Stand` — a route per step, its `host` and
+the endpoint its connections are pooled by — and `Egress`, a connection from a source); `io`, the connection's bytes
+for hyper by copy (`ReadBufCursor::put_slice`; the crate forbids `unsafe`), counted, `Sent` at the first flush after
+the hand-off; `rest`, the carrier: the frame from its fills (a call's at its first dispatch, so a resend's is the same
+bytes; a poll's at its own), the route, the correlation id, a connection from the source's pool (idle by endpoint, the
+latest first, one its peer closed dropped) or a new one whose task runs on the source's runtime, the request handed
+over; the answer read to its last frame or to the cap, judged under the floor. hyper 1.11.1 (`client`, `http1`),
+`http`, `http-body`, `bytes` join the allowlist; the command log's `fills` re-exports the faker's `Namespace`, so the
+shell names no faker. A log whose header names channels or host calls is refused before T0.
+- **What it found**: the guards decision 16 put on `Sent` — the body's end, a byte written — never change it. hyper
+  encodes the head and a one-frame body before its first flush, and flushes the socket only with its buffer empty
+  (`proto/h1/io.rs:271-303`, `proto/h1/dispatch.rs`), and the attempt arms the probe and hands the request over in one
+  poll on the connection's own runtime: the first successful flush after the hand-off is the last byte. Their mutants
+  survived; the guards are gone, and the twins, which compare `Sent` with the instant the stub saw the last byte under
+  held-back writes, hold hyper to the order. The first Unknown twin broke the connection before the answer's head and
+  so left the branch of a body cut short untested: its mutant survived until the cut-short twin.
+- **Executors**: seven twins (the executor row). Eight mutants, each killed: `Sent` at the hand-off, or at the first
+  write; the arrival at the head; no connection pooled; an answer past the cap read; a close once a byte left
+  unanswered, or retried as if none had; an answer cut short unanswered. Not executed here: a request handed back
+  unsent, or with no byte accepted, taken by the next connection — only a reuse racing the peer's close makes one, K2-3's
+  twin in K2b-6 (§ Owed).
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -1127,6 +1155,10 @@ only and measures move to the 12-core box.
   are K2b-7's. A journal writer that fails is heard at the finish, not at its line.
 - **A hold that never ends** (K2b-1): the machine waits for an answer being judged however long, and a carrier stuck
   in its judging holds the run; a hold is a fault at the stuck scale, the route timeout — K2b-3, with the hold's age.
+- **What K2b-2a leaves to later slices**: a request handed back unsent taken by the next connection, executed by K2-3's
+  close-on-reuse twin, and a refused connect retried a floor apart (today the frontier censors it, unsent), K2b-6's; idle
+  retirement, K2b-6's; an answer after a censored deadline kept and journaled ignored, and the ports' cap, K2b-8's; a
+  poll's frame its own and a call's resent byte for byte, executed by K2-5's frames with a `Sent` hole, K2b-4's.
 - **The live composition** (K2b-1): `Runtimes` takes a handle per source; the threads that run them, a lag sampler
   each, and the machine's own runtime are K2b-6's, with the real clock measured against a spin — and a lateness drill:
   the machine kept busy by a burst while answers are judged, its own late work stamped at the instant taken, never at
@@ -1203,3 +1235,6 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   the ports. Decision 16 refined: the floor of an answer being judged holds the machine's own work too, an input below
   the machine's clock a harness fault; the live clock's timed wait is its own timer thread's; the virtual clock's
   idle panic is raised in the test's future.
+- 2026-11-23: K2b-2 cut into K2b-2a and K2b-2b; K2b-2a built (§ Measured): REST over hyper's own connection. Decision
+  16 refined: `Sent` is the first flush after the hand-off, the guards of the body's end and a byte written dropped as
+  dead, the twins holding hyper's order.

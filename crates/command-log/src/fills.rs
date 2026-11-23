@@ -11,7 +11,9 @@
 
 use std::fmt;
 
-use ascetic_ddd_faker::Namespace;
+// The run's namespace, as `Fills` takes it: its users need not name the
+// faker for it.
+pub use ascetic_ddd_faker::Namespace;
 
 use crate::json::{self, Json};
 use crate::record::{Hole, Name, Subject, TimeBase, Value};
