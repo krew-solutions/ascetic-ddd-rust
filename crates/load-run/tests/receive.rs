@@ -22,7 +22,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
 
-use ascetic_ddd_command_log::fills::Namespace;
 use ascetic_ddd_command_log::record::{Record, Rest};
 use ascetic_ddd_command_log::render::RunSecret;
 use ascetic_ddd_load_run::clock::{Clock, RealClock};
@@ -216,7 +215,7 @@ fn attempt_once(prodded: bool) -> Option<Vec<Line>> {
             addr,
             peer: peer.clone(),
         },
-        Config::new(Namespace(1), RunSecret::new([7; 32])),
+        Config::new(RunSecret::new([7; 32])),
     );
     // The spinner and the peek, from the test's own thread.
     let spun = Arc::new(AtomicU64::new(u64::MAX));
@@ -261,16 +260,19 @@ fn attempt_once(prodded: bool) -> Option<Vec<Line>> {
     });
     let journal = rt
         .block_on(run(
-            admit(
-                ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
-                W,
-                Arc::new(carrier),
-                &Runtimes::assumed(vec![source], 1_024),
-            )
-            .unwrap(),
-            shell,
+            ascetic_ddd_load_run::run::Ready::assumed(
+                admit(
+                    ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
+                    W,
+                    Arc::new(carrier),
+                    &Runtimes::assumed(vec![source], 1_024),
+                )
+                .unwrap(),
+                shell,
+                Lines::new(),
+                ascetic_ddd_command_log::fills::Namespace(1),
+            ),
             Records::new(records.iter().cloned()),
-            Lines::new(),
         ))
         .unwrap()
         .journal;
@@ -371,7 +373,7 @@ fn calls_over_tcp_from_a_live_source_are_answered() {
         header.clone(),
         OneStand,
         egress,
-        Config::new(Namespace(1), RunSecret::new([7; 32])),
+        Config::new(RunSecret::new([7; 32])),
     );
     let records = [
         call("read", 1, 0, 0, 0),
@@ -384,16 +386,19 @@ fn calls_over_tcp_from_a_live_source_are_answered() {
     let started = clock.now();
     let journal = rt
         .block_on(run(
-            admit(
-                ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
-                W,
-                Arc::new(carrier),
-                live.runtimes(),
-            )
-            .unwrap(),
-            clock.clone(),
+            ascetic_ddd_load_run::run::Ready::assumed(
+                admit(
+                    ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
+                    W,
+                    Arc::new(carrier),
+                    live.runtimes(),
+                )
+                .unwrap(),
+                clock.clone(),
+                Lines::new(),
+                ascetic_ddd_command_log::fills::Namespace(1),
+            ),
             Records::new(records.iter().cloned()),
-            Lines::new(),
         ))
         .unwrap()
         .journal;

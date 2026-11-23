@@ -12,6 +12,12 @@
 //!
 //! The journal is opened after the third stage, its header built by
 //! [`journal_header`]; T0's clock started after it.
+//!
+//! The stages are a chain (decision 20): [`Admitted::measure`] makes a
+//! [`Measured`], [`Measured::gates`] a [`Gated`] — or a [`Barred`], its
+//! refusal journaled by the library — and [`Gated::start`] the
+//! [`Ready`] that [`run`](crate::run::run) alone takes: no
+//! stage skipped, no evidence the root's own, T0's clock the library's.
 
 use std::sync::Arc;
 
@@ -28,12 +34,155 @@ use ascetic_ddd_scheduler::judge::{Contract, Transport, judge};
 use ascetic_ddd_scheduler::machine::{self, MACHINE_REVISION};
 
 use crate::carrier::{Carrier, Unprobed};
-use crate::clock::Clock;
+use crate::clock::{Clock, RealClock};
 use crate::live::Descriptors;
-use crate::run::{Admitted, RunError, descriptors_fit};
+use crate::run::{Admitted, Ready, RunError, descriptors_fit};
 use crate::sink::JournalSink;
 use crate::stamps::{on_source, on_source_task};
 use crate::stand::{Opening, Refused};
+
+/// The second stage done: the judging measured.
+pub struct Measured<C, X> {
+    admitted: Admitted<C, X>,
+    judging: Judging,
+}
+
+impl<C: Clock, X: Carrier<C>> Admitted<C, X> {
+    /// The second stage: the judging time measured on a source's runtime by
+    /// `stopwatch` (see [`measure`]).
+    pub async fn measure(self, stopwatch: Arc<C>) -> Result<Measured<C, X>, RunError> {
+        let judging = measure(&self, stopwatch).await?;
+        Ok(Measured {
+            admitted: self,
+            judging,
+        })
+    }
+}
+
+/// The third stage passed under `namespace`: its gates' evidence.
+pub struct Gated<C, X> {
+    admitted: Admitted<C, X>,
+    judging: Judging,
+    namespace: Namespace,
+    gates: Vec<Gate>,
+}
+
+/// The third stage refused: what passed before, and the refusal — journaled
+/// by [`Barred::journal`].
+pub struct Barred<C, X> {
+    admitted: Admitted<C, X>,
+    judging: Judging,
+    namespace: Namespace,
+    gates: Vec<Gate>,
+    refused: Refused,
+}
+
+impl<C, X> Barred<C, X> {
+    /// The refusal: its gate, journaled; why, the caller's.
+    pub fn refused(&self) -> &Refused {
+        &self.refused
+    }
+
+    /// The refusal journaled into the sink `open` makes of its header — no
+    /// T0, the gates passed before it, the judging — its fault the only
+    /// line, then the trailer; `source` the writer's revision.
+    pub fn journal<K: JournalSink>(
+        self,
+        source: String,
+        open: impl FnOnce(journal::Header) -> Result<K, JournalError>,
+    ) -> Result<K::Finished, JournalError> {
+        let identity = Identity {
+            source,
+            log: self.admitted.log().to_owned(),
+            validator: self.admitted.validator().to_owned(),
+            namespace: self.namespace,
+        };
+        let header = journal_header(
+            &self.admitted,
+            identity,
+            None,
+            self.gates,
+            Some(self.judging),
+        );
+        refused(open(header)?, &self.refused)
+    }
+}
+
+impl<C: Clock, X: Carrier<C>> Measured<C, X> {
+    /// The third stage under `namespace`: the carrier's sockets probed, the
+    /// stand's gates in turn, the process's descriptors read again — each
+    /// within `bound` µs of `stopwatch`; the first refusal bars the run.
+    pub async fn gates(
+        self,
+        namespace: Namespace,
+        stopwatch: Arc<C>,
+        bound: u64,
+    ) -> Result<Gated<C, X>, Box<Barred<C, X>>> {
+        let Measured { admitted, judging } = self;
+        let mut passed = Vec::new();
+        let outcome = async {
+            passed.push(probe(&admitted, stopwatch.clone(), bound).await?);
+            let opening = Opening {
+                header: admitted.header(),
+                namespace,
+            };
+            passed.extend(gates(&admitted, opening, &*stopwatch, bound).await?);
+            passed.push(descriptors(&admitted)?);
+            Ok::<(), Refused>(())
+        }
+        .await;
+        match outcome {
+            Ok(()) => Ok(Gated {
+                admitted,
+                judging,
+                namespace,
+                gates: passed,
+            }),
+            Err(refused) => Err(Box::new(Barred {
+                admitted,
+                judging,
+                namespace,
+                gates: passed,
+                refused,
+            })),
+        }
+    }
+}
+
+impl<X> Gated<RealClock, X> {
+    /// T0: the run's clock started — the library's, after the third stage —
+    /// its journal opened by `open` from the stages' evidence and T0's wall
+    /// instant; `source` the writer's revision.
+    pub fn start<K: JournalSink>(
+        self,
+        source: String,
+        open: impl FnOnce(journal::Header) -> Result<K, JournalError>,
+    ) -> Result<Ready<RealClock, X, K>, RunError> {
+        let Gated {
+            admitted,
+            judging,
+            namespace,
+            gates,
+        } = self;
+        let clock =
+            Arc::new(RealClock::start(admitted.header().profile.jitter).map_err(RunError::Clock)?);
+        let identity = Identity {
+            source,
+            log: admitted.log().to_owned(),
+            validator: admitted.validator().to_owned(),
+            namespace,
+        };
+        let header = journal_header(
+            &admitted,
+            identity,
+            Some(clock.wall()),
+            gates,
+            Some(judging),
+        );
+        let sink = open(header).map_err(RunError::Journal)?;
+        Ok(Ready::new(admitted, clock, sink, namespace))
+    }
+}
 
 /// The shapes a document of the cap is measured in: the worst of them by the
 /// judging time a byte (an array of numbers, measured).

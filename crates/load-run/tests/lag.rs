@@ -20,7 +20,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
-use ascetic_ddd_command_log::fills::Namespace;
 use ascetic_ddd_command_log::record::{Header, Record, Rest};
 use ascetic_ddd_command_log::render::RunSecret;
 use ascetic_ddd_load_run::carrier::Carrier;
@@ -133,19 +132,22 @@ fn waiting_lag(write_at: u64) -> Option<u64> {
         .unwrap();
     let journal = rt
         .block_on(run(
-            admit(
-                ascetic_ddd_load_run::source::Plan::assumed(Arc::new(h), Default::default()),
-                W,
-                Arc::new(Waiting {
-                    clock: clock.clone(),
-                    write_at,
-                }),
-                live.runtimes(),
-            )
-            .unwrap(),
-            clock.clone(),
+            ascetic_ddd_load_run::run::Ready::assumed(
+                admit(
+                    ascetic_ddd_load_run::source::Plan::assumed(Arc::new(h), Default::default()),
+                    W,
+                    Arc::new(Waiting {
+                        clock: clock.clone(),
+                        write_at,
+                    }),
+                    live.runtimes(),
+                )
+                .unwrap(),
+                clock.clone(),
+                Lines::new(),
+                ascetic_ddd_command_log::fills::Namespace(1),
+            ),
             Records::new(records.iter().cloned()),
-            Lines::new(),
         ))
         .unwrap()
         .journal;
@@ -362,7 +364,7 @@ fn connection_lag(early: bool) -> Option<u64> {
         OneStand,
         GatedTcp { addr, open, waker },
         Hogging(clock.clone()),
-        Config::new(Namespace(1), RunSecret::new([7; 32])),
+        Config::new(RunSecret::new([7; 32])),
     );
     // Line 2's body is what the gate holds.
     let mut gated = call("update", 1, 0, 0, 0);
@@ -379,16 +381,19 @@ fn connection_lag(early: bool) -> Option<u64> {
         .unwrap();
     let journal = rt
         .block_on(run(
-            admit(
-                ascetic_ddd_load_run::source::Plan::assumed(h, Default::default()),
-                W,
-                Arc::new(carrier),
-                live.runtimes(),
-            )
-            .unwrap(),
-            clock.clone(),
+            ascetic_ddd_load_run::run::Ready::assumed(
+                admit(
+                    ascetic_ddd_load_run::source::Plan::assumed(h, Default::default()),
+                    W,
+                    Arc::new(carrier),
+                    live.runtimes(),
+                )
+                .unwrap(),
+                clock.clone(),
+                Lines::new(),
+                ascetic_ddd_command_log::fills::Namespace(1),
+            ),
             Records::new(records.iter().cloned()),
-            Lines::new(),
         ))
         .unwrap()
         .journal;
@@ -570,7 +575,7 @@ fn late_floor_lag() -> Option<u64> {
             addr,
             refused: AtomicBool::new(false),
         },
-        Config::new(Namespace(1), RunSecret::new([7; 32])),
+        Config::new(RunSecret::new([7; 32])),
     );
     let records = [call("read", 1, 0, 0, 0)];
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -578,16 +583,19 @@ fn late_floor_lag() -> Option<u64> {
         .unwrap();
     let journal = rt
         .block_on(run(
-            admit(
-                ascetic_ddd_load_run::source::Plan::assumed(h, Default::default()),
-                W,
-                Arc::new(carrier),
-                live.runtimes(),
-            )
-            .unwrap(),
-            clock,
+            ascetic_ddd_load_run::run::Ready::assumed(
+                admit(
+                    ascetic_ddd_load_run::source::Plan::assumed(h, Default::default()),
+                    W,
+                    Arc::new(carrier),
+                    live.runtimes(),
+                )
+                .unwrap(),
+                clock,
+                Lines::new(),
+                ascetic_ddd_command_log::fills::Namespace(1),
+            ),
             Records::new(records.iter().cloned()),
-            Lines::new(),
         ))
         .unwrap()
         .journal;
@@ -645,7 +653,7 @@ fn decorated_lag() -> Option<journal::Sent> {
         )
         .with_ports(62),
         Awaiting(clock.clone()),
-        Config::new(Namespace(1), RunSecret::new([7; 32])),
+        Config::new(RunSecret::new([7; 32])),
     );
     let records = [call("update", 1, 0, 0, 0), call("update", 2, 0, HOG_AT, 0)];
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -653,16 +661,19 @@ fn decorated_lag() -> Option<journal::Sent> {
         .unwrap();
     let journal = rt
         .block_on(run(
-            admit(
-                ascetic_ddd_load_run::source::Plan::assumed(h, Default::default()),
-                W,
-                Arc::new(carrier),
-                live.runtimes(),
-            )
-            .unwrap(),
-            clock.clone(),
+            ascetic_ddd_load_run::run::Ready::assumed(
+                admit(
+                    ascetic_ddd_load_run::source::Plan::assumed(h, Default::default()),
+                    W,
+                    Arc::new(carrier),
+                    live.runtimes(),
+                )
+                .unwrap(),
+                clock.clone(),
+                Lines::new(),
+                ascetic_ddd_command_log::fills::Namespace(1),
+            ),
             Records::new(records.iter().cloned()),
-            Lines::new(),
         ))
         .unwrap()
         .journal;
@@ -763,7 +774,7 @@ fn stalled_report() -> Option<journal::Unsent> {
             at: REFUSED_AT,
             refused: AtomicBool::new(false),
         },
-        Config::new(Namespace(1), RunSecret::new([7; 32])),
+        Config::new(RunSecret::new([7; 32])),
     );
     let records = [call("read", 1, 0, 0, 0)];
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -771,16 +782,19 @@ fn stalled_report() -> Option<journal::Unsent> {
         .unwrap();
     let journal = rt
         .block_on(run(
-            admit(
-                ascetic_ddd_load_run::source::Plan::assumed(h, Default::default()),
-                W,
-                Arc::new(carrier),
-                live.runtimes(),
-            )
-            .unwrap(),
-            clock,
+            ascetic_ddd_load_run::run::Ready::assumed(
+                admit(
+                    ascetic_ddd_load_run::source::Plan::assumed(h, Default::default()),
+                    W,
+                    Arc::new(carrier),
+                    live.runtimes(),
+                )
+                .unwrap(),
+                clock,
+                Lines::new(),
+                ascetic_ddd_command_log::fills::Namespace(1),
+            ),
             Records::new(records.iter().cloned()),
-            Lines::new(),
         ))
         .unwrap()
         .journal;
@@ -820,7 +834,7 @@ fn slow_refusal_sent() -> Option<journal::Sent> {
             at: REFUSED_AT,
             refused: AtomicBool::new(false),
         },
-        Config::new(Namespace(1), RunSecret::new([7; 32])),
+        Config::new(RunSecret::new([7; 32])),
     );
     let records = [call("read", 1, 0, 0, 0)];
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -828,16 +842,19 @@ fn slow_refusal_sent() -> Option<journal::Sent> {
         .unwrap();
     let journal = rt
         .block_on(run(
-            admit(
-                ascetic_ddd_load_run::source::Plan::assumed(h, Default::default()),
-                W,
-                Arc::new(carrier),
-                live.runtimes(),
-            )
-            .unwrap(),
-            clock,
+            ascetic_ddd_load_run::run::Ready::assumed(
+                admit(
+                    ascetic_ddd_load_run::source::Plan::assumed(h, Default::default()),
+                    W,
+                    Arc::new(carrier),
+                    live.runtimes(),
+                )
+                .unwrap(),
+                clock,
+                Lines::new(),
+                ascetic_ddd_command_log::fills::Namespace(1),
+            ),
             Records::new(records.iter().cloned()),
-            Lines::new(),
         ))
         .unwrap()
         .journal;

@@ -13,7 +13,6 @@ use std::future::Future;
 use std::net::TcpListener;
 use std::sync::Arc;
 
-use ascetic_ddd_command_log::fills::Namespace;
 use ascetic_ddd_command_log::record::{Record, Rest};
 use ascetic_ddd_command_log::render::RunSecret;
 use ascetic_ddd_command_log::validate::Peaks;
@@ -109,7 +108,7 @@ fn a_run_at_the_descriptors_bound_hits_no_emfile() {
                 vec![None],
             )
             .with_ports(CAP),
-            Config::new(Namespace(1), RunSecret::new([7; 32])),
+            Config::new(RunSecret::new([7; 32])),
         ))
     };
     // What a `Live` of one source holds with everything else open: its
@@ -151,10 +150,13 @@ fn a_run_at_the_descriptors_bound_hits_no_emfile() {
     let clock = Arc::new(RealClock::start(2_000).unwrap());
     let ran = machine
         .block_on(run(
-            admitted,
-            clock,
+            ascetic_ddd_load_run::run::Ready::assumed(
+                admitted,
+                clock,
+                Lines::new(),
+                ascetic_ddd_command_log::fills::Namespace(1),
+            ),
             Records::new(records.into_iter()),
-            Lines::new(),
         ))
         .unwrap();
     let journal = ran.journal;

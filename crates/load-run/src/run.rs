@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use ascetic_ddd_command_log::LogError;
+use ascetic_ddd_command_log::fills::Namespace;
 use ascetic_ddd_command_log::record::{Action, Header, Probe, Record};
 use ascetic_ddd_scheduler::journal::{self, FaultClass, JournalError, LogFault};
 use ascetic_ddd_scheduler::machine::{Input, Line, Machine, Output};
@@ -214,6 +215,8 @@ pub enum RunError {
     Inadmissible(Inadmissible),
     /// A measurement before T0 failed: the harness's.
     Measure(String),
+    /// T0's clock would not start.
+    Clock(crate::clock::ClockError),
     /// The log, refused before T0.
     Log(LogError),
     /// The journal's sink.
@@ -225,6 +228,7 @@ impl fmt::Display for RunError {
         match self {
             RunError::Inadmissible(why) => write!(f, "refused before T0: {why}"),
             RunError::Measure(why) => write!(f, "not measured before T0: {why}"),
+            RunError::Clock(e) => write!(f, "{e}"),
             RunError::Log(e) => write!(f, "{e}"),
             RunError::Journal(e) => write!(f, "{e}"),
         }
@@ -383,6 +387,9 @@ fn poll_now<S: LineSource>(source: &mut S) -> Poll<Result<Option<Arc<Record>>, L
 /// and only one runs.
 pub struct Admitted<C, X> {
     header: Arc<Header>,
+    /// Its log's digest and validator, from its plan.
+    log: String,
+    validator: String,
     peaks: ascetic_ddd_command_log::validate::Peaks,
     /// The caps of the sources needing sockets, summed (decision 20).
     caps: Option<u64>,
@@ -402,6 +409,16 @@ impl<C, X> Admitted<C, X> {
     /// What a run of it must hold: the validator's peaks.
     pub fn peaks(&self) -> &ascetic_ddd_command_log::validate::Peaks {
         &self.peaks
+    }
+
+    /// Its log's digest, as its commitment holds it.
+    pub fn log(&self) -> &str {
+        &self.log
+    }
+
+    /// The validator that committed its log.
+    pub fn validator(&self) -> &str {
+        &self.validator
     }
 
     /// The caps of its sources needing sockets, summed; none if none does.
@@ -517,6 +534,8 @@ pub fn admit<C: Clock, X: Carrier<C>>(
     drop(Machine::new(header.clone(), read_ahead)?);
     Ok(Admitted {
         header,
+        log: plan.log().to_owned(),
+        validator: plan.validator().to_owned(),
         peaks: *plan.peaks(),
         caps,
         read_ahead,
@@ -526,14 +545,79 @@ pub fn admit<C: Clock, X: Carrier<C>>(
     })
 }
 
-/// Runs the log `admitted` heads, read from `source` ahead of the clock —
-/// started at T0, after the stages before it (decision 18) — its journal's
-/// lines after the header into `sink`.
-pub async fn run<C, S, K, X>(
+/// A run ready at T0 (decision 20): admitted, measured and gated — its
+/// clock started after the third stage, its journal opened from their
+/// evidence, its namespace the one its gates certified. Only the stages
+/// make one, and [`Ready::assumed`] a test's.
+pub struct Ready<C, X, K> {
     admitted: Admitted<C, X>,
     clock: Arc<C>,
+    sink: K,
+    namespace: Namespace,
+}
+
+impl<C, X, K> Ready<C, X, K> {
+    pub(crate) fn new(
+        admitted: Admitted<C, X>,
+        clock: Arc<C>,
+        sink: K,
+        namespace: Namespace,
+    ) -> Ready<C, X, K> {
+        Ready {
+            admitted,
+            clock,
+            sink,
+            namespace,
+        }
+    }
+
+    /// A test's: `admitted` run by `clock` into `sink` under `namespace`,
+    /// its stages assumed.
+    #[cfg(feature = "testing")]
+    pub fn assumed(
+        admitted: Admitted<C, X>,
+        clock: Arc<C>,
+        sink: K,
+        namespace: Namespace,
+    ) -> Ready<C, X, K> {
+        Ready::new(admitted, clock, sink, namespace)
+    }
+}
+
+/// Runs the log `ready` heads, read from `source` ahead of its clock — T0 its
+/// start, after the stages (decisions 18, 20) — its journal's lines after
+/// the header into its sink.
+///
+/// Only a [`Ready`] runs: a run admitted and not through its stages does
+/// not.
+///
+/// ```compile_fail,E0308
+/// use ascetic_ddd_command_log::record::Record;
+/// use ascetic_ddd_load_run::carrier::Carrier;
+/// use ascetic_ddd_load_run::clock::RealClock;
+/// use ascetic_ddd_load_run::run::{Admitted, run};
+/// use ascetic_ddd_load_run::source::Records;
+/// async fn skipped<X: Carrier<RealClock>>(a: Admitted<RealClock, X>) {
+///     let _ = run(a, Records::new(std::iter::empty::<Record>())).await;
+/// }
+/// ```
+///
+/// Nor is a [`Ready`] built but by the stages:
+///
+/// ```compile_fail,E0451
+/// use ascetic_ddd_load_run::run::{Admitted, Ready};
+/// fn forged<C, X, K>(admitted: Admitted<C, X>, clock: std::sync::Arc<C>, sink: K) {
+///     let _ = Ready {
+///         admitted,
+///         clock,
+///         sink,
+///         namespace: ascetic_ddd_command_log::fills::Namespace(1),
+///     };
+/// }
+/// ```
+pub async fn run<C, S, K, X>(
+    ready: Ready<C, X, K>,
     mut source: S,
-    mut sink: K,
 ) -> Result<Ran<K::Finished>, RunError>
 where
     C: Clock,
@@ -541,6 +625,12 @@ where
     K: JournalSink,
     X: Carrier<C>,
 {
+    let Ready {
+        admitted,
+        clock,
+        mut sink,
+        namespace,
+    } = ready;
     let Admitted {
         header,
         read_ahead,
@@ -552,7 +642,7 @@ where
     // A hold that outlives it is a stuck carrier (decision 17).
     let route_timeout = header.profile.route_timeout;
     let mut machine = Machine::new(header, read_ahead)?;
-    let stamps = Arc::new(Stamps::new(clock.clone()));
+    let stamps = Arc::new(Stamps::new(clock.clone(), namespace));
     let mut queue = Ordered::new();
     // The lines read and not ended, for their dispatches, and when each was
     // first dispatched.

@@ -559,7 +559,7 @@ fn run_rest_refused(
                 connects: Arc::new(AtomicUsize::new(0)),
             },
             {
-                let mut c = Config::new(NAMESPACE, RunSecret::new([7; 32]));
+                let mut c = Config::new(RunSecret::new([7; 32]));
                 tune(&mut c);
                 c
             },
@@ -587,10 +587,13 @@ fn run_rest_refused(
             Ok(admitted) => {
                 clock
                     .within(run(
-                        admitted,
-                        clock.clone(),
+                        ascetic_ddd_load_run::run::Ready::assumed(
+                            admitted,
+                            clock.clone(),
+                            Lines::new(),
+                            ascetic_ddd_command_log::fills::Namespace(1),
+                        ),
                         Records::new(records.iter().cloned()),
-                        Lines::new(),
                     ))
                     .await
             }
@@ -1069,7 +1072,7 @@ fn over_rest_the_shell_journals_what_sim_journals() {
                             eof: None,
                             connects: Arc::new(AtomicUsize::new(0)),
                         },
-                        Config::new(NAMESPACE, RunSecret::new([7; 32])),
+                        Config::new(RunSecret::new([7; 32])),
                     ),
                     scripted: Scripted::new(script.clone()),
                 };
@@ -1079,16 +1082,22 @@ fn over_rest_the_shell_journals_what_sim_journals() {
                 );
                 clock
                     .within(run(
-                        admit(
-                            ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
-                            W,
-                            Arc::new(carrier),
-                            &runtimes,
-                        )
-                        .unwrap(),
-                        clock.clone(),
+                        ascetic_ddd_load_run::run::Ready::assumed(
+                            admit(
+                                ascetic_ddd_load_run::source::Plan::assumed(
+                                    header,
+                                    Default::default(),
+                                ),
+                                W,
+                                Arc::new(carrier),
+                                &runtimes,
+                            )
+                            .unwrap(),
+                            clock.clone(),
+                            Lines::new(),
+                            ascetic_ddd_command_log::fills::Namespace(1),
+                        ),
                         Records::new(records.iter().cloned()),
-                        Lines::new(),
                     ))
                     .await
                     .unwrap_or_else(|e| panic!("{name}/{seed}: {e}"))
@@ -1290,21 +1299,24 @@ fn looked(lags: &[(u64, u64)], answer: Answer) -> Vec<Line> {
                 eof: None,
                 connects: Arc::new(AtomicUsize::new(0)),
             },
-            Config::new(NAMESPACE, RunSecret::new([7; 32])),
+            Config::new(RunSecret::new([7; 32])),
         );
         let runtimes = Runtimes::assumed(vec![tokio::runtime::Handle::current()], 1_024);
         inner
             .within(run(
-                admit(
-                    ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
-                    W,
-                    Arc::new(carrier),
-                    &runtimes,
-                )
-                .unwrap(),
-                clock,
+                ascetic_ddd_load_run::run::Ready::assumed(
+                    admit(
+                        ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
+                        W,
+                        Arc::new(carrier),
+                        &runtimes,
+                    )
+                    .unwrap(),
+                    clock,
+                    Lines::new(),
+                    ascetic_ddd_command_log::fills::Namespace(1),
+                ),
                 Records::new(records.iter().cloned()),
-                Lines::new(),
             ))
             .await
             .unwrap()
@@ -1479,21 +1491,24 @@ fn run_decorated(
                 connects: Arc::new(AtomicUsize::new(0)),
             },
             proofs,
-            Config::new(NAMESPACE, RunSecret::new([7; 32])),
+            Config::new(RunSecret::new([7; 32])),
         );
         let runtimes = Runtimes::assumed(vec![tokio::runtime::Handle::current()], 1_024);
         let ran = clock
             .within(run(
-                admit(
-                    ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
-                    W,
-                    Arc::new(carrier),
-                    &runtimes,
-                )
-                .unwrap(),
-                clock.clone(),
+                ascetic_ddd_load_run::run::Ready::assumed(
+                    admit(
+                        ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
+                        W,
+                        Arc::new(carrier),
+                        &runtimes,
+                    )
+                    .unwrap(),
+                    clock.clone(),
+                    Lines::new(),
+                    ascetic_ddd_command_log::fills::Namespace(1),
+                ),
                 Records::new(records.iter().cloned()),
-                Lines::new(),
             ))
             .await;
         let came = stub.came.lock().unwrap().clone();
@@ -2454,7 +2469,8 @@ fn admission_holds_a_source_s_sockets() {
             events: Some(cap + 2),
         }
     );
-    // A plan of two sources, a carrier of one.
+    // A plan of two sources, a carrier built from a header of its own, of
+    // one: refused — its header not the plan's (decision 20).
     let mut two = header.clone();
     two.profile.sources = 2;
     let records: Vec<Record> = vec![call("read", 1, 0, 0, 0)];
@@ -2477,7 +2493,7 @@ fn admission_holds_a_source_s_sockets() {
         Err(RunError::Inadmissible(Inadmissible::Carrier(why))) => why,
         other => panic!("{:?}", other.map(|j| j.len())),
     };
-    assert!(why.contains("source 1"), "{why}");
+    assert_eq!(why, "the carrier's header is not the plan's");
     // The process's descriptors: the caps, those open and the reserve within
     // the soft limit, one source or two summed.
     use ascetic_ddd_load_run::live::Descriptors;
@@ -2695,7 +2711,7 @@ fn stop_leaves_no_request(connect: u64, throttle: Throttle) {
                 eof: None,
                 connects: Arc::new(AtomicUsize::new(0)),
             },
-            Config::new(NAMESPACE, RunSecret::new([7; 32])),
+            Config::new(RunSecret::new([7; 32])),
         );
         let runtimes = Runtimes::assumed(vec![tokio::runtime::Handle::current()], 1_024);
         let source = Failing {
@@ -2704,16 +2720,19 @@ fn stop_leaves_no_request(connect: u64, throttle: Throttle) {
         };
         let ran = clock
             .within(run(
-                admit(
-                    ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
-                    W,
-                    Arc::new(carrier),
-                    &runtimes,
-                )
-                .unwrap(),
-                clock.clone(),
+                ascetic_ddd_load_run::run::Ready::assumed(
+                    admit(
+                        ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
+                        W,
+                        Arc::new(carrier),
+                        &runtimes,
+                    )
+                    .unwrap(),
+                    clock.clone(),
+                    Lines::new(),
+                    ascetic_ddd_command_log::fills::Namespace(1),
+                ),
                 source,
-                Lines::new(),
             ))
             .await
             .unwrap();
@@ -2778,20 +2797,23 @@ fn a_run_dropped_takes_its_attempts_with_it() {
                 eof: None,
                 connects: Arc::new(AtomicUsize::new(0)),
             },
-            Config::new(NAMESPACE, RunSecret::new([7; 32])),
+            Config::new(RunSecret::new([7; 32])),
         );
         let runtimes = Runtimes::assumed(vec![tokio::runtime::Handle::current()], 1_024);
         let running = run(
-            admit(
-                ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
-                W,
-                Arc::new(carrier),
-                &runtimes,
-            )
-            .unwrap(),
-            clock.clone(),
+            ascetic_ddd_load_run::run::Ready::assumed(
+                admit(
+                    ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
+                    W,
+                    Arc::new(carrier),
+                    &runtimes,
+                )
+                .unwrap(),
+                clock.clone(),
+                Lines::new(),
+                ascetic_ddd_command_log::fills::Namespace(1),
+            ),
             Records::new(records.clone().into_iter()),
-            Lines::new(),
         );
         tokio::select! {
             biased;
@@ -2869,7 +2891,7 @@ fn the_rest_carrier_s_gates_are_its_stand_s() {
                 eof: None,
                 connects: Arc::new(AtomicUsize::new(0)),
             },
-            Config::new(NAMESPACE, RunSecret::new([7; 32])),
+            Config::new(RunSecret::new([7; 32])),
         );
         let runtimes = Runtimes::assumed(vec![tokio::runtime::Handle::current()], 1_024);
         let admitted = admit(

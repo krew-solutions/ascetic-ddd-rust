@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 
 use ascetic_ddd_command_log::answer::{self, Reply};
-use ascetic_ddd_command_log::fills::{Fills, Namespace};
+use ascetic_ddd_command_log::fills::Fills;
 use ascetic_ddd_command_log::record::{Action, Header, Operation, Record};
 use ascetic_ddd_command_log::render::{self, RunSecret};
 use ascetic_ddd_command_log::request::{self, Frame};
@@ -60,10 +60,9 @@ impl Looks {
     }
 }
 
-/// What every frame of a run is filled from beside its step.
+/// What every frame of a run is filled from beside its step and the run's
+/// namespace (its attempt's: decision 20).
 pub struct Config {
-    /// The run's namespace.
-    pub namespace: Namespace,
     /// The run's secret.
     pub secret: RunSecret,
     /// The least microseconds between an attempt's consecutive connects,
@@ -81,13 +80,12 @@ pub const CONNECT_FLOOR: u64 = 10_000;
 pub const IDLE_MARGIN: u64 = 1_000_000;
 
 impl Config {
-    /// The run's namespace and secret; the connect floor and the idle margin
-    /// by default. T0's wall instant is its clock's, read at each attempt: a
-    /// carrier built before T0 stamps no frame by an earlier one (decision
-    /// 18).
-    pub fn new(namespace: Namespace, secret: RunSecret) -> Config {
+    /// The run's secret; the connect floor and the idle margin by default.
+    /// T0's wall instant is its clock's, read at each attempt: a carrier
+    /// built before T0 stamps no frame by an earlier one (decision 18); the
+    /// namespace its attempt's.
+    pub fn new(secret: RunSecret) -> Config {
         Config {
-            namespace,
             secret,
             connect_floor: CONNECT_FLOOR,
             idle_margin: IDLE_MARGIN,
@@ -258,6 +256,10 @@ impl<S: Stand, E: Egress, D: Decorator> RestCarrier<S, E, D> {
 
 impl<C: Clock, S: Stand, E: Egress, D: Decorator> Carrier<C> for RestCarrier<S, E, D> {
     fn carries(&self, header: &Header) -> Result<(), String> {
+        // The plan's header, not one of its own (decision 20).
+        if !std::ptr::eq(header, &*self.inner.header) {
+            return Err("the carrier's header is not the plan's".to_owned());
+        }
         if !header.channels.is_empty() {
             return Err("a log with channels: the bus is K3's".to_owned());
         }
@@ -555,7 +557,7 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
         let run_start = a.clock().wall();
         let wall = |at: u64| run_start.saturating_add(i64::try_from(at).unwrap_or(i64::MAX));
         let fills = Fills {
-            namespace: self.config.namespace,
+            namespace: a.namespace(),
             secret: &self.config.secret,
             run_start,
             // A call's frame is its first attempt's, resent byte for byte; a
@@ -589,7 +591,7 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
                 ),
             );
         }
-        let id = render::correlation(self.config.namespace, &record.step, a.attempt());
+        let id = render::correlation(a.namespace(), &record.step, a.attempt());
         // Decorated once an attempt (decision 16): only the operation's
         // declared names, each a header's value.
         let view = Decoration {
@@ -938,7 +940,10 @@ mod tests {
             .build()
             .unwrap();
         rt.block_on(async {
-            let stamps = Stamps::new(Arc::new(RealClock::start(1_000_000).unwrap()));
+            let stamps = Stamps::new(
+                Arc::new(RealClock::start(1_000_000).unwrap()),
+                ascetic_ddd_command_log::fills::Namespace(1),
+            );
             let sockets = Sockets::new(2);
             let pool = Pool::default();
             pool.put("gateway", idle(&stamps, &sockets, 5).await);

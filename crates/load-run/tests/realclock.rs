@@ -155,22 +155,25 @@ fn over_tcp(
             vec![None],
         )
         .with_ports(1_000),
-        Config::new(NAMESPACE, RunSecret::new([7; 32])),
+        Config::new(RunSecret::new([7; 32])),
     );
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
     rt.block_on(run(
-        admit(
-            ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
-            W,
-            Arc::new(carrier),
-            live.runtimes(),
-        )
-        .unwrap(),
-        clock,
+        ascetic_ddd_load_run::run::Ready::assumed(
+            admit(
+                ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
+                W,
+                Arc::new(carrier),
+                live.runtimes(),
+            )
+            .unwrap(),
+            clock,
+            Lines::new(),
+            ascetic_ddd_command_log::fills::Namespace(1),
+        ),
         Records::new(records.iter().cloned()),
-        Lines::new(),
     ))
     .map(|r| r.journal)
 }
@@ -301,16 +304,19 @@ fn drill_timed(
         .build()
         .unwrap();
     let ran = rt.block_on(run(
-        admit(
-            ascetic_ddd_load_run::source::Plan::assumed(Arc::new(header), Default::default()),
-            W,
-            Arc::new(carrier),
-            live.runtimes(),
-        )
-        .unwrap(),
-        clock.clone(),
+        ascetic_ddd_load_run::run::Ready::assumed(
+            admit(
+                ascetic_ddd_load_run::source::Plan::assumed(Arc::new(header), Default::default()),
+                W,
+                Arc::new(carrier),
+                live.runtimes(),
+            )
+            .unwrap(),
+            clock.clone(),
+            Lines::new(),
+            ascetic_ddd_command_log::fills::Namespace(1),
+        ),
         Records::new(records.iter().cloned()),
-        Lines::new(),
     ));
     ran.map(|r| (r.journal, clock.now()))
 }

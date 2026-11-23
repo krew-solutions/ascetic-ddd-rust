@@ -237,10 +237,7 @@ fn admission_refuses_an_endpoint_unreached() {
             Declaring(declared),
             TcpEgress::new(BTreeMap::from([("gateway".to_owned(), addr)]), vec![source])
                 .with_ports(100),
-            Config::new(
-                ascetic_ddd_command_log::fills::Namespace(1),
-                ascetic_ddd_command_log::render::RunSecret::new([7; 32]),
-            ),
+            Config::new(ascetic_ddd_command_log::render::RunSecret::new([7; 32])),
         );
         admit::<VirtualClock, _>(
             Plan::assumed(h.clone(), Default::default()),
@@ -329,10 +326,7 @@ fn probed<E: Egress>(
         h.clone(),
         Declaring("gateway"),
         egress,
-        Config::new(
-            ascetic_ddd_command_log::fills::Namespace(1),
-            ascetic_ddd_command_log::render::RunSecret::new([7; 32]),
-        ),
+        Config::new(ascetic_ddd_command_log::render::RunSecret::new([7; 32])),
     );
     let admitted = admit::<RealClock, _>(
         Plan::assumed(h, Default::default()),
@@ -436,4 +430,218 @@ fn the_probe_connects_once_to_each_declared_pair_and_sends_nothing() {
     )
     .unwrap_err();
     assert_eq!(refused.gate, "egress.probe.s0.e0.egress_ports");
+}
+
+/// A loopback stand answering every request `200 {}`, the correlation ids it
+/// read kept.
+fn answering(seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>) -> SocketAddr {
+    use std::io::Write;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for s in listener.incoming() {
+            let Ok(mut s) = s else { return };
+            let seen = seen.clone();
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let Some(end) = buf.windows(4).position(|x| x == b"\r\n\r\n") else {
+                        match s.read(&mut chunk) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&buf[..end]).to_lowercase();
+                    if let Some(id) = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("x-correlation-id:"))
+                    {
+                        seen.lock().unwrap().push(id.trim().to_owned());
+                    }
+                    buf.drain(..end + 4);
+                    if s.write_all(b"HTTP/1.1 200 X\r\ncontent-length: 2\r\n\r\n{}")
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+/// Admitted, for the chain's twins: one source declaring `gateway` at
+/// `addr`, on `live`.
+fn chained(
+    addr: SocketAddr,
+    live: &ascetic_ddd_load_run::live::Live,
+) -> (
+    ascetic_ddd_load_run::run::Admitted<
+        ascetic_ddd_load_run::clock::RealClock,
+        ascetic_ddd_load_run::rest::RestCarrier<Declaring, TcpEgress>,
+    >,
+    Vec<ascetic_ddd_command_log::record::Record>,
+) {
+    use ascetic_ddd_load_run::clock::RealClock;
+    use ascetic_ddd_load_run::rest::{Config, RestCarrier};
+    use ascetic_ddd_load_run::run::admit;
+    use ascetic_ddd_load_run::source::Plan;
+    let mut h = fixture::header();
+    h.channels.clear();
+    h.calls.clear();
+    h.operations.iter_mut().for_each(|o| o.timeout = 2_000_000);
+    // The judging measured at a small cap: the stage, not its length.
+    h.profile.answer_cap = 4_096;
+    let h = std::sync::Arc::new(h);
+    let carrier = RestCarrier::new(
+        h.clone(),
+        Declaring("gateway"),
+        TcpEgress::new(BTreeMap::from([("gateway".to_owned(), addr)]), vec![None]).with_ports(100),
+        Config::new(ascetic_ddd_command_log::render::RunSecret::new([7; 32])),
+    );
+    let admitted = admit::<RealClock, _>(
+        Plan::assumed(
+            h,
+            ascetic_ddd_command_log::validate::Peaks {
+                pending: 1,
+                ..Default::default()
+            },
+        ),
+        fixture::W,
+        std::sync::Arc::new(carrier),
+        live.runtimes(),
+    )
+    .unwrap();
+    (admitted, vec![fixture::call("read", 1, 0, 0, 0)])
+}
+
+/// The wall clock now, in microseconds since the epoch.
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "a twin's own reading of the wall"
+)]
+fn wall_now() -> i64 {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    i64::try_from(since.as_micros()).unwrap()
+}
+
+/// Decision 20: the stages are a chain whose evidence is the library's — the
+/// journal's header holding the gates that ran (the probe, the descriptors),
+/// the judging, the namespace the gates certified, T0 no earlier than the
+/// third stage's end; the stand reading the run's frames under that
+/// namespace.
+#[test]
+fn the_stages_are_a_chain_its_evidence_the_library_s() {
+    use ascetic_ddd_command_log::fills::Namespace;
+    use ascetic_ddd_load_run::clock::RealClock;
+    use ascetic_ddd_load_run::live::Live;
+    use ascetic_ddd_load_run::run::run;
+    use ascetic_ddd_load_run::sink::Written;
+    use ascetic_ddd_load_run::source::Records;
+    use ascetic_ddd_scheduler::journal::{Code, Reader};
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let addr = answering(seen.clone());
+    let live = Live::for_caps(&[100]).unwrap();
+    let (admitted, records) = chained(addr, &live);
+    let jitter = admitted.header().profile.jitter;
+    let step = records[0].step.clone();
+    let root = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let stopwatch = std::sync::Arc::new(RealClock::start(2_000).unwrap());
+    let (ready, gated_at) = root.block_on(async {
+        let measured = admitted.measure(stopwatch.clone()).await.unwrap();
+        let Ok(gated) = measured
+            .gates(Namespace(7), stopwatch.clone(), 1_000_000)
+            .await
+        else {
+            panic!("the stages refused");
+        };
+        let at = wall_now();
+        let ready = gated
+            .start("twin".to_owned(), |head| {
+                Written::start(Vec::new(), head, 4)
+            })
+            .unwrap();
+        (ready, at)
+    });
+    let ran = root
+        .block_on(run(ready, Records::new(records.into_iter())))
+        .unwrap();
+    let (bytes, _) = ran.journal;
+    let reader = Reader::new(std::io::Cursor::new(bytes)).unwrap();
+    let h = reader.header().clone();
+    assert_eq!(h.namespace, 7);
+    let names: Vec<Code> = h.gates.iter().map(|g| g.name.clone()).collect();
+    assert_eq!(
+        names,
+        vec![
+            Code::Named("egress.probe".to_owned()),
+            Code::Named("egress.descriptors".to_owned()),
+        ]
+    );
+    assert!(h.judging.is_some());
+    let t0 = h.t0.expect("T0's wall instant");
+    assert!(
+        t0 + i64::try_from(jitter).unwrap() >= gated_at,
+        "T0 {t0} before the third stage's end {gated_at}"
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![ascetic_ddd_command_log::render::correlation(
+            Namespace(7),
+            &step,
+            1
+        )]
+    );
+}
+
+/// Decision 20: a refusal at the third stage journaled by the library — the
+/// header with no T0, the gates passed before it, its fault the only line.
+#[test]
+fn a_barred_run_is_journaled_by_the_library() {
+    use ascetic_ddd_command_log::fills::Namespace;
+    use ascetic_ddd_load_run::clock::RealClock;
+    use ascetic_ddd_load_run::live::Live;
+    use ascetic_ddd_load_run::sink::Written;
+    use ascetic_ddd_scheduler::journal::{Code, FaultClass, Line, Reader};
+    let closed = {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+    let live = Live::for_caps(&[100]).unwrap();
+    let (admitted, _) = chained(closed, &live);
+    let root = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let stopwatch = std::sync::Arc::new(RealClock::start(2_000).unwrap());
+    let barred = root.block_on(async {
+        let measured = admitted.measure(stopwatch.clone()).await.unwrap();
+        match measured.gates(Namespace(7), stopwatch, 1_000_000).await {
+            Err(barred) => barred,
+            Ok(_) => panic!("a closed port passed"),
+        }
+    });
+    assert_eq!(barred.refused().gate, "egress.probe.s0.e0.refused");
+    let (bytes, _) = barred
+        .journal("twin".to_owned(), |head| {
+            Written::start(Vec::new(), head, 4)
+        })
+        .unwrap();
+    let reader = Reader::new(std::io::Cursor::new(bytes)).unwrap();
+    let h = reader.header().clone();
+    assert_eq!((h.t0, h.namespace, h.gates.len()), (None, 7, 0));
+    assert!(h.judging.is_some());
+    let lines: Vec<Line> = reader.collect::<Result<_, _>>().unwrap();
+    assert_eq!(lines.len(), 1);
+    assert!(
+        matches!(&lines[0], Line::Fault(f) if f.class == FaultClass::Gate { name: Code::Named("egress.probe.s0.e0.refused".to_owned()) }),
+        "{lines:?}"
+    );
 }

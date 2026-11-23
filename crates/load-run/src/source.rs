@@ -19,6 +19,10 @@ use tokio::sync::mpsc;
 pub struct Plan {
     header: Arc<Header>,
     peaks: Peaks,
+    /// The log's trailer's SHA-256, as its commitment holds it.
+    log: String,
+    /// The validator that committed it.
+    validator: String,
 }
 
 impl Plan {
@@ -32,10 +36,25 @@ impl Plan {
         &self.peaks
     }
 
-    /// A test's plan: `header`, its peaks assumed.
+    /// Its log's digest, as its commitment holds it.
+    pub fn log(&self) -> &str {
+        &self.log
+    }
+
+    /// The validator that committed it.
+    pub fn validator(&self) -> &str {
+        &self.validator
+    }
+
+    /// A test's plan: `header`, its peaks assumed, its log a test's.
     #[cfg(feature = "testing")]
     pub fn assumed(header: Arc<Header>, peaks: Peaks) -> Plan {
-        Plan { header, peaks }
+        Plan {
+            header,
+            peaks,
+            log: "ab".repeat(32),
+            validator: live::validator(),
+        }
     }
 }
 
@@ -85,6 +104,8 @@ impl Replayed {
         let plan = Plan {
             header: Arc::new(reader.header().clone()),
             peaks: commitment.peaks,
+            log: commitment.sha256.clone(),
+            validator: commitment.validator.clone(),
         };
         let (tx, rx) = mpsc::channel(ahead.max(1));
         std::thread::Builder::new()

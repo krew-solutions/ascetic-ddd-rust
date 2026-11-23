@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 
+use ascetic_ddd_command_log::fills::Namespace;
 use ascetic_ddd_command_log::record::Record;
 use ascetic_ddd_scheduler::frontier::{Below, Frontier, Hold, Left};
 use ascetic_ddd_scheduler::journal::{Code, FaultClass};
@@ -458,15 +459,18 @@ impl Tasks {
 /// signal.
 pub(crate) struct Stamps<C> {
     clock: Arc<C>,
+    /// The run's namespace, its gates' (decision 20).
+    namespace: Namespace,
     state: Mutex<State>,
     notify: Notify,
     tasks: Tasks,
 }
 
 impl<C: Clock> Stamps<C> {
-    pub(crate) fn new(clock: Arc<C>) -> Stamps<C> {
+    pub(crate) fn new(clock: Arc<C>, namespace: Namespace) -> Stamps<C> {
         Stamps {
             clock,
+            namespace,
             state: Mutex::new(State {
                 frontier: Frontier::new(),
                 fault: None,
@@ -657,6 +661,11 @@ impl<C: Clock> Attempt<C> {
     /// The clock its reports are stamped by.
     pub fn clock(&self) -> &C {
         self.stamps.clock()
+    }
+
+    /// The run's namespace: the one its gates certified (decision 20).
+    pub fn namespace(&self) -> Namespace {
+        self.stamps.namespace
     }
 
     /// Its bytes left, now: pushed if before its deadline, once.

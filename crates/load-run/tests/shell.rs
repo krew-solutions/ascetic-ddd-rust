@@ -83,7 +83,15 @@ fn shell_from<S: LineSource, X: Carrier<VirtualClock>>(
             &runtimes,
         )?;
         clock
-            .within(run(admitted, clock.clone(), source, Lines::new()))
+            .within(run(
+                ascetic_ddd_load_run::run::Ready::assumed(
+                    admitted,
+                    clock.clone(),
+                    Lines::new(),
+                    ascetic_ddd_command_log::fills::Namespace(1),
+                ),
+                source,
+            ))
             .await
     })
 }
@@ -468,19 +476,22 @@ fn stress<C: Clock>(make: impl Fn(u64) -> C, seeds: u64, calls: u64) {
             };
             let sink = Written::start(Vec::new(), journal_header, 1_024).unwrap();
             let ran = run(
-                admit(
-                    ascetic_ddd_load_run::source::Plan::assumed(
-                        Arc::new(header.clone()),
-                        Default::default(),
-                    ),
-                    W,
-                    Arc::new(Scripted::new(quick)),
-                    &runtimes,
-                )
-                .unwrap(),
-                clock,
+                ascetic_ddd_load_run::run::Ready::assumed(
+                    admit(
+                        ascetic_ddd_load_run::source::Plan::assumed(
+                            Arc::new(header.clone()),
+                            Default::default(),
+                        ),
+                        W,
+                        Arc::new(Scripted::new(quick)),
+                        &runtimes,
+                    )
+                    .unwrap(),
+                    clock,
+                    sink,
+                    ascetic_ddd_command_log::fills::Namespace(1),
+                ),
                 Records::new(records.clone().into_iter()),
-                sink,
             )
             .await
             .unwrap_or_else(|e| panic!("seed {seed}: {e}"));
@@ -716,23 +727,26 @@ fn a_carrier_stuck_on_its_thread_is_a_harness_fault() {
     let err = rt.block_on(async {
         let clock = Arc::new(RealClock::start(2_000).unwrap());
         run(
-            admit(
-                ascetic_ddd_load_run::source::Plan::assumed(
-                    Arc::new(h.clone()),
-                    Default::default(),
-                ),
-                W,
-                Arc::new(Judging {
-                    arrive: 0,
-                    judging: Some(0),
-                    block: 200_000,
-                }),
-                &Runtimes::assumed(vec![runtimes.sources()[0].clone()], 1_024),
-            )
-            .unwrap(),
-            clock,
+            ascetic_ddd_load_run::run::Ready::assumed(
+                admit(
+                    ascetic_ddd_load_run::source::Plan::assumed(
+                        Arc::new(h.clone()),
+                        Default::default(),
+                    ),
+                    W,
+                    Arc::new(Judging {
+                        arrive: 0,
+                        judging: Some(0),
+                        block: 200_000,
+                    }),
+                    &Runtimes::assumed(vec![runtimes.sources()[0].clone()], 1_024),
+                )
+                .unwrap(),
+                clock,
+                Lines::new(),
+                ascetic_ddd_command_log::fills::Namespace(1),
+            ),
             Records::new(records.iter().cloned()),
-            Lines::new(),
         )
         .await
         .unwrap()
@@ -805,16 +819,22 @@ fn a_late_hand_off_is_journaled() {
     let journal = rt.block_on(async {
         let clock = Arc::new(RealClock::start(2_000).unwrap());
         run(
-            admit(
-                ascetic_ddd_load_run::source::Plan::assumed(Arc::new(header()), Default::default()),
-                W,
-                Arc::new(Blocking),
-                &Runtimes::assumed(vec![runtimes.sources()[0].clone()], 1_024),
-            )
-            .unwrap(),
-            clock,
+            ascetic_ddd_load_run::run::Ready::assumed(
+                admit(
+                    ascetic_ddd_load_run::source::Plan::assumed(
+                        Arc::new(header()),
+                        Default::default(),
+                    ),
+                    W,
+                    Arc::new(Blocking),
+                    &Runtimes::assumed(vec![runtimes.sources()[0].clone()], 1_024),
+                )
+                .unwrap(),
+                clock,
+                Lines::new(),
+                ascetic_ddd_command_log::fills::Namespace(1),
+            ),
             Records::new(records.iter().cloned()),
-            Lines::new(),
         )
         .await
         .unwrap()
@@ -1130,19 +1150,22 @@ fn a_poisoned_lock_stops_the_run() {
         let runtimes = Runtimes::assumed(vec![tokio::runtime::Handle::current()], 1_024);
         virtual_clock
             .within(run(
-                admit(
-                    ascetic_ddd_load_run::source::Plan::assumed(
-                        Arc::new(header()),
-                        Default::default(),
-                    ),
-                    W,
-                    Arc::new(Poisoner),
-                    &runtimes,
-                )
-                .unwrap(),
-                clock,
+                ascetic_ddd_load_run::run::Ready::assumed(
+                    admit(
+                        ascetic_ddd_load_run::source::Plan::assumed(
+                            Arc::new(header()),
+                            Default::default(),
+                        ),
+                        W,
+                        Arc::new(Poisoner),
+                        &runtimes,
+                    )
+                    .unwrap(),
+                    clock,
+                    Lines::new(),
+                    ascetic_ddd_command_log::fills::Namespace(1),
+                ),
                 Records::new(records.into_iter()),
-                Lines::new(),
             ))
             .await
     });

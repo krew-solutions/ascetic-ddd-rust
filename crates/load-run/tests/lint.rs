@@ -137,3 +137,31 @@ fn every_select_is_biased() {
         }
     }
 }
+
+/// Decision 20: a constructor that assumes what the stages prove — a plan, a
+/// runtime's events, the descriptors, a run ready — is a test's alone, held
+/// to the `testing` feature; none slips into a host's build.
+#[test]
+fn every_assumption_is_a_test_s() {
+    let mut held = 0;
+    for (name, text) in SOURCES {
+        let lines: Vec<&str> = text.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            let t = line.trim_start();
+            if !(t.starts_with("pub fn assumed(") || t.starts_with("pub fn with_descriptors(")) {
+                continue;
+            }
+            // The attributes right above it, its doc comment aside.
+            let above = lines[..i]
+                .iter()
+                .rev()
+                .map(|l| l.trim_start())
+                .take_while(|l| l.starts_with("#[") || l.starts_with("///"))
+                .any(|l| l == "#[cfg(feature = \"testing\")]");
+            assert!(above, "{name}:{}: {t}", i + 1);
+            held += 1;
+        }
+    }
+    // A plan's, the runtimes' two, the descriptors', a ready run's.
+    assert_eq!(held, 5);
+}
