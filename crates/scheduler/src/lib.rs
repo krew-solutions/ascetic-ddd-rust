@@ -14,5 +14,6 @@ pub mod journal;
 pub mod judge;
 pub mod machine;
 pub mod order;
+pub mod pace;
 pub mod sim;
 pub mod verdict;
