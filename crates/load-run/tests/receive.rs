@@ -278,14 +278,20 @@ fn attempt_once(prodded: bool) -> Option<Vec<Line>> {
         .journal;
     driver.join().unwrap();
     let _ = stop.send(());
-    // The state the twin is about: the runtime busy before the bytes came,
-    // the bytes in the socket before the deadline.
+    // The state the twin is about: the step released on time — its deadline
+    // `D`, which the driver's instants assume (a release late, the reader
+    // slipping past its read-ahead on a loaded box, moves the deadline with
+    // it) —, the runtime busy before the bytes came, the bytes in the socket
+    // before the deadline.
+    let on_time = journal
+        .iter()
+        .any(|l| matches!(l, Line::Dispatch(d) if d.deadline == D));
     let (spun, written, peeked) = (
         spun.load(Ordering::SeqCst),
         written.load(Ordering::SeqCst),
         peeked.load(Ordering::SeqCst),
     );
-    (spun < written && written < D && peeked > 0).then_some(journal)
+    (on_time && spun < written && written < D && peeked > 0).then_some(journal)
 }
 
 #[test]

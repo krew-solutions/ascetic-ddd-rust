@@ -1733,6 +1733,16 @@ observed.
 - **The receive twin's second sighting**: `a_wake_between_the_yield_and_the_turn_is_no_turn` (K2b-6b, the prodded
   variant) failed once under the whole suite, passing alone four times and in the next whole suite; its message,
   which carries the journal, was not kept — the next sighting's is.
+- **The third sighting, and its cause** (2026-11-24): `an_answer_in_the_host_by_its_deadline_is_read_at_the_look`
+  failed under the whole suite at `f.deadline == D` — 75,062 against 70,000. A call's deadline runs from its release
+  (`machine.rs:959`); the suite's load had the reader slip past the twin's read-ahead (1 ms) and release the step
+  5 ms late, while the twin's driver writes and peeks at instants taken from the constant `D`: a run outside the
+  twin's preconditions, which the twin checked for every other state it needs but not this one. Both twins share
+  `look()` and this assertion — the earlier sightings, whose messages were not kept, are most likely the same. The
+  twin now takes a run only if its dispatch's deadline is `D`, else tries another of its eight. Measured beside four
+  spinning processes, thirty runs each: unfixed, 2 failures at that assertion (71,670 and 72,832) and 22 refusals "the
+  box too loaded for the twin"; fixed, none at the assertion, 27 refusals — under that load the twin says so rather
+  than read a moved deadline as a defect. A test-only fix.
 - The sweep killed both mutants.
 
 **K2b-8d-2 — a whole process stalled** (2026-11-24, § Owed's stall twin): `tests/stall.rs`, a test binary of its own —
@@ -1781,6 +1791,16 @@ attempt passing at the first instant at or past its pace outside them, the reser
 - So the shaper keeps healthy runs healthy only while ρ exceeds the box's own outage fraction (its inflow of lateness)
   — on this laptop at 500 a second ρ = 50‰ holds; at ρ = 0 (the fixture's) every run drifts. A first replay that took
   the larger of the pace and the real hand-off, not their sum, under-reported this (its discriminator).
+- **The pairwise form against the recursion**, side by side over the same journals (a third set of runs): for every
+  two hand-offs `1000·|G_k − G_i| ≥ (1000 − ρ)·(|raw_k − raw_i| − J)` — no clamp, no rounding, the allowance
+  `(1 − ρ)·J` exact — against round 3's recursion. **No healthy run held an inversion** (an attempt handed behind a
+  later due already handed): the read-ahead covers the reader, so the two forms differ only by the tighter allowance —
+  within 1 per mille of hand-offs past J in every run. At 2 ms: none missed at any ρ ∈ {10, 50, 100, 200}‰, handed past
+  J 0, 163 and 0 per mille at 10‰, 0, 34 and 0 at 50‰. At 500 µs: 424–516 missed in two runs of three at 10‰, 0–4 at
+  50‰ and above, the shift up to 0.5 s.
+- **This box's noise**: the same replay's runs differ several-fold between sets (at 500 µs and 50‰: 0, 768 and 0
+  missed in one set, 2,191, 3,287 and 0 in a second, 4, 0 and 0 in a third) — availability's numbers belong to the
+  machine that runs the load, measured there; this laptop's settle only that 500 steps a second hold at ρ ≥ 10‰.
 
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
@@ -2056,3 +2076,9 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   round owed from what they established (§ Owed).
 - 2026-11-24: decision 21, round 3: a shaper at the hand-off, sound in kind; its discriminator's defects and its
   replay over healthy runs (§ Measured) recorded; its roles next.
+- 2026-11-24: decision 21's pairwise form replayed beside round 3's recursion (§ Measured): no inversion in a healthy
+  run, the forms within 1 per mille; the laptop's noise between sets recorded. The owner, the same day: the 12-core box
+  is busy and a remote load machine is coming; the launch-scale measurements wait for it, and the laptop settles
+  counts, A/B on one box and the first host run as a correctness run.
+- 2026-11-24: the receive twin's flake found — a release late past the read-ahead moved the deadline the twin's driver
+  assumes; the twin now requires its step's deadline before judging a run (§ Measured K2b-8d-2, its third sighting).

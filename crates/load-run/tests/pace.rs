@@ -145,7 +145,7 @@ fn paced(lines: &[journal::Line], j: u64) -> (usize, usize, usize, u64) {
 /// one whose pass falls at or past its deadline never handed. The attempts
 /// never handed, the largest shift past the raw due, and the share handed
 /// more than J past it, per mille.
-fn shaped(lines: &[journal::Line], j: u64, reserve: u64) -> (usize, u64, u64) {
+fn shaped(lines: &[journal::Line], j: u64, reserve: u64, pairwise: bool) -> Shape {
     let mut intended: BTreeMap<u64, u64> = BTreeMap::new();
     let mut handed: BTreeMap<(u64, u32), u64> = BTreeMap::new();
     let mut order: Vec<(u64, u32, u64, u64)> = Vec::new();
@@ -197,40 +197,83 @@ fn shaped(lines: &[journal::Line], j: u64, reserve: u64) -> (usize, u64, u64) {
             _ => t,
         }
     };
+    // The solver's recursion: `(D, P)`, the dues clamped monotonic. The
+    // pairwise form (its discriminator): for every two hand-offs
+    // `1000·|G_k − G_i| ≥ c·(|raw_k − raw_i| − J)`, `c = 1000 − reserve` — the
+    // allowance `(1 − κ)·J` exact, no clamp, no rounding — as two running
+    // maxima `U = max(1000·G + c·raw)`, `V = max(1000·G − c·raw)`.
+    let c = i128::from(1_000 - u32::try_from(reserve).unwrap());
+    let ji = i128::from(j);
     let (mut d_last, mut p, mut g_last) = (0u64, 0u64, 0u64);
-    let (mut missed, mut largest, mut late, mut passed) = (0usize, 0u64, 0u64, 0u64);
+    let (mut u, mut v): (Option<i128>, Option<i128>) = (None, None);
+    let mut d_max = 0u64;
+    let mut shape = Shape::default();
+    let mut passed = 0u64;
     for &(line, attempt, due, deadline) in &order {
         if !handed.contains_key(&(line, attempt)) {
             continue;
         }
         let r = raw(line, attempt, due);
-        let d = r.max(d_last);
-        let a = d.max(p + (1_000 - reserve) * (d - d_last) / 1_000);
+        let a = if pairwise {
+            let ri = i128::from(r);
+            [
+                v.map(|v| v + c * ri - c * ji),
+                u.map(|u| u - c * ri - c * ji),
+            ]
+            .into_iter()
+            .flatten()
+            .max()
+            .map_or(r, |m| {
+                r.max(u64::try_from((m.max(0) + 999) / 1_000).unwrap())
+            })
+        } else {
+            let d = r.max(d_last);
+            d.max(p + (1_000 - reserve) * (d - d_last) / 1_000)
+        };
         let g = free(a.max(g_last));
         if g >= deadline {
-            missed += 1;
+            shape.missed += 1;
             continue;
         }
-        passed += 1;
-        largest = largest.max(g - r);
-        if g > r + j {
-            late += 1;
+        if r < d_max {
+            shape.inverted += 1;
         }
-        p = a.max(g.saturating_sub(j));
-        d_last = d;
+        passed += 1;
+        shape.largest = shape.largest.max(g - r);
+        if g > r + j {
+            shape.late += 1;
+        }
+        if pairwise {
+            let (gi, ri) = (1_000 * i128::from(g), i128::from(r));
+            u = Some(u.map_or(gi + c * ri, |u| u.max(gi + c * ri)));
+            v = Some(v.map_or(gi - c * ri, |v| v.max(gi - c * ri)));
+        } else {
+            let d = r.max(d_last);
+            p = a.max(g.saturating_sub(j));
+            d_last = d;
+        }
+        d_max = d_max.max(r);
         g_last = g;
     }
-    (
-        missed,
-        largest,
-        (late * 1_000).checked_div(passed).unwrap_or(0),
-    )
+    shape.late = (shape.late * 1_000).checked_div(passed).unwrap_or(0);
+    shape
+}
+
+/// A shaper's replay: attempts never handed, the largest shift past the raw
+/// due, the share handed more than J past it (per mille), and the attempts
+/// handed behind a later due already handed.
+#[derive(Default)]
+struct Shape {
+    missed: usize,
+    largest: u64,
+    late: u64,
+    inverted: usize,
 }
 
 /// A healthy run of `steps` reads `gap` µs apart: the gate replayed.
 /// The gate's replay — attempts, displaced, refused, the largest displacement
 /// — and the shaper's per reserve: missed, the largest shift, the share late.
-type Replayed = ((usize, usize, usize, u64), Vec<(u64, usize, u64, u64)>);
+type Replayed = ((usize, usize, usize, u64), Vec<(u64, bool, Shape)>);
 
 fn healthy(gap: u64, steps: u64) -> Replayed {
     let _ = Descriptors::raise().unwrap();
@@ -300,12 +343,10 @@ fn healthy(gap: u64, steps: u64) -> Replayed {
         .unwrap()
         .journal;
     let j = header.profile.jitter;
-    let shapes = [0, 10, 50, 100, 200]
+    let shapes = [10, 50, 100, 200]
         .into_iter()
-        .map(|r| {
-            let (missed, largest, late) = shaped(&lines, j, r);
-            (r, missed, largest, late)
-        })
+        .flat_map(|r| [false, true].map(|pairwise| (r, pairwise)))
+        .map(|(r, pairwise)| (r, pairwise, shaped(&lines, j, r, pairwise)))
         .collect();
     (paced(&lines, j), shapes)
 }
@@ -316,10 +357,12 @@ fn the_gate_replayed_over_healthy_runs() {
     for (gap, steps) in [(2_000, 15_000), (500, 20_000)] {
         for run in 0..3 {
             let ((attempts, displaced, refused, largest), shapes) = healthy(gap, steps);
-            for (reserve, missed, shift, late) in shapes {
+            for (reserve, pairwise, s) in shapes {
+                let form = if pairwise { "pairwise" } else { "recursion" };
                 eprintln!(
-                    "MEASURED shape: a step every {gap} µs, run {run}, reserve {reserve}‰: {missed} never \
-                     handed, the largest shift {shift} µs, {late}‰ handed past J"
+                    "MEASURED shape: a step every {gap} µs, run {run}, {form}, reserve {reserve}‰: {} never \
+                     handed, the largest shift {} µs, {}‰ handed past J, {} inverted",
+                    s.missed, s.largest, s.late, s.inverted
                 );
             }
             eprintln!(
