@@ -23,6 +23,7 @@ pub mod render;
 pub mod request;
 mod runs;
 pub mod sample;
+pub mod shape;
 mod spill;
 pub mod template;
 pub mod validate;

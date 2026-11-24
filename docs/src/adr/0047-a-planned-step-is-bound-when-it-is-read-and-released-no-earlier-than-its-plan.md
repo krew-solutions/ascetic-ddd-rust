@@ -41,7 +41,8 @@ To be built in slices, each a commit of its own:
   thread's lag, its park detector measured first; **K2b-7d** the three stages before T0; **K2b-7e** the
   shell's memory (decision 22), in five — **K2b-7e-1** the constants by construction; **K2b-7e-2** admission, in three
   — **K2b-7e-2a** the costs stated and held, `fits` re-pinned, **K2b-7e-2b** a stated memory, in three — **K2b-7e-2b-1**
-  the plan's shapes and their prices, **K2b-7e-2b-2** the reader's, the journal's and the sources' terms by
+  the plan's shapes and their prices (**K2b-7e-2b-1a** a record's shape and its price; **K2b-7e-2b-1b** the
+  validator's peaks of shapes in the commitment; **K2b-7e-2b-1c** `fits` and the frame priced by them), **K2b-7e-2b-2** the reader's, the journal's and the sources' terms by
   construction, **K2b-7e-2b-3** admission and its evidence —, **K2b-7e-2c** the cgroup's memory, after the read gate;
   **K2b-7e-3** the read gate; **K2b-7e-4** the parse; **K2b-7e-5** a waiting budget, if a real plan needs it; **K2b-8** a censored attempt's connection, its closing report and the ports (decision 19), in
   four: **K2b-8a** journal version 7 in the pure fold; **K2b-8b** the shell's censor, report and connect errors, in two — **K2b-8b-1** a connect's failure classed, zero
@@ -1026,6 +1027,7 @@ which `admit` never called; § Alternatives Considered keeps what each refuted):
 | K2b-8d-2 | K2b | a whole process stopped 1.5 s by `SIGSTOP` mid-run beside a stand of its own process answering at once and refusing connects 40 ms in every 100, two thousand reads 2 ms apart, each on a connection of its own: no censor — sent, or never sent — a Root, in every run (some five hundred never-sent reports a run, every one undecided); the stand's own resets and the system's answers in the machine's catch-up burst counted, not asserted (decision 21 owed) | — (the timer rule's mutants survive it: § Measured) |
 | K2b-7e-1 | K2b | a head of 16,384 bytes parsed, of 16,385 or of a hundred and one headers the run stopped naming `rest.head`; a forged length of 2^62 unread at its head; over a transport not vectored the first write the head alone, the body queued after it; after a burst of tasks ended and one aborted, no handle kept; one builder in the shell, no free handshake, no `max_buf_size` (the lint) | the exact read size dropped; writes flattened; a head too large left `Broken`; a length past the cap read; the body sized from any length |
 | K2b-7e-2a | K2b | `tests/costs.rs` (a binary of its own: an allocator tagging each block with its owner, a moved block counted at both sizes, a pipe of rings the stand allocates, `sim` subtracting the machine at the same states, two sizes just past powers of two): the shell's share an attempt, a connection idle, an attempt beside it, each within `[80 %, 100 %]` of what is stated; a body held whole at its length, or at the cap with no length, within a KiB of it while its first part is read; the worst head within `[85 %, 100 %]` of `HEAD`, every answer within its charge; the scheduler's `tests/costs.rs` holding a burst of 32,769 host calls and of REST reads at one instant, a REST read not ended and an ended step just past powers of two within what `fits` counts | the exact read size dropped; a declared body not sized; a body of no length grown by doubling; the head's parts kept through the body; an answer charged its body only; `fits`' live cell as it was; a finished task's handle kept (its unit twin) |
+| K2b-7e-2b-1a | K2b | `command-log/tests/shape.rs` (a counting allocator): over 512 records generated across every field, the bytes a record decoded from its line holds in its `Arc` equal `shape::heap`, at most `shape::bound` of its shape and at least a third of it; a record of no sequence priced exactly; every record type taken apart whole (a new field does not compile uncounted) | a predicate's pointer not counted; serde's first four slots forgotten; a sequence bound at its elements once; byte strings' padding left out; base64's estimate taken as the length; the `Arc` left out; a capture's source not counted |
 | K2b-9a | K2b | the machine's poll grid at the plan's instant: an observation read at 250 polled at 300, 400 …, read on a point at 600 polled there once, two read together at 620 on their own phases; the differential with `schedule.py` moved alike, settled run by run against machine 4 (16 of 3,944 changed, each at a poll of an observation released late) | the grid at `released`; the release's point not held (polled twice at one instant) |
 | K2b-9b-1 | K2b | journal version 9 — the golden holding the run's catch-up at 999, a refusal read, `decorated` on a `Sent`, both sides of a never-sent report's `decorated` and a found answer's `handed`; the schema and `journal.py` alike; a rate deviation read as a refusal, another rule's and none not; the differential's journals and the golden runs settled against version 8, the new fields removed, every line the same | a rate deviation unread; any rule read as a refusal |
 | K2b-9b-2 | K2b | `scheduler::pace`: each attempt handed at the later of its earliest and the instant it came, every pair keeping the rule by brute force, a microsecond sooner some pair breaking (κ ∈ {0, 1, 100, 500, 999}, J ∈ {0, 1, 250, 2000}); every hand-off within `(1 − κ)·J` of its raw never paced; the band — a dispatched batch in raw order, the rest paced to the instant computed by hand; an attempt not arrived holding the front; a head whose pace falls past its deadline leaving; a straggler within the band passing; an attempt past its deadline beyond the band leaving, so the next turn never names an instant gone | the allowance J; κ ignored; rounding down; the mirror term dropped; the band unbounded; arrival ignored; never late — each red |
@@ -1991,6 +1993,23 @@ a connection of its own (retired at once); the journal folded, each Root classed
 - A hog over the deadline while connecting or writing on a thread others hold is the source thread's lag (K2b-7c-2's
   twins, the path's lag counted from the thread's last blocked park); the stall twin is its whole-process case.
 
+**K2b-7e-2b-1a — a record's shape and its price** (2026-11-24, decision 22 as amended): `command-log::shape` — a
+record's shape, the plan-intrinsic counts its bytes are priced by (its strings' and byte strings' bytes, its
+sequences' elements and non-empty sequences by element type, its captured holes and their subjects' and slots' bytes,
+its barrier key's bytes, its request's literal bytes and holes), summed and taken at their peaks as the validator will
+commit them (K2b-7e-2b-1b); `shape::heap`, the bytes a record decoded from its line holds in its own `Arc` at this
+build, exactly — its strings at their length, a byte string at base64's estimate (`3·⌈n/3⌉`), a sequence as serde
+grows it (four slots at first, then doubling) times its element's size; `shape::bound`, the price of a shape — the
+sequences at twice their elements and two a sequence, the byte strings at two bytes past their length — at the run's
+own sizes, so a price re-pinned needs no new dry run. Every type is taken apart whole: a field added to a record does
+not compile until its shape counts it. Its executor, `command-log/tests/shape.rs` (a binary of its own, a counting
+allocator): over 512 records generated across every field — strings plain, escaped and multi-byte, byte strings
+empty to 200 bytes, sequences of none, of up to four, of five to nine, of 16 or 17 — what each holds decoded equals
+`heap` to the byte, is at most `bound`, and at least a third of it; a record of no sequence priced exactly. Mutants,
+each red: a predicate's pointer not counted; serde's first four slots forgotten; a sequence bound at its elements once;
+byte strings' padding left out (by the exact twin); base64's estimate taken as the length; the `Arc` left out; a
+capture's source not counted.
+
 **K2b-7e-2a — the shell's costs stated and held; `fits` re-pinned** (2026-11-24, decision 22): the carrier states
 what its parts hold (`carrier::Costs` in `Needs::Sockets`: a connection, an attempt beside it, an answer at the
 profile's cap), the shell its own share an attempt (`run::ATTEMPT`); `tests/costs.rs`, a binary of its own, holds each
@@ -2556,3 +2575,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   sources by construction; decision 21's I2 kept; every refusal at once, each remedy its owner's; the stated memory
   checked against the cgroup; a periodic `memory` line; no launch-scale run before the read gate. K2b-7e-2b cut in
   three, K2b-7e-2c moved after the read gate.
+- 2026-11-24: K2b-7e-2b-1a built (§ Measured): a record's shape and its price — exact against what a decoded record
+  holds over records generated across every field; K2b-7e-2b-1 cut in three.
