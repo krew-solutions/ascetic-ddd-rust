@@ -650,7 +650,7 @@
       "type": "object",
       "properties": {
         "journal": {
-          "const": 7
+          "const": 8
         },
         "machine": {
           "$ref": "#/$defs/u32"
@@ -701,6 +701,16 @@
               "$ref": "#/$defs/judging"
             }
           ]
+        },
+        "admission": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/admission"
+            }
+          ]
         }
       },
       "required": [
@@ -715,7 +725,8 @@
         "namespace",
         "t0",
         "gates",
-        "judging"
+        "judging",
+        "admission"
       ],
       "additionalProperties": false
     },
@@ -1170,6 +1181,84 @@
         "cap",
         "took",
         "shape"
+      ],
+      "additionalProperties": false
+    },
+    "admission": {
+      "type": "object",
+      "properties": {
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source_fit"
+          }
+        },
+        "descriptors": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/descriptors_read"
+            }
+          ]
+        },
+        "assumed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "sources",
+        "descriptors",
+        "assumed"
+      ],
+      "additionalProperties": false
+    },
+    "source_fit": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/u32"
+        },
+        "needed": {
+          "$ref": "#/$defs/u64"
+        },
+        "cap": {
+          "$ref": "#/$defs/u64"
+        },
+        "events": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "source",
+        "needed",
+        "cap",
+        "events"
+      ],
+      "additionalProperties": false
+    },
+    "descriptors_read": {
+      "type": "object",
+      "properties": {
+        "soft": {
+          "$ref": "#/$defs/u64"
+        },
+        "hard": {
+          "$ref": "#/$defs/u64"
+        },
+        "open": {
+          "$ref": "#/$defs/u64"
+        },
+        "raised": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "soft",
+        "hard",
+        "open",
+        "raised"
       ],
       "additionalProperties": false
     },

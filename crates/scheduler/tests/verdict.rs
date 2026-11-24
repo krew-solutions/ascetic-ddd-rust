@@ -53,6 +53,7 @@ fn journal_header(header: &Header, log: &Log) -> journal::Header {
         t0: Some(1_763_640_000_000_000),
         gates: Vec::new(),
         judging: None,
+        admission: None,
     }
 }
 

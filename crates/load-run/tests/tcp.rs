@@ -587,6 +587,24 @@ fn the_stages_are_a_chain_its_evidence_the_library_s() {
         ]
     );
     assert!(h.judging.is_some());
+    // Admission's evidence (version 8): the source's need, cap and events;
+    // the descriptors read once the runtimes existed; the plan a test's.
+    let admission = h.admission.as_ref().expect("admission's evidence");
+    assert_eq!(
+        admission.sources,
+        vec![ascetic_ddd_scheduler::journal::SourceFit {
+            source: 0,
+            needed: 1,
+            cap: 100,
+            events: 102,
+        }]
+    );
+    let read = admission
+        .descriptors
+        .as_ref()
+        .expect("the descriptors read");
+    assert!(read.open > 0 && read.open < read.soft, "{read:?}");
+    assert!(admission.assumed);
     let t0 = h.t0.expect("T0's wall instant");
     assert!(
         t0 + i64::try_from(jitter).unwrap() >= gated_at,
@@ -638,6 +656,7 @@ fn a_barred_run_is_journaled_by_the_library() {
     let h = reader.header().clone();
     assert_eq!((h.t0, h.namespace, h.gates.len()), (None, 7, 0));
     assert!(h.judging.is_some());
+    assert!(h.admission.is_some_and(|a| a.sources.len() == 1));
     let lines: Vec<Line> = reader.collect::<Result<_, _>>().unwrap();
     assert_eq!(lines.len(), 1);
     assert!(

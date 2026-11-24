@@ -40,6 +40,8 @@ pub struct Runtimes {
     sources: Vec<Handle>,
     events: Vec<usize>,
     descriptors: Option<Descriptors>,
+    /// Made by a test, not read.
+    assumed: bool,
 }
 
 impl Runtimes {
@@ -52,6 +54,7 @@ impl Runtimes {
             sources,
             events,
             descriptors,
+            assumed: false,
         }
     }
 
@@ -64,6 +67,7 @@ impl Runtimes {
             sources,
             events: vec![events; n],
             descriptors: Some(Descriptors::assumed(u64::MAX, u64::MAX, 0)),
+            assumed: true,
         }
     }
 
@@ -357,6 +361,10 @@ pub struct Ran<F> {
     /// The run's tasks still running: after a stop, those its wait did not
     /// see end — one stuck in its judging.
     pub running: usize,
+    /// The closing reports journaled, by their code (decision 20): where
+    /// attempts never sent stood — `rest.cap.full`, say — a code no carrier
+    /// named as `other`.
+    pub unsent: BTreeMap<String, u64>,
 }
 
 /// Turns at one instant with work due and none done, past which the loop is
@@ -387,6 +395,8 @@ fn poll_now<S: LineSource>(source: &mut S) -> Poll<Result<Option<Arc<Record>>, L
 /// and only one runs.
 pub struct Admitted<C, X> {
     header: Arc<Header>,
+    /// What admission held it to (decision 20): the journal's evidence.
+    admission: journal::Admission,
     /// Its log's digest and validator, from its plan.
     log: String,
     validator: String,
@@ -419,6 +429,11 @@ impl<C, X> Admitted<C, X> {
     /// The validator that committed its log.
     pub fn validator(&self) -> &str {
         &self.validator
+    }
+
+    /// What admission held it to: each source's sockets, the descriptors.
+    pub fn admission(&self) -> &journal::Admission {
+        &self.admission
     }
 
     /// The caps of its sources needing sockets, summed; none if none does.
@@ -494,6 +509,7 @@ pub fn admit<C: Clock, X: Carrier<C>>(
     }
     // The caps of the sources needing sockets, summed: the process's share.
     let mut caps: Option<u64> = None;
+    let mut fitted = Vec::new();
     for source in 0..sources {
         let needs = carrier
             .needs(plan.peaks(), source)
@@ -522,6 +538,14 @@ pub fn admit<C: Clock, X: Carrier<C>>(
             }
             let cap = u64::try_from(cap).unwrap_or(u64::MAX);
             caps = Some(caps.unwrap_or(0).saturating_add(cap));
+            fitted.push(journal::SourceFit {
+                source,
+                needed,
+                cap,
+                events: events
+                    .and_then(|e| u64::try_from(e).ok())
+                    .unwrap_or(u64::MAX),
+            });
         }
     }
     // I1: every cap's sockets, with those open and the reserve, within the
@@ -532,7 +556,20 @@ pub fn admit<C: Clock, X: Carrier<C>>(
     }
     // The machine's own refusals: a read-ahead past the header's.
     drop(Machine::new(header.clone(), read_ahead)?);
+    let descriptors = caps
+        .and(runtimes.descriptors())
+        .map(|d| journal::DescriptorsRead {
+            soft: d.soft(),
+            hard: d.hard(),
+            open: d.open(),
+            raised: d.raised(),
+        });
     Ok(Admitted {
+        admission: journal::Admission {
+            sources: fitted,
+            descriptors,
+            assumed: runtimes.assumed || plan.is_assumed(),
+        },
         header,
         log: plan.log().to_owned(),
         validator: plan.validator().to_owned(),
@@ -654,6 +691,7 @@ where
     let mut last = 0u64;
     let mut exhausted = false;
     let mut stalled: Option<(u64, u32)> = None;
+    let mut unsent: BTreeMap<String, u64> = BTreeMap::new();
     let aborts = Aborts(stamps.clone());
     let halted: Result<(), Halt> = async {
     queue.push(0, Input::Wake);
@@ -806,6 +844,16 @@ where
             }
             let outputs = machine.step(at, input.clone())?;
             for l in journal::events(at, &input, &outputs) {
+                if let journal::Line::Answer(a) = &l
+                    && let Some(u) = &a.unsent
+                {
+                    let code = match &u.code {
+                        journal::Code::Named(c) => c.clone(),
+                        journal::Code::Other => "other".to_owned(),
+                    };
+                    let n = unsent.entry(code).or_insert(0u64);
+                    *n = n.saturating_add(1);
+                }
                 sink.line(l)?;
             }
             for output in outputs {
@@ -919,6 +967,7 @@ where
         kept: machine.kept(),
         end: stop.map_or(RunEnd::Ended, RunEnd::Stopped),
         running,
+        unsent,
     })
 }
 

@@ -23,6 +23,8 @@ pub struct Plan {
     log: String,
     /// The validator that committed it.
     validator: String,
+    /// Made by a test, not read from a commitment.
+    assumed: bool,
 }
 
 impl Plan {
@@ -46,6 +48,11 @@ impl Plan {
         &self.validator
     }
 
+    /// Whether a test made it.
+    pub fn is_assumed(&self) -> bool {
+        self.assumed
+    }
+
     /// A test's plan: `header`, its peaks assumed, its log a test's.
     #[cfg(feature = "testing")]
     pub fn assumed(header: Arc<Header>, peaks: Peaks) -> Plan {
@@ -54,6 +61,7 @@ impl Plan {
             peaks,
             log: "ab".repeat(32),
             validator: live::validator(),
+            assumed: true,
         }
     }
 }
@@ -106,6 +114,7 @@ impl Replayed {
             peaks: commitment.peaks,
             log: commitment.sha256.clone(),
             validator: commitment.validator.clone(),
+            assumed: false,
         };
         let (tx, rx) = mpsc::channel(ahead.max(1));
         std::thread::Builder::new()

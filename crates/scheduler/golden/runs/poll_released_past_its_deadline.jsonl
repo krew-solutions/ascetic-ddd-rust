@@ -1,5 +1,5 @@
-{"header":{"journal":7,"machine":4,"source":"verdict","log":"3161efd3f5905d426a8ff87880d7de081270365487d74fff006ea07ad4abca9a","validator":"a test's validator","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000","gates":[],"judging":null}}
+{"header":{"journal":8,"machine":4,"source":"verdict","log":"3161efd3f5905d426a8ff87880d7de081270365487d74fff006ea07ad4abca9a","validator":"a test's validator","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000","gates":[],"judging":null,"admission":null}}
 {"read":{"at":"2000","line":"2","key":{"kind":"device","scope":"Bw==","label":"watched","n":0},"action":"poll","safety":"never","cause":"2","after":[],"planned":"1000"}}
 {"released":{"at":"2000","line":"2","intended":"1000","released":"2000","deadline":"1500"}}
 {"end":{"at":"2000","line":"2","end":"unknown","read":"2000","ready":"0","intended":"1000","released":"2000","dispatched":null,"sent":null,"ended":"2000","attempts":0,"critical":null,"bound":[],"fault":false,"wake":"2000"}}
-{"trailer":{"events":"3","steps":"1","sha256":"0a19775bb7bf436ca31eac4eed7c3892ee2909513bf732c39c3d4f82b0211cfb"}}
+{"trailer":{"events":"3","steps":"1","sha256":"e3737732e17916cfb98ac9b8ff50c0c6ac20fa11054d01d8bc7de26f65ed7a2b"}}

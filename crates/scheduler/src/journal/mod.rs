@@ -26,13 +26,13 @@ use crate::machine::{self, Binding, Input, Judgement, Line as Number, Output};
 pub mod sample;
 
 /// The version a reader accepts and a writer writes: exactly this one.
-pub const JOURNAL_VERSION: u32 = 7;
+pub const JOURNAL_VERSION: u32 = 8;
 
 /// The byte form's identity: the SHA-256 of the golden journal
 /// (`golden/journal.jsonl`, [`sample`]), which holds every line and variant. A
 /// change to how any line is written changes the golden journal, and so this,
 /// in the same edit.
-pub const JOURNAL: &str = "e514b32f9103c7ae3674604cc6137111de6245b3317b1565e055a6672f52f6ff";
+pub const JOURNAL: &str = "a0b01862803af6b1962b8ddaf1d5a6b96ec21c2c3bf48f9c0855eddc27e587ed";
 
 /// A journal's line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +96,57 @@ pub struct Header {
     /// The judging time measured before T0 (version 6): evidence, not a
     /// refusal, until a plan claims J's precision.
     pub judging: Option<Judging>,
+    /// What admission held the run to (version 8, ADR-0047 decision 20):
+    /// evidence of the sockets each source needed against its cap and its
+    /// driver's events, and of the process's descriptors.
+    pub admission: Option<Admission>,
+}
+
+/// Admission's evidence (version 8, decision 20).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Admission {
+    /// Each source whose carrier needs sockets.
+    pub sources: Vec<SourceFit>,
+    /// The process's descriptors, read once its runtimes existed; none if
+    /// no source needed sockets.
+    pub descriptors: Option<DescriptorsRead>,
+    /// Whether any of it was assumed by a test rather than read.
+    pub assumed: bool,
+}
+
+/// A source's sockets as admission held them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceFit {
+    /// The source.
+    pub source: u32,
+    /// Needed at once under the plan's bound.
+    #[serde(with = "u64s")]
+    pub needed: u64,
+    /// Its cap.
+    #[serde(with = "u64s")]
+    pub cap: u64,
+    /// Its driver's events a turn.
+    #[serde(with = "u64s")]
+    pub events: u64,
+}
+
+/// The process's descriptors as admission read them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DescriptorsRead {
+    /// Its soft limit.
+    #[serde(with = "u64s")]
+    pub soft: u64,
+    /// Its hard limit.
+    #[serde(with = "u64s")]
+    pub hard: u64,
+    /// Those open.
+    #[serde(with = "u64s")]
+    pub open: u64,
+    /// Whether the soft limit was raised to the hard one.
+    pub raised: bool,
 }
 
 /// A stand's gate passed before T0 (decision 18).

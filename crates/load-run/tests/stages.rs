@@ -426,4 +426,33 @@ fn a_replayed_plan_carries_its_commitment_s_peaks() {
     let (plan, _) = ascetic_ddd_load_run::source::Replayed::open(&log, &commitment, 4).unwrap();
     assert_eq!(*plan.peaks(), commitment.peaks);
     assert_eq!(**plan.header(), header());
+    assert_eq!(plan.log(), commitment.sha256);
+    // Read, not assumed: admitted on `Live`, its evidence says so.
+    assert!(!plan.is_assumed());
+    let live = ascetic_ddd_load_run::live::Live::start(1, 64).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let clock = rt.block_on(async { Arc::new(VirtualClock::start(0)) });
+    let admitted = |runtimes: &Runtimes| {
+        rt.block_on(async {
+            admit(
+                plan.clone(),
+                W,
+                Arc::new(Gated {
+                    clock: clock.clone(),
+                    gates: vec![],
+                }),
+                runtimes,
+            )
+            .unwrap()
+            .admission()
+            .assumed
+        })
+    };
+    assert!(!admitted(live.runtimes()));
+    // The same plan on a test's runtimes: assumed.
+    let assumed = Runtimes::assumed(vec![rt.handle().clone()], 1_024);
+    assert!(admitted(&assumed));
 }

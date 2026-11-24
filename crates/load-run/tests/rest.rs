@@ -1746,6 +1746,7 @@ fn folded(
         t0: Some(0),
         gates: Vec::new(),
         judging: None,
+        admission: None,
     };
     let mut w = Writer::new(Vec::new(), h.clone()).unwrap();
     for l in lines {

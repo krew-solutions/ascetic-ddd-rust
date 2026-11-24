@@ -1,4 +1,4 @@
-{"header":{"journal":7,"machine":4,"source":"verdict","log":"6558aa547e59f6eb6af9007fcf209143980f5a405c607b549aab03ca0903e31e","validator":"a test's validator","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000","gates":[],"judging":null}}
+{"header":{"journal":8,"machine":4,"source":"verdict","log":"6558aa547e59f6eb6af9007fcf209143980f5a405c607b549aab03ca0903e31e","validator":"a test's validator","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000","gates":[],"judging":null,"admission":null}}
 {"read":{"at":"0","line":"2","key":{"kind":"device","scope":"Bw==","label":"watched","n":0},"action":"poll","safety":"never","cause":"2","after":[],"planned":"0"}}
 {"released":{"at":"0","line":"2","intended":"0","released":"0","deadline":"10000"}}
 {"dispatch":{"at":"0","line":"2","attempt":1,"deadline":"10000","due":"0"}}
@@ -8,4 +8,4 @@
 {"answer":{"at":"10000","line":"2","attempt":2,"judged":"unknown","captured":[],"ignored":null,"status":null,"code":null,"after":null,"censored":true,"found":null,"unsent":null}}
 {"end":{"at":"10000","line":"2","end":"unknown","read":"0","ready":"0","intended":"0","released":"0","dispatched":"0","sent":"0","ended":"10000","attempts":2,"critical":null,"bound":[],"fault":false,"wake":"10000"}}
 {"answer":{"at":"10001","line":"2","attempt":2,"judged":"unknown","captured":[],"ignored":"ended","status":null,"code":null,"after":null,"censored":false,"found":null,"unsent":{"handed":null,"connected":null,"lag":"0","refused":0,"refused_by":null,"code":{"named":"sim.unsent"}}}}
-{"trailer":{"events":"9","steps":"1","sha256":"b3cbd19af763c29d26038dcd2a52a85bd80f6c4e3d89a93b0ef7e26a5d705d0a"}}
+{"trailer":{"events":"9","steps":"1","sha256":"05966bee21bcb500efd85a3ce988bd8935414602d79523abec2568793e9eedbd"}}

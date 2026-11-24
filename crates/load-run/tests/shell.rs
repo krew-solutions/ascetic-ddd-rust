@@ -473,6 +473,7 @@ fn stress<C: Clock>(make: impl Fn(u64) -> C, seeds: u64, calls: u64) {
                 t0: Some(clock.wall()),
                 gates: Vec::new(),
                 judging: None,
+                admission: None,
             };
             let sink = Written::start(Vec::new(), journal_header, 1_024).unwrap();
             let ran = run(
@@ -1256,6 +1257,11 @@ fn a_saturated_source_stops_the_run() {
     let records: Vec<Record> = (0..5_000).map(|i| call("read", i + 1, 0, 0, 0)).collect();
     let ran = shell(&h, &records, W, Leaving).unwrap();
     assert!(matches!(ran.end, RunEnd::Ended), "{:?}", ran.journal.last());
+    // Each closing report counted by where it stood (decision 20).
+    assert_eq!(
+        ran.unsent,
+        std::collections::BTreeMap::from([("sim.unsent".to_owned(), 5_000)])
+    );
 }
 
 /// Leaves each attempt a microsecond past its deadline, unanswered.

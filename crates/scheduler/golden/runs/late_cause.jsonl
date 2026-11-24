@@ -1,4 +1,4 @@
-{"header":{"journal":7,"machine":4,"source":"verdict","log":"6bb8f791a17ebe187c99171d1c903253e95fb8cf61aac000e8c767cb811b4d12","validator":"a test's validator","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000","gates":[],"judging":null}}
+{"header":{"journal":8,"machine":4,"source":"verdict","log":"6bb8f791a17ebe187c99171d1c903253e95fb8cf61aac000e8c767cb811b4d12","validator":"a test's validator","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000","gates":[],"judging":null,"admission":null}}
 {"read":{"at":"0","line":"2","key":{"kind":"device","scope":"Bw==","label":"update","n":0},"action":"rest","safety":"never","cause":null,"after":[],"planned":"1000"}}
 {"released":{"at":"0","line":"2","intended":"1000","released":"1000","deadline":"10001000"}}
 {"read":{"at":"100","line":"3","key":{"kind":"device","scope":"Bw==","label":"watched","n":0},"action":"observe","safety":"never","cause":"2","after":[{"step":{"on":"sent","line":"2"}}],"planned":"1100"}}
@@ -11,4 +11,4 @@
 {"end":{"at":"2100","line":"2","end":"expected","read":"0","ready":"0","intended":"1000","released":"1000","dispatched":"2000","sent":"2000","ended":"2100","attempts":1,"critical":null,"bound":[],"fault":false,"wake":null}}
 {"answer":{"at":"3000","line":"3","attempt":1,"judged":"unknown","captured":[],"ignored":null,"status":null,"code":null,"after":null,"censored":true,"found":null,"unsent":null}}
 {"end":{"at":"3000","line":"3","end":"unknown","read":"100","ready":"2000","intended":"2000","released":"2000","dispatched":"2000","sent":"2000","ended":"3000","attempts":1,"critical":{"step":"2"},"bound":["2"],"fault":false,"wake":null}}
-{"trailer":{"events":"12","steps":"2","sha256":"c078939e51777af8a82a97ec95c6cf3958d4d001397cbd3ea7003ddd41fdab02"}}
+{"trailer":{"events":"12","steps":"2","sha256":"056b53806e136af7fb28707f1aebfb3769915df199caa2c9ace64fa7d56c9cea"}}

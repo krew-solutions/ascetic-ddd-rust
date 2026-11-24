@@ -500,6 +500,7 @@ pub fn journal_header<C, X>(
         t0,
         gates,
         judging,
+        admission: Some(admitted.admission().clone()),
     }
 }
 

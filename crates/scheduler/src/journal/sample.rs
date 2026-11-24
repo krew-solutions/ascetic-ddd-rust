@@ -6,9 +6,9 @@
 use ascetic_ddd_command_log::record::{On, Safety, Subject};
 
 use super::{
-    Action, Answer, Code, Critical, Dep, Dispatch, End, Ended, Fault, FaultClass, Found, Gate,
-    Header, Ignored, JOURNAL_VERSION, Judged, Judging, Key, Line, LogFault, Read, Refusal,
-    Released, Sent, Shape, Skip, Slot, Unsent,
+    Action, Admission, Answer, Code, Critical, Dep, DescriptorsRead, Dispatch, End, Ended, Fault,
+    FaultClass, Found, Gate, Header, Ignored, JOURNAL_VERSION, Judged, Judging, Key, Line,
+    LogFault, Read, Refusal, Released, Sent, Shape, Skip, Slot, SourceFit, Unsent,
 };
 use crate::machine::MACHINE_REVISION;
 
@@ -40,6 +40,29 @@ pub fn header() -> Header {
             cap: u64::MAX,
             took: 0,
             shape: Shape::Numbers,
+        }),
+        admission: Some(Admission {
+            sources: vec![
+                SourceFit {
+                    source: 0,
+                    needed: u64::MAX,
+                    cap: 0,
+                    events: u64::MAX,
+                },
+                SourceFit {
+                    source: u32::MAX,
+                    needed: 0,
+                    cap: u64::MAX,
+                    events: 0,
+                },
+            ],
+            descriptors: Some(DescriptorsRead {
+                soft: u64::MAX,
+                hard: 0,
+                open: u64::MAX,
+                raised: true,
+            }),
+            assumed: false,
         }),
     }
 }

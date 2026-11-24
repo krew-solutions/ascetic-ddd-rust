@@ -195,6 +195,12 @@ const JOURNALS: &[(u32, u32, &str)] = &[
         4,
         "70f34e7ccb12926086d905de269f8fdbc7b303d50d3b94040ddfccadf9cc062b",
     ),
+    // Version 8 (decision 20): admission's evidence in the header.
+    (
+        8,
+        4,
+        "50954900fa530f47e6d46389a0bfa491af2e055b2174418fd904f9497584ed30",
+    ),
 ];
 
 /// What the fold decided of the differential's runs, the digest of their
@@ -248,6 +254,14 @@ const CLASSES: &[(u32, u32, u32, &str)] = &[
     ),
     (
         7,
+        4,
+        7,
+        "913215b9afa0c80eb6dea3ab53f603b501fad921c62bfd1066e5cfd7afffec1d",
+    ),
+    // Version 8 (decision 20): admission's evidence in the header; the fold
+    // reads none of it.
+    (
+        8,
         4,
         7,
         "913215b9afa0c80eb6dea3ab53f603b501fad921c62bfd1066e5cfd7afffec1d",
@@ -675,6 +689,7 @@ fn the_machine_is_the_scheduler_by_definition() {
                         t0: Some(1_763_640_000_000_000),
                         gates: Vec::new(),
                         judging: None,
+                        admission: None,
                     };
                     let journal_bytes =
                         journal_of(&run_name, journal_header.clone(), &header, &ran, &records);
@@ -921,6 +936,7 @@ fn late_wakes_are_the_harness_s_lateness() {
                 t0: Some(1_763_640_000_000_000),
                 gates: Vec::new(),
                 judging: None,
+                admission: None,
             };
             let mut w = journal::Writer::new(Vec::new(), journal_header.clone()).unwrap();
             for l in &ran.journal {
