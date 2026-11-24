@@ -74,6 +74,7 @@ fn folded(
         read_ahead: W,
         jitter: header.profile.jitter,
         resend: header.profile.resend,
+        catch_up: header.profile.reserve / 2,
         namespace: 1,
         t0: Some(1_763_640_000_000_000),
         gates: Vec::new(),

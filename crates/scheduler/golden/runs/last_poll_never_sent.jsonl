@@ -1,11 +1,11 @@
-{"header":{"journal":8,"machine":5,"source":"verdict","log":"6558aa547e59f6eb6af9007fcf209143980f5a405c607b549aab03ca0903e31e","validator":"a test's validator","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000","gates":[],"judging":null,"admission":null}}
-{"read":{"at":"0","line":"2","key":{"kind":"device","scope":"Bw==","label":"watched","n":0},"action":"poll","safety":"never","cause":"2","after":[],"planned":"0"}}
+{"header":{"journal":9,"machine":5,"source":"verdict","log":"6558aa547e59f6eb6af9007fcf209143980f5a405c607b549aab03ca0903e31e","validator":"a test's validator","read_ahead":"1000","jitter":"200","resend":"100","catch_up":0,"namespace":"1","t0":"1763640000000000","gates":[],"judging":null,"admission":null}}
+{"read":{"at":"0","line":"2","key":{"kind":"device","scope":"Bw==","label":"watched","n":0},"action":"poll","safety":"never","cause":"2","after":[],"planned":"0","refusal":false}}
 {"released":{"at":"0","line":"2","intended":"0","released":"0","deadline":"10000"}}
 {"dispatch":{"at":"0","line":"2","attempt":1,"deadline":"10000","due":"0"}}
-{"sent":{"at":"0","line":"2","attempt":1,"handed":"0","connected":"0","lag":"0"}}
+{"sent":{"at":"0","line":"2","attempt":1,"decorated":"0","handed":"0","connected":"0","lag":"0"}}
 {"answer":{"at":"10","line":"2","attempt":1,"judged":"unexpected","captured":[],"ignored":null,"status":null,"code":null,"after":null,"censored":false,"found":null,"unsent":null}}
 {"dispatch":{"at":"1000","line":"2","attempt":2,"deadline":"10000","due":"1000"}}
 {"answer":{"at":"10000","line":"2","attempt":2,"judged":"unknown","captured":[],"ignored":null,"status":null,"code":null,"after":null,"censored":true,"found":null,"unsent":null}}
 {"end":{"at":"10000","line":"2","end":"unknown","read":"0","ready":"0","intended":"0","released":"0","dispatched":"0","sent":"0","ended":"10000","attempts":2,"critical":null,"bound":[],"fault":false,"wake":"10000"}}
-{"answer":{"at":"10001","line":"2","attempt":2,"judged":"unknown","captured":[],"ignored":"ended","status":null,"code":null,"after":null,"censored":false,"found":null,"unsent":{"handed":null,"connected":null,"lag":"0","refused":0,"refused_by":null,"code":{"named":"sim.unsent"}}}}
-{"trailer":{"events":"9","steps":"1","sha256":"15b0392c309abe3e35ca75540f7a2857f2248847aadc7b5b0d6726909bf2456e"}}
+{"answer":{"at":"10001","line":"2","attempt":2,"judged":"unknown","captured":[],"ignored":"ended","status":null,"code":null,"after":null,"censored":false,"found":null,"unsent":{"decorated":null,"handed":null,"connected":null,"lag":"0","refused":0,"refused_by":null,"code":{"named":"sim.unsent"}}}}
+{"trailer":{"events":"9","steps":"1","sha256":"2ac3335fe5d24940552ce02314f2cd8128cf0fefc0b2689c2eef4817de7f45c4"}}

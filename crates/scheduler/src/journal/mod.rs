@@ -26,13 +26,13 @@ use crate::machine::{self, Binding, Input, Judgement, Line as Number, Output};
 pub mod sample;
 
 /// The version a reader accepts and a writer writes: exactly this one.
-pub const JOURNAL_VERSION: u32 = 8;
+pub const JOURNAL_VERSION: u32 = 9;
 
 /// The byte form's identity: the SHA-256 of the golden journal
 /// (`golden/journal.jsonl`, [`sample`]), which holds every line and variant. A
 /// change to how any line is written changes the golden journal, and so this,
 /// in the same edit.
-pub const JOURNAL: &str = "9c8da3019b2351fc000f41bc5c1e255d1fa032d4cacf7792f98d862da186d363";
+pub const JOURNAL: &str = "f91f8cd1a26235227bd68667e08b0e66990cfbe0e4c39960e6acbb22e4731256";
 
 /// A journal's line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +81,10 @@ pub struct Header {
     /// The profile's resend floor (ADR-0047 decision 15).
     #[serde(with = "u64s")]
     pub resend: u64,
+    /// The run's catch-up κ, parts per thousand (version 9, ADR-0047 decision
+    /// 21): a late harness compresses its plan by at most this, at most the
+    /// profile's reserve.
+    pub catch_up: u32,
     /// The run's namespace: public, every secret drawn from the run's own
     /// secret instead (decision 15), so that the run's rendered values and
     /// correlation ids can be told again.
@@ -294,6 +298,10 @@ pub struct Read {
     /// intended start's from it (ADR-0047 decision 17).
     #[serde(with = "u64s")]
     pub planned: u64,
+    /// Whether its plan expects it refused at a rate limit — a deviation
+    /// from the validator's rate rule (version 9, ADR-0047 decision 21): a
+    /// bucket refills over a shift, so it may be admitted.
+    pub refusal: bool,
 }
 
 /// A step's release decided.
@@ -350,7 +358,11 @@ pub struct Sent {
     pub line: Number,
     /// The attempt.
     pub attempt: u32,
-    /// When its task first ran (version 4): the hand-off's lateness from the
+    /// When it was ready to pass the hand-off — decorated, if its carrier
+    /// decorates (version 9, ADR-0047 decision 21).
+    #[serde(with = "u64s")]
+    pub decorated: u64,
+    /// When it was handed off (version 4): the hand-off's lateness from the
     /// dispatch, the harness's (ADR-0047 decision 17).
     #[serde(with = "u64s")]
     pub handed: u64,
@@ -442,7 +454,11 @@ pub struct Answer {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Unsent {
-    /// When it was ready to connect — decorated; none if it never was.
+    /// When it was ready to pass the hand-off — decorated, if its carrier
+    /// decorates (version 9); none if it never was.
+    #[serde(with = "u64s_option")]
+    pub decorated: Option<u64>,
+    /// When it was handed off, ready to connect; none if it never was.
     #[serde(with = "u64s_option")]
     pub handed: Option<u64>,
     /// When its request was handed to a connection, if ever.
@@ -476,6 +492,7 @@ pub enum Refusal {
 impl From<&machine::Unsent> for Unsent {
     fn from(u: &machine::Unsent) -> Unsent {
         Unsent {
+            decorated: u.decorated,
             handed: u.handed,
             connected: u.connected,
             lag: u.lag,
@@ -501,6 +518,11 @@ pub struct Found {
     /// Its attempt's deadline.
     #[serde(with = "u64s")]
     pub deadline: u64,
+    /// When its attempt was handed off, if it was (version 9, ADR-0047
+    /// decision 21): an early reply's attempt has no `Sent`, yet its bytes
+    /// reached the system.
+    #[serde(with = "u64s_option")]
+    pub handed: Option<u64>,
 }
 
 /// A problem's code: a short dotted name as the server wrote it, or `other`
@@ -875,11 +897,13 @@ pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
                 cause,
                 after,
                 planned: record.at,
+                refusal: record.deviation.as_ref().is_some_and(|d| d.rule == "rate"),
             }));
         }
         Input::Sent {
             line,
             attempt,
+            decorated,
             handed,
             connected,
             lag,
@@ -887,6 +911,7 @@ pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
             at,
             line: *line,
             attempt: *attempt,
+            decorated: *decorated,
             handed: *handed,
             connected: *connected,
             lag: *lag,
@@ -933,6 +958,7 @@ pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
                 found: seen.found.map(|f| Found {
                     absent: f.absent,
                     deadline: f.deadline,
+                    handed: f.handed,
                 }),
                 unsent: seen.unsent.as_ref().map(Unsent::from),
             }));

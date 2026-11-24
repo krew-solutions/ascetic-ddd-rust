@@ -204,8 +204,10 @@ enum Event {
 pub fn drawn_unsent(line: Line, attempt: u32, dispatched: u64) -> Unsent {
     let a = u64::from(attempt);
     let refused = u32::try_from(line.wrapping_add(a.wrapping_mul(2)) % 3).unwrap_or(0);
+    let handed = (line.wrapping_add(a) % 4 != 0).then_some(dispatched);
     Unsent {
-        handed: (line.wrapping_add(a) % 4 != 0).then_some(dispatched),
+        decorated: handed,
+        handed,
         connected: None,
         lag: 0,
         refused,

@@ -209,6 +209,14 @@ const JOURNALS: &[(u32, u32, &str)] = &[
         5,
         "890972f02702fb0198cb04ffc05c2839ee08568b2e644dde0ab660d1fbf80956",
     ),
+    // Version 9 (decision 21): settled against version 8 run by run — its new
+    // fields removed, every line the same; `decorated` equal to `handed`
+    // throughout, until a gate stands between them (§ Measured K2b-9b-1).
+    (
+        9,
+        5,
+        "226930edeb1ab48e1f0ff7a29a10018f7460391cbf8e54a206eb7db773e9aa3c",
+    ),
 ];
 
 /// What the fold decided of the differential's runs, the digest of their
@@ -280,6 +288,15 @@ const CLASSES: &[(u32, u32, u32, &str)] = &[
     // poll of an observation released after its planned instant.
     (
         8,
+        5,
+        7,
+        "b9b6085d247cc1ae6a17c52f66618294ffc4c4f76223aeb66078486891fa1f92",
+    ),
+    // Version 9 (decision 21): the run's catch-up, a hand-off's readiness,
+    // a found answer's hand-off, a refusal read; the fold reads none of them
+    // yet — the same classes.
+    (
+        9,
         5,
         7,
         "b9b6085d247cc1ae6a17c52f66618294ffc4c4f76223aeb66078486891fa1f92",
@@ -718,6 +735,7 @@ fn the_machine_is_the_scheduler_by_definition() {
                         read_ahead,
                         jitter: header.profile.jitter,
                         resend: header.profile.resend,
+                        catch_up: header.profile.reserve / 2,
                         namespace: 1,
                         t0: Some(1_763_640_000_000_000),
                         gates: Vec::new(),
@@ -966,6 +984,7 @@ fn late_wakes_are_the_harness_s_lateness() {
                 read_ahead: 1_000,
                 jitter: j,
                 resend: header.profile.resend,
+                catch_up: header.profile.reserve / 2,
                 namespace: 1,
                 t0: Some(1_763_640_000_000_000),
                 gates: Vec::new(),

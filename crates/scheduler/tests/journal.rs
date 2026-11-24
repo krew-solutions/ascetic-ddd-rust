@@ -683,3 +683,37 @@ fn every_header_variant_reads_back() {
         assert_eq!(read, h);
     }
 }
+
+/// Version 9 (ADR-0047 decision 21): a step its plan deviates from the
+/// validator's rate rule — expected refused at a rate limit — is read with
+/// `refusal`; another rule's deviation, or none, without.
+#[test]
+fn a_rate_deviation_is_read_as_a_refusal() {
+    use std::sync::Arc;
+
+    use ascetic_ddd_command_log::record::Deviation;
+    use ascetic_ddd_scheduler::machine::{Input, Machine};
+    let read = |deviation: Option<&str>| {
+        let mut r = fixture::call("read", 1, 0, 0, 0);
+        r.deviation = deviation.map(|rule| Deviation {
+            rule: rule.into(),
+            reason: "a test's".to_owned(),
+        });
+        let input = Input::Line {
+            line: 2,
+            record: Arc::new(r),
+        };
+        let mut m = Machine::new(Arc::new(fixture::header()), fixture::W).unwrap();
+        let out = m.step(0, input.clone()).unwrap();
+        journal::events(0, &input, &out)
+            .into_iter()
+            .find_map(|l| match l {
+                Line::Read(r) => Some(r.refusal),
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert!(read(Some("rate")));
+    assert!(!read(Some("timeout")));
+    assert!(!read(None));
+}

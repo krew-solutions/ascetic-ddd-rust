@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a built (§ Measured), K2b-9b to 9d next, then K2b-7e and the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a and K2b-9b-1 built (§ Measured), K2b-9b-2 to 9d next, then K2b-7e and the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -50,7 +50,8 @@ To be built in slices, each a commit of its own:
   evidence in the journal; **K2b-8d** the real clock's twins, in two — **K2b-8d-1** a driver's events, `TIME_WAIT`,
   exhausted ports measured; **K2b-8d-2** a hog over the deadline while connecting and writing, a whole process
   stalled; **K2b-9** the harness shaping at the hand-off (decision 21), in four — **K2b-9a** the machine's poll grid at
-  the plan's instant; **K2b-9b** the pure pace, `sim` paced, journal version 9, the fold's revision 8; **K2b-9c** the
+  the plan's instant; **K2b-9b** in three — **K2b-9b-1** journal version 9's bytes, **K2b-9b-2** the pure pace and
+  `sim` paced, **K2b-9b-3** the fold's revision 8; **K2b-9c** the
   shell's gate, its type, I2 and κ at admission; **K2b-9d** the twins.
 - **The first host run:** REST only, on the compose stand, `sources = 1` — a correctness run.
 - **K3** facts and the bus; **K4** shaping and the emulated client's retries; **K5** the report.
@@ -897,7 +898,8 @@ amends decision 17; § Alternatives Considered keeps what each round refuted):
 | K2b-8d-1 | K2b | on the real clock, a source of four sockets: `Live::for_caps`' runtime reading every answer in the host at the look, three answers, the driver's own wake and the target's ready across a spin past the deadline; a runtime taking four events a turn, claiming six, missing the fifth in some run — a false Root I1 forbids; no socket the shell closes in `TIME_WAIT` on its source's address — closed by the stand's `connection: close`, pooled and closed at the run's end, censored and reset; measured on purpose (`ports.rs`, ignored: two minutes), a bound source's ports out at its bind and an unbound one's at its connect, each `egress.ports` | no zero linger; `Live` building fewer events than it records |
 | K2b-8d-2 | K2b | a whole process stopped 1.5 s by `SIGSTOP` mid-run beside a stand of its own process answering at once and refusing connects 40 ms in every 100, two thousand reads 2 ms apart, each on a connection of its own: no censor — sent, or never sent — a Root, in every run (some five hundred never-sent reports a run, every one undecided); the stand's own resets and the system's answers in the machine's catch-up burst counted, not asserted (decision 21 owed) | — (the timer rule's mutants survive it: § Measured) |
 | K2b-9a | K2b | the machine's poll grid at the plan's instant: an observation read at 250 polled at 300, 400 …, read on a point at 600 polled there once, two read together at 620 on their own phases; the differential with `schedule.py` moved alike, settled run by run against machine 4 (16 of 3,944 changed, each at a poll of an observation released late) | the grid at `released`; the release's point not held (polled twice at one instant) |
-| K2b-9b | K2b | `scheduler::pace` against brute force over every pair (κ ∈ {0, 1, 100, 500, 999}, J ∈ {0, 1, 250, 2000}, ties and inversions); a hand-off late by at most `(1 − κ)·J` past its earliest moving neither maximum; `sim` paced and `verdict.py` recomputing its gate exactly and checking every pair on every differential run; a golden at κ > 0, J > 0 coherent under the pace and void under the allowance J; a refusal admitted under a shift undecided; excursions recomputed by `verdict.py` | the allowance J; the clamp `max(raw, D)`; rounding up; finality by time; the found answer's `handed` ignored |
+| K2b-9b-1 | K2b | journal version 9 — the golden holding the run's catch-up at 999, a refusal read, `decorated` on a `Sent`, both sides of a never-sent report's `decorated` and a found answer's `handed`; the schema and `journal.py` alike; a rate deviation read as a refusal, another rule's and none not; the differential's journals and the golden runs settled against version 8, the new fields removed, every line the same | a rate deviation unread; any rule read as a refusal |
+| K2b-9b-2, -3 | K2b | `scheduler::pace` against brute force over every pair (κ ∈ {0, 1, 100, 500, 999}, J ∈ {0, 1, 250, 2000}, ties and inversions); a hand-off late by at most `(1 − κ)·J` past its earliest moving neither maximum; `sim` paced and `verdict.py` recomputing its gate exactly and checking every pair on every differential run; a golden at κ > 0, J > 0 coherent under the pace and void under the allowance J; a refusal admitted under a shift undecided; excursions recomputed by `verdict.py` | the allowance J; the clamp `max(raw, D)`; rounding up; finality by time; the found answer's `handed` ignored |
 | K2b-9c | K2b | shell == sim with a reader lag, gate-delayed hand-offs and `pace.late` more than none; a decoration timing out ahead of a second attempt that passes; two sources' inverted raws passed in raw order; hand-offs within the band in raw order as a journal property; κ = 0 refused on the real clock; I2 at the compressed rate | the band dropped; dispatch order; the head kept past its decision; a carrier sending ungated |
 | K2b-9d | K2b | the stall twin beside a stand that resets past the certified bucket, its random closures gone: no Root gated, Roots ungated (the control); the gate recomputed from the journal predicting each hand-off and `pace.late`; the healthy and large-answer replays rerun with the gate built, optimised | the gate off; FIFO by dispatch |
 | K2-1 | K2 | the shell against an in-memory transport (hyper over `tokio::io::duplex`) under paused time reproduces `sim`'s journal | `std::time::Instant` in a handler |
@@ -1843,11 +1845,30 @@ a connection of its own (retired at once); the journal folded, each Root classed
   answer the system gave to a step released far past J, which decision 17 makes the system's own however late it was
   sent. The verdict reads **Fail** on a load the plan never asked of the stand: owed — decision 21, under the gate,
   before the first host run.
+- **A censor Root, once** (2026-11-24, K2b-9b-1's gate): one run of the twin read a censor Root (`censors 1`), against
+  its assertion; the fold read the journal it always reads (K2b-9b-1 adds fields no rule uses), so a rare outcome of
+  the run, not of the commit. Fifty-two runs since, none. The twin's tally counts as the stall's any Root whose step
+  has a censored or never-sent attempt — but its stand refuses connects 40 ms in every 100, and a never-sent attempt
+  on time whose connects the closed listener refused is a Root by decision 19, the stand's like its backlog's resets;
+  which it was is not known: the twin now prints such a Root's whole path, kept for the next sighting. The same fifty
+  runs: 402 Roots, 119 of steps released late (the burst), 283 of steps released on time — far more than the stand's
+  closures (3–7 a run before): the burst's on-time neighbours, decision 21's case; K2b-9d's stand drops the closures.
 - The timer rule's mutants (a completed timer's due unnoted, a dropped one's) survive this twin — its censors are
   undecided by paths besides — and are killed by `lag.rs`'s twins; why no attempt refused just before the stop, its
   floor across it, makes a Root under them is not established here.
 - A hog over the deadline while connecting or writing on a thread others hold is the source thread's lag (K2b-7c-2's
   twins, the path's lag counted from the thread's last blocked park); the stall twin is its whole-process case.
+
+**K2b-9b-1 — journal version 9's bytes** (2026-11-24, decision 21): the header's `catch_up` (half the profile's
+reserve until K2b-9c gives the run its own κ), `decorated` beside `handed` on `Sent` and a never-sent report (equal
+until a gate stands between them), a found answer's `handed` (an early reply's attempt has no `Sent`, yet its bytes
+reached the system — DS5's hole), the read line's `refusal` (a deviation from the validator's rate rule). The fold reads
+none of them yet: its classes' digest is version 8's. Settled run by run: the differential's 3,732 runs and the 31
+golden runs, their new fields removed, line for line version 8's; `decorated` equal to `handed` in all 22,935 sends
+and 37 never-sent reports; `catch_up` 50 throughout (the fixture's reserve 100). No run of the corpus deviates from
+the rate rule: `refusal` is reached by the golden journal and a test of its own. The writer thread's message keeps
+its line unboxed (`large_enum_variant` expected, its reason stated): boxing would allocate every line to shrink the
+run's one `Finish`.
 
 **K2b-9a — a poll's grid at its line's planned instant** (2026-11-24, machine revision 5; decision 21):
 - **Settled, not re-pinned.** The differential writes each run's journal under `SCHEDULER_JOURNALS_TO` when it is set
@@ -2205,3 +2226,6 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   withdrawn; judgements of large answers found holding the machine — the judge's speed owed with H-1's trigger.
 - 2026-11-24: K2b-9a built (§ Measured): machine revision 5, a poll's grid at its line's planned instant, its
   release's point held; settled run by run against machine 4; the REST twin's never-sent evidence projected.
+- 2026-11-24: K2b-9b-1 built (§ Measured): journal version 9's bytes — catch-up, `decorated`, a found answer's
+  `handed`, a refusal read — settled against version 8. The stall twin's first censor Root recorded (§ Measured
+  K2b-8d-2), its path now printed.

@@ -49,6 +49,7 @@ fn journal_header(header: &Header, log: &Log) -> journal::Header {
         read_ahead: header.read_ahead,
         jitter: header.profile.jitter,
         resend: header.profile.resend,
+        catch_up: header.profile.reserve / 2,
         namespace: 1,
         t0: Some(1_763_640_000_000_000),
         gates: Vec::new(),
@@ -694,6 +695,7 @@ fn backstop() -> (Header, Vec<Record>, Vec<Line>) {
         Input::Sent {
             line: 2,
             attempt: 1,
+            decorated: 0,
             handed: 0,
             connected: 0,
             lag: 0,
@@ -1311,7 +1313,11 @@ fn end_at(l: &[Line]) -> usize {
 
 /// A late answer's bracket.
 fn bracket(absent: u64, deadline: u64) -> Option<journal::Found> {
-    Some(journal::Found { absent, deadline })
+    Some(journal::Found {
+        absent,
+        deadline,
+        handed: None,
+    })
 }
 
 /// A late answer, found for its attempt's censor at `at` (version 5).
@@ -1642,6 +1648,7 @@ fn the_receive_side_s_guarantees_hold_over_the_looks() {
                     Some(Found {
                         absent,
                         deadline: d,
+                        handed: None,
                     }),
                     Ignored::Ended,
                 ),
@@ -2206,6 +2213,7 @@ fn a_never_sent_censor_is_its_report_s_to_decide() {
             a.found = Some(journal::Found {
                 absent: a.at - 1,
                 deadline: a.at - 1,
+                handed: None,
             });
             a.unsent = None;
         }),
@@ -2217,6 +2225,7 @@ fn a_never_sent_censor_is_its_report_s_to_decide() {
             a.found = Some(journal::Found {
                 absent: a.at,
                 deadline: a.at - 1,
+                handed: None,
             });
             a.unsent = None;
         }),

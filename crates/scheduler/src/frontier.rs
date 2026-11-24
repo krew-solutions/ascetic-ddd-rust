@@ -107,9 +107,11 @@ struct Open {
     sent: bool,
     /// Its answer arrived in time: no longer censorable.
     arrived: bool,
-    /// When its task first ran, and when its request was handed to a ready
-    /// connection: carried by whichever `Sent` is pushed (ADR-0047 decision
-    /// 17).
+    /// When it was ready to pass the hand-off (decorated, if its carrier
+    /// decorates), when it was handed off, and when its request was handed
+    /// to a ready connection: carried by whichever `Sent` is pushed (ADR-0047
+    /// decisions 17, 21).
+    decorated: u64,
     handed: u64,
     connected: u64,
     /// Its source thread's scheduling lag on its send path (decision 18),
@@ -209,6 +211,7 @@ impl Frontier {
                 deadline,
                 sent: false,
                 arrived: false,
+                decorated: at,
                 handed: at,
                 connected: at,
                 lag: 0,
@@ -218,9 +221,12 @@ impl Frontier {
         None
     }
 
-    /// Its task first ran at `now`: connected then too, until reported.
+    /// Ready to pass the hand-off and handed off at `now` — no gate yet
+    /// stands between them (ADR-0047 decision 21's K2b-9c builds it):
+    /// connected then too, until reported.
     pub fn handed(&mut self, now: u64, line: Line, attempt: u32) {
         if let Some(o) = self.open.get_mut(&(line, attempt)) {
+            o.decorated = now;
             o.handed = now;
             o.connected = now;
         }
@@ -252,12 +258,13 @@ impl Frontier {
             return Ok(false);
         }
         o.sent = true;
-        let (handed, connected, lag) = (o.handed, o.connected, o.lag);
+        let (decorated, handed, connected, lag) = (o.decorated, o.handed, o.connected, o.lag);
         self.push(
             now,
             Input::Sent {
                 line,
                 attempt,
+                decorated,
                 handed,
                 connected,
                 lag,
@@ -312,6 +319,7 @@ impl Frontier {
             let sent = Input::Sent {
                 line,
                 attempt,
+                decorated: o.decorated,
                 handed: o.handed,
                 connected: o.connected,
                 lag: o.lag,

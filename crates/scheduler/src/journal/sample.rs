@@ -23,6 +23,8 @@ pub fn header() -> Header {
         read_ahead: u64::MAX,
         jitter: 200,
         resend: 100_000,
+        // The most a run's catch-up can be: below the reserve's thousand.
+        catch_up: 999,
         namespace: u64::MAX,
         // Before the epoch, past what a float holds exactly.
         t0: Some(i64::MIN),
@@ -117,6 +119,7 @@ pub fn lines() -> Vec<Line> {
             cause: None,
             after: vec![],
             planned: 0,
+            refusal: true,
         }),
         Line::Read(Read {
             at: u64::MAX,
@@ -141,6 +144,7 @@ pub fn lines() -> Vec<Line> {
                 },
             ],
             planned: u64::MAX,
+            refusal: false,
         }),
         Line::Read(Read {
             at: 1,
@@ -151,6 +155,7 @@ pub fn lines() -> Vec<Line> {
             cause: None,
             after: vec![],
             planned: 1,
+            refusal: false,
         }),
         Line::Read(Read {
             at: 1,
@@ -161,6 +166,7 @@ pub fn lines() -> Vec<Line> {
             cause: None,
             after: vec![],
             planned: 1,
+            refusal: false,
         }),
         Line::Read(Read {
             at: 2,
@@ -171,6 +177,7 @@ pub fn lines() -> Vec<Line> {
             cause: Some(2),
             after: vec![],
             planned: 2,
+            refusal: false,
         }),
         Line::Released(Released {
             at: 1,
@@ -190,6 +197,7 @@ pub fn lines() -> Vec<Line> {
             at: 4,
             line: 2,
             attempt: u32::MAX,
+            decorated: 0,
             handed: 3,
             connected: u64::MAX,
             lag: u64::MAX,
@@ -238,9 +246,11 @@ pub fn lines() -> Vec<Line> {
             code,
             after,
             censored: judged == Judged::Unknown,
-            found: (judged == Judged::Unexpected).then_some(Found {
+            found: matches!(judged, Judged::Unexpected | Judged::NotTaken).then_some(Found {
                 absent: 0,
                 deadline: u64::MAX,
+                // Both sides (version 9).
+                handed: (judged == Judged::Unexpected).then_some(u64::MAX),
             }),
             unsent: None,
         }));
@@ -268,6 +278,7 @@ pub fn lines() -> Vec<Line> {
             censored: false,
             found: None,
             unsent: Some(Unsent {
+                decorated: (i % 2 == 1).then_some(u64::MAX),
                 handed: (i % 2 == 0).then_some(u64::MAX),
                 connected: (i % 2 == 1).then_some(u64::MAX),
                 lag: u64::MAX,

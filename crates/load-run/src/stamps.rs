@@ -727,6 +727,8 @@ impl<C: Clock> Attempt<C> {
     /// the peer's refusals, where it stood — `code` a dotted name.
     pub fn report(&self, code: &str, refused: u32, refused_by: Option<Refusal>) -> Unsent {
         Unsent {
+            // No gate yet between them (K2b-9c builds it).
+            decorated: self.ready,
             handed: self.ready,
             connected: self.connected_at,
             lag: self.path.lag(),
@@ -815,6 +817,7 @@ impl<C: Clock> Attempt<C> {
                 seen.found = Some(Found {
                     absent: self.absent,
                     deadline: self.deadline,
+                    handed: self.ready,
                 });
             }
             self.stamps.push(|f, _| f.ended(hold, judgement, seen));

@@ -1009,6 +1009,7 @@ fn projected(journal: &[Line]) -> Vec<Line> {
                 a.code = None;
                 if let Some(u) = a.unsent.as_mut() {
                     *u = ascetic_ddd_scheduler::journal::Unsent {
+                        decorated: None,
                         handed: None,
                         connected: None,
                         lag: 0,
@@ -1354,7 +1355,12 @@ fn found(journal: &[Line]) -> Option<(u64, journal::Found)> {
 #[test]
 fn a_late_answer_carries_where_it_was_not() {
     let at = |t: u64| ok(t, 0);
-    let bracket = |absent, deadline| journal::Found { absent, deadline };
+    // Handed off at its dispatch, 0 (version 9).
+    let bracket = |absent, deadline| journal::Found {
+        absent,
+        deadline,
+        handed: Some(0),
+    };
     // The look past the deadline put off 5 ms: the answer, in at 13,000, is
     // read as it comes, absent since the early look.
     assert_eq!(
@@ -1753,6 +1759,7 @@ fn folded(
         source: "load-run rest".to_owned(),
         log: sha256.clone(),
         validator: ascetic_ddd_command_log::live::validator(),
+        catch_up: header.profile.reserve / 2,
         read_ahead: W,
         jitter: header.profile.jitter,
         resend: header.profile.resend,

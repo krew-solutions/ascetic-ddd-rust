@@ -329,6 +329,7 @@ fn a_closing_report_follows_its_censor() {
     use ascetic_ddd_scheduler::frontier::Left;
     use ascetic_ddd_scheduler::machine::{Code, Unsent};
     let unsent = || Unsent {
+        decorated: Some(5),
         handed: Some(5),
         connected: None,
         lag: 0,

@@ -469,6 +469,7 @@ fn inputs_of_one_instant_are_taken_in_one_order() {
             Input::Sent {
                 line: 3,
                 attempt: 1,
+                decorated: 0,
                 handed: 0,
                 connected: 0,
                 lag: 0,
@@ -477,6 +478,7 @@ fn inputs_of_one_instant_are_taken_in_one_order() {
             Input::Sent {
                 line: 2,
                 attempt: 1,
+                decorated: 0,
                 handed: 0,
                 connected: 0,
                 lag: 0,

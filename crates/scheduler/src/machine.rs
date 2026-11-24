@@ -64,7 +64,11 @@ pub struct Seen {
 /// source's thread could tell — never at the censor, made on the machine's.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unsent {
-    /// When it was ready to connect — decorated; none if it never was.
+    /// When it was ready to pass the hand-off — decorated, if its carrier
+    /// decorates (ADR-0047 decision 21, journal version 9); none if it never
+    /// was.
+    pub decorated: Option<u64>,
+    /// When it was ready to connect — handed off; none if it never was.
     pub handed: Option<u64>,
     /// When its request was handed to a connection, if ever.
     pub connected: Option<u64>,
@@ -100,6 +104,10 @@ pub struct Found {
     pub absent: u64,
     /// Its attempt's deadline.
     pub deadline: u64,
+    /// When its attempt was handed off, if it was (ADR-0047 decision 21,
+    /// journal version 9): an early reply's attempt has no `Sent`, yet its
+    /// bytes reached the system.
+    pub handed: Option<u64>,
 }
 
 /// A problem's code as the journal may carry it: the server's text only if it
@@ -166,7 +174,10 @@ pub enum Input {
         line: Line,
         /// The attempt, from 1.
         attempt: u32,
-        /// When its task first ran: the hand-off's lateness from the dispatch
+        /// When it was ready to pass the hand-off — decorated, if its carrier
+        /// decorates (ADR-0047 decision 21).
+        decorated: u64,
+        /// When it was handed off: the hand-off's lateness from the dispatch
         /// is the harness's (ADR-0047 decision 17).
         handed: u64,
         /// When its request was handed to a ready connection: the connect's

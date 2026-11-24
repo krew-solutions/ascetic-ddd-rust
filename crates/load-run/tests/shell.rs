@@ -468,6 +468,7 @@ fn stress<C: Clock>(make: impl Fn(u64) -> C, seeds: u64, calls: u64) {
                 validator: ascetic_ddd_command_log::live::validator(),
                 read_ahead: W,
                 jitter: header.profile.jitter,
+                catch_up: header.profile.reserve / 2,
                 resend: header.profile.resend,
                 namespace: 1,
                 t0: Some(clock.wall()),

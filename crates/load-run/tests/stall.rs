@@ -186,6 +186,7 @@ fn a_whole_process_stalled_makes_no_root() {
         read_ahead: W,
         jitter: header.profile.jitter,
         resend: header.profile.resend,
+        catch_up: header.profile.reserve / 2,
         namespace: 1,
         t0: Some(0),
         gates: Vec::new(),
@@ -246,6 +247,19 @@ fn a_whole_process_stalled_makes_no_root() {
         });
         if censored {
             censors += 1;
+            // Its path whole, kept for the next sighting: the journal's
+            // lines of its step.
+            for l in lines.iter().filter(|l| match l {
+                journal::Line::Read(x) => x.line == line,
+                journal::Line::Released(x) => x.line == line,
+                journal::Line::Dispatch(x) => x.line == line,
+                journal::Line::Sent(x) => x.line == line,
+                journal::Line::Answer(x) => x.line == line,
+                journal::Line::End(x) => x.line == line,
+                _ => false,
+            }) {
+                eprintln!("MEASURED stall censor root, line {line}: {l:?}");
+            }
         } else if late {
             burst += 1;
         } else {

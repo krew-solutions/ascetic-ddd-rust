@@ -1,11 +1,11 @@
-{"header":{"journal":8,"machine":5,"source":"verdict","log":"376927ed99df2541cf2224aca052b3d051dd3241d23b415238461d9bd65a1d66","validator":"a test's validator","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000","gates":[],"judging":null,"admission":null}}
-{"read":{"at":"1500","line":"2","key":{"kind":"device","scope":"Bw==","label":"watched","n":0},"action":"poll","safety":"never","cause":"2","after":[],"planned":"1000"}}
+{"header":{"journal":9,"machine":5,"source":"verdict","log":"376927ed99df2541cf2224aca052b3d051dd3241d23b415238461d9bd65a1d66","validator":"a test's validator","read_ahead":"1000","jitter":"200","resend":"100","catch_up":0,"namespace":"1","t0":"1763640000000000","gates":[],"judging":null,"admission":null}}
+{"read":{"at":"1500","line":"2","key":{"kind":"device","scope":"Bw==","label":"watched","n":0},"action":"poll","safety":"never","cause":"2","after":[],"planned":"1000","refusal":false}}
 {"released":{"at":"1500","line":"2","intended":"1000","released":"1500","deadline":"2000"}}
 {"dispatch":{"at":"1500","line":"2","attempt":1,"deadline":"2000","due":"1500"}}
-{"sent":{"at":"1500","line":"2","attempt":1,"handed":"1500","connected":"1500","lag":"0"}}
+{"sent":{"at":"1500","line":"2","attempt":1,"decorated":"1500","handed":"1500","connected":"1500","lag":"0"}}
 {"answer":{"at":"1510","line":"2","attempt":1,"judged":"unexpected","captured":[],"ignored":null,"status":null,"code":null,"after":null,"censored":false,"found":null,"unsent":null}}
 {"dispatch":{"at":"1800","line":"2","attempt":2,"deadline":"2000","due":"1800"}}
-{"sent":{"at":"1800","line":"2","attempt":2,"handed":"1800","connected":"1800","lag":"0"}}
+{"sent":{"at":"1800","line":"2","attempt":2,"decorated":"1800","handed":"1800","connected":"1800","lag":"0"}}
 {"answer":{"at":"1810","line":"2","attempt":2,"judged":"unexpected","captured":[],"ignored":null,"status":null,"code":null,"after":null,"censored":false,"found":null,"unsent":null}}
 {"end":{"at":"2000","line":"2","end":"unknown","read":"1500","ready":"0","intended":"1000","released":"1500","dispatched":"1500","sent":"1500","ended":"2000","attempts":2,"critical":null,"bound":[],"fault":false,"wake":"2000"}}
-{"trailer":{"events":"9","steps":"1","sha256":"f098be08c3d3e07332c58fe1c0406aedbdf4a7c6e64a0edb5bb32c875193c7ce"}}
+{"trailer":{"events":"9","steps":"1","sha256":"a72d76b68e59044fed1b44ae760723230dfd6fabf4cb3ca3ae293118cb509a82"}}

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/krew-solutions/ascetic-ddd-rust/crates/scheduler/schema/journal.schema.json",
-  "title": "A line of a scheduler's journal (ADR-0047 decision 14), version 7",
+  "title": "A line of a scheduler's journal (ADR-0047 decision 14), version 9",
   "description": "Normative. Every object's properties are listed in the order a line writes them: the canonical order. A line is the compact JSON of one of these, then a newline; the first line is a header and only it, the last a trailer, whose sha256 is of every line before it and events the number of lines between the two. Every u64 is a decimal string.",
   "oneOf": [
     {
@@ -544,11 +544,22 @@
         },
         "deadline": {
           "$ref": "#/$defs/u64"
+        },
+        "handed": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
         }
       },
       "required": [
         "absent",
-        "deadline"
+        "deadline",
+        "handed"
       ],
       "additionalProperties": false
     },
@@ -650,7 +661,7 @@
       "type": "object",
       "properties": {
         "journal": {
-          "const": 8
+          "const": 9
         },
         "machine": {
           "$ref": "#/$defs/u32"
@@ -672,6 +683,9 @@
         },
         "resend": {
           "$ref": "#/$defs/u64"
+        },
+        "catch_up": {
+          "$ref": "#/$defs/u32"
         },
         "namespace": {
           "$ref": "#/$defs/u64"
@@ -722,6 +736,7 @@
         "read_ahead",
         "jitter",
         "resend",
+        "catch_up",
         "namespace",
         "t0",
         "gates",
@@ -766,6 +781,9 @@
         },
         "planned": {
           "$ref": "#/$defs/u64"
+        },
+        "refusal": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -776,7 +794,8 @@
         "safety",
         "cause",
         "after",
-        "planned"
+        "planned",
+        "refusal"
       ],
       "additionalProperties": false
     },
@@ -848,6 +867,9 @@
         "attempt": {
           "$ref": "#/$defs/u32"
         },
+        "decorated": {
+          "$ref": "#/$defs/u64"
+        },
         "handed": {
           "$ref": "#/$defs/u64"
         },
@@ -862,6 +884,7 @@
         "at",
         "line",
         "attempt",
+        "decorated",
         "handed",
         "connected",
         "lag"
@@ -1281,6 +1304,16 @@
     "unsent": {
       "type": "object",
       "properties": {
+        "decorated": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
         "handed": {
           "oneOf": [
             {
@@ -1322,6 +1355,7 @@
         }
       },
       "required": [
+        "decorated",
         "handed",
         "connected",
         "lag",

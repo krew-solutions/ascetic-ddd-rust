@@ -52,6 +52,10 @@ impl JournalSink for Lines {
 }
 
 /// What the machine hands its journal's thread.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "every message but a run's last is a line: boxing would allocate each to shrink the one `Finish`"
+)]
 enum Message {
     Line(Line),
     /// The journal whole: its trailer, and only then (decision 18).
