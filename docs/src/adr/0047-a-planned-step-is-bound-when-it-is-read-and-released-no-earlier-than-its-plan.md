@@ -1868,6 +1868,25 @@ a connection of its own (retired at once); the journal folded, each Root classed
 - A hog over the deadline while connecting or writing on a thread others hold is the source thread's lag (K2b-7c-2's
   twins, the path's lag counted from the thread's last blocked park); the stall twin is its whole-process case.
 
+**K2b-7e's measurement — the shell's own bytes** (2026-11-24, this laptop, optimised; `tests/memory.rs`, a binary of
+its own, ignored: a counting allocator over the whole process, a stand of its own process, the journal counted, not
+kept): 1,000 and 2,000 reads at one instant, each answered 1 s later, a last read keeping the run open while the
+connections lie idle; the difference per attempt —
+
+| answers of | an open attempt, its fresh connection with it | a connection pooled idle | at the peak, the answers read |
+|---|---|---|---|
+| 2 B | 51.5 kB | 46.9 kB | 51.5 kB |
+| 64 KiB | 51.5 kB | 71.5 kB | 105 kB |
+
+- The connection is nearly all of it: some 47 kB idle, the attempt 4.5 kB more. Its parts, read from the code: the
+  counting `Io`'s scratch, 16 KiB, every read copied through it (`io.rs`, `SCRATCH`); hyper's read buffer, 8 KiB at
+  first, grown to fit a large body and kept grown — a pooled connection 24 kB heavier after a 64 KiB answer; hyper's
+  write buffer.
+- An answer read costs some 1.6 times its body at the peak.
+- So at 10,000 attempts at once some half a gigabyte, and an answer cap (1 MiB in the fixture) times the attempts in
+  flight, gigabytes: K2b-7e's bound needs a connection's cost fixed (hyper's exact read size, the scratch
+  reconsidered) and the answers being read bounded, not only counted — its design next, under the gate.
+
 **Decision 21's raw dues, a second round, and no catch-up replayed** (2026-11-24):
 - **Plan-time twins refuted by their roles.** A blind solver (Fable, given the question) derived each instant's
   plan-time twin `τ = min(t, r + S(t − g))`, `S(w) = ⌊1000·w/c⌋`, waits dilated, joins by a second maximum — the
@@ -2313,3 +2332,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-24: decision 21's raw dues, a second round: plan-time twins (a blind solver and the discriminator
   converging) refuted by Distributed Systems and Verifiability — a covered dependent compressed, a trilemma; no catch-up
   replayed over five minutes (§ Measured): small, the deadlines' anchor what costs; the next question recorded (§ Owed).
+- 2026-11-24: K2b-7e's measurement (§ Measured): an open attempt with its connection some 51.5 kB, a pooled connection
+  47 kB (71.5 kB after 64 KiB answers), an answer read 1.6 times its body.
