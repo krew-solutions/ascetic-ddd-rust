@@ -219,15 +219,15 @@ fn fits_refuses_at_and_past_each_boundary() {
     for more in [
         Peaks {
             held: 1_001,
-            ..peaks
+            ..peaks.clone()
         },
         Peaks {
             pending: 201,
-            ..peaks
+            ..peaks.clone()
         },
         Peaks {
             barriers: 31,
-            ..peaks
+            ..peaks.clone()
         },
     ] {
         assert!(needed(&more, line) > need, "{more:?}");

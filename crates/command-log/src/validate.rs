@@ -26,6 +26,7 @@ use crate::record::{
     Subject, Test, Value,
 };
 use crate::runs::{Event, Sorter};
+use crate::shape::{self, Shape};
 use crate::spill::{Counted, SpillDir};
 
 /// A rule of decisions 5, 7 and 9.
@@ -216,8 +217,67 @@ impl fmt::Display for Violation {
     }
 }
 
+/// What the steps a run holds keep once ended (ADR-0047 decision 22): their
+/// barrier keys' bytes, their capture specs, those specs' subjects' and
+/// slots' bytes — a sum over the held set.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(deny_unknown_fields)]
+pub struct Kept {
+    /// Barrier keys' bytes: a subject's kind and scope, a label.
+    pub keys: u64,
+    /// Capture specs: the values kept for later readers.
+    pub captures: u64,
+    /// Their subjects' and slots' bytes.
+    pub capture_bytes: u64,
+}
+
+impl Kept {
+    fn of(s: &Shape) -> Kept {
+        Kept {
+            keys: s.key_bytes,
+            captures: s.captures.elements,
+            capture_bytes: s.capture_bytes,
+        }
+    }
+
+    fn plus(self, o: Kept) -> Kept {
+        Kept {
+            keys: self.keys.saturating_add(o.keys),
+            captures: self.captures.saturating_add(o.captures),
+            capture_bytes: self.capture_bytes.saturating_add(o.capture_bytes),
+        }
+    }
+
+    fn less(self, o: Kept) -> Kept {
+        Kept {
+            keys: self.keys.saturating_sub(o.keys),
+            captures: self.captures.saturating_sub(o.captures),
+            capture_bytes: self.capture_bytes.saturating_sub(o.capture_bytes),
+        }
+    }
+
+    fn most(self, o: Kept) -> Kept {
+        Kept {
+            keys: self.keys.max(o.keys),
+            captures: self.captures.max(o.captures),
+            capture_bytes: self.capture_bytes.max(o.capture_bytes),
+        }
+    }
+}
+
 /// What a run must hold, as the log plans it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Peaks {
     /// The most completions kept at once for later dependencies: the steps
@@ -243,6 +303,23 @@ pub struct Peaks {
     pub horizon: u64,
     /// The barrier keys: one a step's own, kept for the run.
     pub barriers: u64,
+    /// The shapes of the steps not ended at once, each count at its peak over
+    /// the reads (ADR-0047 decision 22, K2b-7e-2b): what a machine and its
+    /// attempts hold of their records is priced by them, at the run's build.
+    pub pending_shape: Shape,
+    /// The most steps not ended at once were every end a jitter later: the
+    /// handles a run holds past their deadline until their looks.
+    pub late: u64,
+    /// Their shapes, each count at its peak.
+    pub late_shape: Shape,
+    /// What the steps held keep once ended, each count at its peak.
+    pub kept: Kept,
+    /// By a call's or a probe's source, the most steps taking its sockets
+    /// not ended at once.
+    pub sockets: Vec<u64>,
+    /// The barrier keys' bytes — a subject's kind and scope, a label —, one a
+    /// key: a machine keeps each key for the run.
+    pub barrier_bytes: u64,
 }
 
 /// What a pass found.
@@ -625,6 +702,38 @@ struct Held {
     intended: u64,
     end: u64,
     hold: u64,
+    /// What it keeps once ended (decision 22).
+    kept: Kept,
+}
+
+/// A step read and not ended, by its worst end: its shape and the source
+/// whose socket it takes (decision 22).
+struct Ending {
+    end: u64,
+    /// Its line: ties broken in reading order.
+    line: u64,
+    shape: Shape,
+    socket: Option<u32>,
+}
+
+impl PartialEq for Ending {
+    fn eq(&self, o: &Ending) -> bool {
+        (self.end, self.line) == (o.end, o.line)
+    }
+}
+
+impl Eq for Ending {}
+
+impl PartialOrd for Ending {
+    fn partial_cmp(&self, o: &Ending) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(o))
+    }
+}
+
+impl Ord for Ending {
+    fn cmp(&self, o: &Ending) -> std::cmp::Ordering {
+        (self.end, self.line).cmp(&(o.end, o.line))
+    }
 }
 
 struct Pass<'h, H: Host> {
@@ -644,11 +753,19 @@ struct Pass<'h, H: Host> {
     /// A barrier key's members planned so far, the latest `at` of them, and
     /// the latest worst end.
     barriers: BTreeMap<BarrierKey, (u64, u64, u64)>,
-    /// The holds of steps the window let go that a machine may still hold: a
-    /// min-heap, popped as reads pass them (ADR-0047 K1e-2).
-    beyond: BinaryHeap<Reverse<u64>>,
-    /// The worst ends of steps read and not ended, alike.
-    ends: BinaryHeap<Reverse<u64>>,
+    /// The holds of steps the window let go that a machine may still hold, and
+    /// what each keeps: a min-heap, popped as reads pass them (ADR-0047 K1e-2).
+    beyond: BinaryHeap<Reverse<(u64, Kept)>>,
+    /// The steps read and not ended, by their worst ends, alike.
+    ends: BinaryHeap<Reverse<Ending>>,
+    /// Those ended less than a jitter ago (decision 22).
+    late: BinaryHeap<Reverse<Ending>>,
+    /// The shapes of `ends`, and of `ends` and `late`, summed; what the held
+    /// keep, summed; by source, the steps of `ends` taking its sockets.
+    pending_sum: Shape,
+    late_sum: Shape,
+    kept_sum: Kept,
+    sockets: Vec<u64>,
     progress: Option<crate::engine::Observer>,
     slots: BTreeMap<(Subject, String), Slot>,
     /// Live captures: slots whose latest writer is within W of the cursor
@@ -1742,11 +1859,13 @@ impl<H: Host> Pass<'_, H> {
     fn evict(&mut self) {
         let (w, c) = (self.header.window, self.cursor);
         let tau = c.saturating_sub(self.header.read_ahead);
-        let beyond = &mut self.beyond;
+        let (beyond, kept) = (&mut self.beyond, &mut self.kept_sum);
         // What the window lets go a machine may still hold (K1e-2).
         self.window.read(c, |h| {
             if h.hold >= tau {
-                beyond.push(Reverse(h.hold));
+                beyond.push(Reverse((h.hold, h.kept)));
+            } else {
+                *kept = kept.less(h.kept);
             }
         });
         while let Some((written, _)) = self.live_order.first() {
@@ -1793,11 +1912,31 @@ impl<H: Host> Pass<'_, H> {
         // Every prefix of its key passes it once every member up to it ended.
         let s = &r.step;
         let key = crate::plan::member_key(s);
+        if !self.barriers.contains_key(&key) {
+            let bytes = key
+                .0
+                .len()
+                .saturating_add(key.1.len())
+                .saturating_add(key.2.len());
+            let p = &mut self.report.peaks;
+            p.barrier_bytes = p
+                .barrier_bytes
+                .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+        }
         let b = self.barriers.entry(key).or_insert((0, 0, 0));
         let hold = end.max(b.2);
         *b = (b.0.saturating_add(1), b.1.max(r.at), b.2.max(end));
         let retained = self.header.retained.contains(&r.step.label);
-        let beyond = &mut self.beyond;
+        // Its shape, what it keeps once ended, the source whose socket it
+        // takes (decision 22).
+        let shape = shape::shape(r);
+        let socket = crate::plan::socket(r);
+        let kept = Kept::of(&shape);
+        if let Some(o) = &self.progress {
+            o.0.shape(line, &shape, socket);
+        }
+        self.kept_sum = self.kept_sum.plus(kept);
+        let (beyond, kept_sum) = (&mut self.beyond, &mut self.kept_sum);
         self.window.keep(
             digest,
             r.at,
@@ -1806,19 +1945,56 @@ impl<H: Host> Pass<'_, H> {
                 intended,
                 end,
                 hold,
+                kept,
             },
             |h| {
                 if h.hold >= tau {
-                    beyond.push(Reverse(h.hold));
+                    beyond.push(Reverse((h.hold, h.kept)));
+                } else {
+                    *kept_sum = kept_sum.less(h.kept);
                 }
             },
         );
-        self.ends.push(Reverse(end));
-        while self.beyond.peek().is_some_and(|Reverse(h)| *h < tau) {
-            self.beyond.pop();
+        self.pending_sum = self.pending_sum.plus(shape);
+        self.late_sum = self.late_sum.plus(shape);
+        if let Some(s) = socket.and_then(|s| usize::try_from(s).ok()) {
+            if self.sockets.len() <= s {
+                self.sockets.resize(s.saturating_add(1), 0);
+            }
+            if let Some(n) = self.sockets.get_mut(s) {
+                *n = n.saturating_add(1);
+            }
         }
-        while self.ends.peek().is_some_and(|Reverse(e)| *e < tau) {
-            self.ends.pop();
+        self.ends.push(Reverse(Ending {
+            end,
+            line,
+            shape,
+            socket,
+        }));
+        while self.beyond.peek().is_some_and(|Reverse(h)| h.0 < tau) {
+            if let Some(Reverse((_, k))) = self.beyond.pop() {
+                self.kept_sum = self.kept_sum.less(k);
+            }
+        }
+        // Past its end it is pending no more; a jitter past it, late no more.
+        let late_tau = tau.saturating_sub(self.header.profile.jitter);
+        while self.ends.peek().is_some_and(|Reverse(e)| e.end < tau) {
+            if let Some(Reverse(e)) = self.ends.pop() {
+                self.pending_sum = self.pending_sum.less(e.shape);
+                if let Some(n) = e
+                    .socket
+                    .and_then(|s| usize::try_from(s).ok())
+                    .and_then(|s| self.sockets.get_mut(s))
+                {
+                    *n = n.saturating_sub(1);
+                }
+                self.late.push(Reverse(e));
+            }
+        }
+        while self.late.peek().is_some_and(|Reverse(e)| e.end < late_tau) {
+            if let Some(Reverse(e)) = self.late.pop() {
+                self.late_sum = self.late_sum.less(e.shape);
+            }
         }
         let p = &mut self.report.peaks;
         let window = self.window.len() as u64;
@@ -1827,6 +2003,16 @@ impl<H: Host> Pass<'_, H> {
         let pending = self.ends.len() as u64;
         p.held = p.held.max(held);
         p.pending = p.pending.max(pending);
+        p.late = p.late.max(pending.saturating_add(self.late.len() as u64));
+        p.pending_shape = p.pending_shape.most(self.pending_sum);
+        p.late_shape = p.late_shape.most(self.late_sum);
+        p.kept = p.kept.most(self.kept_sum);
+        if p.sockets.len() < self.sockets.len() {
+            p.sockets.resize(self.sockets.len(), 0);
+        }
+        for (peak, now) in p.sockets.iter_mut().zip(&self.sockets) {
+            *peak = (*peak).max(*now);
+        }
         p.horizon = p.horizon.max(end);
         p.barriers = p.barriers.max(self.barriers.len() as u64);
         if let Some(o) = &self.progress {
@@ -1843,6 +2029,7 @@ impl<H: Host> Pass<'_, H> {
         self.barriers = BTreeMap::new();
         self.beyond = BinaryHeap::new();
         self.ends = BinaryHeap::new();
+        self.late = BinaryHeap::new();
         self.slots = BTreeMap::new();
         self.live = BTreeMap::new();
         self.live_order = BTreeSet::new();
@@ -1929,6 +2116,11 @@ pub fn validate_on<R: BufRead>(
         barriers: BTreeMap::new(),
         beyond: BinaryHeap::new(),
         ends: BinaryHeap::new(),
+        late: BinaryHeap::new(),
+        pending_sum: Shape::default(),
+        late_sum: Shape::default(),
+        kept_sum: Kept::default(),
+        sockets: Vec::new(),
         progress: limits.progress.clone(),
         slots: BTreeMap::new(),
         live: BTreeMap::new(),

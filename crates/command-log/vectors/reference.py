@@ -74,6 +74,7 @@ The rules (ADR-0046 decisions 5, 7, 9):
   B + ceil(R * J / P) + 1.
 """
 
+import base64
 import importlib.util
 import json
 import pathlib
@@ -617,7 +618,7 @@ def peaks(text):
 REACHED = ("pin", "prefix", "read_ahead", "tie")
 
 
-def bound(text, seen):
+def bound(text, seen, out=None):
     """The plan's own bound (ADR-0047 K1e-2), by definition, quadratic: every
     line read at its earliest, at - L with L the header's read-ahead, and every
     action ending at its deadline. Per line: R, the latest release — its plan,
@@ -725,11 +726,107 @@ def bound(text, seen):
         per_line.append([j + 2, R[j], E[j], now_held, now_pending])
         held, pending = max(held, now_held), max(pending, now_pending)
     keys = {member(r["step"]) for r in steps}
+    if out is not None:
+        out["E"], out["H"] = E, H
     return per_line, [held, pending, max(E, default=0), len(keys)]
+
+
+# A shape's counts as the corpus carries them (ADR-0047 decision 22): records,
+# bytes, byte strings, then (elements, sequences) of deps, values, fields,
+# outcomes, predicates, captures, the captures' bytes, (elements, sequences) of
+# measures, spans, subjects, then holes, hole bytes, key bytes, request bytes,
+# request holes.
+SHAPE = 27
+KEY_BYTES, CAPTURES, CAPTURE_BYTES = 24, 13, 15
+
+
+def socket(r):
+    """The source whose socket a step takes: a call's, a probe's; none, -1."""
+    a = r["action"]
+    if "rest" in a:
+        return int(a["rest"]["source"])
+    probe = a.get("observe", {}).get("probe", {})
+    if "rest" in probe:
+        return int(probe["rest"]["source"])
+    return -1
+
+
+def byte_peaks(text, shapes):
+    """The plan's byte peaks (ADR-0047 decision 22), by definition, quadratic,
+    from the shapes the validator read: at the read of line j, tau the cursor
+    less L, J the profile's jitter — the shapes of the steps not ended
+    (E >= tau) summed, of those not ended a jitter later (E >= tau - J), what
+    the held keep (the held as `bound` defines them), each source's steps not
+    ended; each count's peak over the reads. A shape's counts this reference
+    can derive itself — its key's and its captures' bytes, its captures, its
+    source — are checked against the record first."""
+    lines = text.split("\n")[:-1]
+    header = json.loads(lines[0])["header"]
+    steps = [json.loads(line)["step"] for line in lines[1:-1]]
+    if len(shapes) != len(steps):
+        raise SystemExit(f"{len(shapes)} shapes for {len(steps)} steps")
+    w, retained, ahead = int(header["window"]), header["retained"], int(header["read_ahead"])
+    jitter = int(header["profile"]["jitter"])
+    utf8 = lambda t: len(t.encode())
+    raw = lambda t: len(base64.b64decode(t))
+    for k, (r, s) in enumerate(zip(steps, shapes)):
+        line, src, counts = s[0], s[1], s[2:]
+        subject = r["step"]["subject"]
+        key_bytes = utf8(subject["kind"]) + raw(subject["scope"]) + utf8(r["step"]["label"])
+        took = sum(utf8(c["subject"]["kind"]) + raw(c["subject"]["scope"]) + utf8(c["slot"]) for c in r["capture"])
+        want = (k + 2, socket(r), 1, key_bytes, len(r["capture"]), took)
+        have = (line, src, counts[0], counts[KEY_BYTES], counts[CAPTURES], counts[CAPTURE_BYTES])
+        if len(counts) != SHAPE or want != have:
+            raise SystemExit(f"line {k + 2}: the shape's (line, source, records, key, captures, their bytes) are {have}, by definition {want}")
+    out = {}
+    bound(text, {term: 0 for term in REACHED}, out)
+    E, H = out["E"], out["H"]
+    cursors = []
+    for r in steps:
+        cursors.append(max([int(r["at"])] + cursors[-1:]))
+    late = 0
+    pending_shape, late_shape, kept = [0] * SHAPE, [0] * SHAPE, [0, 0, 0]
+    sockets = {}
+    for j in range(len(steps)):
+        tau = max(cursors[j] - ahead, 0)
+        now_p, now_l, now_k, now_s, n_late = [0] * SHAPE, [0] * SHAPE, [0, 0, 0], {}, 0
+        for k in range(j + 1):
+            counts = shapes[k][2:]
+            if E[k] >= tau:
+                now_p = [a + b for a, b in zip(now_p, counts)]
+                src = shapes[k][1]
+                if src >= 0:
+                    now_s[src] = now_s.get(src, 0) + 1
+            if E[k] >= tau - jitter:
+                now_l = [a + b for a, b in zip(now_l, counts)]
+                n_late += 1
+            latest = max(x for x in range(j + 1) if steps[x]["step"] == steps[k]["step"]) == k
+            kept_k = latest and (steps[k]["step"]["label"] in retained or cursors[j] - int(steps[k]["at"]) <= w)
+            if kept_k or H[k] >= tau:
+                now_k = [a + b for a, b in zip(now_k, (counts[KEY_BYTES], counts[CAPTURES], counts[CAPTURE_BYTES]))]
+        late = max(late, n_late)
+        pending_shape = [max(a, b) for a, b in zip(pending_shape, now_p)]
+        late_shape = [max(a, b) for a, b in zip(late_shape, now_l)]
+        kept = [max(a, b) for a, b in zip(kept, now_k)]
+        for src, n in now_s.items():
+            sockets[src] = max(sockets.get(src, 0), n)
+    top = max(sockets, default=-1)
+    keys = {(r["step"]["subject"]["kind"], r["step"]["subject"]["scope"], r["step"]["label"], r["step"]["n"]) for r in steps}
+    return {
+        "late": late,
+        "pending_shape": pending_shape,
+        "late_shape": late_shape,
+        "kept": kept,
+        "sockets": [sockets.get(i, 0) for i in range(top + 1)],
+        "barrier_bytes": sum(utf8(kind) + raw(scope) + utf8(label) for kind, scope, label, _ in keys),
+    }
 
 
 def main():
     count, apart, rules = 0, 0, {}
+    # What the corpus reaches of the byte peaks (decision 22): each, or the
+    # agreement on it says nothing.
+    reached = {"late": 0, "socket": 0, "kept_capture": 0, "hole": 0}
     seen = {k: 0 for k in REACHED}
     for entry in sys.stdin:
         entry = json.loads(entry)
@@ -744,6 +841,15 @@ def main():
         if per_line != entry["bounds"]:
             diff = next(((m, t) for m, t in zip(per_line, entry["bounds"]) if m != t), (per_line[-1:], entry["bounds"][-1:]))
             raise SystemExit(f"{entry['name']}: the bound by definition {diff[0]}, the validator's {diff[1]} ([line, R, E, held, pending])")
+        mine_bytes = byte_peaks(entry["log"], entry["shapes"])
+        if mine_bytes != entry["byte_peaks"]:
+            diff = {k: (mine_bytes[k], entry["byte_peaks"][k]) for k in mine_bytes if mine_bytes[k] != entry["byte_peaks"].get(k)}
+            raise SystemExit(f"{entry['name']}: the byte peaks by definition differ from the validator's: {diff}")
+        p = entry["peaks"]
+        reached["late"] += mine_bytes["late"] > p[4]
+        reached["socket"] += any(mine_bytes["sockets"])
+        reached["kept_capture"] += mine_bytes["kept"][1] > 0
+        reached["hole"] += mine_bytes["pending_shape"][22] > 0
         if verdict(entry["log"], clock="line") != mine:
             apart += 1
         count += 1
@@ -753,10 +859,13 @@ def main():
         raise SystemExit("no corpus on stdin")
     if apart == 0:
         raise SystemExit("no log tells the cursor from the line's own time: the corpus does not execute decision 16's clock")
+    unreached = [k for k, n in reached.items() if n == 0]
+    if unreached:
+        raise SystemExit(f"the corpus reaches no byte peak's {unreached}: the agreement on them says nothing ({reached})")
     missed = [k for k, n in seen.items() if n == 0]
     if missed:
         raise SystemExit(f"the corpus reaches no read held only by {missed}: the bound's executors do not execute them")
-    print(f"{count} logs agree, {apart} of them only on the cursor's clock; violations by rule: {dict(sorted(rules.items()))}; the bound's terms reached at {seen}")
+    print(f"{count} logs agree, {apart} of them only on the cursor's clock; violations by rule: {dict(sorted(rules.items()))}; the bound's terms reached at {seen}; the byte peaks' at {reached}")
 
 
 if __name__ == "__main__":

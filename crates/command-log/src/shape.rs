@@ -96,6 +96,10 @@ pub struct Shape {
     pub predicates: Seqs,
     /// Its capture specs: the slots it produces.
     pub captures: Seqs,
+    /// Their subjects' kinds and scopes and their slots, in bytes: what a
+    /// value it captures is kept under.
+    #[serde(with = "u64s")]
+    pub capture_bytes: u64,
     /// Its measures.
     pub measures: Seqs,
     /// Its payloads' holes.
@@ -135,6 +139,7 @@ impl Shape {
             outcomes: self.outcomes.plus(o.outcomes),
             predicates: self.predicates.plus(o.predicates),
             captures: self.captures.plus(o.captures),
+            capture_bytes: self.capture_bytes.saturating_add(o.capture_bytes),
             measures: self.measures.plus(o.measures),
             spans: self.spans.plus(o.spans),
             subjects: self.subjects.plus(o.subjects),
@@ -144,6 +149,70 @@ impl Shape {
             request: self.request.saturating_add(o.request),
             request_holes: self.request_holes.saturating_add(o.request_holes),
         }
+    }
+
+    /// The sum less a shape it holds: the validator's running sums, each
+    /// count let go as it was added.
+    pub fn less(self, o: Shape) -> Shape {
+        let seqs = |a: Seqs, b: Seqs| Seqs {
+            elements: a.elements.saturating_sub(b.elements),
+            sequences: a.sequences.saturating_sub(b.sequences),
+        };
+        Shape {
+            records: self.records.saturating_sub(o.records),
+            bytes: self.bytes.saturating_sub(o.bytes),
+            byte_strings: self.byte_strings.saturating_sub(o.byte_strings),
+            deps: seqs(self.deps, o.deps),
+            values: seqs(self.values, o.values),
+            fields: seqs(self.fields, o.fields),
+            outcomes: seqs(self.outcomes, o.outcomes),
+            predicates: seqs(self.predicates, o.predicates),
+            captures: seqs(self.captures, o.captures),
+            capture_bytes: self.capture_bytes.saturating_sub(o.capture_bytes),
+            measures: seqs(self.measures, o.measures),
+            spans: seqs(self.spans, o.spans),
+            subjects: seqs(self.subjects, o.subjects),
+            holes: self.holes.saturating_sub(o.holes),
+            hole_bytes: self.hole_bytes.saturating_sub(o.hole_bytes),
+            key_bytes: self.key_bytes.saturating_sub(o.key_bytes),
+            request: self.request.saturating_sub(o.request),
+            request_holes: self.request_holes.saturating_sub(o.request_holes),
+        }
+    }
+
+    /// Its counts in their declared order, each sequence's elements then its
+    /// sequences: the form the corpus carries to the reference.
+    pub fn counts(&self) -> Vec<u64> {
+        let Shape {
+            records,
+            bytes,
+            byte_strings,
+            deps,
+            values,
+            fields,
+            outcomes,
+            predicates,
+            captures,
+            capture_bytes,
+            measures,
+            spans,
+            subjects,
+            holes,
+            hole_bytes,
+            key_bytes,
+            request,
+            request_holes,
+        } = *self;
+        let mut v = vec![records, bytes, byte_strings];
+        for s in [deps, values, fields, outcomes, predicates, captures] {
+            v.extend([s.elements, s.sequences]);
+        }
+        v.push(capture_bytes);
+        for s in [measures, spans, subjects] {
+            v.extend([s.elements, s.sequences]);
+        }
+        v.extend([holes, hole_bytes, key_bytes, request, request_holes]);
+        v
     }
 
     /// Each count the larger of two shapes': what a peak of sums commits —
@@ -159,6 +228,7 @@ impl Shape {
             outcomes: self.outcomes.most(o.outcomes),
             predicates: self.predicates.most(o.predicates),
             captures: self.captures.most(o.captures),
+            capture_bytes: self.capture_bytes.max(o.capture_bytes),
             measures: self.measures.most(o.measures),
             spans: self.spans.most(o.spans),
             subjects: self.subjects.most(o.subjects),
@@ -552,6 +622,12 @@ impl Walk {
             source,
             secret: _,
         } = c;
+        let bytes = subject
+            .kind
+            .len()
+            .saturating_add(subject.scope.len())
+            .saturating_add(slot.len());
+        self.shape.capture_bytes = self.shape.capture_bytes.saturating_add(as_u64(bytes));
         self.subject(subject);
         self.string(slot);
         match source {

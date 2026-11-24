@@ -1028,6 +1028,7 @@ which `admit` never called; § Alternatives Considered keeps what each refuted):
 | K2b-7e-1 | K2b | a head of 16,384 bytes parsed, of 16,385 or of a hundred and one headers the run stopped naming `rest.head`; a forged length of 2^62 unread at its head; over a transport not vectored the first write the head alone, the body queued after it; after a burst of tasks ended and one aborted, no handle kept; one builder in the shell, no free handshake, no `max_buf_size` (the lint) | the exact read size dropped; writes flattened; a head too large left `Broken`; a length past the cap read; the body sized from any length |
 | K2b-7e-2a | K2b | `tests/costs.rs` (a binary of its own: an allocator tagging each block with its owner, a moved block counted at both sizes, a pipe of rings the stand allocates, `sim` subtracting the machine at the same states, two sizes just past powers of two): the shell's share an attempt, a connection idle, an attempt beside it, each within `[80 %, 100 %]` of what is stated; a body held whole at its length, or at the cap with no length, within a KiB of it while its first part is read; the worst head within `[85 %, 100 %]` of `HEAD`, every answer within its charge; the scheduler's `tests/costs.rs` holding a burst of 32,769 host calls and of REST reads at one instant, a REST read not ended and an ended step just past powers of two within what `fits` counts | the exact read size dropped; a declared body not sized; a body of no length grown by doubling; the head's parts kept through the body; an answer charged its body only; `fits`' live cell as it was; a finished task's handle kept (its unit twin) |
 | K2b-7e-2b-1a | K2b | `command-log/tests/shape.rs` (a counting allocator): over 512 records generated across every field, the bytes a record decoded from its line holds in its `Arc` equal `shape::heap`, at most `shape::bound` of its shape and at least a third of it; a record of no sequence priced exactly; every record type taken apart whole (a new field does not compile uncounted) | a predicate's pointer not counted; serde's first four slots forgotten; a sequence bound at its elements once; byte strings' padding left out; base64's estimate taken as the length; the `Arc` left out; a capture's source not counted |
+| K2b-7e-2b-1b | K2b | `vectors/reference.py` folding each line's shape over the pending, late and held sets by definition and agreeing with the validator's byte peaks on every corpus log, deriving a shape's key, captures and source itself, refusing a corpus that reaches no late step, socket, held capture or captured hole; the commitment's largest line and chunk against a log of 19 steps in chunks of four; the validator's identity at revision 10 | a step past its end not kept late; the late kept past the jitter; what the window drops kept still; what the held let go kept still; a source's sockets never let go; a pending shape never let go; the barrier keys' bytes not counted; the largest line not taken; a chunk's bytes carried past its prefix |
 | K2b-9a | K2b | the machine's poll grid at the plan's instant: an observation read at 250 polled at 300, 400 …, read on a point at 600 polled there once, two read together at 620 on their own phases; the differential with `schedule.py` moved alike, settled run by run against machine 4 (16 of 3,944 changed, each at a poll of an observation released late) | the grid at `released`; the release's point not held (polled twice at one instant) |
 | K2b-9b-1 | K2b | journal version 9 — the golden holding the run's catch-up at 999, a refusal read, `decorated` on a `Sent`, both sides of a never-sent report's `decorated` and a found answer's `handed`; the schema and `journal.py` alike; a rate deviation read as a refusal, another rule's and none not; the differential's journals and the golden runs settled against version 8, the new fields removed, every line the same | a rate deviation unread; any rule read as a refusal |
 | K2b-9b-2 | K2b | `scheduler::pace`: each attempt handed at the later of its earliest and the instant it came, every pair keeping the rule by brute force, a microsecond sooner some pair breaking (κ ∈ {0, 1, 100, 500, 999}, J ∈ {0, 1, 250, 2000}); every hand-off within `(1 − κ)·J` of its raw never paced; the band — a dispatched batch in raw order, the rest paced to the instant computed by hand; an attempt not arrived holding the front; a head whose pace falls past its deadline leaving; a straggler within the band passing; an attempt past its deadline beyond the band leaving, so the next turn never names an instant gone | the allowance J; κ ignored; rounding down; the mirror term dropped; the band unbounded; arrival ignored; never late — each red |
@@ -1993,6 +1994,24 @@ a connection of its own (retired at once); the journal folded, each Root classed
 - A hog over the deadline while connecting or writing on a thread others hold is the source thread's lag (K2b-7c-2's
   twins, the path's lag counted from the thread's last blocked park); the stall twin is its whole-process case.
 
+**K2b-7e-2b-1b — the plan's byte peaks committed** (2026-11-24, decision 22 as amended): the validator, as it reads,
+sums the shapes of the steps not ended (the plan's bound's pending set), of those not ended were every end a jitter
+later (the handles a run holds past their deadline until their looks), what the held keep once ended (their barrier
+keys' bytes, their capture specs and those specs' subjects' and slots' bytes — an ended cell's record is let go), and
+by a call's or a probe's source the steps taking its sockets (`plan::socket`: a bus step and a host call take none);
+`Peaks` commits each count at its peak (`pending_shape`, `late`, `late_shape`, `kept`, `sockets`) and the barrier keys'
+bytes, one a key (`barrier_bytes`: a machine keeps each key for the run), and the commitment
+its largest step line and its largest chunk of step lines, a last one short of its size included (`line`,
+`chunk_bytes`); `RULES_REVISION` 10 — a commitment of revision 9 is stale. A shape carries its captures' bytes beside
+their count. Its executors: the reference (`vectors/reference.py`) folds each line's shape, as the validator emits it,
+over the same sets by definition — quadratic — and agrees on all 2,841 logs of the corpus, having derived itself what
+of a shape it can from the record (its key's bytes, its captures and their bytes, its source); it refuses a corpus that
+reaches no step late past pending (37 logs reach one), no source's socket (2,673), no capture held (847), no captured
+hole (304); the commitment's line and chunk against a log of 19 steps in chunks of four. Mutants, each red: a step past
+its end not kept late; the late kept past the jitter; what the window drops kept still; what the held let go kept
+still; a source's sockets never let go; a pending shape never let go; the barrier keys' bytes not counted; the
+largest line not taken; a chunk's bytes carried past its prefix.
+
 **K2b-7e-2b-1a — a record's shape and its price** (2026-11-24, decision 22 as amended): `command-log::shape` — a
 record's shape, the plan-intrinsic counts its bytes are priced by (its strings' and byte strings' bytes, its
 sequences' elements and non-empty sequences by element type, its captured holes and their subjects' and slots' bytes,
@@ -2577,3 +2596,6 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   three, K2b-7e-2c moved after the read gate.
 - 2026-11-24: K2b-7e-2b-1a built (§ Measured): a record's shape and its price — exact against what a decoded record
   holds over records generated across every field; K2b-7e-2b-1 cut in three.
+- 2026-11-24: K2b-7e-2b-1b built (§ Measured): the plan's byte peaks committed — the shapes pending and late by a
+  jitter, what the held keep, each source's sockets, the barrier keys' bytes, the largest line and chunk; the
+  validator's revision 10.

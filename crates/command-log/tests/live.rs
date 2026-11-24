@@ -349,7 +349,7 @@ fn a_dry_run_commits_only_what_is_clean() {
 fn the_validator_s_identity_is_its_rules() {
     assert_eq!(
         validator(),
-        "9: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent frame predicate expect secret"
+        "10: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent frame predicate expect secret"
     );
 }
 
@@ -374,6 +374,29 @@ fn the_trailer_is_not_a_chunk_s_line() {
     assert_eq!(commitment.records, 19);
     assert_eq!(commitment.prefixes.len(), 4);
     assert_eq!(commitment.sha256, sha256_hex(head(&log, 20)));
+}
+
+/// The largest step line and the largest chunk of step lines — a last one
+/// short of its size included — are committed, in bytes (ADR-0047 decision
+/// 22): 19 steps in chunks of 4, the header and the trailer no step.
+#[test]
+fn the_largest_line_and_chunk_are_committed() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = Devices::new(9);
+    let units: [&dyn Unit; 2] = [&plan, &One];
+    let (commitment, log) = committed(dir.path(), &units);
+    let lines: Vec<&[u8]> = log.split_inclusive(|b| *b == b'\n').collect();
+    let steps = &lines[1..lines.len() - 1];
+    assert_eq!(steps.len(), 19);
+    let line = steps.iter().map(|l| l.len() as u64).max().unwrap();
+    let chunk = steps
+        .chunks(CHUNK as usize)
+        .map(|c| c.iter().map(|l| l.len() as u64).sum::<u64>())
+        .max()
+        .unwrap();
+    assert_eq!((commitment.line, commitment.chunk_bytes), (line, chunk));
+    // Distinct, so neither stands in for the other.
+    assert!(line < chunk && steps.iter().any(|l| (l.len() as u64) < line));
 }
 
 mod replay {

@@ -38,8 +38,11 @@ use crate::validate::{Host, Limits, Report, Rule, spill_need, validate_on};
 /// resend floor, answer cap and idle checked; 8: K2a-4b — `frame`,
 /// `predicate`, `expect`, `secret`, a not-taken resend's codes, an idempotent
 /// call's own slot, one producer a slot a record, no captured value in a raw
-/// span; 9: ADR-0047 K2b-7d — a call's source within the profile's).
-pub const RULES_REVISION: u32 = 9;
+/// span; 9: ADR-0047 K2b-7d — a call's source within the profile's; 10:
+/// K2b-7e-2b — the peaks of the records' shapes, of the steps late by a
+/// jitter, of what the held keep, of each source's sockets, the barrier keys'
+/// bytes; the largest line and chunk committed).
+pub const RULES_REVISION: u32 = 10;
 
 /// The validator's identity: its revision and its rules' names.
 pub fn validator() -> String {
@@ -76,6 +79,12 @@ pub struct Commitment {
     /// the plan's own bound among them, which the scheduler's shell refuses
     /// before T0 when its machine cannot.
     pub peaks: crate::validate::Peaks,
+    /// Its largest step line, in bytes, `\n` included (ADR-0047 decision 22):
+    /// a reader holds no longer one.
+    pub line: u64,
+    /// Its largest chunk of step lines, in bytes: a verifier holds a chunk
+    /// until its prefix is checked.
+    pub chunk_bytes: u64,
 }
 
 impl Commitment {
@@ -169,6 +178,10 @@ struct Tally {
     prefixes: Vec<String>,
     emitted: Emitted,
     sha256: Option<String>,
+    /// The largest step line; the largest chunk, and the one being tallied.
+    line: u64,
+    chunk_bytes: u64,
+    this_chunk: u64,
 }
 
 impl Tally {
@@ -180,6 +193,9 @@ impl Tally {
             prefixes: Vec::new(),
             emitted: Emitted::default(),
             sha256: None,
+            line: 0,
+            chunk_bytes: 0,
+            this_chunk: 0,
         }
     }
 
@@ -191,6 +207,9 @@ impl Tally {
             prefixes,
             emitted,
             sha256,
+            line: largest,
+            chunk_bytes,
+            this_chunk,
         } = self;
         let _ = lines.push(buf, |line| {
             if header.is_none() {
@@ -200,8 +219,13 @@ impl Tally {
                 sha256.get_or_insert_with(|| chain.now());
             } else if sha256.is_none() {
                 emitted.add(line);
+                let n = u64::try_from(line.len()).unwrap_or(u64::MAX);
+                *largest = (*largest).max(n);
+                *this_chunk = this_chunk.saturating_add(n);
+                *chunk_bytes = (*chunk_bytes).max(*this_chunk);
                 if chain.step(line).is_some() {
                     prefixes.push(chain.now());
+                    *this_chunk = 0;
                 }
             }
             Ok(())
@@ -225,6 +249,8 @@ impl Tally {
             multiset: format!("{:032x}", self.emitted.multiset),
             sha256: self.sha256.unwrap_or_default(),
             peaks,
+            line: self.line,
+            chunk_bytes: self.chunk_bytes,
         }
     }
 }
@@ -433,7 +459,7 @@ pub fn commit_file(
     };
     if report.violations.is_empty() && report.violated == 0 {
         tally
-            .commitment(fingerprint, chunk, report.peaks)
+            .commitment(fingerprint, chunk, report.peaks.clone())
             .write(commitment)?;
     }
     Ok(report)
@@ -622,7 +648,7 @@ pub fn dry_on(
     let report = validated.map_err(EngineError::Log)?;
     if report.violations.is_empty() && report.violated == 0 {
         tally
-            .commitment(fingerprint, chunk, report.peaks)
+            .commitment(fingerprint, chunk, report.peaks.clone())
             .write(commitment)
             .map_err(|e| EngineError::Log(LogError::Io(e)))?;
     }

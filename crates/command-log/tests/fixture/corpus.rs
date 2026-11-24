@@ -768,7 +768,7 @@ pub fn lines() -> Vec<String> {
             headers.push((format!("{name}/short"), short_header()));
         }
         for (name, header) in headers {
-            let (report, bounds) = run_bounded(header.clone(), &records, &NoHost, 3);
+            let (report, bounds, shapes) = run_shaped(header.clone(), &records, &NoHost, 3);
             let mut verdict: Vec<(u64, &str)> = report
                 .violations
                 .iter()
@@ -778,7 +778,17 @@ pub fn lines() -> Vec<String> {
             verdict.sort();
             verdict.dedup();
             let log = String::from_utf8(bytes(header, &records)).unwrap();
-            let p = report.peaks;
+            let p = &report.peaks;
+            // The byte peaks (decision 22): the steps late by a jitter, the
+            // shapes' counts, what the held keep, each source's sockets.
+            let byte_peaks = serde_json::json!({
+                "late": p.late,
+                "pending_shape": p.pending_shape.counts(),
+                "late_shape": p.late_shape.counts(),
+                "kept": [p.kept.keys, p.kept.captures, p.kept.capture_bytes],
+                "sockets": p.sockets,
+                "barrier_bytes": p.barrier_bytes,
+            });
             let peaks = [
                 p.completions,
                 p.captures,
@@ -790,6 +800,7 @@ pub fn lines() -> Vec<String> {
             ];
             let line = serde_json::json!({
                 "name": name, "log": log, "verdict": verdict, "peaks": peaks, "bounds": bounds,
+                "shapes": shapes, "byte_peaks": byte_peaks,
             });
             out.push(line.to_string());
         }

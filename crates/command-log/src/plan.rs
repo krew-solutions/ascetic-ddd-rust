@@ -92,6 +92,20 @@ pub fn captured(r: &Record) -> Vec<(&Subject, &Name, &StepId)> {
         .collect()
 }
 
+/// The source whose socket `r` takes: a call's, an observation's probe's —
+/// none for a bus step or a host call, which take none of a source's sockets
+/// (ADR-0047 decision 22).
+pub fn socket(r: &Record) -> Option<u32> {
+    match &r.action {
+        Action::Rest(rest) => Some(rest.source),
+        Action::Observe(o) => match &o.probe {
+            crate::record::Probe::Rest(rest) => Some(rest.source),
+            crate::record::Probe::Bus { .. } => None,
+        },
+        Action::Bus(_) | Action::Host(_) => None,
+    }
+}
+
 /// The step an observation's deadline runs from, when it is another.
 pub fn cause(r: &Record) -> Option<&StepId> {
     match &r.action {

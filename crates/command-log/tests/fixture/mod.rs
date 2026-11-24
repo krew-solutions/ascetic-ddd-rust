@@ -314,9 +314,14 @@ pub fn bytes(header: Header, records: &[Record]) -> Vec<u8> {
 }
 
 /// What the plan's bound counts at each read (ADR-0047 K1e-2): the line, its
-/// worst intended start and end, the steps held and those not ended.
+/// worst intended start and end, the steps held and those not ended; and each
+/// line's shape (decision 22): its line, the source whose socket it takes or
+/// -1, its counts in their declared order.
 #[derive(Default)]
-pub struct Bounds(pub std::sync::Mutex<Vec<[u64; 5]>>);
+pub struct Bounds(
+    pub std::sync::Mutex<Vec<[u64; 5]>>,
+    pub std::sync::Mutex<Vec<Vec<i64>>>,
+);
 
 impl ascetic_ddd_command_log::engine::Progress for Bounds {
     fn bound(&self, line: u64, intended: u64, end: u64, held: u64, pending: u64) {
@@ -324,6 +329,12 @@ impl ascetic_ddd_command_log::engine::Progress for Bounds {
             .lock()
             .unwrap()
             .push([line, intended, end, held, pending]);
+    }
+
+    fn shape(&self, line: u64, shape: &ascetic_ddd_command_log::shape::Shape, socket: Option<u32>) {
+        let mut v = vec![line as i64, socket.map_or(-1, i64::from)];
+        v.extend(shape.counts().into_iter().map(|c| c as i64));
+        self.1.lock().unwrap().push(v);
     }
 }
 
@@ -334,6 +345,17 @@ pub fn run_bounded(
     host: &impl Host,
     ids: usize,
 ) -> (Report, Vec<[u64; 5]>) {
+    let (report, bounds, _) = run_shaped(header, records, host, ids);
+    (report, bounds)
+}
+
+/// [`run_bounded`], and each line's shape.
+pub fn run_shaped(
+    header: Header,
+    records: &[Record],
+    host: &impl Host,
+    ids: usize,
+) -> (Report, Vec<[u64; 5]>, Vec<Vec<i64>>) {
     let dir = tempfile::tempdir().unwrap();
     let bounds = std::sync::Arc::new(Bounds::default());
     let limits = Limits {
@@ -348,7 +370,8 @@ pub fn run_bounded(
     let reader = Reader::new(Cursor::new(bytes(header, records))).unwrap();
     let report = validate(reader, host, &limits).unwrap();
     let seen = std::mem::take(&mut *bounds.0.lock().unwrap());
-    (report, seen)
+    let shapes = std::mem::take(&mut *bounds.1.lock().unwrap());
+    (report, seen, shapes)
 }
 
 pub fn run_with(header: Header, records: &[Record], host: &impl Host, ids: usize) -> Report {

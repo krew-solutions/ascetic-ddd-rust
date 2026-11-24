@@ -579,7 +579,7 @@ pub fn admit<C: Clock, X: Carrier<C>>(
         header,
         log: plan.log().to_owned(),
         validator: plan.validator().to_owned(),
-        peaks: *plan.peaks(),
+        peaks: plan.peaks().clone(),
         caps,
         read_ahead,
         carrier,

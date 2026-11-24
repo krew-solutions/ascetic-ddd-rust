@@ -111,7 +111,7 @@ impl Replayed {
         let reader = live::replay(path, commitment)?;
         let plan = Plan {
             header: Arc::new(reader.header().clone()),
-            peaks: commitment.peaks,
+            peaks: commitment.peaks.clone(),
             log: commitment.sha256.clone(),
             validator: commitment.validator.clone(),
             assumed: false,

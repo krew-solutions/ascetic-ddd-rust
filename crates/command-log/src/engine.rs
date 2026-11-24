@@ -148,6 +148,11 @@ pub trait Progress: Send + Sync {
     fn bound(&self, line: u64, intended: u64, end: u64, held: u64, pending: u64) {
         let _ = (line, intended, end, held, pending);
     }
+    /// A validation read `line` (ADR-0047 decision 22): its record's shape and
+    /// the source whose socket it takes, as the plan's byte peaks sum them.
+    fn shape(&self, line: u64, shape: &crate::shape::Shape, socket: Option<u32>) {
+        let _ = (line, shape, socket);
+    }
 }
 
 /// A [`Progress`] a [`Config`] carries.
