@@ -1029,6 +1029,7 @@ which `admit` never called; § Alternatives Considered keeps what each refuted):
 | K2b-7e-2a | K2b | `tests/costs.rs` (a binary of its own: an allocator tagging each block with its owner, a moved block counted at both sizes, a pipe of rings the stand allocates, `sim` subtracting the machine at the same states, two sizes just past powers of two): the shell's share an attempt, a connection idle, an attempt beside it, each within `[80 %, 100 %]` of what is stated; a body held whole at its length, or at the cap with no length, within a KiB of it while its first part is read; the worst head within `[85 %, 100 %]` of `HEAD`, every answer within its charge; the scheduler's `tests/costs.rs` holding a burst of 32,769 host calls and of REST reads at one instant, a REST read not ended and an ended step just past powers of two within what `fits` counts | the exact read size dropped; a declared body not sized; a body of no length grown by doubling; the head's parts kept through the body; an answer charged its body only; `fits`' live cell as it was; a finished task's handle kept (its unit twin) |
 | K2b-7e-2b-1a | K2b | `command-log/tests/shape.rs` (a counting allocator): over 512 records generated across every field, the bytes a record decoded from its line holds in its `Arc` equal `shape::heap`, at most `shape::bound` of its shape and at least a third of it; a record of no sequence priced exactly; every record type taken apart whole (a new field does not compile uncounted) | a predicate's pointer not counted; serde's first four slots forgotten; a sequence bound at its elements once; byte strings' padding left out; base64's estimate taken as the length; the `Arc` left out; a capture's source not counted |
 | K2b-7e-2b-1b | K2b | `vectors/reference.py` folding each line's shape over the pending, late and held sets by definition and agreeing with the validator's byte peaks on every corpus log, deriving a shape's key, captures and source itself, refusing a corpus that reaches no late step, socket, held capture or captured hole; the commitment's largest line and chunk against a log of 19 steps in chunks of four; the validator's identity at revision 10 | a step past its end not kept late; the late kept past the jitter; what the window drops kept still; what the held let go kept still; a source's sockets never let go; a pending shape never let go; the barrier keys' bytes not counted; the largest line not taken; a chunk's bytes carried past its prefix |
+| K2b-7e-2b-1c | K2b | the scheduler's `tests/costs.rs`: thirteen rows — ended in the window, not ended, bursts of host calls and REST reads at one instant, REST updates of 4 KiB bodies, barrier keys of 1 KiB labels, writers keeping captures, captured values sent back, a step awaiting the 65 before it — each within what `fits` counts of its counts and shapes, the rows a constant or a price is pinned on at least 70–80 % of it; `fits`' boundary pair and every count of a shape and of what the held keep raising its need; the judge's golden: a number of 8,192 digits taken, of 8,193 not, its twin in `vectors/judge.py` | the records' shapes, a captured value, what the held keep, the barrier keys' bytes not priced; a live cell as before the shapes, doubled; an ended cell a quarter lighter; a captured number taken past `TAKEN`; (survives: a dependency's binding not priced — owed) |
 | K2b-9a | K2b | the machine's poll grid at the plan's instant: an observation read at 250 polled at 300, 400 …, read on a point at 600 polled there once, two read together at 620 on their own phases; the differential with `schedule.py` moved alike, settled run by run against machine 4 (16 of 3,944 changed, each at a poll of an observation released late) | the grid at `released`; the release's point not held (polled twice at one instant) |
 | K2b-9b-1 | K2b | journal version 9 — the golden holding the run's catch-up at 999, a refusal read, `decorated` on a `Sent`, both sides of a never-sent report's `decorated` and a found answer's `handed`; the schema and `journal.py` alike; a rate deviation read as a refusal, another rule's and none not; the differential's journals and the golden runs settled against version 8, the new fields removed, every line the same | a rate deviation unread; any rule read as a refusal |
 | K2b-9b-2 | K2b | `scheduler::pace`: each attempt handed at the later of its earliest and the instant it came, every pair keeping the rule by brute force, a microsecond sooner some pair breaking (κ ∈ {0, 1, 100, 500, 999}, J ∈ {0, 1, 250, 2000}); every hand-off within `(1 − κ)·J` of its raw never paced; the band — a dispatched batch in raw order, the rest paced to the instant computed by hand; an attempt not arrived holding the front; a head whose pace falls past its deadline leaving; a straggler within the band passing; an attempt past its deadline beyond the band leaving, so the next turn never names an instant gone | the allowance J; κ ignored; rounding down; the mirror term dropped; the band unbounded; arrival ignored; never late — each red |
@@ -1228,7 +1229,8 @@ pending · (LIVE_CELL − ENDED_CELL + line) + barriers · BARRIER` — or a rea
   step not ended beside its 270-byte line, 556 B a barrier key, and holds each plan's peak within what `fits` counts
   of its own counts (`ENDED_CELL` 1,152, `LIVE_CELL` 1,792, `BARRIER` 768, some 30 % above — re-pinned by K2b-7e-2a
   to 1,216, 3,776 and 768, § Measured: that margin was its allocator counting a block moved as grown in place, and no
-  row released a burst at one instant or held a REST read); a cell keeping its record
+  row released a burst at one instant or held a REST read; then by K2b-7e-2b-1c, its records priced apart by the
+  plan's shapes, `LIVE_CELL` 2,944); a cell keeping its record
   at the end is red (1,542 B an ended step). The differential holds the machine to the validator's bound on every run
   whose reads all lie within `[at − L, at]` — 822 of 3,780, 348 of them with a reader lagging, base logs also under
   timeouts on W's scale, an at-deadline script beside the three: no step released past its `R̂` or ended past its
@@ -1994,6 +1996,37 @@ a connection of its own (retired at once); the journal folded, each Root classed
 - A hog over the deadline while connecting or writing on a thread others hold is the source thread's lag (K2b-7c-2's
   twins, the path's lag counted from the thread's last blocked park); the stall twin is its whole-process case.
 
+**K2b-7e-2b-1c — `fits` priced by the plan's shapes; a captured number bounded** (2026-11-24, decision 22 as
+amended): `fits::needed` takes the peaks alone (`Budget.line`, a mean, gone): the cells — `ENDED_CELL`, `LIVE_CELL`
+without their records, `BARRIER` — and, priced by the committed shapes at the run's own sizes, the records of the
+steps not ended as they hold decoded (`shape::bound`), the producers their captured holes are bound to and the values
+those take (a subject and a slot copied each, a value at most `VALUE` = `2·TAKEN + 2` bytes), a dependency's binding
+and its producer's waiter, what the held keep once ended (their keys, their captures), the barrier keys' bytes. A
+captured JSON number is taken only within what a use carries, as a string is — `TAKEN`, 8 KiB —, so `VALUE` bounds
+every value (its twin in `vectors/judge.py`; the golden's case of a number of 8,192 digits taken and one of 8,193 not).
+The scheduler's executor (`tests/costs.rs`) prices each row's steps at the largest shape among its records and holds
+thirteen rows, each within what `fits` counts and, on the rows a constant or a price is pinned on, at least its floor
+of it:
+
+| row | measured of counted |
+|---|---|
+| ended in the window (and at 2^14 + 1) — `ENDED_CELL` | 75 % |
+| host calls at one instant, 32,769 — `LIVE_CELL` | 81 % |
+| REST updates of 4 KiB bodies at one instant — the record's bytes | 89 % |
+| barrier keys of 1 KiB labels — the keys' bytes | 88 % |
+| captures kept in the window — what the held keep | 97 % |
+| captured values sent back — the values a hole takes | 85 % |
+| REST reads, each awaiting the 65 before it | 69 % |
+| the rest: not ended, REST reads (bursts, at 0, not ended), chained, barrier keys | 41–73 % |
+
+Beside the shapes, a step's cell held at most 914 B ended and 2,256 B not ended (a burst of host calls), so
+`LIVE_CELL` 3,776 → 2,944 (its record now priced apart) and `ENDED_CELL` kept (1,216). Mutants, each red but one: the
+records' shapes not priced; a captured value not priced; what the held keep not priced; the barrier keys' bytes not
+priced; a live cell as before the shapes; an ended cell a quarter lighter; a live cell doubled (by its floor); a
+captured number taken past `TAKEN` (by the judge's twin). **A dependency's binding not priced survives** every row:
+`LIVE_CELL`'s margin over a dependent's own cell exceeds the bindings of 65 dependencies — owed, a row where they pass
+it.
+
 **K2b-7e-2b-1b — the plan's byte peaks committed** (2026-11-24, decision 22 as amended): the validator, as it reads,
 sums the shapes of the steps not ended (the plan's bound's pending set), of those not ended were every end a jitter
 later (the handles a run holds past their deadline until their looks), what the held keep once ended (their barrier
@@ -2361,6 +2394,9 @@ only and measures move to the 12-core box.
   bound socket's bind, `EADDRNOTAVAIL` at an unbound one's connect; Verifiability) — K2b-8d, in a namespace with a
   ten-port range; **a read-ahead floor against the looks' slack** — trigger: a run with `rest.cap.*` reports;
   **the counts of reports by code** in `Ran` or the fold — with K2b-8c-7's evidence.
+- **K2b-7e-2b-1c's survivor** (2026-11-24): a dependency's binding left unpriced survives the scheduler's executor —
+  `LIVE_CELL`'s margin over a dependent's cell exceeds the bindings of 65 dependencies; owed, a row where they pass it
+  (a step awaiting a thousand), or a white-box twin of the bindings' count.
 - **K2b-7e-2b's measurements owed** (2026-11-24, its roles), each before what it settles: **the catch-up's backlog** —
   `sim` with a stall past L at κ = half the reserve, the peak of steps read and not ended against pending and against
   `pending·1000/(1000 − κ)` (before decision 21's I2 is amended); **counted bytes against the process** — the counted
@@ -2599,3 +2635,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-24: K2b-7e-2b-1b built (§ Measured): the plan's byte peaks committed — the shapes pending and late by a
   jitter, what the held keep, each source's sockets, the barrier keys' bytes, the largest line and chunk; the
   validator's revision 10.
+- 2026-11-24: K2b-7e-2b-1c built (§ Measured): `fits` priced by the plan's shapes, its cells without their records
+  (`LIVE_CELL` 2,944), `Budget.line` gone; a captured JSON number bounded by `TAKEN` (decision 15's take amended).

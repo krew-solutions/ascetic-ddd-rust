@@ -143,6 +143,14 @@ fn problem_body(code: &str) -> &'static [u8] {
     )
 }
 
+/// A body of two numbers: one of 8,192 digits, the most a value taken has,
+/// and one of 8,193.
+fn numbers() -> &'static [u8] {
+    let digits = |n: usize| "7".repeat(n);
+    let body = format!("{{\"a\":{},\"b\":{}}}", digits(8_192), digits(8_193));
+    Box::leak(body.into_bytes().into_boxed_slice())
+}
+
 fn cases() -> Vec<(&'static str, Record, T)> {
     use T::Answer;
     let ok = || response(200, None, vec![]);
@@ -152,6 +160,11 @@ fn cases() -> Vec<(&'static str, Record, T)> {
             "a listed answer, its captures taken",
             rest(vec![ok()], vec![json("id", "/id"), header("etag", "ETag"), json("n", "/n")]),
             Answer(200, vec![("ETag", b"\"v-1\""), ("Content-Type", b"application/json")], Some(b"{\"id\":\"d-7\",\"n\":12345678901234567890123}")),
+        ),
+        (
+            "a number at what a use carries, and one past it",
+            rest(vec![ok()], vec![json("a", "/a"), json("b", "/b")]),
+            Answer(200, vec![("Content-Type", b"application/json")], Some(numbers())),
         ),
         ("a Location path", rest(vec![response(201, None, vec![])], vec![location()]), Answer(201, vec![("Location", b"/v1/roles/r%41-1")], None)),
         (

@@ -12,7 +12,8 @@
 mod fixture;
 
 use ascetic_ddd_command_log::record::{Header, On, Record};
-use ascetic_ddd_command_log::validate::{NoHost, Peaks};
+use ascetic_ddd_command_log::shape::Shape;
+use ascetic_ddd_command_log::validate::{Kept, NoHost, Peaks};
 use ascetic_ddd_scheduler::fits::{Budget, Refusal, fits, needed};
 use ascetic_ddd_scheduler::machine::{End, Judgement};
 use ascetic_ddd_scheduler::sim::{Attempt, Run, run};
@@ -193,29 +194,37 @@ fn fits_refuses_at_and_past_each_boundary() {
         ..Peaks::default()
     };
     let h = plan_header(T);
-    let line = 300;
-    let need = needed(&peaks, line);
-    assert_eq!(fits(&peaks, &h, L, &Budget { bytes: need, line }), Ok(need));
+    let need = needed(&peaks);
+    assert_eq!(fits(&peaks, &h, L, &Budget { bytes: need }), Ok(need));
     assert!(matches!(
-        fits(&peaks, &h, L, &Budget { bytes: need - 1, line }),
+        fits(&peaks, &h, L, &Budget { bytes: need - 1 }),
         Err(Refusal::Bytes { needed, budget, .. }) if needed == need && budget == need - 1
     ));
     assert_eq!(
-        fits(
-            &peaks,
-            &h,
-            L + 1,
-            &Budget {
-                bytes: u64::MAX,
-                line
-            }
-        ),
+        fits(&peaks, &h, L + 1, &Budget { bytes: u64::MAX }),
         Err(Refusal::ReadAhead {
             asked: L + 1,
             planned: L
         })
     );
-    // Each part counts.
+    // Each part counts: the cells, the keys, and every count of a record's
+    // shape and of what the held keep that a price takes (decision 22).
+    let shaped = |f: fn(&mut Shape)| {
+        let mut s = peaks.pending_shape;
+        f(&mut s);
+        Peaks {
+            pending_shape: s,
+            ..peaks.clone()
+        }
+    };
+    let kept = |f: fn(&mut Kept)| {
+        let mut k = peaks.kept;
+        f(&mut k);
+        Peaks {
+            kept: k,
+            ..peaks.clone()
+        }
+    };
     for more in [
         Peaks {
             held: 1_001,
@@ -229,8 +238,30 @@ fn fits_refuses_at_and_past_each_boundary() {
             barriers: 31,
             ..peaks.clone()
         },
+        Peaks {
+            barrier_bytes: 1,
+            ..peaks.clone()
+        },
+        shaped(|s| s.records = 1),
+        shaped(|s| s.bytes = 1),
+        shaped(|s| s.byte_strings = 1),
+        shaped(|s| s.deps.elements = 1),
+        shaped(|s| s.deps.sequences = 1),
+        shaped(|s| s.values.elements = 1),
+        shaped(|s| s.fields.elements = 1),
+        shaped(|s| s.outcomes.elements = 1),
+        shaped(|s| s.predicates.elements = 1),
+        shaped(|s| s.captures.elements = 1),
+        shaped(|s| s.measures.elements = 1),
+        shaped(|s| s.spans.elements = 1),
+        shaped(|s| s.subjects.elements = 1),
+        shaped(|s| s.holes = 1),
+        shaped(|s| s.hole_bytes = 1),
+        kept(|k| k.keys = 1),
+        kept(|k| k.captures = 1),
+        kept(|k| k.capture_bytes = 1),
     ] {
-        assert!(needed(&more, line) > need, "{more:?}");
+        assert!(needed(&more) > need, "{more:?}");
     }
 }
 

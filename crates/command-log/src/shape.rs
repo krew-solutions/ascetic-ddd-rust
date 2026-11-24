@@ -151,6 +151,34 @@ impl Shape {
         }
     }
 
+    /// The shape of `n` records of this shape.
+    pub fn times(self, n: u64) -> Shape {
+        let seqs = |a: Seqs| Seqs {
+            elements: a.elements.saturating_mul(n),
+            sequences: a.sequences.saturating_mul(n),
+        };
+        Shape {
+            records: self.records.saturating_mul(n),
+            bytes: self.bytes.saturating_mul(n),
+            byte_strings: self.byte_strings.saturating_mul(n),
+            deps: seqs(self.deps),
+            values: seqs(self.values),
+            fields: seqs(self.fields),
+            outcomes: seqs(self.outcomes),
+            predicates: seqs(self.predicates),
+            captures: seqs(self.captures),
+            capture_bytes: self.capture_bytes.saturating_mul(n),
+            measures: seqs(self.measures),
+            spans: seqs(self.spans),
+            subjects: seqs(self.subjects),
+            holes: self.holes.saturating_mul(n),
+            hole_bytes: self.hole_bytes.saturating_mul(n),
+            key_bytes: self.key_bytes.saturating_mul(n),
+            request: self.request.saturating_mul(n),
+            request_holes: self.request_holes.saturating_mul(n),
+        }
+    }
+
     /// The sum less a shape it holds: the validator's running sums, each
     /// count let go as it was added.
     pub fn less(self, o: Shape) -> Shape {

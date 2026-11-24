@@ -253,7 +253,10 @@ impl Read<'_> {
             }
             Source::Json(pointer) => match self.body.as_ref()?.at(pointer).ok()?? {
                 Json::String(s) => text(s),
-                Json::Number(n) => Some(n.text().as_bytes().to_vec()),
+                // A number as written, within what a use carries: a value
+                // taken is at most `TAKEN` bytes, whatever its kind (ADR-0047
+                // decision 22).
+                Json::Number(n) => carried(n.text()).then(|| n.text().as_bytes().to_vec()),
                 _ => None,
             },
         }

@@ -13,7 +13,7 @@ code in `not_run`, NotTaken, with `Retry-After`; a status of 500 or more, or
 below 200, Unknown; an empty `expect` but a poll's, Expected; else
 Unexpected. The code: the string at the pointer of an object body, read from
 a status of 400 or more whose one Content-Type's essence is
-application/problem+json. A value taken: a number as written, or a string of
+application/problem+json. A value taken: a number as written, at most 8 KiB, or a string of
 visible ASCII with inner blanks, not empty, `.` or `..`, at most 8 KiB, as a
 JSON string; from a header's one line, a body's pointer, or a Location's last
 non-empty path segment, its query and fragment dropped, percent-decoded
@@ -198,7 +198,7 @@ def take(answer, capture):
     doc = body(answer)
     v = MISSING if doc is MISSING else at(doc, source["json"])
     if isinstance(v, reader.Num):
-        return str(v).encode()
+        return str(v).encode() if carried(str(v)) else None
     if isinstance(v, str):
         return quoted(v)
     return None

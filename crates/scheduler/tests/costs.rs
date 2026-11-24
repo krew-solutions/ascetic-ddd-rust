@@ -11,8 +11,11 @@ mod fixture;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
+use ascetic_ddd_command_log::fills::Captured;
+use ascetic_ddd_command_log::record::{Codec, On};
 use ascetic_ddd_command_log::record::{Header, Record};
-use ascetic_ddd_command_log::validate::Peaks;
+use ascetic_ddd_command_log::shape::{self, Shape};
+use ascetic_ddd_command_log::validate::{Kept, Peaks};
 use ascetic_ddd_scheduler::fits;
 use ascetic_ddd_scheduler::machine::Judgement;
 use ascetic_ddd_scheduler::sim::{Attempt, Run, run_streaming};
@@ -63,44 +66,107 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
-/// One plan of `lines` steps a line every `every` µs from `start` — all at
-/// one instant when `every` is 0 —, through `sim` with every answer `answer` µs after its send, W `w` µs;
-/// each step its own label when `keys`, so that every line is a barrier key
-/// of its own; a REST read when `rest`, a host call otherwise. The machine's
-/// peak heap, the run, and the log's mean line bytes.
-fn costs(
-    lines: u64,
-    start: u64,
-    every: u64,
-    answer: u64,
-    w: u64,
-    keys: bool,
-    rest: bool,
-) -> (usize, Run, u64) {
+/// What a row's steps are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    /// A host call, its label its own when `keys`, of `label` bytes at least.
+    Host { keys: bool, label: usize },
+    /// A REST read.
+    Read,
+    /// A REST update carrying a JSON body of `body` bytes.
+    Update { body: usize },
+    /// A REST read awaiting the `deps` steps before it sent.
+    Chained { deps: u64 },
+    /// A read capturing its group's ETag, the largest value a capture holds,
+    /// answered at once: kept with its capture while the window keeps it.
+    Writers,
+    /// Pairs: a read capturing its group's ETag — the largest value a capture
+    /// holds —, then, `answer` µs before its answer, a read sending it back.
+    Captures,
+}
+
+/// One plan of `lines` steps of `kind` a line every `every` µs from `start` —
+/// all at one instant when `every` is 0 —, through `sim` with every answer
+/// `answer` µs after its send, W `w` µs. The machine's peak heap, the run, and
+/// what `fits` counts of the plan: the run's own counts, every step priced at
+/// the largest shape among the plan's.
+fn costs(lines: u64, start: u64, every: u64, answer: u64, w: u64, kind: Kind) -> (usize, Run, u64) {
     let header = Header {
         window: w,
         read_ahead: w.min(1_000),
         ..header()
     };
-    let record = move |i: u64| {
-        let label = if keys {
-            format!("k{i}")
-        } else {
-            "call".to_owned()
-        };
-        if rest {
-            call("read", i, 0, start + i * every, 0)
-        } else {
-            step(id("device", i, &label, 0), start + i * every)
+    let record = move |i: u64| -> Record {
+        let at = start + i * every;
+        match kind {
+            Kind::Host { keys, label } => {
+                let name = if keys {
+                    format!("k{i}")
+                } else {
+                    "call".to_owned()
+                };
+                let pad = label.saturating_sub(name.len());
+                step(
+                    id("device", i, &format!("{name}{}", "x".repeat(pad)), 0),
+                    at,
+                )
+            }
+            Kind::Read => call("read", i, 0, at, 0),
+            Kind::Update { body } => {
+                let r = call("update", i, 0, at, 0);
+                with_payload(r, Codec::Json, body, vec![])
+            }
+            Kind::Chained { deps } => (i.saturating_sub(deps)..i)
+                .fold(call("read", i, 0, at, 0), |r, j| {
+                    after(r, &id("device", j, "read", 0), On::Sent)
+                }),
+            Kind::Writers => captures_etag(call("read", i, 0, at, 0), i),
+            Kind::Captures => {
+                let g = i / 2;
+                let writer = captures_etag(call("read", g, 0, at, 0), g);
+                if i.is_multiple_of(2) {
+                    writer
+                } else {
+                    let mut r = acting(
+                        step(id("device", g, "update", 0), at),
+                        read_etag("update", g, &writer.step),
+                    );
+                    r = after(r, &writer.step, On::Expected);
+                    r
+                }
+            }
         }
     };
-    let bytes = bytes(header.clone(), &(0..lines).map(record).collect::<Vec<_>>());
-    let line = (bytes.len() as u64) / lines.max(1);
-    let script = move |_: u64, _: u32, _: &Record| Attempt {
+    let records: Vec<Record> = (0..lines).map(record).collect();
+    let largest = records
+        .iter()
+        .map(shape::shape)
+        .fold(Shape::default(), Shape::most);
+    let keys: std::collections::BTreeSet<_> = records
+        .iter()
+        .map(|r| ascetic_ddd_command_log::plan::member_key(&r.step))
+        .collect();
+    let barrier_bytes = keys
+        .iter()
+        .map(|k| (k.0.len() + k.1.len() + k.2.len()) as u64)
+        .sum();
+    drop(records);
+    // A writer's value: the largest a capture holds.
+    let value = vec![b'a'; fits::VALUE as usize];
+    let script = move |_: u64, _: u32, r: &Record| Attempt {
         after: None,
         sent_after: 0,
-        answer_after: Some(answer),
-        judgement: Judgement::Expected(vec![]),
+        answer_after: Some(if r.capture.is_empty() { answer } else { 10 }),
+        judgement: Judgement::Expected(
+            r.capture
+                .iter()
+                .map(|c| Captured {
+                    subject: c.subject.clone(),
+                    slot: c.slot.clone(),
+                    value: value.clone(),
+                })
+                .collect(),
+        ),
     };
     let before = NOW.load(Relaxed);
     PEAK.store(before, Relaxed);
@@ -111,29 +177,62 @@ fn costs(
         &script,
     )
     .unwrap();
-    (PEAK.load(Relaxed) - before, ran, line)
+    let peak = PEAK.load(Relaxed) - before;
+    let (held, pending) = (ran.held as u64, ran.pending as u64);
+    let peaks = Peaks {
+        held,
+        pending,
+        barriers: ran.barriers as u64,
+        barrier_bytes,
+        pending_shape: largest.times(pending),
+        kept: Kept {
+            keys: largest.key_bytes * held,
+            // What the held keep once ended: a writer's capture, the writers
+            // being those within W behind the cursor, one every two lines —
+            // its readers' copies are their own, priced as their holes.
+            captures: if kind == Kind::Captures {
+                w / (2 * every) + 1
+            } else {
+                largest.captures.elements * held
+            },
+            capture_bytes: if kind == Kind::Captures {
+                largest.capture_bytes * (w / (2 * every) + 1)
+            } else {
+                largest.capture_bytes * held
+            },
+        },
+        ..Peaks::default()
+    };
+    let shaped = fits::needed(&Peaks {
+        held: 0,
+        pending: 0,
+        ..peaks.clone()
+    });
+    let residue = (peak as u64).saturating_sub(shaped);
+    eprintln!(
+        "MEASURED residue beside the shapes: {residue} B, {} a held step, {} a pending one",
+        residue / held.max(1),
+        residue / pending.max(1)
+    );
+    (peak, ran, fits::needed(&peaks))
 }
 
-/// K1e-2: the costs `fits` counts are upper bounds of what the machine holds:
-/// a plan of ended steps the window keeps, one of steps not ended, one of
-/// barrier keys — each peak within what `fits::needed` says of its counts.
+/// K1e-2, K2b-7e-2b-1c: the costs `fits` counts are upper bounds of what the
+/// machine holds, and not loose ones: each row's peak within what
+/// `fits::needed` counts of its counts and shapes, and on the rows a constant
+/// or a price is pinned on at least its floor of it.
 #[test]
 fn the_machine_holds_no_more_than_fits_counts() {
     let mut over = Vec::new();
     // Each row's counts just past a power of two where a container grows
     // with them — a block moved holds the old and the new at once — or
     // read ahead and released at one instant, a burst of outputs and inputs.
-    for (name, lines, start, every, answer, w, keys, rest) in [
-        (
-            "ended in the window",
-            40_000,
-            0,
-            50,
-            100,
-            1_000_000,
-            false,
-            false,
-        ),
+    let host = Kind::Host {
+        keys: false,
+        label: 0,
+    };
+    for (name, lines, start, every, answer, w, kind) in [
+        ("ended in the window", 40_000, 0, 50, 100, 1_000_000, host),
         (
             "ended in the window, 2^14 + 1",
             40_000,
@@ -141,11 +240,33 @@ fn the_machine_holds_no_more_than_fits_counts() {
             50,
             100,
             819_200,
-            false,
-            false,
+            host,
         ),
-        ("not ended", 40_000, 0, 50, 500_000, 1_000, false, false),
-        ("barrier keys", 40_000, 0, 50, 100, 1_000, true, false),
+        ("not ended", 40_000, 0, 50, 500_000, 1_000, host),
+        (
+            "barrier keys",
+            40_000,
+            0,
+            50,
+            100,
+            1_000,
+            Kind::Host {
+                keys: true,
+                label: 0,
+            },
+        ),
+        (
+            "barrier keys of 1 KiB labels",
+            16_385,
+            0,
+            50,
+            100,
+            1_000,
+            Kind::Host {
+                keys: true,
+                label: 1_024,
+            },
+        ),
         (
             "REST reads not ended, 2^13 + 1",
             40_000,
@@ -153,8 +274,7 @@ fn the_machine_holds_no_more_than_fits_counts() {
             50,
             409_600,
             1_000,
-            false,
-            true,
+            Kind::Read,
         ),
         (
             "host calls at one instant",
@@ -163,8 +283,7 @@ fn the_machine_holds_no_more_than_fits_counts() {
             0,
             500_000,
             1_000,
-            false,
-            false,
+            host,
         ),
         (
             "REST reads at one instant",
@@ -173,8 +292,7 @@ fn the_machine_holds_no_more_than_fits_counts() {
             0,
             500_000,
             1_000,
-            false,
-            true,
+            Kind::Read,
         ),
         (
             "REST reads at one instant, at 0",
@@ -183,24 +301,76 @@ fn the_machine_holds_no_more_than_fits_counts() {
             0,
             500_000,
             1_000,
-            false,
-            true,
+            Kind::Read,
+        ),
+        (
+            "REST updates of 4 KiB bodies at one instant",
+            8_193,
+            10_000,
+            0,
+            500_000,
+            1_000,
+            Kind::Update { body: 4_097 },
+        ),
+        (
+            "REST reads, each awaiting the one before",
+            8_193,
+            0,
+            50,
+            500_000,
+            1_000,
+            Kind::Chained { deps: 1 },
+        ),
+        (
+            "REST reads, each awaiting the 65 before it",
+            4_097,
+            0,
+            10,
+            500_000,
+            1_000,
+            Kind::Chained { deps: 65 },
+        ),
+        (
+            "captures kept in the window",
+            8_193,
+            0,
+            100,
+            100,
+            1_000_000,
+            Kind::Writers,
+        ),
+        (
+            "captured values sent back",
+            16_386,
+            0,
+            25,
+            500_000,
+            1_000,
+            Kind::Captures,
         ),
     ] {
-        let (peak, ran, line) = costs(lines, start, every, answer, w, keys, rest);
-        let peaks = Peaks {
-            held: ran.held as u64,
-            pending: ran.pending as u64,
-            barriers: ran.barriers as u64,
-            ..Peaks::default()
+        let (peak, ran, needed) = costs(lines, start, every, answer, w, kind);
+        // The rows each constant and price is pinned on: not loose on them.
+        let floor = match name {
+            "ended in the window" | "ended in the window, 2^14 + 1" => 0.7,
+            "host calls at one instant" => 0.75,
+            "barrier keys of 1 KiB labels"
+            | "REST updates of 4 KiB bodies at one instant"
+            | "captures kept in the window"
+            | "captured values sent back" => 0.8,
+            _ => 0.0,
         };
-        let needed = fits::needed(&peaks, line);
+        if (peak as f64) < floor * needed as f64 {
+            over.push(format!(
+                "{name}: {peak} B held, below {floor} of the {needed} counted"
+            ));
+        }
         eprintln!(
-            "{name}: peak {peak} B, held {}, pending {}, barriers {}, line {line} B; {} B a held step; fits counts {needed}",
+            "MEASURED {name}: peak {peak} B, held {}, pending {}, barriers {}; fits counts {needed} ({:.0} %)",
             ran.held,
             ran.pending,
             ran.barriers,
-            peak as u64 / (ran.held as u64).max(1)
+            100.0 * peak as f64 / needed as f64
         );
         if peak as u64 > needed {
             over.push(format!("{name}: {peak} B held, {needed} counted"));

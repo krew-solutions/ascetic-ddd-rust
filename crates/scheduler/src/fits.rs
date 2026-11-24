@@ -2,39 +2,49 @@
 //! own bound, which the validator committed, against one budget of bytes — a
 //! refusal before T0, naming the part, never a machine killed hours in.
 //!
-//! A step a machine holds weighs [`ENDED_CELL`] once it ended (its record
-//! dropped), [`LIVE_CELL`] and its line's bytes while it has not; a barrier
-//! key [`BARRIER`]. The steps not ended are among those held, so a plan needs
-//! `held · ENDED_CELL + pending · (LIVE_CELL − ENDED_CELL + line) + barriers ·
-//! BARRIER`. The costs are upper bounds `tests/costs.rs` measures and pins:
-//! some 30 % above the worst it measured on the fixture's records, each count
-//! just past a power of two where a container grows with it, a block moved
-//! counted at its old and new sizes at once (2026-11-24, ADR-0047 K2b-7e-2:
-//! 927 B an ended step; 3,144 B a REST read not ended beside its 364-byte
-//! line, read ahead and released with 32,768 others at one instant — their
-//! outputs and inputs at once; 569 B a key).
+//! A step a machine holds weighs [`ENDED_CELL`] once it ended, [`LIVE_CELL`]
+//! while it has not — its cell, its wake, its inputs in flight, its share of
+//! a burst's outputs, its record aside —; a barrier key [`BARRIER`] and its
+//! bytes. Its record, and what the machine copies of it, are priced by the
+//! plan's committed shapes (decision 22, K2b-7e-2b): the records of the steps
+//! not ended as they hold decoded ([`shape::bound`]); the producers their
+//! captured holes are bound to, a subject and a slot copied each; the values
+//! those holes take, at most [`VALUE`] bytes each; a dependency's binding and
+//! its producer's waiter; what the held keep once ended — their keys, their
+//! captures. The costs are upper bounds `tests/costs.rs` measures and pins:
+//! some 30 % above the worst it measured, each count just past a power of two
+//! where a container grows with it, a block moved counted at its old and new
+//! sizes at once.
 
-use ascetic_ddd_command_log::record::Header;
-use ascetic_ddd_command_log::validate::Peaks;
+use std::mem::size_of;
+
+use ascetic_ddd_command_log::answer::TAKEN;
+use ascetic_ddd_command_log::fills::Captured;
+use ascetic_ddd_command_log::record::{Header, Name, On, Subject};
+use ascetic_ddd_command_log::shape::{self, Shape};
+use ascetic_ddd_command_log::validate::{Kept, Peaks};
+
+use crate::machine::Line;
 
 /// The bytes an ended step's cell holds at most, its share of the window and
-/// of the cells' map included.
+/// of the cells' map included, its keys and captures aside.
 pub const ENDED_CELL: u64 = 1_216;
-/// The bytes a step not ended holds at most beside its line's: its cell with
-/// its record's structure, its wake, its inputs in flight, its share of the
-/// outputs of a burst released at one instant.
-pub const LIVE_CELL: u64 = 3_776;
-/// The bytes a barrier key holds at most: its summary and its map node.
+/// The bytes a step not ended holds at most beside its record: its cell, its
+/// wake, its inputs in flight, its share of the outputs of a burst released
+/// at one instant.
+pub const LIVE_CELL: u64 = 2_944;
+/// The bytes a barrier key holds at most beside its own bytes: its summary
+/// and its map node.
 pub const BARRIER: u64 = 768;
+/// The bytes a captured value holds at most: a carried text of at most
+/// `TAKEN` bytes, quoted, each byte escaped at worst (`answer::take`).
+pub const VALUE: u64 = 2 * TAKEN as u64 + 2;
 
 /// What a machine may hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Budget {
     /// Its memory for the run, in bytes.
     pub bytes: u64,
-    /// The mean bytes of the log's step lines: a step not ended holds its
-    /// record.
-    pub line: u64,
 }
 
 /// Why a plan does not fit.
@@ -63,14 +73,61 @@ pub enum Refusal {
     },
 }
 
-/// The bytes a plan of these peaks needs, its lines of `line` bytes on mean.
-pub fn needed(peaks: &Peaks, line: u64) -> u64 {
-    let live = LIVE_CELL.saturating_sub(ENDED_CELL).saturating_add(line);
+fn bytes_of(n: usize) -> u64 {
+    u64::try_from(n).unwrap_or(u64::MAX)
+}
+
+/// Slots of `size` bytes for `n` elements pushed one at a time into
+/// sequences, at most `sequences` of them not empty: twice the elements and
+/// two a sequence.
+fn slots(n: u64, sequences: u64, size: usize) -> u64 {
+    n.saturating_mul(2)
+        .saturating_add(sequences.saturating_mul(2))
+        .saturating_mul(bytes_of(size))
+}
+
+/// What the machine copies of the records of shape `s` while their steps are
+/// not ended: the producers their captured holes are bound to and the values
+/// those take, each a subject and a slot copied; a dependency's binding and
+/// its producer's waiter.
+fn bound_to(s: &Shape) -> u64 {
+    let holes = s.holes;
+    let producers = slots(holes, holes, size_of::<(Subject, Name, Line)>());
+    let values =
+        slots(holes, holes, size_of::<Captured>()).saturating_add(holes.saturating_mul(VALUE));
+    let deps = s.deps.elements;
+    let bindings = slots(deps, s.deps.sequences, size_of::<Line>()).saturating_add(slots(
+        deps,
+        deps,
+        size_of::<(Line, On)>(),
+    ));
+    producers
+        .saturating_add(values)
+        .saturating_add(s.hole_bytes.saturating_mul(2))
+        .saturating_add(bindings)
+}
+
+/// What the held keep once ended: their keys' bytes, their captures — each a
+/// value, a subject and a slot.
+fn keeping(k: &Kept) -> u64 {
+    k.keys
+        .saturating_add(slots(k.captures, k.captures, size_of::<Captured>()))
+        .saturating_add(k.captures.saturating_mul(VALUE))
+        .saturating_add(k.capture_bytes)
+}
+
+/// The bytes a plan of these peaks needs.
+pub fn needed(peaks: &Peaks) -> u64 {
+    let live = LIVE_CELL.saturating_sub(ENDED_CELL);
     peaks
         .held
         .saturating_mul(ENDED_CELL)
         .saturating_add(peaks.pending.saturating_mul(live))
         .saturating_add(peaks.barriers.saturating_mul(BARRIER))
+        .saturating_add(peaks.barrier_bytes)
+        .saturating_add(shape::bound(&peaks.pending_shape))
+        .saturating_add(bound_to(&peaks.pending_shape))
+        .saturating_add(keeping(&peaks.kept))
 }
 
 /// Whether a machine of `budget`, reading `read_ahead` ahead, holds the plan
@@ -88,7 +145,7 @@ pub fn fits(
             planned: header.read_ahead,
         });
     }
-    let needed = needed(peaks, budget.line);
+    let needed = needed(peaks);
     if needed > budget.bytes {
         return Err(Refusal::Bytes {
             needed,
