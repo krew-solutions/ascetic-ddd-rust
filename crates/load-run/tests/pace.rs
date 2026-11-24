@@ -52,10 +52,20 @@ impl Stand for OneStand {
     }
 }
 
-/// The stand, a process of its own: answers each request at once.
+/// The stand, a process of its own: answers each request at once — every
+/// `every`-th of all (0: none) with a JSON array of numbers of `size` bytes,
+/// the judge's slowest shape (ADR-0047 § Measured, K2b-7d), the rest `{}`.
 const STAND: &str = r#"
 import socket, sys, threading
 port = int(sys.argv[1])
+every = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+size = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+small = b"HTTP/1.1 200 X\r\ncontent-length: 2\r\n\r\n{}"
+items = b",".join(b"%d" % (i % 1000) for i in range(max(size // 4, 1)))
+body = b"[" + items + b"]"
+large = b"HTTP/1.1 200 X\r\ncontent-length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+lock = threading.Lock()
+count = [0]
 def serve(c):
     buf = b""
     try:
@@ -66,7 +76,10 @@ def serve(c):
             buf += d
             while b"\r\n\r\n" in buf:
                 _, _, buf = buf.partition(b"\r\n\r\n")
-                c.sendall(b"HTTP/1.1 200 X\r\ncontent-length: 2\r\n\r\n{}")
+                with lock:
+                    count[0] += 1
+                    n = count[0]
+                c.sendall(large if every and n % every == 0 else small)
     except OSError:
         pass
     finally:
@@ -276,6 +289,11 @@ struct Shape {
 type Replayed = ((usize, usize, usize, u64), Vec<(u64, bool, Shape)>);
 
 fn healthy(gap: u64, steps: u64) -> Replayed {
+    healthy_with(gap, steps, 0, 0)
+}
+
+/// [`healthy`], every `every`-th answer `size` bytes of numbers.
+fn healthy_with(gap: u64, steps: u64, every: u64, size: u64) -> Replayed {
     let _ = Descriptors::raise().unwrap();
     let port = {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -289,6 +307,8 @@ fn healthy(gap: u64, steps: u64) -> Replayed {
             .arg("-I")
             .arg(&script)
             .arg(port.to_string())
+            .arg(every.to_string())
+            .arg(size.to_string())
             .spawn()
             .unwrap(),
     );
@@ -354,7 +374,7 @@ fn healthy(gap: u64, steps: u64) -> Replayed {
 #[test]
 #[ignore = "decision 21's measurement, on purpose: the gate replayed over healthy runs"]
 fn the_gate_replayed_over_healthy_runs() {
-    for (gap, steps) in [(2_000, 15_000), (500, 20_000)] {
+    for (gap, steps) in [(2_000, 15_000), (500, 20_000), (100, 50_000)] {
         for run in 0..3 {
             let ((attempts, displaced, refused, largest), shapes) = healthy(gap, steps);
             for (reserve, pairwise, s) in shapes {
@@ -369,6 +389,34 @@ fn the_gate_replayed_over_healthy_runs() {
                 "MEASURED pace: a step every {gap} µs, run {run}: {attempts} attempts, {displaced} displaced \
                  past J, {refused} the gate would refuse, the largest displacement {largest} µs"
             );
+        }
+    }
+}
+
+/// The roles' judging-hold measurement (decision 21, round 3: Operability,
+/// Performance, Distributed Systems): a healthy run whose every hundredth
+/// answer is large — its read and judgement hold the loop — replayed through
+/// the pairwise pace. Measured on purpose (`--ignored`).
+#[test]
+#[ignore = "a measurement, run on purpose"]
+fn the_pace_replayed_with_large_answers() {
+    for size in [16_384, 65_536, 262_144] {
+        for run in 0..2 {
+            let ((attempts, displaced, _, largest), shapes) =
+                healthy_with(2_000, 15_000, 100, size);
+            eprintln!(
+                "MEASURED large: a step every 2000 µs, one answer in 100 of {size} B, run {run}: {attempts} \
+                 attempts, {displaced} displaced past J, the largest displacement {largest} µs"
+            );
+            for (reserve, pairwise, s) in shapes {
+                if pairwise {
+                    eprintln!(
+                        "MEASURED large shape: {size} B, run {run}, reserve {reserve}‰: {} never handed, the \
+                         largest shift {} µs, {}‰ handed past J",
+                        s.missed, s.largest, s.late
+                    );
+                }
+            }
         }
     }
 }

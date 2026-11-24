@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 under the gate — the burst the harness makes catching up (§ Owed): rounds 1 and 2 refuted, round 3 (a shaper at the hand-off) sound in kind and measured, its roles next, before K2b-7e and the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21), K2b-9 to build it, then K2b-7e and the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -49,7 +49,9 @@ To be built in slices, each a commit of its own:
   probe; **K2b-8c-7** the chain and the evidence, in two — **K2b-8c-7a** the chain, **K2b-8c-7b** admission's
   evidence in the journal; **K2b-8d** the real clock's twins, in two — **K2b-8d-1** a driver's events, `TIME_WAIT`,
   exhausted ports measured; **K2b-8d-2** a hog over the deadline while connecting and writing, a whole process
-  stalled.
+  stalled; **K2b-9** the harness shaping at the hand-off (decision 21), in four — **K2b-9a** the machine's poll grid at
+  the plan's instant; **K2b-9b** the pure pace, `sim` paced, journal version 9, the fold's revision 8; **K2b-9c** the
+  shell's gate, its type, I2 and κ at admission; **K2b-9d** the twins.
 - **The first host run:** REST only, on the compose stand, `sources = 1` — a correctness run.
 - **K3** facts and the bus; **K4** shaping and the emulated client's retries; **K5** the report.
 
@@ -647,6 +649,73 @@ stage 1; § Alternatives Considered keeps what each refuted):
   test binary of their own); K2b-8c-5 endpoints and sources; K2b-8c-6 the probe; K2b-8c-7 the chain and the
   evidence.
 
+### 21. The harness shapes at the hand-off: a late harness delays its plan, never compresses it
+
+*Decided for K2b-9 onward* (2026-11-24, under the gate in three rounds: blind solvers and discriminators on Fable,
+four roles on round 3's synthesis — Distributed Systems, Verifiability, Operability, Performance — on Opus; it
+amends decision 17; § Alternatives Considered keeps what each round refuted):
+- **The problem.** A harness stalled resumes and releases the stalled stretch's steps at once (K2b-8d-2); the stand
+  meets a burst the plan never had, and its resets under it — answers the system gave, its own however late sent
+  (decision 17) — read Fail. Measured since (§ Measured): every judgement of a large answer holds the machine in the
+  same way, so the burst is no rarity of stalls. The fold cannot tell after the fact which answers a burst caused (no
+  capacity model but the declared limits, no bounded memory of the system, no counterfactual run): the harness must
+  not make it.
+- **The pace.** For every two hand-offs i, k: `1000·|G_k − G_i| ≥ (1000 − κ)·(|raw_k − raw_i| − J)`, exact integers —
+  in hand-off order two running maxima `U = max(1000·G + c·raw)`, `V = max(1000·G − c·raw)`, `c = 1000 − κ`; the
+  earliest k may pass `max(raw_k, ⌈(max(V + c·raw_k, U − c·raw_k) − c·J) / 1000⌉)`. The attempts handed in any window
+  of width u then have raw dues spanning at most `(u + (1 − κ)·J)/(1 − κ)`: a declared bucket meets at most
+  `B + R·u/P`, exactly the curve the validator certified the plan against (`rate.rs`: arrivals each delayed by up to
+  J, at `R·(1 − reserve)`), given `κ ≤ reserve`. For capacity no limit declares, the same reading is the profile's
+  premise: the stand tolerates its plan compressed by `1/(1 − reserve)`.
+- **Raw dues.** A first attempt: its `Released.intended` — never the plan's instant, which would make the system's
+  latency a shift on every later step (coordinated omission). A poll: its grid point anchored at the plan's instant,
+  `read.planned + k·every`, the grid the validator certified, the points before `intended` skipped — anchored at
+  `intended` or `released`, observations caused or read together share one grid for life and the pace lets their
+  polls pass bunched at every interval. A resend: its `Dispatch.due` — uncertified (the validator counts none): equal
+  raws pass together.
+- **κ, the run's catch-up**: a header field, `κ ≤ profile.reserve` (compressing less than certified stays inside the
+  certificate), by default half the reserve — the other half the resends' room until K4 paces resends against the
+  buckets (a 503 resent into a bucket the catch-up filled meets a 429 and a `Retry-After` past the catch-up's end).
+  A run on the real clock with κ = 0 is refused at stage 1 — a shift never drains; `sim` and the virtual clock
+  allow it.
+- **The gate**, the shell's, after decoration, under the stamps lock, one for the run:
+  - **in a band ordered by raw due**: an attempt passes when the pace allows and its raw is within J of the least
+    raw among the attempts dispatched, neither handed nor gone, ties by line and attempt — dispatch order would charge
+    the zigzag of raws (late-read lines interleaved with dependents) instead of their span;
+  - **self-stamped**: each attempt stamps its own `handed` when its own thread passes — a hand-off stamped for it
+    by another thread would let a busy source's backlog leave as a burst below the gate; a waiter sleeps to its
+    predicted earliest and is woken early only when the band's front advances;
+  - **holding, not killing**: an attempt not yet arrived (decorating, its thread busy) holds the front until its
+    own deadline — a kill would void healthy runs, whose attempts the replays measured displaced past J;
+  - **released at the decision**, not in a drop; waiters race their own deadline; one waker each, registered under
+    the lock that checks the front; a head that cannot pass before its deadline leaves at once, `pace.late`;
+  - **every carrier through it**, by type: no connect or send without a pass; `sim` paces by the same pure
+    `scheduler::pace`, its scripted hand-offs drawn from it;
+  - **admission's I2 at the compressed rate**: `⌈needed·1000/(1000 − κ)⌉ ≤ cap(s)`.
+- **The fold** (revision 8):
+  - coherence: the pace over hand-offs in hand-off order, final by reports — a hand-off is final when every attempt
+    dispatched at or before its instant has reported (`Sent`, a closing report, an answer found at the look, which
+    now carries its `handed`: its bytes reached the system);
+  - a step its plan expects refused at a rate limit, admitted while handed more than J past its raw: undecided — the
+    pace bounds compression, not spreading, and a bucket refills over a shift;
+  - the report: excursions (maximal spans of hand-offs more than J late: start, end, peak shift), gate deaths by
+    code, Roots handed more than J late or as resends, the share past J.
+- **Decision 17, amended**: an answer is the system's however late it was sent, because the load offered was the
+  certified one — except resends and `Retry-After` polls (K4), dependents of answers stamped together after a
+  receive-side stall, and bunching below the gate (§ Owed). The harness's lateness is a shift later steps inherit; a
+  censor more than J late is undecided, as today, while it lasts.
+- **The journal** (version 9): the header's κ; `decorated` beside `handed` on `Sent` and `Unsent`; an answer found
+  with its `handed`; the read line marking a step expected refused at a rate limit. **The machine** (revision 5): the
+  poll grid at `read.planned`.
+- **Not built with it — decision 14's unplanned 429**: judged by status alone, it lets the system choose void over
+  Fail (its services' own 429s; a bucket tighter than declared); the rule needs decision 14's rate monitor —
+  undecided only where the journal shows the harness could have caused it within the bucket's horizon. Until then a
+  harness-made 429 (a resend wave, coincident dependents, bunching below the gate) reads a Root, which the report
+  marks.
+- **Cut**: K2b-9a the machine's poll grid; K2b-9b the pure pace, `sim` paced, journal 9, fold 8; K2b-9c the shell's
+  gate, its type, I2 and κ at admission; K2b-9d the twins. Each settled, not re-pinned: one commit per cause, the
+  previous fold's rules over the new journals equal to the new fold's classes, every changed run explained.
+
 ## Consequences
 
 - A load run is judged against the plan the validator checked, with every lateness the run's and every failure
@@ -763,6 +832,17 @@ stage 1; § Alternatives Considered keeps what each refuted):
   most one overdue attempt in flight at once — decision 17's lone late step — the rest shed, the fold verifying it) —
   refuted by measurement (§ Measured, decision 21): on this laptop it would have voided two of three healthy runs at
   500 steps a second and every one at 2,000.
+- **Decision 21, round 3** (2026-11-24): its blind solver's **recursion** — `d = max(raw, D)` — refuted by its
+  discriminator: late-read lines behind a drained wake take its due and pass at one instant, the burst certified; its
+  rounding up cancels the reserve at small gaps; its allowance J leaves `κRJ/P` over the curve. Refuted by the roles:
+  **FIFO by dispatch sequence** (it charges the zigzag of raws; after a hold resends and polls dispatch first, the
+  followers' shift some 2.8 times the raw order's); **each waiter passing when its own pace allows** (a straggler's
+  earliest outruns now for ever once an on-time stream passes — every displaced attempt dies, round 2's failure);
+  **hand-offs stamped on behalf of waiters** by the deciding thread (a busy source's backlog leaves as a burst below
+  the gate); **killing an attempt whose decoration misses its turn by J** (a healthy run's displaced attempts die —
+  void); **the whole reserve for the catch-up** (the resends' room gone); **the poll grid at `intended`** (shared
+  grids for observations caused together); **the unplanned 429 by status** (the system choosing void over Fail);
+  **the plan's instant as every raw due** (the system's latency a shift on every step).
 - **One SHA-256 a pass and a hashing thread**, **a partitioned machine for telemetry**, **ABBA and snapshots**,
   **TLA+ trace validation of the shell**: later, each on its own trigger (§ Owed).
 
@@ -816,6 +896,10 @@ stage 1; § Alternatives Considered keeps what each refuted):
 | K2b-8c-7b | K2b | journal version 8 — the golden holding admission's evidence, every field at its bounds, the schema its `admission`, `source_fit`, `descriptors_read`; the differential's journals re-pinned (8, 4), their classes version 7's; the chain's header holding the source's need, cap and events, the descriptors read, the plan assumed; a barred run's too; a replayed plan on `Live` not assumed, on a test's runtimes assumed; five thousand closing reports counted by their code in `Ran` | no evidence journaled; no source's fit; no descriptors read; the plan's assumption alone; the runtimes' alone; reports uncounted |
 | K2b-8d-1 | K2b | on the real clock, a source of four sockets: `Live::for_caps`' runtime reading every answer in the host at the look, three answers, the driver's own wake and the target's ready across a spin past the deadline; a runtime taking four events a turn, claiming six, missing the fifth in some run — a false Root I1 forbids; no socket the shell closes in `TIME_WAIT` on its source's address — closed by the stand's `connection: close`, pooled and closed at the run's end, censored and reset; measured on purpose (`ports.rs`, ignored: two minutes), a bound source's ports out at its bind and an unbound one's at its connect, each `egress.ports` | no zero linger; `Live` building fewer events than it records |
 | K2b-8d-2 | K2b | a whole process stopped 1.5 s by `SIGSTOP` mid-run beside a stand of its own process answering at once and refusing connects 40 ms in every 100, two thousand reads 2 ms apart, each on a connection of its own: no censor — sent, or never sent — a Root, in every run (some five hundred never-sent reports a run, every one undecided); the stand's own resets and the system's answers in the machine's catch-up burst counted, not asserted (decision 21 owed) | — (the timer rule's mutants survive it: § Measured) |
+| K2b-9a | K2b | the machine's poll grid at the plan's instant: an observation read late polled on its planned phase, two caused together on their own grids, nothing dispatched before `intended`; the differential with `schedule.py` moved alike, every changed run one whose observation was read or caused late | the grid at `intended`; at `released` |
+| K2b-9b | K2b | `scheduler::pace` against brute force over every pair (κ ∈ {0, 1, 100, 500, 999}, J ∈ {0, 1, 250, 2000}, ties and inversions); a hand-off late by at most `(1 − κ)·J` past its earliest moving neither maximum; `sim` paced and `verdict.py` recomputing its gate exactly and checking every pair on every differential run; a golden at κ > 0, J > 0 coherent under the pace and void under the allowance J; a refusal admitted under a shift undecided; excursions recomputed by `verdict.py` | the allowance J; the clamp `max(raw, D)`; rounding up; finality by time; the found answer's `handed` ignored |
+| K2b-9c | K2b | shell == sim with a reader lag, gate-delayed hand-offs and `pace.late` more than none; a decoration timing out ahead of a second attempt that passes; two sources' inverted raws passed in raw order; hand-offs within the band in raw order as a journal property; κ = 0 refused on the real clock; I2 at the compressed rate | the band dropped; dispatch order; the head kept past its decision; a carrier sending ungated |
+| K2b-9d | K2b | the stall twin beside a stand that resets past the certified bucket, its random closures gone: no Root gated, Roots ungated (the control); the gate recomputed from the journal predicting each hand-off and `pace.late`; the healthy and large-answer replays rerun with the gate built, optimised | the gate off; FIFO by dispatch |
 | K2-1 | K2 | the shell against an in-memory transport (hyper over `tokio::io::duplex`) under paused time reproduces `sim`'s journal | `std::time::Instant` in a handler |
 | K2-2 | K2 | each cause delayed alone — the reader, the token, the pool, the connect, the write, the dependency — moves exactly one gap of the chain | a gap merged |
 | K2-3 | K2 | on the real clock, multi-thread: chain order, no release before its stamped met instants, the stub's requests per correlation id equal the journal's attempts — a keep-alive connection closed as it is reused included; a request processed then reset before the answer is Unknown; a response stamped 1 µs before its deadline delivered after the tick is Expected | hyper's hidden retry; Unknown read as not taken; deadlines by arrival |
@@ -1765,7 +1849,28 @@ a connection of its own (retired at once); the journal folded, each Root classed
 - A hog over the deadline while connecting or writing on a thread others hold is the source thread's lag (K2b-7c-2's
   twins, the path's lag counted from the thread's last blocked park); the stall twin is its whole-process case.
 
-**Decision 21's pacing, replayed over healthy runs** (2026-11-24, this laptop; `tests/pace.rs`, ignored, on purpose):
+**Decision 21's replays on an optimised build** (2026-11-24, this laptop; `tests/pace.rs`, ignored,
+`cargo test --release`, one test at a time). **The replays below this paragraph ran on the test profile, opt-level 0**
+— the library sets no profile — and so did their conclusion "this box cannot offer 2,000 a second": the optimised
+harness offers it. The pairwise pace at κ ∈ {10, 50, 200}‰, the harness's outages from the journal:
+- 15,000 reads 2 ms apart, three runs: 30, 10 and 0 hand-offs displaced past J (the largest 8.2 ms); none missed at any
+  κ; past J at most 8 per mille at 10‰, 2 at 50‰.
+- 20,000 reads 500 µs apart: 0, 18 and 3 displaced; none missed; past J at most 37 per mille at 10‰, 7 at 50‰.
+- 50,000 reads 100 µs apart (10,000 a second, the stand a Python process on the same box, a thread per connection,
+  each read on a fresh connection): 1,626, 3,100 and 9,681 displaced (up to 81 ms); at 50‰ none, none and 3,870
+  missed, 61–100 % past J; at 200‰ none, none and 1,754 — this box's limit with its stand beside it.
+- One answer in a hundred large (an array of numbers, the judge's slowest shape), 500 reads a second, two runs each:
+  16 KiB — about 120 displaced, none missed at any κ, at most 8 per mille past J; 64 KiB — some 845 displaced (up to
+  20 ms), 144–150 missed at 10‰, none at 50‰ but two thirds past J (the shift up to 19 ms), 18 % at 200‰; 256 KiB —
+  2,800–3,300 displaced (up to 76 ms), 1,589–2,158 missed at 50‰, none at 200‰ but 83–99 % past J.
+- So: a judgement holds the whole machine through the frontier's floor (decision 16) for its read — 9.9 ms at 64 KiB
+  of numbers, 150–180 ns a byte (K2b-7a, release) — and every hold past `(1 − κ)·J` is a shift. Answers of a few KiB
+  cost nothing; one in a hundred at 64 KiB leaves a healthy run whole but every censor of a failing one undecided for
+  most of it; at 256 KiB, void. Today's fold reads all of these Pass on a healthy stand; on a failing one each
+  catch-up after a hold is K2b-8d-2's burst. The judge's speed (decision 18's owed `Number` and duplicate check) is
+  decision 21's precondition wherever answers are that large: trigger, H-1's largest answers.
+
+**Decision 21's pacing, replayed over healthy runs** (2026-11-24, this laptop, opt-level 0; `tests/pace.rs`, ignored):
 a stand of its own process answering at once, no stall, J = 2 ms, deadlines 500 ms, each read on a fresh connection;
 the journal replayed through round 2's gate — an attempt displaced past J (its hand-off more than J after its due
 instant) admitted only if no admitted displaced attempt's hand-off falls after its overdue instant.
@@ -1778,7 +1883,7 @@ instant) admitted only if no admitted displaced attempt's hand-off falls after i
   past J alone voids healthy runs; the plans' J and the box's jitter are a question for the host's reference machine
   (M12) as much as for decision 21.
 
-**Decision 21, round 3's shaper replayed** (2026-11-24, this laptop; `tests/pace.rs`, ignored): round 3's blind solver
+**Decision 21, round 3's shaper replayed** (2026-11-24, this laptop, opt-level 0; `tests/pace.rs`, ignored): round 3's blind solver
 — the harness a shaper at the hand-off, never compressing the plan by more than the profile's reserve ρ nor bunching
 past J, the fold verifying it — replayed over the same healthy journals as its discriminator prescribed: the
 harness's outages (the union of `[due + J, handed)` over attempts handed more than J late) taken from the journal, each
@@ -1908,29 +2013,19 @@ only and measures move to the 12-core box.
   bound socket's bind, `EADDRNOTAVAIL` at an unbound one's connect; Verifiability) — K2b-8d, in a namespace with a
   ten-port range; **a read-ahead floor against the looks' slack** — trigger: a run with `rest.cap.*` reports;
   **the counts of reports by code** in `Ran` or the fold — with K2b-8c-7's evidence.
-- **The burst the harness makes catching up — two rounds refuted, a third owed** (2026-11-24; § Alternatives
-  Considered, § Measured decision 21): what the rounds established — the fold cannot tell from a run which answers a
-  burst caused (no capacity model but declared limits, no bounded memory of the system, no counterfactual); the
-  reference load is the plan's (`read.planned`), not the run's `intended`; the population is every attempt at its
-  hand-off; a lone late step's answer stays the system's (decision 17); the system can hold the loop itself (judging
-  holds); and this box displaces healthy steps 5–50 ms at J = 2 ms. Measured too: a harness that cannot offer the plan
-  at all (10,000 a second here) passes on a healthy stand today. A third round, from these facts, before the first
-  host run. **Round 3** (a shaper at the hand-off — the plan never compressed by more than the profile's reserve, never
-  bunched past J; the fold verifying it, no new excuse): sound in kind, its discriminator found — the dues' monotonic
-  clamp re-admits the burst (late-read lines behind a drained wake pass at one instant); rounding up cancels the
-  reserve at small gaps; J and the reserve are each spent twice (the reserve is also resends' room; J also below the
-  hand-off); one global head-of-line gate couples the sources; a system flood or a slow decorator becomes a shift on
-  every source; and (measured, § Measured) ρ must exceed the box's outage fraction. Its pairwise form — for every two
-  hand-offs, `1000·(G_k − G_i + J) ≥ (1000 − ρ)·|raw_k − raw_i|`, two running maxima — removes the clamp and the
-  rounding. Owed next: its roles, then the build — a pure `scheduler::pace` shared by the shell and `sim`, the fold's
-  recursion (revision 8), the reserve in the journal's header (version 9), admission refusing a reserve below the box's
-  measured outage fraction (a pacing probe before T0). Found first:
-- **The burst the harness makes catching up** (found by K2b-8d-2's stall twin, 2026-11-24): a harness stalled — its
-  machine with it — releases the stalled stretch's steps at once when it resumes, each past its plan by the stall; the
-  stand's answers to them, a reset under the burst among them, are the system's own by decision 17 however late
-  sent, and a run reads Fail on a load its plan never asked of the stand. Owed: **decision 21, under the gate, before
-  the first host run** — how the harness's lateness in releasing a step bears on the system's answer to it, and on the
-  load the steps around it met.
+- **Decision 21's owed** (2026-11-24, its roles): **a hung decorator holds the band's front** to its deadline (up to
+  the route timeout) — a bound on a head not arrived, trigger: H-1's decorations measured past J; the Decorator
+  contract stated now (shared credentials refreshed ahead, off the attempt's path; headers valid to the attempt's
+  deadline); **decision 14's rate monitor and the unplanned 429** (§ Decision 21); **dependents of answers stamped
+  together** after a receive-side stall — their `intended` coincide, the pace lets them pass together: the stall
+  witness; **bunching below the gate** (connect floors, cap waiters) — witnessed by `connected` and the lag, judged by
+  nothing: trigger, a host run's Roots with `connected − handed` bunched; **the judge's speed** where answers are large
+  (§ Measured, decision 21's replays): trigger, H-1's largest answers past 16 KiB; **the stand co-located** with the
+  harness, stopped with it (its own backlog answering paced attempts) — the stall twin with the stand stopped too, on
+  this laptop; **the header's J and κ checked against the commitment** — trigger: a host writing its journal header;
+  **admission refusing the rate** when no κ keeps the box's own shift draining — on the load machine; **a stop when
+  nothing can pass before the longest timeout**, ranking below Fail, and a progress port; **the gate's capacity** —
+  each hand-off a wake of the next while predictions fail: measured at the launch's rate on the load machine.
 - **A lag sampler per source** (decision 9, K2b-1): for measures' intervals, not the fold's rules — K5's report, with
   the machine's own runtime set apart from the sources' (`Live` runs the sources; the composition root runs the
   machine).
@@ -2082,3 +2177,7 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   counts, A/B on one box and the first host run as a correctness run.
 - 2026-11-24: the receive twin's flake found — a release late past the read-ahead moved the deadline the twin's driver
   assumes; the twin now requires its step's deadline before judging a run (§ Measured K2b-8d-2, its third sighting).
+- 2026-11-24: **decision 21 decided** after round 3's four roles (§ Decision 21; § Alternatives Considered round 3):
+  the pace, its raw dues, κ, the band gate, the fold's revision 8, decision 17 amended; K2b-9 its cut. The replays
+  rerun optimised (§ Measured): the earlier ones were on opt-level 0, and their "this box cannot offer 2,000 a second"
+  withdrawn; judgements of large answers found holding the machine — the judge's speed owed with H-1's trigger.
