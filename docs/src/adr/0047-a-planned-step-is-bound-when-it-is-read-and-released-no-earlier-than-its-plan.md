@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 under the gate — the burst the harness makes catching up (§ Owed): two rounds refuted, a third next, before K2b-7e and the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 under the gate — the burst the harness makes catching up (§ Owed): rounds 1 and 2 refuted, round 3 (a shaper at the hand-off) sound in kind and measured, its roles next, before K2b-7e and the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -1768,6 +1768,20 @@ instant) admitted only if no admitted displaced attempt's hand-off falls after i
   past J alone voids healthy runs; the plans' J and the box's jitter are a question for the host's reference machine
   (M12) as much as for decision 21.
 
+**Decision 21, round 3's shaper replayed** (2026-11-24, this laptop; `tests/pace.rs`, ignored): round 3's blind solver
+— the harness a shaper at the hand-off, never compressing the plan by more than the profile's reserve ρ nor bunching
+past J, the fold verifying it — replayed over the same healthy journals as its discriminator prescribed: the
+harness's outages (the union of `[due + J, handed)` over attempts handed more than J late) taken from the journal, each
+attempt passing at the first instant at or past its pace outside them, the reserve rounded down so none is lost.
+- 15,000 reads 2 ms apart (30 s), three runs: none missed its deadline at any ρ; handed more than J past its due —
+  at ρ = 0, 0, 900 and 870 per mille (the shift a running sum, up to 74 ms); at ρ = 50‰, 0, 5 and 48 per mille;
+  at ρ = 200‰, 0, 1 and 11.
+- 20,000 reads 500 µs apart (10 s), three runs: at ρ = 50‰, 0, 768 and 0 missed, 420, 998 and 44 per mille handed late;
+  at ρ = 200‰, 0, 477 and 0 missed — this box cannot offer 2,000 a second reliably.
+- So the shaper keeps healthy runs healthy only while ρ exceeds the box's own outage fraction (its inflow of lateness)
+  — on this laptop at 500 a second ρ = 50‰ holds; at ρ = 0 (the fixture's) every run drifts. A first replay that took
+  the larger of the pace and the real hand-off, not their sum, under-reported this (its discriminator).
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -1881,7 +1895,16 @@ only and measures move to the 12-core box.
   hand-off; a lone late step's answer stays the system's (decision 17); the system can hold the loop itself (judging
   holds); and this box displaces healthy steps 5–50 ms at J = 2 ms. Measured too: a harness that cannot offer the plan
   at all (10,000 a second here) passes on a healthy stand today. A third round, from these facts, before the first
-  host run. Found first:
+  host run. **Round 3** (a shaper at the hand-off — the plan never compressed by more than the profile's reserve, never
+  bunched past J; the fold verifying it, no new excuse): sound in kind, its discriminator found — the dues' monotonic
+  clamp re-admits the burst (late-read lines behind a drained wake pass at one instant); rounding up cancels the
+  reserve at small gaps; J and the reserve are each spent twice (the reserve is also resends' room; J also below the
+  hand-off); one global head-of-line gate couples the sources; a system flood or a slow decorator becomes a shift on
+  every source; and (measured, § Measured) ρ must exceed the box's outage fraction. Its pairwise form — for every two
+  hand-offs, `1000·(G_k − G_i + J) ≥ (1000 − ρ)·|raw_k − raw_i|`, two running maxima — removes the clamp and the
+  rounding. Owed next: its roles, then the build — a pure `scheduler::pace` shared by the shell and `sim`, the fold's
+  recursion (revision 8), the reserve in the journal's header (version 9), admission refusing a reserve below the box's
+  measured outage fraction (a pacing probe before T0). Found first:
 - **The burst the harness makes catching up** (found by K2b-8d-2's stall twin, 2026-11-24): a harness stalled — its
   machine with it — releases the stalled stretch's steps at once when it resumes, each past its plan by the stall; the
   stand's answers to them, a reset under the burst among them, are the system's own by decision 17 however late
@@ -2031,3 +2054,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-24: decision 21 under the gate, two rounds: a displacement window, an overrun of the plan's densest window,
   pacing at the hand-off — each refuted (§ Alternatives Considered), the last by measurement (§ Measured); a third
   round owed from what they established (§ Owed).
+- 2026-11-24: decision 21, round 3: a shaper at the hand-off, sound in kind; its discriminator's defects and its
+  replay over healthy runs (§ Measured) recorded; its roles next.

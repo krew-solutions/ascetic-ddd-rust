@@ -136,8 +136,103 @@ fn paced(lines: &[journal::Line], j: u64) -> (usize, usize, usize, u64) {
     (a.len(), displaced.len(), refused, largest)
 }
 
+/// Round 3's shaper replayed (ADR-0047 § Measured, decision 21), as its
+/// discriminator prescribed: the harness's outages — the union of `[due + J,
+/// handed)` over attempts handed more than J late — taken from the journal;
+/// attempts in dispatch order, each passing at the first instant at or past
+/// its pace outside an outage (the plan compressed by at most `reserve` per
+/// mille, its rounding down so that no reserve is lost; bunched at most J);
+/// one whose pass falls at or past its deadline never handed. The attempts
+/// never handed, the largest shift past the raw due, and the share handed
+/// more than J past it, per mille.
+fn shaped(lines: &[journal::Line], j: u64, reserve: u64) -> (usize, u64, u64) {
+    let mut intended: BTreeMap<u64, u64> = BTreeMap::new();
+    let mut handed: BTreeMap<(u64, u32), u64> = BTreeMap::new();
+    let mut order: Vec<(u64, u32, u64, u64)> = Vec::new();
+    for l in lines {
+        match l {
+            journal::Line::Released(r) => {
+                intended.insert(r.line, r.intended);
+            }
+            journal::Line::Dispatch(d) => order.push((d.line, d.attempt, d.due, d.deadline)),
+            journal::Line::Sent(x) => {
+                handed.entry((x.line, x.attempt)).or_insert(x.handed);
+            }
+            journal::Line::Answer(x) => {
+                if let Some(h) = x.unsent.as_ref().and_then(|u| u.handed) {
+                    handed.entry((x.line, x.attempt)).or_insert(h);
+                }
+            }
+            _ => {}
+        }
+    }
+    let raw = |line: u64, attempt: u32, due: u64| {
+        if attempt == 1 {
+            intended.get(&line).copied().unwrap_or(due)
+        } else {
+            due
+        }
+    };
+    // The harness's outages, merged.
+    let mut out: Vec<(u64, u64)> = order
+        .iter()
+        .filter_map(|&(line, attempt, due, _)| {
+            let h = *handed.get(&(line, attempt))?;
+            let r = raw(line, attempt, due);
+            (h > r + j).then_some((r + j, h))
+        })
+        .collect();
+    out.sort_unstable();
+    let mut outages: Vec<(u64, u64)> = Vec::new();
+    for (s, e) in out {
+        match outages.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ => outages.push((s, e)),
+        }
+    }
+    let free = |t: u64| -> u64 {
+        let i = outages.partition_point(|&(s, _)| s <= t);
+        match i.checked_sub(1).map(|k| outages[k]) {
+            Some((_, e)) if t < e => e,
+            _ => t,
+        }
+    };
+    let (mut d_last, mut p, mut g_last) = (0u64, 0u64, 0u64);
+    let (mut missed, mut largest, mut late, mut passed) = (0usize, 0u64, 0u64, 0u64);
+    for &(line, attempt, due, deadline) in &order {
+        if !handed.contains_key(&(line, attempt)) {
+            continue;
+        }
+        let r = raw(line, attempt, due);
+        let d = r.max(d_last);
+        let a = d.max(p + (1_000 - reserve) * (d - d_last) / 1_000);
+        let g = free(a.max(g_last));
+        if g >= deadline {
+            missed += 1;
+            continue;
+        }
+        passed += 1;
+        largest = largest.max(g - r);
+        if g > r + j {
+            late += 1;
+        }
+        p = a.max(g.saturating_sub(j));
+        d_last = d;
+        g_last = g;
+    }
+    (
+        missed,
+        largest,
+        (late * 1_000).checked_div(passed).unwrap_or(0),
+    )
+}
+
 /// A healthy run of `steps` reads `gap` µs apart: the gate replayed.
-fn healthy(gap: u64, steps: u64) -> (usize, usize, usize, u64) {
+/// The gate's replay — attempts, displaced, refused, the largest displacement
+/// — and the shaper's per reserve: missed, the largest shift, the share late.
+type Replayed = ((usize, usize, usize, u64), Vec<(u64, usize, u64, u64)>);
+
+fn healthy(gap: u64, steps: u64) -> Replayed {
     let _ = Descriptors::raise().unwrap();
     let port = {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -204,15 +299,29 @@ fn healthy(gap: u64, steps: u64) -> (usize, usize, usize, u64) {
         ))
         .unwrap()
         .journal;
-    paced(&lines, header.profile.jitter)
+    let j = header.profile.jitter;
+    let shapes = [0, 10, 50, 100, 200]
+        .into_iter()
+        .map(|r| {
+            let (missed, largest, late) = shaped(&lines, j, r);
+            (r, missed, largest, late)
+        })
+        .collect();
+    (paced(&lines, j), shapes)
 }
 
 #[test]
 #[ignore = "decision 21's measurement, on purpose: the gate replayed over healthy runs"]
 fn the_gate_replayed_over_healthy_runs() {
-    for (gap, steps) in [(2_000, 5_000), (500, 20_000), (100, 50_000)] {
+    for (gap, steps) in [(2_000, 15_000), (500, 20_000)] {
         for run in 0..3 {
-            let (attempts, displaced, refused, largest) = healthy(gap, steps);
+            let ((attempts, displaced, refused, largest), shapes) = healthy(gap, steps);
+            for (reserve, missed, shift, late) in shapes {
+                eprintln!(
+                    "MEASURED shape: a step every {gap} µs, run {run}, reserve {reserve}‰: {missed} never \
+                     handed, the largest shift {shift} µs, {late}‰ handed past J"
+                );
+            }
             eprintln!(
                 "MEASURED pace: a step every {gap} µs, run {run}: {attempts} attempts, {displaced} displaced \
                  past J, {refused} the gate would refuse, the largest displacement {largest} µs"
