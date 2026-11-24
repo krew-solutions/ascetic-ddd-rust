@@ -54,6 +54,9 @@ enum Answer {
     Cut { after: u64 },
     /// Never answered.
     Silent,
+    /// These bytes `after` µs after the request came, as they are: a head
+    /// the stub would not write (ADR-0047 decision 22).
+    Raw { after: u64, bytes: Vec<u8> },
 }
 
 /// A request as it came: its correlation id, the instant its last byte did,
@@ -173,6 +176,12 @@ impl Stub {
                     return;
                 }
                 Answer::Silent => std::future::pending::<()>().await,
+                Answer::Raw { after, bytes } => {
+                    self.clock.sleep_until(at + after).await;
+                    if io.write_all(&bytes).await.is_err() {
+                        return;
+                    }
+                }
             }
         }
     }
@@ -777,9 +786,76 @@ fn an_answer_past_the_cap_is_unread_and_its_connection_closed() {
     let (journal, came, opened) = run_rest(header, &records, vec![big, ok(10, 0)], AT_ONCE);
     let journal = journal.unwrap();
     let a = answer(&journal, 2).unwrap();
-    // Arrived once the cap was passed: the body's frame, at head + body.
-    assert_eq!((a.at, a.status), (came[0].at + 30, Some(200)));
+    // Its length past the cap (decision 22): unreadable at its head — no byte
+    // of the body read, nothing allocated for it.
+    assert_eq!((a.at, a.status), (came[0].at + 10, Some(200)));
     assert_eq!(opened, 2, "a connection with its answer unread is closed");
+}
+
+/// A head of exactly `len` bytes, no body: its padding in one field.
+fn head_of(len: usize) -> Vec<u8> {
+    let bare = "HTTP/1.1 200 X\r\ncontent-length: 0\r\nx-pad: \r\n\r\n".len();
+    let pad = "p".repeat(len - bare);
+    let head = format!("HTTP/1.1 200 X\r\ncontent-length: 0\r\nx-pad: {pad}\r\n\r\n");
+    assert_eq!(head.len(), len);
+    head.into_bytes()
+}
+
+/// The run's last line, if a carrier's fault: its name.
+fn faulted(journal: &[Line]) -> Option<String> {
+    match journal.last() {
+        Some(Line::Fault(journal::Fault {
+            class:
+                journal::FaultClass::Carrier {
+                    cannot: journal::Code::Named(c),
+                    ..
+                },
+            ..
+        })) => Some(c.clone()),
+        _ => None,
+    }
+}
+
+/// Decision 22: hyper's reads exact at 16 KiB — a head of 16,384 bytes
+/// parses; of 16,385, or of a hundred and one headers, the run stops naming
+/// the head (`rest.head`), never the system's Unknown. Literals, not the
+/// constant: the twin must not move with it.
+#[test]
+fn a_head_past_the_read_size_stops_the_run() {
+    let records = vec![call("read", 1, 0, 0, 0)];
+    let raw = |bytes| Answer::Raw { after: 10, bytes };
+    let (journal, _, _) = run_rest(rest_header(), &records, vec![raw(head_of(16_384))], AT_ONCE);
+    let journal = journal.unwrap();
+    assert_eq!(answer(&journal, 2).and_then(|a| a.status), Some(200));
+    assert_eq!(faulted(&journal), None);
+    let (journal, _, _) = run_rest(rest_header(), &records, vec![raw(head_of(16_385))], AT_ONCE);
+    assert_eq!(faulted(&journal.unwrap()).as_deref(), Some("rest.head"));
+    let many: String = (0..101).map(|i| format!("x-{i}: v\r\n")).collect();
+    let head = format!("HTTP/1.1 200 X\r\ncontent-length: 0\r\n{many}\r\n").into_bytes();
+    assert!(head.len() < 2_048);
+    let (journal, _, _) = run_rest(rest_header(), &records, vec![raw(head)], AT_ONCE);
+    assert_eq!(faulted(&journal.unwrap()).as_deref(), Some("rest.head"));
+}
+
+/// Decision 22: a length past the cap is unread at its head — a forged
+/// 2^62 allocates nothing (sized from it, the process would abort).
+#[test]
+fn a_forged_length_is_unread_at_its_head() {
+    let records = vec![call("read", 1, 0, 0, 0)];
+    let head = b"HTTP/1.1 200 X\r\ncontent-length: 4611686018427387904\r\n\r\n".to_vec();
+    let (journal, came, opened) = run_rest(
+        rest_header(),
+        &records,
+        vec![Answer::Raw {
+            after: 10,
+            bytes: head,
+        }],
+        AT_ONCE,
+    );
+    let journal = journal.unwrap();
+    let a = answer(&journal, 2).unwrap();
+    assert_eq!((a.at, a.status), (came[0].at + 10, Some(200)));
+    assert_eq!(opened, 1);
 }
 
 #[test]

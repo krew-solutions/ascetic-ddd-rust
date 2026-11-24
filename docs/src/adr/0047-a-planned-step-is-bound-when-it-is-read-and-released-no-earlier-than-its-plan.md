@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1 next; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1 built, K2b-7e-2 next; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -945,6 +945,7 @@ which `admit` never called; § Alternatives Considered keeps what each refuted):
 | K2b-8c-7b | K2b | journal version 8 — the golden holding admission's evidence, every field at its bounds, the schema its `admission`, `source_fit`, `descriptors_read`; the differential's journals re-pinned (8, 4), their classes version 7's; the chain's header holding the source's need, cap and events, the descriptors read, the plan assumed; a barred run's too; a replayed plan on `Live` not assumed, on a test's runtimes assumed; five thousand closing reports counted by their code in `Ran` | no evidence journaled; no source's fit; no descriptors read; the plan's assumption alone; the runtimes' alone; reports uncounted |
 | K2b-8d-1 | K2b | on the real clock, a source of four sockets: `Live::for_caps`' runtime reading every answer in the host at the look, three answers, the driver's own wake and the target's ready across a spin past the deadline; a runtime taking four events a turn, claiming six, missing the fifth in some run — a false Root I1 forbids; no socket the shell closes in `TIME_WAIT` on its source's address — closed by the stand's `connection: close`, pooled and closed at the run's end, censored and reset; measured on purpose (`ports.rs`, ignored: two minutes), a bound source's ports out at its bind and an unbound one's at its connect, each `egress.ports` | no zero linger; `Live` building fewer events than it records |
 | K2b-8d-2 | K2b | a whole process stopped 1.5 s by `SIGSTOP` mid-run beside a stand of its own process answering at once and refusing connects 40 ms in every 100, two thousand reads 2 ms apart, each on a connection of its own: no censor — sent, or never sent — a Root, in every run (some five hundred never-sent reports a run, every one undecided); the stand's own resets and the system's answers in the machine's catch-up burst counted, not asserted (decision 21 owed) | — (the timer rule's mutants survive it: § Measured) |
+| K2b-7e-1 | K2b | a head of 16,384 bytes parsed, of 16,385 or of a hundred and one headers the run stopped naming `rest.head`; a forged length of 2^62 unread at its head; over a transport not vectored the first write the head alone, the body queued after it; after a burst of tasks ended and one aborted, no handle kept; one builder in the shell, no free handshake, no `max_buf_size` (the lint) | the exact read size dropped; writes flattened; a head too large left `Broken`; a length past the cap read; the body sized from any length |
 | K2b-9a | K2b | the machine's poll grid at the plan's instant: an observation read at 250 polled at 300, 400 …, read on a point at 600 polled there once, two read together at 620 on their own phases; the differential with `schedule.py` moved alike, settled run by run against machine 4 (16 of 3,944 changed, each at a poll of an observation released late) | the grid at `released`; the release's point not held (polled twice at one instant) |
 | K2b-9b-1 | K2b | journal version 9 — the golden holding the run's catch-up at 999, a refusal read, `decorated` on a `Sent`, both sides of a never-sent report's `decorated` and a found answer's `handed`; the schema and `journal.py` alike; a rate deviation read as a refusal, another rule's and none not; the differential's journals and the golden runs settled against version 8, the new fields removed, every line the same | a rate deviation unread; any rule read as a refusal |
 | K2b-9b-2 | K2b | `scheduler::pace`: each attempt handed at the later of its earliest and the instant it came, every pair keeping the rule by brute force, a microsecond sooner some pair breaking (κ ∈ {0, 1, 100, 500, 999}, J ∈ {0, 1, 250, 2000}); every hand-off within `(1 − κ)·J` of its raw never paced; the band — a dispatched batch in raw order, the rest paced to the instant computed by hand; an attempt not arrived holding the front; a head whose pace falls past its deadline leaving; a straggler within the band passing; an attempt past its deadline beyond the band leaving, so the next turn never names an instant gone | the allowance J; κ ignored; rounding down; the mirror term dropped; the band unbounded; arrival ignored; never late — each red |
@@ -1908,6 +1909,21 @@ a connection of its own (retired at once); the journal folded, each Root classed
 - A hog over the deadline while connecting or writing on a thread others hold is the source thread's lag (K2b-7c-2's
   twins, the path's lag counted from the thread's last blocked park); the stall twin is its whole-process case.
 
+**K2b-7e-1 — the shell's constants by construction** (2026-11-24, decision 22): one HTTP/1.1 builder
+(`rest::builder`: reads exact at `READ` = 16 KiB, writes vectored) for every connection, the pool test's too; a head
+past it, or past hyper's hundred headers, a fault `rest.head` naming the operation (a client build of hyper has no
+`is_parse_too_large` — server-gated —, so its description, "message head is too large", is the tell the twin pins);
+the counting `Io`'s scratch one a thread; the body sized from its Content-Length, at most the cap, a length past the
+cap unread at its head; the head copied and the response's parts dropped before the body; a task lets go of its own
+handle as its future ends or is dropped (a registry keyed per task, a key ended before its handle kept remembered as
+gone). Measured again (`tests/memory.rs`, optimised): a pooled idle connection 39.8 kB after 2 B answers and after
+64 KiB alike (46.9 and 71.5 kB before — the drift gone), an open attempt with its connection 47.1 kB (51.5), the
+peak while 64 KiB answers are read 50.7 kB (105). The twin of an answer past the cap moved: its length declared past
+the cap, it is now unread at its head (10 µs after the request, not 30). Its executors (§ Executors), five mutants
+each red — the exact read size dropped, writes flattened, a head too large left `Broken`, a length past the cap read,
+the body sized from any length (the last two abort the process on a forged 2^62). The two-sided bands of `CONNECTION`
+and `ATTEMPT` go with K2b-7e-2, where admission takes them.
+
 **K2b-7e's measurement — the shell's own bytes** (2026-11-24, this laptop, optimised; `tests/memory.rs`, a binary of
 its own, ignored: a counting allocator over the whole process, a stand of its own process, the journal counted, not
 kept): 1,000 and 2,000 reads at one instant, each answered 1 s later, a last read keeping the run open while the
@@ -2388,3 +2404,6 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   constants by construction, a stated memory, the answers charged statically before any wait; K2b-7e cut in five.
   K2b-7e's measurement corrected: hyper's read buffer did not grow to fit a body — the counting `Io`'s 16 KiB reads
   capped it at 32 KiB, the growth measured; the "1.6×" is the per-attempt peak, not a parse factor.
+- 2026-11-24: K2b-7e-1 built (§ Measured): the shell's constants by construction — one builder, a head too large a
+  fault, the scratch one a thread, the body sized from its length, the head copied first, a task's handle let go at
+  its end; a pooled connection 39.8 kB however large the answers it read.

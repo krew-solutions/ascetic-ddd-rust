@@ -265,19 +265,24 @@ impl Probe {
 pub(crate) struct Io<T> {
     inner: T,
     probe: Arc<Probe>,
-    scratch: Vec<u8>,
     _slot: Slot,
 }
 
 /// The most a read copies at once.
 const SCRATCH: usize = 16 * 1024;
 
+std::thread_local! {
+    /// The read's scratch, one a thread, not one a connection (ADR-0047
+    /// decision 22): it is used only inside one synchronous read.
+    static READ: std::cell::RefCell<Box<[u8]>> =
+        std::cell::RefCell::new(vec![0; SCRATCH].into_boxed_slice());
+}
+
 impl<T> Io<T> {
     pub(crate) fn new(inner: T, probe: Arc<Probe>, slot: Slot) -> Io<T> {
         Io {
             inner,
             probe,
-            scratch: vec![0; SCRATCH],
             _slot: slot,
         }
     }
@@ -290,14 +295,16 @@ impl<T: AsyncRead + Unpin> hyper::rt::Read for Io<T> {
         mut buf: hyper::rt::ReadBufCursor<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        let room = buf.remaining().min(this.scratch.len());
-        let Some(scratch) = this.scratch.get_mut(..room) else {
-            return Poll::Ready(Ok(()));
-        };
-        let mut read = ReadBuf::new(scratch);
-        ready!(Pin::new(&mut this.inner).poll_read(cx, &mut read))?;
-        buf.put_slice(read.filled());
-        Poll::Ready(Ok(()))
+        READ.with_borrow_mut(|scratch| {
+            let room = buf.remaining().min(scratch.len());
+            let Some(scratch) = scratch.get_mut(..room) else {
+                return Poll::Ready(Ok(()));
+            };
+            let mut read = ReadBuf::new(scratch);
+            ready!(Pin::new(&mut this.inner).poll_read(cx, &mut read))?;
+            buf.put_slice(read.filled());
+            Poll::Ready(Ok(()))
+        })
     }
 }
 

@@ -505,6 +505,20 @@ fn build(
     })
 }
 
+/// The most a connection's read buffer holds (ADR-0047 decision 22): hyper's
+/// reads exact, its buffer never grown to a body's or a head's size — a head
+/// past it a fault.
+pub const READ: usize = 16 * 1024;
+
+/// The one HTTP/1.1 client builder every connection takes (decision 22): reads
+/// of exactly [`READ`]; writes vectored — a body queued, never copied into the
+/// head's buffer.
+fn builder() -> http1::Builder {
+    let mut b = http1::Builder::new();
+    b.read_buf_exact_size(Some(READ)).writev(true);
+    b
+}
+
 impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
     async fn connect<C: Clock>(
         &self,
@@ -518,7 +532,8 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
         let probe = Arc::new(Probe::default());
         // hyper's HTTP/1.1 handshake does no I/O: its failure is the
         // harness's.
-        let (sender, connection) = http1::handshake(Io::new(stream, probe.clone(), slot))
+        let (sender, connection) = builder()
+            .handshake(Io::new(stream, probe.clone(), slot))
             .await
             .map_err(|e| Connect::Harness {
                 cannot: "rest.handshake",
@@ -788,6 +803,22 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
             match outcome {
                 Ok(response) => break (response, conn),
                 Err(mut e) => {
+                    // A head past the read size, or past hyper's hundred
+                    // headers (decision 22): the harness's — the run stops
+                    // naming the operation, never the system's Unknown.
+                    // (A client build has no `is_parse_too_large`, gated on
+                    // hyper's server feature: its description is the tell,
+                    // the head twin pinning it.)
+                    if e.error().is_parse() && e.error().to_string() == "message head is too large"
+                    {
+                        return a.fault(
+                            "rest.head",
+                            format!(
+                                "{}: a response head past {READ} bytes or 100 headers",
+                                op.name
+                            ),
+                        );
+                    }
                     // Handed back, or no byte of it accepted: no end; its
                     // path's lag goes on on this task (decision 18).
                     if e.take_message().is_some() || conn.probe.written() == 0 {
@@ -805,9 +836,28 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
         };
         let (parts, mut incoming) = response.into_parts();
         let cap = usize::try_from(header.profile.answer_cap).unwrap_or(usize::MAX);
-        let mut body = Vec::new();
-        let mut whole = true;
-        loop {
+        // The head copied and its parts dropped before the body (decision
+        // 22): a header slices hyper's read buffer, and pinned it while the
+        // body came.
+        let status = parts.status.as_u16();
+        let headers: Vec<(String, Vec<u8>)> = parts
+            .headers
+            .iter()
+            .map(|(n, v)| (n.as_str().to_owned(), v.as_bytes().to_vec()))
+            .collect();
+        let length = parts
+            .headers
+            .get(hyper::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|l| usize::try_from(l).unwrap_or(usize::MAX));
+        drop(parts);
+        // The body sized from its length, at most the cap (decision 22): no
+        // doubling, no allocation a forged length could abort; a length past
+        // the cap unreadable at its head — unread, and the connection closed.
+        let mut whole = length.is_none_or(|l| l <= cap);
+        let mut body = Vec::with_capacity(length.filter(|_| whole).unwrap_or(0));
+        while whole {
             let next = tokio::select! {
                 biased;
                 f = poll_fn(|cx| Pin::new(&mut incoming).poll_frame(cx)) => Some(f),
@@ -851,13 +901,8 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
             }
         }
         a.arrived();
-        let headers: Vec<(String, Vec<u8>)> = parts
-            .headers
-            .iter()
-            .map(|(n, v)| (n.as_str().to_owned(), v.as_bytes().to_vec()))
-            .collect();
         let reply = Reply {
-            status: parts.status.as_u16(),
+            status,
             headers: &headers,
             body: whole.then_some(body.as_slice()),
         };
@@ -898,8 +943,6 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
 mod tests {
     use std::sync::Arc;
 
-    use hyper::client::conn::http1;
-
     use super::{Conn, Outgoing, Place, Pool, place};
     use crate::clock::RealClock;
     use crate::io::{Io, Probe, Sockets};
@@ -912,10 +955,10 @@ mod tests {
         let slot = sockets.take().unwrap();
         let held = slot.held();
         let probe = Arc::new(Probe::default());
-        let (sender, connection) =
-            http1::handshake::<_, Outgoing>(Io::new(client, probe.clone(), slot))
-                .await
-                .unwrap();
+        let (sender, connection) = super::builder()
+            .handshake::<_, Outgoing>(Io::new(client, probe.clone(), slot))
+            .await
+            .unwrap();
         let task = stamps.spawn_on(
             &tokio::runtime::Handle::current(),
             Feeds::Nothing,
@@ -965,6 +1008,96 @@ mod tests {
             assert!(matches!(held, Place::Taken(_)));
             assert!(matches!(place(&sockets, &pool), Place::Full));
             drop((taken, held));
+        });
+    }
+
+    /// A transport that is not vectored, keeping each write's bytes and
+    /// reading nothing.
+    struct Recorder(Arc<std::sync::Mutex<Vec<Vec<u8>>>>);
+
+    impl tokio::io::AsyncRead for Recorder {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            _: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    impl tokio::io::AsyncWrite for Recorder {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            self.0.lock().unwrap().push(buf.to_vec());
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Decision 22: writes vectored — over a transport that is not, hyper
+    /// queues the body after the head, never copying it into the head's
+    /// buffer: the first write is the head alone.
+    #[test]
+    fn the_body_is_queued_not_copied_into_the_head() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let stamps = Stamps::new(
+                Arc::new(RealClock::start(1_000_000).unwrap()),
+                ascetic_ddd_command_log::fills::Namespace(1),
+            );
+            let here = tokio::runtime::Handle::current();
+            let writes = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sockets = Sockets::new(1);
+            let io = Io::new(
+                Recorder(writes.clone()),
+                Arc::new(Probe::default()),
+                sockets.take().unwrap(),
+            );
+            let (mut sender, connection) =
+                super::builder().handshake::<_, Outgoing>(io).await.unwrap();
+            let driver = stamps.spawn_on(&here, Feeds::Nothing, async move {
+                let _ = connection.await;
+            });
+            let body = bytes::Bytes::from_static(b"BODY-0123456789");
+            let request = http::Request::post("http://stand.test/")
+                .header("content-length", body.len())
+                .body(Outgoing { data: Some(body) })
+                .unwrap();
+            let sent = stamps.spawn_on(&here, Feeds::Nothing, async move {
+                let _ = sender.send_request(request).await;
+            });
+            for _ in 0..16 {
+                tokio::task::yield_now().await;
+            }
+            let writes = writes.lock().unwrap().clone();
+            let first = writes.first().expect("nothing written");
+            assert!(
+                first.ends_with(b"\r\n\r\n"),
+                "{:?}",
+                String::from_utf8_lossy(first)
+            );
+            assert!(!first.windows(4).any(|w| w == b"BODY"));
+            assert!(writes.iter().any(|w| w.as_slice() == b"BODY-0123456789"));
+            sent.abort();
+            driver.abort();
         });
     }
 }

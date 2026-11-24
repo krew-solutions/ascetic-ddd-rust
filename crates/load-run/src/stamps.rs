@@ -425,33 +425,78 @@ where
 }
 
 /// Every task the shell spawns for a run, so that a stop aborts them all, and
-/// a run dropped with them (decision 18): reaped as the list grows.
+/// a run dropped with them (decision 18). A task lets go of its own handle as
+/// its future ends or is dropped (decision 22): a finished task's cell is
+/// freed at once, not kept until the list is next reaped.
 #[derive(Default)]
 pub(crate) struct Tasks {
-    handles: Mutex<Vec<AbortHandle>>,
+    inner: Mutex<Registry>,
+}
+
+#[derive(Default)]
+struct Registry {
+    next: u64,
+    live: BTreeMap<u64, AbortHandle>,
+    /// Keys whose task ended before its handle was kept.
+    gone: std::collections::BTreeSet<u64>,
+}
+
+/// Held by a task's future: its key let go when the future ends or is
+/// dropped.
+struct Reap {
+    tasks: Arc<Tasks>,
+    key: u64,
+}
+
+impl Drop for Reap {
+    fn drop(&mut self) {
+        let mut r = self.tasks.lock();
+        if r.live.remove(&self.key).is_none() {
+            r.gone.insert(self.key);
+        }
+    }
 }
 
 impl Tasks {
-    fn keep(&self, h: AbortHandle) {
-        let mut v = self.handles.lock().unwrap_or_else(PoisonError::into_inner);
-        if v.len() == v.capacity() {
-            v.retain(|h| !h.is_finished());
+    fn lock(&self) -> MutexGuard<'_, Registry> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A key for a task about to be spawned.
+    fn key(&self) -> u64 {
+        let mut r = self.lock();
+        r.next = r.next.wrapping_add(1);
+        r.next
+    }
+
+    /// The task's handle, kept unless the task already ended.
+    fn keep(&self, key: u64, h: AbortHandle) {
+        let mut r = self.lock();
+        if !r.gone.remove(&key) {
+            r.live.insert(key, h);
         }
-        v.push(h);
     }
 
     /// Aborts every task still running.
     pub(crate) fn abort(&self) {
-        let v = self.handles.lock().unwrap_or_else(PoisonError::into_inner);
-        for h in v.iter() {
+        for h in self.lock().live.values() {
             h.abort();
         }
     }
 
     /// Tasks not finished.
     pub(crate) fn running(&self) -> usize {
-        let v = self.handles.lock().unwrap_or_else(PoisonError::into_inner);
-        v.iter().filter(|h| !h.is_finished()).count()
+        self.lock()
+            .live
+            .values()
+            .filter(|h| !h.is_finished())
+            .count()
+    }
+
+    /// Handles kept: the tasks not yet ended.
+    #[cfg(test)]
+    pub(crate) fn kept(&self) -> usize {
+        self.lock().live.len()
     }
 }
 
@@ -463,7 +508,7 @@ pub(crate) struct Stamps<C> {
     namespace: Namespace,
     state: Mutex<State>,
     notify: Notify,
-    tasks: Tasks,
+    tasks: Arc<Tasks>,
 }
 
 impl<C: Clock> Stamps<C> {
@@ -478,7 +523,7 @@ impl<C: Clock> Stamps<C> {
                 deadlines: BTreeMap::new(),
             }),
             notify: Notify::new(),
-            tasks: Tasks::default(),
+            tasks: Arc::new(Tasks::default()),
         }
     }
 
@@ -530,14 +575,22 @@ impl<C: Clock> Stamps<C> {
         C: Clock,
         F: Future<Output = ()> + Send + 'static,
     {
+        let key = self.tasks.key();
+        let reap = Reap {
+            tasks: self.tasks.clone(),
+            key,
+        };
         let timed = Timed {
             clock: self.clock.clone(),
             feeds,
             pending: self.clock.now(),
-            task: Box::pin(task),
+            task: Box::pin(async move {
+                let _reap = reap;
+                task.await;
+            }),
         };
         let handle = on.spawn(timed).abort_handle();
-        self.tasks.keep(handle.clone());
+        self.tasks.keep(key, handle.clone());
         handle
     }
 
@@ -943,7 +996,42 @@ impl<C: Clock> fmt::Debug for Attempt<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ATTEMPT, CONNECTION, OFF, Path};
+    use super::{ATTEMPT, CONNECTION, Feeds, OFF, Path, Stamps};
+
+    /// Decision 22: a task lets go of its handle as it ends — after a burst
+    /// of tasks all ended, and one aborted, none is kept, though no spawn
+    /// came since to reap them.
+    #[test]
+    fn a_task_ended_is_let_go_at_once() {
+        use std::sync::Arc;
+
+        use crate::clock::RealClock;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let stamps = Stamps::new(
+                Arc::new(RealClock::start(1_000_000).unwrap()),
+                ascetic_ddd_command_log::fills::Namespace(1),
+            );
+            let here = tokio::runtime::Handle::current();
+            for _ in 0..64 {
+                stamps.spawn_on(&here, Feeds::Nothing, async {});
+            }
+            let held = stamps.spawn_on(&here, Feeds::Nothing, std::future::pending());
+            assert_eq!(stamps.tasks().kept(), 65);
+            // Every task runs and ends; the pending one is aborted.
+            for _ in 0..4 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(stamps.tasks().kept(), 1);
+            held.abort();
+            for _ in 0..4 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(stamps.tasks().kept(), 0);
+        });
+    }
 
     /// A poll's lag (decision 18): from the later of the task's last pending
     /// and the path's start on it, at most since its thread last blocked;

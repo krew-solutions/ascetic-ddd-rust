@@ -97,6 +97,32 @@ fn every_task_is_spawned_where_it_is_timed() {
     }
 }
 
+/// Decision 22: one HTTP/1.1 builder for every connection — its read size
+/// exact, its writes vectored — and no way around it: no free `handshake`,
+/// no `max_buf_size` (it unsets the exact read size).
+#[test]
+fn every_connection_takes_the_one_builder() {
+    for (name, text) in SOURCES {
+        let code: String = text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!code.contains("http1::handshake("), "{name}");
+        assert!(!code.contains("max_buf_size("), "{name}");
+        let builders = code.matches("http1::Builder::new()").count();
+        if name == "rest.rs" {
+            assert_eq!(builders, 1, "{name}");
+            assert!(
+                code.contains("read_buf_exact_size(Some(READ)).writev(true)"),
+                "{name}"
+            );
+        } else {
+            assert_eq!(builders, 0, "{name}");
+        }
+    }
+}
+
 #[test]
 fn only_the_clock_reads_a_clock() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
