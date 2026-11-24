@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d-1 built (§ Measured), K2b-8d-2 next — K2b-8 before K2b-7e, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 next under the gate — the burst the harness makes catching up (§ Owed), before K2b-7e and the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -802,6 +802,7 @@ stage 1; § Alternatives Considered keeps what each refuted):
 | K2b-8c-7a | K2b | on the real clock, the chain from admission to the run: the journal's header holding the gates that ran — `egress.probe`, `egress.descriptors` — the judging, the namespace the gates certified, T0 no earlier than the third stage's end; the stand reading the run's frame under that namespace; a probe's refusal journaled by the library — no T0, no gate passed, its fault the only line; `run` refusing an `Admitted` and a `Ready` built by hand (`compile_fail` doctests, their error codes pinned); every assumption's constructor held to `testing` (the lint, five counted); a carrier built from a header not the plan's refused | no probe in the chain; no re-read in the chain; no T0 in the header; another namespace run; the frames' namespace the config's; a header of its own carried; a plan assumed in a host's build |
 | K2b-8c-7b | K2b | journal version 8 — the golden holding admission's evidence, every field at its bounds, the schema its `admission`, `source_fit`, `descriptors_read`; the differential's journals re-pinned (8, 4), their classes version 7's; the chain's header holding the source's need, cap and events, the descriptors read, the plan assumed; a barred run's too; a replayed plan on `Live` not assumed, on a test's runtimes assumed; five thousand closing reports counted by their code in `Ran` | no evidence journaled; no source's fit; no descriptors read; the plan's assumption alone; the runtimes' alone; reports uncounted |
 | K2b-8d-1 | K2b | on the real clock, a source of four sockets: `Live::for_caps`' runtime reading every answer in the host at the look, three answers, the driver's own wake and the target's ready across a spin past the deadline; a runtime taking four events a turn, claiming six, missing the fifth in some run — a false Root I1 forbids; no socket the shell closes in `TIME_WAIT` on its source's address — closed by the stand's `connection: close`, pooled and closed at the run's end, censored and reset; measured on purpose (`ports.rs`, ignored: two minutes), a bound source's ports out at its bind and an unbound one's at its connect, each `egress.ports` | no zero linger; `Live` building fewer events than it records |
+| K2b-8d-2 | K2b | a whole process stopped 1.5 s by `SIGSTOP` mid-run beside a stand of its own process answering at once and refusing connects 40 ms in every 100, two thousand reads 2 ms apart, each on a connection of its own: no censor — sent, or never sent — a Root, in every run (some five hundred never-sent reports a run, every one undecided); the stand's own resets and the system's answers in the machine's catch-up burst counted, not asserted (decision 21 owed) | — (the timer rule's mutants survive it: § Measured) |
 | K2-1 | K2 | the shell against an in-memory transport (hyper over `tokio::io::duplex`) under paused time reproduces `sim`'s journal | `std::time::Instant` in a handler |
 | K2-2 | K2 | each cause delayed alone — the reader, the token, the pool, the connect, the write, the dependency — moves exactly one gap of the chain | a gap merged |
 | K2-3 | K2 | on the real clock, multi-thread: chain order, no release before its stamped met instants, the stub's requests per correlation id equal the journal's attempts — a keep-alive connection closed as it is reused included; a request processed then reset before the answer is Unknown; a response stamped 1 µs before its deadline delivered after the tick is Expected | hyper's hidden retry; Unknown read as not taken; deadlines by arrival |
@@ -1721,6 +1722,26 @@ observed.
   which carries the journal, was not kept — the next sighting's is.
 - The sweep killed both mutants.
 
+**K2b-8d-2 — a whole process stalled** (2026-11-24, § Owed's stall twin): `tests/stall.rs`, a test binary of its own —
+a child stops it with `SIGSTOP` 1 s into the run for 1.5 s; the stand, a Python process of its own, answers every
+request at once and closes its listener 40 ms in every 100; two thousand reads 2 ms apart, deadlines 500 ms, each on
+a connection of its own (retired at once); the journal folded, each Root classed by its path.
+- **No censor a Root**, in some fifteen runs: a sent censor's or a never-sent report's — some five hundred reports
+  a run (`rest.connecting` most, `rest.floor`, `rest.pooling`, `rest.writing`), every one undecided. The wake-latency
+  blind spot (§ Owed) made no false Root here.
+- **Roots of two other kinds.** (1) The stand's own: closing its listener resets what its backlog held — 3 to 7 a run
+  in some runs, steps released on time: true, the stand's. (2) **The burst the harness makes catching up**: the
+  machine, stopped too, reads and releases the stalled stretch's steps at once on resuming — some 1.27 s past their
+  plan — and the stand, meeting some six hundred connects at once, resets some; 10 and 12 Roots in two runs, each an
+  answer the system gave to a step released far past J, which decision 17 makes the system's own however late it was
+  sent. The verdict reads **Fail** on a load the plan never asked of the stand: owed — decision 21, under the gate,
+  before the first host run.
+- The timer rule's mutants (a completed timer's due unnoted, a dropped one's) survive this twin — its censors are
+  undecided by paths besides — and are killed by `lag.rs`'s twins; why no attempt refused just before the stop, its
+  floor across it, makes a Root under them is not established here.
+- A hog over the deadline while connecting or writing on a thread others hold is the source thread's lag (K2b-7c-2's
+  twins, the path's lag counted from the thread's last blocked park); the stall twin is its whole-process case.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -1827,6 +1848,12 @@ only and measures move to the 12-core box.
   bound socket's bind, `EADDRNOTAVAIL` at an unbound one's connect; Verifiability) — K2b-8d, in a namespace with a
   ten-port range; **a read-ahead floor against the looks' slack** — trigger: a run with `rest.cap.*` reports;
   **the counts of reports by code** in `Ran` or the fold — with K2b-8c-7's evidence.
+- **The burst the harness makes catching up** (found by K2b-8d-2's stall twin, 2026-11-24): a harness stalled — its
+  machine with it — releases the stalled stretch's steps at once when it resumes, each past its plan by the stall; the
+  stand's answers to them, a reset under the burst among them, are the system's own by decision 17 however late
+  sent, and a run reads Fail on a load its plan never asked of the stand. Owed: **decision 21, under the gate, before
+  the first host run** — how the harness's lateness in releasing a step bears on the system's answer to it, and on the
+  load the steps around it met.
 - **A lag sampler per source** (decision 9, K2b-1): for measures' intervals, not the fold's rules — K5's report, with
   the machine's own runtime set apart from the sources' (`Live` runs the sources; the composition root runs the
   machine).
@@ -1965,3 +1992,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   counted by code. K2b-8c built.
 - 2026-11-24: K2b-8d-1 built (§ Measured): a driver's events against the cap on the real clock, no `TIME_WAIT` left
   by the shell, exhausted ports measured. K2b-8d cut in two.
+- 2026-11-24: K2b-8d-2 built (§ Measured): a whole process stalled — no censor a Root; the burst the harness makes
+  catching up found to make Roots of the system's answers (decision 17) — owed, decision 21. K2b-8d built.
