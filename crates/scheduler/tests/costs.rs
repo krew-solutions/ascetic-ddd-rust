@@ -47,15 +47,14 @@ unsafe impl GlobalAlloc for Counting {
         NOW.fetch_sub(layout.size(), Relaxed);
     }
 
+    /// The new size counted before the old is let go: a block moved holds
+    /// both at once, and the system's realloc may move it.
     unsafe fn realloc(&self, p: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         // SAFETY: the caller's contract, passed on.
         let q = unsafe { System.realloc(p, layout, size) };
         if !q.is_null() {
-            if size >= layout.size() {
-                grew(size - layout.size());
-            } else {
-                NOW.fetch_sub(layout.size() - size, Relaxed);
-            }
+            grew(size);
+            NOW.fetch_sub(layout.size(), Relaxed);
         }
         q
     }
@@ -64,11 +63,20 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
-/// One plan of `lines` steps a line every `every` µs, through `sim` with every
-/// answer `answer` µs after its send, W `w` µs; each step its own label when
-/// `keys`, so that every line is a barrier key of its own. The machine's peak
-/// heap, the run, and the log's mean line bytes.
-fn costs(lines: u64, every: u64, answer: u64, w: u64, keys: bool) -> (usize, Run, u64) {
+/// One plan of `lines` steps a line every `every` µs from `start` — all at
+/// one instant when `every` is 0 —, through `sim` with every answer `answer` µs after its send, W `w` µs;
+/// each step its own label when `keys`, so that every line is a barrier key
+/// of its own; a REST read when `rest`, a host call otherwise. The machine's
+/// peak heap, the run, and the log's mean line bytes.
+fn costs(
+    lines: u64,
+    start: u64,
+    every: u64,
+    answer: u64,
+    w: u64,
+    keys: bool,
+    rest: bool,
+) -> (usize, Run, u64) {
     let header = Header {
         window: w,
         read_ahead: w.min(1_000),
@@ -80,7 +88,11 @@ fn costs(lines: u64, every: u64, answer: u64, w: u64, keys: bool) -> (usize, Run
         } else {
             "call".to_owned()
         };
-        step(id("device", i, &label, 0), i * every)
+        if rest {
+            call("read", i, 0, start + i * every, 0)
+        } else {
+            step(id("device", i, &label, 0), start + i * every)
+        }
     };
     let bytes = bytes(header.clone(), &(0..lines).map(record).collect::<Vec<_>>());
     let line = (bytes.len() as u64) / lines.max(1);
@@ -107,12 +119,75 @@ fn costs(lines: u64, every: u64, answer: u64, w: u64, keys: bool) -> (usize, Run
 /// barrier keys — each peak within what `fits::needed` says of its counts.
 #[test]
 fn the_machine_holds_no_more_than_fits_counts() {
-    for (name, lines, every, answer, w, keys) in [
-        ("ended in the window", 40_000, 50, 100, 1_000_000, false),
-        ("not ended", 40_000, 50, 500_000, 1_000, false),
-        ("barrier keys", 40_000, 50, 100, 1_000, true),
+    let mut over = Vec::new();
+    // Each row's counts just past a power of two where a container grows
+    // with them — a block moved holds the old and the new at once — or
+    // read ahead and released at one instant, a burst of outputs and inputs.
+    for (name, lines, start, every, answer, w, keys, rest) in [
+        (
+            "ended in the window",
+            40_000,
+            0,
+            50,
+            100,
+            1_000_000,
+            false,
+            false,
+        ),
+        (
+            "ended in the window, 2^14 + 1",
+            40_000,
+            0,
+            50,
+            100,
+            819_200,
+            false,
+            false,
+        ),
+        ("not ended", 40_000, 0, 50, 500_000, 1_000, false, false),
+        ("barrier keys", 40_000, 0, 50, 100, 1_000, true, false),
+        (
+            "REST reads not ended, 2^13 + 1",
+            40_000,
+            0,
+            50,
+            409_600,
+            1_000,
+            false,
+            true,
+        ),
+        (
+            "host calls at one instant",
+            32_769,
+            10_000,
+            0,
+            500_000,
+            1_000,
+            false,
+            false,
+        ),
+        (
+            "REST reads at one instant",
+            32_769,
+            10_000,
+            0,
+            500_000,
+            1_000,
+            false,
+            true,
+        ),
+        (
+            "REST reads at one instant, at 0",
+            32_769,
+            0,
+            0,
+            500_000,
+            1_000,
+            false,
+            true,
+        ),
     ] {
-        let (peak, ran, line) = costs(lines, every, answer, w, keys);
+        let (peak, ran, line) = costs(lines, start, every, answer, w, keys, rest);
         let peaks = Peaks {
             held: ran.held as u64,
             pending: ran.pending as u64,
@@ -127,9 +202,9 @@ fn the_machine_holds_no_more_than_fits_counts() {
             ran.barriers,
             peak as u64 / (ran.held as u64).max(1)
         );
-        assert!(
-            peak as u64 <= needed,
-            "{name}: {peak} B held, {needed} counted"
-        );
+        if peak as u64 > needed {
+            over.push(format!("{name}: {peak} B held, {needed} counted"));
+        }
     }
+    assert!(over.is_empty(), "{over:#?}");
 }

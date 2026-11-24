@@ -7,19 +7,23 @@
 //! key [`BARRIER`]. The steps not ended are among those held, so a plan needs
 //! `held · ENDED_CELL + pending · (LIVE_CELL − ENDED_CELL + line) + barriers ·
 //! BARRIER`. The costs are upper bounds `tests/costs.rs` measures and pins:
-//! some 30 % above what it measured on the fixture's records (2026-11-22: 896
-//! B an ended step, 1,389 B a step not ended beside its 270-byte line, 556 B a
-//! key).
+//! some 30 % above the worst it measured on the fixture's records, each count
+//! just past a power of two where a container grows with it, a block moved
+//! counted at its old and new sizes at once (2026-11-24, ADR-0047 K2b-7e-2:
+//! 927 B an ended step; 3,144 B a REST read not ended beside its 364-byte
+//! line, read ahead and released with 32,768 others at one instant — their
+//! outputs and inputs at once; 569 B a key).
 
 use ascetic_ddd_command_log::record::Header;
 use ascetic_ddd_command_log::validate::Peaks;
 
 /// The bytes an ended step's cell holds at most, its share of the window and
 /// of the cells' map included.
-pub const ENDED_CELL: u64 = 1_152;
+pub const ENDED_CELL: u64 = 1_216;
 /// The bytes a step not ended holds at most beside its line's: its cell with
-/// its record's structure, its wake, its inputs in flight.
-pub const LIVE_CELL: u64 = 1_792;
+/// its record's structure, its wake, its inputs in flight, its share of the
+/// outputs of a burst released at one instant.
+pub const LIVE_CELL: u64 = 3_776;
 /// The bytes a barrier key holds at most: its summary and its map node.
 pub const BARRIER: u64 = 768;
 

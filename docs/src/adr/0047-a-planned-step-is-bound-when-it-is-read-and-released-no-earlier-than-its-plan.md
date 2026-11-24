@@ -39,7 +39,10 @@ To be built in slices, each a commit of its own:
   in the built shell; **K2b-7b** journal version 6 — a run's stop, the source thread's lag, the stages' evidence —
   in the pure fold; **K2b-7c** the shell's stop and its lag, in two: **K2b-7c-1** the stop, **K2b-7c-2** the source
   thread's lag, its park detector measured first; **K2b-7d** the three stages before T0; **K2b-7e** the
-  shell's memory; **K2b-8** a censored attempt's connection, its closing report and the ports (decision 19), in
+  shell's memory (decision 22), in five — **K2b-7e-1** the constants by construction; **K2b-7e-2** admission, in three
+  — **K2b-7e-2a** the costs stated and held, `fits` re-pinned, **K2b-7e-2b** a stated memory, I1 and I2, the refusal
+  and the evidence, **K2b-7e-2c** the cgroup's memory; **K2b-7e-3** the read gate; **K2b-7e-4** the parse; **K2b-7e-5**
+  a waiting budget, if a real plan needs it; **K2b-8** a censored attempt's connection, its closing report and the ports (decision 19), in
   four: **K2b-8a** journal version 7 in the pure fold; **K2b-8b** the shell's censor, report and connect errors, in two — **K2b-8b-1** a connect's failure classed, zero
   linger, no shutdown, saturation by age; **K2b-8b-2** the reset at the censor, no byte or hand-over at the deadline,
   an unused connection pooled, a timer's exact lag;
@@ -730,10 +733,12 @@ which `admit` never called; § Alternatives Considered keeps what each refuted):
   into the head's buffer); a head past the read size, or past hyper's hundred headers, a fault that stops the run
   naming the operation — never `Broken`, the system's Unknown (a declared head limit owed); the counting `Io`'s
   scratch one a thread, not one a connection (it is used only inside one synchronous read); an answer's body sized
-  from its Content-Length, at most the cap, a length past the cap unreadable at its head (no doubling, no allocation
-  a forged length could abort); the response's headers copied and its parts dropped before the body (a header slices
-  the read buffer and pinned it); a finished attempt's task cell let go at once. The carrier states each cost —
-  `CONNECTION`, `ATTEMPT`, a source's — and the executors hold them two-sided.
+  from its Content-Length, at most the cap, a length past the cap unreadable at its head, a body of no length reserved
+  at the cap (no doubling — it held twice the cap, K2b-7e-2a —, no allocation a forged length could abort); the
+  response's headers copied and its parts dropped before the body (a header slices the read buffer and pinned it); a
+  finished attempt's task cell let go at once. The carrier states each cost (`carrier::Costs`: a connection, an
+  attempt beside it, an answer at the cap with its head at its worst), the shell its own share an attempt
+  (`run::ATTEMPT`), a source's its own (K2b-7e-2b) — and the executors hold them two-sided.
 - **A memory the operator states** (K2b-7e-2): `Memory { bytes }` — declared, or derived from the process's cgroup as
   the least `memory.max` of its ancestors, refusing `max` with its remedy (a scope with `MemoryMax`), never the host's
   free memory guessed; I1, soundness: the machine's share, the attempts' cap times `ATTEMPT`, the sockets' caps times
@@ -746,8 +751,10 @@ which `admit` never called; § Alternatives Considered keeps what each refuted):
 - **The parse bounded** (K2b-7e-4): the body's state journaled (whole, cut at the cap, unparsed and why) — an answer
   the harness could not parse is the harness's, never `Unexpected`; the allowance structural (nodes, string bytes,
   depth), its twin in `json.py`.
-- **Cut**: K2b-7e-1 the constants; K2b-7e-2 admission; K2b-7e-3 the read gate; K2b-7e-4 the parse; K2b-7e-5 a waiting
-  budget, if a real plan needs it.
+- **Cut**: K2b-7e-1 the constants; K2b-7e-2 admission, in three — K2b-7e-2a the costs stated and held (and `fits`
+  re-pinned, its executor's margin found an under-count), K2b-7e-2b `Memory`, I1 and I2, the refusal and the
+  evidence, K2b-7e-2c the cgroup's memory; K2b-7e-3 the read gate; K2b-7e-4 the parse; K2b-7e-5 a waiting budget, if
+  a real plan needs it.
 
 ## Consequences
 
@@ -946,6 +953,7 @@ which `admit` never called; § Alternatives Considered keeps what each refuted):
 | K2b-8d-1 | K2b | on the real clock, a source of four sockets: `Live::for_caps`' runtime reading every answer in the host at the look, three answers, the driver's own wake and the target's ready across a spin past the deadline; a runtime taking four events a turn, claiming six, missing the fifth in some run — a false Root I1 forbids; no socket the shell closes in `TIME_WAIT` on its source's address — closed by the stand's `connection: close`, pooled and closed at the run's end, censored and reset; measured on purpose (`ports.rs`, ignored: two minutes), a bound source's ports out at its bind and an unbound one's at its connect, each `egress.ports` | no zero linger; `Live` building fewer events than it records |
 | K2b-8d-2 | K2b | a whole process stopped 1.5 s by `SIGSTOP` mid-run beside a stand of its own process answering at once and refusing connects 40 ms in every 100, two thousand reads 2 ms apart, each on a connection of its own: no censor — sent, or never sent — a Root, in every run (some five hundred never-sent reports a run, every one undecided); the stand's own resets and the system's answers in the machine's catch-up burst counted, not asserted (decision 21 owed) | — (the timer rule's mutants survive it: § Measured) |
 | K2b-7e-1 | K2b | a head of 16,384 bytes parsed, of 16,385 or of a hundred and one headers the run stopped naming `rest.head`; a forged length of 2^62 unread at its head; over a transport not vectored the first write the head alone, the body queued after it; after a burst of tasks ended and one aborted, no handle kept; one builder in the shell, no free handshake, no `max_buf_size` (the lint) | the exact read size dropped; writes flattened; a head too large left `Broken`; a length past the cap read; the body sized from any length |
+| K2b-7e-2a | K2b | `tests/costs.rs` (a binary of its own: an allocator tagging each block with its owner, a moved block counted at both sizes, a pipe of rings the stand allocates, `sim` subtracting the machine at the same states, two sizes just past powers of two): the shell's share an attempt, a connection idle, an attempt beside it, each within `[80 %, 100 %]` of what is stated; a body held whole at its length, or at the cap with no length, within a KiB of it while its first part is read; the worst head within `[85 %, 100 %]` of `HEAD`, every answer within its charge; the scheduler's `tests/costs.rs` holding a burst of 32,769 host calls and of REST reads at one instant, a REST read not ended and an ended step just past powers of two within what `fits` counts | the exact read size dropped; a declared body not sized; a body of no length grown by doubling; the head's parts kept through the body; an answer charged its body only; `fits`' live cell as it was; a finished task's handle kept (its unit twin) |
 | K2b-9a | K2b | the machine's poll grid at the plan's instant: an observation read at 250 polled at 300, 400 …, read on a point at 600 polled there once, two read together at 620 on their own phases; the differential with `schedule.py` moved alike, settled run by run against machine 4 (16 of 3,944 changed, each at a poll of an observation released late) | the grid at `released`; the release's point not held (polled twice at one instant) |
 | K2b-9b-1 | K2b | journal version 9 — the golden holding the run's catch-up at 999, a refusal read, `decorated` on a `Sent`, both sides of a never-sent report's `decorated` and a found answer's `handed`; the schema and `journal.py` alike; a rate deviation read as a refusal, another rule's and none not; the differential's journals and the golden runs settled against version 8, the new fields removed, every line the same | a rate deviation unread; any rule read as a refusal |
 | K2b-9b-2 | K2b | `scheduler::pace`: each attempt handed at the later of its earliest and the instant it came, every pair keeping the rule by brute force, a microsecond sooner some pair breaking (κ ∈ {0, 1, 100, 500, 999}, J ∈ {0, 1, 250, 2000}); every hand-off within `(1 − κ)·J` of its raw never paced; the band — a dispatched batch in raw order, the rest paced to the instant computed by hand; an attempt not arrived holding the front; a head whose pace falls past its deadline leaving; a straggler within the band passing; an attempt past its deadline beyond the band leaving, so the next turn never names an instant gone | the allowance J; κ ignored; rounding down; the mirror term dropped; the band unbounded; arrival ignored; never late — each red |
@@ -1143,7 +1151,9 @@ barrier (the validator counts none); `Machine::new` refuses a read-ahead past th
 pending · (LIVE_CELL − ENDED_CELL + line) + barriers · BARRIER` — or a read-ahead past the header's, naming the part.
 - **Executors**: `tests/costs.rs` measures, on the machine streaming three plans, 896 B an ended step held, 1,389 B a
   step not ended beside its 270-byte line, 556 B a barrier key, and holds each plan's peak within what `fits` counts
-  of its own counts (`ENDED_CELL` 1,152, `LIVE_CELL` 1,792, `BARRIER` 768, some 30 % above); a cell keeping its record
+  of its own counts (`ENDED_CELL` 1,152, `LIVE_CELL` 1,792, `BARRIER` 768, some 30 % above — re-pinned by K2b-7e-2a
+  to 1,216, 3,776 and 768, § Measured: that margin was its allocator counting a block moved as grown in place, and no
+  row released a burst at one instant or held a REST read); a cell keeping its record
   at the end is red (1,542 B an ended step). The differential holds the machine to the validator's bound on every run
   whose reads all lie within `[at − L, at]` — 822 of 3,780, 348 of them with a reader lagging, base logs also under
   timeouts on W's scale, an at-deadline script beside the three: no step released past its `R̂` or ended past its
@@ -1909,6 +1919,49 @@ a connection of its own (retired at once); the journal folded, each Root classed
 - A hog over the deadline while connecting or writing on a thread others hold is the source thread's lag (K2b-7c-2's
   twins, the path's lag counted from the thread's last blocked park); the stall twin is its whole-process case.
 
+**K2b-7e-2a — the shell's costs stated and held; `fits` re-pinned** (2026-11-24, decision 22): the carrier states
+what its parts hold (`carrier::Costs` in `Needs::Sockets`: a connection, an attempt beside it, an answer at the
+profile's cap), the shell its own share an attempt (`run::ATTEMPT`); `tests/costs.rs`, a binary of its own, holds each
+two-sided — at most what is stated, at least 80 % of it (85 % for the worst head):
+- **The instrument.** An allocator tagging every block with its owner in a prefix: the stand's futures run tagged,
+  and their blocks are theirs wherever they are let go; a block moved counted at its old and its new size at once
+  (V2: the system's realloc may hold both). A pipe of two fixed rings the stand allocates — a socket's buffers are the
+  kernel's, never the harness's heap. The virtual clock, sampled at instants where nothing else is due: the bytes
+  held and the peak since the instant before. The machine's own bytes subtracted by `sim` running the same plan,
+  sampled at its probes' dispatch; the run's constants by two sizes of the plan, each just past a power of two
+  (257 and 513; the shell's share 4,097 and 8,193), where a container growing with them holds the most a read. The
+  counts are the same unoptimised and optimised.
+- **Measured**, a read's share beside the machine:
+
+| part | measured | stated |
+|---|---|---|
+| the shell's own share an attempt, held or at the burst of its dispatch | 1,316 B | `run::ATTEMPT` 1,536 B |
+| a connection idle in its pool: its read block, its write buffer, its task, its place | 37,136 B | `rest::CONNECTION` 40,960 B |
+| an attempt beside its connection: its task, its frame, its request in flight | 4,619 B | `rest::ATTEMPT` 5,120 B |
+| an answer's head at its worst: 16,384 bytes in a hundred fields, its bulk in their names | 69,718 B | `rest::HEAD` 77,824 B |
+| an answer of 2 bytes, its head small | 17,133 B | the cap and `HEAD` |
+| an answer of 65,537 bytes at the cap, its length declared / chunked | 81,720 / 65,341 B | 143,361 B |
+
+- **Found, and taken into the constants.** (1) **A read block an answer pins**: hyper reads again before the attempt
+  can copy the head, and the head's slice keeps the first 16 KiB block, so every answer holds a second block until
+  its attempt runs — the "read block" Verifiability put in an answer's charge. (2) **A head's three copies**: that
+  block, hyper's map of it (it copies a custom name, slices a value), the judge's copy; a head at hyper's limit costs
+  up to 69.7 kB, its bulk in long names the worst (54.3 kB in values, 49.9 kB in three fields). (3) **A body of no
+  length grew by doubling** — up to twice the cap, three times while a block moved —, beyond what an answer is
+  charged: now reserved at the cap, never grown (its pages untouched stay out of RSS); the chunked row holds it.
+  (4) **`fits` under-counted the machine**: a REST read not ended 2,181 B a step against 2,157 counted, and a burst
+  read ahead and released at one instant — its outputs and inputs at once, 840 B a read — 2,916 B a host call and
+  3,144 B a REST read against some 2,050 and 2,140; its stated 30 % margin was its allocator counting a block moved as
+  grown in place. Re-pinned some 30 % above the worst row: `LIVE_CELL` 1,792 → 3,776, `ENDED_CELL` 1,152 → 1,216
+  (927 B measured), `BARRIER` kept (569 B); the scheduler's executor gains those rows, each count just past a power of
+  two, and a moved block counted at both sizes.
+- **Mutants**, each alone, each red: the exact read size dropped (a connection idle below 80 % of its stated cost, a
+  body's first part held off its length); a declared body not sized, and a body of no length grown by doubling (the
+  first part held off the body's size); the head's parts kept through the body (the same, and the worst head past
+  `HEAD`); an answer charged its body only (every answer past its charge); `fits`' live cell as it was (the
+  scheduler's executor); a finished task's handle kept — below the bands' resolution, red by its white-box twin
+  (`a_task_ended_is_let_go_at_once`).
+
 **K2b-7e-1 — the shell's constants by construction** (2026-11-24, decision 22): one HTTP/1.1 builder
 (`rest::builder`: reads exact at `READ` = 16 KiB, writes vectored) for every connection, the pool test's too; a head
 past it, or past hyper's hundred headers, a fault `rest.head` naming the operation (a client build of hyper has no
@@ -2206,7 +2259,10 @@ only and measures move to the 12-core box.
   under-counts a bulk phase: the validator commits the pending set's bytes); **the plan's pending per source**;
   **a host's `Io`'s own heap** (TLS) stated by its `Egress`; **hyper pinned** (`=1.11.1`) or a stage-2 behavioural
   self-check; **a streaming judge** (a body never held whole) — trigger: a waiting budget voiding a host run, or
-  judging holds past J; **the memory's evidence** (memory.pressure, events, peak bracketed; gate closures as lines; a
+  judging holds past J; **captured values' bytes** (K2b-7e-2a: `fits` counts no capture — `Peaks.captures` is
+  unused, and a value captured from a body may reach the cap) — trigger: a host plan capturing from bodies; **a head
+  limit below `READ`** would shrink `HEAD` (69.7 kB at hyper's limit, 17 kB at a small head) — with the declared head
+  limit above; **the memory's evidence** (memory.pressure, events, peak bracketed; gate closures as lines; a
   periodic sample, so a run the OOM killer took still shows its memory).
 - **Decision 21's raw dues — a dead end, its next question** (2026-11-24; § Measured, § Alternatives Considered): three
   rules refuted, each fixing one constraint and breaking another; their common premise, a catch-up (κ > 0). The next
@@ -2407,3 +2463,8 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-24: K2b-7e-1 built (§ Measured): the shell's constants by construction — one builder, a head too large a
   fault, the scratch one a thread, the body sized from its length, the head copied first, a task's handle let go at
   its end; a pooled connection 39.8 kB however large the answers it read.
+- 2026-11-24: K2b-7e-2a built (§ Measured): the costs the carrier and the shell state, held two-sided by a tagging
+  allocator under the virtual clock; an answer's charge its body at the cap and its head at its worst (a read block
+  pinned, hyper's map, the judge's copy: 69.7 kB); a body of no length reserved at the cap, no longer doubled to twice
+  it (decision 22 amended); `fits` found under-counting — a burst released at one instant, a REST read, a moved block
+  counted once — and re-pinned (`LIVE_CELL` 3,776, `ENDED_CELL` 1,216; decision 7's executor). K2b-7e-2 cut in three.

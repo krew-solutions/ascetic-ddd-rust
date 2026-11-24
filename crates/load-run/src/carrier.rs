@@ -18,13 +18,33 @@ pub enum Needs {
     /// No socket of its own on the source's runtime: a test's script.
     Nothing,
     /// Sockets on the source's runtime: `needed` at once under the plan's
-    /// bound, at most `cap` held.
+    /// bound, at most `cap` held, each part's bytes as `costs` states them.
     Sockets {
         /// At once, under the plan's bound.
         needed: u64,
         /// Its cap on the source.
         cap: usize,
+        /// What its parts hold (decision 22).
+        costs: Costs,
     },
+}
+
+/// The bytes a carrier's parts hold at most (ADR-0047 decision 22), beside
+/// the machine's cells and the shell's own share an attempt
+/// ([`ATTEMPT`](crate::run::ATTEMPT)): each an upper bound over the part's
+/// life, transients included, that its executor holds two-sided
+/// (`tests/costs.rs`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Costs {
+    /// A connection, pooled or in use: its buffers, its task, its place in
+    /// its pool.
+    pub connection: u64,
+    /// An attempt beside its connection: its task, its frame, its request in
+    /// flight.
+    pub attempt: u64,
+    /// An answer being read at the profile's cap: its body, and its head as
+    /// it is read and copied.
+    pub answer: u64,
 }
 
 /// A probe's failure (decision 20): the declared endpoint's index, and how —

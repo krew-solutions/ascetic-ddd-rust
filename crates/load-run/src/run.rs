@@ -103,6 +103,12 @@ impl Runtimes {
 /// the journal's file, a gate's client, the host's own.
 pub const DESCRIPTORS_RESERVE: u64 = 16;
 
+/// The bytes an attempt holds at most beside the machine's cell and its
+/// carrier's parts (ADR-0047 decision 22): its task's own, its stamps, its
+/// inputs in flight — the shell's share, whatever carries it; held two-sided
+/// by `tests/costs.rs` against a carrier that holds nothing of its own.
+pub const ATTEMPT: u64 = 1_536;
+
 /// The I/O events a source's driver spends a turn on its own (decision 20):
 /// its waker, and its signal receiver when tokio's `signal` feature is
 /// compiled in — an upper bound.
@@ -514,7 +520,7 @@ pub fn admit<C: Clock, X: Carrier<C>>(
         let needs = carrier
             .needs(plan.peaks(), source)
             .map_err(|why| refused(Inadmissible::Carrier(why)))?;
-        if let Needs::Sockets { needed, cap } = needs {
+        if let Needs::Sockets { needed, cap, .. } = needs {
             // I1: a look's verified turn sees every ready socket.
             let events = runtimes.events(source);
             let fits = cap

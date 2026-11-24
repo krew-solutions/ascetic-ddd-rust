@@ -31,7 +31,7 @@ use http_body::{Body, Frame as BodyFrame, SizeHint};
 use hyper::client::conn::http1::{self, SendRequest};
 use tokio::task::AbortHandle;
 
-use crate::carrier::{Carrier, Needs, Unprobed};
+use crate::carrier::{Carrier, Costs, Needs, Unprobed};
 use crate::clock::Clock;
 use crate::decorate::{Decoration, Decorator, Undecorated};
 use crate::io::{Held, Io, Probe, Slot, Sockets};
@@ -291,7 +291,8 @@ impl<C: Clock, S: Stand, E: Egress, D: Decorator> Carrier<C> for RestCarrier<S, 
     }
 
     /// A socket an attempt not ended, under the plan's bound its pending
-    /// steps (one HTTP/1.1 request a connection); its cap the egress's.
+    /// steps (one HTTP/1.1 request a connection); its cap the egress's; an
+    /// answer charged its body at the profile's cap and its head at its worst.
     fn needs(
         &self,
         peaks: &ascetic_ddd_command_log::validate::Peaks,
@@ -304,6 +305,11 @@ impl<C: Clock, S: Stand, E: Egress, D: Decorator> Carrier<C> for RestCarrier<S, 
         Ok(Needs::Sockets {
             needed: peaks.pending,
             cap: sockets.cap(),
+            costs: Costs {
+                connection: CONNECTION,
+                attempt: ATTEMPT,
+                answer: self.inner.header.profile.answer_cap.saturating_add(HEAD),
+            },
         })
     }
 
@@ -509,6 +515,20 @@ fn build(
 /// reads exact, its buffer never grown to a body's or a head's size — a head
 /// past it a fault.
 pub const READ: usize = 16 * 1024;
+
+/// The bytes a connection holds at most, pooled or in use (decision 22): its
+/// read block of [`READ`], its write buffer, its task, its place in its pool.
+pub const CONNECTION: u64 = 40_960;
+
+/// The bytes an attempt holds at most beside its connection and the shell's
+/// own share (decision 22): its task, its frame, its request in flight.
+pub const ATTEMPT: u64 = 5_120;
+
+/// The bytes an answer's head holds at most as it is read and copied
+/// (decision 22): the read block it pins until it is copied, hyper's map of
+/// it, the copy the judge reads — a head of [`READ`] bytes in a hundred
+/// fields, its bulk in their names (hyper copies a name; a value it slices).
+pub const HEAD: u64 = 77_824;
 
 /// The one HTTP/1.1 client builder every connection takes (decision 22): reads
 /// of exactly [`READ`]; writes vectored — a body queued, never copied into the
@@ -852,11 +872,17 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
             .and_then(|v| v.trim().parse::<u64>().ok())
             .map(|l| usize::try_from(l).unwrap_or(usize::MAX));
         drop(parts);
-        // The body sized from its length, at most the cap (decision 22): no
-        // doubling, no allocation a forged length could abort; a length past
-        // the cap unreadable at its head — unread, and the connection closed.
+        // The body sized at once, never grown (decision 22): its length, at
+        // most the cap — a length past the cap unreadable at its head, unread
+        // and the connection closed; a body of no length, the cap — what an
+        // answer is charged, never twice it by doubling; no allocation a
+        // forged length could abort.
         let mut whole = length.is_none_or(|l| l <= cap);
-        let mut body = Vec::with_capacity(length.filter(|_| whole).unwrap_or(0));
+        let mut body = Vec::with_capacity(match length {
+            Some(l) if whole => l,
+            Some(_) => 0,
+            None => cap,
+        });
         while whole {
             let next = tokio::select! {
                 biased;
