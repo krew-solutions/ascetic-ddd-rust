@@ -1,4 +1,4 @@
-{"header":{"journal":8,"machine":4,"source":"verdict","log":"f32b62d5a84c331b3b356cecbfc2c471dfde1321dfd868c2491fbbece5dc0faf","validator":"a test's validator","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000","gates":[],"judging":null,"admission":null}}
+{"header":{"journal":8,"machine":5,"source":"verdict","log":"f32b62d5a84c331b3b356cecbfc2c471dfde1321dfd868c2491fbbece5dc0faf","validator":"a test's validator","read_ahead":"1000","jitter":"200","resend":"100","namespace":"1","t0":"1763640000000000","gates":[],"judging":null,"admission":null}}
 {"read":{"at":"0","line":"2","key":{"kind":"device","scope":"Bw==","label":"update","n":0},"action":"rest","safety":"never","cause":null,"after":[],"planned":"0"}}
 {"released":{"at":"0","line":"2","intended":"0","released":"0","deadline":"10000000"}}
 {"dispatch":{"at":"0","line":"2","attempt":1,"deadline":"10000000","due":"0"}}
@@ -9,4 +9,4 @@
 {"end":{"at":"50","line":"2","end":"unexpected","read":"0","ready":"0","intended":"0","released":"0","dispatched":"0","sent":"0","ended":"50","attempts":1,"critical":null,"bound":[],"fault":false,"wake":null}}
 {"end":{"at":"50","line":"3","end":{"skipped":{"dependency":"2"}},"read":"0","ready":"0","intended":"50","released":"50","dispatched":null,"sent":null,"ended":"50","attempts":0,"critical":null,"bound":["2"],"fault":false,"wake":null}}
 {"end":{"at":"50","line":"4","end":{"skipped":{"dependency":"3"}},"read":"0","ready":"0","intended":"50","released":"50","dispatched":null,"sent":null,"ended":"50","attempts":0,"critical":null,"bound":["3"],"fault":false,"wake":null}}
-{"trailer":{"events":"10","steps":"3","sha256":"57fb6c3df1466cba6b4969258c304501d59687302c8458ce20e62581f0a518e8"}}
+{"trailer":{"events":"10","steps":"3","sha256":"cfdff3514a329c1019fa5d147c7f66b97356b70c5c330884937664fb9fdc9aac"}}

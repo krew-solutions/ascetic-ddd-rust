@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21), K2b-9 to build it, then K2b-7e and the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a built (§ Measured), K2b-9b to 9d next, then K2b-7e and the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -896,7 +896,7 @@ amends decision 17; § Alternatives Considered keeps what each round refuted):
 | K2b-8c-7b | K2b | journal version 8 — the golden holding admission's evidence, every field at its bounds, the schema its `admission`, `source_fit`, `descriptors_read`; the differential's journals re-pinned (8, 4), their classes version 7's; the chain's header holding the source's need, cap and events, the descriptors read, the plan assumed; a barred run's too; a replayed plan on `Live` not assumed, on a test's runtimes assumed; five thousand closing reports counted by their code in `Ran` | no evidence journaled; no source's fit; no descriptors read; the plan's assumption alone; the runtimes' alone; reports uncounted |
 | K2b-8d-1 | K2b | on the real clock, a source of four sockets: `Live::for_caps`' runtime reading every answer in the host at the look, three answers, the driver's own wake and the target's ready across a spin past the deadline; a runtime taking four events a turn, claiming six, missing the fifth in some run — a false Root I1 forbids; no socket the shell closes in `TIME_WAIT` on its source's address — closed by the stand's `connection: close`, pooled and closed at the run's end, censored and reset; measured on purpose (`ports.rs`, ignored: two minutes), a bound source's ports out at its bind and an unbound one's at its connect, each `egress.ports` | no zero linger; `Live` building fewer events than it records |
 | K2b-8d-2 | K2b | a whole process stopped 1.5 s by `SIGSTOP` mid-run beside a stand of its own process answering at once and refusing connects 40 ms in every 100, two thousand reads 2 ms apart, each on a connection of its own: no censor — sent, or never sent — a Root, in every run (some five hundred never-sent reports a run, every one undecided); the stand's own resets and the system's answers in the machine's catch-up burst counted, not asserted (decision 21 owed) | — (the timer rule's mutants survive it: § Measured) |
-| K2b-9a | K2b | the machine's poll grid at the plan's instant: an observation read late polled on its planned phase, two caused together on their own grids, nothing dispatched before `intended`; the differential with `schedule.py` moved alike, every changed run one whose observation was read or caused late | the grid at `intended`; at `released` |
+| K2b-9a | K2b | the machine's poll grid at the plan's instant: an observation read at 250 polled at 300, 400 …, read on a point at 600 polled there once, two read together at 620 on their own phases; the differential with `schedule.py` moved alike, settled run by run against machine 4 (16 of 3,944 changed, each at a poll of an observation released late) | the grid at `released`; the release's point not held (polled twice at one instant) |
 | K2b-9b | K2b | `scheduler::pace` against brute force over every pair (κ ∈ {0, 1, 100, 500, 999}, J ∈ {0, 1, 250, 2000}, ties and inversions); a hand-off late by at most `(1 − κ)·J` past its earliest moving neither maximum; `sim` paced and `verdict.py` recomputing its gate exactly and checking every pair on every differential run; a golden at κ > 0, J > 0 coherent under the pace and void under the allowance J; a refusal admitted under a shift undecided; excursions recomputed by `verdict.py` | the allowance J; the clamp `max(raw, D)`; rounding up; finality by time; the found answer's `handed` ignored |
 | K2b-9c | K2b | shell == sim with a reader lag, gate-delayed hand-offs and `pace.late` more than none; a decoration timing out ahead of a second attempt that passes; two sources' inverted raws passed in raw order; hand-offs within the band in raw order as a journal property; κ = 0 refused on the real clock; I2 at the compressed rate | the band dropped; dispatch order; the head kept past its decision; a carrier sending ungated |
 | K2b-9d | K2b | the stall twin beside a stand that resets past the certified bucket, its random closures gone: no Root gated, Roots ungated (the control); the gate recomputed from the journal predicting each hand-off and `pace.late`; the healthy and large-answer replays rerun with the gate built, optimised | the gate off; FIFO by dispatch |
@@ -1849,6 +1849,28 @@ a connection of its own (retired at once); the journal folded, each Root classed
 - A hog over the deadline while connecting or writing on a thread others hold is the source thread's lag (K2b-7c-2's
   twins, the path's lag counted from the thread's last blocked park); the stall twin is its whole-process case.
 
+**K2b-9a — a poll's grid at its line's planned instant** (2026-11-24, machine revision 5; decision 21):
+- **Settled, not re-pinned.** The differential writes each run's journal under `SCHEDULER_JOURNALS_TO` when it is set
+  (a test's evidence, written on request); machine 4's journals against machine 5's, the header's revision and the
+  trailer's whole-journal digest set aside: of 3,944 runs, 3,928 unchanged below the header; 16 changed, each first at
+  a poll of an observation released after its planned instant — the poll that moved, or the event it moved past, or
+  (the late-wakes differential drawing its lateness per wake in order) the first dispatch that differs. Folded before
+  and after by `verdict.py`, five of the sixteen changed class: one `void:undecided` turned pass, four had a Root
+  appear or go, each as the scripted answers met polls at other instants; the fold itself did not change.
+- **The goldens**: one changed below its header — `observation_read_late_not_yet`, its second poll from 1,900
+  (the release plus `every`) to 1,800, its plan's point.
+- **A defect found building it**: anchored at the plan's instant alone, an observation released exactly on a grid
+  point was polled twice there — its first attempt and the next at one instant, one past what the validator
+  certified; machine and `schedule.py` alike, so the differential stayed green, and no run of its corpus releases on a
+  point. The first attempt now holds its release's point: `k ≥ ⌊(released − at)/every⌋ + attempt`, on time the old
+  `k ≥ attempt`. Two machine tests: an observation read at 250 polled at 300, 400 … (not 350, 450 …) and read at 600
+  polled there once, then 700; two read together at 620 keep their own phases (700, 800 … and 650, 750 …). Each red
+  under the release's anchor and under the point not held.
+- **The REST twin's projection**: a poll moved within 44 µs of its deadline was never sent, and `sim`'s drawn report
+  (`drawn_unsent`, refused twice) is not the REST carrier's (connected, its write held: `rest.writing`, refused by
+  none) — no REST attempt of that corpus had been dispatched that near its deadline. The twin compares that a report
+  exists, at its instant; its evidence is the carrier's, which the never-sent twins hold.
+
 **Decision 21's replays on an optimised build** (2026-11-24, this laptop; `tests/pace.rs`, ignored,
 `cargo test --release`, one test at a time). **The replays below this paragraph ran on the test profile, opt-level 0**
 — the library sets no profile — and so did their conclusion "this box cannot offer 2,000 a second": the optimised
@@ -2181,3 +2203,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   the pace, its raw dues, κ, the band gate, the fold's revision 8, decision 17 amended; K2b-9 its cut. The replays
   rerun optimised (§ Measured): the earlier ones were on opt-level 0, and their "this box cannot offer 2,000 a second"
   withdrawn; judgements of large answers found holding the machine — the judge's speed owed with H-1's trigger.
+- 2026-11-24: K2b-9a built (§ Measured): machine revision 5, a poll's grid at its line's planned instant, its
+  release's point held; settled run by run against machine 4; the REST twin's never-sent evidence projected.

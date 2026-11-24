@@ -32,7 +32,7 @@ pub const JOURNAL_VERSION: u32 = 8;
 /// (`golden/journal.jsonl`, [`sample`]), which holds every line and variant. A
 /// change to how any line is written changes the golden journal, and so this,
 /// in the same edit.
-pub const JOURNAL: &str = "a0b01862803af6b1962b8ddaf1d5a6b96ec21c2c3bf48f9c0855eddc27e587ed";
+pub const JOURNAL: &str = "9c8da3019b2351fc000f41bc5c1e255d1fa032d4cacf7792f98d862da186d363";
 
 /// A journal's line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

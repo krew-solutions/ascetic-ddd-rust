@@ -584,6 +584,62 @@ fn polls_keep_to_their_grid() {
     assert_eq!(entry(&ran.entries, 2).end, End::Unknown);
 }
 
+/// Decision 21: an observation read late polls on its plan's grid, the
+/// validator's `at + k·every`, its points before the release passed over —
+/// not on a grid of its own from its release; and released on a point, it is
+/// not polled twice there.
+#[test]
+fn an_observation_read_late_polls_on_its_plan_s_grid() {
+    use ascetic_ddd_scheduler::sim::run_reading;
+    let not_yet = |_: u64, _: u32, _: &Record| Attempt {
+        after: None,
+        sent_after: 0,
+        answer_after: Some(0),
+        judgement: Judgement::Unexpected,
+    };
+    let polls = |read: u64| {
+        let r = polling(1, 0, 0, 100, 1_000);
+        let ran = run_reading(header(), &[r], 0, &|_| read, &not_yet).unwrap();
+        ran.dispatches.iter().map(|d| d.0).collect::<Vec<u64>>()
+    };
+    // Read at 250: released then, the plan's grid from 300 — not 350, 450.
+    assert_eq!(polls(250), vec![250, 300, 400, 500, 600, 700, 800, 900]);
+    // Read on a point, 600: polled there once, then 700.
+    assert_eq!(polls(600), vec![600, 700, 800, 900]);
+}
+
+/// Decision 21: two observations read late together keep their own plan's
+/// phases — anchored at the release they would share one grid for life.
+#[test]
+fn observations_read_late_together_keep_their_own_grids() {
+    use ascetic_ddd_scheduler::sim::run_reading;
+    let not_yet = |_: u64, _: u32, _: &Record| Attempt {
+        after: None,
+        sent_after: 0,
+        answer_after: Some(0),
+        judgement: Judgement::Unexpected,
+    };
+    let records = [polling(1, 0, 0, 100, 1_000), polling(2, 0, 50, 100, 1_000)];
+    // Both read at 620: a line is read at `at − L + lag`.
+    let ran = run_reading(
+        header(),
+        &records,
+        0,
+        &|line| if line == 2 { 620 } else { 570 },
+        &not_yet,
+    )
+    .unwrap();
+    let of = |line: u64| -> Vec<u64> {
+        ran.dispatches
+            .iter()
+            .filter(|d| d.1 == line)
+            .map(|d| d.0)
+            .collect()
+    };
+    assert_eq!(of(2), vec![620, 700, 800, 900]);
+    assert_eq!(of(3), vec![620, 650, 750, 850, 950]);
+}
+
 /// A holder awaiting its barrier as expected is skipped when a member read
 /// before it ended otherwise — at that end, and not before the holder was read
 /// (decision 6, `vectors/schedule.py`) — whatever the members before that one

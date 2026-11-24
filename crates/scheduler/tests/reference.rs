@@ -201,6 +201,14 @@ const JOURNALS: &[(u32, u32, &str)] = &[
         4,
         "50954900fa530f47e6d46389a0bfa491af2e055b2174418fd904f9497584ed30",
     ),
+    // Machine 5 (decision 21): a poll's grid at its line's planned instant —
+    // 16 runs of 3,944 changed below the header, each first at a poll of an
+    // observation released after its planned instant (§ Measured K2b-9a).
+    (
+        8,
+        5,
+        "890972f02702fb0198cb04ffc05c2839ee08568b2e644dde0ab660d1fbf80956",
+    ),
 ];
 
 /// What the fold decided of the differential's runs, the digest of their
@@ -266,11 +274,36 @@ const CLASSES: &[(u32, u32, u32, &str)] = &[
         7,
         "913215b9afa0c80eb6dea3ab53f603b501fad921c62bfd1066e5cfd7afffec1d",
     ),
+    // Machine 5 (decision 21): a poll's grid at its line's planned instant.
+    // Settled run by run against machine 4's journals (§ Measured K2b-9a):
+    // five runs' classes moved, each a run whose first changed dispatch is a
+    // poll of an observation released after its planned instant.
+    (
+        8,
+        5,
+        7,
+        "b9b6085d247cc1ae6a17c52f66618294ffc4c4f76223aeb66078486891fa1f92",
+    ),
 ];
 
 /// The journal written, read back, and told against the run it journals
 /// (ADR-0047 K1e-3b): every end and dispatch, every send and answer in the
 /// order the machine took them, the bindings of every read, the releases.
+/// A run's journal written under `SCHEDULER_JOURNALS_TO` when it is set: a
+/// change to the machine or to the journal settled run by run against its
+/// parent's journals, not only by the pins' one digest (ADR-0047 decision 21's
+/// cut).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test's evidence, written on request: the machine reads and writes nothing"
+)]
+fn dumped(run: &str, bytes: &[u8]) {
+    if let Some(dir) = std::env::var_os("SCHEDULER_JOURNALS_TO") {
+        let path = std::path::Path::new(&dir).join(format!("{}.jsonl", run.replace('/', "_")));
+        std::fs::write(path, bytes).unwrap();
+    }
+}
+
 fn journal_of(
     name: &str,
     header: journal::Header,
@@ -694,6 +727,7 @@ fn the_machine_is_the_scheduler_by_definition() {
                     let journal_bytes =
                         journal_of(&run_name, journal_header.clone(), &header, &ran, &records);
                     sha2::Digest::update(&mut journals, &journal_bytes);
+                    dumped(&run_name, &journal_bytes);
                     let open = || {
                         journal::Reader::new(std::io::Cursor::new(journal_bytes.clone())).unwrap()
                     };
@@ -943,6 +977,7 @@ fn late_wakes_are_the_harness_s_lateness() {
                 w.line(l).unwrap();
             }
             let bytes = w.finish().unwrap().0;
+            dumped(&format!("late/{j}/{}", journal_header.log), &bytes);
             let open = || journal::Reader::new(std::io::Cursor::new(bytes.clone())).unwrap();
             let log_id = Log {
                 sha256: identity,

@@ -377,8 +377,9 @@ pub enum Ignored {
 /// What the machine decides, as a number: raised whenever a run's journal
 /// for the same inputs changes, which the differential's journals pin beside
 /// it (ADR-0047 K1e-3). A journal's header names it, so that a verdict is read
-/// against the machine that made it.
-pub const MACHINE_REVISION: u32 = 4;
+/// against the machine that made it. Revision 5 (ADR-0047 decision 21): a
+/// poll's grid anchored at its line's planned instant, not its release.
+pub const MACHINE_REVISION: u32 = 5;
 
 /// How long past a deadline the machine waits for a handler that does not
 /// report: then the step ends unknown, and it is the harness's fault.
@@ -1021,13 +1022,26 @@ impl Machine {
             Judgement::Unexpected | Judgement::NotTaken | Judgement::Unknown if poll => {
                 // Not yet, or no telling: the next poll on its grid, no sooner
                 // than its `Retry-After`, never two out at once (decision 15).
+                // The grid is the plan's, `at + k·every` — the instants the
+                // validator certified (decision 21): anchored at the release,
+                // observations read or caused together would share one grid
+                // for their lives, their polls bunched at every interval. Its
+                // points before the release are passed over: `next ≥ now`;
+                // the first attempt holds its release's point, so one released
+                // on a point is not polled twice there.
                 let every = every.unwrap_or(1);
-                let since = now.saturating_sub(c.released);
-                let k = since.div_ceil(every).max(u64::from(attempt));
-                let next = c
+                let since = now.saturating_sub(c.at);
+                let first = c
                     .released
-                    .saturating_add(k.saturating_mul(every))
-                    .max(now.saturating_add(after.unwrap_or(0)));
+                    .saturating_sub(c.at)
+                    .checked_div(every)
+                    .unwrap_or(0);
+                let k = since
+                    .div_ceil(every)
+                    .max(first.saturating_add(u64::from(attempt)));
+                let next =
+                    c.at.saturating_add(k.saturating_mul(every))
+                        .max(now.saturating_add(after.unwrap_or(0)));
                 c.phase = Phase::Flight {
                     attempt,
                     outstanding: false,

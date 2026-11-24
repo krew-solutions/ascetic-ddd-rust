@@ -994,7 +994,11 @@ impl Carrier<VirtualClock> for Mixed {
 }
 
 /// A journal with what `sim` cannot know of an answer — its status, its
-/// problem's code — left out.
+/// problem's code, and a never-sent attempt's evidence: `sim` draws a report
+/// of its own (`drawn_unsent`, the scripted carrier's), while over REST the
+/// report is the carrier's — a write held to the deadline is `rest.writing`,
+/// refused by none — which the never-sent twins above hold. That there is a
+/// report, at its instant, stays compared.
 fn projected(journal: &[Line]) -> Vec<Line> {
     journal
         .iter()
@@ -1003,6 +1007,16 @@ fn projected(journal: &[Line]) -> Vec<Line> {
             Line::Answer(mut a) => {
                 a.status = None;
                 a.code = None;
+                if let Some(u) = a.unsent.as_mut() {
+                    *u = ascetic_ddd_scheduler::journal::Unsent {
+                        handed: None,
+                        connected: None,
+                        lag: 0,
+                        refused: 0,
+                        refused_by: None,
+                        code: ascetic_ddd_scheduler::journal::Code::Named("projected".to_owned()),
+                    };
+                }
                 Line::Answer(a)
             }
             other => other,

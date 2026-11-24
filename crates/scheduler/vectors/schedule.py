@@ -30,8 +30,9 @@ The definitions:
 - attempts: dispatched at released; sent at dispatch + sent_after if before the
   deadline; answered at sent + answer_after if sent and by the deadline, else
   unknown at the deadline. An expected answer ends it; a polled observation's
-  not-yet, not-taken or unknown answer dispatches the next poll on the grid
-  released + k * every, k at least the attempt and the answer's own grid index,
+  not-yet, not-taken or unknown answer dispatches the next poll on the plan's
+  grid at + k * every, k at least the attempt past the release's own index
+  ((released - at) // every) and the answer's own grid index,
   no sooner than the answer plus its Retry-After, ending unknown at the deadline
   if that is not before it; a not-taken answer is resent unless the operation is
   never resent, an unknown only if it is idempotent — at the answer plus the
@@ -258,8 +259,8 @@ def schedule(text, read_ahead, reads, script, seen):
                 entry["captures"] = s.get("captures", [])
             elif judgement in ("unexpected", "not_taken", "unknown") and poll:
                 every = max(int(a["observe"]["every"]), 1)
-                k = max(-(-(at_ - released) // every), attempt)
-                nxt = max(released + k * every, at_ + (after or 0))
+                k = max(-(-(at_ - at) // every), (released - at) // every + attempt)
+                nxt = max(at + k * every, at_ + (after or 0))
                 if judgement == "unknown" and at_ < deadline:
                     seen["poll_unknown_repolled"] += 1
                 if nxt >= deadline:
