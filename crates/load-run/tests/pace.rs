@@ -363,7 +363,7 @@ fn healthy_with(gap: u64, steps: u64, every: u64, size: u64) -> Replayed {
         .unwrap()
         .journal;
     let j = header.profile.jitter;
-    let shapes = [10, 50, 100, 200]
+    let shapes = [0, 10, 50, 100, 200]
         .into_iter()
         .flat_map(|r| [false, true].map(|pairwise| (r, pairwise)))
         .map(|(r, pairwise)| (r, pairwise, shaped(&lines, j, r, pairwise)))
@@ -418,5 +418,27 @@ fn the_pace_replayed_with_large_answers() {
                 }
             }
         }
+    }
+}
+
+/// Whether the harness must catch up at all (decision 21's raw dues, the
+/// dead end's cheapest check): five minutes of a healthy run, 500 reads a
+/// second, replayed through the pace with no catch-up (κ = 0) — the shift a
+/// running sum of the box's own hiccups past J — on an optimised build.
+/// Measured on purpose (`--ignored`).
+#[test]
+#[ignore = "a measurement, run on purpose"]
+fn the_shift_without_catch_up() {
+    for run in 0..2 {
+        let ((attempts, displaced, _, largest), shapes) = healthy(2_000, 150_000);
+        let (_, _, s) = shapes
+            .into_iter()
+            .find(|(r, pairwise, _)| *r == 0 && *pairwise)
+            .unwrap();
+        eprintln!(
+            "MEASURED no catch-up: run {run}: {attempts} attempts, {displaced} displaced past J (the largest \
+             {largest} µs); paced at κ = 0: {} never handed, the largest shift {} µs, {}‰ handed past J",
+            s.missed, s.largest, s.late
+        );
     }
 }

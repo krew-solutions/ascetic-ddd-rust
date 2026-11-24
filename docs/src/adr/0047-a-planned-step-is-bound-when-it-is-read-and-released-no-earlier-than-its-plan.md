@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted while building, its amendment under the gate (§ Owed); then K2b-9b-3 to 9d, K2b-7e and the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d, K2b-7e and the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -835,6 +835,12 @@ amends decision 17; § Alternatives Considered keeps what each round refuted):
   most one overdue attempt in flight at once — decision 17's lone late step — the rest shed, the fold verifying it) —
   refuted by measurement (§ Measured, decision 21): on this laptop it would have voided two of three healthy runs at
   500 steps a second and every one at 2,000.
+- **Decision 21's raw dues** (2026-11-24, refuted while building and in their own round): **`intended`** (a dependency's
+  shift counted twice, a covered dependent compressed); **intended less the least shift** of the dependencies (right
+  only at κ = 0: under a catch-up a drained shift returns to the run); **plan-time twins** τ with waits dilated (a
+  covered dependent made tight by the harness compressed onto the open plan — a false Fail; the trilemma above,
+  § Measured). The common premise of all three: that a late harness should catch up (κ > 0) — catching up across
+  causal chains and the open plan cannot be certified.
 - **Decision 21, round 3** (2026-11-24): its blind solver's **recursion** — `d = max(raw, D)` — refuted by its
   discriminator: late-read lines behind a drained wake take its due and pass at one instant, the burst certified; its
   rounding up cancels the reserve at small gaps; its allowance J leaves `κRJ/P` over the curve. Refuted by the roles:
@@ -1862,6 +1868,25 @@ a connection of its own (retired at once); the journal folded, each Root classed
 - A hog over the deadline while connecting or writing on a thread others hold is the source thread's lag (K2b-7c-2's
   twins, the path's lag counted from the thread's last blocked park); the stall twin is its whole-process case.
 
+**Decision 21's raw dues, a second round, and no catch-up replayed** (2026-11-24):
+- **Plan-time twins refuted by their roles.** A blind solver (Fable, given the question) derived each instant's
+  plan-time twin `τ = min(t, r + S(t − g))`, `S(w) = ⌊1000·w/c⌋`, waits dilated, joins by a second maximum — the
+  discriminator's `v` reached from the drain rate. Refuted by Distributed Systems with numbers: a dependent the
+  certificate covers (slack on time) made tight by the harness — its cause handed 50 ms late, 1 s of think — gets its
+  shifted intended start as raw and passes with an independent step planned 50 ms after it: an unplanned 429 a Root,
+  a false Fail. A trilemma, not a slip: a certified raw makes the band hold the chain and its shift grow per link
+  (50 → 95 → 144 → 193 ms); a neutral raw compresses; holding the plan until a dependency answers is coordinated
+  omission. At κ = 0 none of it happens. Verifiability: the twin and the machine would share the sentences, the
+  proposed properties measure each attempt against its own raw (blind to the defect), every golden runs at κ = 0
+  (blind to S), rounding per segment stops the drain at small κ; its counterfactual pair (one script on time and
+  late, raws bounded per attempt) is an executor any rule keeps.
+- **No catch-up, replayed** (`tests/pace.rs`, `the_shift_without_catch_up`, optimised, five minutes of 500 reads a
+  second, twice): 33 and 17 hand-offs displaced past J (the largest 5.1 and 11.9 ms); paced at κ = 0, none missed, the
+  largest shift 3.3 and 10.8 ms — but with deadlines from the release, as today, the second run's lasting 10 ms puts
+  963 per mille of its hand-offs past J and every censor of it undecided. So the shift with no catch-up is small —
+  the run would end some milliseconds later — and it is the deadlines' anchor, not the shift, that would cost the
+  verdict.
+
 **K2b-9b-2 — the pure pace and its band** (2026-11-24, decision 21): `scheduler::pace` — `Pace`, the two maxima in
 exact integers (κ at most 999); `Gate`, the band (attempts dispatched, arrived, gone; turns at an instant — passes in
 raw order within J of the front, a head whose earliest falls at or past its deadline late, any attempt past its
@@ -2098,11 +2123,15 @@ only and measures move to the 12-core box.
   bound socket's bind, `EADDRNOTAVAIL` at an unbound one's connect; Verifiability) — K2b-8d, in a namespace with a
   ten-port range; **a read-ahead floor against the looks' slack** — trigger: a run with `rest.cap.*` reports;
   **the counts of reports by code** in `Ran` or the fold — with K2b-8c-7's evidence.
-- **Decision 21's raw dues** (2026-11-24, refuted while building K2b-9b — § Measured, `sim` paced): the rule's
-  amendment under the gate before `sim` and the shell pace — a blind solver on the question (an attempt's raw due
-  when its dependencies' hand-offs were shifted: neither counting the shift twice nor making the system's latency a
-  shift, sound against the certificate), its discriminator's position the machine-side `v` inherited; then K2b-9b-3
-  (the machine computes and journals each attempt's raw), K2b-9b-4 (`sim` paced, the saved slice), K2b-9b-5 (the fold).
+- **Decision 21's raw dues — a dead end, its next question** (2026-11-24; § Measured, § Alternatives Considered): three
+  rules refuted, each fixing one constraint and breaking another; their common premise, a catch-up (κ > 0). The next
+  round's question, before `sim` and the shell pace: **no catch-up — a late harness delays its plan, never compresses
+  it** — the plan's clock pausing with the harness (κ = 0: a raw due the exact plan-time counterfactual, nothing ever
+  compressed) and **each attempt's deadline from its hand-off** (it keeps its whole window: its censor stays the
+  system's after a hiccup) — amending decision 7's anchor and decision 21's κ; measured viable on this box (the shift
+  with no catch-up some milliseconds over five minutes); what it costs: the run ends later by the harness's lost time,
+  and the cells a held shift keeps (better the machine's own clock paused than attempts held at the gate). Then
+  K2b-9b-3 to 9b-5 by whatever it decides. The owner's call before it is built.
   With it: **an observation's last "not yet" under a shift** — the harness's lateness left its polls fewer; whether
   its final answer stays the system's (decision 17 says so) is the fold's question, owed to K2b-9b-5.
 - **Decision 21's owed** (2026-11-24, its roles): **a hung decorator holds the band's front** to its deadline (up to
@@ -2281,3 +2310,6 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-24: K2b-9b-2 built (§ Measured): the pure pace and its band. `sim` paced on decision 21's raw dues built
   and run, not committed: its findings recorded, and the raw-due rule refuted — a dependent's intended start carries
   its dependency's shift, counted again, unsound against the certificate; its amendment under the gate (§ Owed).
+- 2026-11-24: decision 21's raw dues, a second round: plan-time twins (a blind solver and the discriminator
+  converging) refuted by Distributed Systems and Verifiability — a covered dependent compressed, a trilemma; no catch-up
+  replayed over five minutes (§ Measured): small, the deadlines' anchor what costs; the next question recorded (§ Owed).
