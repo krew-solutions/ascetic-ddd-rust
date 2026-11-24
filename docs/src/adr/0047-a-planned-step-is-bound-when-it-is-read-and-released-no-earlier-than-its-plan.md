@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d, K2b-7e and the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1 next; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -719,6 +719,36 @@ amends decision 17; § Alternatives Considered keeps what each round refuted):
   gate, its type, I2 and κ at admission; K2b-9d the twins. Each settled, not re-pinned: one commit per cause, the
   previous fold's rules over the new journals equal to the new fold's classes, every changed run explained.
 
+### 22. The shell's memory: constants by construction, a stated memory, the answers charged before they wait
+
+*Decided for K2b-7e* (2026-11-24, under the gate: the main position, a blind solver and a discriminator on Fable,
+two roles — Operability, Verifiability — on Opus; it builds decisions 16's and 18's "`fits` with the shell's memory",
+which `admit` never called; § Alternatives Considered keeps what each refuted):
+- **Constants by construction, not measurements that drift** (K2b-7e-1): one hyper HTTP/1.1 builder for every
+  connection — an exact read size (`read_buf_exact_size`, 16 KiB: the read buffer never grows to a body's or a head's
+  size; exclusive with `max_buf_size`, which unsets it) and vectored writes (`writev`: the body queued, never copied
+  into the head's buffer); a head past the read size, or past hyper's hundred headers, a fault that stops the run
+  naming the operation — never `Broken`, the system's Unknown (a declared head limit owed); the counting `Io`'s
+  scratch one a thread, not one a connection (it is used only inside one synchronous read); an answer's body sized
+  from its Content-Length, at most the cap, a length past the cap unreadable at its head (no doubling, no allocation
+  a forged length could abort); the response's headers copied and its parts dropped before the body (a header slices
+  the read buffer and pinned it); a finished attempt's task cell let go at once. The carrier states each cost —
+  `CONNECTION`, `ATTEMPT`, a source's — and the executors hold them two-sided.
+- **A memory the operator states** (K2b-7e-2): `Memory { bytes }` — declared, or derived from the process's cgroup as
+  the least `memory.max` of its ancestors, refusing `max` with its remedy (a scope with `MemoryMax`), never the host's
+  free memory guessed; I1, soundness: the machine's share, the attempts' cap times `ATTEMPT`, the sockets' caps times
+  `CONNECTION`, the sources' parse and the answers' charge within it; I2, prediction: the plan's peaks within the
+  shares; a refusal naming every part and the least memory that would fit; every term and its origin in the header.
+  **The answers charged statically first**: each socket holds at most one answer (HTTP/1.1), so their charge is the
+  sockets' cap times the answer cap's — never a wait; a budget that waits only when a real plan is refused by it.
+- **The read gate** (K2b-7e-3): no line read while the attempts alive reach their cap or the machine's live cost its
+  share — a late read, the harness's; starved past the longest timeout, a fault and a stop.
+- **The parse bounded** (K2b-7e-4): the body's state journaled (whole, cut at the cap, unparsed and why) — an answer
+  the harness could not parse is the harness's, never `Unexpected`; the allowance structural (nodes, string bytes,
+  depth), its twin in `json.py`.
+- **Cut**: K2b-7e-1 the constants; K2b-7e-2 admission; K2b-7e-3 the read gate; K2b-7e-4 the parse; K2b-7e-5 a waiting
+  budget, if a real plan needs it.
+
 ## Consequences
 
 - A load run is judged against the plan the validator checked, with every lateness the run's and every failure
@@ -835,6 +865,16 @@ amends decision 17; § Alternatives Considered keeps what each round refuted):
   most one overdue attempt in flight at once — decision 17's lone late step — the rest shed, the fold verifying it) —
   refuted by measurement (§ Measured, decision 21): on this laptop it would have voided two of three healthy runs at
   500 steps a second and every one at 2,000.
+- **Decision 22** (2026-11-24): the main position's **exact read size with a bounded write buffer** (hyper's setters
+  unset each other); **reading straight into hyper's buffer** (only `unsafe` advances it: `forbid(unsafe_code)`); **a
+  body budget reserved as bytes are read** (two chunked answers each holding part deadlock to their deadlines);
+  **the attempts open bounded by the plan** (the prediction relabelled soundness: a stall's backlog, decision 21's
+  gate); **TCP's flow control holding the rest at the stand** (the receive buffer autotunes to tens of MiB, charged to
+  the process); **"1.6×" as the parse's factor** (the per-attempt peak, the connection inside it; the worst shape,
+  singleton nesting, some 100–130× counted); the solver's **socket buffers fixed** (Operability: the kernel doubles
+  and clamps them, a slower reader than real clients at a high bandwidth-delay product, a load the gateway feels)
+  and **its budget charged by the plan's pending to every source** (Operability: four sources, four times what a run
+  can hold; the default egress's 28,232 ports some 37 GB at a 1 MiB cap).
 - **Decision 21's raw dues** (2026-11-24, refuted while building and in their own round): **`intended`** (a dependency's
   shift counted twice, a covered dependent compressed); **intended less the least shift** of the dependencies (right
   only at κ = 0: under a catch-up a drained shift returns to the run); **plan-time twins** τ with waits dilated (a
@@ -1880,9 +1920,9 @@ connections lie idle; the difference per attempt —
 
 - The connection is nearly all of it: some 47 kB idle, the attempt 4.5 kB more. Its parts, read from the code: the
   counting `Io`'s scratch, 16 KiB, every read copied through it (`io.rs`, `SCRATCH`); hyper's read buffer, 8 KiB at
-  first, grown to fit a large body and kept grown — a pooled connection 24 kB heavier after a 64 KiB answer; hyper's
-  write buffer.
-- An answer read costs some 1.6 times its body at the peak.
+  first, grown by its adaptive strategy — capped at 32 KiB by those 16 KiB reads (corrected by decision 22's
+  discriminator: not "to fit a body"), a pooled connection 24 kB heavier after a 64 KiB answer; hyper's write buffer.
+- The per-attempt peak is some 1.6 times the body — the connection and its growth inside it, not a parse factor.
 - So at 10,000 attempts at once some half a gigabyte, and an answer cap (1 MiB in the fixture) times the attempts in
   flight, gigabytes: K2b-7e's bound needs a connection's cost fixed (hyper's exact read size, the scratch
   reconsidered) and the answers being read bounded, not only counted — its design next, under the gate.
@@ -2142,6 +2182,16 @@ only and measures move to the 12-core box.
   bound socket's bind, `EADDRNOTAVAIL` at an unbound one's connect; Verifiability) — K2b-8d, in a namespace with a
   ten-port range; **a read-ahead floor against the looks' slack** — trigger: a run with `rest.cap.*` reports;
   **the counts of reports by code** in `Ran` or the fold — with K2b-8c-7's evidence.
+- **Decision 22's owed** (2026-11-24, its roles): **a declared head limit** (`head_cap`, the trailer's largest head;
+  hyper's header count too); **the socket buffers** (sized from the emulated client or the bandwidth-delay product,
+  read back, admission against the host's `tcp_mem` less the stand's share; the sysctls and sockstat journaled);
+  **RSS beside counted bytes** (glibc's chunks: `malloc_usable_size` in the executors, RSS with transparent huge pages
+  off; per-thread arenas — a budget a source, or the allocator's tunables); **the plan's peak line bytes** (the mean
+  under-counts a bulk phase: the validator commits the pending set's bytes); **the plan's pending per source**;
+  **a host's `Io`'s own heap** (TLS) stated by its `Egress`; **hyper pinned** (`=1.11.1`) or a stage-2 behavioural
+  self-check; **a streaming judge** (a body never held whole) — trigger: a waiting budget voiding a host run, or
+  judging holds past J; **the memory's evidence** (memory.pressure, events, peak bracketed; gate closures as lines; a
+  periodic sample, so a run the OOM killer took still shows its memory).
 - **Decision 21's raw dues — a dead end, its next question** (2026-11-24; § Measured, § Alternatives Considered): three
   rules refuted, each fixing one constraint and breaking another; their common premise, a catch-up (κ > 0). The next
   round's question, before `sim` and the shell pace: **no catch-up — a late harness delays its plan, never compresses
@@ -2334,3 +2384,7 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   replayed over five minutes (§ Measured): small, the deadlines' anchor what costs; the next question recorded (§ Owed).
 - 2026-11-24: K2b-7e's measurement (§ Measured): an open attempt with its connection some 51.5 kB, a pooled connection
   47 kB (71.5 kB after 64 KiB answers), an answer read 1.6 times its body.
+- 2026-11-24: **decision 22 decided** (§ Decision 22; § Alternatives Considered; § Owed): the shell's memory —
+  constants by construction, a stated memory, the answers charged statically before any wait; K2b-7e cut in five.
+  K2b-7e's measurement corrected: hyper's read buffer did not grow to fit a body — the counting `Io`'s 16 KiB reads
+  capped it at 32 KiB, the growth measured; the "1.6×" is the per-attempt peak, not a parse factor.
