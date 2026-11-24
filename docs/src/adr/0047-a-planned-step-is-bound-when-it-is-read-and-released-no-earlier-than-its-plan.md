@@ -40,9 +40,10 @@ To be built in slices, each a commit of its own:
   in the pure fold; **K2b-7c** the shell's stop and its lag, in two: **K2b-7c-1** the stop, **K2b-7c-2** the source
   thread's lag, its park detector measured first; **K2b-7d** the three stages before T0; **K2b-7e** the
   shell's memory (decision 22), in five — **K2b-7e-1** the constants by construction; **K2b-7e-2** admission, in three
-  — **K2b-7e-2a** the costs stated and held, `fits` re-pinned, **K2b-7e-2b** a stated memory, I1 and I2, the refusal
-  and the evidence, **K2b-7e-2c** the cgroup's memory; **K2b-7e-3** the read gate; **K2b-7e-4** the parse; **K2b-7e-5**
-  a waiting budget, if a real plan needs it; **K2b-8** a censored attempt's connection, its closing report and the ports (decision 19), in
+  — **K2b-7e-2a** the costs stated and held, `fits` re-pinned, **K2b-7e-2b** a stated memory, in three — **K2b-7e-2b-1**
+  the plan's shapes and their prices, **K2b-7e-2b-2** the reader's, the journal's and the sources' terms by
+  construction, **K2b-7e-2b-3** admission and its evidence —, **K2b-7e-2c** the cgroup's memory, after the read gate;
+  **K2b-7e-3** the read gate; **K2b-7e-4** the parse; **K2b-7e-5** a waiting budget, if a real plan needs it; **K2b-8** a censored attempt's connection, its closing report and the ports (decision 19), in
   four: **K2b-8a** journal version 7 in the pure fold; **K2b-8b** the shell's censor, report and connect errors, in two — **K2b-8b-1** a connect's failure classed, zero
   linger, no shutdown, saturation by age; **K2b-8b-2** the reset at the censor, no byte or hand-over at the deadline,
   an unused connection pooled, a timer's exact lag;
@@ -739,22 +740,80 @@ which `admit` never called; § Alternatives Considered keeps what each refuted):
   finished attempt's task cell let go at once. The carrier states each cost (`carrier::Costs`: a connection, an
   attempt beside it, an answer at the cap with its head at its worst), the shell its own share an attempt
   (`run::ATTEMPT`), a source's its own (K2b-7e-2b) — and the executors hold them two-sided.
-- **A memory the operator states** (K2b-7e-2): `Memory { bytes }` — declared, or derived from the process's cgroup as
-  the least `memory.max` of its ancestors, refusing `max` with its remedy (a scope with `MemoryMax`), never the host's
-  free memory guessed; I1, soundness: the machine's share, the attempts' cap times `ATTEMPT`, the sockets' caps times
-  `CONNECTION`, the sources' parse and the answers' charge within it; I2, prediction: the plan's peaks within the
-  shares; a refusal naming every part and the least memory that would fit; every term and its origin in the header.
-  **The answers charged statically first**: each socket holds at most one answer (HTTP/1.1), so their charge is the
-  sockets' cap times the answer cap's — never a wait; a budget that waits only when a real plan is refused by it.
+- **A memory the operator states** (K2b-7e-2): `Memory { bytes }` — declared (the cgroup's as its source with
+  K2b-7e-2c), never the host's free memory guessed; I1, soundness, I2, prediction, a refusal naming every part and the
+  least memory that would fit, every term and its origin in the header. **Amended for K2b-7e-2b** (2026-11-24, under
+  the gate: the main position, a blind solver and a discriminator on Fable, three roles — Software Design,
+  Operability, Verifiability — on Opus; § Alternatives Considered keeps what each refuted):
+  - **I1 is a sum of terms, each a count held by a named enforcer times a cost stated by its part's owner** and held
+    by an executor — two-sided where the library holds it, journaled `host-stated` where a host's part states it; a
+    count with two enforcers takes the lesser; a term whose count or cost has no enforcer yet is charged at its
+    measured worst and journaled `measured`, or refused naming it — never claimed held, never left no room. Checked
+    arithmetic; the slack never a saturating subtraction.
+  - **One pool, not two shares**: the machine's cells and the attempts are taken by one act, a read, and freed by one
+    event, a step's end — a gate on attempts alive bounds nothing (lines read at `at − L` dispatch later with no
+    further read, as do dependents, resends and polls; an answered attempt's handle is dropped before its end is
+    stepped). The pool's count is the steps read and not ended plus the handles past their deadline (a censored
+    attempt's handle lives to its `D + 1` look, holding its record, frame and captures).
+  - **The plan commits shapes, the scheduler prices them**: the commitment carries, at their peaks over the pending
+    and the held sets, plan-intrinsic sums — a record's string bytes by role, its holes, its dependencies, its frame's
+    template bytes — with pending by source (one `source_of` in `command-log::plan`, socket steps only), the largest
+    line and chunk, and pending with every end a jitter later; one pure function the scheduler owns prices a shape
+    (cells, keys, bound producers, a producer's waiters, captures), the carrier a record's frame (its template, its
+    holes at the capture bound, its decorator's stated bound) — `Σ cᵢ·max Sᵢ ≥ max Σ cᵢ·Sᵢ`, so a re-pin needs no new
+    dry run and `RULES_REVISION` moves only with a shape's meaning. A heap model's output committed would freeze its
+    revision (`LIVE_CELL` moved 1,792 → 3,776 in K2b-7e-2a).
+  - **An attempt priced by its record**: its frame, the request's copy of the body, its captures' copies — a constant
+    `a` charged a 64 KiB bulk import a tenth of what it holds.
+  - **Captures held by the enforcer that exists**: a value is taken only within `TAKEN` (8 KiB, `answer::take`); a JSON
+    number, today unbounded, bounded likewise; each copy a reader holds in flight priced.
+  - **The reader and the journal by construction**: `ahead` and `behind` carried by type from what built their
+    channels (admission saw neither); the verifier's chunk held twice at the committed largest chunk; the line limit
+    enforced before its allocation, its four buffers stated; zstd's window bounded (`window_log_max`) and charged —
+    libzstd's malloc is outside the counted heap.
+  - **A source's own**: a constant (its runtime, its thread's scratch, one answered tail, one head in transition) and
+    its driver's events times an event's size (`Runtimes` owns the events, linear in the cap); the parse at its
+    measured worst until K2b-7e-4. The answered tail — arrived, read, judged, checked in — a function with no await,
+    so "one answer a socket, one tail a source" holds by the compiler, not by position.
+  - **I2 stays decision 21's where it was decided**: `⌈needed(s)·1000/(1000 − κ)⌉ ≤ cap(s)`, `needed(s)` the carrier's
+    from the plan's pending by source; the pool's prediction at the same rate — κ = 0 when decision 21's question
+    settles on no catch-up, never dropped silently.
+  - **The refusal**: every refusal at once, not the first (raising the descriptors to be refused on memory next is
+    wasted work); I1 or I2 failed, the largest term, the least memory `M*` (`M*` admits, `M* − 1` does not), the
+    largest uniform cap that fits; each remedy from its part's owner — the carrier's knob in its own argument (the
+    REST egress's `with_ports` is a total it divides), the plan author's (`answer_cap` is the plan's: a new dry run,
+    and the largest body by operation owed), the operator's memory; a cap derived from the stated memory offered, as
+    decision 20 offers its derivations.
+  - **The stated memory checked against the process's limits** at stage 1: the least `memory.max` over its cgroup's
+    ancestors, a stated memory past it refused; `max` journaled with its remedy (a scope with `MemoryMax`, which also
+    confines oomd's kill to the harness).
+  - **The evidence**: the header's `admission.memory` (journal version 10) — the stated bytes and origin, `basis:
+    counted-heap`, each term's count, cost and `enforced-by` (cap, channel, gate not built, measured, host-stated), the
+    constants as values, the slack — and, in the same version, a periodic `memory` line (the process's resident and
+    high-water bytes, the cgroup's current and events, the live counts of sockets, attempts, cells, captures), so a run
+    the OOM killer took still shows what grew.
+  - **No launch-scale run before the read gate**: until K2b-7e-3 the attempts' term is predicted, not held; the first
+    host run (`sources = 1`, a correctness run) inside a scope with `MemoryMax`.
+  - **The answers charged statically first**: each socket holds at most one answer (HTTP/1.1), so their charge is the
+    sockets' cap times the answer cap's — never a wait; a budget that waits only when a real plan is refused by it;
+    with the read gate, the lesser of the cap and the pool's handles.
 - **The read gate** (K2b-7e-3): no line read while the attempts alive reach their cap or the machine's live cost its
   share — a late read, the harness's; starved past the longest timeout, a fault and a stop.
 - **The parse bounded** (K2b-7e-4): the body's state journaled (whole, cut at the cap, unparsed and why) — an answer
   the harness could not parse is the harness's, never `Unexpected`; the allowance structural (nodes, string bytes,
   depth), its twin in `json.py`.
-- **Cut**: K2b-7e-1 the constants; K2b-7e-2 admission, in three — K2b-7e-2a the costs stated and held (and `fits`
-  re-pinned, its executor's margin found an under-count), K2b-7e-2b `Memory`, I1 and I2, the refusal and the
-  evidence, K2b-7e-2c the cgroup's memory; K2b-7e-3 the read gate; K2b-7e-4 the parse; K2b-7e-5 a waiting budget, if
-  a real plan needs it.
+- **Cut**: K2b-7e-1 the constants; K2b-7e-2 admission — K2b-7e-2a the costs stated and held (and `fits` re-pinned, its
+  executor's margin found an under-count); K2b-7e-2b in three: **2b-1** the plan's shapes and their prices (every
+  field K2b-7e commits, in one revision: the shapes' peaks, pending by source and with ends a jitter later, the
+  largest line and chunk; the pricing function and its executor — equality with a decoded record's heap under a
+  generator of records, each field's term zeroed red; the scheduler's executor two-sided, with dependencies), **2b-2**
+  the reader's, the journal's and the sources' terms by construction (`ahead` and `behind` by type, the line limit
+  before its allocation, zstd's window, events by `Runtimes`, the answered tail with no await), **2b-3** admission
+  (`memory::admit` over the stated parts, every refusal at once, the cgroup's check, the header and the `memory`
+  line, journal version 10); K2b-7e-3 the read gate; K2b-7e-4 the parse; K2b-7e-2c the cgroup's memory as the
+  stated number's source — after the gate and an RSS measurement (deriving it from `memory.max` first would make the
+  kernel the judge of an I1 nothing enforces, and that counts heap, not the process); K2b-7e-5 a waiting budget, if a
+  real plan needs it.
 
 ## Consequences
 
@@ -872,6 +931,19 @@ which `admit` never called; § Alternatives Considered keeps what each refuted):
   most one overdue attempt in flight at once — decision 17's lone late step — the rest shed, the fold verifying it) —
   refuted by measurement (§ Measured, decision 21): on this laptop it would have voided two of three healthy runs at
   500 steps a second and every one at 2,000.
+- **Decision 22, K2b-7e-2b's admission** (2026-11-24): the main position's **two shares** — an attempts' cap `A`
+  derived as the largest that fits, the machine's share `fits(peaks)` (one resource taken by one read: a gate on
+  attempts alive bounds nothing; the discriminator) and its **largest line** as a record's bytes (a line's bytes are
+  not its record's heap); the synthesis's earlier **`A ≥ 2·⌈pending·1000/(1000 − κ)⌉`** (its factor unexplained, its
+  count the wrong one); the blind solver's **slots = alive + waiting** (an answered attempt's handle is dropped before
+  its end is stepped: a wave of 503s lets reads past it; the discriminator) and its **captures refused** when the plan
+  has any (every host plan captures an id); the discriminator's **`weight(&Record)` in `command-log`** (it cannot see
+  the machine's clones, and a model's output committed freezes its revision; Software Design), **a constant per
+  attempt** (an attempt holds its frame, the request's copy and its captures'; Software Design, Verifiability),
+  **captures journaled unenforced** (an enforcer exists, `TAKEN`; Operability) and **no κ in I2** (it would amend
+  decision 21's decided I2 silently; Software Design, Verifiability); **the cgroup as the number's source before the
+  read gate** (the discriminator); **the first refusal only, one binding term, remedies from another owner**
+  (Operability, Software Design, Verifiability).
 - **Decision 22** (2026-11-24): the main position's **exact read size with a bounded write buffer** (hyper's setters
   unset each other); **reading straight into hyper's buffer** (only `unsafe` advances it: `forbid(unsafe_code)`); **a
   body budget reserved as bytes are read** (two chunked answers each holding part deadlock to their deadlines);
@@ -2251,6 +2323,15 @@ only and measures move to the 12-core box.
   bound socket's bind, `EADDRNOTAVAIL` at an unbound one's connect; Verifiability) — K2b-8d, in a namespace with a
   ten-port range; **a read-ahead floor against the looks' slack** — trigger: a run with `rest.cap.*` reports;
   **the counts of reports by code** in `Ran` or the fold — with K2b-8c-7's evidence.
+- **K2b-7e-2b's measurements owed** (2026-11-24, its roles), each before what it settles: **the catch-up's backlog** —
+  `sim` with a stall past L at κ = half the reserve, the peak of steps read and not ended against pending and against
+  `pending·1000/(1000 − κ)` (before decision 21's I2 is amended); **counted bytes against the process** — the counted
+  peak beside the resident high-water, the cgroup's current and its socket memory, cap sockets each receiving 1 MiB
+  answers while their thread judges, one and four sources, transparent huge pages off and on (before guidance on a
+  stated memory, and before K2b-7e-2c); **the copies a capture holds in flight** — a costs row with a captured hole (five
+  a reader counted from the code); **a connection over TCP** — tokio's registration a socket, which the pipe does not
+  show (a loopback control row for `CONNECTION`); **a source's own bytes** — `Live` under the allocator, differenced over
+  sources and over events.
 - **Decision 22's owed** (2026-11-24, its roles): **a declared head limit** (`head_cap`, the trailer's largest head;
   hyper's header count too); **the socket buffers** (sized from the emulated client or the bandwidth-delay product,
   read back, admission against the host's `tcp_mem` less the stand's share; the sysctls and sockstat journaled);
@@ -2468,3 +2549,10 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   pinned, hyper's map, the judge's copy: 69.7 kB); a body of no length reserved at the cap, no longer doubled to twice
   it (decision 22 amended); `fits` found under-counting — a burst released at one instant, a REST read, a moved block
   counted once — and re-pinned (`LIVE_CELL` 3,776, `ENDED_CELL` 1,216; decision 7's executor). K2b-7e-2 cut in three.
+- 2026-11-24: **decision 22's admission amended for K2b-7e-2b** (§ Decision 22; § Alternatives Considered; § Owed):
+  I1 a sum of enforced counts times owner-stated costs, the unenforced charged at their measured worst; one pool, its
+  count the steps read and not ended and the handles past their deadline; the plan commits shapes, the scheduler and
+  the carrier price them; an attempt priced by its record; captures held by `TAKEN`; the reader, the journal and the
+  sources by construction; decision 21's I2 kept; every refusal at once, each remedy its owner's; the stated memory
+  checked against the cgroup; a periodic `memory` line; no launch-scale run before the read gate. K2b-7e-2b cut in
+  three, K2b-7e-2c moved after the read gate.
