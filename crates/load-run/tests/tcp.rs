@@ -664,3 +664,123 @@ fn a_barred_run_is_journaled_by_the_library() {
         "{lines:?}"
     );
 }
+
+/// The sockets in `/proc/net/tcp` on `ip` (IPv4) in TIME_WAIT.
+fn time_waits(ip: Ipv4Addr) -> usize {
+    let local = format!("{:08X}", u32::from_le_bytes(ip.octets()));
+    std::fs::read_to_string("/proc/net/tcp")
+        .unwrap()
+        .lines()
+        .skip(1)
+        .filter(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            f.len() > 3 && f[1].starts_with(&local) && f[3] == "06"
+        })
+        .count()
+}
+
+/// Decision 19: no socket the shell closes waits in TIME_WAIT on its
+/// source's address — a connection closed by its stand's `connection:
+/// close`, one pooled and closed at the run's end, one censored and reset at
+/// its last look: each closed at zero linger, a reset.
+#[test]
+fn no_socket_the_shell_closes_waits_in_time_wait() {
+    use ascetic_ddd_command_log::fills::Namespace;
+    use ascetic_ddd_load_run::clock::{Clock, RealClock};
+    use ascetic_ddd_load_run::live::Live;
+    use ascetic_ddd_load_run::rest::{Config, RestCarrier};
+    use ascetic_ddd_load_run::run::{Ready, admit, run};
+    use ascetic_ddd_load_run::sink::Lines;
+    use ascetic_ddd_load_run::source::{Plan, Records};
+    use std::io::Write;
+    let ip = Ipv4Addr::new(127, 0, 0, 9);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let records: Vec<_> = (1..=3).map(|g| fixture::call("read", g, 0, 0, 0)).collect();
+    let id =
+        |i: usize| ascetic_ddd_command_log::render::correlation(Namespace(1), &records[i].step, 1);
+    let (close, keep) = (id(0), id(1));
+    let stand = std::thread::spawn(move || {
+        let mut served = Vec::new();
+        for _ in 0..3 {
+            let (mut s, _) = listener.accept().unwrap();
+            let (close, keep) = (close.clone(), keep.clone());
+            served.push(std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                while !buf.windows(4).any(|x| x == b"\r\n\r\n") {
+                    match s.read(&mut chunk) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let head = String::from_utf8_lossy(&buf).to_lowercase();
+                if head.contains(&close) {
+                    let _ = s.write_all(
+                        b"HTTP/1.1 200 X\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+                    );
+                } else if head.contains(&keep) {
+                    let _ = s.write_all(b"HTTP/1.1 200 X\r\ncontent-length: 2\r\n\r\n{}");
+                }
+                // The third left unanswered. Each closed once the shell's
+                // end of it went.
+                let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let _ = s.read(&mut chunk);
+            }));
+        }
+        for t in served {
+            let _ = t.join();
+        }
+    });
+    let live = Live::for_caps(&[100]).unwrap();
+    let mut h = fixture::header();
+    h.channels.clear();
+    h.calls.clear();
+    h.operations.iter_mut().for_each(|o| o.timeout = 200_000);
+    let h = std::sync::Arc::new(h);
+    let carrier = RestCarrier::new(
+        h.clone(),
+        Declaring("gateway"),
+        TcpEgress::new(
+            BTreeMap::from([("gateway".to_owned(), addr)]),
+            vec![Some(IpAddr::V4(ip))],
+        )
+        .with_ports(100),
+        Config::new(ascetic_ddd_command_log::render::RunSecret::new([7; 32])),
+    );
+    let before = time_waits(ip);
+    let admitted = admit::<RealClock, _>(
+        Plan::assumed(
+            h,
+            ascetic_ddd_command_log::validate::Peaks {
+                pending: 3,
+                ..Default::default()
+            },
+        ),
+        fixture::W,
+        std::sync::Arc::new(carrier),
+        live.runtimes(),
+    )
+    .unwrap();
+    let root = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let clock = std::sync::Arc::new(RealClock::start(2_000).unwrap());
+    root.block_on(run(
+        Ready::assumed(admitted, clock, Lines::new(), Namespace(1)),
+        Records::new(records.into_iter()),
+    ))
+    .unwrap();
+    drop(live);
+    stand.join().unwrap();
+    // The closes settled in the kernel.
+    let settle = RealClock::start(2_000).unwrap();
+    while settle.now() < 100_000 {
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        time_waits(ip),
+        before,
+        "a socket of the shell's in TIME_WAIT"
+    );
+}

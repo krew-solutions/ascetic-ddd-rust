@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) built (§ Measured), K2b-8d next — K2b-8 before K2b-7e, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d-1 built (§ Measured), K2b-8d-2 next — K2b-8 before K2b-7e, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -47,7 +47,9 @@ To be built in slices, each a commit of its own:
   egress's ports and the cap over each socket's life; **K2b-8c-2** a wait at the cap; **K2b-8c-3** the plan, the
   carrier's needs and the events; **K2b-8c-4** the descriptors; **K2b-8c-5** endpoints and sources; **K2b-8c-6** the
   probe; **K2b-8c-7** the chain and the evidence, in two — **K2b-8c-7a** the chain, **K2b-8c-7b** admission's
-  evidence in the journal; **K2b-8d** the real clock's twins.
+  evidence in the journal; **K2b-8d** the real clock's twins, in two — **K2b-8d-1** a driver's events, `TIME_WAIT`,
+  exhausted ports measured; **K2b-8d-2** a hog over the deadline while connecting and writing, a whole process
+  stalled.
 - **The first host run:** REST only, on the compose stand, `sources = 1` — a correctness run.
 - **K3** facts and the bus; **K4** shaping and the emulated client's retries; **K5** the report.
 
@@ -799,6 +801,7 @@ stage 1; § Alternatives Considered keeps what each refuted):
 | K2b-8c-6 | K2b | two sources bound to their own addresses probed from a root runtime with no I/O driver: one gate `egress.probe`, the stand accepting two connections, each read as reset with no byte; a closed port refused as `egress.probe.s0.e0.refused`; a connect never answered refused as `…unanswered` within its bound, its future dropped; the harness's failure named by its own, `…egress_ports`; in the descriptors' own binary, stage 3's re-read within at admission's bound and refused once the reserve and one more were opened since; the lint counting every method spawn of a task, its receiver whatever | probed on the root; failures ignored; the harness's name kept dotted; a stream kept; no re-read |
 | K2b-8c-7a | K2b | on the real clock, the chain from admission to the run: the journal's header holding the gates that ran — `egress.probe`, `egress.descriptors` — the judging, the namespace the gates certified, T0 no earlier than the third stage's end; the stand reading the run's frame under that namespace; a probe's refusal journaled by the library — no T0, no gate passed, its fault the only line; `run` refusing an `Admitted` and a `Ready` built by hand (`compile_fail` doctests, their error codes pinned); every assumption's constructor held to `testing` (the lint, five counted); a carrier built from a header not the plan's refused | no probe in the chain; no re-read in the chain; no T0 in the header; another namespace run; the frames' namespace the config's; a header of its own carried; a plan assumed in a host's build |
 | K2b-8c-7b | K2b | journal version 8 — the golden holding admission's evidence, every field at its bounds, the schema its `admission`, `source_fit`, `descriptors_read`; the differential's journals re-pinned (8, 4), their classes version 7's; the chain's header holding the source's need, cap and events, the descriptors read, the plan assumed; a barred run's too; a replayed plan on `Live` not assumed, on a test's runtimes assumed; five thousand closing reports counted by their code in `Ran` | no evidence journaled; no source's fit; no descriptors read; the plan's assumption alone; the runtimes' alone; reports uncounted |
+| K2b-8d-1 | K2b | on the real clock, a source of four sockets: `Live::for_caps`' runtime reading every answer in the host at the look, three answers, the driver's own wake and the target's ready across a spin past the deadline; a runtime taking four events a turn, claiming six, missing the fifth in some run — a false Root I1 forbids; no socket the shell closes in `TIME_WAIT` on its source's address — closed by the stand's `connection: close`, pooled and closed at the run's end, censored and reset; measured on purpose (`ports.rs`, ignored: two minutes), a bound source's ports out at its bind and an unbound one's at its connect, each `egress.ports` | no zero linger; `Live` building fewer events than it records |
 | K2-1 | K2 | the shell against an in-memory transport (hyper over `tokio::io::duplex`) under paused time reproduces `sim`'s journal | `std::time::Instant` in a handler |
 | K2-2 | K2 | each cause delayed alone — the reader, the token, the pool, the connect, the write, the dependency — moves exactly one gap of the chain | a gap merged |
 | K2-3 | K2 | on the real clock, multi-thread: chain order, no release before its stamped met instants, the stub's requests per correlation id equal the journal's attempts — a keep-alive connection closed as it is reused included; a request processed then reset before the answer is Unknown; a response stamped 1 µs before its deadline delivered after the tick is Expected | hyper's hidden retry; Unknown read as not taken; deadlines by arrival |
@@ -1695,6 +1698,29 @@ counts the closing reports journaled by their code — `rest.cap.full`, say — 
 observed.
 - The sweep killed all 6 mutants.
 
+**K2b-8d-1 — a driver's events; `TIME_WAIT`; exhausted ports** (2026-11-24, decisions 19, 20): `tests/events.rs`,
+`tests/ports.rs` and a `TIME_WAIT` twin in `tests/tcp.rs`.
+- **The events twin** (Verifiability's strongest executor of I1): a turn of tokio 1.53.1's driver is one
+  `epoll_wait` of at most its events, the ready list first in first out; four sockets on a source, a spinner on its
+  thread from `D − 800` to `D + 6,000`, three answers at `D − 600`, a task spawned from outside at `D − 400` (the
+  driver's own wake), the target's answer at `D − 200`. On a runtime of four events claiming six, the last look's one
+  verified turn takes three sockets and the wake, and the target's answer, in the host before its deadline, is read
+  absent — in some of eight runs; on `Live::for_caps`' runtime, in every run whose preconditions held, read. The first
+  build of the twin never missed: with the fixture's jitter of 0 the look before the deadline also fell past the
+  spin, and its own verified turn delivered the target — the look then needs `D − J/2` before the spin (J = 2 ms).
+- **No `TIME_WAIT`**: after a run whose three connections were closed by `connection: close`, at the run's end, and
+  reset at a censor, `/proc/net/tcp` holds no socket in `TIME_WAIT` on the source's own address.
+- **Exhausted ports, measured on purpose** (2026-11-24, this laptop, its range 32768–60999): a source bound to
+  127.0.0.7 took 28,232 binds of the 28,232, then `EADDRINUSE`; unbound, 28,228 connects to one endpoint, then
+  `EADDRNOTAVAIL`; `TcpEgress` named each `egress.ports`. The kernel searches its range for each bind and connect,
+  so near exhaustion the run is quadratic — 126 s for both, run in turn (a bound source's ports sit in the bind table
+  an unbound connect's search reads: run together, the unbound ran out early). Not in the gate: the classing's
+  executor is the pure twin.
+- **The receive twin's second sighting**: `a_wake_between_the_yield_and_the_turn_is_no_turn` (K2b-6b, the prodded
+  variant) failed once under the whole suite, passing alone four times and in the next whole suite; its message,
+  which carries the journal, was not kept — the next sighting's is.
+- The sweep killed both mutants.
+
 Nothing else yet. **M11** (K1): the machine's events a second at bursts in `sim` — a partitioned machine is needed when a
 burst's dispatch lateness passes J at the host's largest planned burst. **M12** (K2): own lateness and the receive
 side's lag against offered rate on this laptop with the stand running — past J, the laptop gives correctness runs
@@ -1937,3 +1963,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   cut in two.
 - 2026-11-24: K2b-8c-7b built (§ Measured): journal version 8, admission's evidence in its header; the closing reports
   counted by code. K2b-8c built.
+- 2026-11-24: K2b-8d-1 built (§ Measured): a driver's events against the cap on the real clock, no `TIME_WAIT` left
+  by the shell, exhausted ports measured. K2b-8d cut in two.
