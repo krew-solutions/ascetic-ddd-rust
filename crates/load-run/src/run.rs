@@ -97,7 +97,46 @@ impl Runtimes {
             .ok()
             .and_then(|s| self.events.get(s).copied())
     }
+
+    /// The bytes runtime `s` holds of its own (ADR-0047 decision 22,
+    /// K2b-7e-2b-2c-1): [`RUNTIME`], and its driver's events at [`EVENT`]
+    /// each, as built — charged for every runtime built, whatever the plan's
+    /// sources. None for a test's runtimes, or where no event's size is
+    /// stated.
+    pub fn own(&self, s: u32) -> Option<u64> {
+        if self.assumed {
+            return None;
+        }
+        let events = u64::try_from(self.events(s)?).ok()?;
+        RUNTIME.checked_add(events.checked_mul(EVENT?)?)
+    }
 }
+
+/// The bytes a source's runtime holds of its own, its events aside (ADR-0047
+/// decision 22, K2b-7e-2b-2c-1): a `current_thread` runtime with I/O, its
+/// thread and its stop, its places in `Live` — measured at build by
+/// `tests/sources.rs` (2,547 B, alike at 1 and 9 sources; the margin a
+/// thread's name of more digits). A look's and a socket's own on its thread
+/// are the attempts' and the connections'.
+pub const RUNTIME: u64 = 2_600;
+
+/// The bytes a driver's event takes: libc's `epoll_event`, packed on x86_64
+/// and on x86 with glibc, 12 B; 16 B on Linux elsewhere; none on another
+/// system, where no executor states it (ADR-0047 decision 22, K2b-7e-2b-2c-1).
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", all(target_arch = "x86", target_env = "gnu"))
+))]
+pub const EVENT: Option<u64> = Some(12);
+/// See the x86 variant.
+#[cfg(all(
+    target_os = "linux",
+    not(any(target_arch = "x86_64", all(target_arch = "x86", target_env = "gnu")))
+))]
+pub const EVENT: Option<u64> = Some(16);
+/// See the x86 variant.
+#[cfg(not(target_os = "linux"))]
+pub const EVENT: Option<u64> = None;
 
 /// Descriptors kept for what is opened after they are read (decision 20):
 /// the journal's file, a gate's client, the host's own.

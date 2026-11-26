@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a and K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3) built, K2b-7e-2b-2c next; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a, K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3) and K2b-7e-2b-2c-1 built, K2b-7e-2b-2c-2 next; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -45,7 +45,9 @@ To be built in slices, each a commit of its own:
   validator's peaks of shapes in the commitment; **K2b-7e-2b-1c** `fits` and the frame priced by them), **K2b-7e-2b-2** the reader's, the journal's and the sources' terms by
   construction, in three (**K2b-7e-2b-2a** the reader; **K2b-7e-2b-2b** the journal, in three — **K2b-7e-2b-2b-1** the lines and the
   writer, **K2b-7e-2b-2b-2** the channel built from admission, **K2b-7e-2b-2b-3** the carrier's boundary;
-  **K2b-7e-2b-2c** the sources), **K2b-7e-2b-3** admission and its evidence —, **K2b-7e-2c** the cgroup's memory, after the read gate;
+  **K2b-7e-2b-2c** the sources, in four — **K2b-7e-2b-2c-1** the runtime and its events, **K2b-7e-2b-2c-2** the
+  parse's bound and its roles, **K2b-7e-2b-2c-3** the tail held, **K2b-7e-2b-2c-4** a carrier's source costs),
+  **K2b-7e-2b-3** admission and its evidence —, **K2b-7e-2c** the cgroup's memory, after the read gate;
   **K2b-7e-3** the read gate; **K2b-7e-4** the parse; **K2b-7e-5** a waiting budget, if a real plan needs it; **K2b-8** a censored attempt's connection, its closing report and the ports (decision 19), in
   four: **K2b-8a** journal version 7 in the pure fold; **K2b-8b** the shell's censor, report and connect errors, in two — **K2b-8b-1** a connect's failure classed, zero
   linger, no shutdown, saturation by age; **K2b-8b-2** the reset at the censor, no byte or hand-over at the deadline,
@@ -791,7 +793,20 @@ which `admit` never called; § Alternatives Considered keeps what each refuted):
   - **A source's own**: a constant (its runtime, its thread's scratch, one answered tail, one head in transition) and
     its driver's events times an event's size (`Runtimes` owns the events, linear in the cap); the parse at its
     measured worst until K2b-7e-4. The answered tail — arrived, read, judged, checked in — a function with no await,
-    so "one answer a socket, one tail a source" holds by the compiler, not by position.
+    so "one answer a socket, one tail a source" holds by the compiler, not by position. **Amended for K2b-7e-2b-2c**
+    (2026-11-27, under the gate: the main position, a blind solver and a discriminator on Fable, three roles —
+    Performance, Software Design, Verifiability — on Opus; § Alternatives Considered keeps what each refuted): **the
+    parse is bounded by the answer cap**, `json::bound(n) = 2·size_of::<Json>()·(n + 1)` — its densest input, chains of
+    single-element arrays, holds about 128 B a body byte, a shape stage 2 never times —, enforced by the cap and lowered
+    by K2b-7e-4, not "at its measured worst"; its cost to an owner is `128·cap·sources` (8 MiB a source at a 64 KiB
+    cap, 128 MiB at 1 MiB, enough to refuse a plan that fits — the refusal names it, its remedies the cap and
+    K2b-7e-4). **The shell's own**: `RUNTIME` and `EVENT` by target, `Runtimes::own` over the runtimes built (2b-2c-1);
+    `kept`'s rebuild once a source, whatever carries it (2b-2c-3). **A carrier's source costs** beside its needs — its
+    scratch, a head copied in transition, the most its tails hold at once — summed, not their largest (a host's
+    carrier may parse a head and a body in one section), stated by the library or by its host (2b-2c-4). **One tail a
+    source** held by a sync `answered` and an `answer::Read` neither `Send` nor `Sync` (2b-2c-3). **A capture's
+    value** one predicate of `take`'s contract, at `kept` and before `fills` parses it; **the plan's largest predicate
+    literal and pointer** roles of its shape (revision 13; 2b-2c-2).
   - **I2 stays decision 21's where it was decided**: `⌈needed(s)·1000/(1000 − κ)⌉ ≤ cap(s)`, `needed(s)` the carrier's
     from the plan's pending by source; the pool's prediction at the same rate — κ = 0 when decision 21's question
     settles on no catch-up, never dropped silently.
@@ -961,6 +976,18 @@ which `admit` never called; § Alternatives Considered keeps what each refuted):
   decision 21's decided I2 silently; Software Design, Verifiability); **the cgroup as the number's source before the
   read gate** (the discriminator); **the first refusal only, one binding term, remedies from another owner**
   (Operability, Software Design, Verifiability).
+- **Decision 22, K2b-7e-2b-2c's sources** (2026-11-27): the main position's **parse at its measured worst over stage
+  2's shapes** (chains, the densest input, are no shape; it under-charged 2.7–3.9×; the discriminator), its **head in
+  transition omitted**, its **`SOURCE` holding the scratch** (a carrier's, allocated at a thread's first read — an
+  executor at build cannot see it) and its **runtime measured idle as its lazy part** (a look's own is the
+  attempt's); the synthesis's **`scratch + max(head, tail)`** (REST's premise, not a type; Software Design), **`kept`'s
+  rebuild in `judge`'s price** (the shell's, whatever carries it; Software Design), **a first-byte scalar check**
+  (whitespace bypasses it; Software Design, Verifiability), **the source costs inside `Needs::Sockets`** (a socketless
+  carrier that judges has none; Software Design), **charged over the runtimes built** (an idle runtime judges nothing;
+  Performance), **`EVENT` 16 B elsewhere** (kqueue's and IOCP's are larger; Software Design), **`Live::start` gated as
+  the remedy for allocating before admission** (`for_caps`, the production path, does the same; owed to 2b-3);
+  **a validator refusing a literal past the cap** in place of a role (it doubles every source's tail); **one judging
+  thread for the process** (one tail in all, but bodies would queue unbounded; the discriminator).
 - **Decision 22, K2b-7e-2b-2b's journal** (2026-11-26): the main position's **reader's mirror** — `JournalSink::behind()`
   and a check in `run` (late: it fires after the stages touched the stand, the journal's header written and left
   with no trailer; self-declared: a host's sink states its own count; the discriminator) —, its **`Ended.bound` by
@@ -1063,6 +1090,7 @@ which `admit` never called; § Alternatives Considered keeps what each refuted):
 | K2b-7e-2b-1a | K2b | `command-log/tests/shape.rs` (a counting allocator): over 512 records generated across every field, the bytes a record decoded from its line holds in its `Arc` equal `shape::heap`, at most `shape::bound` of its shape and at least a third of it; a record of no sequence priced exactly; every record type taken apart whole (a new field does not compile uncounted) | a predicate's pointer not counted; serde's first four slots forgotten; a sequence bound at its elements once; byte strings' padding left out; base64's estimate taken as the length; the `Arc` left out; a capture's source not counted |
 | K2b-7e-2b-1b | K2b | `vectors/reference.py` folding each line's shape over the pending, late and held sets by definition and agreeing with the validator's byte peaks on every corpus log, deriving a shape's key, captures and source itself, refusing a corpus that reaches no late step, socket, held capture or captured hole; the commitment's largest line and chunk against a log of 19 steps in chunks of four; the validator's identity at revision 10 | a step past its end not kept late; the late kept past the jitter; what the window drops kept still; what the held let go kept still; a source's sockets never let go; a pending shape never let go; the barrier keys' bytes not counted; the largest line not taken; a chunk's bytes carried past its prefix |
 | K2b-7e-2b-1c | K2b | the scheduler's `tests/costs.rs`: thirteen rows — ended in the window, not ended, bursts of host calls and REST reads at one instant, REST updates of 4 KiB bodies, barrier keys of 1 KiB labels, writers keeping captures, captured values sent back, a step awaiting the 65 before it — each within what `fits` counts of its counts and shapes, the rows a constant or a price is pinned on at least 70–80 % of it; `fits`' boundary pair and every count of a shape and of what the held keep raising its need; the judge's golden: a number of 8,192 digits taken, of 8,193 not, its twin in `vectors/judge.py` | the records' shapes, a captured value, what the held keep, the barrier keys' bytes not priced; a live cell as before the shapes, doubled; an ended cell a quarter lighter; a captured number taken past `TAKEN`; (survives: a dependency's binding not priced — owed) |
+| K2b-7e-2b-2c-1 | K2b | `load-run/tests/sources.rs` (a binary of one test, its allocator the process's): runtimes for 1 and 9 sources at caps 0 and 4,096 — their events exactly `EVENT` each, a source's own within `RUNTIME` and its events at 98 %, `Runtimes::own` each runtime built, a test's runtimes priced by no one, a runtime of no event built and recorded with one; `tests/lint.rs`: `Live::start` a test's, `EVENT` three items under their targets | an event of 16 B; an event's size unconditional; the runtime halved; the events uncharged; a test's runtimes priced; the events recorded as asked; unchecked runtimes a host's |
 | K2b-7e-2b-2b-3 | K2b | `load-run/tests/shell.rs`: a carrier's capture no spec of its step names, one past the specs of its subject and slot, a value's buffer past `VALUE` — each a carrier fault named, the run stopped, its answer never journaled; captures within the specs taken in any order, two of one subject and slot where two specs name them, a buffer of exactly `VALUE`; a carrier minting a code an attempt: `UNSENT` codes named, the rest counted, every report counted; `stamps.rs`'s own test: a capture kept in its spec's names at their exact length; `scheduler/tests/judge.rs`: a value taken at its worst escape `VALUE` bytes, its buffer no larger; a `compile_fail` doctest: no code made but by `Code::of` | the boundary bypassed; the check after the push; captures matched in order; a spec taken twice; a buffer of exactly `VALUE` refused; a capture kept in its carrier's names; a value taken grown; the unsent codes uncapped; the codes past the cap dropped; a code of any shape made |
 | K2b-7e-2b-2b-2 | K2b | `load-run/tests/channel.rs` (a binary of one test, its allocator the process's: the journal's three threads): a journal's channel full and its writer stalled in a write, its output of exactly `OUT` bytes inline holding a stated heap, a feeder's sends begun `behind + 2` and done `behind + 1`, within its `Journal`'s bytes at 98.8–99.9 % at 1, 4, 64 and 128 lines and at 0, clamped; its slope from 64 lines to 128 its stated one to within the thread's own 72 B; `tests/memory.rs`: a burst's first line comes with the run holding, from 64 dependents to 128, the machine's outputs' growth alone; `tests/tcp.rs`: through admission and the stages, the journal's channel admission's (37 lines), its output opened before T0, an output of `OUT` bytes taken and of `OUT + 1` refused before it is opened; `tests/sink.rs`: a test's journal marked assumed; `tests/lint.rs`: the journal kept whole a test's | the channel twice the admitted; one line beside the channel; the slots, a slot's stamp, the lines, the writer's buffer, the thread, the output uncharged; no line behind clamped; an assumed journal unmarked; the journal kept whole a host's; a burst's lines made at once; the stages ignoring the admitted journal; an output past `OUT` taken; the output opened after the clock |
 | K2b-7e-2b-2b-1 | K2b | `scheduler/tests/lines.rs` (a counting allocator by thread): over the corpus's clean logs, every answer capturing every spec, each line within its log's largest record's `journal::line_bound`, each read, end and answer exactly its row at its exact capacities, each row reached; a read of 0, 1, 4, 5, 9 and 17 step and barrier dependencies, its answer under two codes of 64 B, its end: the bytes made for each line, as it is taken, its walk's, each row its price, the bound their largest, the machine's bindings exactly `fits`' price of the record; the writer given its buffer and the header's box at its start and nothing a line — the shortest, about the buffer, ten buffers of escapes, an end's bound lines —, each line whole and flushed once written, its bytes the canonical lines', a header past the buffer read back with its trailer, a failing output an I/O error; `tests/costs.rs`: barriers of 1 KiB labels, memberless and with members, within `fits`; the validator's identity at revision 12, `vectors/reference.py` deriving the barriers' keys' bytes | a read's dependencies, its barriers' keys, an answer's second code, an end's bound lines unpriced; the bound a read's alone; a barrier's key, an answer's slots, an unsent code, an end's box not walked; a read's dependencies collected through a flatten; a step's lines made at once; the machine's bindings unpriced; a record's barriers' keys not walked, not summed, not at their most; a line, the header written through a copy; a bound line's numbers through a string; the buffer grown, not written out; a full buffer not digested; no flush, no write at a line's end; a write's error an encoding's |
@@ -2033,6 +2061,25 @@ a connection of its own (retired at once); the journal folded, each Root classed
 - A hog over the deadline while connecting or writing on a thread others hold is the source thread's lag (K2b-7c-2's
   twins, the path's lag counted from the thread's last blocked park); the stall twin is its whole-process case.
 
+**K2b-7e-2b-2c-1 — the runtime and its events** (2026-11-27, decision 22 as amended for K2b-7e-2b-2c): a source's
+runtime holds `RUNTIME` of its own — a `current_thread` runtime with I/O, its thread and its stop, its places in
+`Live` — and its driver's events at `EVENT` each, as built: `Runtimes::own(s)` states them for each runtime built,
+whatever the plan's sources, none for a test's. `EVENT` is libc's `epoll_event`, stated by target: 12 B packed on
+x86_64 and on x86 with glibc, 16 B elsewhere on Linux, none on another system — where nothing is stated, admission
+refuses. A runtime is built, and recorded, with one event at least (it was recorded as asked). `live::events_for(caps)`
+prices a source's events before anything is built; `Live::start`, of events no cap checked, is a test's. Measured
+(`load-run/tests/sources.rs`):
+
+| | measured | stated |
+|---|---|---|
+| a runtime's events, 1 and 9 runtimes at cap 4,096 against cap 0 | 49,152 and 442,368 B — 12 B an event, exactly | `EVENT` |
+| a source's own, from 1 runtime to 9 (one alone the same: no constant beside them) | 2,571 B (2,547 B and two events) | 2,624 B (98 %) |
+
+Twenty runs idle and twenty beside four busy loops: none outside its bounds.
+Mutants, each red: an event of 16 B; an event's size unconditional (by the lint: the CI's arch sees one);
+the runtime halved; the events uncharged; a test's runtimes priced; the events recorded as asked; unchecked
+runtimes a host's.
+
 **K2b-7e-2b-2b-3 — the carrier's boundary** (2026-11-27, decision 22 as amended for K2b-7e-2b-2b): what a carrier
 hands the shell is held where it enters, before the frontier takes it. A code is made by `Code::of` alone — the
 machine's `Code` a name of at most `CODE` bytes at its exact length, or none, its payload private —, so a closing
@@ -2621,6 +2668,14 @@ only and measures move to the 12-core box.
   machine).
 - **A cell's residue** (K1e-2): an ended cell keeps its key's strings and its map node, some 0.6–0.9 kB; a compact
   ended cell and keys interned per barrier — trigger: capacity binding on a host plan.
+- **Decision 22's sources, owed** (2026-11-27, K2b-7e-2b-2c's roles): **a look's burst** — a row of attempts sharing
+  a deadline, a source thread's deferred wakers; **pool slots** — a row of several endpoints; **tokio's
+  `ScheduledIo`** on a real socket; **`machine.step`'s input clone** of captures against `LIVE_CELL`; **a CI variant
+  with tokio's `signal`** (a registration a runtime); **`Live` built from admission's fitted caps** by type, as the
+  journal's channel is (K2b-7e-2b-3: `for_caps` allocates before admission, a cap of `i32::MAX` reserving 25 GB);
+  **stage 2's time over chains**, measured before its vocabulary changes; **a host dry run's answers replayed**
+  through `read` and `judge`, their tree a byte by operation — K2b-7e-4's priority (Performance); **`stamps::Tasks`'
+  one mutex** measured on the 16-core box (Performance).
 - **Decision 22's journal, owed** (2026-11-26, K2b-7e-2b-2b's roles): **the journal's backpressure** (Operability) —
   five waits with no bound: a line's send on a full channel (`sink.rs:121`), the trailer's (`sink.rs:132`), the join
   of a writer stuck in a write (`sink.rs:105, 133`), the header written on the caller's thread after T0
@@ -2846,3 +2901,7 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-27: K2b-7e-2b-2b-3 built (§ Measured): the carrier's boundary — a code made by `Code::of` alone, an answer's
   captures matched to distinct specs and kept in their names, a value's buffer at most `VALUE`, the library's values at
   their length, `Ran::unsent` capped at `UNSENT` codes; K2b-7e-2b-2b built.
+- 2026-11-27: K2b-7e-2b-2c decided under the gate (the main position, a blind solver and a discriminator on Fable,
+  three roles on Opus; § Alternatives Considered) and cut in four; decision 22's source bullet amended: the parse
+  bounded by the answer cap, not at its measured worst. K2b-7e-2b-2c-1 built (§ Measured): `RUNTIME` and `EVENT`,
+  `Runtimes::own`, a runtime's events as built, `live::events_for`, `Live::start` a test's.

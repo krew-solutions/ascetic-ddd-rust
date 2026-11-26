@@ -109,6 +109,26 @@ impl Descriptors {
     }
 }
 
+/// The events each source's driver takes a turn for `caps` by source: its
+/// cap and its driver's own (decision 20) — computed before anything is
+/// built, so a host can price them first (ADR-0047 decision 22,
+/// K2b-7e-2b-2c-1); a cap past what a driver sizes refused.
+pub fn events_for(caps: &[usize]) -> io::Result<Vec<usize>> {
+    caps.iter()
+        .map(|cap| {
+            cap.checked_add(DRIVER_EVENTS)
+                // mio sizes its buffer to an `i32`.
+                .filter(|e| i32::try_from(*e).is_ok())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("a cap of {cap} sockets: past a driver's events"),
+                    )
+                })
+        })
+        .collect()
+}
+
 /// The sources' runtimes, running until dropped.
 pub struct Live {
     runtimes: Runtimes,
@@ -118,7 +138,9 @@ pub struct Live {
 
 impl Live {
     /// `sources` runtimes, each taking `events` a driver turn — no fewer than
-    /// the source's cap and its driver's own (decision 20).
+    /// the source's cap and its driver's own (decision 20): a test's, its
+    /// events unchecked.
+    #[cfg(feature = "testing")]
     pub fn start(sources: usize, events: usize) -> io::Result<Live> {
         Live::with_events(&vec![events; sources])
     }
@@ -127,21 +149,7 @@ impl Live {
     /// a turn (decision 20): `caps` by source — a carrier's
     /// [`Needs`](crate::carrier::Needs).
     pub fn for_caps(caps: &[usize]) -> io::Result<Live> {
-        let events = caps
-            .iter()
-            .map(|cap| {
-                cap.checked_add(DRIVER_EVENTS)
-                    // mio sizes its buffer to an `i32`.
-                    .filter(|e| i32::try_from(*e).is_ok())
-                    .ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("a cap of {cap} sockets: past a driver's events"),
-                        )
-                    })
-            })
-            .collect::<io::Result<Vec<usize>>>()?;
-        Live::with_events(&events)
+        Live::with_events(&events_for(caps)?)
     }
 
     fn with_events(events: &[usize]) -> io::Result<Live> {
@@ -149,11 +157,13 @@ impl Live {
         let mut handles = Vec::with_capacity(sources);
         let mut stops = Vec::with_capacity(sources);
         let mut threads = Vec::with_capacity(sources);
+        // As built: a driver takes one event at least.
+        let events: Vec<usize> = events.iter().map(|&e| e.max(1)).collect();
         for (i, &events) in events.iter().enumerate() {
             // Its parks seen: whether each blocked (decision 18).
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_io()
-                .max_io_events_per_tick(events.max(1))
+                .max_io_events_per_tick(events)
                 .on_thread_park(crate::clock::idle::parking)
                 .on_thread_unpark(crate::clock::idle::unparked)
                 .build()?;
@@ -173,7 +183,7 @@ impl Live {
         // Read once the runtimes exist: their own counted (decision 20).
         let descriptors = Descriptors::read().ok();
         Ok(Live {
-            runtimes: Runtimes::new(handles, events.to_vec(), descriptors),
+            runtimes: Runtimes::new(handles, events, descriptors),
             stops,
             threads,
         })

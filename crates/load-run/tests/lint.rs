@@ -217,3 +217,61 @@ fn the_journal_kept_whole_is_a_test_s() {
         assert!(gated, "sink.rs:{}: {item} not a test's", i + 1);
     }
 }
+
+/// Runtimes of events no cap checked are a test's (ADR-0047 K2b-7e-2b-2c-1):
+/// a host builds its own by `Live::for_caps`, its events priced first.
+#[test]
+fn runtimes_of_unchecked_events_are_a_test_s() {
+    let (_, text) = SOURCES.iter().find(|(name, _)| *name == "live.rs").unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    let i = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("pub fn start("))
+        .expect("live.rs: no `pub fn start(`");
+    let gated = lines[..i]
+        .iter()
+        .rev()
+        .map(|l| l.trim_start())
+        .take_while(|l| l.starts_with("#[") || l.starts_with("///"))
+        .any(|l| l == "#[cfg(feature = \"testing\")]");
+    assert!(gated, "live.rs:{}: `Live::start` not a test's", i + 1);
+}
+
+/// A driver's event is stated by the system and arch it is built for
+/// (ADR-0047 K2b-7e-2b-2c-1): libc's `epoll_event` is packed on x86_64 and on
+/// x86 with glibc alone, and another system has no stated size — so `EVENT`
+/// is three items, each under its own `cfg`, the CI's arch exercising only one.
+#[test]
+fn an_event_s_size_is_its_target_s() {
+    let (_, text) = SOURCES.iter().find(|(name, _)| *name == "run.rs").unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    let items: Vec<(usize, String)> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.trim_start().starts_with("pub const EVENT: Option<u64> ="))
+        .map(|(i, l)| {
+            let attrs: String = lines[..i]
+                .iter()
+                .rev()
+                .take_while(|l| !l.trim().is_empty() && !l.trim_start().starts_with("pub "))
+                .map(|l| l.trim())
+                .collect::<Vec<_>>()
+                .join(" ");
+            (i, format!("{attrs} {}", l.trim()))
+        })
+        .collect();
+    assert_eq!(items.len(), 3, "{items:?}");
+    let has = |needle: &[&str]| {
+        items
+            .iter()
+            .any(|(_, s)| needle.iter().all(|n| s.contains(n)))
+    };
+    assert!(has(&[
+        "Some(12)",
+        "target_os = \"linux\"",
+        "target_arch = \"x86_64\"",
+        "target_env = \"gnu\""
+    ]));
+    assert!(has(&["Some(16)", "target_os = \"linux\"", "not(any("]));
+    assert!(has(&["None", "not(target_os = \"linux\")"]));
+}
