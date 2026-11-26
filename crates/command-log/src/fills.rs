@@ -134,6 +134,18 @@ impl Fills<'_> {
                     .iter()
                     .find(|c| c.subject == *subject && c.slot == *slot)
                     .ok_or_else(|| HoleError::Missing { slot: slot.clone() })?;
+                // A structure is never parsed: a host's array of `VALUE`
+                // bytes would be a tree of megabytes before it is refused
+                // (ADR-0047 decision 22, K2b-7e-2b-2c-2). The shell takes
+                // only what `answer::is_taken` admits; this refusal's class
+                // is the parse's.
+                let first = c
+                    .value
+                    .iter()
+                    .find(|b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r'));
+                if matches!(first, Some(b'[' | b'{')) {
+                    return Err(HoleError::NotScalar { slot: slot.clone() });
+                }
                 match json::parse(&c.value) {
                     Ok(Json::String(s)) => Ok(Filled::Text(s)),
                     Ok(Json::Number(n)) => Ok(Filled::Json(n.text().to_owned())),

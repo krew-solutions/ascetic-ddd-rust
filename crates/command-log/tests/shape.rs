@@ -585,3 +585,60 @@ fn a_header_holds_what_its_walk_counts() {
         );
     }
 }
+
+/// K2b-7e-2b-2c-2: a record's largest predicate literal — its expectation's
+/// or its observation's `until` — and its longest pointer, a predicate's or a
+/// capture's, are its shape's.
+#[test]
+fn a_record_s_largest_literal_and_longest_pointer() {
+    let subject = Subject {
+        kind: "device".to_owned(),
+        scope: vec![7],
+        index: 1,
+    };
+    let mut r = Record {
+        step: StepId {
+            subject: subject.clone(),
+            label: "read".to_owned(),
+            n: 0,
+        },
+        at: 0,
+        think: 0,
+        after: vec![],
+        action: Action::Host(HostCall {
+            op: "read".to_owned(),
+            args: Payload {
+                codec: Codec::Text,
+                bytes: vec![],
+                holes: vec![],
+            },
+        }),
+        expect: vec![],
+        capture: vec![],
+        measure: vec![],
+        deviation: None,
+    };
+    r.expect = vec![Outcome::Response {
+        status: 200,
+        problem: None,
+        body: vec![
+            Predicate {
+                pointer: "/a".into(),
+                test: Test::Equals(Value::Literal("\"xy\"".into())),
+            },
+            Predicate {
+                pointer: "/b".into(),
+                test: Test::Contains(Value::Literal("[1,2,3]".into())),
+            },
+        ],
+    }];
+    r.capture = vec![Capture {
+        subject,
+        slot: "id".into(),
+        source: Source::Json("/a/long/pointer".into()),
+        secret: false,
+    }];
+    let s = shape(&r);
+    assert_eq!(s.literal_bytes, 7, "the largest literal, not their sum");
+    assert_eq!(s.pointer_bytes, 15, "the capture's pointer, the longest");
+}

@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a, K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3) and K2b-7e-2b-2c-1 built, K2b-7e-2b-2c-2 next; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a, K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3), K2b-7e-2b-2c-1 and K2b-7e-2b-2c-2 built, K2b-7e-2b-2c-3 next; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -1090,6 +1090,7 @@ which `admit` never called; § Alternatives Considered keeps what each refuted):
 | K2b-7e-2b-1a | K2b | `command-log/tests/shape.rs` (a counting allocator): over 512 records generated across every field, the bytes a record decoded from its line holds in its `Arc` equal `shape::heap`, at most `shape::bound` of its shape and at least a third of it; a record of no sequence priced exactly; every record type taken apart whole (a new field does not compile uncounted) | a predicate's pointer not counted; serde's first four slots forgotten; a sequence bound at its elements once; byte strings' padding left out; base64's estimate taken as the length; the `Arc` left out; a capture's source not counted |
 | K2b-7e-2b-1b | K2b | `vectors/reference.py` folding each line's shape over the pending, late and held sets by definition and agreeing with the validator's byte peaks on every corpus log, deriving a shape's key, captures and source itself, refusing a corpus that reaches no late step, socket, held capture or captured hole; the commitment's largest line and chunk against a log of 19 steps in chunks of four; the validator's identity at revision 10 | a step past its end not kept late; the late kept past the jitter; what the window drops kept still; what the held let go kept still; a source's sockets never let go; a pending shape never let go; the barrier keys' bytes not counted; the largest line not taken; a chunk's bytes carried past its prefix |
 | K2b-7e-2b-1c | K2b | the scheduler's `tests/costs.rs`: thirteen rows — ended in the window, not ended, bursts of host calls and REST reads at one instant, REST updates of 4 KiB bodies, barrier keys of 1 KiB labels, writers keeping captures, captured values sent back, a step awaiting the 65 before it — each within what `fits` counts of its counts and shapes, the rows a constant or a price is pinned on at least 70–80 % of it; `fits`' boundary pair and every count of a shape and of what the held keep raising its need; the judge's golden: a number of 8,192 digits taken, of 8,193 not, its twin in `vectors/judge.py` | the records' shapes, a captured value, what the held keep, the barrier keys' bytes not priced; a live cell as before the shapes, doubled; an ended cell a quarter lighter; a captured number taken past `TAKEN`; (survives: a dependency's binding not priced — owed) |
+| K2b-7e-2b-2c-2 | K2b | `command-log/tests/parse.rs` (a counting allocator by thread, a block moved counted new before old): the densest input — a forest of chains just past a power of two — at 99.7–99.8 % of `json::bound`, cut inputs within it and some past two nodes a byte, nested objects within it, any bytes and every prefix of generated documents within it, the bound saturating; a pointer's tokens at 95 % of `json::pointer_bound`; `scheduler/tests/tail.rs`: judging within `judge::bound`, each term the one that decides a row of its own — a literal the body's size, a value at `VALUE` under names of 8 KiB, a hole of `TAKEN` digits, a `Location` decoded into `TAKEN` quotes, a pointer of 65 tokens —, a host's array in a hole never parsed, `is_taken` refusing what no take makes; the validator's identity at revision 13, `vectors/reference.py` deriving the largest literal and the longest pointer, `tests/shape.rs` a capture's pointer the longest and the largest literal not their sum | the bound's added slot dropped; the bound a depth looser; one node a byte; objects pre-sized; a token's slot held once; a literal not walked; a capture's pointer not walked; the literals summed at their most; a hole's value, a segment's decoding, a pointer's tokens unpriced; the body and a value read at their largest; a segment sized by its escapes; a take's value checked by its first byte; a structure parsed; a value taken, its names unpriced |
 | K2b-7e-2b-2c-1 | K2b | `load-run/tests/sources.rs` (a binary of one test, its allocator the process's): runtimes for 1 and 9 sources at caps 0 and 4,096 — their events exactly `EVENT` each, a source's own within `RUNTIME` and its events at 98 %, `Runtimes::own` each runtime built, a test's runtimes priced by no one, a runtime of no event built and recorded with one; `tests/lint.rs`: `Live::start` a test's, `EVENT` three items under their targets | an event of 16 B; an event's size unconditional; the runtime halved; the events uncharged; a test's runtimes priced; the events recorded as asked; unchecked runtimes a host's |
 | K2b-7e-2b-2b-3 | K2b | `load-run/tests/shell.rs`: a carrier's capture no spec of its step names, one past the specs of its subject and slot, a value's buffer past `VALUE` — each a carrier fault named, the run stopped, its answer never journaled; captures within the specs taken in any order, two of one subject and slot where two specs name them, a buffer of exactly `VALUE`; a carrier minting a code an attempt: `UNSENT` codes named, the rest counted, every report counted; `stamps.rs`'s own test: a capture kept in its spec's names at their exact length; `scheduler/tests/judge.rs`: a value taken at its worst escape `VALUE` bytes, its buffer no larger; a `compile_fail` doctest: no code made but by `Code::of` | the boundary bypassed; the check after the push; captures matched in order; a spec taken twice; a buffer of exactly `VALUE` refused; a capture kept in its carrier's names; a value taken grown; the unsent codes uncapped; the codes past the cap dropped; a code of any shape made |
 | K2b-7e-2b-2b-2 | K2b | `load-run/tests/channel.rs` (a binary of one test, its allocator the process's: the journal's three threads): a journal's channel full and its writer stalled in a write, its output of exactly `OUT` bytes inline holding a stated heap, a feeder's sends begun `behind + 2` and done `behind + 1`, within its `Journal`'s bytes at 98.8–99.9 % at 1, 4, 64 and 128 lines and at 0, clamped; its slope from 64 lines to 128 its stated one to within the thread's own 72 B; `tests/memory.rs`: a burst's first line comes with the run holding, from 64 dependents to 128, the machine's outputs' growth alone; `tests/tcp.rs`: through admission and the stages, the journal's channel admission's (37 lines), its output opened before T0, an output of `OUT` bytes taken and of `OUT + 1` refused before it is opened; `tests/sink.rs`: a test's journal marked assumed; `tests/lint.rs`: the journal kept whole a test's | the channel twice the admitted; one line beside the channel; the slots, a slot's stamp, the lines, the writer's buffer, the thread, the output uncharged; no line behind clamped; an assumed journal unmarked; the journal kept whole a host's; a burst's lines made at once; the stages ignoring the admitted journal; an output past `OUT` taken; the output opened after the clock |
@@ -2061,6 +2062,44 @@ a connection of its own (retired at once); the journal folded, each Root classed
 - A hog over the deadline while connecting or writing on a thread others hold is the source thread's lag (K2b-7c-2's
   twins, the path's lag counted from the thread's last blocked park); the stall twin is its whole-process case.
 
+**K2b-7e-2b-2c-2 — the parse's bound and its roles** (2026-11-27, decision 22 as amended for K2b-7e-2b-2c):
+parsing `n` bytes holds at most `json::bound(n) = 2·size_of::<Json>()·(n + 1)` — a node 64 B; its densest input, an
+array of one element, four slots (std's first growth) on two bytes; the added slot for an input cut inside it (`[1`,
+258 B on two bytes) —, and a pointer's tokens at most `json::pointer_bound(n)`, three strings and a byte a byte and
+std's first four slots. A record's shape commits two roles more (`RULES_REVISION` 13): its largest predicate literal
+(`literal_bytes`, a judge parses one at a time) and its longest pointer, a predicate's or a capture's
+(`pointer_bytes`). `answer::bound(cap, record, problem)` is the body's tree, one pointer's tokens, and one value read at
+a time — a literal's tree, a captured hole's value (`HOLE`, a number of `TAKEN` digits parsed, copied, parsed again),
+a `Location`'s segment decoded (`DECODE`, sized before it is decoded and refused past `TAKEN`) —, the predicates
+read before the captures; `judge::bound` adds what it takes: each value at most `VALUE`, its names, its slot in what
+is taken and in what is missed. `answer::is_taken` is `take`'s contract — a carried text quoted, or a carried JSON
+number — checked with nothing allocated, for the shell's boundary (K2b-7e-2b-2c-3); `fills` refuses a structure
+before it parses one, whitespace before it or not, its refusal's class the parse's (a host's array of `VALUE` bytes
+was a tree of megabytes before `not_scalar`). Measured (`command-log/tests/parse.rs`, `scheduler/tests/tail.rs`):
+
+| | measured | bound |
+|---|---|---|
+| 17 chains as deep as an answer nests, 4,353 B | 555,810 B | 557,312 B (99.73 %) |
+| 257 chains, 65,793 B | 8,405,250 B | 8,421,632 B (99.81 %) |
+| objects nested 127 deep, 636 B | 44,986 B | 81,536 B |
+| 65 empty pointer tokens | 4,608 B | 4,841 B (95 %) |
+| judging a body of 17 chains and a literal of its size | 1,110,596 B | 1,115,453 B (99.6 %) |
+| a header's value at `VALUE` under names of 8 KiB, no body | 33,187 B | 42,288 B (78 %; the value or the names gone, past it) |
+| a hole of 8,192 digits | 33,026 B | 34,237 B (96.5 %) |
+| a `Location` of 8,192 `%22` | 24,578 B | 25,912 B (94.9 %) |
+| a pointer of 65 tokens | 4,608 B | 5,721 B (80.5 %) |
+| a host's array of 64 chains in a hole, whitespace before it | under 4 KiB: never parsed | |
+
+The bound of a hole's value holds of a value a take makes; a host's carrier is held to that at the shell's boundary by
+K2b-7e-2b-2c-3.
+Mutants, each red: the bound's added slot dropped; the bound a depth looser; one node a byte; objects pre-sized;
+a token's slot held once; a literal not walked; a capture's pointer not walked (it survived the corpus, whose
+captured pointers are never a record's longest: red by `tests/shape.rs`' own row); the literals summed at their
+most; a hole's value, a segment's decoding, a pointer's tokens unpriced; the body and a value read at their
+largest; a segment sized by its escapes; a take's value checked by its first byte; a structure parsed; a value
+taken, its names unpriced. A slot of what is taken or missed is no row's deciding term: held by construction,
+as `fits` prices its own.
+
 **K2b-7e-2b-2c-1 — the runtime and its events** (2026-11-27, decision 22 as amended for K2b-7e-2b-2c): a source's
 runtime holds `RUNTIME` of its own — a `current_thread` runtime with I/O, its thread and its stop, its places in
 `Live` — and its driver's events at `EVENT` each, as built: `Runtimes::own(s)` states them for each runtime built,
@@ -2905,3 +2944,6 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   three roles on Opus; § Alternatives Considered) and cut in four; decision 22's source bullet amended: the parse
   bounded by the answer cap, not at its measured worst. K2b-7e-2b-2c-1 built (§ Measured): `RUNTIME` and `EVENT`,
   `Runtimes::own`, a runtime's events as built, `live::events_for`, `Live::start` a test's.
+- 2026-11-27: K2b-7e-2b-2c-2 built (§ Measured): `json::bound` and `json::pointer_bound`, the shape's largest literal and
+  longest pointer (the validator's revision 13), `answer::bound` and `judge::bound`, `answer::is_taken`, a `Location`'s
+  segment sized before it is decoded, `fills` refusing a structure before it parses one.

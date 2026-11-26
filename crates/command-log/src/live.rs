@@ -45,8 +45,9 @@ use crate::validate::{Host, Limits, Report, Rule, spill_need, validate_on};
 /// bytes; the largest line and chunk committed; 11: K2b-7e-2b-2 — the
 /// largest record's shape, each count at its most over one record; 12:
 /// K2b-7e-2b-2b — a shape's barrier dependencies' key bytes, which 10
-/// missed).
-pub const RULES_REVISION: u32 = 12;
+/// missed; 13: K2b-7e-2b-2c — its largest predicate literal and its
+/// longest pointer).
+pub const RULES_REVISION: u32 = 13;
 
 /// The validator's identity: its revision and its rules' names.
 pub fn validator() -> String {

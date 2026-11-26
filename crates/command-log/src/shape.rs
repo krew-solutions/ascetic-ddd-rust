@@ -131,6 +131,15 @@ pub struct Shape {
     /// step's key bounds them.
     #[serde(with = "u64s")]
     pub each_bytes: u64,
+    /// Its largest predicate literal, in bytes — the largest, not their sum:
+    /// a judge parses one at a time (K2b-7e-2b-2c-2). Summed over records,
+    /// an upper bound of theirs.
+    #[serde(with = "u64s")]
+    pub literal_bytes: u64,
+    /// Its longest pointer — a predicate's or a capture's —, in bytes: a
+    /// judge collects one's tokens at a time (K2b-7e-2b-2c-2).
+    #[serde(with = "u64s")]
+    pub pointer_bytes: u64,
 }
 
 impl Shape {
@@ -156,6 +165,8 @@ impl Shape {
             request: self.request.saturating_add(o.request),
             request_holes: self.request_holes.saturating_add(o.request_holes),
             each_bytes: self.each_bytes.saturating_add(o.each_bytes),
+            literal_bytes: self.literal_bytes.saturating_add(o.literal_bytes),
+            pointer_bytes: self.pointer_bytes.saturating_add(o.pointer_bytes),
         }
     }
 
@@ -185,6 +196,8 @@ impl Shape {
             request: self.request.saturating_mul(n),
             request_holes: self.request_holes.saturating_mul(n),
             each_bytes: self.each_bytes.saturating_mul(n),
+            literal_bytes: self.literal_bytes.saturating_mul(n),
+            pointer_bytes: self.pointer_bytes.saturating_mul(n),
         }
     }
 
@@ -215,6 +228,8 @@ impl Shape {
             request: self.request.saturating_sub(o.request),
             request_holes: self.request_holes.saturating_sub(o.request_holes),
             each_bytes: self.each_bytes.saturating_sub(o.each_bytes),
+            literal_bytes: self.literal_bytes.saturating_sub(o.literal_bytes),
+            pointer_bytes: self.pointer_bytes.saturating_sub(o.pointer_bytes),
         }
     }
 
@@ -241,6 +256,8 @@ impl Shape {
             request,
             request_holes,
             each_bytes,
+            literal_bytes,
+            pointer_bytes,
         } = *self;
         let mut v = vec![records, bytes, byte_strings];
         for s in [deps, values, fields, outcomes, predicates, captures] {
@@ -257,6 +274,8 @@ impl Shape {
             request,
             request_holes,
             each_bytes,
+            literal_bytes,
+            pointer_bytes,
         ]);
         v
     }
@@ -284,6 +303,8 @@ impl Shape {
             request: self.request.max(o.request),
             request_holes: self.request_holes.max(o.request_holes),
             each_bytes: self.each_bytes.max(o.each_bytes),
+            literal_bytes: self.literal_bytes.max(o.literal_bytes),
+            pointer_bytes: self.pointer_bytes.max(o.pointer_bytes),
         }
     }
 }
@@ -667,11 +688,21 @@ impl Walk {
         for p in ps {
             let Predicate { pointer, test } = p;
             self.string(pointer);
+            self.pointer(pointer);
             match test {
                 Test::Exists => {}
-                Test::Equals(v) | Test::Contains(v) => self.value(v),
+                Test::Equals(v) | Test::Contains(v) => {
+                    if let Value::Literal(s) = v {
+                        self.shape.literal_bytes = self.shape.literal_bytes.max(as_u64(s.len()));
+                    }
+                    self.value(v);
+                }
             }
         }
+    }
+
+    fn pointer(&mut self, pointer: &str) {
+        self.shape.pointer_bytes = self.shape.pointer_bytes.max(as_u64(pointer.len()));
     }
 
     fn capture(&mut self, c: &Capture) {
@@ -690,7 +721,11 @@ impl Walk {
         self.subject(subject);
         self.string(slot);
         match source {
-            Source::Header(s) | Source::Json(s) => self.string(s),
+            Source::Header(s) => self.string(s),
+            Source::Json(s) => {
+                self.string(s);
+                self.pointer(s);
+            }
             Source::Location => {}
         }
     }

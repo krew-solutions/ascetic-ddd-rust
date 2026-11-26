@@ -33,9 +33,12 @@
 
 use std::fmt;
 
-use ascetic_ddd_command_log::answer::{PredicateError, Read};
+use ascetic_ddd_command_log::answer::{self, PredicateError, Read};
 use ascetic_ddd_command_log::fills::{Captured, Fills};
 use ascetic_ddd_command_log::record::{Action, Name, Outcome, Probe, Record, Subject};
+use ascetic_ddd_command_log::shape::Shape;
+
+use crate::fits::VALUE;
 
 pub use crate::machine::{CODE, Code};
 use crate::machine::{Judgement, Seen};
@@ -127,6 +130,26 @@ impl fmt::Debug for Judged {
 
 fn is_poll(record: &Record) -> bool {
     matches!(&record.action, Action::Observe(o) if matches!(o.probe, Probe::Rest(_)))
+}
+
+/// The most bytes judging an answer of at most `cap` body bytes holds beside
+/// its body, for a record of at most `record`'s shape whose problem pointer
+/// is `problem` bytes (ADR-0047 decision 22, K2b-7e-2b-2c-2): reading it
+/// (`answer::bound`), and what it takes — each value at most `VALUE`, its
+/// subject's and slot's names, its slot in what is taken and in what is
+/// missed, each grown one at a time. Saturating.
+pub fn bound(cap: u64, record: &Shape, problem: u64) -> u64 {
+    let n = record.captures.elements;
+    let slots = |size: usize| {
+        n.saturating_mul(2)
+            .saturating_add(2)
+            .saturating_mul(u64::try_from(size).unwrap_or(u64::MAX))
+    };
+    answer::bound(cap, record, problem)
+        .saturating_add(slots(size_of::<Captured>()))
+        .saturating_add(slots(size_of::<(Subject, Name)>()))
+        .saturating_add(n.saturating_mul(VALUE))
+        .saturating_add(record.capture_bytes)
 }
 
 /// An attempt of `record` judged; an error only for a predicate the plan

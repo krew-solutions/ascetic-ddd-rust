@@ -735,9 +735,10 @@ def bound(text, seen, out=None):
 # bytes, byte strings, then (elements, sequences) of deps, values, fields,
 # outcomes, predicates, captures, the captures' bytes, (elements, sequences) of
 # measures, spans, subjects, then holes, hole bytes, key bytes, request bytes,
-# request holes, the barrier dependencies' key bytes (K2b-7e-2b-2b).
-SHAPE = 28
-KEY_BYTES, CAPTURES, CAPTURE_BYTES, EACH_BYTES = 24, 13, 15, 27
+# request holes, the barrier dependencies' key bytes (K2b-7e-2b-2b), the largest
+# predicate literal and the longest pointer (K2b-7e-2b-2c).
+SHAPE = 30
+KEY_BYTES, CAPTURES, CAPTURE_BYTES, EACH_BYTES, LITERAL_BYTES, POINTER_BYTES = 24, 13, 15, 27, 28, 29
 
 
 def socket(r):
@@ -777,10 +778,15 @@ def byte_peaks(text, shapes):
         key_bytes = utf8(subject["kind"]) + raw(subject["scope"]) + utf8(r["step"]["label"])
         took = sum(utf8(c["subject"]["kind"]) + raw(c["subject"]["scope"]) + utf8(c["slot"]) for c in r["capture"])
         each = sum(utf8(d["each"]["kind"]) + raw(d["each"]["scope"]) + utf8(d["each"]["label"]) for d in r["after"] if "each" in d)
-        want = (k + 2, socket(r), 1, key_bytes, len(r["capture"]), took, each)
-        have = (line, src, counts[0], counts[KEY_BYTES], counts[CAPTURES], counts[CAPTURE_BYTES], counts[EACH_BYTES])
+        predicates = [p for o in r["expect"] if isinstance(o, dict) for p in o["response"]["body"]]
+        predicates += r["action"]["observe"]["until"] if "observe" in r["action"] else []
+        literal = max((utf8(t[test]["literal"]) for p in predicates for t in [p["test"]] if isinstance(t, dict) for test in t if "literal" in t[test]), default=0)
+        pointers = [p["pointer"] for p in predicates] + [c["source"]["json"] for c in r["capture"] if isinstance(c["source"], dict) and "json" in c["source"]]
+        pointer = max((utf8(p) for p in pointers), default=0)
+        want = (k + 2, socket(r), 1, key_bytes, len(r["capture"]), took, each, literal, pointer)
+        have = (line, src, counts[0], counts[KEY_BYTES], counts[CAPTURES], counts[CAPTURE_BYTES], counts[EACH_BYTES], counts[LITERAL_BYTES], counts[POINTER_BYTES])
         if len(counts) != SHAPE or want != have:
-            raise SystemExit(f"line {k + 2}: the shape's (line, source, records, key, captures, their bytes, barrier keys' bytes) are {have}, by definition {want}")
+            raise SystemExit(f"line {k + 2}: the shape's (line, source, records, key, captures, their bytes, barrier keys' bytes, largest literal, longest pointer) are {have}, by definition {want}")
     out = {}
     bound(text, {term: 0 for term in REACHED}, out)
     E, H = out["E"], out["H"]

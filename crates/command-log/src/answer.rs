@@ -33,6 +33,7 @@ use crate::fills::{Fills, HoleError};
 use crate::json::{self, Json};
 use crate::record::{Capture, Predicate, Source, Test, Value};
 use crate::render::Filled;
+use crate::shape::Shape;
 
 /// The most bytes a taken value has.
 pub const TAKEN: usize = 8 * 1024;
@@ -163,7 +164,14 @@ fn hex(b: u8) -> Option<u8> {
 /// `%XX` decoded; a `%` not followed by two hex digits, or bytes not UTF-8,
 /// is none.
 fn decoded(s: &str) -> Option<String> {
-    let mut out = Vec::with_capacity(s.len());
+    // Sized before it is: each `%XX` one byte, and past what a capture takes
+    // not decoded at all (ADR-0047 decision 22, K2b-7e-2b-2c-2).
+    let escapes = s.bytes().filter(|&b| b == b'%').count();
+    let len = s.len().saturating_sub(escapes.saturating_mul(2));
+    if len > TAKEN {
+        return None;
+    }
+    let mut out = Vec::with_capacity(len);
     let mut it = s.bytes();
     while let Some(b) = it.next() {
         if b == b'%' {
@@ -175,6 +183,114 @@ fn decoded(s: &str) -> Option<String> {
         }
     }
     String::from_utf8(out).ok()
+}
+
+/// The most bytes a captured value holds while a predicate reads it, a value
+/// [`is_taken`] alone admits: parsed, its text copied, parsed again — a
+/// number of `TAKEN` digits at its worst (ADR-0047 decision 22,
+/// K2b-7e-2b-2c-2).
+pub const HOLE: u64 = 4 * TAKEN as u64 + 2 * json::NODE as u64;
+
+/// The most bytes `take` holds while it reads a capture, beside the value it
+/// keeps: a `Location`'s segment decoded, at most `TAKEN` bytes, sized
+/// before it is (K2b-7e-2b-2c-2).
+pub const DECODE: u64 = TAKEN as u64;
+
+/// The most bytes reading an answer of at most `cap` body bytes holds beside
+/// its body and the values it takes, for a record of at most `record`'s
+/// shape whose problem pointer is `problem` bytes (ADR-0047 decision 22,
+/// K2b-7e-2b-2c-2): the body's tree; one pointer's tokens at a time; and one
+/// value read at a time — a predicate's literal's tree, a captured hole's
+/// value, a capture's segment decoded —, the predicates read before the
+/// captures. Saturating.
+pub fn bound(cap: u64, record: &Shape, problem: u64) -> u64 {
+    let hole = if record.holes > 0 { HOLE } else { 0 };
+    let decode = if record.captures.elements > 0 {
+        DECODE
+    } else {
+        0
+    };
+    json::bound(cap)
+        .saturating_add(json::pointer_bound(record.pointer_bytes.max(problem)))
+        .saturating_add(json::bound(record.literal_bytes).max(hole).max(decode))
+}
+
+/// Whether `value` is one [`Read::take`] makes: a carried text quoted, or a
+/// carried JSON number — the only values a capture holds (ADR-0047 decision
+/// 22, K2b-7e-2b-2c-2). Checked with nothing allocated, so a value no take
+/// made — an array a host's carrier hands the shell — is refused before
+/// anything parses it.
+pub fn is_taken(value: &[u8]) -> bool {
+    match value
+        .strip_prefix(b"\"")
+        .and_then(|v| v.strip_suffix(b"\""))
+    {
+        Some(inner) => is_quoted(inner),
+        None => std::str::from_utf8(value).is_ok_and(|s| carried(s) && is_number(s)),
+    }
+}
+
+/// Whether `inner` is a carried text as `quoted` writes it, its quotes
+/// aside.
+fn is_quoted(inner: &[u8]) -> bool {
+    let visible = |c: u8| (0x21..=0x7e).contains(&c);
+    let (mut n, mut first, mut last) = (0usize, None, None);
+    let mut bytes = inner.iter().copied();
+    while let Some(b) = bytes.next() {
+        let c = match b {
+            b'\\' => match bytes.next() {
+                Some(b'"') => b'"',
+                Some(b'\\') => b'\\',
+                Some(b't') => b'\t',
+                _ => return false,
+            },
+            b'"' | b'\t' => return false,
+            c if visible(c) || c == b' ' => c,
+            _ => return false,
+        };
+        n = n.saturating_add(1);
+        first.get_or_insert(c);
+        last = Some(c);
+    }
+    let dots = inner == b"." || inner == b"..";
+    (1..=TAKEN).contains(&n) && !dots && first.is_some_and(visible) && last.is_some_and(visible)
+}
+
+/// Whether `s` is a JSON number: `-`, an integer part with no leading zero,
+/// a fraction, an exponent.
+fn is_number(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut i = usize::from(b.first() == Some(&b'-'));
+    let digits = |i: &mut usize| {
+        let start = *i;
+        while b.get(*i).is_some_and(u8::is_ascii_digit) {
+            *i = i.saturating_add(1);
+        }
+        i.saturating_sub(start)
+    };
+    match b.get(i) {
+        Some(b'0') => i = i.saturating_add(1),
+        Some(c) if c.is_ascii_digit() => {
+            digits(&mut i);
+        }
+        _ => return false,
+    }
+    if b.get(i) == Some(&b'.') {
+        i = i.saturating_add(1);
+        if digits(&mut i) == 0 {
+            return false;
+        }
+    }
+    if matches!(b.get(i), Some(b'e' | b'E')) {
+        i = i.saturating_add(1);
+        if matches!(b.get(i), Some(b'+' | b'-')) {
+            i = i.saturating_add(1);
+        }
+        if digits(&mut i) == 0 {
+            return false;
+        }
+    }
+    i == b.len()
 }
 
 /// The last non-empty path segment of a `Location`, its query and fragment

@@ -43,6 +43,32 @@ pub const DEPTH: usize = 128;
 /// The most digits a number's exponent has, its leading zeros dropped.
 pub const EXPONENT_DIGITS: usize = 18;
 
+/// A value's bytes in a parse's tree: every value is one (ADR-0047 decision
+/// 22, K2b-7e-2b-2c-2).
+pub const NODE: usize = size_of::<Json>();
+
+/// The most bytes [`parse`] holds at once for `n` bytes of input, whatever
+/// they are — valid, truncated or not JSON: two nodes a byte and two more.
+/// The densest input is an array of one element, which holds four slots, std's
+/// first growth, on its two bytes; any other value holds less a byte
+/// (K2b-7e-2b-2c-2). Saturating: a bound past the address space is no bound.
+pub const fn bound(n: u64) -> u64 {
+    TWO_NODES.saturating_mul(n.saturating_add(1))
+}
+
+const TWO_NODES: u64 = 2 * NODE as u64;
+
+/// The most bytes a pointer of `n` bytes' reference tokens hold at once
+/// ([`tokens`]): three strings a byte — a slot each, grown one at a time, held
+/// twice as it moves —, a byte, and std's first four slots.
+pub const fn pointer_bound(n: u64) -> u64 {
+    TOKEN.saturating_mul(n).saturating_add(FIRST_SLOTS)
+}
+
+const STRING: u64 = size_of::<String>() as u64;
+const TOKEN: u64 = 3 * STRING + 1;
+const FIRST_SLOTS: u64 = 4 * STRING;
+
 /// A JSON value. Its `Debug` shows only its shape: an answer may carry a
 /// secret a step captures.
 #[derive(Clone)]
