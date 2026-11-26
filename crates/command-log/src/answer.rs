@@ -132,9 +132,15 @@ fn carried(s: &str) -> bool {
         && b.last().is_some_and(visible)
 }
 
-/// A carried string as one JSON value's text.
+/// A carried string as one JSON value's text, held at its exact length: each
+/// byte it escapes two (ADR-0047 decision 22, K2b-7e-2b-2b-3 — a value is
+/// priced by its buffer's capacity, at most `VALUE`).
 fn quoted(s: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(s.len().saturating_add(2));
+    let escaped = s
+        .bytes()
+        .filter(|b| matches!(b, b'"' | b'\\' | b'\t'))
+        .count();
+    let mut out = Vec::with_capacity(s.len().saturating_add(escaped).saturating_add(2));
     out.push(b'"');
     for b in s.bytes() {
         match b {

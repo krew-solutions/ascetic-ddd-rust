@@ -335,7 +335,7 @@ fn a_closing_report_follows_its_censor() {
         lag: 0,
         refused: 0,
         refused_by: None,
-        code: Code::Named("rest.connecting".to_owned()),
+        code: Code::of("rest.connecting"),
     };
     let censors = |out: &[(u64, Input)]| -> Vec<u64> {
         out.iter()

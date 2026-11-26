@@ -1396,3 +1396,171 @@ fn a_path_connected_off_its_attempt_is_a_fault() {
         "{stop:?}"
     );
 }
+
+/// A read capturing its group's ETag, answered at once as `taken` says.
+fn capturing(taken: impl Fn(&Record) -> Vec<Captured> + Send + Sync + 'static) -> Scripted {
+    Scripted::new(Arc::new(move |_, _, r: &Record| sim::Attempt {
+        after: None,
+        sent_after: 5,
+        answer_after: Some(20),
+        judgement: Judgement::Expected(taken(r)),
+    }))
+}
+
+/// The `i`th capture spec of `r`, taking `value`.
+fn of_spec(r: &Record, i: usize, value: Vec<u8>) -> Captured {
+    Captured {
+        subject: r.capture[i].subject.clone(),
+        slot: r.capture[i].slot.clone(),
+        value,
+    }
+}
+
+/// K2b-7e-2b-2b-3: what a carrier hands the shell is held where it enters —
+/// a capture no spec of its step names, one past the specs of its subject
+/// and slot, a value whose buffer is past `VALUE`: each a carrier fault
+/// named, the run stopped, its answer never journaled.
+#[test]
+fn a_carrier_s_captures_are_held_where_they_enter() {
+    use ascetic_ddd_scheduler::fits::VALUE;
+    let value = VALUE as usize;
+    let records = vec![captures_etag(call("read", 1, 0, 0, 0), 1)];
+    type Taken = Box<dyn Fn(&Record) -> Vec<Captured> + Send + Sync>;
+    let cases: [(&str, Taken); 3] = [
+        (
+            "shell.capture.unspecified",
+            Box::new(|r: &Record| {
+                vec![Captured {
+                    slot: "nope".into(),
+                    ..of_spec(r, 0, b"\"v\"".to_vec())
+                }]
+            }),
+        ),
+        (
+            "shell.capture.repeated",
+            Box::new(|r: &Record| {
+                vec![
+                    of_spec(r, 0, b"\"v\"".to_vec()),
+                    of_spec(r, 0, b"\"w\"".to_vec()),
+                ]
+            }),
+        ),
+        (
+            "shell.capture.too_large",
+            Box::new(move |r: &Record| {
+                let mut small = Vec::with_capacity(value + 1);
+                small.extend_from_slice(b"\"v\"");
+                vec![of_spec(r, 0, small)]
+            }),
+        ),
+    ];
+    for (cannot, taken) in cases {
+        let ran = shell(&header(), &records, W, capturing(taken)).unwrap();
+        let (stop, journal) = stopped(ran);
+        assert!(
+            matches!(&stop, Stop::Harness(Harness::Carrier { line: 2, attempt: 1, cannot: c, .. }) if *c == cannot),
+            "{cannot}: {stop:?}"
+        );
+        assert!(
+            !journal
+                .iter()
+                .any(|l| matches!(l, journal::Line::Answer(a) if a.line == 2)),
+            "{cannot}: its answer journaled"
+        );
+    }
+}
+
+/// A carrier's captures within the specs are taken: in any order, two of one
+/// subject and slot where two specs name them, a value's buffer of exactly
+/// `VALUE`.
+#[test]
+fn a_carrier_s_captures_within_the_specs_are_taken() {
+    use ascetic_ddd_scheduler::fits::VALUE;
+    let value = VALUE as usize;
+    // Two specs of one subject and slot, and one of another group.
+    let mut r = captures_etag(captures_etag(call("read", 1, 0, 0, 0), 1), 2);
+    r.capture.push(r.capture[0].clone());
+    let records = vec![r];
+    let taken = move |r: &Record| {
+        let mut widest = Vec::with_capacity(value);
+        widest.extend_from_slice(b"\"v\"");
+        vec![
+            of_spec(r, 1, b"\"w\"".to_vec()),
+            of_spec(r, 2, widest),
+            of_spec(r, 0, b"\"x\"".to_vec()),
+        ]
+    };
+    let ran = shell(&header(), &records, W, capturing(taken)).unwrap();
+    assert!(matches!(ran.end, RunEnd::Ended), "{:?}", ran.end);
+    let captured = ran
+        .journal
+        .iter()
+        .find_map(|l| match l {
+            journal::Line::Answer(a) if a.line == 2 => Some(a.captured.len()),
+            _ => None,
+        })
+        .expect("its answer journaled");
+    assert_eq!(captured, 3);
+}
+
+/// Leaves each attempt a microsecond past its deadline, its closing report
+/// under a code of its own line's: a carrier minting a code an attempt.
+struct Minting;
+
+impl Carrier<VirtualClock> for Minting {
+    fn carries(&self, _: &Header) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn needs(
+        &self,
+        _: &ascetic_ddd_command_log::validate::Peaks,
+        _: u32,
+    ) -> Result<ascetic_ddd_load_run::carrier::Needs, String> {
+        Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
+    }
+
+    fn probe(
+        &self,
+        _: u32,
+        _: std::sync::Arc<VirtualClock>,
+        _: u64,
+    ) -> impl std::future::Future<Output = Vec<ascetic_ddd_load_run::carrier::Unprobed>> + Send + 'static
+    {
+        std::future::ready(Vec::new())
+    }
+
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "the task must not borrow its carrier: it is 'static"
+    )]
+    fn carry(&self, a: Attempt<VirtualClock>) -> impl Future<Output = ()> + Send + 'static {
+        async move {
+            a.clock().sleep_until(a.deadline() + 1).await;
+            let report = ascetic_ddd_scheduler::machine::Unsent {
+                code: ascetic_ddd_scheduler::machine::Code::of(&format!("host.line_{}", a.line())),
+                ..sim::drawn_unsent(a.line(), a.attempt(), a.dispatched())
+            };
+            a.left(report);
+        }
+    }
+}
+
+/// K2b-7e-2b-2b-3: a run names at most `UNSENT` codes of its closing
+/// reports, a carrier minting more counted apart — every report counted.
+#[test]
+fn a_run_names_at_most_its_unsent_codes() {
+    use ascetic_ddd_load_run::run::UNSENT;
+    let n = UNSENT as u64 + 8;
+    let records: Vec<Record> = (0..n).map(|i| call("read", i, 0, i * 10, 0)).collect();
+    let ran = shell(&header(), &records, W, Minting).unwrap();
+    let reports = ran
+        .journal
+        .iter()
+        .filter(|l| matches!(l, journal::Line::Answer(a) if a.unsent.is_some()))
+        .count() as u64;
+    assert_eq!(reports, n);
+    assert_eq!(ran.unsent.len(), UNSENT);
+    assert_eq!(ran.unsent_past, 8);
+    assert_eq!(ran.unsent.values().sum::<u64>() + ran.unsent_past, n);
+}

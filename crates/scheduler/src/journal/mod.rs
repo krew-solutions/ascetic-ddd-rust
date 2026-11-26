@@ -538,9 +538,9 @@ pub enum Code {
 
 impl From<&machine::Code> for Code {
     fn from(c: &machine::Code) -> Code {
-        match c {
-            machine::Code::Named(n) => Code::Named(n.clone()),
-            machine::Code::Other => Code::Other,
+        match c.name() {
+            Some(n) => Code::Named(n.to_owned()),
+            None => Code::Other,
         }
     }
 }

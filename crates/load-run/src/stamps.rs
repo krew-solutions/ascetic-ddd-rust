@@ -18,6 +18,7 @@ use std::task::{Context, Poll};
 
 use ascetic_ddd_command_log::fills::Namespace;
 use ascetic_ddd_command_log::record::Record;
+use ascetic_ddd_scheduler::fits::VALUE;
 use ascetic_ddd_scheduler::frontier::{Below, Frontier, Hold, Left};
 use ascetic_ddd_scheduler::journal::{Code, FaultClass};
 use ascetic_ddd_scheduler::machine::{
@@ -860,8 +861,15 @@ impl<C: Clock> Attempt<C> {
     }
 
     /// Its answer judged: pushed at the instant it arrived — now, if it was
-    /// not reported to have arrived.
+    /// not reported to have arrived. What its carrier took is held where it
+    /// enters the shell (ADR-0047 decision 22, K2b-7e-2b-2b-3): each capture
+    /// one of its step's specs, kept in the spec's own names, its value's
+    /// buffer at most `VALUE` — or a harness fault, and no answer.
     pub fn ended(mut self, judgement: Judgement, mut seen: Seen) {
+        let judgement = match kept(&self.record, judgement) {
+            Ok(judgement) => judgement,
+            Err((cannot, detail)) => return self.fault(cannot, detail),
+        };
         self.arrived();
         if let Some(hold) = self.hold.take() {
             // A late answer carries where it was not (decision 17): nothing
@@ -994,6 +1002,58 @@ impl<C: Clock> fmt::Debug for Attempt<C> {
     }
 }
 
+/// What a carrier took, held as the shell prices it (ADR-0047 decision 22,
+/// K2b-7e-2b-2b-3): each capture matched to a distinct spec of `record`'s by
+/// its subject and slot — in any order, as the machine looks them up — and
+/// rebuilt in that spec's names, its value's buffer at most `VALUE`. Why not,
+/// as a carrier fault's name and its caller's detail: positions and sizes
+/// only, never a value or a carrier's text.
+fn kept(record: &Record, judgement: Judgement) -> Result<Judgement, (&'static str, String)> {
+    let Judgement::Expected(taken) = judgement else {
+        return Ok(judgement);
+    };
+    let n = taken.len();
+    for (i, c) in taken.iter().enumerate() {
+        let held = u64::try_from(c.value.capacity()).unwrap_or(u64::MAX);
+        if held > VALUE {
+            return Err((
+                "shell.capture.too_large",
+                format!("capture {i} of {n}: a value's buffer of {held} bytes, at most {VALUE}"),
+            ));
+        }
+    }
+    let mut kept: Vec<Captured> = Vec::with_capacity(n);
+    for (i, c) in taken.into_iter().enumerate() {
+        let named = |subject: &_, slot: &String| *subject == c.subject && *slot == c.slot;
+        // The k-th capture of a subject and slot takes the k-th spec of them.
+        let k = kept.iter().filter(|p| named(&p.subject, &p.slot)).count();
+        let Some(spec) = record
+            .capture
+            .iter()
+            .filter(|s| named(&s.subject, &s.slot))
+            .nth(k)
+        else {
+            let cannot = if k == 0 {
+                "shell.capture.unspecified"
+            } else {
+                "shell.capture.repeated"
+            };
+            return Err((
+                cannot,
+                format!(
+                    "capture {i} of {n}: its subject and slot past its step's specs of them ({k} taken)"
+                ),
+            ));
+        };
+        kept.push(Captured {
+            subject: spec.subject.clone(),
+            slot: spec.slot.clone(),
+            value: c.value,
+        });
+    }
+    Ok(Judgement::Expected(kept))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ATTEMPT, CONNECTION, Feeds, OFF, Path, Stamps};
@@ -1094,5 +1154,77 @@ mod tests {
         path.polled(CONNECTION, 3_000, 1_500, 2_990);
         path.woken(1_000);
         assert_eq!(path.lag(), 810);
+    }
+
+    /// K2b-7e-2b-2b-3: a capture kept is rebuilt in its spec's names — a
+    /// carrier's strings with room to spare are not what the shell holds.
+    #[test]
+    fn a_capture_is_kept_in_its_spec_s_names() {
+        use ascetic_ddd_command_log::record::{
+            Action, Capture, Codec, HostCall, Payload, Record, Source, StepId, Subject,
+        };
+        use ascetic_ddd_scheduler::machine::{Captured, Judgement};
+
+        use super::kept;
+        let group = Subject {
+            kind: "group".into(),
+            scope: vec![7],
+            index: 1,
+        };
+        let record = Record {
+            step: StepId {
+                subject: group.clone(),
+                label: "read".into(),
+                n: 0,
+            },
+            at: 0,
+            think: 0,
+            after: vec![],
+            action: Action::Host(HostCall {
+                op: "read".into(),
+                args: Payload {
+                    codec: Codec::Text,
+                    bytes: vec![],
+                    holes: vec![],
+                },
+            }),
+            expect: vec![],
+            capture: vec![Capture {
+                subject: group,
+                slot: "etag".into(),
+                source: Source::Header("ETag".into()),
+                secret: false,
+            }],
+            measure: vec![],
+            deviation: None,
+        };
+        let roomy = |s: &str| {
+            let mut out = String::with_capacity(4_096);
+            out.push_str(s);
+            out
+        };
+        let mut scope = Vec::with_capacity(4_096);
+        scope.push(7);
+        let taken = Captured {
+            subject: Subject {
+                kind: roomy("group"),
+                scope,
+                index: 1,
+            },
+            slot: roomy("etag"),
+            value: b"\"v\"".to_vec(),
+        };
+        let Ok(Judgement::Expected(kept)) = kept(&record, Judgement::Expected(vec![taken])) else {
+            panic!("refused");
+        };
+        let c = &kept[0];
+        assert_eq!(
+            (
+                c.subject.kind.capacity(),
+                c.subject.scope.capacity(),
+                c.slot.capacity()
+            ),
+            (5, 1, 4)
+        );
     }
 }

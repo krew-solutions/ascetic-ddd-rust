@@ -11,7 +11,7 @@ use ascetic_ddd_command_log::record::{
 };
 use ascetic_ddd_command_log::render::RunSecret;
 use ascetic_ddd_faker::Namespace;
-use ascetic_ddd_scheduler::judge::{Code, Contract, Judged, Transport, Why, judge};
+use ascetic_ddd_scheduler::judge::{Contract, Judged, Transport, Why, judge};
 use ascetic_ddd_scheduler::machine::Judgement;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -331,9 +331,9 @@ fn line(name: &str, j: &Judged) -> String {
         Why::Unlisted => "unlisted".to_owned(),
     };
     let opt = |o: Option<String>| o.unwrap_or_else(|| "-".to_owned());
-    let code = j.code.as_ref().map(|c| match c {
-        Code::Named(n) => format!("named {n}"),
-        Code::Other => "other".to_owned(),
+    let code = j.code.as_ref().map(|c| match c.name() {
+        Some(n) => format!("named {n}"),
+        None => "other".to_owned(),
     });
     let taken: Vec<String> = taken
         .iter()
@@ -523,4 +523,39 @@ proptest! {
             prop_assert_eq!(taken.len() + j.missing.len(), record.capture.len());
         }
     }
+}
+
+/// K2b-7e-2b-2b-3: a value taken is held at its exact length — at its worst,
+/// a header of `TAKEN` quotes, each escaped, `VALUE` bytes exactly, its
+/// buffer no larger: the shell's boundary refuses a buffer past `VALUE`.
+#[test]
+fn a_value_taken_is_held_at_its_length() {
+    use ascetic_ddd_command_log::answer::TAKEN;
+    use ascetic_ddd_scheduler::fits::VALUE;
+    let capture = Capture {
+        subject: Subject {
+            kind: "group".into(),
+            scope: vec![7],
+            index: 1,
+        },
+        slot: "etag".into(),
+        source: Source::Header("ETag".into()),
+        secret: false,
+    };
+    for (text, len) in [
+        ("\"".repeat(TAKEN), 2 * TAKEN + 2),
+        (format!("{}\"", "a".repeat(TAKEN - 1)), TAKEN + 3),
+        ("a".repeat(TAKEN), TAKEN + 2),
+    ] {
+        let headers = vec![("ETag".to_owned(), text.into_bytes())];
+        let reply = Reply {
+            status: 200,
+            headers: &headers,
+            body: None,
+        };
+        let value = read(&reply).take(&capture).expect("taken");
+        assert_eq!(value.len(), len);
+        assert_eq!(value.capacity(), value.len(), "held at its length");
+    }
+    assert_eq!(2 * TAKEN as u64 + 2, VALUE, "the worst is `VALUE`");
 }

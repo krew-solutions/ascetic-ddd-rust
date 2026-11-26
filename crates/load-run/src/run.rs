@@ -394,9 +394,17 @@ pub struct Ran<F> {
     pub running: usize,
     /// The closing reports journaled, by their code (decision 20): where
     /// attempts never sent stood — `rest.cap.full`, say — a code no carrier
-    /// named as `other`.
+    /// named as `other`; at most [`UNSENT`] codes (ADR-0047 decision 22,
+    /// K2b-7e-2b-2b-3), a carrier minting more counted in `unsent_past`.
     pub unsent: BTreeMap<String, u64>,
+    /// The closing reports whose codes came past the first [`UNSENT`]: a
+    /// carrier's own vocabulary is a few; their codes are in the journal.
+    pub unsent_past: u64,
 }
+
+/// The most codes [`Ran::unsent`] names: the library's carrier has eight, and
+/// a carrier naming a code an attempt would grow it with the run.
+pub const UNSENT: usize = 32;
 
 /// Turns at one instant with work due and none done, past which the loop is
 /// stuck: far more than a race at a microsecond makes, far fewer than a
@@ -767,6 +775,7 @@ where
     let mut exhausted = false;
     let mut stalled: Option<(u64, u32)> = None;
     let mut unsent: BTreeMap<String, u64> = BTreeMap::new();
+    let mut unsent_past = 0u64;
     let aborts = Aborts(stamps.clone());
     let halted: Result<(), Halt> = async {
     queue.push(0, Input::Wake);
@@ -926,8 +935,12 @@ where
                         journal::Code::Named(c) => c.clone(),
                         journal::Code::Other => "other".to_owned(),
                     };
-                    let n = unsent.entry(code).or_insert(0u64);
-                    *n = n.saturating_add(1);
+                    if unsent.len() < UNSENT || unsent.contains_key(&code) {
+                        let n = unsent.entry(code).or_insert(0u64);
+                        *n = n.saturating_add(1);
+                    } else {
+                        unsent_past = unsent_past.saturating_add(1);
+                    }
                 }
                 sink.line(l)?;
             }
@@ -1043,6 +1056,7 @@ where
         end: stop.map_or(RunEnd::Ended, RunEnd::Stopped),
         running,
         unsent,
+        unsent_past,
     })
 }
 

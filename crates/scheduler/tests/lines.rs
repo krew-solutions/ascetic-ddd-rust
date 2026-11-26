@@ -102,7 +102,7 @@ fn widest_code() -> Code {
     let code = format!("{}.{}", "a".repeat(31), "b".repeat(CODE - 32));
     assert_eq!(code.len(), CODE);
     let c = Code::of(&code);
-    assert!(matches!(&c, Code::Named(n) if n.len() == CODE));
+    assert!(c.name().is_some_and(|n| n.len() == CODE));
     c
 }
 

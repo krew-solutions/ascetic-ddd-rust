@@ -112,14 +112,16 @@ pub struct Found {
 
 /// A problem's code as the journal may carry it: the server's text only if it
 /// is a short dotted name, as every host and gateway code is; any other the
-/// journal does not take in.
+/// journal does not take in. Made by [`Code::of`] alone (ADR-0047 decision
+/// 22, K2b-7e-2b-2b-3): a name of at most [`CODE`] bytes at its exact
+/// length, whatever a carrier hands the shell.
+///
+/// ```compile_fail
+/// // No code of any other shape is made outside the machine.
+/// let _ = ascetic_ddd_scheduler::machine::Code(Some("a.b".repeat(1 << 20)));
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Code {
-    /// A dotted name of at most [`CODE`] bytes.
-    Named(Name),
-    /// Some other text.
-    Other,
-}
+pub struct Code(Option<Name>);
 
 /// The most bytes a journaled code has.
 pub const CODE: usize = 64;
@@ -134,11 +136,15 @@ impl Code {
         };
         let mut parts = code.split('.');
         let named = code.len() <= CODE && parts.clone().count() >= 2 && parts.all(part);
-        if named {
-            Code::Named(code.to_owned())
-        } else {
-            Code::Other
-        }
+        Code(named.then(|| code.to_owned()))
+    }
+
+    /// Some other text: no name.
+    pub const OTHER: Code = Code(None);
+
+    /// Its name, if it is a dotted one.
+    pub fn name(&self) -> Option<&str> {
+        self.0.as_deref()
     }
 }
 

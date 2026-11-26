@@ -217,7 +217,7 @@ pub fn drawn_unsent(line: Line, attempt: u32, dispatched: u64) -> Unsent {
             2 => Refusal::Aborted,
             _ => Refusal::Closed,
         }),
-        code: Code::Named("sim.unsent".to_owned()),
+        code: Code::of("sim.unsent"),
     }
 }
 

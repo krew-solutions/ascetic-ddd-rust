@@ -604,7 +604,7 @@ fn an_answer_journals_what_came_back() {
         (
             Seen {
                 status: Some(503),
-                code: Some(Taken::Named("service.unavailable".into())),
+                code: Some(Taken::of("service.unavailable")),
                 after: Some(5_000_000),
                 censored: false,
                 found: None,
@@ -619,7 +619,7 @@ fn an_answer_journals_what_came_back() {
         (
             Seen {
                 status: Some(400),
-                code: Some(Taken::Other),
+                code: Some(Taken::OTHER),
                 after: None,
                 censored: false,
                 found: None,
