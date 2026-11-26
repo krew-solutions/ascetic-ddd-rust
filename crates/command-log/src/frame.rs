@@ -7,7 +7,7 @@
 //! before it. What a stream's header, trailer and version are is its own.
 
 use std::fmt;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -107,6 +107,91 @@ impl io::Write for Same<'_> {
                 None => self.same = false,
             }
         }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A stream's lines written to `W` in their canonical bytes with no copy of
+/// a line (ADR-0047 decision 22, K2b-7e-2b-2b): serialised through a buffer
+/// of a fixed capacity, never grown, the digest taken as its bytes leave;
+/// each line whole in `W`, and `W` flushed, once [`line`](Out::line)
+/// returns.
+pub struct Out<W: Write> {
+    out: W,
+    buffer: Vec<u8>,
+    digest: Digest,
+}
+
+impl<W: Write> Out<W> {
+    /// Lines to `out` through a buffer of `capacity` bytes, at least one.
+    pub fn new(out: W, capacity: usize) -> Out<W> {
+        Out {
+            out,
+            buffer: Vec::with_capacity(capacity.max(1)),
+            digest: Digest::new(),
+        }
+    }
+
+    /// `value` as a line. An error writing is [`FrameError::Io`], one
+    /// encoding [`FrameError::Encode`]; either leaves the line cut.
+    pub fn line<T: Serialize>(&mut self, value: &T) -> Result<(), FrameError> {
+        serde_json::to_writer(Chunks(self), value).map_err(|e| {
+            if e.is_io() {
+                FrameError::Io(e.into())
+            } else {
+                FrameError::Encode(e.to_string())
+            }
+        })?;
+        self.push(b"\n")?;
+        self.drain()?;
+        self.out.flush()?;
+        Ok(())
+    }
+
+    /// The digest of the lines written.
+    pub fn digest(&self) -> &Digest {
+        &self.digest
+    }
+
+    /// The output.
+    pub fn into_inner(self) -> W {
+        self.out
+    }
+
+    /// `bytes` into the buffer, which is written out each time it is full.
+    fn push(&mut self, mut bytes: &[u8]) -> io::Result<()> {
+        while !bytes.is_empty() {
+            let room = self.buffer.capacity().saturating_sub(self.buffer.len());
+            if room == 0 {
+                self.drain()?;
+                continue;
+            }
+            let (now, later) = bytes.split_at(room.min(bytes.len()));
+            self.buffer.extend_from_slice(now);
+            bytes = later;
+        }
+        Ok(())
+    }
+
+    /// What the buffer holds, digested and written out.
+    fn drain(&mut self) -> io::Result<()> {
+        self.digest.update(&self.buffer);
+        self.out.write_all(&self.buffer)?;
+        self.buffer.clear();
+        Ok(())
+    }
+}
+
+/// What serde writes, pushed into an [`Out`]'s buffer.
+struct Chunks<'a, W: Write>(&'a mut Out<W>);
+
+impl<W: Write> io::Write for Chunks<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.push(buf)?;
         Ok(buf.len())
     }
 

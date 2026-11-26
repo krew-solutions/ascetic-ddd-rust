@@ -12,7 +12,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
 use ascetic_ddd_command_log::fills::Captured;
-use ascetic_ddd_command_log::record::{Codec, On};
+use ascetic_ddd_command_log::record::{Codec, Dep, On};
 use ascetic_ddd_command_log::record::{Header, Record};
 use ascetic_ddd_command_log::shape::{self, Shape};
 use ascetic_ddd_command_log::validate::{Kept, Peaks};
@@ -83,6 +83,10 @@ enum Kind {
     /// Pairs: a read capturing its group's ETag — the largest value a capture
     /// holds —, then, `answer` µs before its answer, a read sending it back.
     Captures,
+    /// Pairs: a read, then a step awaiting every read before it settled and
+    /// `deps` barriers no step is a member of, each keyed by a label of
+    /// `label` bytes (K2b-7e-2b-2b): the keys the machine binds it by.
+    Barriers { deps: u64, label: usize },
 }
 
 /// One plan of `lines` steps of `kind` a line every `every` µs from `start` —
@@ -121,6 +125,32 @@ fn costs(lines: u64, start: u64, every: u64, answer: u64, w: u64, kind: Kind) ->
                     after(r, &id("device", j, "read", 0), On::Sent)
                 }),
             Kind::Writers => captures_etag(call("read", i, 0, at, 0), i),
+            Kind::Barriers { deps, label } => {
+                if i.is_multiple_of(2) {
+                    call("read", i, 0, at, 0)
+                } else {
+                    let mut r = step(id("device", i, "hold", 0), at);
+                    r.after.push(Dep::Each {
+                        kind: "device".into(),
+                        scope: vec![7],
+                        label: "read".into(),
+                        n: 0,
+                        on: On::Settled,
+                        count: None,
+                    });
+                    for j in 0..deps {
+                        r.after.push(Dep::Each {
+                            kind: "nobody".into(),
+                            scope: vec![7],
+                            label: format!("{j}{}", "x".repeat(label)),
+                            n: 0,
+                            on: On::Settled,
+                            count: None,
+                        });
+                    }
+                    r
+                }
+            }
             Kind::Captures => {
                 let g = i / 2;
                 let writer = captures_etag(call("read", g, 0, at, 0), g);
@@ -201,6 +231,7 @@ fn costs(lines: u64, start: u64, every: u64, answer: u64, w: u64, kind: Kind) ->
                 largest.capture_bytes * held
             },
         },
+        record: largest,
         ..Peaks::default()
     };
     let shaped = fits::needed(&Peaks {
@@ -329,6 +360,18 @@ fn the_machine_holds_no_more_than_fits_counts() {
             500_000,
             1_000,
             Kind::Chained { deps: 65 },
+        ),
+        (
+            "barriers of 1 KiB labels, memberless and with members",
+            2_049,
+            0,
+            50,
+            100,
+            1_000,
+            Kind::Barriers {
+                deps: 64,
+                label: 1_024,
+            },
         ),
         (
             "captures kept in the window",

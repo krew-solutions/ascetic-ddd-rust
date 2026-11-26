@@ -120,13 +120,23 @@ pub mod u64s_vec {
     use serde::ser::SerializeSeq;
     use serde::{Deserialize, Deserializer, Serializer, de::Error};
 
-    /// Writes it.
+    /// Writes it, each number as it is formatted: no string of it held
+    /// (ADR-0047 decision 22, K2b-7e-2b-2b).
     pub fn serialize<S: Serializer>(v: &[u64], s: S) -> Result<S::Ok, S::Error> {
         let mut seq = s.serialize_seq(Some(v.len()))?;
         for x in v {
-            seq.serialize_element(&x.to_string())?;
+            seq.serialize_element(&Decimal(*x))?;
         }
         seq.end()
+    }
+
+    /// A number written as its decimal string.
+    struct Decimal(u64);
+
+    impl serde::Serialize for Decimal {
+        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            s.collect_str(&self.0)
+        }
     }
 
     /// Reads it, only in its canonical text.

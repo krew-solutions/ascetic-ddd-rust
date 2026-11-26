@@ -926,6 +926,10 @@ fn the_rules_meaning_is_pinned_to_its_revision() {
             11,
             "e530ef75817c582dd39ef679e91d95e3df52ca746cc11b94fa089df14277eab6",
         ),
+        (
+            12,
+            "88a77e806d250b6a3674df79532dc54a5d8c48667a4e03c682edc342562dc096",
+        ),
     ];
     let mut digest = Sha256::new();
     for line in fixture::corpus::lines() {

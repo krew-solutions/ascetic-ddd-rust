@@ -125,6 +125,12 @@ pub struct Shape {
     /// The holes its request fills.
     #[serde(with = "u64s")]
     pub request_holes: u64,
+    /// Its barrier dependencies' keys — each one's kind, scope and label —
+    /// in bytes: what the machine binds them by and a read's journal line
+    /// names them by (K2b-7e-2b-2b). A barrier may have no member, so no
+    /// step's key bounds them.
+    #[serde(with = "u64s")]
+    pub each_bytes: u64,
 }
 
 impl Shape {
@@ -149,6 +155,7 @@ impl Shape {
             key_bytes: self.key_bytes.saturating_add(o.key_bytes),
             request: self.request.saturating_add(o.request),
             request_holes: self.request_holes.saturating_add(o.request_holes),
+            each_bytes: self.each_bytes.saturating_add(o.each_bytes),
         }
     }
 
@@ -177,6 +184,7 @@ impl Shape {
             key_bytes: self.key_bytes.saturating_mul(n),
             request: self.request.saturating_mul(n),
             request_holes: self.request_holes.saturating_mul(n),
+            each_bytes: self.each_bytes.saturating_mul(n),
         }
     }
 
@@ -206,6 +214,7 @@ impl Shape {
             key_bytes: self.key_bytes.saturating_sub(o.key_bytes),
             request: self.request.saturating_sub(o.request),
             request_holes: self.request_holes.saturating_sub(o.request_holes),
+            each_bytes: self.each_bytes.saturating_sub(o.each_bytes),
         }
     }
 
@@ -231,6 +240,7 @@ impl Shape {
             key_bytes,
             request,
             request_holes,
+            each_bytes,
         } = *self;
         let mut v = vec![records, bytes, byte_strings];
         for s in [deps, values, fields, outcomes, predicates, captures] {
@@ -240,7 +250,14 @@ impl Shape {
         for s in [measures, spans, subjects] {
             v.extend([s.elements, s.sequences]);
         }
-        v.extend([holes, hole_bytes, key_bytes, request, request_holes]);
+        v.extend([
+            holes,
+            hole_bytes,
+            key_bytes,
+            request,
+            request_holes,
+            each_bytes,
+        ]);
         v
     }
 
@@ -266,6 +283,7 @@ impl Shape {
             key_bytes: self.key_bytes.max(o.key_bytes),
             request: self.request.max(o.request),
             request_holes: self.request_holes.max(o.request_holes),
+            each_bytes: self.each_bytes.max(o.each_bytes),
         }
     }
 }
@@ -456,6 +474,11 @@ impl Walk {
                 self.string(kind);
                 self.byte_string(scope);
                 self.string(label);
+                self.shape.each_bytes = self.shape.each_bytes.saturating_add(as_u64(
+                    kind.len()
+                        .saturating_add(scope.len())
+                        .saturating_add(label.len()),
+                ));
             }
         }
     }

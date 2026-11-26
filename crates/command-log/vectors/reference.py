@@ -735,9 +735,9 @@ def bound(text, seen, out=None):
 # bytes, byte strings, then (elements, sequences) of deps, values, fields,
 # outcomes, predicates, captures, the captures' bytes, (elements, sequences) of
 # measures, spans, subjects, then holes, hole bytes, key bytes, request bytes,
-# request holes.
-SHAPE = 27
-KEY_BYTES, CAPTURES, CAPTURE_BYTES = 24, 13, 15
+# request holes, the barrier dependencies' key bytes (K2b-7e-2b-2b).
+SHAPE = 28
+KEY_BYTES, CAPTURES, CAPTURE_BYTES, EACH_BYTES = 24, 13, 15, 27
 
 
 def socket(r):
@@ -760,7 +760,8 @@ def byte_peaks(text, shapes):
     ended; each count's peak over the reads, and over the records one at a
     time (the largest record's, K2b-7e-2b-2). A shape's counts this reference
     can derive itself — its key's and its captures' bytes, its captures, its
-    source — are checked against the record first."""
+    barrier dependencies' key bytes, its source — are checked against the
+    record first."""
     lines = text.split("\n")[:-1]
     header = json.loads(lines[0])["header"]
     steps = [json.loads(line)["step"] for line in lines[1:-1]]
@@ -775,10 +776,11 @@ def byte_peaks(text, shapes):
         subject = r["step"]["subject"]
         key_bytes = utf8(subject["kind"]) + raw(subject["scope"]) + utf8(r["step"]["label"])
         took = sum(utf8(c["subject"]["kind"]) + raw(c["subject"]["scope"]) + utf8(c["slot"]) for c in r["capture"])
-        want = (k + 2, socket(r), 1, key_bytes, len(r["capture"]), took)
-        have = (line, src, counts[0], counts[KEY_BYTES], counts[CAPTURES], counts[CAPTURE_BYTES])
+        each = sum(utf8(d["each"]["kind"]) + raw(d["each"]["scope"]) + utf8(d["each"]["label"]) for d in r["after"] if "each" in d)
+        want = (k + 2, socket(r), 1, key_bytes, len(r["capture"]), took, each)
+        have = (line, src, counts[0], counts[KEY_BYTES], counts[CAPTURES], counts[CAPTURE_BYTES], counts[EACH_BYTES])
         if len(counts) != SHAPE or want != have:
-            raise SystemExit(f"line {k + 2}: the shape's (line, source, records, key, captures, their bytes) are {have}, by definition {want}")
+            raise SystemExit(f"line {k + 2}: the shape's (line, source, records, key, captures, their bytes, barrier keys' bytes) are {have}, by definition {want}")
     out = {}
     bound(text, {term: 0 for term in REACHED}, out)
     E, H = out["E"], out["H"]

@@ -852,8 +852,21 @@ fn ended(at: u64, e: &machine::Entry) -> Ended {
 /// The journal's lines of one machine step: the input it took at `at`, then
 /// what it decided, in order. A line's bindings and an answer's being ignored
 /// are told with their input; wakes, wants and wake-ups are not journaled.
-pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
-    let mut lines = Vec::new();
+///
+/// Made one at a time, as they are taken (ADR-0047 decision 22, K2b-7e-2b-2b):
+/// a run holds the line it sends, never every line of a burst at once.
+pub fn events<'a>(
+    at: u64,
+    input: &'a Input,
+    outputs: &'a [Output],
+) -> impl Iterator<Item = Line> + 'a {
+    std::iter::once_with(move || input_line(at, input, outputs))
+        .flatten()
+        .chain(outputs.iter().flat_map(move |o| output_lines(at, o)))
+}
+
+/// The line of the input a step took, if it is journaled.
+fn input_line(at: u64, input: &Input, outputs: &[Output]) -> Option<Line> {
     match input {
         Input::Line { line, record } => {
             let bound = outputs.iter().find_map(|o| match o {
@@ -867,10 +880,11 @@ pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
             });
             let cause = bound.and_then(|b| b.1);
             let safety = bound.map_or(Safety::Never, |b| b.2);
+            // From a slice, at its exact length: a line's price counts its
+            // dependencies, not a collection's growth.
             let after = bound
-                .map(|b| b.0)
-                .into_iter()
-                .flatten()
+                .map_or(&[][..], |b| b.0.as_slice())
+                .iter()
                 .map(|b| match b {
                     Binding::Step { on, line } => Dep::Step {
                         on: *on,
@@ -888,7 +902,7 @@ pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
                     },
                 })
                 .collect();
-            lines.push(Line::Read(Read {
+            Some(Line::Read(Read {
                 at,
                 line: *line,
                 key: key_of(&record.step),
@@ -898,7 +912,7 @@ pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
                 after,
                 planned: record.at,
                 refusal: record.deviation.as_ref().is_some_and(|d| d.rule == "rate"),
-            }));
+            }))
         }
         Input::Sent {
             line,
@@ -907,7 +921,7 @@ pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
             handed,
             connected,
             lag,
-        } => lines.push(Line::Sent(Sent {
+        } => Some(Line::Sent(Sent {
             at,
             line: *line,
             attempt: *attempt,
@@ -944,7 +958,7 @@ pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
                 Judgement::NotTaken => (Judged::NotTaken, Vec::new()),
                 Judgement::Unknown => (Judged::Unknown, Vec::new()),
             };
-            lines.push(Line::Answer(Answer {
+            Some(Line::Answer(Answer {
                 at,
                 line: *line,
                 attempt: *attempt,
@@ -961,51 +975,59 @@ pub fn events(at: u64, input: &Input, outputs: &[Output]) -> Vec<Line> {
                     handed: f.handed,
                 }),
                 unsent: seen.unsent.as_ref().map(Unsent::from),
-            }));
+            }))
         }
-        Input::Wake => {}
+        Input::Wake => None,
     }
-    for o in outputs {
-        match o {
-            Output::Released {
-                line,
-                intended,
-                released,
-                deadline,
-            } => lines.push(Line::Released(Released {
+}
+
+/// The lines one output is journaled as: none, one, or a step's end and the
+/// backstop's fault after it.
+fn output_lines(at: u64, o: &Output) -> impl Iterator<Item = Line> {
+    let (line, fault) = match o {
+        Output::Released {
+            line,
+            intended,
+            released,
+            deadline,
+        } => (
+            Some(Line::Released(Released {
                 at,
                 line: *line,
                 intended: *intended,
                 released: *released,
                 deadline: *deadline,
             })),
-            Output::Dispatch {
-                line,
-                attempt,
-                deadline,
-                due,
-                ..
-            } => lines.push(Line::Dispatch(Dispatch {
+            None,
+        ),
+        Output::Dispatch {
+            line,
+            attempt,
+            deadline,
+            due,
+            ..
+        } => (
+            Some(Line::Dispatch(Dispatch {
                 at,
                 line: *line,
                 attempt: *attempt,
                 deadline: *deadline,
                 due: *due,
             })),
-            Output::Ended(e) => {
-                lines.push(Line::End(Box::new(ended(at, e))));
-                if e.fault {
-                    lines.push(Line::Fault(Fault {
-                        at,
-                        class: FaultClass::Backstop { line: e.line },
-                    }));
-                }
-            }
-            Output::Bound { .. } | Output::Ignored { .. } | Output::WakeAt(_) | Output::Want(_) => {
-            }
+            None,
+        ),
+        Output::Ended(e) => (
+            Some(Line::End(Box::new(ended(at, e)))),
+            e.fault.then_some(Line::Fault(Fault {
+                at,
+                class: FaultClass::Backstop { line: e.line },
+            })),
+        ),
+        Output::Bound { .. } | Output::Ignored { .. } | Output::WakeAt(_) | Output::Want(_) => {
+            (None, None)
         }
-    }
-    lines
+    };
+    line.into_iter().chain(fault)
 }
 
 /// Why a journal was refused.
@@ -1069,28 +1091,29 @@ impl From<FrameError> for JournalError {
     }
 }
 
+/// The bytes a journal's writer buffers: a constant, however long a line
+/// (ADR-0047 decision 22, K2b-7e-2b-2b), as the log's reader's `BUFFER`.
+pub const BUFFER: usize = 8 << 10;
+
 /// Writes a journal: its header, its lines, then its trailer at
-/// [`finish`](Writer::finish).
+/// [`finish`](Writer::finish) — each line streamed through [`BUFFER`] bytes,
+/// whole in its output and the output flushed once written, no copy of it.
 pub struct Writer<W: Write> {
-    out: W,
-    digest: Digest,
+    out: frame::Out<W>,
     events: u64,
     steps: u64,
 }
 
 impl<W: Write> Writer<W> {
     /// Starts a journal; refused if the header names another version.
-    pub fn new(mut out: W, header: Header) -> Result<Writer<W>, JournalError> {
+    pub fn new(out: W, header: Header) -> Result<Writer<W>, JournalError> {
         if header.journal != JOURNAL_VERSION {
             return Err(JournalError::Version(header.journal));
         }
-        let bytes = frame::canonical(&Line::Header(Box::new(header)))?;
-        out.write_all(&bytes).map_err(FrameError::Io)?;
-        let mut digest = Digest::new();
-        digest.update(&bytes);
+        let mut out = frame::Out::new(out, BUFFER);
+        out.line(&Line::Header(Box::new(header)))?;
         Ok(Writer {
             out,
-            digest,
             events: 0,
             steps: 0,
         })
@@ -1107,9 +1130,7 @@ impl<W: Write> Writer<W> {
             Line::End(_) => self.steps = self.steps.saturating_add(1),
             _ => {}
         }
-        let bytes = frame::canonical(line)?;
-        self.out.write_all(&bytes).map_err(FrameError::Io)?;
-        self.digest.update(&bytes);
+        self.out.line(line)?;
         self.events = self.events.saturating_add(1);
         Ok(())
     }
@@ -1119,12 +1140,10 @@ impl<W: Write> Writer<W> {
         let trailer = Trailer {
             events: self.events,
             steps: self.steps,
-            sha256: self.digest.hex(),
+            sha256: self.out.digest().hex(),
         };
-        let bytes = frame::canonical(&Line::Trailer(trailer.clone()))?;
-        self.out.write_all(&bytes).map_err(FrameError::Io)?;
-        self.out.flush().map_err(FrameError::Io)?;
-        Ok((self.out, trailer))
+        self.out.line(&Line::Trailer(trailer.clone()))?;
+        Ok((self.out.into_inner(), trailer))
     }
 }
 
@@ -1219,6 +1238,276 @@ impl<R: BufRead> Iterator for Reader<R> {
                 self.ended = true;
                 Some(Err(e))
             }
+        }
+    }
+}
+
+/// The most bytes a line of the journal's channel holds on the heap, any
+/// line a run's machine makes about a record of at most `record`'s shape —
+/// the plan's largest record (`Peaks::record`) — or about the harness (ADR-0047
+/// decision 22, K2b-7e-2b-2b): the largest of a read's key and dependencies,
+/// an answer's captured slots and its two codes, an end's box and the lines
+/// its step dependencies bound, a fault's code. A header and a trailer never
+/// enter the channel ([`Writer::line`] refuses them).
+pub fn line_bound(record: &ascetic_ddd_command_log::shape::Shape) -> u64 {
+    let bytes = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+    let code = bytes(machine::CODE);
+    let read = record
+        .key_bytes
+        .saturating_add(bytes(size_of::<Dep>()).saturating_mul(record.deps.elements))
+        .saturating_add(record.each_bytes);
+    let answer = bytes(size_of::<Slot>())
+        .saturating_mul(record.captures.elements)
+        .saturating_add(record.capture_bytes)
+        .saturating_add(code.saturating_mul(2));
+    let end = bytes(size_of::<Ended>())
+        .saturating_add(bytes(size_of::<Number>()).saturating_mul(record.deps.elements));
+    read.max(answer).max(end).max(code)
+}
+
+/// The bytes `line` holds on the heap, exactly: its boxes, its strings and
+/// sequences at their capacities. Every type taken apart whole, so a field
+/// added is counted or does not compile.
+pub fn line_heap(line: &Line) -> u64 {
+    let mut n = Heap(0);
+    match line {
+        Line::Header(h) => {
+            n.size::<Header>();
+            n.header(h);
+        }
+        Line::Read(r) => n.read(r),
+        Line::Released(Released {
+            at: _,
+            line: _,
+            intended: _,
+            released: _,
+            deadline: _,
+        })
+        | Line::Dispatch(Dispatch {
+            at: _,
+            line: _,
+            attempt: _,
+            deadline: _,
+            due: _,
+        })
+        | Line::Sent(Sent {
+            at: _,
+            line: _,
+            attempt: _,
+            decorated: _,
+            handed: _,
+            connected: _,
+            lag: _,
+        }) => {}
+        Line::Answer(a) => n.answer(a),
+        Line::End(e) => {
+            n.size::<Ended>();
+            n.ended(e);
+        }
+        Line::Fault(Fault { at: _, class }) => n.fault(class),
+        Line::Trailer(Trailer {
+            events: _,
+            steps: _,
+            sha256,
+        }) => n.owned(sha256),
+    }
+    n.0
+}
+
+/// A heap's bytes, walked.
+struct Heap(u64);
+
+impl Heap {
+    fn add(&mut self, bytes: usize) {
+        self.0 = self
+            .0
+            .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+    }
+
+    fn size<T>(&mut self) {
+        self.add(size_of::<T>());
+    }
+
+    fn vec<T>(&mut self, v: &Vec<T>) {
+        self.add(v.capacity().saturating_mul(size_of::<T>()));
+    }
+
+    fn code(&mut self, c: &Code) {
+        match c {
+            Code::Named(name) => self.owned(name),
+            Code::Other => {}
+        }
+    }
+
+    fn owned(&mut self, s: &String) {
+        self.add(s.capacity());
+    }
+
+    fn subject(&mut self, s: &Subject) {
+        let Subject {
+            kind,
+            scope,
+            index: _,
+        } = s;
+        self.owned(kind);
+        self.vec(scope);
+    }
+
+    fn key(&mut self, k: &Key) {
+        let Key {
+            kind,
+            scope,
+            label,
+            n: _,
+        } = k;
+        self.owned(kind);
+        self.vec(scope);
+        self.owned(label);
+    }
+
+    fn header(&mut self, h: &Header) {
+        let Header {
+            journal: _,
+            machine: _,
+            source,
+            log,
+            validator,
+            read_ahead: _,
+            jitter: _,
+            resend: _,
+            catch_up: _,
+            namespace: _,
+            t0: _,
+            gates,
+            judging,
+            admission,
+        } = h;
+        self.owned(source);
+        self.owned(log);
+        self.owned(validator);
+        self.vec(gates);
+        for Gate { name, took: _ } in gates {
+            self.code(name);
+        }
+        if let Some(Judging {
+            cap: _,
+            took: _,
+            shape: _,
+        }) = judging
+        {}
+        if let Some(Admission {
+            sources,
+            descriptors: _,
+            assumed: _,
+        }) = admission
+        {
+            self.vec(sources);
+        }
+    }
+
+    fn read(&mut self, r: &Read) {
+        let Read {
+            at: _,
+            line: _,
+            key,
+            action: _,
+            safety: _,
+            cause: _,
+            after,
+            planned: _,
+            refusal: _,
+        } = r;
+        self.key(key);
+        self.vec(after);
+        for d in after {
+            match d {
+                Dep::Step { on: _, line: _ } => {}
+                Dep::Each {
+                    on: _,
+                    key,
+                    members: _,
+                } => self.key(key),
+            }
+        }
+    }
+
+    fn answer(&mut self, a: &Answer) {
+        let Answer {
+            at: _,
+            line: _,
+            attempt: _,
+            judged: _,
+            captured,
+            ignored: _,
+            status: _,
+            code,
+            after: _,
+            censored: _,
+            found: _,
+            unsent,
+        } = a;
+        self.vec(captured);
+        for Slot { subject, slot } in captured {
+            self.subject(subject);
+            self.owned(slot);
+        }
+        if let Some(c) = code {
+            self.code(c);
+        }
+        if let Some(Unsent {
+            decorated: _,
+            handed: _,
+            connected: _,
+            lag: _,
+            refused: _,
+            refused_by: _,
+            code,
+        }) = unsent
+        {
+            self.code(code);
+        }
+    }
+
+    fn ended(&mut self, e: &Ended) {
+        let Ended {
+            at: _,
+            line: _,
+            end: _,
+            read: _,
+            ready: _,
+            intended: _,
+            released: _,
+            dispatched: _,
+            sent: _,
+            ended: _,
+            attempts: _,
+            critical: _,
+            bound,
+            fault: _,
+            wake: _,
+        } = e;
+        self.vec(bound);
+    }
+
+    fn fault(&mut self, class: &FaultClass) {
+        match class {
+            FaultClass::Carrier {
+                line: _,
+                attempt: _,
+                cannot,
+            } => self.code(cannot),
+            FaultClass::Gate { name } => self.code(name),
+            FaultClass::Backstop { .. }
+            | FaultClass::Below { .. }
+            | FaultClass::Disordered { .. }
+            | FaultClass::Backdated { .. }
+            | FaultClass::Dropped { .. }
+            | FaultClass::Held { .. }
+            | FaultClass::Stalled
+            | FaultClass::Poisoned
+            | FaultClass::Saturated { .. }
+            | FaultClass::Clock
+            | FaultClass::Log(_) => {}
         }
     }
 }

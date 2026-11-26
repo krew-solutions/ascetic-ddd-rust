@@ -24,7 +24,7 @@ use ascetic_ddd_command_log::record::{Header, Name, On, Subject};
 use ascetic_ddd_command_log::shape::{self, Shape};
 use ascetic_ddd_command_log::validate::{Kept, Peaks};
 
-use crate::machine::Line;
+use crate::machine::{Binding, Line};
 
 /// The bytes an ended step's cell holds at most, its share of the window and
 /// of the cells' map included, its keys and captures aside.
@@ -107,6 +107,16 @@ fn bound_to(s: &Shape) -> u64 {
         .saturating_add(bindings)
 }
 
+/// What the machine binds a line it reads by, while its step is taken: its
+/// dependencies' bindings, each barrier's key copied (K2b-7e-2b-2b) — one
+/// record's at a time, at most the plan's largest; a barrier may have no
+/// member, so no step's key bounds its key.
+fn binding(record: &Shape) -> u64 {
+    bytes_of(size_of::<Binding>())
+        .saturating_mul(record.deps.elements)
+        .saturating_add(record.each_bytes)
+}
+
 /// What the held keep once ended: their keys' bytes, their captures — each a
 /// value, a subject and a slot.
 fn keeping(k: &Kept) -> u64 {
@@ -128,6 +138,7 @@ pub fn needed(peaks: &Peaks) -> u64 {
         .saturating_add(shape::bound(&peaks.pending_shape))
         .saturating_add(bound_to(&peaks.pending_shape))
         .saturating_add(keeping(&peaks.kept))
+        .saturating_add(binding(&peaks.record))
 }
 
 /// Whether a machine of `budget`, reading `read_ahead` ahead, holds the plan
