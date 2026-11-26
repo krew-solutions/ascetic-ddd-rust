@@ -57,7 +57,7 @@ fn a_journal_dropped_unfinished_has_no_trailer() {
     let lines = sample::lines();
     for finished in [false, true] {
         let (out, buf, gone) = shared(None);
-        let mut w = Written::start(out, sample::header(), 4).unwrap();
+        let mut w = Written::assumed(out, sample::header(), 4).unwrap();
         for l in lines.iter().take(5) {
             w.line(l.clone()).unwrap();
         }
@@ -89,7 +89,7 @@ fn a_failing_writer_is_heard_within_its_lag() {
     let lines = sample::lines();
     // The header is the writer's first line; it fails on its third.
     let (out, _, _gone) = shared(Some(3));
-    let mut w = Written::start(out, sample::header(), behind).unwrap();
+    let mut w = Written::assumed(out, sample::header(), behind).unwrap();
     let (heard, error) = lines
         .iter()
         .cycle()
@@ -100,4 +100,22 @@ fn a_failing_writer_is_heard_within_its_lag() {
     // Lines 1 and 2 of the machine's are written; its line 3 fails.
     assert!(heard <= 2 + behind + 1, "heard at line {heard}");
     assert!(error.to_string().contains("the disk is full"), "{error}");
+}
+
+/// A test's journal is no admission's (ADR-0047 K2b-7e-2b-2b): its header's
+/// admission says it was assumed, whatever it said before.
+#[test]
+fn an_assumed_journal_says_so() {
+    let mut header = sample::header();
+    if let Some(a) = header.admission.as_mut() {
+        a.assumed = false;
+    }
+    assert!(header.admission.is_some());
+    let (out, buf, gone) = shared(None);
+    let w = Written::assumed(out, header, 4).unwrap();
+    drop(w.finish().unwrap());
+    gone.recv().unwrap();
+    let bytes = buf.lock().unwrap().clone();
+    let read = Reader::new(Cursor::new(bytes)).unwrap();
+    assert!(read.header().admission.as_ref().is_some_and(|a| a.assumed));
 }

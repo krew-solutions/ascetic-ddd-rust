@@ -168,6 +168,14 @@ pub enum Inadmissible {
         /// The source's.
         ahead: usize,
     },
+    /// The journal's output larger inline than its thread is stated for
+    /// (ADR-0047 decision 22, K2b-7e-2b-2b): its host boxes it.
+    Output {
+        /// Its bytes inline.
+        size: usize,
+        /// The most [`sink::THREAD`](crate::sink::THREAD) states.
+        most: usize,
+    },
 }
 
 impl fmt::Display for Inadmissible {
@@ -224,6 +232,10 @@ impl fmt::Display for Inadmissible {
             Inadmissible::Reader { admitted, ahead } => write!(
                 f,
                 "the lines read {ahead} records ahead, their plan admitted with {admitted}"
+            ),
+            Inadmissible::Output { size, most } => write!(
+                f,
+                "the journal's output holds {size} bytes inline, at most {most}: box it"
             ),
         }
     }
@@ -422,6 +434,9 @@ pub struct Admitted<C, X> {
     peaks: ascetic_ddd_command_log::validate::Peaks,
     /// The reader its plan was read by; none for a test's.
     reader: Option<crate::source::Reader>,
+    /// The journal its run writes (decision 22, K2b-7e-2b-2b): what its
+    /// channel is built from.
+    journal: crate::sink::Journal,
     /// The caps of the sources needing sockets, summed (decision 20).
     caps: Option<u64>,
     read_ahead: u64,
@@ -467,6 +482,11 @@ impl<C, X> Admitted<C, X> {
         self.reader.as_ref()
     }
 
+    /// The journal its run writes.
+    pub fn journal(&self) -> &crate::sink::Journal {
+        &self.journal
+    }
+
     /// Its read-ahead.
     pub fn read_ahead(&self) -> u64 {
         self.read_ahead
@@ -501,7 +521,8 @@ pub(crate) fn descriptors_fit(
 }
 
 /// Admits `plan`, read `read_ahead` µs ahead, its attempts carried by
-/// `carrier` on `runtimes` — or refuses it, before any journal exists: a
+/// `carrier` on `runtimes`, its journal `journal` — or refuses it, before any
+/// journal exists: a
 /// carrier that cannot carry it, a runtime not `current_thread`, fewer
 /// runtimes than sources, a read-ahead past the header's; a source whose cap
 /// with its driver's own exceeds the events a turn (decision 20's I1), or
@@ -511,6 +532,7 @@ pub fn admit<C: Clock, X: Carrier<C>>(
     read_ahead: u64,
     carrier: Arc<X>,
     runtimes: &Runtimes,
+    journal: crate::sink::Journal,
 ) -> Result<Admitted<C, X>, RunError> {
     let header = plan.header().clone();
     let refused = |i| RunError::Inadmissible(i);
@@ -601,6 +623,7 @@ pub fn admit<C: Clock, X: Carrier<C>>(
         validator: plan.validator().to_owned(),
         peaks: plan.peaks().clone(),
         reader: plan.reader().copied(),
+        journal,
         caps,
         read_ahead,
         carrier,
@@ -645,6 +668,21 @@ impl<C, X, K> Ready<C, X, K> {
         namespace: Namespace,
     ) -> Ready<C, X, K> {
         Ready::new(admitted, clock, sink, namespace)
+    }
+
+    /// Its journal's sink: a test's view of what the stages built.
+    #[cfg(feature = "testing")]
+    pub fn sink(&self) -> &K {
+        &self.sink
+    }
+}
+
+impl<X, K> Ready<crate::clock::RealClock, X, K> {
+    /// T0's wall instant, microseconds since the Unix epoch, as its journal's
+    /// header holds it: a host naming its output by its run needs no
+    /// journal read back.
+    pub fn t0(&self) -> i64 {
+        self.clock.wall()
     }
 }
 

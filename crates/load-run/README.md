@@ -17,5 +17,7 @@ time and carries its attempts.
 - `decorate` — the host's decorator: what only it can mint, once an attempt.
 - `tcp`, `live` — the library's TCP egress, a source bound to its own address;
   the live composition, a `current_thread` runtime per source.
-- `source`, `sink`, `carrier`, `stand` — the ports: the log's lines, the
-  journal, what carries an attempt, and the stand's routes and connections.
+- `source`, `carrier`, `stand` — the ports: the log's lines, what carries an
+  attempt, and the stand's routes and connections.
+- `sink` — the journal: a run's written by a thread of its own to the host's
+  output, its channel built from what admission holds (ADR-0047 decision 22).

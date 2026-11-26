@@ -36,8 +36,8 @@ use ascetic_ddd_scheduler::machine::{self, MACHINE_REVISION};
 use crate::carrier::{Carrier, Unprobed};
 use crate::clock::{Clock, RealClock};
 use crate::live::Descriptors;
-use crate::run::{Admitted, Ready, RunError, descriptors_fit};
-use crate::sink::JournalSink;
+use crate::run::{Admitted, Inadmissible, Ready, RunError, descriptors_fit};
+use crate::sink::{JournalSink, OUT, Written};
 use crate::stamps::{on_source, on_source_task};
 use crate::stand::{Opening, Refused};
 
@@ -83,14 +83,16 @@ impl<C, X> Barred<C, X> {
         &self.refused
     }
 
-    /// The refusal journaled into the sink `open` makes of its header — no
-    /// T0, the gates passed before it, the judging — its fault the only
-    /// line, then the trailer; `source` the writer's revision.
-    pub fn journal<K: JournalSink>(
+    /// The refusal journaled into the output `open` opens — its header with
+    /// no T0, the gates passed before it, the judging —, its fault the only
+    /// line, then the trailer, written in the caller's thread; `source` the
+    /// writer's revision.
+    pub fn journal<W: std::io::Write + Send>(
         self,
         source: String,
-        open: impl FnOnce(journal::Header) -> Result<K, JournalError>,
-    ) -> Result<K::Finished, JournalError> {
+        open: impl FnOnce() -> std::io::Result<W>,
+    ) -> Result<(W, journal::Trailer), JournalError> {
+        let out = open().map_err(io)?;
         let identity = Identity {
             source,
             log: self.admitted.log().to_owned(),
@@ -104,7 +106,7 @@ impl<C, X> Barred<C, X> {
             self.gates,
             Some(self.judging),
         );
-        refused(open(header)?, &self.refused)
+        refused(journal::Writer::new(out, header)?, &self.refused)
     }
 }
 
@@ -150,20 +152,30 @@ impl<C: Clock, X: Carrier<C>> Measured<C, X> {
 }
 
 impl<X> Gated<RealClock, X> {
-    /// T0: the run's clock started — the library's, after the third stage —
-    /// its journal opened by `open` from the stages' evidence and T0's wall
-    /// instant; `source` the writer's revision.
-    pub fn start<K: JournalSink>(
+    /// T0: the journal's output opened by `open` — before the clock, so a
+    /// slow open is never the run's —, the run's clock started — the
+    /// library's, after the third stage —, the journal's header written from
+    /// the stages' evidence and T0's wall instant, its channel the admitted
+    /// journal's (ADR-0047 decision 22, K2b-7e-2b-2b); `source` the writer's
+    /// revision. An output larger inline than [`OUT`] is refused.
+    pub fn start<W: std::io::Write + Send + 'static>(
         self,
         source: String,
-        open: impl FnOnce(journal::Header) -> Result<K, JournalError>,
-    ) -> Result<Ready<RealClock, X, K>, RunError> {
+        open: impl FnOnce() -> std::io::Result<W>,
+    ) -> Result<Ready<RealClock, X, Written<W>>, RunError> {
+        if size_of::<W>() > OUT {
+            return Err(RunError::Inadmissible(Inadmissible::Output {
+                size: size_of::<W>(),
+                most: OUT,
+            }));
+        }
         let Gated {
             admitted,
             judging,
             namespace,
             gates,
         } = self;
+        let out = open().map_err(|e| RunError::Journal(io(e)))?;
         let clock =
             Arc::new(RealClock::start(admitted.header().profile.jitter).map_err(RunError::Clock)?);
         let identity = Identity {
@@ -179,7 +191,8 @@ impl<X> Gated<RealClock, X> {
             gates,
             Some(judging),
         );
-        let sink = open(header).map_err(RunError::Journal)?;
+        let journal = *admitted.journal();
+        let sink = Written::start(out, header, journal).map_err(RunError::Journal)?;
         Ok(Ready::new(admitted, clock, sink, namespace))
     }
 }
@@ -520,4 +533,9 @@ pub fn refused<K: JournalSink>(
         },
     }))?;
     sink.finish()
+}
+
+/// An output's failure, as the journal's.
+fn io(e: std::io::Error) -> JournalError {
+    JournalError::Frame(ascetic_ddd_command_log::frame::FrameError::Io(e))
 }

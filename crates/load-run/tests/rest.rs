@@ -11,6 +11,7 @@
 #[allow(unused_imports, clippy::disallowed_methods, clippy::disallowed_types)]
 mod fixture;
 
+use ascetic_ddd_load_run::sink::Journal;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::io;
@@ -592,6 +593,7 @@ fn run_rest_refused(
             W,
             Arc::new(carrier),
             &runtimes,
+            Journal::new(64, 0),
         ) {
             Ok(admitted) => {
                 clock
@@ -1182,6 +1184,7 @@ fn over_rest_the_shell_journals_what_sim_journals() {
                                 W,
                                 Arc::new(carrier),
                                 &runtimes,
+                                Journal::new(64, 0),
                             )
                             .unwrap(),
                             clock.clone(),
@@ -1401,6 +1404,7 @@ fn looked(lags: &[(u64, u64)], answer: Answer) -> Vec<Line> {
                         W,
                         Arc::new(carrier),
                         &runtimes,
+                        Journal::new(64, 0),
                     )
                     .unwrap(),
                     clock,
@@ -1598,6 +1602,7 @@ fn run_decorated(
                         W,
                         Arc::new(carrier),
                         &runtimes,
+                        Journal::new(64, 0),
                     )
                     .unwrap(),
                     clock.clone(),
@@ -2824,6 +2829,7 @@ fn stop_leaves_no_request(connect: u64, throttle: Throttle) {
                         W,
                         Arc::new(carrier),
                         &runtimes,
+                        Journal::new(64, 0),
                     )
                     .unwrap(),
                     clock.clone(),
@@ -2905,6 +2911,7 @@ fn a_run_dropped_takes_its_attempts_with_it() {
                     W,
                     Arc::new(carrier),
                     &runtimes,
+                    Journal::new(64, 0),
                 )
                 .unwrap(),
                 clock.clone(),
@@ -2997,6 +3004,7 @@ fn the_rest_carrier_s_gates_are_its_stand_s() {
             W,
             Arc::new(carrier),
             &runtimes,
+            Journal::new(64, 0),
         )
         .unwrap();
         let opening = ascetic_ddd_load_run::stand::Opening {

@@ -9,6 +9,7 @@
 #[allow(unused_imports, clippy::disallowed_methods, clippy::disallowed_types)]
 mod fixture;
 
+use ascetic_ddd_load_run::sink::Journal;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -81,6 +82,7 @@ fn shell_from<S: LineSource, X: Carrier<VirtualClock>>(
             read_ahead,
             Arc::new(carrier),
             &runtimes,
+            Journal::new(64, 0),
         )?;
         clock
             .within(run(
@@ -336,6 +338,7 @@ fn a_log_the_carrier_cannot_carry_is_refused_before_t0() {
             W,
             Arc::new(Scripted::new(Arc::new(script(1, "refused")))),
             &runtimes,
+            Journal::new(64, 0),
         )
         .err()
         .unwrap()
@@ -476,7 +479,7 @@ fn stress<C: Clock>(make: impl Fn(u64) -> C, seeds: u64, calls: u64) {
                 judging: None,
                 admission: None,
             };
-            let sink = Written::start(Vec::new(), journal_header, 1_024).unwrap();
+            let sink = Written::assumed(Vec::new(), journal_header, 1_024).unwrap();
             let ran = run(
                 ascetic_ddd_load_run::run::Ready::assumed(
                     admit(
@@ -487,6 +490,7 @@ fn stress<C: Clock>(make: impl Fn(u64) -> C, seeds: u64, calls: u64) {
                         W,
                         Arc::new(Scripted::new(quick)),
                         &runtimes,
+                        Journal::new(64, 0),
                     )
                     .unwrap(),
                     clock,
@@ -742,6 +746,7 @@ fn a_carrier_stuck_on_its_thread_is_a_harness_fault() {
                         block: 200_000,
                     }),
                     &Runtimes::assumed(vec![runtimes.sources()[0].clone()], 1_024),
+                    Journal::new(64, 0),
                 )
                 .unwrap(),
                 clock,
@@ -830,6 +835,7 @@ fn a_late_hand_off_is_journaled() {
                     W,
                     Arc::new(Blocking),
                     &Runtimes::assumed(vec![runtimes.sources()[0].clone()], 1_024),
+                    Journal::new(64, 0),
                 )
                 .unwrap(),
                 clock,
@@ -876,6 +882,7 @@ fn a_source_not_on_a_current_thread_runtime_is_refused() {
             W,
             Arc::new(Scripted::new(Arc::new(script(1, "flavor")))),
             &Runtimes::assumed(vec![pool.handle().clone()], 1_024),
+            Journal::new(64, 0),
         )
         .err()
         .unwrap()
@@ -1161,6 +1168,7 @@ fn a_poisoned_lock_stops_the_run() {
                         W,
                         Arc::new(Poisoner),
                         &runtimes,
+                        Journal::new(64, 0),
                     )
                     .unwrap(),
                     clock,

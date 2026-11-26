@@ -11,6 +11,7 @@
 #[allow(unused_imports, clippy::disallowed_methods, clippy::disallowed_types)]
 mod fixture;
 
+use ascetic_ddd_load_run::sink::Journal;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -175,6 +176,7 @@ fn a_whole_process_stalled_makes_no_root() {
         W,
         Arc::new(carrier),
         live.runtimes(),
+        Journal::new(64, 0),
     )
     .unwrap();
     let h = journal::Header {
@@ -193,7 +195,7 @@ fn a_whole_process_stalled_makes_no_root() {
         judging: None,
         admission: None,
     };
-    let sink = Written::start(Vec::new(), h.clone(), 64).unwrap();
+    let sink = Written::assumed(Vec::new(), h.clone(), 64).unwrap();
     // The stall: this process stopped from 1 s to 2.5 s into the run.
     let pid = std::process::id();
     let _stopper = Killed(

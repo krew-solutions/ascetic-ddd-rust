@@ -5,6 +5,7 @@
 #[allow(unused_imports, clippy::disallowed_methods, clippy::disallowed_types)]
 mod fixture;
 
+use ascetic_ddd_load_run::sink::Journal;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::io::Cursor;
@@ -199,6 +200,7 @@ fn gated(
                 gates,
             }),
             &runtimes,
+            Journal::new(64, 0),
         )
         .unwrap();
         let opening = Opening {
@@ -276,6 +278,7 @@ fn a_gate_s_refusal_is_journaled_alone() {
                 gates: vec![],
             }),
             &runtimes,
+            Journal::new(64, 0),
         )
         .unwrap()
     });
@@ -290,7 +293,11 @@ fn a_gate_s_refusal_is_journaled_alone() {
     let refusal = why.unwrap_err();
     let lines = refused(Lines::new(), &refusal).unwrap();
     assert_eq!(lines.len(), 1);
-    let (bytes, _) = refused(Written::start(Vec::new(), jh.clone(), 4).unwrap(), &refusal).unwrap();
+    let (bytes, _) = refused(
+        Written::assumed(Vec::new(), jh.clone(), 4).unwrap(),
+        &refusal,
+    )
+    .unwrap();
     let text = String::from_utf8(bytes.clone()).unwrap();
     assert!(!text.contains("own words"), "{text}");
     let open = || Reader::new(Cursor::new(bytes.clone())).unwrap();
@@ -335,6 +342,7 @@ fn the_judging_time_is_measured_on_a_source() {
                 gates: vec![],
             }),
             &runtimes,
+            Journal::new(64, 0),
         )
         .unwrap();
         measure(&admitted, clock).await.unwrap()
@@ -364,6 +372,7 @@ fn a_read_ahead_past_the_header_s_is_refused_at_admission() {
                 gates: vec![],
             }),
             &runtimes,
+            Journal::new(64, 0),
         )
         .err()
     });
@@ -445,6 +454,7 @@ fn a_replayed_plan_carries_its_commitment_s_peaks() {
                     gates: vec![],
                 }),
                 runtimes,
+                Journal::new(64, 0),
             )
             .unwrap()
             .admission()
@@ -506,6 +516,7 @@ fn a_run_reading_past_its_admitted_reader_is_refused() {
                 gates: vec![],
             }),
             &runtimes,
+            Journal::new(64, 0),
         )
         .unwrap()
     });

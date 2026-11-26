@@ -14,6 +14,7 @@
 #[allow(unused_imports, clippy::disallowed_methods, clippy::disallowed_types)]
 mod fixture;
 
+use ascetic_ddd_load_run::sink::Journal;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::io::{Read, Write};
@@ -264,7 +265,7 @@ fn once(how: &Source) -> Option<bool> {
             ..Default::default()
         },
     );
-    let admitted = admit(plan, W, Arc::new(carrier), &runtimes).unwrap();
+    let admitted = admit(plan, W, Arc::new(carrier), &runtimes, Journal::new(64, 0)).unwrap();
     let journal = machine
         .block_on(run(
             Ready::assumed(admitted, clock.clone(), Lines::new(), Namespace(1)),

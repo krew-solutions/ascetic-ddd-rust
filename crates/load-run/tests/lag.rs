@@ -12,6 +12,7 @@
 #[allow(unused_imports, clippy::disallowed_methods, clippy::disallowed_types)]
 mod fixture;
 
+use ascetic_ddd_load_run::sink::Journal;
 use std::future::Future;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
@@ -141,6 +142,7 @@ fn waiting_lag(write_at: u64) -> Option<u64> {
                         write_at,
                     }),
                     live.runtimes(),
+                    Journal::new(64, 0),
                 )
                 .unwrap(),
                 clock.clone(),
@@ -387,6 +389,7 @@ fn connection_lag(early: bool) -> Option<u64> {
                     W,
                     Arc::new(carrier),
                     live.runtimes(),
+                    Journal::new(64, 0),
                 )
                 .unwrap(),
                 clock.clone(),
@@ -589,6 +592,7 @@ fn late_floor_lag() -> Option<u64> {
                     W,
                     Arc::new(carrier),
                     live.runtimes(),
+                    Journal::new(64, 0),
                 )
                 .unwrap(),
                 clock,
@@ -667,6 +671,7 @@ fn decorated_lag() -> Option<journal::Sent> {
                     W,
                     Arc::new(carrier),
                     live.runtimes(),
+                    Journal::new(64, 0),
                 )
                 .unwrap(),
                 clock.clone(),
@@ -788,6 +793,7 @@ fn stalled_report() -> Option<journal::Unsent> {
                     W,
                     Arc::new(carrier),
                     live.runtimes(),
+                    Journal::new(64, 0),
                 )
                 .unwrap(),
                 clock,
@@ -848,6 +854,7 @@ fn slow_refusal_sent() -> Option<journal::Sent> {
                     W,
                     Arc::new(carrier),
                     live.runtimes(),
+                    Journal::new(64, 0),
                 )
                 .unwrap(),
                 clock,

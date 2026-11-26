@@ -188,6 +188,32 @@ fn every_assumption_is_a_test_s() {
             held += 1;
         }
     }
-    // A plan's, the runtimes' two, the descriptors', a ready run's.
-    assert_eq!(held, 5);
+    // A plan's, the runtimes' two, the descriptors', a ready run's, a
+    // journal's.
+    assert_eq!(held, 6);
+}
+
+/// The journal that keeps every line is a test's (ADR-0047 K2b-7e-2b-2b): no
+/// count bounds it, so a host's build has none.
+#[test]
+fn the_journal_kept_whole_is_a_test_s() {
+    let (_, text) = SOURCES.iter().find(|(name, _)| *name == "sink.rs").unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    for item in [
+        "pub struct Lines {",
+        "impl Lines {",
+        "impl JournalSink for Lines {",
+    ] {
+        let i = lines
+            .iter()
+            .position(|l| l.trim_start() == item)
+            .unwrap_or_else(|| panic!("sink.rs: no `{item}`"));
+        let gated = lines[..i]
+            .iter()
+            .rev()
+            .map(|l| l.trim_start())
+            .take_while(|l| l.starts_with("#[") || l.starts_with("///"))
+            .any(|l| l == "#[cfg(feature = \"testing\")]");
+        assert!(gated, "sink.rs:{}: {item} not a test's", i + 1);
+    }
 }

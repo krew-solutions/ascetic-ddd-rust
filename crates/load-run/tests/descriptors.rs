@@ -9,6 +9,7 @@
 #[allow(unused_imports, clippy::disallowed_methods, clippy::disallowed_types)]
 mod fixture;
 
+use ascetic_ddd_load_run::sink::Journal;
 use std::future::Future;
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -126,7 +127,7 @@ fn a_run_at_the_descriptors_bound_hits_no_emfile() {
     {
         let live = Live::for_caps(&[CAP]).unwrap();
         assert_eq!(live.runtimes().descriptors().unwrap().open(), open);
-        match admit::<RealClock, _>(plan(), W, carrier(), live.runtimes()) {
+        match admit::<RealClock, _>(plan(), W, carrier(), live.runtimes(), Journal::new(64, 0)) {
             Err(RunError::Inadmissible(Inadmissible::Descriptors { needed, .. })) => {
                 assert_eq!(needed, bound);
             }
@@ -137,7 +138,7 @@ fn a_run_at_the_descriptors_bound_hits_no_emfile() {
     // none answered — and no `EMFILE`.
     setrlimit(Resource::RLIMIT_NOFILE, bound, hard).unwrap();
     let live = Live::for_caps(&[CAP]).unwrap();
-    let admitted = admit(plan(), W, carrier(), live.runtimes()).unwrap();
+    let admitted = admit(plan(), W, carrier(), live.runtimes(), Journal::new(64, 0)).unwrap();
     // Stage 3's re-read: within; past the reserve once more were opened
     // since admission (decision 20).
     assert!(ascetic_ddd_load_run::stages::descriptors(&admitted).is_ok());

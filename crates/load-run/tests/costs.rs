@@ -17,6 +17,7 @@ mod fixture;
 
 mod common;
 
+use ascetic_ddd_load_run::sink::Journal;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::future::Future;
@@ -713,7 +714,7 @@ async fn go<X: Carrier<VirtualClock>>(
     clock: Arc<VirtualClock>,
     records: Vec<Record>,
 ) {
-    let admitted = admit(plan, W, Arc::new(carrier), runtimes).unwrap();
+    let admitted = admit(plan, W, Arc::new(carrier), runtimes, Journal::new(64, 0)).unwrap();
     clock
         .within(run(
             Ready::assumed(admitted, clock.clone(), Unkept, Namespace(1)),

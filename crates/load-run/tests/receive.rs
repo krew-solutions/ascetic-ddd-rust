@@ -15,6 +15,7 @@
 #[allow(unused_imports, clippy::disallowed_methods, clippy::disallowed_types)]
 mod fixture;
 
+use ascetic_ddd_load_run::sink::Journal;
 use std::future::{Future, poll_fn};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
@@ -266,6 +267,7 @@ fn attempt_once(prodded: bool) -> Option<Vec<Line>> {
                     W,
                     Arc::new(carrier),
                     &Runtimes::assumed(vec![source], 1_024),
+                    Journal::new(64, 0),
                 )
                 .unwrap(),
                 shell,
@@ -398,6 +400,7 @@ fn calls_over_tcp_from_a_live_source_are_answered() {
                     W,
                     Arc::new(carrier),
                     live.runtimes(),
+                    Journal::new(64, 0),
                 )
                 .unwrap(),
                 clock.clone(),

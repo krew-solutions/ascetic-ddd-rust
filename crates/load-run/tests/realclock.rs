@@ -10,6 +10,7 @@
 #[allow(unused_imports, clippy::disallowed_methods, clippy::disallowed_types)]
 mod fixture;
 
+use ascetic_ddd_load_run::sink::Journal;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::io::{Read, Write};
@@ -167,6 +168,7 @@ fn over_tcp(
                 W,
                 Arc::new(carrier),
                 live.runtimes(),
+                Journal::new(64, 0),
             )
             .unwrap(),
             clock,
@@ -310,6 +312,7 @@ fn drill_timed(
                 W,
                 Arc::new(carrier),
                 live.runtimes(),
+                Journal::new(64, 0),
             )
             .unwrap(),
             clock.clone(),

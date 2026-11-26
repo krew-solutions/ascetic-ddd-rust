@@ -8,6 +8,7 @@
 #[allow(unused_imports, clippy::disallowed_methods, clippy::disallowed_types)]
 mod fixture;
 
+use ascetic_ddd_load_run::sink::Journal;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -349,6 +350,7 @@ fn healthy_with(gap: u64, steps: u64, every: u64, size: u64) -> Replayed {
         W,
         Arc::new(carrier),
         live.runtimes(),
+        Journal::new(64, 0),
     )
     .unwrap();
     let clock = Arc::new(RealClock::start(header.profile.jitter).unwrap());

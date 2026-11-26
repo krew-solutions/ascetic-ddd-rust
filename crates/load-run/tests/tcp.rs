@@ -6,6 +6,7 @@
 #[allow(unused_imports, clippy::disallowed_methods, clippy::disallowed_types)]
 mod fixture;
 
+use ascetic_ddd_load_run::sink::Journal;
 use std::collections::BTreeMap;
 use std::io::{self, Read};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
@@ -244,6 +245,7 @@ fn admission_refuses_an_endpoint_unreached() {
             fixture::W,
             std::sync::Arc::new(carrier),
             &runtimes,
+            Journal::new(64, 0),
         )
         .map(|_| ())
     };
@@ -333,6 +335,7 @@ fn probed<E: Egress>(
         fixture::W,
         std::sync::Arc::new(carrier),
         live.runtimes(),
+        Journal::new(64, 0),
     )
     .unwrap();
     let root = tokio::runtime::Builder::new_current_thread()
@@ -513,6 +516,7 @@ fn chained(
         fixture::W,
         std::sync::Arc::new(carrier),
         live.runtimes(),
+        Journal::new(37, 0),
     )
     .unwrap();
     (admitted, vec![fixture::call("read", 1, 0, 0, 0)])
@@ -542,7 +546,6 @@ fn the_stages_are_a_chain_its_evidence_the_library_s() {
     use ascetic_ddd_load_run::clock::RealClock;
     use ascetic_ddd_load_run::live::Live;
     use ascetic_ddd_load_run::run::run;
-    use ascetic_ddd_load_run::sink::Written;
     use ascetic_ddd_load_run::source::Records;
     use ascetic_ddd_scheduler::journal::{Code, Reader};
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -564,11 +567,10 @@ fn the_stages_are_a_chain_its_evidence_the_library_s() {
             panic!("the stages refused");
         };
         let at = wall_now();
-        let ready = gated
-            .start("twin".to_owned(), |head| {
-                Written::start(Vec::new(), head, 4)
-            })
-            .unwrap();
+        let ready = gated.start("twin".to_owned(), || Ok(Vec::new())).unwrap();
+        // The journal's channel is the one admission holds (ADR-0047
+        // decision 22, K2b-7e-2b-2b): `chained` admits 37 lines behind.
+        assert_eq!(ready.sink().behind(), 37);
         (ready, at)
     });
     let ran = root
@@ -627,7 +629,6 @@ fn a_barred_run_is_journaled_by_the_library() {
     use ascetic_ddd_command_log::fills::Namespace;
     use ascetic_ddd_load_run::clock::RealClock;
     use ascetic_ddd_load_run::live::Live;
-    use ascetic_ddd_load_run::sink::Written;
     use ascetic_ddd_scheduler::journal::{Code, FaultClass, Line, Reader};
     let closed = {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -648,9 +649,7 @@ fn a_barred_run_is_journaled_by_the_library() {
     });
     assert_eq!(barred.refused().gate, "egress.probe.s0.e0.refused");
     let (bytes, _) = barred
-        .journal("twin".to_owned(), |head| {
-            Written::start(Vec::new(), head, 4)
-        })
+        .journal("twin".to_owned(), || Ok(Vec::new()))
         .unwrap();
     let reader = Reader::new(std::io::Cursor::new(bytes)).unwrap();
     let h = reader.header().clone();
@@ -760,6 +759,7 @@ fn no_socket_the_shell_closes_waits_in_time_wait() {
         fixture::W,
         std::sync::Arc::new(carrier),
         live.runtimes(),
+        Journal::new(64, 0),
     )
     .unwrap();
     let root = tokio::runtime::Builder::new_current_thread()
@@ -783,4 +783,86 @@ fn no_socket_the_shell_closes_waits_in_time_wait() {
         before,
         "a socket of the shell's in TIME_WAIT"
     );
+}
+
+/// An output of `N` bytes inline.
+struct Wide<const N: usize>([u8; N]);
+
+impl<const N: usize> std::io::Write for Wide<N> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// K2b-7e-2b-2b-2: a journal's output is held inline by its thread, which
+/// states `OUT` bytes of it: an output of `OUT` bytes starts a run, opened
+/// before T0; one of `OUT + 1` is refused before it is opened.
+#[test]
+fn an_output_wider_than_its_thread_states_is_refused() {
+    use ascetic_ddd_command_log::fills::Namespace;
+    use ascetic_ddd_load_run::clock::RealClock;
+    use ascetic_ddd_load_run::live::Live;
+    use ascetic_ddd_load_run::run::{Inadmissible, RunError};
+    use ascetic_ddd_load_run::sink::OUT;
+    const WIDER: usize = OUT + 1;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let addr = answering(seen);
+    let live = Live::for_caps(&[100]).unwrap();
+    let root = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let gated = || {
+        let (admitted, _) = chained(addr, &live);
+        let stopwatch = std::sync::Arc::new(RealClock::start(2_000).unwrap());
+        root.block_on(async {
+            let measured = admitted.measure(stopwatch.clone()).await.unwrap();
+            match measured.gates(Namespace(7), stopwatch, 1_000_000).await {
+                Ok(gated) => gated,
+                Err(_) => panic!("the stages refused"),
+            }
+        })
+    };
+    assert_eq!(size_of::<Wide<OUT>>(), OUT);
+    // Opened before T0: a slow open is never the run's.
+    let opened_at = std::cell::Cell::new(0);
+    let ready = gated()
+        .start("twin".to_owned(), || {
+            opened_at.set(wall_now());
+            // Slow, as a remote file system's open may be.
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "an open's own time, before the run's clock exists"
+            )]
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            Ok(Wide([0; OUT]))
+        })
+        .unwrap();
+    assert!(
+        opened_at.get() < ready.t0(),
+        "opened at {}, T0 at {}",
+        opened_at.get(),
+        ready.t0()
+    );
+    drop(ready);
+    let opened = std::cell::Cell::new(false);
+    let refused = gated().start("twin".to_owned(), || {
+        opened.set(true);
+        Ok(Wide([0; WIDER]))
+    });
+    assert!(
+        matches!(
+            refused,
+            Err(RunError::Inadmissible(Inadmissible::Output {
+                size: WIDER,
+                most: OUT
+            }))
+        ),
+        "{:?}",
+        refused.err()
+    );
+    assert!(!opened.get(), "refused before it was opened");
 }

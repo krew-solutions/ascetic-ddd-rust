@@ -10,6 +10,9 @@
 #[allow(unused_imports, clippy::disallowed_methods, clippy::disallowed_types)]
 mod fixture;
 
+mod common;
+
+use ascetic_ddd_load_run::sink::Journal;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -230,6 +233,7 @@ fn measured(n: u64, delay: f64, size: usize) -> (Samples, usize, usize, (usize, 
         W,
         Arc::new(carrier),
         live.runtimes(),
+        Journal::new(64, 0),
     )
     .unwrap();
     let root = tokio::runtime::Builder::new_current_thread()
@@ -306,4 +310,111 @@ fn the_shell_s_bytes() {
             per(one.5, two.5)
         );
     }
+}
+
+/// A journal sampling the bytes held as each line comes: its kind, its step's
+/// line, the bytes. Reserved before the run, so it is given nothing.
+struct Sampling {
+    seen: Vec<(u8, u64, usize)>,
+}
+
+impl JournalSink for Sampling {
+    type Finished = Vec<(u8, u64, usize)>;
+
+    fn line(&mut self, line: journal::Line) -> Result<(), JournalError> {
+        let (kind, of) = match &line {
+            journal::Line::Answer(a) => (1, a.line),
+            journal::Line::End(e) => (2, e.line),
+            journal::Line::Released(r) => (3, r.line),
+            _ => (0, 0),
+        };
+        let now = NOW.load(Relaxed);
+        drop(line);
+        assert!(
+            self.seen.len() < self.seen.capacity(),
+            "the samples reserved"
+        );
+        self.seen.push((kind, of, now));
+        Ok(())
+    }
+
+    fn finish(self) -> Result<Vec<(u8, u64, usize)>, JournalError> {
+        Ok(self.seen)
+    }
+}
+
+/// What the run holds as the first line of a burst comes, past what it held
+/// as the line before: one producer, `k` dependents read before its answer
+/// and released at once when it comes.
+fn burst(k: u64) -> usize {
+    use ascetic_ddd_command_log::record::On;
+    use ascetic_ddd_load_run::clock::VirtualClock;
+    use ascetic_ddd_load_run::run::Runtimes;
+    use ascetic_ddd_scheduler::sim;
+    let producer = call("read", 0, 0, 0, 0);
+    let records: Vec<Record> = std::iter::once(producer.clone())
+        .chain((1..=k).map(|i| after(call("read", i, 0, 0, 0), &producer.step, On::Expected)))
+        .collect();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let seen = rt.block_on(async {
+        let clock = Arc::new(VirtualClock::start(0));
+        let runtimes = Runtimes::assumed(vec![tokio::runtime::Handle::current()], 1_024);
+        let admitted = admit(
+            Plan::assumed(Arc::new(header()), Default::default()),
+            W,
+            Arc::new(common::Scripted::new(Arc::new(|_, _, _: &Record| {
+                sim::Attempt::expected(100)
+            }))),
+            &runtimes,
+            Journal::new(64, 0),
+        )
+        .unwrap();
+        let sink = Sampling {
+            seen: Vec::with_capacity(16 * (k as usize + 4)),
+        };
+        clock
+            .within(run(
+                Ready::assumed(admitted, clock.clone(), sink, Namespace(1)),
+                Records::new(records.into_iter()),
+            ))
+            .await
+            .unwrap()
+            .journal
+    });
+    // The producer's answer, line 2's: the burst's first line.
+    let first = seen
+        .iter()
+        .position(|&(kind, of, _)| kind == 1 && of == 2)
+        .expect("the producer answered");
+    assert!(
+        seen[first..]
+            .iter()
+            .filter(|&&(kind, _, _)| kind == 3)
+            .count() as u64
+            >= k,
+        "the dependents released after it"
+    );
+    seen[first].2.saturating_sub(seen[first - 1].2)
+}
+
+/// K2b-7e-2b-2b-2: a step's lines are made one at a time as the run sends
+/// them — the bytes the run holds as a burst's first line comes grow, from 64
+/// dependents to 128, by the machine's outputs, never by a burst's lines.
+#[test]
+fn a_burst_s_lines_are_made_one_at_a_time() {
+    use ascetic_ddd_scheduler::machine::Output;
+    let (k, two_k) = (burst(64), burst(128));
+    let each = two_k.saturating_sub(k) / 64;
+    eprintln!(
+        "MEASURED a burst's first line: {k} B past the line before at 64 dependents, {two_k} B at 128, {each} B a dependent; an output {} B, a line {} B",
+        size_of::<Output>(),
+        size_of::<journal::Line>()
+    );
+    assert!(
+        each < 4 * size_of::<Output>() + size_of::<journal::Line>(),
+        "{each} B a dependent: a burst's lines made at once"
+    );
 }
