@@ -16,9 +16,10 @@ use std::mem::size_of;
 use serde::{Deserialize, Serialize};
 
 use crate::record::{
-    Action, Bus, Caller, Capture, Dep, Deviation, Field, Hole, HostCall, Measure, Observe, Of,
-    Outcome, Payload, Predicate, Probe, Record, Rest, Source, Span, StepId, StreamPosition,
-    Subject, Test, Value,
+    Action, Bus, By, Call, Caller, Capture, Channel, ClientRetry, Dep, Deviation, Field, Header,
+    Hole, HostCall, Law, Limit, Measure, Observe, Of, Operation, Outcome, Payload, Place,
+    Predicate, Probe, Profile, Record, Rest, Source, Span, StepId, StreamPosition, Subject, Test,
+    Value,
 };
 use crate::wire::u64s;
 
@@ -273,7 +274,15 @@ impl Shape {
 /// `Arc` as the machine holds it: their strings, their byte strings, their
 /// sequences grown one element at a time.
 pub fn bound(s: &Shape) -> u64 {
-    let arcs = s.records.saturating_mul(as_u64(ARC));
+    s.records
+        .saturating_mul(as_u64(ARC))
+        .saturating_add(parts(s))
+}
+
+/// What [`bound`] prices but the records' own `Arc`s: the bytes their fields
+/// hold at most decoded, the records wherever they are — in a channel's slot,
+/// on a thread's stack.
+pub fn parts(s: &Shape) -> u64 {
     let parts = [
         s.deps.bound(size_of::<Dep>()),
         s.values.bound(size_of::<Value>()),
@@ -286,8 +295,7 @@ pub fn bound(s: &Shape) -> u64 {
         s.subjects.bound(size_of::<Subject>()),
     ];
     parts.into_iter().fold(
-        arcs.saturating_add(s.bytes)
-            .saturating_add(s.byte_strings.saturating_mul(2)),
+        s.bytes.saturating_add(s.byte_strings.saturating_mul(2)),
         u64::saturating_add,
     )
 }
@@ -668,5 +676,145 @@ impl Walk {
         let Measure { metric, from } = m;
         self.string(metric);
         self.step(from);
+    }
+}
+
+/// The bytes a log's header holds decoded from its line, in its own `Arc` as a
+/// run shares it (ADR-0047 decision 22, K2b-7e-2b-2): its strings at their
+/// length, its sequences as serde grows them — exactly, at this build. Every
+/// type taken apart whole, as a record's is.
+pub fn header(h: &Header) -> u64 {
+    let mut n = Bytes(as_u64(size_of::<[usize; 2]>()).saturating_add(as_u64(size_of::<Header>())));
+    let Header {
+        format: _,
+        algorithm,
+        scenario,
+        revision,
+        profile,
+        window: _,
+        read_ahead: _,
+        retained,
+        laws,
+        operations,
+        channels,
+        calls,
+    } = h;
+    n.strings([algorithm, scenario, revision]);
+    n.profile(profile);
+    n.names(retained);
+    n.seq::<Law>(laws.len());
+    for Law { name, law } in laws {
+        n.strings([name, law]);
+    }
+    n.seq::<Operation>(operations.len());
+    for o in operations {
+        n.operation(o);
+    }
+    n.seq::<Channel>(channels.len());
+    for Channel { name, timeout: _ } in channels {
+        n.strings([name]);
+    }
+    n.seq::<Call>(calls.len());
+    for Call {
+        name,
+        timeout: _,
+        safety: _,
+    } in calls
+    {
+        n.strings([name]);
+    }
+    n.0
+}
+
+/// A header's bytes as they are counted.
+struct Bytes(u64);
+
+impl Bytes {
+    fn strings<'a>(&mut self, ss: impl IntoIterator<Item = &'a String>) {
+        for s in ss {
+            self.0 = self.0.saturating_add(as_u64(s.len()));
+        }
+    }
+
+    fn seq<T>(&mut self, len: usize) {
+        self.0 = self
+            .0
+            .saturating_add(as_u64(slots(len).saturating_mul(size_of::<T>())));
+    }
+
+    fn names(&mut self, names: &[String]) {
+        self.seq::<String>(names.len());
+        self.strings(names);
+    }
+
+    fn profile(&mut self, p: &Profile) {
+        let Profile {
+            name,
+            rendered,
+            captured,
+            gapless,
+            sources: _,
+            jitter: _,
+            reserve: _,
+            route_timeout: _,
+            problem,
+            correlation,
+            resend: _,
+            answer_cap: _,
+            idle: _,
+        } = p;
+        self.strings([name, problem, correlation]);
+        self.names(rendered);
+        self.names(captured);
+        self.names(gapless);
+    }
+
+    fn operation(&mut self, o: &Operation) {
+        let Operation {
+            name,
+            method,
+            path,
+            content_type,
+            decorated,
+            writes,
+            safety: _,
+            client,
+            not_run,
+            timeout: _,
+            limits,
+        } = o;
+        self.strings([name, method, path, content_type]);
+        self.names(decorated);
+        self.names(writes);
+        let ClientRetry {
+            attempts: _,
+            on,
+            backoff: _,
+            retry_after: _,
+        } = client;
+        self.seq::<u16>(on.len());
+        self.names(not_run);
+        self.seq::<Limit>(limits.len());
+        for Limit {
+            key,
+            bucket,
+            by,
+            requests: _,
+            per_seconds: _,
+            burst: _,
+        } in limits
+        {
+            self.strings([key, bucket]);
+            match by {
+                By::All | By::Source => {}
+                By::At(
+                    Place::Path(s)
+                    | Place::Query(s)
+                    | Place::Header(s)
+                    | Place::Body(s)
+                    | Place::Credential(s),
+                ) => self.strings([s]),
+            }
+        }
     }
 }

@@ -780,7 +780,8 @@ pub fn lines() -> Vec<String> {
             let log = String::from_utf8(bytes(header, &records)).unwrap();
             let p = &report.peaks;
             // The byte peaks (decision 22): the steps late by a jitter, the
-            // shapes' counts, what the held keep, each source's sockets.
+            // shapes' counts, what the held keep, each source's sockets, the
+            // largest record's.
             let byte_peaks = serde_json::json!({
                 "late": p.late,
                 "pending_shape": p.pending_shape.counts(),
@@ -788,6 +789,7 @@ pub fn lines() -> Vec<String> {
                 "kept": [p.kept.keys, p.kept.captures, p.kept.capture_bytes],
                 "sockets": p.sockets,
                 "barrier_bytes": p.barrier_bytes,
+                "record": p.record.counts(),
             });
             let peaks = [
                 p.completions,

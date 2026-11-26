@@ -75,10 +75,44 @@ pub fn decode<T: Serialize + DeserializeOwned>(bytes: &[u8], number: u64) -> Res
         line: number,
         reason: e.to_string(),
     })?;
-    if canonical(&value)? != bytes {
+    if !is_canonical(&value, body)? {
         return Err(FrameError::NotCanonical { line: number });
     }
     Ok(value)
+}
+
+/// Whether `value` serialises to exactly `body`: compared as it is written,
+/// so a line is checked with no copy of it (ADR-0047 decision 22 — a reader
+/// holds no buffer of a line's size but its own).
+fn is_canonical<T: Serialize>(value: &T, body: &[u8]) -> Result<bool, FrameError> {
+    let mut same = Same {
+        rest: body,
+        same: true,
+    };
+    serde_json::to_writer(&mut same, value).map_err(|e| FrameError::Encode(e.to_string()))?;
+    Ok(same.same && same.rest.is_empty())
+}
+
+/// A writer comparing what it is given with the bytes left.
+struct Same<'a> {
+    rest: &'a [u8],
+    same: bool,
+}
+
+impl io::Write for Same<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.same {
+            match self.rest.strip_prefix(buf) {
+                Some(rest) => self.rest = rest,
+                None => self.same = false,
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// The next line of `input`, `\n` included; `None` at its end.

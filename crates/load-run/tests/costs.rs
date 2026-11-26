@@ -942,3 +942,97 @@ fn the_worst_head_holds_what_rest_charges() {
         0.0,
     );
 }
+
+/// K2b-7e-2b-2: a replay's reader holds what its `Reader` states — its
+/// reading, the records its channel holds ahead and the two beside it (the
+/// one its thread waits to send, the one the run took), each at the plan's
+/// largest, the channel's blocks, its thread — with the channel full and its
+/// thread waiting: an upper bound, not a loose one.
+#[test]
+fn a_replay_s_reader_holds_what_it_states() {
+    use ascetic_ddd_command_log::disk::LocalDisk;
+    use ascetic_ddd_command_log::live::{Commitment, commit_file};
+    use ascetic_ddd_command_log::record::{Action, Codec, HostCall, Payload};
+    use ascetic_ddd_command_log::validate::NoHost;
+    use ascetic_ddd_load_run::source::{LineSource, Replayed};
+    let _alone = alone();
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("plan.jsonl");
+    let ahead = 64;
+    let records = (0..(ahead as u64 + 8)).map(|i| {
+        let mut r = step(id("device", i, "call", 0), i * 1_000);
+        r.action = Action::Host(HostCall {
+            op: "noop".into(),
+            args: Payload {
+                codec: Codec::Text,
+                bytes: vec![b'x'; 12_000],
+                holes: vec![],
+            },
+        });
+        r
+    });
+    ascetic_ddd_command_log::write_file(
+        &log,
+        header(),
+        records,
+        ascetic_ddd_command_log::Compression::None,
+    )
+    .unwrap();
+    let path = dir.path().join("plan.commitment");
+    let report = commit_file(
+        &log,
+        &NoHost,
+        &limits_in(dir.path()),
+        "build",
+        16,
+        &path,
+        &LocalDisk,
+    )
+    .unwrap();
+    assert!(report.violations.is_empty(), "{:?}", report.violations);
+    let commitment = Commitment::read(&path).unwrap();
+    let base = HELD[HARNESS].load(Relaxed);
+    PEAK.store(base, Relaxed);
+    let (plan, mut replayed) = Replayed::open(&log, &commitment, ahead).unwrap();
+    // The run takes one; the channel fills again; its thread decodes the
+    // next and waits to send it — the heap still once it does.
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    let taken = loop {
+        if let Poll::Ready(r) = replayed.poll_next(&mut cx) {
+            break r.unwrap().unwrap();
+        }
+        std::thread::yield_now();
+    };
+    // Bounded, in rounds (the shell's one clock is `Clock`): a channel that
+    // never holds exactly `ahead` — wider than its reader's — is refused, not
+    // waited on.
+    let still = || {
+        for _ in 0..10_000 {
+            let before = HELD[HARNESS].load(Relaxed);
+            for _ in 0..20_000 {
+                std::thread::yield_now();
+            }
+            if replayed.queued() == ahead && HELD[HARNESS].load(Relaxed) == before {
+                return;
+            }
+        }
+        panic!(
+            "the channel holds {} records, its reader {ahead}",
+            replayed.queued()
+        );
+    };
+    still();
+    let peak = (PEAK.load(Relaxed) - base) as u64;
+    let reader = *plan.reader().unwrap();
+    assert_eq!(reader.ahead, ahead);
+    // The plan's own beside it: its digest, its validator, its peaks' sockets.
+    let own = (plan.log().len() + plan.validator().len() + 8 * plan.peaks().sockets.len()) as u64;
+    // No string of the log escaped: serde's scratch, the line's bound past
+    // its copy, is never taken — so the rest is resolved to a record or two.
+    assert!(!std::fs::read(&log).unwrap().contains(&b'\\'));
+    let scratch = 2 * commitment.line;
+    let stated = reader.bytes(&plan.peaks().record) + own - scratch;
+    within("a replay's reader, its channel full", peak, stated, 0.95);
+    drop(taken);
+}

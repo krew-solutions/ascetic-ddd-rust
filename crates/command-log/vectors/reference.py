@@ -757,7 +757,8 @@ def byte_peaks(text, shapes):
     less L, J the profile's jitter — the shapes of the steps not ended
     (E >= tau) summed, of those not ended a jitter later (E >= tau - J), what
     the held keep (the held as `bound` defines them), each source's steps not
-    ended; each count's peak over the reads. A shape's counts this reference
+    ended; each count's peak over the reads, and over the records one at a
+    time (the largest record's, K2b-7e-2b-2). A shape's counts this reference
     can derive itself — its key's and its captures' bytes, its captures, its
     source — are checked against the record first."""
     lines = text.split("\n")[:-1]
@@ -819,6 +820,7 @@ def byte_peaks(text, shapes):
         "kept": kept,
         "sockets": [sockets.get(i, 0) for i in range(top + 1)],
         "barrier_bytes": sum(utf8(kind) + raw(scope) + utf8(label) for kind, scope, label, _ in keys),
+        "record": [max((s[2:][i] for s in shapes), default=0) for i in range(SHAPE)],
     }
 
 

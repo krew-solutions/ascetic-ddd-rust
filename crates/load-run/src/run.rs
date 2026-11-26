@@ -159,6 +159,15 @@ pub enum Inadmissible {
         /// The events a turn, if known.
         events: Option<usize>,
     },
+    /// The lines run from a reader holding more records ahead than the one
+    /// its plan was admitted with (decision 22): what admission charged is
+    /// not what runs.
+    Reader {
+        /// The records ahead the plan's reader holds.
+        admitted: usize,
+        /// The source's.
+        ahead: usize,
+    },
 }
 
 impl fmt::Display for Inadmissible {
@@ -212,6 +221,10 @@ impl fmt::Display for Inadmissible {
                 ),
                 None => write!(f, "source {source}'s events a turn unknown, its cap {cap}"),
             },
+            Inadmissible::Reader { admitted, ahead } => write!(
+                f,
+                "the lines read {ahead} records ahead, their plan admitted with {admitted}"
+            ),
         }
     }
 }
@@ -407,6 +420,8 @@ pub struct Admitted<C, X> {
     log: String,
     validator: String,
     peaks: ascetic_ddd_command_log::validate::Peaks,
+    /// The reader its plan was read by; none for a test's.
+    reader: Option<crate::source::Reader>,
     /// The caps of the sources needing sockets, summed (decision 20).
     caps: Option<u64>,
     read_ahead: u64,
@@ -445,6 +460,11 @@ impl<C, X> Admitted<C, X> {
     /// The caps of its sources needing sockets, summed; none if none does.
     pub fn caps(&self) -> Option<u64> {
         self.caps
+    }
+
+    /// The reader its plan was read by; none for a test's.
+    pub fn reader(&self) -> Option<&crate::source::Reader> {
+        self.reader.as_ref()
     }
 
     /// Its read-ahead.
@@ -580,6 +600,7 @@ pub fn admit<C: Clock, X: Carrier<C>>(
         log: plan.log().to_owned(),
         validator: plan.validator().to_owned(),
         peaks: plan.peaks().clone(),
+        reader: plan.reader().copied(),
         caps,
         read_ahead,
         carrier,
@@ -679,8 +700,18 @@ where
         read_ahead,
         carrier,
         runtimes,
+        reader,
         ..
     } = admitted;
+    // The lines read by no more records ahead than admission charged.
+    if let (Some(reader), Some(ahead)) = (reader, source.ahead())
+        && ahead > reader.ahead
+    {
+        return Err(RunError::Inadmissible(Inadmissible::Reader {
+            admitted: reader.ahead,
+            ahead,
+        }));
+    }
     let runtimes = &runtimes;
     // A hold that outlives it is a stuck carrier (decision 17).
     let route_timeout = header.profile.route_timeout;

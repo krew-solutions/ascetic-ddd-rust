@@ -14,6 +14,7 @@
 //! validate.
 
 use std::io::{self, BufRead, Read, Write};
+use std::mem::size_of;
 use std::path::Path;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
@@ -41,8 +42,9 @@ use crate::validate::{Host, Limits, Report, Rule, spill_need, validate_on};
 /// span; 9: ADR-0047 K2b-7d — a call's source within the profile's; 10:
 /// K2b-7e-2b — the peaks of the records' shapes, of the steps late by a
 /// jitter, of what the held keep, of each source's sockets, the barrier keys'
-/// bytes; the largest line and chunk committed).
-pub const RULES_REVISION: u32 = 10;
+/// bytes; the largest line and chunk committed; 11: K2b-7e-2b-2 — the
+/// largest record's shape, each count at its most over one record).
+pub const RULES_REVISION: u32 = 11;
 
 /// The validator's identity: its revision and its rules' names.
 pub fn validator() -> String {
@@ -79,6 +81,9 @@ pub struct Commitment {
     /// the plan's own bound among them, which the scheduler's shell refuses
     /// before T0 when its machine cannot.
     pub peaks: crate::validate::Peaks,
+    /// Its header line, in bytes, `\n` included (ADR-0047 decision 22): the
+    /// first line a reader reads, at most this long.
+    pub header_line: u64,
     /// Its largest step line, in bytes, `\n` included (ADR-0047 decision 22):
     /// a reader holds no longer one.
     pub line: u64,
@@ -178,7 +183,9 @@ struct Tally {
     prefixes: Vec<String>,
     emitted: Emitted,
     sha256: Option<String>,
-    /// The largest step line; the largest chunk, and the one being tallied.
+    /// The header line; the largest step line; the largest chunk, and the
+    /// one being tallied.
+    header_line: u64,
     line: u64,
     chunk_bytes: u64,
     this_chunk: u64,
@@ -193,6 +200,7 @@ impl Tally {
             prefixes: Vec::new(),
             emitted: Emitted::default(),
             sha256: None,
+            header_line: 0,
             line: 0,
             chunk_bytes: 0,
             this_chunk: 0,
@@ -207,6 +215,7 @@ impl Tally {
             prefixes,
             emitted,
             sha256,
+            header_line,
             line: largest,
             chunk_bytes,
             this_chunk,
@@ -215,6 +224,7 @@ impl Tally {
             if header.is_none() {
                 chain.digest.update(line);
                 *header = Some(chain.now());
+                *header_line = u64::try_from(line.len()).unwrap_or(u64::MAX);
             } else if is_trailer(line) {
                 sha256.get_or_insert_with(|| chain.now());
             } else if sha256.is_none() {
@@ -249,6 +259,7 @@ impl Tally {
             multiset: format!("{:032x}", self.emitted.multiset),
             sha256: self.sha256.unwrap_or_default(),
             peaks,
+            header_line: self.header_line,
             line: self.line,
             chunk_bytes: self.chunk_bytes,
         }
@@ -358,9 +369,53 @@ impl Verifier {
 pub struct Verified<R> {
     inner: R,
     verifier: Verifier,
+    /// The line being read: reserved at its limit, never grown — a line past
+    /// it is refused before a byte more is held (ADR-0047 decision 22).
     line: Vec<u8>,
     out: Vec<u8>,
     at: usize,
+    /// The header line's limit, then a step's or the trailer's.
+    limits: Bounds,
+    /// Lines read.
+    number: u64,
+}
+
+/// A replay's line limits, from its commitment.
+#[derive(Clone, Copy, Debug)]
+struct Bounds {
+    header: usize,
+    step: usize,
+    chunk: usize,
+}
+
+impl Bounds {
+    fn of(c: &Commitment) -> io::Result<Bounds> {
+        let size = |n: u64| {
+            usize::try_from(n).map_err(|_| io::Error::other("a commitment's size past this host's"))
+        };
+        Ok(Bounds {
+            header: size(c.header_line)?,
+            step: size(c.line.max(trailer_line()))?,
+            chunk: size(c.chunk_bytes.saturating_add(trailer_line()))?,
+        })
+    }
+}
+
+/// The longest trailer line: the most steps, a SHA-256 in hex.
+pub fn trailer_line() -> u64 {
+    let trailer = Line::Trailer(Trailer {
+        records: u64::MAX,
+        sha256: "0".repeat(64),
+    });
+    crate::log::encode(&trailer).map_or(u64::MAX, |b| u64::try_from(b.len()).unwrap_or(u64::MAX))
+}
+
+/// `capacity` bytes, or the allocator's refusal as an error — never an abort.
+fn reserved(capacity: usize) -> io::Result<Vec<u8>> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(capacity)
+        .map_err(|e| io::Error::new(io::ErrorKind::OutOfMemory, e))?;
+    Ok(v)
 }
 
 impl<R: BufRead> Verified<R> {
@@ -375,17 +430,20 @@ impl<R: BufRead> Verified<R> {
         if commitment.validator != validator() {
             return Err(diverged("the validator"));
         }
+        let limits = Bounds::of(commitment)?;
         Ok(Verified {
             inner,
             verifier: Verifier {
                 chain: Chain::new(commitment.chunk),
-                held: Vec::new(),
+                held: reserved(limits.chunk)?,
                 commitment: commitment.clone(),
                 started: false,
             },
-            line: Vec::new(),
-            out: Vec::new(),
+            line: reserved(limits.header)?,
+            out: reserved(limits.header)?,
             at: 0,
+            limits,
+            number: 0,
         })
     }
 }
@@ -405,11 +463,29 @@ impl<R: BufRead> Read for Verified<R> {
 impl<R: BufRead> BufRead for Verified<R> {
     fn fill_buf(&mut self) -> io::Result<&[u8]> {
         while self.at >= self.out.len() {
+            if self.number == 1 {
+                // The header released: its buffers let go, a step's taken.
+                self.line = reserved(self.limits.step)?;
+                self.out = reserved(self.limits.chunk)?;
+            }
             self.out.clear();
             self.at = 0;
             self.line.clear();
-            self.inner.read_until(b'\n', &mut self.line)?;
+            let limit = if self.number == 0 {
+                self.limits.header
+            } else {
+                self.limits.step
+            };
+            self.number = self.number.saturating_add(1);
+            let read = (&mut self.inner)
+                .take(u64::try_from(limit).unwrap_or(u64::MAX))
+                .read_until(b'\n', &mut self.line)?;
             if self.line.last() != Some(&b'\n') {
+                if read == limit && !self.inner.fill_buf()?.is_empty() {
+                    return Err(io::Error::other(Diverged {
+                        what: format!("line {}, past its {limit} bytes,", self.number),
+                    }));
+                }
                 // The end, or a line cut short: nothing more is released.
                 return Ok(&[]);
             }
@@ -431,8 +507,136 @@ pub fn replay(
     path: &Path,
     commitment: &Commitment,
 ) -> Result<Reader<Verified<Box<dyn BufRead + Send>>>, LogError> {
-    let input = crate::log::decoded(io::BufReader::new(std::fs::File::open(path)?))?;
-    Reader::new(Verified::new(input, commitment)?)
+    replay_priced(path, commitment).map(|(reader, _)| reader)
+}
+
+/// The reader of a replay: a log's lines verified, then decoded.
+pub type Replay = Reader<Verified<Box<dyn BufRead + Send>>>;
+
+/// [`replay`], and what its reader holds by construction.
+pub fn replay_priced(path: &Path, commitment: &Commitment) -> Result<(Replay, Reading), LogError> {
+    let file = io::BufReader::with_capacity(crate::log::BUFFER, std::fs::File::open(path)?);
+    let (input, compressed) = crate::log::decoded_as(file)?;
+    let reader = Reader::new(Verified::new(input, commitment)?)?;
+    let reading = reading(commitment, reader.header(), compressed);
+    Ok((reader, reading))
+}
+
+/// What a replay's reader holds by construction (ADR-0047 decision 22,
+/// K2b-7e-2b-2), the records it decodes apart — the shell prices those by the
+/// plan's largest record, as many as its channel holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reading {
+    /// Its input's buffers, each [`crate::log::BUFFER`]: the file's, and a
+    /// compressed log's decoded output; the boxed reader over them.
+    pub buffers: u64,
+    /// The verifier's, each reserved at its limit and never grown: a line
+    /// and a chunk released, the header's while it is read, a step's after —
+    /// and a chunk held.
+    pub verifier: u64,
+    /// The commitment the verifier keeps.
+    pub commitment: u64,
+    /// A line as the log's reader copies it out of the verifier and decodes
+    /// it, the header's or a step's: its copy, and serde's scratch for an
+    /// escaped string, at worst twice the line — three lines.
+    pub line: u64,
+    /// The header, decoded once and shared with the run.
+    pub header: u64,
+    /// libzstd's context at [`crate::log::WINDOW_LOG`], outside the counted
+    /// heap; none for a plain log.
+    pub decoder: u64,
+}
+
+impl Reading {
+    /// The counted heap's terms summed — [`Reading::decoder`] apart.
+    pub fn heap(&self) -> u64 {
+        let Reading {
+            buffers,
+            verifier,
+            commitment,
+            line,
+            header,
+            decoder: _,
+        } = *self;
+        [buffers, verifier, commitment, line, header]
+            .into_iter()
+            .fold(0, u64::saturating_add)
+    }
+}
+
+/// libzstd's decoding context at [`crate::log::WINDOW_LOG`]: its window, its
+/// input block, its own state — as `ZSTD_sizeof_DCtx` reports it once a frame
+/// of that window is decoded (`tests/zstd.rs` holds it two-sided).
+pub const DECODER: u64 = 2_600_000;
+
+/// What a replay of `c`'s log, of header `h`, holds by construction.
+pub fn reading(c: &Commitment, h: &Header, compressed: bool) -> Reading {
+    let buffer = crate::log::BUFFER as u64;
+    let file = size_of::<io::BufReader<std::fs::File>>() as u64;
+    let buffers = if compressed {
+        let boxed =
+            size_of::<io::BufReader<zstd::Decoder<'static, io::BufReader<std::fs::File>>>>();
+        buffer.saturating_mul(2).saturating_add(boxed as u64)
+    } else {
+        buffer.saturating_add(file)
+    };
+    let trailer = trailer_line();
+    let step = c.line.max(trailer);
+    let chunk = c.chunk_bytes.saturating_add(trailer);
+    let reading_header = c.header_line.saturating_mul(2).saturating_add(chunk);
+    let reading_steps = step.saturating_add(chunk.saturating_mul(2));
+    Reading {
+        buffers,
+        verifier: reading_header.max(reading_steps),
+        commitment: commitment_heap(c),
+        line: c.header_line.max(c.line).saturating_mul(3),
+        header: crate::shape::header(h),
+        decoder: if compressed { DECODER } else { 0 },
+    }
+}
+
+/// The bytes a commitment's clone holds: its strings, its prefixes, its peaks'
+/// sockets, each at its length.
+fn commitment_heap(c: &Commitment) -> u64 {
+    let Commitment {
+        format,
+        validator,
+        fingerprint,
+        header,
+        chunk: _,
+        prefixes,
+        records: _,
+        multiset,
+        sha256,
+        peaks,
+        header_line: _,
+        line: _,
+        chunk_bytes: _,
+    } = c;
+    let crate::validate::Peaks {
+        completions: _,
+        captures: _,
+        polls: _,
+        held: _,
+        pending: _,
+        horizon: _,
+        barriers: _,
+        pending_shape: _,
+        late: _,
+        late_shape: _,
+        kept: _,
+        sockets,
+        barrier_bytes: _,
+        record: _,
+    } = peaks;
+    let len = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+    let strings = [format, validator, fingerprint, header, multiset, sha256]
+        .into_iter()
+        .chain(prefixes)
+        .fold(0u64, |n, s| n.saturating_add(len(s.len())));
+    strings
+        .saturating_add(len(prefixes.len().saturating_mul(size_of::<String>())))
+        .saturating_add(len(sockets.len().saturating_mul(size_of::<u64>())))
 }
 
 /// A persisted log validated, and its commitment written to `commitment`

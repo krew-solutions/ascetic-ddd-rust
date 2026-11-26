@@ -349,7 +349,7 @@ fn a_dry_run_commits_only_what_is_clean() {
 fn the_validator_s_identity_is_its_rules() {
     assert_eq!(
         validator(),
-        "10: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent frame predicate expect secret"
+        "11: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent frame predicate expect secret"
     );
 }
 
@@ -378,7 +378,8 @@ fn the_trailer_is_not_a_chunk_s_line() {
 
 /// The largest step line and the largest chunk of step lines — a last one
 /// short of its size included — are committed, in bytes (ADR-0047 decision
-/// 22): 19 steps in chunks of 4, the header and the trailer no step.
+/// 22): 19 steps in chunks of 4, the header and the trailer no step; the
+/// header line apart.
 #[test]
 fn the_largest_line_and_chunk_are_committed() {
     let dir = tempfile::tempdir().unwrap();
@@ -395,6 +396,7 @@ fn the_largest_line_and_chunk_are_committed() {
         .max()
         .unwrap();
     assert_eq!((commitment.line, commitment.chunk_bytes), (line, chunk));
+    assert_eq!(commitment.header_line, lines[0].len() as u64);
     // Distinct, so neither stands in for the other.
     assert!(line < chunk && steps.iter().any(|l| (l.len() as u64) < line));
 }

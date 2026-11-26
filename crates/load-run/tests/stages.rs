@@ -456,3 +456,64 @@ fn a_replayed_plan_carries_its_commitment_s_peaks() {
     let assumed = Runtimes::assumed(vec![rt.handle().clone()], 1_024);
     assert!(admitted(&assumed));
 }
+
+/// Decision 22: a run reading its lines through a reader holding more records
+/// ahead than the one its plan was admitted with is refused before its first
+/// line — what admission charged is what runs.
+#[test]
+fn a_run_reading_past_its_admitted_reader_is_refused() {
+    use ascetic_ddd_command_log::live::{Commitment, commit_file};
+    use ascetic_ddd_command_log::validate::NoHost;
+    use ascetic_ddd_load_run::run::{Inadmissible, Ready, RunError, run};
+    use ascetic_ddd_load_run::source::Replayed;
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("plan.jsonl");
+    let records: Vec<_> = (1..=3).map(|g| call("read", g, 0, 0, 0)).collect();
+    ascetic_ddd_command_log::write_file(
+        &log,
+        header(),
+        records,
+        ascetic_ddd_command_log::Compression::None,
+    )
+    .unwrap();
+    let path = dir.path().join("plan.commitment");
+    commit_file(
+        &log,
+        &NoHost,
+        &limits_in(dir.path()),
+        "build",
+        4,
+        &path,
+        &ascetic_ddd_command_log::disk::LocalDisk,
+    )
+    .unwrap();
+    let commitment = Commitment::read(&path).unwrap();
+    let (plan, _) = Replayed::open(&log, &commitment, 4).unwrap();
+    assert_eq!(plan.reader().map(|r| r.ahead), Some(4));
+    let (_, wider) = Replayed::open(&log, &commitment, 8).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let clock = rt.block_on(async { Arc::new(VirtualClock::start(0)) });
+    let runtimes = Runtimes::assumed(vec![rt.handle().clone()], 1_024);
+    let admitted = rt.block_on(async {
+        admit(
+            plan,
+            W,
+            Arc::new(Gated {
+                clock: clock.clone(),
+                gates: vec![],
+            }),
+            &runtimes,
+        )
+        .unwrap()
+    });
+    let ready = Ready::assumed(admitted, clock, Lines::new(), Namespace(1));
+    match rt.block_on(run(ready, wider)) {
+        Err(RunError::Inadmissible(Inadmissible::Reader { admitted, ahead })) => {
+            assert_eq!((admitted, ahead), (4, 8));
+        }
+        other => panic!("{:?}", other.map(|_| ())),
+    }
+}

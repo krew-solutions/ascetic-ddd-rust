@@ -43,7 +43,8 @@ To be built in slices, each a commit of its own:
   — **K2b-7e-2a** the costs stated and held, `fits` re-pinned, **K2b-7e-2b** a stated memory, in three — **K2b-7e-2b-1**
   the plan's shapes and their prices (**K2b-7e-2b-1a** a record's shape and its price; **K2b-7e-2b-1b** the
   validator's peaks of shapes in the commitment; **K2b-7e-2b-1c** `fits` and the frame priced by them), **K2b-7e-2b-2** the reader's, the journal's and the sources' terms by
-  construction, **K2b-7e-2b-3** admission and its evidence —, **K2b-7e-2c** the cgroup's memory, after the read gate;
+  construction, in three (**K2b-7e-2b-2a** the reader; **K2b-7e-2b-2b** the journal; **K2b-7e-2b-2c** the
+  sources), **K2b-7e-2b-3** admission and its evidence —, **K2b-7e-2c** the cgroup's memory, after the read gate;
   **K2b-7e-3** the read gate; **K2b-7e-4** the parse; **K2b-7e-5** a waiting budget, if a real plan needs it; **K2b-8** a censored attempt's connection, its closing report and the ports (decision 19), in
   four: **K2b-8a** journal version 7 in the pure fold; **K2b-8b** the shell's censor, report and connect errors, in two — **K2b-8b-1** a connect's failure classed, zero
   linger, no shutdown, saturation by age; **K2b-8b-2** the reset at the censor, no byte or hand-over at the deadline,
@@ -1030,6 +1031,7 @@ which `admit` never called; § Alternatives Considered keeps what each refuted):
 | K2b-7e-2b-1a | K2b | `command-log/tests/shape.rs` (a counting allocator): over 512 records generated across every field, the bytes a record decoded from its line holds in its `Arc` equal `shape::heap`, at most `shape::bound` of its shape and at least a third of it; a record of no sequence priced exactly; every record type taken apart whole (a new field does not compile uncounted) | a predicate's pointer not counted; serde's first four slots forgotten; a sequence bound at its elements once; byte strings' padding left out; base64's estimate taken as the length; the `Arc` left out; a capture's source not counted |
 | K2b-7e-2b-1b | K2b | `vectors/reference.py` folding each line's shape over the pending, late and held sets by definition and agreeing with the validator's byte peaks on every corpus log, deriving a shape's key, captures and source itself, refusing a corpus that reaches no late step, socket, held capture or captured hole; the commitment's largest line and chunk against a log of 19 steps in chunks of four; the validator's identity at revision 10 | a step past its end not kept late; the late kept past the jitter; what the window drops kept still; what the held let go kept still; a source's sockets never let go; a pending shape never let go; the barrier keys' bytes not counted; the largest line not taken; a chunk's bytes carried past its prefix |
 | K2b-7e-2b-1c | K2b | the scheduler's `tests/costs.rs`: thirteen rows — ended in the window, not ended, bursts of host calls and REST reads at one instant, REST updates of 4 KiB bodies, barrier keys of 1 KiB labels, writers keeping captures, captured values sent back, a step awaiting the 65 before it — each within what `fits` counts of its counts and shapes, the rows a constant or a price is pinned on at least 70–80 % of it; `fits`' boundary pair and every count of a shape and of what the held keep raising its need; the judge's golden: a number of 8,192 digits taken, of 8,193 not, its twin in `vectors/judge.py` | the records' shapes, a captured value, what the held keep, the barrier keys' bytes not priced; a live cell as before the shapes, doubled; an ended cell a quarter lighter; a captured number taken past `TAKEN`; (survives: a dependency's binding not priced — owed) |
+| K2b-7e-2b-2a | K2b | `command-log/tests/reading.rs` (a counting allocator): a replay's peak within its `Reading` and one record at the largest, plain and compressed, at 89–90 %; past a header longer than two chunks, its text escaped, a step's reading alone; a line one byte past its commitment's — a step's, the header's — refused, nothing grown past the limits; libzstd's context at the window two-sided, a frame of a wider window refused, a level-19 log replayed; `tests/shape.rs`: a header's heap exactly `shape::header`, every sequence at 0, 1, 4, 5, 9 and 17 elements, every kind of limit; a line decoded holding at its peak its record's heap alone; `load-run/tests/costs.rs`: a replay's reader, its channel full, within its `Reader` at 99 %; `tests/stages.rs`: a run whose source holds more records ahead than its plan's reader refused; the validator's identity at revision 11, `vectors/reference.py` agreeing on the largest record | a line read past its limit; the verifier's buffers grown; the header's buffers kept; the canonical check, base64's writing, a text's reading through a copy; the reader's window unbounded, the writer's its level's; the largest record not committed; the header's limits not walked; the line's term, the header's reading, libzstd's context dropped; the run's reader unchecked; the two beside the channel, the channel's blocks uncharged; the channel twice the reader's |
 | K2b-9a | K2b | the machine's poll grid at the plan's instant: an observation read at 250 polled at 300, 400 …, read on a point at 600 polled there once, two read together at 620 on their own phases; the differential with `schedule.py` moved alike, settled run by run against machine 4 (16 of 3,944 changed, each at a poll of an observation released late) | the grid at `released`; the release's point not held (polled twice at one instant) |
 | K2b-9b-1 | K2b | journal version 9 — the golden holding the run's catch-up at 999, a refusal read, `decorated` on a `Sent`, both sides of a never-sent report's `decorated` and a found answer's `handed`; the schema and `journal.py` alike; a rate deviation read as a refusal, another rule's and none not; the differential's journals and the golden runs settled against version 8, the new fields removed, every line the same | a rate deviation unread; any rule read as a refusal |
 | K2b-9b-2 | K2b | `scheduler::pace`: each attempt handed at the later of its earliest and the instant it came, every pair keeping the rule by brute force, a microsecond sooner some pair breaking (κ ∈ {0, 1, 100, 500, 999}, J ∈ {0, 1, 250, 2000}); every hand-off within `(1 − κ)·J` of its raw never paced; the band — a dispatched batch in raw order, the rest paced to the instant computed by hand; an attempt not arrived holding the front; a head whose pace falls past its deadline leaving; a straggler within the band passing; an attempt past its deadline beyond the band leaving, so the next turn never names an instant gone | the allowance J; κ ignored; rounding down; the mirror term dropped; the band unbounded; arrival ignored; never late — each red |
@@ -1996,6 +1998,53 @@ a connection of its own (retired at once); the journal folded, each Root classed
 - A hog over the deadline while connecting or writing on a thread others hold is the source thread's lag (K2b-7c-2's
   twins, the path's lag counted from the thread's last blocked park); the stall twin is its whole-process case.
 
+**K2b-7e-2b-2a — the reader by construction** (2026-11-25, decision 22 as amended): a replay's reader holds what
+`live::Reading` states, each term by construction —
+- **its input**: two buffers of `log::BUFFER` (8 KiB), the file's and a compressed log's decoded output's, and the
+  boxed reader over them;
+- **the verifier's**, each reserved at the commitment's size and never grown: a line and a chunk released at the
+  header line's while it is read (`Commitment.header_line`, committed now), then a line at the largest step line's (or
+  the longest trailer's) and a chunk released at the largest chunk's and a trailer's; a chunk held. A line past its
+  limit is refused (`Diverged`: "line N, past its L bytes") before a byte past the limit is held;
+- **the commitment** the verifier keeps; **the line** the log's reader copies out and decodes, three lines at worst —
+  its copy, and serde's scratch for an escaped string; **the header**, decoded once and shared with the run
+  (`Reader::shared_header`; the run had a clone of it), priced exactly by `shape::header`.
+
+A line decodes holding nothing but its value: its canonical bytes compared as the value is serialised, no re-encoded
+copy; the wire's texts — decimal numbers, base64 — read where the deserializer lends them, base64 checked canonical a
+768-byte group at a time on the stack and written as it is encoded (each held a copy, base64 two: 10 kB beside a
+5.5 kB record of a 4 KB payload). zstd's window is bounded: the writer's `window_log` 21 at every level (level 3's own,
+four times level 1's), the reader's `window_log_max` the same — a frame asking more is refused at its header, never
+allocated; libzstd's context at that window, outside the counted heap, is `DECODER` (2.6 MB). The plan commits **the
+largest record's shape** (each count at its most over one record; the validator's revision 11): a record the reader
+holds ahead of the machine, none of the pending yet, is priced by it. The source's channel carries records in the `Arc`
+the machine holds them in — a channel's slot a pointer's, not a record's — and `source::Reader { ahead, reading }`,
+built by `Replayed::open` with its channel, states what the reader holds at most: its reading; `ahead + 2` records at
+the largest — the channel's, the one its thread decodes or waits to send, the one the run took; the channel's blocks
+(tokio's, 32 messages each: those its messages span across a block's edge, one read and not yet handed back, three
+handed back for reuse past the tail — `reclaim_block` walks at most three); its thread. The plan carries it to
+admission, and `run` refuses a source holding more records ahead than its plan's reader (`Inadmissible::Reader`).
+Measured (counting allocators: `command-log/tests/reading.rs`, `tests/shape.rs`; `load-run/tests/costs.rs`):
+
+| | measured | stated |
+|---|---|---|
+| a replay's peak, a plain log of 6.4 kB escaped lines in chunks of four | 82,914 B | 93,608 B (89 %) |
+| the same compressed (libzstd's context apart) | 91,186 B | 101,880 B (90 %) |
+| a header longer than two chunks, its scenario 40 kB of escaped text: its peak | 601,596 B | 753,328 B (80 %) |
+| past that header: a step's reading | 191,977 B | 192,611 B (99.7 %) |
+| libzstd's context at 2^21 (`ZSTD_sizeof_DCtx`) | 2,586,408 B | 2,600,000 B (99.5 %) |
+| a replay's reader, its channel of 64 full, 12 kB records (no escaped string: the scratch apart) | 1,408,056 B | 1,416,871 B (99 %) |
+| decoding a 6.4 kB line of no escaped string, at its peak | its record's heap exactly | |
+
+The 11 % slack of a replay's peak is in part serde's scratch, stated at a whole line (`3 · max(header, line)`) while
+the fixture's escaped label is a third of one (≈ 4.4 of 10.7 kB); the rest is not attributed. Mutants, each red: a line read past its limit; the verifier's buffers grown, not
+reserved; the header's buffers kept; the canonical check by a copy; base64 written through a copy; a text read through
+a copy; the reader's window unbounded; the writer's window its level's; the largest record not committed; the header's
+limits not walked; the line's term dropped; the header's reading dropped (red once the wide header carries an escaped
+scenario, its scratch past a step's chunks — it survived a header of plain text); libzstd's context not charged; the
+run's reader unchecked; the two beside the channel uncharged; the channel's blocks uncharged; the channel twice the
+reader's (red once the test's wait for a full channel is bounded — unbounded, the mutant spun it 27 h).
+
 **K2b-7e-2b-1c — `fits` priced by the plan's shapes; a captured number bounded** (2026-11-24, decision 22 as
 amended): `fits::needed` takes the peaks alone (`Budget.line`, a mean, gone): the cells — `ENDED_CELL`, `LIVE_CELL`
 without their records, `BARRIER` — and, priced by the committed shapes at the run's own sizes, the records of the
@@ -2637,3 +2686,12 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   validator's revision 10.
 - 2026-11-24: K2b-7e-2b-1c built (§ Measured): `fits` priced by the plan's shapes, its cells without their records
   (`LIVE_CELL` 2,944), `Budget.line` gone; a captured JSON number bounded by `TAKEN` (decision 15's take amended).
+- 2026-11-25: K2b-7e-2b-2a built (§ Measured): the reader by construction — the line limits enforced before their
+  allocation (the header line committed), the verifier's buffers reserved at the commitment's sizes, a line decoded
+  with no copy of it or of its texts, zstd's window bounded and libzstd's context stated, the header shared, the
+  largest record's shape committed (the validator's revision 11), records sent in their `Arc`, the reader's `ahead`
+  carried by the plan and held at the run; K2b-7e-2b-2 cut in three. The counting allocators of `command-log`'s
+  `tests/shape.rs` and `tests/reading.rs` count each thread's bytes, not the process's: the gate, under load, saw a
+  record's heap off by 533 B — the harness's threads allocating and letting go in a test's window, a lock between the
+  tests no guard against them (four busy loops beside: 8 runs of `shape.rs` in 20 red counting the process, 0 of 20
+  counting the thread, the same bytes measured idle).

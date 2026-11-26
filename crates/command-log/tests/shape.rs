@@ -1,27 +1,69 @@
 //! K2b-7e-2b-1 of ADR-0047 (decision 22): a record's shape prices what it
 //! holds decoded. Over records generated across every field, the bytes a
 //! record decoded from its line holds in its `Arc` are exactly `shape::heap`,
-//! and at most `shape::bound` of its shape. A binary of its own: the
-//! allocator counts the whole process.
+//! and at most `shape::bound` of its shape. A binary of its own: its
+//! allocator counts each thread's bytes.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::cell::Cell;
+use std::sync::Arc;
 
 use ascetic_ddd_command_log::frame;
 use ascetic_ddd_command_log::record::{
-    Action, Bus, Caller, Capture, Codec, Dep, Deviation, Field, Form, Hole, HostCall, Measure,
-    Observe, Of, On, Outcome, Payload, Predicate, Probe, Record, Rendering, Rest, Source, Span,
+    Action, Bus, By, Call, Caller, Capture, Channel, ClientRetry, Codec, Dep, Deviation, Field,
+    Form, Header, Hole, HostCall, Law, Limit, Measure, Observe, Of, On, Operation, Outcome,
+    Payload, Place, Predicate, Probe, Profile, Record, Rendering, Rest, Safety, Source, Span,
     StepId, StreamPosition, Subject, Test, TimeBase, TimeRendering, Value,
 };
 use ascetic_ddd_command_log::shape::{bound, heap, shape};
 use proptest::prelude::*;
 
-/// The system allocator, counting the bytes it holds; a block moved counted
-/// at its new size before its old is let go.
+/// The system allocator, counting the bytes each thread holds and their peak:
+/// a thread's own, so the harness's threads — spawning tests, collecting
+/// their output — are not counted in a test's (they were, under load: a
+/// record's heap off by ±600 B); a block moved counted at its new size before
+/// its old is let go.
 struct Counting;
 
-static NOW: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// The bytes this thread allocated less those it let go.
+    static NOW: Cell<isize> = const { Cell::new(0) };
+    /// The most of [`NOW`] since [`reset_peak`].
+    static PEAK: Cell<isize> = const { Cell::new(0) };
+}
+
+fn counted(by: isize) {
+    // A thread past its locals' end counts nothing: no test measures there.
+    let _ = NOW.try_with(|now| {
+        let n = now.get().saturating_add(by);
+        now.set(n);
+        let _ = PEAK.try_with(|peak| peak.set(peak.get().max(n)));
+    });
+}
+
+fn size(bytes: usize) -> isize {
+    isize::try_from(bytes).unwrap_or(isize::MAX)
+}
+
+/// The bytes this thread holds.
+fn now() -> isize {
+    NOW.with(Cell::get)
+}
+
+/// This thread's peak, counted from what it holds now.
+fn reset_peak() {
+    PEAK.with(|peak| peak.set(now()));
+}
+
+/// What this thread held at most past `base`, since [`reset_peak`].
+fn peak_past(base: isize) -> u64 {
+    u64::try_from(PEAK.with(Cell::get) - base).unwrap()
+}
+
+/// What this thread holds past `base`.
+fn held_past(base: isize) -> u64 {
+    u64::try_from(now() - base).unwrap()
+}
 
 // SAFETY: every call goes to the system allocator unchanged; this only counts
 // the sizes it was asked for.
@@ -30,7 +72,7 @@ unsafe impl GlobalAlloc for Counting {
         // SAFETY: the caller's contract, passed on.
         let p = unsafe { System.alloc(layout) };
         if !p.is_null() {
-            NOW.fetch_add(layout.size(), Relaxed);
+            counted(size(layout.size()));
         }
         p
     }
@@ -38,15 +80,15 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn dealloc(&self, p: *mut u8, layout: Layout) {
         // SAFETY: the caller's contract, passed on.
         unsafe { System.dealloc(p, layout) };
-        NOW.fetch_sub(layout.size(), Relaxed);
+        counted(-size(layout.size()));
     }
 
     unsafe fn realloc(&self, p: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         // SAFETY: the caller's contract, passed on.
         let q = unsafe { System.realloc(p, layout, size) };
         if !q.is_null() {
-            NOW.fetch_add(size, Relaxed);
-            NOW.fetch_sub(layout.size(), Relaxed);
+            counted(self::size(size));
+            counted(-self::size(layout.size()));
         }
         q
     }
@@ -54,12 +96,6 @@ unsafe impl GlobalAlloc for Counting {
 
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
-
-/// One test measuring at a time: the allocator counts the whole process.
-fn alone() -> std::sync::MutexGuard<'static, ()> {
-    static ONE: Mutex<()> = Mutex::new(());
-    ONE.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 /// Strings of every kind serde_json writes: plain, escaped, multi-byte.
 fn text() -> impl Strategy<Value = String> {
@@ -324,12 +360,12 @@ fn record() -> impl Strategy<Value = Record> {
 /// The bytes `r`, decoded from its line, holds in its own `Arc`.
 fn decoded(r: &Record) -> usize {
     let line = frame::canonical(r).unwrap();
-    let before = NOW.load(Relaxed);
+    let before = now();
     let held: Arc<Record> = Arc::new(frame::decode(&line, 2).unwrap());
-    let after = NOW.load(Relaxed);
+    let after = held_past(before);
     assert_eq!(*held, *r);
     drop(held);
-    after - before
+    usize::try_from(after).unwrap()
 }
 
 /// Decoded from its line, a record holds exactly what `shape::heap` says, and
@@ -337,7 +373,6 @@ fn decoded(r: &Record) -> usize {
 /// strategy nests deep enough to pass a test thread's stack unoptimised.
 #[test]
 fn a_record_holds_what_its_shape_prices() {
-    let _alone = alone();
     std::thread::Builder::new()
         .stack_size(256 << 20)
         .spawn(|| {
@@ -366,7 +401,6 @@ fn a_record_holds_what_its_shape_prices() {
 /// three, a payload of four into six.
 #[test]
 fn a_record_of_no_sequence_is_priced_exactly() {
-    let _alone = alone();
     let r = Record {
         step: StepId {
             subject: Subject {
@@ -396,4 +430,158 @@ fn a_record_of_no_sequence_is_priced_exactly() {
     let held = decoded(&r) as u64;
     assert_eq!(held, heap(&r));
     assert_eq!(held, bound(&shape(&r)));
+}
+
+/// Decoding a line holds nothing but its record (K2b-7e-2b-2): its canonical
+/// bytes checked as they are written, no copy of the line — the peak while a
+/// record of no escaped string is decoded and put in its `Arc` is its heap.
+#[test]
+fn a_line_decodes_holding_nothing_but_its_record() {
+    let mut r = Record {
+        step: StepId {
+            subject: Subject {
+                kind: "device".to_owned(),
+                scope: vec![7; 40],
+                index: 1,
+            },
+            label: "call".repeat(200),
+            n: 0,
+        },
+        at: 0,
+        think: 0,
+        after: vec![],
+        action: Action::Host(HostCall {
+            op: "noop".to_owned(),
+            args: Payload {
+                codec: Codec::Text,
+                bytes: vec![1; 4_000],
+                holes: vec![],
+            },
+        }),
+        expect: vec![],
+        capture: vec![],
+        measure: vec![],
+        deviation: None,
+    };
+    for _ in 0..2 {
+        let line = frame::canonical(&r).unwrap();
+        let before = now();
+        reset_peak();
+        let held: Arc<Record> = Arc::new(frame::decode(&line, 2).unwrap());
+        let peak = peak_past(before);
+        assert_eq!(peak, heap(&r), "a line of {} bytes", line.len());
+        drop(held);
+        r.after.push(Dep::Step {
+            step: r.step.clone(),
+            on: On::Sent,
+        });
+    }
+}
+
+fn names(n: usize, of: &str) -> Vec<String> {
+    (0..n).map(|i| format!("{of}-{i}")).collect()
+}
+
+/// A header with every sequence at `n` elements, every kind of limit.
+fn header_of(n: usize) -> Header {
+    let places = [
+        By::All,
+        By::Source,
+        By::At(Place::Path("group".to_owned())),
+        By::At(Place::Query("q".to_owned())),
+        By::At(Place::Header("X-Tenant".to_owned())),
+        By::At(Place::Body("/a/b".to_owned())),
+        By::At(Place::Credential("sub".to_owned())),
+    ];
+    let limit = |i: usize| Limit {
+        key: format!("key-{i}"),
+        bucket: format!("bucket-{i}"),
+        by: places[i % places.len()].clone(),
+        requests: 10,
+        per_seconds: 1,
+        burst: 2,
+    };
+    let operation = |i: usize| Operation {
+        name: format!("operation-{i}"),
+        method: "POST".to_owned(),
+        path: format!("/groups/{i}/{{group}}"),
+        content_type: "application/json".to_owned(),
+        decorated: names(n, "decorated"),
+        writes: names(n, "etag"),
+        safety: Safety::Idempotent,
+        client: ClientRetry {
+            attempts: 3,
+            on: (0..n).map(|k| 500 + k as u16).collect(),
+            backoff: 100,
+            retry_after: true,
+        },
+        not_run: names(n, "not-run"),
+        timeout: 1_000,
+        limits: (0..n).map(limit).collect(),
+    };
+    Header {
+        format: ascetic_ddd_command_log::FORMAT_VERSION,
+        algorithm: "test".to_owned(),
+        scenario: "a scenario".to_owned(),
+        revision: "1".to_owned(),
+        profile: Profile {
+            name: "policy".to_owned(),
+            rendered: names(n, "rendered"),
+            captured: names(n, "captured"),
+            gapless: names(n, "gapless"),
+            sources: 2,
+            jitter: 100,
+            reserve: 100,
+            route_timeout: 30_000_000,
+            problem: "/code".to_owned(),
+            correlation: "X-Correlation-Id".to_owned(),
+            resend: 1_000,
+            answer_cap: 1 << 20,
+            idle: 3_600_000_000,
+        },
+        window: 1_000,
+        read_ahead: 1_000,
+        retained: names(n, "retained"),
+        laws: (0..n)
+            .map(|i| Law {
+                name: format!("law-{i}"),
+                law: "a law".repeat(i + 1),
+            })
+            .collect(),
+        operations: (0..n).map(operation).collect(),
+        channels: (0..n)
+            .map(|i| Channel {
+                name: format!("channel-{i}"),
+                timeout: 1_000,
+            })
+            .collect(),
+        calls: (0..n)
+            .map(|i| Call {
+                name: format!("call-{i}"),
+                timeout: 1_000,
+                safety: Safety::Never,
+            })
+            .collect(),
+    }
+}
+
+/// A log's header, decoded from its line and shared in its `Arc`, holds
+/// exactly `shape::header` — every sequence empty, within serde's first four
+/// slots, past them, just past a doubling; every kind of limit.
+#[test]
+fn a_header_holds_what_its_walk_counts() {
+    for n in [0, 1, 4, 5, 9, 17] {
+        let h = header_of(n);
+        let line = frame::canonical(&h).unwrap();
+        let before = now();
+        let held: Arc<Header> = Arc::new(frame::decode(&line, 1).unwrap());
+        let after = held_past(before);
+        assert_eq!(*held, h);
+        drop(held);
+        assert_eq!(
+            after,
+            ascetic_ddd_command_log::shape::header(&h),
+            "{n} a sequence"
+        );
+    }
 }

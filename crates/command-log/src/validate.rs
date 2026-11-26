@@ -320,6 +320,10 @@ pub struct Peaks {
     /// The barrier keys' bytes — a subject's kind and scope, a label —, one a
     /// key: a machine keeps each key for the run.
     pub barrier_bytes: u64,
+    /// Each count's most over a single record (K2b-7e-2b-2): a record the
+    /// reader holds ahead of the machine, none of the pending yet, is priced
+    /// by it.
+    pub record: Shape,
 }
 
 /// What a pass found.
@@ -1932,6 +1936,7 @@ impl<H: Host> Pass<'_, H> {
         let shape = shape::shape(r);
         let socket = crate::plan::socket(r);
         let kept = Kept::of(&shape);
+        self.report.peaks.record = self.report.peaks.record.most(shape);
         if let Some(o) = &self.progress {
             o.0.shape(line, &shape, socket);
         }

@@ -232,6 +232,11 @@ impl Default for Compression {
 /// zstd's frame magic, little-endian: a compressed log's first four bytes.
 pub const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
 
+/// A compressed log's window, log₂ of its bytes (ADR-0047 decision 22): the
+/// writer's at every level, the most a reader decodes — a frame asking more
+/// is refused, never allocated. Level 3's own, four times level 1's.
+pub const WINDOW_LOG: u32 = 21;
+
 /// A file being written whole or not at all: `path.partial`, synced and renamed
 /// by [`Partial::commit`], removed if dropped first.
 pub(crate) struct Partial {
@@ -286,7 +291,9 @@ impl FileOut {
         Ok(match compression {
             Compression::None => FileOut::Plain(io::BufWriter::new(file)),
             Compression::Zstd { level } => {
-                FileOut::Zstd(io::BufWriter::new(zstd::Encoder::new(file, level)?))
+                let mut encoder = zstd::Encoder::new(file, level)?;
+                encoder.window_log(WINDOW_LOG)?;
+                FileOut::Zstd(io::BufWriter::new(encoder))
             }
         })
     }
@@ -345,13 +352,25 @@ pub fn open<R: BufRead + Send + 'static>(
     Reader::new(decoded(input)?)
 }
 
+/// A buffered reader's bytes: a log's file read through one, a compressed
+/// log's decoded output through another (ADR-0047 decision 22).
+pub const BUFFER: usize = 8 << 10;
+
 /// A log's lines from its input, plain or compressed, before any is read.
-pub fn decoded<R: BufRead + Send + 'static>(
+pub fn decoded<R: BufRead + Send + 'static>(input: R) -> Result<Box<dyn BufRead + Send>, LogError> {
+    decoded_as(input).map(|(lines, _)| lines)
+}
+
+/// [`decoded`], and whether the input is compressed.
+pub(crate) fn decoded_as<R: BufRead + Send + 'static>(
     mut input: R,
-) -> Result<Box<dyn BufRead + Send>, LogError> {
+) -> Result<(Box<dyn BufRead + Send>, bool), LogError> {
     let first = input.fill_buf()?;
-    let boxed: Box<dyn BufRead + Send> = if first.starts_with(&ZSTD_MAGIC) {
-        Box::new(io::BufReader::new(zstd::Decoder::with_buffer(input)?))
+    let compressed = first.starts_with(&ZSTD_MAGIC);
+    let boxed: Box<dyn BufRead + Send> = if compressed {
+        let mut decoder = zstd::Decoder::with_buffer(input)?;
+        decoder.window_log_max(WINDOW_LOG)?;
+        Box::new(io::BufReader::with_capacity(BUFFER, decoder))
     } else if first.first() == Some(&b'{') {
         Box::new(input)
     } else if first.is_empty() {
@@ -362,7 +381,7 @@ pub fn decoded<R: BufRead + Send + 'static>(
             reason: "neither a log nor a zstd stream of one".to_owned(),
         });
     };
-    Ok(boxed)
+    Ok((boxed, compressed))
 }
 
 /// Opens the log in `path`, plain or compressed.
@@ -374,7 +393,8 @@ pub fn open_file(path: &Path) -> Result<Reader<Box<dyn BufRead + Send>>, LogErro
 /// checked at the end.
 pub struct Reader<R: BufRead> {
     input: R,
-    header: Header,
+    /// Shared with whoever runs the log: one copy decoded, none cloned.
+    header: std::sync::Arc<Header>,
     digest: Digest,
     records: u64,
     line: u64,
@@ -394,7 +414,7 @@ impl<R: BufRead> Reader<R> {
         }
         Ok(Reader {
             input,
-            header,
+            header: std::sync::Arc::new(header),
             digest,
             records: 0,
             line: 1,
@@ -405,6 +425,11 @@ impl<R: BufRead> Reader<R> {
     /// The log's header.
     pub fn header(&self) -> &Header {
         &self.header
+    }
+
+    /// The log's header, shared: the copy it decoded.
+    pub fn shared_header(&self) -> std::sync::Arc<Header> {
+        self.header.clone()
     }
 
     fn next_record(&mut self) -> Result<Option<Record>, LogError> {
