@@ -902,6 +902,8 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
                             a.absent_before(b0);
                             if looks.done() {
                                 conn.reset();
+                                // Let go before the wait, not after it.
+                                drop((body, headers));
                                 return leave(a, refusals, "rest.reading").await;
                             }
                             continue;
@@ -926,19 +928,62 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
                 }
             }
         }
-        a.arrived();
-        let reply = Reply {
+        let idle_since = self.answered(
+            a,
+            &record,
+            op,
+            &fills,
             status,
-            headers: &headers,
-            body: whole.then_some(body.as_slice()),
-        };
-        let read = answer::read(&reply);
-        let idle_since = a.clock().now();
-        self.judged(a, &record, op, &fills, &Transport::Answered(read));
+            headers,
+            whole.then_some(body),
+        );
         if whole && !conn.sender.is_closed() {
             pool.checkin(&route.endpoint, conn, idle_since);
             sockets.idled();
         }
+    }
+
+    /// The answered tail (ADR-0047 decision 22, K2b-7e-2b-2c-3): arrived,
+    /// read, judged — a plain function, so nothing it holds waits on
+    /// anything, and a source's thread holds one tail at a time. The body's
+    /// tree is let go before the attempt ends, its head and body when it
+    /// returns: the instant its connection may idle from.
+    #[expect(clippy::too_many_arguments, reason = "the tail owns what it reads")]
+    fn answered<C: Clock>(
+        &self,
+        mut a: Attempt<C>,
+        record: &Record,
+        op: &Operation,
+        fills: &Fills<'_>,
+        status: u16,
+        headers: Vec<(String, Vec<u8>)>,
+        body: Option<Vec<u8>>,
+    ) -> u64 {
+        a.arrived();
+        let reply = Reply {
+            status,
+            headers: &headers,
+            body: body.as_deref(),
+        };
+        let contract = Contract {
+            not_run: &op.not_run,
+            problem: &self.header.profile.problem,
+        };
+        let idle_since = a.clock().now();
+        let judged = judge(
+            record,
+            contract,
+            fills,
+            &Transport::Answered(answer::read(&reply)),
+        );
+        match judged {
+            Ok(j) => {
+                let seen = j.seen();
+                a.ended(j.judgement, seen);
+            }
+            Err(e) => a.fault("rest.predicate", e.to_string()),
+        }
+        idle_since
     }
 
     /// The attempt judged on what came: arrived now, if it had not.

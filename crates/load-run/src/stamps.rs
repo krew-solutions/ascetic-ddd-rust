@@ -1021,6 +1021,17 @@ fn kept(record: &Record, judgement: Judgement) -> Result<Judgement, (&'static st
                 format!("capture {i} of {n}: a value's buffer of {held} bytes, at most {VALUE}"),
             ));
         }
+        // What `take` makes alone: a carried text quoted, a carried number
+        // (K2b-7e-2b-2c-3) — a host's array is never parsed.
+        if !ascetic_ddd_command_log::answer::is_taken(&c.value) {
+            return Err((
+                "shell.capture.not_taken",
+                format!(
+                    "capture {i} of {n}: a value of {} bytes no take makes",
+                    c.value.len()
+                ),
+            ));
+        }
     }
     let mut kept: Vec<Captured> = Vec::with_capacity(n);
     for (i, c) in taken.into_iter().enumerate() {
@@ -1226,5 +1237,76 @@ mod tests {
             ),
             (5, 1, 4)
         );
+    }
+
+    /// K2b-7e-2b-2c-3: what keeping an answer's captures holds is what
+    /// `run::ending` states of its record's shape: their slots, each spec's
+    /// names copied — exactly, every spec taken.
+    #[test]
+    fn a_capture_s_keeping_holds_what_ending_states() {
+        use ascetic_ddd_command_log::record::{
+            Action, Capture, Codec, HostCall, Payload, Record, Source, StepId, Subject,
+        };
+        use ascetic_ddd_command_log::shape::shape;
+        use ascetic_ddd_scheduler::machine::{Captured, Judgement};
+
+        use super::kept;
+        let subject = |kind: &str, scope: usize| Subject {
+            kind: kind.into(),
+            scope: vec![7; scope],
+            index: 1,
+        };
+        let specs: Vec<Capture> = [
+            ("group", 1, "etag"),
+            ("device", 16, "id"),
+            ("tenant-of-many", 3, "a-long-slot"),
+        ]
+        .into_iter()
+        .map(|(kind, scope, slot)| Capture {
+            subject: subject(kind, scope),
+            slot: slot.into(),
+            source: Source::Header("ETag".into()),
+            secret: false,
+        })
+        .collect();
+        let record = Record {
+            step: StepId {
+                subject: subject("group", 1),
+                label: "read".into(),
+                n: 0,
+            },
+            at: 0,
+            think: 0,
+            after: vec![],
+            action: Action::Host(HostCall {
+                op: "read".into(),
+                args: Payload {
+                    codec: Codec::Text,
+                    bytes: vec![],
+                    holes: vec![],
+                },
+            }),
+            expect: vec![],
+            capture: specs.clone(),
+            measure: vec![],
+            deviation: None,
+        };
+        let taken: Vec<Captured> = specs
+            .iter()
+            .map(|c| Captured {
+                subject: c.subject.clone(),
+                slot: c.slot.clone(),
+                value: b"\"v\"".to_vec(),
+            })
+            .collect();
+        let Ok(Judgement::Expected(kept)) = kept(&record, Judgement::Expected(taken)) else {
+            panic!("refused");
+        };
+        let held = kept.capacity() * size_of::<Captured>()
+            + kept
+                .iter()
+                .map(|c| c.subject.kind.capacity() + c.subject.scope.capacity() + c.slot.capacity())
+                .sum::<usize>();
+        assert_eq!(held as u64, crate::run::ending(&shape(&record)));
     }
 }

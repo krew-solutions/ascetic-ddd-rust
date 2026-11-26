@@ -1418,15 +1418,24 @@ fn of_spec(r: &Record, i: usize, value: Vec<u8>) -> Captured {
 
 /// K2b-7e-2b-2b-3: what a carrier hands the shell is held where it enters —
 /// a capture no spec of its step names, one past the specs of its subject
-/// and slot, a value whose buffer is past `VALUE`: each a carrier fault
-/// named, the run stopped, its answer never journaled.
+/// and slot, a value whose buffer is past `VALUE`, a value no take makes
+/// (K2b-7e-2b-2c-3): each a carrier fault named, the run stopped, its answer
+/// never journaled.
 #[test]
 fn a_carrier_s_captures_are_held_where_they_enter() {
     use ascetic_ddd_scheduler::fits::VALUE;
     let value = VALUE as usize;
     let records = vec![captures_etag(call("read", 1, 0, 0, 0), 1)];
     type Taken = Box<dyn Fn(&Record) -> Vec<Captured> + Send + Sync>;
-    let cases: [(&str, Taken); 3] = [
+    let cases: [(&str, Taken); 5] = [
+        (
+            "shell.capture.not_taken",
+            Box::new(|r: &Record| vec![of_spec(r, 0, b" [[[1]]]".to_vec())]),
+        ),
+        (
+            "shell.capture.not_taken",
+            Box::new(|r: &Record| vec![of_spec(r, 0, b"\"\\u0000\"".to_vec())]),
+        ),
         (
             "shell.capture.unspecified",
             Box::new(|r: &Record| {

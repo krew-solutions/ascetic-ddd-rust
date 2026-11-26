@@ -209,7 +209,9 @@ pub const RUNS: usize = 5;
 pub fn document(shape: Shape, cap: usize) -> (Vec<u8>, String) {
     let array = matches!(shape, Shape::Numbers | Shape::Strings);
     let (open, close) = if array { (b'[', b']') } else { (b'{', b'}') };
-    let mut body = vec![open];
+    // Sized at once, never grown (ADR-0047 decision 22, K2b-7e-2b-2c-3).
+    let mut body = Vec::with_capacity(cap.max(2));
+    body.push(open);
     let mut last = String::new();
     for i in 0u64.. {
         let member = match shape {
@@ -276,6 +278,22 @@ fn judged_by(pointer: &str) -> Record {
         measure: vec![],
         deviation: None,
     }
+}
+
+/// The most bytes [`judging`] holds at `header`'s cap (ADR-0047 decision 22,
+/// K2b-7e-2b-2c-3), once in a process before T0, whatever carries the run: a
+/// document at the cap, sized at once; the step it judges by and its
+/// medians; judging it — at the longest pointer a shape takes, `/k{i}/v`.
+pub fn judging_bound(header: &Header) -> u64 {
+    let cap = header.profile.answer_cap;
+    let pointer = format!("/k{cap}/v");
+    let judged = ascetic_ddd_command_log::shape::shape(&judged_by(&pointer));
+    let problem = u64::try_from(header.profile.problem.len()).unwrap_or(u64::MAX);
+    let medians = u64::try_from(RUNS.saturating_mul(size_of::<u64>())).unwrap_or(u64::MAX);
+    cap.max(2)
+        .saturating_add(ascetic_ddd_command_log::shape::bound(&judged))
+        .saturating_add(medians)
+        .saturating_add(ascetic_ddd_scheduler::judge::bound(cap, &judged, problem))
 }
 
 /// The judging time at `header`'s cap by `stopwatch`: each shape read,

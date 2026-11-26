@@ -59,10 +59,29 @@ impl fmt::Debug for Reply<'_> {
     }
 }
 
-/// An answer read: its body parsed once.
+/// An answer read: its body parsed once. Neither `Send` nor `Sync` (ADR-0047
+/// decision 22, K2b-7e-2b-2c-3): a carrier's attempt is a `Send` future, so
+/// no carrier holds a body's tree across an await — a source's thread holds
+/// one tree at a time, as its memory is charged, not one an attempt waiting.
+///
+/// ```compile_fail
+/// use ascetic_ddd_command_log::answer::{Reply, read};
+/// fn sent<T: Send>(_: T) {}
+/// let reply = Reply { status: 200, headers: &[], body: None };
+/// sent(read(&reply));
+/// ```
+///
+/// Read where it is made, it is what it was:
+///
+/// ```
+/// use ascetic_ddd_command_log::answer::{Reply, read};
+/// let reply = Reply { status: 200, headers: &[], body: None };
+/// assert_eq!(read(&reply).status(), 200);
+/// ```
 pub struct Read<'a> {
     reply: &'a Reply<'a>,
     body: Option<Json>,
+    here: std::marker::PhantomData<*const ()>,
 }
 
 impl fmt::Debug for Read<'_> {
@@ -100,7 +119,11 @@ impl std::error::Error for PredicateError {}
 /// The answer read: its body parsed, if it is JSON.
 pub fn read<'a>(reply: &'a Reply<'a>) -> Read<'a> {
     let body = reply.body.and_then(|b| json::parse(b).ok());
-    Read { reply, body }
+    Read {
+        reply,
+        body,
+        here: std::marker::PhantomData,
+    }
 }
 
 /// The field lines named `name`, compared without case.

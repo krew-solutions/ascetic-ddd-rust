@@ -112,6 +112,21 @@ impl Runtimes {
     }
 }
 
+/// The bytes the shell holds of an answer's captures as it keeps them
+/// (ADR-0047 decision 22, K2b-7e-2b-2c-3): one answer a source at a time,
+/// whatever carries it — their slots, and each spec's subject and slot
+/// copied; their values moved, not copied. At most `record`'s shape: the
+/// plan's largest.
+pub fn ending(record: &ascetic_ddd_command_log::shape::Shape) -> u64 {
+    let slot =
+        u64::try_from(size_of::<ascetic_ddd_scheduler::machine::Captured>()).unwrap_or(u64::MAX);
+    record
+        .captures
+        .elements
+        .saturating_mul(slot)
+        .saturating_add(record.capture_bytes)
+}
+
 /// The bytes a source's runtime holds of its own, its events aside (ADR-0047
 /// decision 22, K2b-7e-2b-2c-1): a `current_thread` runtime with I/O, its
 /// thread and its stop, its places in `Live` — measured at build by
