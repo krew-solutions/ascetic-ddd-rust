@@ -665,3 +665,64 @@ fn no_debug_shows_a_secret_or_a_captured_value() {
     }
     assert!(!shown.contains(&String::from_utf8_lossy(key).into_owned()));
 }
+
+/// K2b-7e-2b-3a of ADR-0047 (decision 22): every case's frame is sized at
+/// once — its target and its body each allocated to their length, never grown
+/// by doubling — so a carrier prices a frame by its bytes: an encoded target,
+/// a body filled past its spans.
+#[test]
+fn every_frame_is_sized_at_once() {
+    let secret = secret();
+    let held = values();
+    let fills = Fills {
+        namespace: Namespace(1),
+        secret: &secret,
+        run_start: RUN_START,
+        sent: SENT,
+        captured: &held,
+    };
+    // An encoded target past its values' length, a body filled past its
+    // spans: what growing by doubling would over-allocate.
+    let grown = (
+        "grown",
+        op("POST", "/d/{id}/{name}/x", "application/json", &[]),
+        rest(
+            vec![Value::Hole(captured(7, "id")), lit("a \"b\" c/d?e")],
+            vec![
+                ("q x", lit("é/?&=")),
+                ("n", Value::Hole(captured(7, "count"))),
+            ],
+            vec![],
+            Some(payload(
+                Codec::Json,
+                vec![
+                    P::Bytes(b"{\"etag\":"),
+                    P::Span(captured(7, "etag"), Form::JsonToken, b"0"),
+                    P::Bytes(b",\"n\":"),
+                    P::Span(captured(7, "count"), Form::JsonToken, b"0"),
+                    P::Bytes(b"}"),
+                ],
+            )),
+        ),
+    );
+    let mut framed = 0;
+    for (name, op, rest) in cases().into_iter().chain([grown]) {
+        let Ok(f) = frame(&op, &rest, &fills, CORRELATION) else {
+            continue;
+        };
+        framed += 1;
+        assert_eq!(f.target.capacity(), f.target.len(), "{name}'s target");
+        if let Some(b) = &f.body {
+            assert_eq!(b.capacity(), b.len(), "{name}'s body");
+        }
+        if name == "grown" {
+            assert!(f.target.len() > 60, "{}", f.target);
+            assert!(
+                f.body.as_ref().is_some_and(|b| b.len() > 40),
+                "{:?}",
+                f.body
+            );
+        }
+    }
+    assert!(framed > 1, "{framed} cases framed");
+}

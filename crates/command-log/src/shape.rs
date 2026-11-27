@@ -1,7 +1,7 @@
 //! A record's shape (ADR-0047 decision 22, K2b-7e-2b): the counts its bytes are
 //! priced by, intrinsic to the plan — its strings' bytes, its sequences'
 //! elements by type, its captured holes, its barrier key, its request's
-//! literal bytes and holes —, summed over the records a run holds at once and
+//! literal bytes and holes by class —, summed over the records a run holds at once and
 //! committed by the validator at their peaks. Whoever holds a record's bytes
 //! prices its shape at the run's own build: the decoded record here
 //! ([`bound`]), the machine its cell, the carrier its frame — so a price
@@ -118,13 +118,26 @@ pub struct Shape {
     /// in bytes.
     #[serde(with = "u64s")]
     pub key_bytes: u64,
-    /// The literal bytes of its request — a call's or a probe's path, query
-    /// and headers, its body — before its holes are filled.
+    /// The literal bytes of its request's target — a call's or a probe's
+    /// path values, its query's names and values — before its holes are
+    /// filled: a carrier encodes them (K2b-7e-2b-3a).
     #[serde(with = "u64s")]
-    pub request: u64,
-    /// The holes its request fills.
+    pub target: u64,
+    /// The holes its request's target fills.
     #[serde(with = "u64s")]
-    pub request_holes: u64,
+    pub target_holes: u64,
+    /// The literal bytes of its request's headers, names and values.
+    #[serde(with = "u64s")]
+    pub headers: u64,
+    /// The holes its request's headers fill.
+    #[serde(with = "u64s")]
+    pub header_holes: u64,
+    /// The bytes of its request's body before its holes are filled.
+    #[serde(with = "u64s")]
+    pub body: u64,
+    /// The holes its request's body fills.
+    #[serde(with = "u64s")]
+    pub body_holes: u64,
     /// Its barrier dependencies' keys — each one's kind, scope and label —
     /// in bytes: what the machine binds them by and a read's journal line
     /// names them by (K2b-7e-2b-2b). A barrier may have no member, so no
@@ -162,8 +175,12 @@ impl Shape {
             holes: self.holes.saturating_add(o.holes),
             hole_bytes: self.hole_bytes.saturating_add(o.hole_bytes),
             key_bytes: self.key_bytes.saturating_add(o.key_bytes),
-            request: self.request.saturating_add(o.request),
-            request_holes: self.request_holes.saturating_add(o.request_holes),
+            target: self.target.saturating_add(o.target),
+            target_holes: self.target_holes.saturating_add(o.target_holes),
+            headers: self.headers.saturating_add(o.headers),
+            header_holes: self.header_holes.saturating_add(o.header_holes),
+            body: self.body.saturating_add(o.body),
+            body_holes: self.body_holes.saturating_add(o.body_holes),
             each_bytes: self.each_bytes.saturating_add(o.each_bytes),
             literal_bytes: self.literal_bytes.saturating_add(o.literal_bytes),
             pointer_bytes: self.pointer_bytes.saturating_add(o.pointer_bytes),
@@ -193,8 +210,12 @@ impl Shape {
             holes: self.holes.saturating_mul(n),
             hole_bytes: self.hole_bytes.saturating_mul(n),
             key_bytes: self.key_bytes.saturating_mul(n),
-            request: self.request.saturating_mul(n),
-            request_holes: self.request_holes.saturating_mul(n),
+            target: self.target.saturating_mul(n),
+            target_holes: self.target_holes.saturating_mul(n),
+            headers: self.headers.saturating_mul(n),
+            header_holes: self.header_holes.saturating_mul(n),
+            body: self.body.saturating_mul(n),
+            body_holes: self.body_holes.saturating_mul(n),
             each_bytes: self.each_bytes.saturating_mul(n),
             literal_bytes: self.literal_bytes.saturating_mul(n),
             pointer_bytes: self.pointer_bytes.saturating_mul(n),
@@ -225,8 +246,12 @@ impl Shape {
             holes: self.holes.saturating_sub(o.holes),
             hole_bytes: self.hole_bytes.saturating_sub(o.hole_bytes),
             key_bytes: self.key_bytes.saturating_sub(o.key_bytes),
-            request: self.request.saturating_sub(o.request),
-            request_holes: self.request_holes.saturating_sub(o.request_holes),
+            target: self.target.saturating_sub(o.target),
+            target_holes: self.target_holes.saturating_sub(o.target_holes),
+            headers: self.headers.saturating_sub(o.headers),
+            header_holes: self.header_holes.saturating_sub(o.header_holes),
+            body: self.body.saturating_sub(o.body),
+            body_holes: self.body_holes.saturating_sub(o.body_holes),
             each_bytes: self.each_bytes.saturating_sub(o.each_bytes),
             literal_bytes: self.literal_bytes.saturating_sub(o.literal_bytes),
             pointer_bytes: self.pointer_bytes.saturating_sub(o.pointer_bytes),
@@ -253,8 +278,12 @@ impl Shape {
             holes,
             hole_bytes,
             key_bytes,
-            request,
-            request_holes,
+            target,
+            target_holes,
+            headers,
+            header_holes,
+            body,
+            body_holes,
             each_bytes,
             literal_bytes,
             pointer_bytes,
@@ -271,8 +300,12 @@ impl Shape {
             holes,
             hole_bytes,
             key_bytes,
-            request,
-            request_holes,
+            target,
+            target_holes,
+            headers,
+            header_holes,
+            body,
+            body_holes,
             each_bytes,
             literal_bytes,
             pointer_bytes,
@@ -300,8 +333,12 @@ impl Shape {
             holes: self.holes.max(o.holes),
             hole_bytes: self.hole_bytes.max(o.hole_bytes),
             key_bytes: self.key_bytes.max(o.key_bytes),
-            request: self.request.max(o.request),
-            request_holes: self.request_holes.max(o.request_holes),
+            target: self.target.max(o.target),
+            target_holes: self.target_holes.max(o.target_holes),
+            headers: self.headers.max(o.headers),
+            header_holes: self.header_holes.max(o.header_holes),
+            body: self.body.max(o.body),
+            body_holes: self.body_holes.max(o.body_holes),
             each_bytes: self.each_bytes.max(o.each_bytes),
             literal_bytes: self.literal_bytes.max(o.literal_bytes),
             pointer_bytes: self.pointer_bytes.max(o.pointer_bytes),
@@ -365,7 +402,7 @@ fn walked(r: &Record) -> (Shape, u64) {
             ..Shape::default()
         },
         heap: as_u64(ARC),
-        request: false,
+        class: None,
     };
     w.record(r);
     (w.shape, w.heap)
@@ -375,9 +412,18 @@ fn walked(r: &Record) -> (Shape, u64) {
 struct Walk {
     shape: Shape,
     heap: u64,
-    /// Whether what is walked is a request's: its literal bytes and holes
-    /// counted as the frame's.
-    request: bool,
+    /// Whose request's part is walked, if any: its literal bytes and holes
+    /// counted as the frame's, by class.
+    class: Option<Class>,
+}
+
+/// A request's part, as a carrier renders it: its target encoded, its
+/// headers as they are, its body filled.
+#[derive(Clone, Copy)]
+enum Class {
+    Target,
+    Headers,
+    Body,
 }
 
 /// The slots serde's sequence of `len` elements holds decoded: none for none,
@@ -402,8 +448,14 @@ impl Walk {
 
     /// A string a request carries as it is: the frame's too.
     fn literal(&mut self, s: &str) {
-        if self.request {
-            self.shape.request = self.shape.request.saturating_add(as_u64(s.len()));
+        let n = as_u64(s.len());
+        if let Some(c) = self.class {
+            let bytes = match c {
+                Class::Target => &mut self.shape.target,
+                Class::Headers => &mut self.shape.headers,
+                Class::Body => &mut self.shape.body,
+            };
+            *bytes = bytes.saturating_add(n);
         }
         self.string(s);
     }
@@ -534,15 +586,17 @@ impl Walk {
             self.seq::<Subject>(names.len(), |s| &mut s.subjects);
             names.iter().for_each(|n| self.subject(n));
         }
-        let was = std::mem::replace(&mut self.request, true);
+        let was = self.class.replace(Class::Target);
         self.seq::<Value>(path.len(), |s| &mut s.values);
         path.iter().for_each(|v| self.value(v));
         self.fields(query);
+        self.class = Some(Class::Headers);
         self.fields(headers);
+        self.class = Some(Class::Body);
         if let Some(p) = body {
             self.payload(p);
         }
-        self.request = was;
+        self.class = was;
     }
 
     fn fields(&mut self, fields: &[Field]) {
@@ -602,8 +656,8 @@ impl Walk {
             bytes,
             holes,
         } = p;
-        if self.request {
-            self.shape.request = self.shape.request.saturating_add(as_u64(bytes.len()));
+        if matches!(self.class, Some(Class::Body)) {
+            self.shape.body = self.shape.body.saturating_add(as_u64(bytes.len()));
         }
         self.byte_string(bytes);
         self.seq::<Span>(holes.len(), |s| &mut s.spans);
@@ -628,8 +682,13 @@ impl Walk {
     }
 
     fn hole(&mut self, h: &Hole) {
-        if self.request {
-            self.shape.request_holes = self.shape.request_holes.saturating_add(1);
+        if let Some(c) = self.class {
+            let holes = match c {
+                Class::Target => &mut self.shape.target_holes,
+                Class::Headers => &mut self.shape.header_holes,
+                Class::Body => &mut self.shape.body_holes,
+            };
+            *holes = holes.saturating_add(1);
         }
         match h {
             Hole::Rendered {

@@ -328,24 +328,39 @@ fn written(span: &Span, filled: Filled) -> Result<Vec<u8>, FillError> {
 }
 
 /// The payload's bytes with every span replaced by its value: the bytes
-/// between spans as they are.
+/// between spans as they are — sized at once (ADR-0047 decision 22,
+/// K2b-7e-2b-3a): each value written first, the length counted, then the
+/// bytes, never grown by doubling.
 pub fn fill(
     payload: &Payload,
     mut value: impl FnMut(&Span) -> Result<Filled, FillError>,
 ) -> Result<Vec<u8>, FillError> {
-    let mut out = Vec::with_capacity(payload.bytes.len());
+    let mut values = Vec::with_capacity(payload.holes.len());
+    let mut length = payload.bytes.len();
     let mut at = 0usize;
     for span in &payload.holes {
         let start = span.offset as usize;
         let end = start
             .checked_add(span.len as usize)
             .ok_or(FillError::Span)?;
-        out.extend_from_slice(payload.bytes.get(at..start).ok_or(FillError::Span)?);
-        if end > payload.bytes.len() {
+        if start < at || end > payload.bytes.len() {
             return Err(FillError::Span);
         }
-        out.extend(written(span, value(span)?)?);
+        let v = written(span, value(span)?)?;
+        length = length
+            .checked_sub(span.len as usize)
+            .and_then(|l| l.checked_add(v.len()))
+            .ok_or(FillError::Span)?;
+        values.push(v);
         at = end;
+    }
+    let mut out = Vec::with_capacity(length);
+    let mut at = 0usize;
+    for (span, v) in payload.holes.iter().zip(values) {
+        let start = span.offset as usize;
+        out.extend_from_slice(payload.bytes.get(at..start).ok_or(FillError::Span)?);
+        out.extend(v);
+        at = start.saturating_add(span.len as usize);
     }
     out.extend_from_slice(payload.bytes.get(at..).ok_or(FillError::Span)?);
     Ok(out)

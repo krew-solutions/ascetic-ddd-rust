@@ -188,17 +188,26 @@ fn literal(b: u8) -> bool {
     unreserved(b) || b"!$&'()*+,;=:@/".contains(&b)
 }
 
-/// Every byte outside unreserved as `%XX`, upper-case.
-fn encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+/// The length of `s` encoded: an unreserved byte as it is, any other as
+/// `%XX`.
+fn encoded(s: &str) -> usize {
+    s.bytes().fold(0usize, |n, b| {
+        n.saturating_add(if unreserved(b) { 1 } else { 3 })
+    })
+}
+
+/// Every byte outside unreserved as `%XX`, upper-case, into `out`.
+fn encode(out: &mut String, s: &str) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     for b in s.bytes() {
         if unreserved(b) {
             out.push(char::from(b));
         } else {
-            out.push_str(&format!("%{b:02X}"));
+            out.push('%');
+            out.push(char::from(HEX[usize::from(b >> 4)]));
+            out.push(char::from(HEX[usize::from(b & 0xF)]));
         }
     }
-    out
 }
 
 enum Piece<'a> {
@@ -332,32 +341,63 @@ pub fn frame(
 ) -> Result<Frame, RequestError> {
     check(op, rest, correlation)?;
     let hole = |field: String| move |error| RequestError::Hole { field, error };
-    let mut target = String::new();
+    // The target sized at once (ADR-0047 decision 22, K2b-7e-2b-3a): its
+    // values filled first, its length counted, then written — never grown by
+    // doubling, so a carrier prices it by its encoded bytes.
+    let pieces = template(&op.path)?;
     let mut values = rest.path.iter().enumerate();
-    for piece in template(&op.path)? {
+    let mut path = Vec::with_capacity(rest.path.len());
+    for piece in &pieces {
+        if let Piece::Placeholder = piece {
+            let (index, v) = values.next().ok_or(RequestError::Arity {
+                placeholders: rest.path.len().saturating_add(1),
+                values: rest.path.len(),
+            })?;
+            let v = fills.text(v).map_err(hole(format!("path[{index}]")))?;
+            if matches!(v.as_str(), "" | "." | "..") {
+                return Err(RequestError::Segment { index });
+            }
+            path.push(v);
+        }
+    }
+    let mut query = Vec::with_capacity(rest.query.len());
+    for q in &rest.query {
+        query.push(
+            fills
+                .text(&q.value)
+                .map_err(hole(format!("query {}", q.name)))?,
+        );
+    }
+    let length = pieces
+        .iter()
+        .map(|p| match p {
+            Piece::Literal(l) => l.len(),
+            Piece::Placeholder => 0,
+        })
+        .chain(path.iter().map(|v| encoded(v)))
+        .chain(rest.query.iter().zip(&query).map(|(q, v)| {
+            encoded(&q.name)
+                .saturating_add(encoded(v))
+                .saturating_add(2)
+        }))
+        .fold(0usize, usize::saturating_add);
+    let mut target = String::with_capacity(length);
+    let mut path = path.iter();
+    for piece in &pieces {
         match piece {
             Piece::Literal(l) => target.push_str(l),
             Piece::Placeholder => {
-                let (index, v) = values.next().ok_or(RequestError::Arity {
-                    placeholders: rest.path.len().saturating_add(1),
-                    values: rest.path.len(),
-                })?;
-                let v = fills.text(v).map_err(hole(format!("path[{index}]")))?;
-                if matches!(v.as_str(), "" | "." | "..") {
-                    return Err(RequestError::Segment { index });
+                if let Some(v) = path.next() {
+                    encode(&mut target, v);
                 }
-                target.push_str(&encode(&v));
             }
         }
     }
-    for (i, q) in rest.query.iter().enumerate() {
-        let v = fills
-            .text(&q.value)
-            .map_err(hole(format!("query {}", q.name)))?;
+    for (i, (q, v)) in rest.query.iter().zip(&query).enumerate() {
         target.push(if i == 0 { '?' } else { '&' });
-        target.push_str(&encode(&q.name));
+        encode(&mut target, &q.name);
         target.push('=');
-        target.push_str(&encode(&v));
+        encode(&mut target, v);
     }
     let mut headers = Vec::with_capacity(rest.headers.len().saturating_add(1));
     for h in &rest.headers {

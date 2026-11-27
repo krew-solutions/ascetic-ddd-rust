@@ -642,3 +642,71 @@ fn a_record_s_largest_literal_and_longest_pointer() {
     assert_eq!(s.literal_bytes, 7, "the largest literal, not their sum");
     assert_eq!(s.pointer_bytes, 15, "the capture's pointer, the longest");
 }
+
+/// K2b-7e-2b-3a: a request's bytes and holes by class — its target (path
+/// values, the query's names and values), its headers (names and values),
+/// its body — each counted apart, the class a carrier renders it by.
+#[test]
+fn a_request_s_bytes_by_class() {
+    let subject = Subject {
+        kind: "device".to_owned(),
+        scope: vec![7],
+        index: 1,
+    };
+    let id = StepId {
+        subject: subject.clone(),
+        label: "read".to_owned(),
+        n: 0,
+    };
+    let hole = || Hole::Captured {
+        subject: subject.clone(),
+        slot: "id".to_owned(),
+        from: id.clone(),
+    };
+    let span = |offset: u32| Span {
+        offset,
+        len: 1,
+        field: "/x".to_owned(),
+        hole: hole(),
+        form: Form::JsonToken,
+    };
+    let r = Record {
+        step: id.clone(),
+        at: 0,
+        think: 0,
+        after: vec![],
+        action: Action::Rest(Rest {
+            op: "op".to_owned(),
+            caller: None,
+            source: 0,
+            path: vec![Value::Literal("ab".to_owned()), Value::Hole(hole())],
+            query: vec![Field {
+                name: "q".to_owned(),
+                value: Value::Literal("xyz".to_owned()),
+            }],
+            headers: vec![
+                Field {
+                    name: "hh".to_owned(),
+                    value: Value::Hole(hole()),
+                },
+                Field {
+                    name: "k".to_owned(),
+                    value: Value::Literal("vvvv".to_owned()),
+                },
+            ],
+            body: Some(Payload {
+                codec: Codec::Json,
+                bytes: b"[0,0,0000]".to_vec(),
+                holes: vec![span(1), span(3)],
+            }),
+        }),
+        expect: vec![],
+        capture: vec![],
+        measure: vec![],
+        deviation: None,
+    };
+    let s = shape(&r);
+    assert_eq!((s.target, s.target_holes), (2 + 1 + 3, 1), "the target");
+    assert_eq!((s.headers, s.header_holes), (2 + 1 + 4, 1), "the headers");
+    assert_eq!((s.body, s.body_holes), (10, 2), "the body");
+}

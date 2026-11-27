@@ -734,11 +734,43 @@ def bound(text, seen, out=None):
 # A shape's counts as the corpus carries them (ADR-0047 decision 22): records,
 # bytes, byte strings, then (elements, sequences) of deps, values, fields,
 # outcomes, predicates, captures, the captures' bytes, (elements, sequences) of
-# measures, spans, subjects, then holes, hole bytes, key bytes, request bytes,
-# request holes, the barrier dependencies' key bytes (K2b-7e-2b-2b), the largest
-# predicate literal and the longest pointer (K2b-7e-2b-2c).
-SHAPE = 30
-KEY_BYTES, CAPTURES, CAPTURE_BYTES, EACH_BYTES, LITERAL_BYTES, POINTER_BYTES = 24, 13, 15, 27, 28, 29
+# measures, spans, subjects, then holes, hole bytes, key bytes, a request's
+# target, headers and body bytes each with its holes (K2b-7e-2b-3a), the barrier
+# dependencies' key bytes (K2b-7e-2b-2b), the largest predicate literal and the
+# longest pointer (K2b-7e-2b-2c).
+SHAPE = 34
+KEY_BYTES, CAPTURES, CAPTURE_BYTES, EACH_BYTES, LITERAL_BYTES, POINTER_BYTES = 24, 13, 15, 31, 32, 33
+REQUEST = 25
+
+
+def request_counts(r):
+    """A call's or a probe's request by class, by definition (K2b-7e-2b-3a):
+    its target's literal bytes — path values, the query's names and values —
+    and holes, its headers' likewise, its body's bytes and holes; none, zero."""
+    a = r["action"]
+    rest = a["rest"] if "rest" in a else a.get("observe", {}).get("probe", {}).get("rest")
+    if rest is None:
+        return (0,) * 6
+    utf8 = lambda t: len(t.encode())
+
+    def values(vs):
+        return (sum(utf8(v["literal"]) for v in vs if "literal" in v), sum(1 for v in vs if "hole" in v))
+
+    path = values(rest["path"])
+    query = values([q["value"] for q in rest["query"]])
+    names = sum(utf8(q["name"]) for q in rest["query"])
+    headers = values([h["value"] for h in rest["headers"]])
+    header_names = sum(utf8(h["name"]) for h in rest["headers"])
+    body = rest.get("body")
+    body_bytes, body_holes = (len(base64.b64decode(body["bytes"])), len(body["holes"])) if body else (0, 0)
+    return (
+        path[0] + query[0] + names,
+        path[1] + query[1],
+        headers[0] + header_names,
+        headers[1],
+        body_bytes,
+        body_holes,
+    )
 
 
 def socket(r):
@@ -783,10 +815,10 @@ def byte_peaks(text, shapes):
         literal = max((utf8(t[test]["literal"]) for p in predicates for t in [p["test"]] if isinstance(t, dict) for test in t if "literal" in t[test]), default=0)
         pointers = [p["pointer"] for p in predicates] + [c["source"]["json"] for c in r["capture"] if isinstance(c["source"], dict) and "json" in c["source"]]
         pointer = max((utf8(p) for p in pointers), default=0)
-        want = (k + 2, socket(r), 1, key_bytes, len(r["capture"]), took, each, literal, pointer)
-        have = (line, src, counts[0], counts[KEY_BYTES], counts[CAPTURES], counts[CAPTURE_BYTES], counts[EACH_BYTES], counts[LITERAL_BYTES], counts[POINTER_BYTES])
+        want = (k + 2, socket(r), 1, key_bytes, len(r["capture"]), took, each, literal, pointer, request_counts(r))
+        have = (line, src, counts[0], counts[KEY_BYTES], counts[CAPTURES], counts[CAPTURE_BYTES], counts[EACH_BYTES], counts[LITERAL_BYTES], counts[POINTER_BYTES], tuple(counts[REQUEST:REQUEST + 6]))
         if len(counts) != SHAPE or want != have:
-            raise SystemExit(f"line {k + 2}: the shape's (line, source, records, key, captures, their bytes, barrier keys' bytes, largest literal, longest pointer) are {have}, by definition {want}")
+            raise SystemExit(f"line {k + 2}: the shape's (line, source, records, key, captures, their bytes, barrier keys' bytes, largest literal, longest pointer, request by class) are {have}, by definition {want}")
     out = {}
     bound(text, {term: 0 for term in REACHED}, out)
     E, H = out["E"], out["H"]

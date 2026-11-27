@@ -212,10 +212,12 @@ const JOURNALS: &[(u32, u32, &str)] = &[
     // Version 9 (decision 21): settled against version 8 run by run — its new
     // fields removed, every line the same; `decorated` equal to `handed`
     // throughout, until a gate stands between them (§ Measured K2b-9b-1).
+    // Re-pinned with the corpus (K2b-7e-2b-3a-1): its logs with a call
+    // queried, the other logs' draws their own keys'.
     (
         9,
         5,
-        "226930edeb1ab48e1f0ff7a29a10018f7460391cbf8e54a206eb7db773e9aa3c",
+        "baf16154225959cfed00065ea253b1e708fe060079d8c12cbf33d893f918af53",
     ),
 ];
 
@@ -294,12 +296,13 @@ const CLASSES: &[(u32, u32, u32, &str)] = &[
     ),
     // Version 9 (decision 21): the run's catch-up, a hand-off's readiness,
     // a found answer's hand-off, a refusal read; the fold reads none of them
-    // yet — the same classes.
+    // yet — the same classes. Re-pinned with the corpus (K2b-7e-2b-3a-1):
+    // its logs with a call queried, the other logs' draws their own keys'.
     (
         9,
         5,
         7,
-        "b9b6085d247cc1ae6a17c52f66618294ffc4c4f76223aeb66078486891fa1f92",
+        "ddc9a8f198be23cb80069e2ab4a34563058627795da23e7cf78edab9cb9ba130",
     ),
 ];
 

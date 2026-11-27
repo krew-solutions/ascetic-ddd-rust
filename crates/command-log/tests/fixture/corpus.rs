@@ -565,6 +565,22 @@ fn mutant(records: &[Record], which: &str, k: &Key) -> Option<Vec<Record>> {
         }
         // What the shell could not send (ADR-0047 decision 15): a header a
         // step may not plan, a dot segment, bytes where a text is needed.
+        "queried" => {
+            // A query on a call: its names and values the target's bytes
+            // (K2b-7e-2b-3a), as the reference derives them.
+            let calls: Vec<usize> = all
+                .iter()
+                .copied()
+                .filter(|&i| call_of(&mut m[i].clone()).is_some())
+                .collect();
+            let i = pick("i", &calls)?;
+            if let Some(rest) = call_of(&mut m[i]) {
+                rest.query.push(ascetic_ddd_command_log::record::Field {
+                    name: "page size".into(),
+                    value: Value::Literal("2/3".into()),
+                });
+            }
+        }
         "reserved-header" => {
             let calls: Vec<usize> = all
                 .iter()
@@ -684,6 +700,7 @@ pub fn logs() -> Vec<(String, Vec<Record>)> {
         "every-halved",
         "key-time",
         "names-dropped",
+        "queried",
         "reserved-header",
         "dot-segment",
         "key-in-path",
