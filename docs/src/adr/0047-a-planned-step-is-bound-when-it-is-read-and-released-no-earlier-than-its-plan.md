@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a, K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3), K2b-7e-2b-2c-1 to K2b-7e-2b-2c-4 built, K2b-7e-2b-3 next; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a, K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3), K2b-7e-2b-2c-1 to K2b-7e-2b-2c-4 built, K2b-7e-2b-3 decided and cut in five, K2b-7e-2b-3a next; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -47,7 +47,9 @@ To be built in slices, each a commit of its own:
   writer, **K2b-7e-2b-2b-2** the channel built from admission, **K2b-7e-2b-2b-3** the carrier's boundary;
   **K2b-7e-2b-2c** the sources, in four — **K2b-7e-2b-2c-1** the runtime and its events, **K2b-7e-2b-2c-2** the
   parse's bound and its roles, **K2b-7e-2b-2c-3** the tail held, **K2b-7e-2b-2c-4** a carrier's source costs),
-  **K2b-7e-2b-3** admission and its evidence —, **K2b-7e-2c** the cgroup's memory, after the read gate;
+  **K2b-7e-2b-3** admission and its evidence, in five — **K2b-7e-2b-3a** the prices, **K2b-7e-2b-3b** the ports'
+  statements, **K2b-7e-2b-3c** the pure fit, **K2b-7e-2b-3d** the wiring and version 10, **K2b-7e-2b-3e** the evidence
+  after a kill —, **K2b-7e-2c** the cgroup's memory, after the read gate;
   **K2b-7e-3** the read gate; **K2b-7e-4** the parse; **K2b-7e-5** a waiting budget, if a real plan needs it; **K2b-8** a censored attempt's connection, its closing report and the ports (decision 19), in
   four: **K2b-8a** journal version 7 in the pure fold; **K2b-8b** the shell's censor, report and connect errors, in two — **K2b-8b-1** a connect's failure classed, zero
   linger, no shutdown, saturation by age; **K2b-8b-2** the reset at the censor, no byte or hand-over at the deadline,
@@ -829,6 +831,34 @@ which `admit` never called; § Alternatives Considered keeps what each refuted):
   - **The answers charged statically first**: each socket holds at most one answer (HTTP/1.1), so their charge is the
     sockets' cap times the answer cap's — never a wait; a budget that waits only when a real plan is refused by it;
     with the read gate, the lesser of the cap and the pool's handles.
+  - **Amended for K2b-7e-2b-3** (2026-11-27, under the gate: the main position, a blind solver and a discriminator on
+    Fable, three roles — Software Design, Verifiability, Operability — on Opus; § Alternatives Considered keeps what
+    each refuted). **One pure `memory::fit` binds everything it prices** — the plan, the carrier, the journal, the
+    read-ahead, the stated memory, the process's limit, by value — into a `Fitted`, the only way to `Live` and to
+    `admit(fitted, &runtimes)`, which checks the flavour, the descriptors and that what was built is what was priced
+    (a host fitting one journal and running another was this ADR's bug class twice). **Three phases, the largest
+    sum**: `need = max(F + B, F + Gt, F + R + P)` — fixed (the reader, the decoder outside the counted heap, the
+    runtimes as they will be built), stage 2's judging, stage 3's probes and a gate's client, the run's (each source's
+    costs and keeping, the journal, the sockets and their answers) and the pool at the one κ the header's catch-up
+    uses; admission decided by the slack's checked subtraction itself; the binding term the largest in the phase that
+    binds. **The pool's count `late`** (it holds pending: `pending + late` charged them twice) **and its records at
+    `late_shape`**, replacing the pending records' term — the records of steps ended while a handle holds them were
+    priced by nobody. **Each part's bytes stated by its owner, apart**: the shell's attempt share and its copy of the
+    captures (`run`'s); the carrier's by byte class (a target percent-encoded and copied into the URI, headers, a body
+    and its clone — one coefficient over the summed request was exact only for bodies) with the body's render sized at
+    once and hyper's head buffer, which never shrinks, charged to the connection at the plan's largest head; a host's
+    `Egress` its connection's own heap (TLS), its `Decorator` a bound held where its headers enter, its gate's client —
+    each required, unstated refused, never left no room. **The term set complete by construction**: a closed `Part`,
+    a sensitivity property (a cost δ raises the least memory by count·δ in its phase), every library part naming its
+    two-sided row, the model a value `fit` takes and the header journals. **The refusal** collected, each remedy on
+    its owner's knob through the map it states (`Egress::caps`, not a uniform cap `with_ports` would split), the least
+    memory also at the needed caps, and stated "predicted, the pool unheld" until the read gate. **The limit a process
+    fact** (`Limit::read`, the least `memory.max` and `memory.high` over the ancestors), and the ADR's own "the first
+    host run inside a scope with `MemoryMax`" executed: a run whose pool nothing holds refused unless its own cgroup
+    has a finite limit. **Version 10**: `admission.memory` required, the fold and `verdict.py` rechecking its
+    arithmetic and refusing tampered headers; the `memory` line's form fixed with it (anon, file and sock apart, heap
+    in use and free, the limit as read), sent through a one-slot mailbox the writer drains first, and read from a
+    journal the kernel cut. `fits::fits` and `Budget` retired, their loop carried to `fit`.
 - **The read gate** (K2b-7e-3): no line read while the attempts alive reach their cap or the machine's live cost its
   share — a late read, the harness's; starved past the longest timeout, a fault and a stop.
 - **The parse bounded** (K2b-7e-4): the body's state journaled (whole, cut at the cap, unparsed and why) — an answer
@@ -976,6 +1006,25 @@ which `admit` never called; § Alternatives Considered keeps what each refuted):
   decision 21's decided I2 silently; Software Design, Verifiability); **the cgroup as the number's source before the
   read gate** (the discriminator); **the first refusal only, one binding term, remedies from another owner**
   (Operability, Software Design, Verifiability).
+- **Decision 22, K2b-7e-2b-3's admission** (2026-11-27): the main position's **pool counted `pending + late`**
+  (`late` holds pending; the discriminator), **the reader after the stages** (it is spawned and filled before them),
+  **a constant attempt price** (the ADR priced it by its record), **no I2 term for memory**, **one refusal**, **no
+  limit read**, **`basis: counted-heap` for every term** (zstd's context is outside it), **`Live::from_admission`**
+  (circular: `Admitted` needs the built runtimes); the solver's **pool on top of the phases' maximum** (the pool is
+  the run's), **a two-cause refusal before the build** (the descriptors are read after it; a pre-read is a lower
+  bound), **remedies by search over the carrier's header** (no knob there), **a hand-bumped `MODEL_REVISION`**; the
+  synthesis's **`admit` taking the plan, carrier and journal again** (one fitted, another run; Software Design),
+  **`late_shape` added beside the pending records** (charged twice; Software Design, Verifiability), **one
+  `stated_by` for a carrier's attempt with a host's decorator inside**, **the egress's TLS inside the library's
+  connection** (Software Design), **one coefficient over the summed request** (exact for bodies only: encoding,
+  the render's doubling, hyper's head buffer; Verifiability), **the binding term across phases** (Software Design),
+  **κ on part of the pool**, **a forgeable `Limit`**, **an unstated gate client unheld and charged nothing**
+  (Software Design), **a uniform cap as the remedy** (`with_ports` splits it; Operability), **`answer_cap` without a
+  number** (computable once `HEAD` is apart; Operability), **the scope rule left to the owner** (the ADR decided it;
+  Operability, Verifiability), **`unheld` surfaced only by a finished run's report** and **samples through the main
+  channel** (a killed run's journal is read by nothing, a blocked machine starves the samples; Operability), **a
+  costs row building its own handles** and **a whole-run floor on the total** (each shares the sentence it checks;
+  Verifiability).
 - **Decision 22, K2b-7e-2b-2c's sources** (2026-11-27): the main position's **parse at its measured worst over stage
   2's shapes** (chains, the densest input, are no shape; it under-charged 2.7–3.9×; the discriminator), its **head in
   transition omitted**, its **`SOURCE` holding the scratch** (a carrier's, allocated at a thread's first read — an
@@ -2775,7 +2824,8 @@ only and measures move to the 12-core box.
     censor's last look makes a false Fail; an observation whose cause was resent, anchored at its first attempt, a
     false Fail; failing observations void with no shift; rules on absolute lateness void every run once S passes 2J;
     the shift undiagnosable; decorations made a lead early.
-  - **The second round** (a blind solver and a discriminator on Fable; roles on Opus under way) re-proved κ = 0 for
+  - **The second round** (a blind solver and a discriminator on Fable; Distributed Systems, Operability,
+    Performance and Verifiability on Opus) re-proved κ = 0 for
     plans with dependents, the hand-off as the anchor and S a running sum of each hand-off's lateness past J (V at
     κ = 0). It found the two positions' call deadlines one identity, `G₁ + T + Σ(G_i − due_i)⁺`, and refuted admission
     as a certifier: a judging time at the cap refuses healthy runs (the cap is not the plan's answers) and admits
@@ -2787,7 +2837,37 @@ only and measures move to the 12-core box.
     the pass. Open: a dependent's plan due (its parent's shift exact, or the clock's at its end), decided by a
     measurement in `sim` (two sources, 200 sessions of 50 zero-slack links, a 200 µs decorator, a 20 ms stand); owed
     too, on the load server: the built gate at 1, 4 and 16 sources at 256 KiB, the timed wait with 1, 4 and 16 cores
-    busy, a 3 h idle-stand run's worst gap. K2b-9b-3 onward waits for the decision and the owner's confirmation.
+    busy, a 3 h idle-stand run's worst gap.
+  - **Its roles refuted the synthesis's operability at launch**, the first cause upstream of decision 21:
+    - **The judging floor holds the one machine** (decision 16): while any source's answer is judged, the machine
+      takes no wake and no line (`run.rs`' floor, `stamps.rs`' push). σ's inflow is the run's large answers a second
+      times their hold past J, whatever thread judges: the server's 256 KiB row costs about 2 ms of σ a large answer,
+      so a host plan of 10³ steps a second, 1 % at 256 KiB, dilates about 20 ‰ on any number of sources. Under a
+      catch-up the same holds were compressed back, a catch-up refuted for dependents; so the floor, not κ, is the
+      question: how an answer is judged without holding the plan's other steps (a floor holding only the answer's
+      dependents, the answer stamped after its judging at a declared latency cost, or a faster judge, K2b-7e-4).
+    - **A frozen front is invisible**: σ booked only at a pass never rises while a hung decoration holds the front, so
+      the dilation stop never fires, the band fills at the plan's rate, and another stop (the read gate's
+      `void:fault`, ranked above Fail) discards answered Roots. The stop and the machine need the prospective
+      `σ̂ = max(σ, t − F − J)`, the machine no dispatch past `F + J`; the front also the frontier's watermark (stamped,
+      unstepped answers); a decorator synchronous over a credential its host refreshes off the path.
+    - **The deadline's credit** starts at the second attempt (from the first, a first attempt held at the gate is
+      given its hold: a false Pass), its dues the real ones, the machine's licence on the credited window.
+    - **The fold must not trust the machine**: plan dues recomputed from the plan's definition (`schedule.py` on a
+      perfect harness), the journal carrying each read's timeout, think, interval and `within`.
+    - **A dependent's plan due** is its parent's shift exact: the clock's at its end bunches dependents of a flight
+      spanning a stall with independents planned there — the counterfactual pair already decides it.
+    - **No receive-side lag exists** to mark a stall's bunched answers, and a whole-process stall reads no lag;
+      collateral 429s on independent steps stay Roots. Owed: the stall witness, and the bucket's horizon marked
+      after a bunched release.
+    - **The stop**: sliding windows, the fold's own dilation check, `Σ ≥ δ·horizon`, the stopped journal classed by
+      its prefix's answered Roots, a ledger line at every pass that survives the stop, strict ties; a poll's
+      `Retry-After` in its plan due; an observation whose cause's first attempt was Unknown decided by both bounds.
+    - **The void's odds grow with the run**: the maximum over windows makes the usable budget about 0.85 δ (an
+      estimate), and a rare stall's rate past δ·H needs some 86 h of launch-shaped runs to bound. Each of M4–M7 was
+      re-specified with a threshold that can refute it.
+  - Next, the owner's call: a round on the judging floor, after a measurement on the load server of the floor's own
+    share of σ at 1, 4 and 16 sources and 5 to 80 large answers a second. K2b-9b-3 onward waits for both.
 - **Decision 21's owed** (2026-11-24, its roles): **a hung decorator holds the band's front** to its deadline (up to
   the route timeout) — a bound on a head not arrived, trigger: H-1's decorations measured past J; the Decorator
   contract stated now (shared credentials refreshed ahead, off the attempt's path; headers valid to the attempt's
@@ -3055,3 +3135,9 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   by its round (§ Owed, "decision 21 at κ = 0"), which records the 2026-11-25 round too.
 - 2026-11-27: K2b-7e-2b-2c-4 built (§ Measured): `carrier::SourceCosts` and `Carrier::source_costs`, the REST
   carrier's scratch, head copy and tail; the head's copy sized at once, not measured growing by doubling as cut.
+- 2026-11-27: decision 21 at κ = 0's second round's roles recorded (§ Owed): the judging floor holding the one machine
+  is the cause upstream of the choice of κ; the synthesis is not yet a decision.
+- 2026-11-27: K2b-7e-2b-3 decided under the gate (§ Alternatives Considered) and cut in five; decision 22 amended:
+  one pure fit binding what admission prices, three phases, the pool at `late` and `late_shape`, each part's bytes by
+  its owner and byte class, the term set complete by construction, the scope rule executed, version 10 with the
+  `memory` line's form.
