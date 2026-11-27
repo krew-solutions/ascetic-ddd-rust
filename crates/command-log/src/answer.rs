@@ -24,13 +24,14 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::unreachable
+    clippy::unreachable,
+    clippy::cast_possible_truncation
 )]
 
 use std::fmt;
 
 use crate::fills::{Fills, HoleError};
-use crate::json::{self, Json};
+use crate::json::{self, Json, Kind, Node, Sorted, Tape};
 use crate::record::{Capture, Predicate, Source, Test, Value};
 use crate::render::Filled;
 use crate::shape::Shape;
@@ -59,12 +60,13 @@ impl fmt::Debug for Reply<'_> {
     }
 }
 
-/// An answer read: its body parsed once, on its first reader — a problem's
-/// code, a predicate, a capture (ADR-0047 decision 23, K2b-7e-4a): a body no
-/// one reads is never parsed, its tree never built. Neither `Send` nor `Sync` (ADR-0047
-/// decision 22, K2b-7e-2b-2c-3): a carrier's attempt is a `Send` future, so
-/// no carrier holds a body's tree across an await — a source's thread holds
-/// one tree at a time, as its memory is charged, not one an attempt waiting.
+/// An answer read: its body read once into a [`Tape`], on its first reader —
+/// a problem's code, a predicate, a capture (ADR-0047 decision 23, K2b-7e-4a,
+/// K2b-7e-4b-2): a body no one reads is never read, its tape never built.
+/// Neither `Send` nor `Sync` (ADR-0047 decision 22, K2b-7e-2b-2c-3): a
+/// carrier's attempt is a `Send` future, so no carrier holds a body's tape
+/// across an await — a source's thread holds one at a time, as its memory is
+/// charged, not one an attempt waiting.
 ///
 /// ```compile_fail
 /// use ascetic_ddd_command_log::answer::{Reply, read};
@@ -82,7 +84,7 @@ impl fmt::Debug for Reply<'_> {
 /// ```
 pub struct Read<'a> {
     reply: &'a Reply<'a>,
-    body: std::cell::OnceCell<Option<Json>>,
+    body: std::cell::OnceCell<Option<Tape<'a>>>,
     here: std::marker::PhantomData<*const ()>,
 }
 
@@ -118,7 +120,7 @@ impl fmt::Display for PredicateError {
 
 impl std::error::Error for PredicateError {}
 
-/// The answer read: its body to be parsed, if it is JSON, when first read.
+/// The answer read: its body to be read, if it is JSON, when first asked.
 pub fn read<'a>(reply: &'a Reply<'a>) -> Read<'a> {
     Read {
         reply,
@@ -223,10 +225,15 @@ pub const DECODE: u64 = TAKEN as u64;
 /// The most bytes reading an answer of at most `cap` body bytes holds beside
 /// its body and the values it takes, for a record of at most `record`'s
 /// shape whose problem pointer is `problem` bytes (ADR-0047 decision 22,
-/// K2b-7e-2b-2c-2): the body's tree; one pointer's tokens at a time; and one
-/// value read at a time — a predicate's literal's tree, a captured hole's
-/// value, a capture's segment decoded —, the predicates read before the
-/// captures. Saturating.
+/// K2b-7e-2b-2c-2; decision 23, K2b-7e-4b-2). Saturating. Its tape's entries
+/// throughout; and the larger of two phases, each with one value read at a
+/// time — a predicate's want, a captured hole's value, a capture's segment
+/// or string decoded:
+///
+/// - the tape's build, the names' check beside its entries and the want of
+///   the predicate whose reading built it;
+/// - after it, the problem's code decoded — kept by the judge to its end —,
+///   one pointer's tokens, the value read.
 pub fn bound(cap: u64, record: &Shape, problem: u64) -> u64 {
     let hole = if record.holes > 0 { HOLE } else { 0 };
     let decode = if record.captures.elements > 0 {
@@ -234,9 +241,18 @@ pub fn bound(cap: u64, record: &Shape, problem: u64) -> u64 {
     } else {
         0
     };
-    json::bound(cap)
-        .saturating_add(json::pointer_bound(record.pointer_bytes.max(problem)))
-        .saturating_add(json::bound(record.literal_bytes).max(hole).max(decode))
+    let value = json::bound(record.literal_bytes).max(hole).max(decode);
+    let build = json::names_bound(cap);
+    let after = cap.saturating_add(json::pointer_bound(record.pointer_bytes.max(problem)));
+    entries(cap)
+        .saturating_add(build.max(after))
+        .saturating_add(value)
+}
+
+/// A tape's entries for `n` bytes: [`json::tape_bound`] less its names'
+/// check.
+fn entries(n: u64) -> u64 {
+    json::tape_bound(n).saturating_sub(json::names_bound(n))
 }
 
 /// Whether `value` is one [`Read::take`] makes: a carried text quoted, or a
@@ -337,12 +353,14 @@ impl Read<'_> {
         self.reply.status
     }
 
-    /// Its body's tree, if it is JSON: parsed on this first call, kept for
-    /// the next — every reader of the body asks here, none decides before.
-    fn parsed(&self) -> Option<&Json> {
+    /// Its body's value, if it is JSON: read on this first call, its tape
+    /// kept for the next — every reader of the body asks here, none decides
+    /// before.
+    fn parsed(&self) -> Option<Node<'_>> {
         self.body
-            .get_or_init(|| self.reply.body.and_then(|b| json::parse(b).ok()))
+            .get_or_init(|| self.reply.body.and_then(|b| json::tape(b).ok()))
             .as_ref()
+            .map(Tape::root)
     }
 
     /// The problem's code, at `pointer`.
@@ -356,13 +374,11 @@ impl Read<'_> {
         if !essence.eq_ignore_ascii_case("application/problem+json") {
             return None;
         }
-        let body @ Json::Object(_) = self.parsed()? else {
+        let body = self.parsed()?;
+        if body.kind() != Kind::Object {
             return None;
-        };
-        match body.at(pointer).ok()?? {
-            Json::String(s) => Some(s.clone()),
-            _ => None,
         }
+        body.at(pointer).ok()??.string()
     }
 
     /// Whether every predicate holds of the body; none holds of a body that
@@ -376,7 +392,7 @@ impl Read<'_> {
         for p in predicates {
             let want = match &p.test {
                 Test::Exists => None,
-                Test::Equals(v) | Test::Contains(v) => Some(expected(v, fills)?),
+                Test::Equals(v) | Test::Contains(v) => Some(Sorted::new(expected(v, fills)?)),
             };
             json::tokens(&p.pointer).map_err(|_| PredicateError::Pointer)?;
             let found = match self.parsed() {
@@ -386,8 +402,8 @@ impl Read<'_> {
             let ok = match (&p.test, found, &want) {
                 (_, None, _) => false,
                 (Test::Exists, Some(_), _) => true,
-                (Test::Equals(_), Some(v), Some(w)) => v == w,
-                (Test::Contains(_), Some(Json::Array(items)), Some(w)) => items.contains(w),
+                (Test::Equals(_), Some(v), Some(w)) => v.equals(w),
+                (Test::Contains(_), Some(v), Some(w)) => v.contains(w),
                 _ => false,
             };
             all = all && ok;
@@ -405,14 +421,21 @@ impl Read<'_> {
                 let location = std::str::from_utf8(one(self.reply, "location")?).ok()?;
                 text(&segment(location)?)
             }
-            Source::Json(pointer) => match self.parsed()?.at(pointer).ok()?? {
-                Json::String(s) => text(s),
-                // A number as written, within what a use carries: a value
-                // taken is at most `TAKEN` bytes, whatever its kind (ADR-0047
-                // decision 22).
-                Json::Number(n) => carried(n.text()).then(|| n.text().as_bytes().to_vec()),
-                _ => None,
-            },
+            Source::Json(pointer) => {
+                let v = self.parsed()?.at(pointer).ok()??;
+                match v.kind() {
+                    // Decoded only within what a use carries (K2b-7e-4b-2).
+                    Kind::String => text(&v.string_within(TAKEN)?),
+                    // A number as written, within what a use carries: a value
+                    // taken is at most `TAKEN` bytes, whatever its kind
+                    // (ADR-0047 decision 22).
+                    Kind::Number => {
+                        let n = v.number()?;
+                        carried(n).then(|| n.as_bytes().to_vec())
+                    }
+                    Kind::Null | Kind::Bool | Kind::Array | Kind::Object => None,
+                }
+            }
         }
     }
 

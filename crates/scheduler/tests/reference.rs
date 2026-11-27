@@ -213,11 +213,12 @@ const JOURNALS: &[(u32, u32, &str)] = &[
     // fields removed, every line the same; `decorated` equal to `handed`
     // throughout, until a gate stands between them (§ Measured K2b-9b-1).
     // Re-pinned with the corpus (K2b-7e-2b-3a-1): its logs with a call
-    // queried, the other logs' draws their own keys'.
+    // queried, the other logs' draws their own keys'. Again (K2b-7e-4b-2):
+    // its capture-pointer mutants, refused, number the barrier logs anew.
     (
         9,
         5,
-        "baf16154225959cfed00065ea253b1e708fe060079d8c12cbf33d893f918af53",
+        "c8d241b45c10ea54dd973c6b8660495dae42095baad8eed4dba59d74e4ff5c6a",
     ),
 ];
 
@@ -298,11 +299,15 @@ const CLASSES: &[(u32, u32, u32, &str)] = &[
     // a found answer's hand-off, a refusal read; the fold reads none of them
     // yet — the same classes. Re-pinned with the corpus (K2b-7e-2b-3a-1):
     // its logs with a call queried, the other logs' draws their own keys'.
+    // Again (K2b-7e-4b-2): its capture-pointer mutants, each refused and
+    // never run, number the barrier logs after them anew (their index is
+    // the corpus's length when made); without the mutants both digests are
+    // the last pins', measured.
     (
         9,
         5,
         7,
-        "ddc9a8f198be23cb80069e2ab4a34563058627795da23e7cf78edab9cb9ba130",
+        "c8dd9df07b94987b394344beda3d648f88a492b5d21a98370b9f2f379ac01cc3",
     ),
 ];
 

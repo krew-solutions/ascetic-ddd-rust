@@ -938,6 +938,10 @@ fn the_rules_meaning_is_pinned_to_its_revision() {
             14,
             "2a3e57b5b07330fadfa44d4bd89d90b35184368c5e2cb608209221463548ebe3",
         ),
+        (
+            15,
+            "1d2b81c2cc72a25d55bc1f2cb9daa7f36eb8fa292c7025bc038bacf57d1dcc30",
+        ),
     ];
     let mut digest = Sha256::new();
     for line in fixture::corpus::lines() {
@@ -1343,7 +1347,7 @@ fn the_profile_names_what_the_shell_reads_and_sends_by() {
     let report = run_with(header(), &seen, &NoHost, 1_000);
     assert!(report.violations.is_empty(), "{:?}", report.violations);
     type Edit = (&'static str, fn(&mut Profile));
-    let edits: [Edit; 9] = [
+    let edits: [Edit; 10] = [
         ("a pointer without its slash", |p| p.problem = "code".into()),
         ("a pointer's bad escape", |p| p.problem = "/c~2".into()),
         ("no correlation header", |p| p.correlation = String::new()),
@@ -1358,6 +1362,9 @@ fn the_profile_names_what_the_shell_reads_and_sends_by() {
         }),
         ("no resend floor", |p| p.resend = 0),
         ("no answer cap", |p| p.answer_cap = 0),
+        ("an answer cap past a tape's places", |p| {
+            p.answer_cap = ascetic_ddd_command_log::json::LONGEST + 1
+        }),
         ("no idle", |p| p.idle = 0),
     ];
     for (name, edit) in edits {
@@ -1366,6 +1373,11 @@ fn the_profile_names_what_the_shell_reads_and_sends_by() {
         let report = run_with(h, &seen, &NoHost, 1_000);
         assert_eq!(pairs(&report), vec![(1, Rule::Header)], "{name}");
     }
+    // The longest cap a tape reads is admitted.
+    let mut h = header();
+    h.profile.answer_cap = ascetic_ddd_command_log::json::LONGEST;
+    let report = run_with(h, &seen, &NoHost, 1_000);
+    assert!(report.violations.is_empty(), "{:?}", report.violations);
     let mut h = header();
     h.profile.problem = String::new();
     let report = run_with(h, &seen, &NoHost, 1_000);

@@ -22,8 +22,8 @@ use crate::log::{LogError, Reader};
 use crate::rate::{self, Curve, Lower};
 use crate::record::{
     Action, Bus, By, Capture, Codec, Dep, Field, Form, Header, Hole, Limit, Observe, Of, On,
-    Outcome, Payload, Place, Predicate, Probe, Record, Rendering, Rest, Safety, Span, StepId,
-    Subject, Test, Value,
+    Outcome, Payload, Place, Predicate, Probe, Record, Rendering, Rest, Safety, Source, Span,
+    StepId, Subject, Test, Value,
 };
 use crate::runs::{Event, Sorter};
 use crate::shape::{self, Shape};
@@ -961,6 +961,14 @@ impl<H: Host> Pass<'_, H> {
                 found.push(format!("profile: no {name}"));
             }
         }
+        // A body is read into a tape whose places are `u32`s (ADR-0047
+        // decision 23, K2b-7e-4b-2): a longer one would be unreadable.
+        if profile.answer_cap > crate::json::LONGEST {
+            found.push(format!(
+                "profile: an answer cap past {} bytes",
+                crate::json::LONGEST
+            ));
+        }
         let mut channels = BTreeSet::new();
         for c in &self.header.channels {
             if !channels.insert(c.name.clone()) {
@@ -1686,6 +1694,17 @@ impl<H: Host> Pass<'_, H> {
             Action::Observe(o) => o.until.as_slice(),
             _ => &[],
         };
+        // A capture's pointer as a predicate's: one the reader cannot follow
+        // would take nothing, silently (K2b-7e-4b-2).
+        for c in &r.capture {
+            if let Source::Json(pointer) = &c.source
+                && crate::json::tokens(pointer).is_err()
+            {
+                found.push(format!(
+                    "the capture's pointer {pointer:?} is not RFC 6901's"
+                ));
+            }
+        }
         for p in bodies.chain(until) {
             if crate::json::tokens(&p.pointer).is_err() {
                 found.push(format!("the pointer {:?} is not RFC 6901's", p.pointer));

@@ -1145,6 +1145,44 @@ pub enum Kind {
     Object,
 }
 
+/// A value a tape's is compared against: a tree, its objects' members
+/// sorted by name, once (K2b-7e-4b-2). Its `Debug` shows only its shape.
+pub struct Sorted(Json);
+
+impl Sorted {
+    /// `want`, its objects' members sorted in place.
+    pub fn new(mut want: Json) -> Sorted {
+        sort(&mut want);
+        Sorted(want)
+    }
+}
+
+impl fmt::Debug for Sorted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+fn sort(v: &mut Json) {
+    match v {
+        Json::Array(items) => items.iter_mut().for_each(sort),
+        Json::Object(members) => {
+            members.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            members.iter_mut().for_each(|(_, v)| sort(v));
+        }
+        Json::Null | Json::Bool(_) | Json::Number(_) | Json::String(_) => {}
+    }
+}
+
+/// Whether a number lexed is `n` by value: `Number`'s equality over its
+/// text, nothing allocated.
+fn same(n: &Number, m: &Lexed<'_>) -> bool {
+    let zero = m.len == 0;
+    n.negative == (m.negative && !zero)
+        && n.exponent == if zero { 0 } else { m.exponent }
+        && n.digits.bytes().eq(m.digits())
+}
+
 /// A value in a [`Tape`]. Its `Debug` shows only its kind.
 #[derive(Clone, Copy)]
 pub struct Node<'t> {
@@ -1210,14 +1248,71 @@ impl<'t> Node<'t> {
         lex(self.text, self.start()).ok().map(|(n, _)| n.text)
     }
 
-    /// Its text decoded, if it is a string.
+    /// Its text decoded, if it is a string: sized at once, its decoded
+    /// length counted first (K2b-7e-4b-2).
     pub fn string(&self) -> Option<String> {
+        self.string_within(usize::MAX)
+    }
+
+    /// Its text decoded, if it is a string of at most `most` bytes decoded;
+    /// none past them, nothing held for them.
+    pub fn string_within(&self, most: usize) -> Option<String> {
         if self.kind() != Kind::String {
             return None;
         }
-        let mut s = String::new();
+        let len = decoded(self.text, self.start())
+            .take(most.saturating_add(1))
+            .count();
+        if len > most {
+            return None;
+        }
+        let mut s = String::with_capacity(len);
         decode(self.text, self.start().saturating_add(1), &mut s).ok()?;
         Some(s)
+    }
+
+    /// Whether it equals `want` as [`Json`]'s own equality has it: numbers
+    /// by their decimal values, strings decoded, arrays in order, objects
+    /// member by member in any order — each of its members found in
+    /// `want`'s, sorted, by its decoded name (K2b-7e-4b-2).
+    pub fn equals(&self, want: &Sorted) -> bool {
+        self.equal(&want.0)
+    }
+
+    /// Whether it is an array holding an element equal to `want`.
+    pub fn contains(&self, want: &Sorted) -> bool {
+        self.kind() == Kind::Array && self.items().any(|x| x.equal(&want.0))
+    }
+
+    fn equal(&self, want: &Json) -> bool {
+        match want {
+            Json::Null => self.kind() == Kind::Null,
+            Json::Bool(b) => self.bool() == Some(*b),
+            Json::Number(n) => {
+                self.kind() == Kind::Number
+                    && lex(self.text, self.start()).is_ok_and(|(m, _)| same(n, &m))
+            }
+            Json::String(s) => self.is(s),
+            Json::Array(a) => {
+                self.kind() == Kind::Array
+                    && self.items().count() == a.len()
+                    && self.items().zip(a).all(|(x, w)| x.equal(w))
+            }
+            Json::Object(o) => {
+                // Each name once on either side (the grammar refuses a
+                // second): a member each found, and as many, is all of them.
+                self.kind() == Kind::Object
+                    && self.members().count() == o.len()
+                    && self.members().all(|(k, v)| {
+                        o.binary_search_by(|(name, _)| {
+                            name.bytes().cmp(decoded(self.text, k.start()))
+                        })
+                        .ok()
+                        .and_then(|i| o.get(i))
+                        .is_some_and(|(_, w)| v.equal(w))
+                    })
+            }
+        }
     }
 
     /// Whether it is a string whose text decoded is `s`.

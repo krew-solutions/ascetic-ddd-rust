@@ -113,5 +113,14 @@ fn stage_2_s_judging_holds_within_its_bound() {
             peak > cap,
             "at {cap}: {peak} B, the document's {cap} not seen"
         );
+        // Where the cap's terms outweigh the record's, the bound is near what
+        // is held: the tape and its names' check at the cap, not a tree
+        // (ADR-0047 decision 23, K2b-7e-4b-2).
+        if cap > 65_536 {
+            assert!(
+                peak as f64 >= 0.8 * stated as f64,
+                "at {cap}: {peak} B of {stated}"
+            );
+        }
     }
 }

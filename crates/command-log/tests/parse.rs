@@ -268,12 +268,14 @@ fn a_body_is_parsed_on_its_first_reader_alone() {
     let r = read(&ok);
     let none = peak_of(|| (r.status(), r.code("/code"), r.holds(&[], &fills).unwrap()));
     assert!(none < 64, "{none} B held with nothing reading the body");
-    // Its first reader: one tree, within its bound.
+    // Its first reader: one tape, its entries — the forest has no object —
+    // and its pointer's tokens (K2b-7e-4b-2).
     let first = peak_of(|| r.holds(&exists, &fills).unwrap());
     let len = u64::try_from(body.len()).unwrap();
-    assert!(first > len, "{first} B: no tree for its reader");
+    let entries = ENTRY as u64 * (len / 2 + 1);
+    assert!(first >= entries, "{first} B: no tape for its reader");
     assert!(
-        first <= bound(len) + pointer_bound(2),
+        first <= entries + pointer_bound(2),
         "{first} B past its bound"
     );
     // A second reader: the tree kept, none built again.
@@ -369,4 +371,200 @@ fn a_document_past_the_longest_is_unreadable_and_holds_nothing() {
     unsafe { std::alloc::dealloc(p, layout) };
     assert_eq!(read, Some((Some(JsonError::Long), Some(JsonError::Long))));
     assert!(held < 1_024, "{held} B held for a document too long");
+}
+
+/// What `f`'s result holds once it is made.
+fn retained<T>(f: impl FnOnce() -> T) -> (T, u64) {
+    let base = NOW.with(Cell::get);
+    let t = f();
+    (t, u64::try_from(NOW.with(Cell::get) - base).unwrap())
+}
+
+/// K2b-7e-4b-2 of ADR-0047 (decision 23): reading an answer holds within
+/// `answer::bound`, and above its parts: a predicate's want alive while its
+/// reading builds the tape and its names' check; a problem's code decoded
+/// at once, its buffer its length.
+#[test]
+fn reading_an_answer_holds_within_its_bound() {
+    use ascetic_ddd_command_log::answer::{self, Reply, read};
+    use ascetic_ddd_command_log::fills::{Fills, Namespace};
+    use ascetic_ddd_command_log::record::{Predicate, Test, Value};
+    use ascetic_ddd_command_log::render::RunSecret;
+    use ascetic_ddd_command_log::shape::Shape;
+    let secret = RunSecret::new([0; 32]);
+    let fills = Fills {
+        namespace: Namespace(0),
+        secret: &secret,
+        run_start: 0,
+        sent: 0,
+        captured: &[],
+    };
+    let members: Vec<String> = (0..10_000).map(|i| format!("\"{i}\":{i}")).collect();
+    let doc = format!("{{{}}}", members.join(","));
+    let n = doc.len() as u64;
+    let numbers: Vec<String> = (0..10_000).map(|i| i.to_string()).collect();
+    let literal = format!("[{}]", numbers.join(","));
+    let shape = Shape {
+        literal_bytes: literal.len() as u64,
+        pointer_bytes: 2,
+        ..Shape::default()
+    };
+    let stated = answer::bound(n, &shape, 5);
+    let (want, kept) = retained(|| json::parse(literal.as_bytes()).unwrap());
+    drop(want);
+    // A predicate's want, then the tape its reading builds.
+    let reply = Reply {
+        status: 200,
+        headers: &[],
+        body: Some(doc.as_bytes()),
+    };
+    let r = read(&reply);
+    let equals = [Predicate {
+        pointer: "/0".to_owned(),
+        test: Test::Equals(Value::Literal(literal.clone())),
+    }];
+    let held = peak_of(|| r.holds(&equals, &fills).unwrap());
+    let parts = ENTRY as u64 * (n / 2 + 1) + names_bound(n) + kept;
+    eprintln!("MEASURED a want and a tape: {held} B, its parts {parts} B, bound {stated} B");
+    assert!(held <= stated, "{held} > {stated}");
+    assert!(
+        held >= parts,
+        "{held} < {parts}: the want or the names unseen"
+    );
+    // A problem's code as long as the body allows: its tape, then the code
+    // sized at once.
+    // Its text in many pieces, an escape every other character: a string
+    // grown piece by piece would hold more than its length.
+    let code = format!("{{\"code\":\"a.{}\"}}", "b\\u0062".repeat(35_001));
+    let n = code.len() as u64;
+    let problem = [(
+        "content-type".to_owned(),
+        b"application/problem+json".to_vec(),
+    )];
+    let reply = Reply {
+        status: 404,
+        headers: &problem,
+        body: Some(code.as_bytes()),
+    };
+    let r = read(&reply);
+    let mut read_code = None;
+    let held = peak_of(|| read_code = r.code("/code"));
+    let read_code = read_code.unwrap();
+    assert_eq!(read_code.capacity(), read_code.len(), "the code grown");
+    let stated = answer::bound(n, &Shape::default(), 5);
+    assert!(held <= stated, "{held} > {stated}");
+    assert!(held >= ENTRY as u64 * (n / 2 + 1) + names_bound(n));
+}
+
+/// Each of `answer::bound`'s terms seen where it binds (K2b-7e-4b-2): the
+/// names' check beside the tape when the want is small; the code kept while
+/// a long pointer's tokens are held, past the names' check; a long string a
+/// capture refuses decoded no further than what a use carries.
+#[test]
+fn each_term_of_the_answer_s_bound_binds() {
+    use ascetic_ddd_command_log::answer::{self, Reply, TAKEN, read};
+    use ascetic_ddd_command_log::fills::{Fills, Namespace};
+    use ascetic_ddd_command_log::record::{Capture, Predicate, Source, Subject, Test, Value};
+    use ascetic_ddd_command_log::render::RunSecret;
+    use ascetic_ddd_command_log::shape::Shape;
+    let secret = RunSecret::new([0; 32]);
+    let fills = Fills {
+        namespace: Namespace(0),
+        secret: &secret,
+        run_start: 0,
+        sent: 0,
+        captured: &[],
+    };
+    let members: Vec<String> = (0..10_000).map(|i| format!("\"{i}\":{i}")).collect();
+    let doc = format!("{{{}}}", members.join(","));
+    let n = doc.len() as u64;
+    let entries = ENTRY as u64 * (n / 2 + 1);
+    // A small want: the names' check binds.
+    let shape = Shape {
+        literal_bytes: 1,
+        pointer_bytes: 2,
+        ..Shape::default()
+    };
+    let reply = Reply {
+        status: 200,
+        headers: &[],
+        body: Some(doc.as_bytes()),
+    };
+    let r = read(&reply);
+    let one = [Predicate {
+        pointer: "/0".to_owned(),
+        test: Test::Equals(Value::Literal("0".into())),
+    }];
+    let held = peak_of(|| r.holds(&one, &fills).unwrap());
+    let stated = answer::bound(n, &shape, 5);
+    assert!(held <= stated, "{held} > {stated}");
+    assert!(held >= entries + names_bound(n), "{held}: the names unseen");
+    assert!(
+        held + n > stated,
+        "{held} B against {stated}: the names' term loose"
+    );
+    // The code kept, then a pointer of empty tokens just past a power of
+    // two, its tokens' densest: past the names' check, the bound near.
+    let code = format!("{{\"code\":\"a.{}\"}}", "b".repeat(65_536));
+    let n = code.len() as u64;
+    let pointer = "/".repeat(1_025);
+    let shape = Shape {
+        pointer_bytes: pointer.len() as u64,
+        ..Shape::default()
+    };
+    let problem = [(
+        "content-type".to_owned(),
+        b"application/problem+json".to_vec(),
+    )];
+    let reply = Reply {
+        status: 404,
+        headers: &problem,
+        body: Some(code.as_bytes()),
+    };
+    let r = read(&reply);
+    let far = [Predicate {
+        pointer: pointer.clone(),
+        test: Test::Exists,
+    }];
+    let held = peak_of(|| {
+        let kept = r.code("/code");
+        let found = r.holds(&far, &fills).unwrap();
+        (kept, found)
+    });
+    let stated = answer::bound(n, &shape, 5);
+    let entries = ENTRY as u64 * (n / 2 + 1);
+    assert!(held <= stated, "{held} > {stated}");
+    assert!(
+        held > entries + names_bound(n),
+        "{held}: the code and the tokens not held past the names' check"
+    );
+    assert!(
+        held + n / 2 > stated,
+        "{held} B against {stated}: the code's term loose"
+    );
+    // A string past what a use carries, refused with nothing decoded.
+    let long = format!("{{\"s\":\"{}\"}}", "A".repeat(1 << 20));
+    let reply = Reply {
+        status: 200,
+        headers: &[],
+        body: Some(long.as_bytes()),
+    };
+    let r = read(&reply);
+    let capture = Capture {
+        subject: Subject {
+            kind: "device".into(),
+            scope: vec![],
+            index: 1,
+        },
+        slot: "s".into(),
+        source: Source::Json("/s".into()),
+        secret: false,
+    };
+    // The tape built by a first take, so that the second's peak is its own.
+    assert_eq!(r.take(&capture), None);
+    let held = peak_of(|| r.take(&capture));
+    assert!(
+        held <= pointer_bound(2) + TAKEN as u64,
+        "{held} B: the string decoded past {TAKEN}"
+    );
 }

@@ -7,7 +7,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use ascetic_ddd_command_log::json::{
-    DEPTH, Json, JsonError, Kind, Malformed, Node, parse, tape, tokens,
+    DEPTH, Json, JsonError, Kind, Malformed, Node, Sorted, parse, tape, tokens,
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -572,6 +572,32 @@ fn canon(v: &Json) -> String {
     }
 }
 
+/// Two documents compared on the tape as their trees are, both ways
+/// (K2b-7e-4b-2): `a`'s tape against `b`'s tree and `b`'s against `a`'s;
+/// each held in an array after a zero, against the other.
+fn compared(a: &[u8], x: &Json, b: &[u8], y: &Json, equal: bool) {
+    let zero = read("0").unwrap();
+    for (text, tree) in [(a, y), (b, x)] {
+        let want = Sorted::new(tree.clone());
+        let shown = || String::from_utf8_lossy(text).into_owned();
+        assert_eq!(
+            tape(text).unwrap().root().equals(&want),
+            equal,
+            "{}",
+            shown()
+        );
+        // Past the depth one more level allows, no array holds it.
+        if let Ok(held) = tape(format!("[0,{}]", shown()).as_bytes()) {
+            assert_eq!(
+                held.root().contains(&want),
+                equal || *tree == zero,
+                "{}",
+                shown()
+            );
+        }
+    }
+}
+
 /// The strata `g` reaches: objects naming two members equal only decoded,
 /// and objects naming both names of one hash.
 fn strata_of(g: &G, counts: &mut [usize; 2]) {
@@ -734,6 +760,7 @@ fn the_reader_agrees_with_python_s_json_and_decimal() {
         } else {
             unequal += 1
         }
+        compared(a.as_bytes(), &x, b.as_bytes(), &y, e);
         cases.push(
             serde_json::json!({"a": STANDARD.encode(&a), "b": STANDARD.encode(&b), "equal": e}),
         );
@@ -747,6 +774,7 @@ fn the_reader_agrees_with_python_s_json_and_decimal() {
         } else {
             unequal += 1
         }
+        compared(a, x, b, y, e);
         cases.push(
             serde_json::json!({"a": STANDARD.encode(a), "b": STANDARD.encode(b), "equal": e}),
         );
@@ -788,4 +816,22 @@ fn the_reader_agrees_with_python_s_json_and_decimal() {
         );
     }
     println!("{reached}");
+}
+
+/// Every pair of numbers the generator writes, compared on the tape as by
+/// the tree (K2b-7e-4b-2): `same` against `Number`'s equality.
+#[test]
+fn numbers_compare_on_the_tape_as_in_the_tree() {
+    let mut equal = 0;
+    for a in NUMBERS {
+        for b in NUMBERS {
+            let (Ok(x), Ok(y)) = (read(a), read(b)) else {
+                continue;
+            };
+            let e = x == y;
+            equal += usize::from(e && a != b);
+            compared(a.as_bytes(), &x, b.as_bytes(), &y, e);
+        }
+    }
+    assert!(equal >= 20, "{equal} pairs of one value written apart");
 }

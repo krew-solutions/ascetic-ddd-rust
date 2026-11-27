@@ -648,6 +648,18 @@ fn mutant(records: &[Record], which: &str, k: &Key) -> Option<Vec<Record>> {
                 });
             }
         }
+        // A capture whose pointer the reader cannot follow (K2b-7e-4b-2).
+        "capture-pointer" => {
+            let capturing: Vec<usize> = all
+                .iter()
+                .copied()
+                .filter(|&i| !m[i].capture.is_empty())
+                .collect();
+            let i = pick("i", &capturing)?;
+            if let Some(c) = m[i].capture.first_mut() {
+                c.source = ascetic_ddd_command_log::record::Source::Json("id".into());
+            }
+        }
         // An assertion left out, or one its action cannot have.
         "expect-dropped" => {
             let asserting: Vec<usize> = all
@@ -705,6 +717,7 @@ pub fn logs() -> Vec<(String, Vec<Record>)> {
         "dot-segment",
         "key-in-path",
         "bad-predicate",
+        "capture-pointer",
         "expect-dropped",
         "expect-misfit",
     ];
@@ -783,6 +796,12 @@ pub fn lines() -> Vec<String> {
         let mut headers = vec![(name.clone(), corpus_header())];
         if base {
             headers.push((format!("{name}/short"), short_header()));
+        }
+        // An answer cap past a tape's places, refused (K2b-7e-4b-2).
+        if name == "log-0" {
+            let mut h = corpus_header();
+            h.profile.answer_cap = ascetic_ddd_command_log::json::LONGEST + 1;
+            headers.push((format!("{name}/capped"), h));
         }
         for (name, header) in headers {
             let (report, bounds, shapes) = run_shaped(header.clone(), &records, &NoHost, 3);

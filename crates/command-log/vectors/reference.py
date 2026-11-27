@@ -345,6 +345,9 @@ def verdict(text, clock="cursor"):
         found.add((1, "header"))
     if any(int(profile[f]) == 0 for f in ("resend", "answer_cap", "idle")):
         found.add((1, "header"))
+    # A body is read into a tape whose places are 32-bit (ADR-0047 K2b-7e-4b-2).
+    if int(profile["answer_cap"]) > 2**32 - 1:
+        found.add((1, "header"))
     route, jitter = int(profile["route_timeout"]), int(profile["jitter"])
     for op in header["operations"]:
         if int(op["timeout"]) == 0 or int(op["timeout"]) + jitter >= route:
@@ -521,6 +524,12 @@ def verdict(text, clock="cursor"):
         # JSON text, a value that is no bytes.
         bodies = [p for o in r["expect"] if isinstance(o, dict) for p in o["response"]["body"]]
         until = action["observe"]["until"] if "observe" in action else []
+        # A capture's pointer as a predicate's (K2b-7e-4b-2).
+        for c in r["capture"]:
+            if isinstance(c["source"], dict) and "json" in c["source"]:
+                pointer = c["source"]["json"]
+                if pointer and (not pointer.startswith("/") or re.search(r"~(?![01])", pointer)):
+                    v.add("predicate")
         for p in bodies + until:
             pointer = p["pointer"]
             if pointer and (not pointer.startswith("/") or re.search(r"~(?![01])", pointer)):
