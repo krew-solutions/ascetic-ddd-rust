@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a, K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3), K2b-7e-2b-2c-1 to K2b-7e-2b-2c-4 built, K2b-7e-2b-3 decided and cut in five, K2b-7e-2b-3a-1 to K2b-7e-2b-3a-3, K2b-7e-2b-3b, K2b-7e-2b-3c-1 and K2b-7e-2b-3c-2 built, K2b-7e-2b-3d next; decision 23 decided, K2b-7e-4a built, K2b-7e-4b decided and cut in three, K2b-7e-4b-1 and K2b-7e-4b-2 built, K2b-7e-4b-3 measured — four refutations, one remedy each —, K2b-7e-4b-4 and K2b-7e-4b-5 built, the rerun after them next; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a, K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3), K2b-7e-2b-2c-1 to K2b-7e-2b-2c-4 built, K2b-7e-2b-3 decided and cut in five, K2b-7e-2b-3a-1 to K2b-7e-2b-3a-3, K2b-7e-2b-3b, K2b-7e-2b-3c-1 and K2b-7e-2b-3c-2 built, K2b-7e-2b-3d next; decision 23 decided, K2b-7e-4a built, K2b-7e-4b decided and cut in three, K2b-7e-4b-1 and K2b-7e-4b-2 built, K2b-7e-4b-3 measured — four refutations, one remedy each —, K2b-7e-4b-4 and K2b-7e-4b-5 built and measured, K2b-7e-4 done (decision 23's steps 1 and 2), K2b-7e-2b-3d next, decision 23's step 3b on the owner's confirmation; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -2891,6 +2891,30 @@ the grammar alone on most shapes. With every other core spinning (the null judge
 - **R8, refuted**: a want of 64 KiB costs 1.2 ms (8 KiB 159 µs, 1 KiB 25 µs) against `Exists` on 64 KiB of numbers'
   178 µs — the tree's parse of the literal, every judgement.
 
+**M-a after the remedies** (2026-11-28; the load server, idle; the trees of `7a1bdaf`, after K2b-7e-4b-4, and of
+`a0b90a5`, after K2b-7e-4b-5; at 256 KiB, S* of the typical shapes; first → after 4b-4 → after 4b-5):
+
+| refutation | shape | ratio |
+|---|---|---|
+| R4, four lookups to `Exists`, at most 2 | members | 3.77 → 2.56 → 1.44 |
+| | shuffled members | 2.92 → 2.34 → 1.79 |
+| | long names | 2.88 → 2.33 → 2.02 (1.96 at 64 KiB, 2.40 at 1 MiB) |
+| | deep | 1.98 → 1.53 → 1.22 |
+| R5, `Contains` of an absent string to `Exists`, at most 1.5 | strings | 2.03 → 1.78 → 1.27 |
+| | text not ASCII | 1.89 → 1.58 → 1.20 |
+| | zeros, at their S* of 64 KiB | 1.16 → 1.44 → 1.66 |
+| R7, the names of one hash to the members' grammar, at most 4 | — | 9.8 → 5.7 → 2.3 (1.3 at 64 KiB, 2.8 at 1 MiB) |
+
+- **R4, not refuted** on members, shuffled members, the deep object, records and numbers; **on long names at its
+  threshold** — 2.0 to 2.4: a 1 KiB prefix every name shares, walked by each lookup member by member. Its remedy, each
+  object's hash run kept and searched, is owed with its trigger: a plan's pointers into objects of long names sharing a
+  prefix, past S*.
+- **R5, not refuted** on strings and text not ASCII; on zeros at 64 KiB the ratio moved 1.16, 1.44, 1.66 across the
+  three runs — the walk a number's kind read an element, against a build of some 13 ns an element —, and its whole,
+  712 µs, stays within J/2.
+- **R7, not refuted**: the names of one hash reach S* = 64 KiB, none before.
+- S* otherwise unchanged: 256 KiB on the typical shapes, 64 KiB on zeros and the deep object.
+
 **Decision 21 at κ = 0, measured on the load server and on the laptop** (2026-11-26/27; commit `effcfad`, optimised,
 one test at a time): the laptop's replay with large answers (`tests/pace.rs`, `the_pace_replayed_with_large_answers`,
 500 reads a second for 30 s, one answer in 100 large) put S past 500 ms at κ = 0 at 64 KiB — the roles' prediction that
@@ -3292,7 +3316,9 @@ only and measures move to the 12-core box.
     29 % and 58 % on zeros, 41 % on members, 40 % on shuffled members, none on numbers, chains, deep or long names —:
     a fresh tape's pages faulted in each judgement. Its remedy, a tape reused by the source, waits on its trigger: the
     host's allocator measured at H-1 (its mmap threshold, its purge of large frees); under glibc's defaults the
-    effect is nil.
+    effect is nil. After K2b-7e-4b-5 (2026-11-28, § Measured, M-a after the remedies): R4 not refuted but on long
+    names, at its threshold — each object's hash run kept is owed to a plan that looks up long shared-prefix names past
+    S* —; R5 and R7 not refuted. K2b-7e-4b is done.
 - **Decision 21's owed** (2026-11-24, its roles): **a hung decorator holds the band's front** to its deadline (up to
   the route timeout) — a bound on a head not arrived, trigger: H-1's decorations measured past J; the Decorator
   contract stated now (shared credentials refreshed ahead, off the attempt's path; headers valid to the attempt's
@@ -3606,5 +3632,7 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-28: M-a rerun after K2b-7e-4b-4 on the load server (R4, R5, R7 still refuted by smaller margins; R6
   refuted on the densest shapes) and K2b-7e-4b-5 built (§ Measured): a plain string compared over its text; K2b-7e-4b-4's
   unit test's escapes restored — its record named escapes it no longer held.
+- 2026-11-28: M-a rerun after K2b-7e-4b-5 (§ Measured): R4 not refuted but on long names at its threshold, R5 and
+  R7 not refuted; K2b-7e-4b done.
 - 2026-11-27: the stall twin's tally (K2b-8d-2) counts apart an on-time attempt the stand refused — the censor Root's
   second sighting, its path printed, a Root by decision 19 (a test-only fix).
