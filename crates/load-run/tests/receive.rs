@@ -37,6 +37,9 @@ use fixture::*;
 struct OneStand;
 
 impl Stand for OneStand {
+    fn gate_bytes(&self) -> ascetic_ddd_load_run::stand::GateBytes {
+        ascetic_ddd_load_run::stand::GateBytes::NONE
+    }
     fn route(&self, _: &Record, _: &Rest) -> Result<Route, String> {
         Ok(Route {
             authority: "stand.test".to_owned(),
@@ -65,6 +68,10 @@ struct Tcp {
 
 impl Egress for Tcp {
     type Io = tokio::net::TcpStream;
+
+    fn io_bytes(&self) -> u64 {
+        0
+    }
 
     fn ports(&self, _: u32) -> usize {
         62

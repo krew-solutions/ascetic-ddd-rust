@@ -39,6 +39,9 @@ const NAMESPACE: Namespace = Namespace(1);
 struct OneStand;
 
 impl Stand for OneStand {
+    fn gate_bytes(&self) -> ascetic_ddd_load_run::stand::GateBytes {
+        ascetic_ddd_load_run::stand::GateBytes::NONE
+    }
     fn route(&self, _: &Record, _: &Rest) -> Result<Route, String> {
         Ok(Route {
             authority: "stand.test".to_owned(),
@@ -275,6 +278,10 @@ impl<C: Clock> Carrier<C> for Drill {
     ) -> Result<ascetic_ddd_load_run::carrier::AttemptCosts, ascetic_ddd_load_run::carrier::Unstated>
     {
         Ok(ascetic_ddd_load_run::carrier::AttemptCosts::NOTHING)
+    }
+
+    fn gate_bytes(&self) -> ascetic_ddd_load_run::stand::GateBytes {
+        ascetic_ddd_load_run::stand::GateBytes::NONE
     }
 
     fn probe(

@@ -102,6 +102,10 @@ impl Carrier<RealClock> for Waiting {
         Ok(ascetic_ddd_load_run::carrier::AttemptCosts::NOTHING)
     }
 
+    fn gate_bytes(&self) -> ascetic_ddd_load_run::stand::GateBytes {
+        ascetic_ddd_load_run::stand::GateBytes::NONE
+    }
+
     fn probe(
         &self,
         _: u32,
@@ -195,6 +199,9 @@ fn a_wait_s_lag_is_the_thread_s_since_it_last_blocked() {
 struct OneStand;
 
 impl Stand for OneStand {
+    fn gate_bytes(&self) -> ascetic_ddd_load_run::stand::GateBytes {
+        ascetic_ddd_load_run::stand::GateBytes::NONE
+    }
     fn route(&self, _: &Record, _: &Rest) -> Result<Route, String> {
         Ok(Route {
             authority: "stand.test".to_owned(),
@@ -276,6 +283,10 @@ struct GatedTcp {
 impl Egress for GatedTcp {
     type Io = Gated;
 
+    fn io_bytes(&self) -> u64 {
+        0
+    }
+
     fn ports(&self, _: u32) -> usize {
         62
     }
@@ -310,6 +321,16 @@ impl Egress for GatedTcp {
 struct Hogging(Arc<RealClock>);
 
 impl Decorator for Hogging {
+    fn bound(
+        &self,
+        _: &ascetic_ddd_command_log::shape::Shape,
+    ) -> Result<ascetic_ddd_load_run::decorate::Decorations, ascetic_ddd_load_run::carrier::Unstated>
+    {
+        Ok(ascetic_ddd_load_run::decorate::Decorations {
+            headers: 1,
+            bytes: 1_024,
+        })
+    }
     async fn decorate<'a>(&'a self, d: Decoration<'a>) -> Result<Vec<(String, String)>, String> {
         // Only the hog's call, planned at its instant, spins.
         if d.record.at == HOG_AT {
@@ -533,6 +554,10 @@ struct RefusingFirst {
 impl Egress for RefusingFirst {
     type Io = tokio::net::TcpStream;
 
+    fn io_bytes(&self) -> u64 {
+        0
+    }
+
     fn ports(&self, _: u32) -> usize {
         62
     }
@@ -637,6 +662,16 @@ fn a_timer_woken_late_is_its_path_s_lag() {
 struct Awaiting(Arc<RealClock>);
 
 impl Decorator for Awaiting {
+    fn bound(
+        &self,
+        _: &ascetic_ddd_command_log::shape::Shape,
+    ) -> Result<ascetic_ddd_load_run::decorate::Decorations, ascetic_ddd_load_run::carrier::Unstated>
+    {
+        Ok(ascetic_ddd_load_run::decorate::Decorations {
+            headers: 1,
+            bytes: 1_024,
+        })
+    }
     async fn decorate<'a>(&'a self, d: Decoration<'a>) -> Result<Vec<(String, String)>, String> {
         if d.record.at == 0 {
             let until = self.0.now() + 5_000;
@@ -721,6 +756,10 @@ struct RefusedAt {
 
 impl Egress for RefusedAt {
     type Io = tokio::net::TcpStream;
+
+    fn io_bytes(&self) -> u64 {
+        0
+    }
 
     fn ports(&self, _: u32) -> usize {
         62

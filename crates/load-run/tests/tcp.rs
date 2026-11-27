@@ -191,6 +191,9 @@ fn an_egress_admits_its_sources_and_reaches_its_endpoints_with_no_packet() {
 struct Declaring(&'static str);
 
 impl ascetic_ddd_load_run::stand::Stand for Declaring {
+    fn gate_bytes(&self) -> ascetic_ddd_load_run::stand::GateBytes {
+        ascetic_ddd_load_run::stand::GateBytes::NONE
+    }
     fn route(
         &self,
         _: &ascetic_ddd_command_log::record::Record,
@@ -278,6 +281,10 @@ impl Drop for Dropped {
 
 impl Egress for Fake {
     type Io = tokio::net::TcpStream;
+
+    fn io_bytes(&self) -> u64 {
+        0
+    }
 
     fn ports(&self, _: u32) -> usize {
         100

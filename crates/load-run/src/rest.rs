@@ -318,6 +318,7 @@ impl<C: Clock, S: Stand, E: Egress, D: Decorator> Carrier<C> for RestCarrier<S, 
             costs: Costs {
                 connection: CONNECTION
                     .saturating_add(head_buffer(head_bound(&peaks.record, &self.inner.header))),
+                io: self.inner.egress.io_bytes(),
                 answer: self.inner.header.profile.answer_cap.saturating_add(HEAD),
             },
         })
@@ -325,22 +326,18 @@ impl<C: Clock, S: Stand, E: Egress, D: Decorator> Carrier<C> for RestCarrier<S, 
 
     /// Each attempt's own, and its request by class: its frame — the target
     /// encoded, its headers, its body filled —, the request built of it
-    /// before hyper takes it, its copy of the captured values. A decorating
-    /// plan's decorations its decorator's to state (K2b-7e-2b-3b).
+    /// before hyper takes it, its copy of the captured values; its
+    /// decorations at the bound its decorator states for the plan's largest
+    /// record, as a header's (K2b-7e-2b-3b).
     fn attempts(
         &self,
-        _: &ascetic_ddd_command_log::validate::Peaks,
+        peaks: &ascetic_ddd_command_log::validate::Peaks,
     ) -> Result<AttemptCosts, Unstated> {
-        if self
-            .inner
-            .header
-            .operations
-            .iter()
-            .any(|o| !o.decorated.is_empty())
-        {
-            return Err(Unstated { part: "decorator" });
-        }
+        let d = self.inner.decorator.bound(&peaks.record)?;
         Ok(AttemptCosts {
+            decorations: HEADER
+                .saturating_mul(d.bytes)
+                .saturating_add(FIELD.saturating_mul(d.headers)),
             each: ATTEMPT,
             target: TARGET,
             target_hole: TARGET_HOLE,
@@ -436,6 +433,11 @@ impl<C: Clock, S: Stand, E: Egress, D: Decorator> Carrier<C> for RestCarrier<S, 
         opening: Opening<'_>,
     ) -> impl Future<Output = Option<Result<String, Refused>>> + Send {
         self.inner.stand.gate(i, opening)
+    }
+
+    /// Its stand's.
+    fn gate_bytes(&self) -> crate::stand::GateBytes {
+        self.inner.stand.gate_bytes()
     }
 }
 
@@ -739,16 +741,22 @@ pub fn copied(parts: &http::response::Parts) -> Head {
     head(parts)
 }
 
-/// The request REST builds of `frame` to `authority`, built and let go: what
-/// it holds beside its frame, for its executor (`tests/frame.rs`).
+/// The request REST builds of `frame` to `authority`, decorated with
+/// `decorated`, built and let go: what it holds beside its frame, for its
+/// executor (`tests/frame.rs`).
 #[cfg(feature = "testing")]
 #[must_use]
-pub fn built(frame: &Frame, authority: &str, correlation: (&str, &str)) -> bool {
+pub fn built(
+    frame: &Frame,
+    authority: &str,
+    correlation: (&str, &str),
+    decorated: &[(String, String)],
+) -> bool {
     let route = Route {
         authority: authority.to_owned(),
         endpoint: String::new(),
     };
-    build(frame, &route, correlation, &[]).is_ok()
+    build(frame, &route, correlation, decorated).is_ok()
 }
 
 /// The one HTTP/1.1 client builder every connection takes (decision 22): reads
@@ -889,6 +897,35 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
                     format!("a decorated header {name} not a header"),
                 );
             }
+        }
+        // Held where they enter (decision 22, K2b-7e-2b-3b): within the bound
+        // its decorator states for this record, as admission charged it.
+        let bound = match self
+            .decorator
+            .bound(&ascetic_ddd_command_log::shape::shape(&record))
+        {
+            Ok(b) => b,
+            Err(u) => {
+                return a.fault(
+                    "rest.decorator",
+                    format!("its decorations unstated: {}", u.part),
+                );
+            }
+        };
+        let bytes = decorated.iter().fold(0u64, |n, (name, value)| {
+            n.saturating_add(name.len() as u64)
+                .saturating_add(value.len() as u64)
+        });
+        if decorated.len() as u64 > bound.headers || bytes > bound.bytes {
+            return a.fault(
+                "rest.decorator",
+                format!(
+                    "{} decorated headers of {bytes} B, past the {} of {} B its decorator states",
+                    decorated.len(),
+                    bound.headers,
+                    bound.bytes
+                ),
+            );
         }
         // Ready to connect: its frame built and decorated — the harness's
         // from the dispatch (decision 17).

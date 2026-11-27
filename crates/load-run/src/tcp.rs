@@ -87,6 +87,11 @@ pub fn local_ports() -> io::Result<usize> {
 impl Egress for TcpEgress {
     type Io = TcpStream;
 
+    /// A plain socket's: none of its own on the heap.
+    fn io_bytes(&self) -> u64 {
+        0
+    }
+
     /// Every source listed; the bound ones on addresses of their own, each
     /// the host's — a throwaway socket bound to it, no packet sent.
     fn admits(&self, sources: u32) -> Result<(), Unfit> {

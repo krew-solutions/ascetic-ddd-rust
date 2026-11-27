@@ -32,6 +32,9 @@ use fixture::*;
 struct OneStand;
 
 impl Stand for OneStand {
+    fn gate_bytes(&self) -> ascetic_ddd_load_run::stand::GateBytes {
+        ascetic_ddd_load_run::stand::GateBytes::NONE
+    }
     fn route(&self, _: &Record, _: &Rest) -> Result<Route, String> {
         Ok(Route {
             authority: "stand.test".to_owned(),

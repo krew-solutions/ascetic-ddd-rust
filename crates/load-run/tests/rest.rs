@@ -311,6 +311,10 @@ struct Pipe {
 impl Egress for Pipe {
     type Io = Throttled;
 
+    fn io_bytes(&self) -> u64 {
+        0
+    }
+
     fn ports(&self, _: u32) -> usize {
         self.ports
     }
@@ -377,6 +381,9 @@ const DECLARED: &[&str] = &["gateway", "other", "third"];
 struct OneStand(&'static [&'static str]);
 
 impl Stand for OneStand {
+    fn gate_bytes(&self) -> ascetic_ddd_load_run::stand::GateBytes {
+        ascetic_ddd_load_run::stand::GateBytes::NONE
+    }
     /// Every call to the gateway; a list to another endpoint, group 99's to
     /// a third.
     fn route(&self, _: &Record, rest: &Rest) -> Result<Route, String> {
@@ -1073,6 +1080,10 @@ impl Carrier<VirtualClock> for Mixed {
         Carrier::<VirtualClock>::attempts(&self.rest, peaks)
     }
 
+    fn gate_bytes(&self) -> ascetic_ddd_load_run::stand::GateBytes {
+        Carrier::<VirtualClock>::gate_bytes(&self.rest)
+    }
+
     fn probe(
         &self,
         source: u32,
@@ -1497,6 +1508,16 @@ struct Proofs {
 }
 
 impl Decorator for Proofs {
+    fn bound(
+        &self,
+        _: &ascetic_ddd_command_log::shape::Shape,
+    ) -> Result<ascetic_ddd_load_run::decorate::Decorations, ascetic_ddd_load_run::carrier::Unstated>
+    {
+        Ok(ascetic_ddd_load_run::decorate::Decorations {
+            headers: 1,
+            bytes: 1_024,
+        })
+    }
     async fn decorate<'a>(&'a self, _: Decoration<'a>) -> Result<Vec<(String, String)>, String> {
         // Never, for `u64::MAX`: a host's minting over a dead IdP.
         if self.takes == u64::MAX {
@@ -1729,16 +1750,21 @@ fn the_decorator_s_time_is_the_harness_s() {
 }
 
 /// A decorated header its operation does not declare, a value no header
-/// takes, a decorating operation without a decorator: each refused.
+/// takes, a decoration past its decorator's stated bound, a decorating
+/// operation without a decorator: each refused.
 #[test]
 fn what_a_decorator_may_give_is_the_operation_s() {
     let records = vec![call("read", 1, 0, 0, 0)];
     let answers = || vec![(id(&records[0], 1), ok(10, 0))];
     // The run stops, its fault the journal's last line, named, no value in it
     // (decision 18).
+    // A decoration past the bound its decorator states (K2b-7e-2b-3b): held
+    // where it enters, as admission charged it.
+    let past = "x".repeat(1_024 - "dpop".len() + 1);
     for (give, cannot) in [
         (("authorization", "x"), "rest.undeclared_header"),
         (("dpop", "a\nb"), "rest.bad_header"),
+        (("dpop", past.as_str()), "rest.decorator"),
     ] {
         let give = Some((give.0.to_owned(), give.1.to_owned()));
         let (journal, _, _) = run_decorated(decorating(), &records, answers(), 0, give);
@@ -2987,6 +3013,9 @@ fn a_run_dropped_takes_its_attempts_with_it() {
 struct Gating;
 
 impl Stand for Gating {
+    fn gate_bytes(&self) -> ascetic_ddd_load_run::stand::GateBytes {
+        ascetic_ddd_load_run::stand::GateBytes::NONE
+    }
     fn route(&self, _: &Record, _: &Rest) -> Result<Route, String> {
         Ok(Route {
             authority: "stand.test".to_owned(),

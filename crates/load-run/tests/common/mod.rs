@@ -58,6 +58,10 @@ impl<C: Clock> Carrier<C> for Scripted {
         Ok(ascetic_ddd_load_run::carrier::AttemptCosts::NOTHING)
     }
 
+    fn gate_bytes(&self) -> ascetic_ddd_load_run::stand::GateBytes {
+        ascetic_ddd_load_run::stand::GateBytes::NONE
+    }
+
     fn probe(
         &self,
         _: u32,

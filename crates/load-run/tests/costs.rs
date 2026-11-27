@@ -226,6 +226,10 @@ fn lock(way: &Way) -> std::sync::MutexGuard<'_, Ring> {
 struct End {
     rx: Way,
     tx: Way,
+    /// The heap an egress's `Io` holds of its own — TLS's buffers, as a
+    /// host's egress would state them; the harness's, allocated at the
+    /// connect.
+    _own: Vec<u8>,
 }
 
 /// A pipe's two ends, each way of `capacity` bytes, allocated by the stand.
@@ -236,8 +240,13 @@ fn pipe(capacity: usize) -> (End, End) {
             End {
                 rx: a.clone(),
                 tx: b.clone(),
+                _own: Vec::new(),
             },
-            End { rx: b, tx: a },
+            End {
+                rx: b,
+                tx: a,
+                _own: Vec::new(),
+            },
         )
     })
 }
@@ -412,6 +421,8 @@ struct Row {
     /// Each read's `If-Match` a writer's captured value of `VALUE` bytes,
     /// the writer answered at once before it (K2b-7e-2b-3a-3).
     captured: bool,
+    /// The heap each connection's `Io` holds of its own (K2b-7e-2b-3b).
+    io: usize,
 }
 
 /// A read's request beyond its group: a path value of `target` spaces (each
@@ -435,6 +446,7 @@ fn answer(row: Row, at: u64) -> Vec<(u64, Vec<u8>)> {
         chunked,
         req: _,
         captured: _,
+        io: _,
     } = row;
     let framing = if chunked {
         "transfer-encoding: chunked".to_owned()
@@ -502,10 +514,16 @@ struct Pipes {
     /// Each way's capacity: a whole answer fits, as a socket's buffers hold
     /// it.
     ring: usize,
+    /// The heap each connection's `Io` holds of its own, as it states it.
+    io: usize,
 }
 
 impl Egress for Pipes {
     type Io = End;
+
+    fn io_bytes(&self) -> u64 {
+        self.io as u64
+    }
 
     fn ports(&self, _: u32) -> usize {
         100_000
@@ -520,9 +538,11 @@ impl Egress for Pipes {
     }
 
     fn connect(&self, _: u32, _: &Route) -> impl Future<Output = Result<End, Connect>> + Send {
-        let (clock, answers, ring) = (self.clock.clone(), self.answers.clone(), self.ring);
+        let (clock, answers, ring, io) =
+            (self.clock.clone(), self.answers.clone(), self.ring, self.io);
         async move {
-            let (client, server) = pipe(ring);
+            let (mut client, server) = pipe(ring);
+            client._own = vec![1; io];
             stand_spawn(serve(server, answers, clock));
             Ok(client)
         }
@@ -532,6 +552,13 @@ impl Egress for Pipes {
 struct OneStand;
 
 impl Stand for OneStand {
+    fn gate_bytes(&self) -> ascetic_ddd_load_run::stand::GateBytes {
+        ascetic_ddd_load_run::stand::GateBytes {
+            stages: 4_096,
+            run: 512,
+        }
+    }
+
     fn route(&self, _: &Record, _: &Rest) -> Result<Route, String> {
         Ok(Route {
             authority: "stand.test".to_owned(),
@@ -787,6 +814,7 @@ fn shell(n: u64, row: Row, scripted: bool) -> Held {
                         + row.body
                         + 3 * (row.req.target + row.req.header + row.req.body)
                         + 8_192,
+                    io: row.io,
                 },
                 Config::new(RunSecret::new([7; 32])),
             );
@@ -892,6 +920,12 @@ fn costs(row: Row, (a, b): (u64, u64)) -> Costs {
 
 /// `f` of the REST carrier of `header`.
 fn with_carrier<T>(header: Header, f: impl FnOnce(&RestCarrier<OneStand, Pipes>) -> T) -> T {
+    with_io(header, 0, f)
+}
+
+/// `f` of the REST carrier of `header`, each connection's `Io` holding `io`
+/// bytes of its own.
+fn with_io<T>(header: Header, io: usize, f: impl FnOnce(&RestCarrier<OneStand, Pipes>) -> T) -> T {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
@@ -907,6 +941,7 @@ fn with_carrier<T>(header: Header, f: impl FnOnce(&RestCarrier<OneStand, Pipes>)
                 probes: vec![],
             }),
             ring: 0,
+            io,
         },
         Config::new(RunSecret::new([7; 32])),
     );
@@ -928,7 +963,7 @@ fn row_peaks(row: Row) -> (Header, Peaks, ascetic_ddd_command_log::shape::Shape)
 /// The REST carrier's stated costs for `row`'s profile.
 fn stated(row: Row) -> ascetic_ddd_load_run::carrier::Costs {
     let (h, peaks, _) = row_peaks(row);
-    with_carrier(h, |carrier| {
+    with_io(h, row.io, |carrier| {
         match Carrier::<VirtualClock>::needs(carrier, &peaks, 0) {
             Ok(Needs::Sockets { costs, .. }) => costs,
             other => panic!("{other:?}"),
@@ -978,6 +1013,7 @@ const SMALL: Row = Row {
         body: 0,
     },
     captured: false,
+    io: 0,
 };
 
 /// A body of 2^16 + 1 bytes at the cap, its first 20,000 with the head.
@@ -1037,18 +1073,78 @@ fn a_head_of_one_name_repeated_holds_what_rest_charges() {
     );
 }
 
-/// K2b-7e-2b-3a-2: a decorating plan's attempts are unstated until its
-/// decorator states its decorations (K2b-7e-2b-3b); a plain one's stated by
-/// the library.
+/// A test's decorator stating `bound`, or nothing it can state.
+struct Stating(Option<ascetic_ddd_load_run::decorate::Decorations>);
+
+impl ascetic_ddd_load_run::decorate::Decorator for Stating {
+    async fn decorate<'a>(
+        &'a self,
+        _: ascetic_ddd_load_run::decorate::Decoration<'a>,
+    ) -> Result<Vec<(String, String)>, String> {
+        Ok(vec![])
+    }
+
+    fn bound(
+        &self,
+        _: &ascetic_ddd_command_log::shape::Shape,
+    ) -> Result<ascetic_ddd_load_run::decorate::Decorations, ascetic_ddd_load_run::carrier::Unstated>
+    {
+        self.0
+            .ok_or(ascetic_ddd_load_run::carrier::Unstated { part: "decorator" })
+    }
+}
+
+/// K2b-7e-2b-3b: an attempt's decorations priced at the bound its decorator
+/// states — REST's copies of them, as a header's —, none undecorated; a
+/// decorator that cannot state its bound, unstated; a stand's gates' client
+/// as its stand states it.
 #[test]
-fn rest_leaves_a_decorated_attempt_unstated() {
+fn rest_prices_decorations_at_their_stated_bound() {
     use ascetic_ddd_load_run::carrier::{StatedBy, Unstated};
-    let (mut h, peaks, _) = row_peaks(SMALL);
+    use ascetic_ddd_load_run::decorate::Decorations;
+    use ascetic_ddd_load_run::rest::{FIELD, HEADER};
+    let (h, peaks, _) = row_peaks(SMALL);
     let plain = with_carrier(h.clone(), |c| Carrier::<VirtualClock>::attempts(c, &peaks));
-    assert_eq!(plain.map(|a| a.stated_by), Ok(StatedBy::Library));
-    h.operations[0].decorated = vec!["authorization".into()];
-    let decorated = with_carrier(h, |c| Carrier::<VirtualClock>::attempts(c, &peaks));
-    assert_eq!(decorated, Err(Unstated { part: "decorator" }));
+    assert_eq!(
+        plain.map(|a| (a.decorations, a.stated_by)),
+        Ok((0, StatedBy::Library))
+    );
+    let decorated = |d: Option<Decorations>| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let _in = rt.enter();
+        let carrier = RestCarrier::decorated(
+            Arc::new(h.clone()),
+            OneStand,
+            Pipes {
+                clock: Arc::new(VirtualClock::start(0)),
+                answers: Arc::new(Answers {
+                    reads: vec![],
+                    probes: vec![],
+                }),
+                ring: 0,
+                io: 0,
+            },
+            Stating(d),
+            Config::new(RunSecret::new([7; 32])),
+        );
+        (
+            Carrier::<VirtualClock>::attempts(&carrier, &peaks),
+            Carrier::<VirtualClock>::gate_bytes(&carrier),
+        )
+    };
+    let (stated, gates) = decorated(Some(Decorations {
+        headers: 3,
+        bytes: 4_096,
+    }));
+    assert_eq!(
+        stated.map(|a| a.decorations),
+        Ok(HEADER * 4_096 + FIELD * 3)
+    );
+    assert_eq!(gates, OneStand.gate_bytes());
+    assert_eq!(decorated(None).0, Err(Unstated { part: "decorator" }));
 }
 
 /// What the REST carrier holds a source beside its sockets, as its needs
@@ -1112,6 +1208,28 @@ fn the_shell_holds_its_stated_share_of_a_captured_hole() {
         ascetic_ddd_load_run::run::attempt_share(&read),
         0.9,
     );
+}
+
+/// K2b-7e-2b-3b: a connection whose egress's `Io` holds 32 KiB of its own,
+/// as the egress states: within what REST charges a connection with it.
+#[test]
+fn a_connection_holds_its_egress_s_stated_io() {
+    let _alone = alone();
+    let small = costs(SMALL, SIZES);
+    let row = Row {
+        io: 32_768,
+        ..SMALL
+    };
+    let c = costs(row, SIZES);
+    let s = stated(row);
+    assert_eq!(s.io, 32_768);
+    within(
+        "a connection with its egress's own",
+        c.idle,
+        s.connection + s.io,
+        0.9,
+    );
+    assert!(c.idle >= small.idle + 32_768, "{} B", c.idle);
 }
 
 /// A connection idle in its pool, an attempt open beside it: as the REST

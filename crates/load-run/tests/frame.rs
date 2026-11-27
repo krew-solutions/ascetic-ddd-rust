@@ -143,7 +143,8 @@ fn held(rest: &Rest, captured: &[Captured]) -> u64 {
     assert!(built(
         &frame,
         "stand.test",
-        (CORRELATION, "0123456789abcdef")
+        (CORRELATION, "0123456789abcdef"),
+        &[]
     ));
     let peak = u64::try_from(PEAK.with(Cell::get) - base).unwrap();
     drop((frame, copy));
@@ -292,6 +293,7 @@ fn attempts() -> ascetic_ddd_load_run::carrier::AttemptCosts {
         body_hole: BODY_HOLE,
         hole: HOLE,
         hole_bytes: 1,
+        decorations: 0,
         stated_by: StatedBy::Library,
     }
 }
@@ -301,4 +303,56 @@ fn shape_of(r: &Rest) -> ascetic_ddd_command_log::shape::Shape {
     let mut record = fixture::call("read", 1, 0, 0, 0);
     record.action = ascetic_ddd_command_log::record::Action::Rest(r.clone());
     ascetic_ddd_command_log::shape::shape(&record)
+}
+
+/// K2b-7e-2b-3b: an attempt's decorations — as a host's decorator gives them,
+/// copied into the request — within what REST prices them at the bound the
+/// decorator states, and not far below.
+#[test]
+fn decorations_hold_what_rest_prices_them() {
+    use ascetic_ddd_load_run::rest::{FIELD, HEADER};
+    let secret = RunSecret::new([7; 32]);
+    let op = read_op();
+    let r = rest(Value::Literal("1".into()), vec![], None);
+    let fills = Fills {
+        namespace: Namespace(1),
+        secret: &secret,
+        run_start: 0,
+        sent: 0,
+        captured: &[],
+    };
+    let frame = request::frame(&op, &r, &fills, CORRELATION).unwrap();
+    let measure = |decorated: &[(String, String)]| {
+        let base = NOW.with(Cell::get);
+        PEAK.with(|p| p.set(base));
+        let copy = decorated.to_vec();
+        assert!(built(
+            &frame,
+            "stand.test",
+            (CORRELATION, "0123456789abcdef"),
+            &copy
+        ));
+        let peak = u64::try_from(PEAK.with(Cell::get) - base).unwrap();
+        drop(copy);
+        peak
+    };
+    let none = measure(&[]);
+    let decorated: Vec<(String, String)> = (0..4)
+        .map(|i| (format!("dpop-{i}"), "a".repeat(8_192)))
+        .collect();
+    let bytes: u64 = decorated
+        .iter()
+        .map(|(n, v)| (n.len() + v.len()) as u64)
+        .sum();
+    let held = measure(&decorated) - none;
+    let stated = HEADER * bytes + FIELD * decorated.len() as u64;
+    eprintln!(
+        "MEASURED 4 decorations of {bytes} B: {held} B held, {stated} B stated ({:.1} %)",
+        100.0 * held as f64 / stated as f64
+    );
+    assert!(held <= stated, "{held} > {stated}");
+    assert!(
+        held as f64 >= 0.95 * stated as f64,
+        "{held} B, below 95 % of {stated}"
+    );
 }

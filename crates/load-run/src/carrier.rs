@@ -40,6 +40,9 @@ pub struct Costs {
     /// plan's largest request head (K2b-7e-2b-3a-2) —, its task, its place
     /// in its pool.
     pub connection: u64,
+    /// A connection's own heap its egress states (TLS's buffers): the
+    /// host's.
+    pub io: u64,
     /// An answer being read at the profile's cap: its body, and its head as
     /// it is read and copied.
     pub answer: u64,
@@ -72,7 +75,10 @@ pub struct AttemptCosts {
     pub hole: u64,
     /// A byte of a captured hole's subject and slot.
     pub hole_bytes: u64,
-    /// Who states them.
+    /// Each attempt's decorations as the carrier holds them, at the bound
+    /// its host's decorator states (K2b-7e-2b-3b): the host's.
+    pub decorations: u64,
+    /// Who states the rest.
     pub stated_by: StatedBy,
 }
 
@@ -90,6 +96,7 @@ impl AttemptCosts {
         body_hole: 0,
         hole: 0,
         hole_bytes: 0,
+        decorations: 0,
         stated_by: StatedBy::Host,
     };
 
@@ -108,10 +115,12 @@ impl AttemptCosts {
             body_hole,
             hole,
             hole_bytes,
+            decorations,
             stated_by: _,
         } = *self;
         [
             (each, s.records),
+            (decorations, s.records),
             (target, s.target),
             (target_hole, s.target_holes),
             (header, s.headers),
@@ -212,6 +221,10 @@ pub trait Carrier<C: Clock>: Send + Sync + 'static {
     /// cannot state, unstated.
     fn attempts(&self, peaks: &Peaks) -> Result<AttemptCosts, Unstated>;
 
+    /// What its stand's gates' client holds (decision 22, K2b-7e-2b-3b): a
+    /// carrier with no stand, none.
+    fn gate_bytes(&self) -> crate::stand::GateBytes;
+
     /// Its sockets of `source` probed before T0 (decision 20): one connect
     /// to each endpoint it declares for it, all at once, each within `bound`
     /// µs of `clock`, nothing sent — the failures; none, passed. Run on the
@@ -240,7 +253,27 @@ pub trait Carrier<C: Clock>: Send + Sync + 'static {
 
 #[cfg(test)]
 mod tests {
-    use super::{SourceCosts, StatedBy};
+    use super::{AttemptCosts, SourceCosts, StatedBy};
+
+    /// An attempt's price: each part times the records, each class's
+    /// coefficient times its count — its decorations each attempt's.
+    #[test]
+    fn an_attempt_s_price_sums_its_parts() {
+        let shape = ascetic_ddd_command_log::shape::Shape {
+            records: 2,
+            target: 10,
+            holes: 1,
+            ..Default::default()
+        };
+        let costs = AttemptCosts {
+            each: 100,
+            target: 6,
+            hole: 1_000,
+            decorations: 7,
+            ..AttemptCosts::NOTHING
+        };
+        assert_eq!(costs.price(&shape), 2 * 100 + 2 * 7 + 6 * 10 + 1_000);
+    }
 
     /// A carrier's source costs charged summed, not their largest, and
     /// saturating.

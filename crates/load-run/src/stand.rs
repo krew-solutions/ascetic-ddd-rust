@@ -48,6 +48,22 @@ pub struct Unfit {
     pub detail: String,
 }
 
+/// What a stand's gates hold of their own (ADR-0047 decision 22,
+/// K2b-7e-2b-3b): their client's heap while the stages open them, and what
+/// it keeps through the run — the host's to state, admission's to charge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GateBytes {
+    /// While the stages open the gates.
+    pub stages: u64,
+    /// Kept through the run.
+    pub run: u64,
+}
+
+impl GateBytes {
+    /// No gate's client: none.
+    pub const NONE: GateBytes = GateBytes { stages: 0, run: 0 };
+}
+
 /// The stand: a route per step, and its gates before T0.
 pub trait Stand: Send + Sync + 'static {
     /// The route of `record`'s call `rest`; its reason if the stand has none.
@@ -67,6 +83,10 @@ pub trait Stand: Send + Sync + 'static {
         i: usize,
         opening: Opening<'_>,
     ) -> impl Future<Output = Option<Result<String, Refused>>> + Send;
+
+    /// What its gates' client holds (decision 22, K2b-7e-2b-3b): stated,
+    /// never left no room — a stand with no gate, none.
+    fn gate_bytes(&self) -> GateBytes;
 }
 
 /// Why a connect failed (ADR-0047 decision 19), as only the egress can tell
@@ -162,6 +182,12 @@ pub trait Egress: Send + Sync + 'static {
     /// its share of the descriptors — the shell's cap on it, over each
     /// socket's life.
     fn ports(&self, source: u32) -> usize;
+
+    /// The heap its [`Io`](Egress::Io) holds a connection of its own —
+    /// TLS's buffers, say; a plain socket's none — the host's to state, the
+    /// carrier's to charge each connection (ADR-0047 decision 22,
+    /// K2b-7e-2b-3b).
+    fn io_bytes(&self) -> u64;
 
     /// Whether it carries `sources` sources at all (decision 20), no packet
     /// sent: each one's own, its address the host's and no other's.

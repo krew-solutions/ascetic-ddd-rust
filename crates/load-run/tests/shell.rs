@@ -261,6 +261,10 @@ impl Carrier<VirtualClock> for Forgetful {
         Ok(ascetic_ddd_load_run::carrier::AttemptCosts::NOTHING)
     }
 
+    fn gate_bytes(&self) -> ascetic_ddd_load_run::stand::GateBytes {
+        ascetic_ddd_load_run::stand::GateBytes::NONE
+    }
+
     fn probe(
         &self,
         _: u32,
@@ -330,6 +334,10 @@ impl Carrier<VirtualClock> for Refusing {
     ) -> Result<ascetic_ddd_load_run::carrier::AttemptCosts, ascetic_ddd_load_run::carrier::Unstated>
     {
         Ok(ascetic_ddd_load_run::carrier::AttemptCosts::NOTHING)
+    }
+
+    fn gate_bytes(&self) -> ascetic_ddd_load_run::stand::GateBytes {
+        ascetic_ddd_load_run::stand::GateBytes::NONE
     }
 
     fn probe(
@@ -691,6 +699,10 @@ impl<C: Clock> Carrier<C> for Judging {
         Ok(ascetic_ddd_load_run::carrier::AttemptCosts::NOTHING)
     }
 
+    fn gate_bytes(&self) -> ascetic_ddd_load_run::stand::GateBytes {
+        ascetic_ddd_load_run::stand::GateBytes::NONE
+    }
+
     fn probe(
         &self,
         _: u32,
@@ -855,6 +867,10 @@ fn a_late_hand_off_is_journaled() {
             ascetic_ddd_load_run::carrier::Unstated,
         > {
             Ok(ascetic_ddd_load_run::carrier::AttemptCosts::NOTHING)
+        }
+
+        fn gate_bytes(&self) -> ascetic_ddd_load_run::stand::GateBytes {
+            ascetic_ddd_load_run::stand::GateBytes::NONE
         }
 
         fn probe(
@@ -1203,6 +1219,10 @@ impl Carrier<Poisoning> for Poisoner {
         Ok(ascetic_ddd_load_run::carrier::AttemptCosts::NOTHING)
     }
 
+    fn gate_bytes(&self) -> ascetic_ddd_load_run::stand::GateBytes {
+        ascetic_ddd_load_run::stand::GateBytes::NONE
+    }
+
     fn probe(
         &self,
         _: u32,
@@ -1295,6 +1315,10 @@ impl Carrier<VirtualClock> for Lingering {
     ) -> Result<ascetic_ddd_load_run::carrier::AttemptCosts, ascetic_ddd_load_run::carrier::Unstated>
     {
         Ok(ascetic_ddd_load_run::carrier::AttemptCosts::NOTHING)
+    }
+
+    fn gate_bytes(&self) -> ascetic_ddd_load_run::stand::GateBytes {
+        ascetic_ddd_load_run::stand::GateBytes::NONE
     }
 
     fn probe(
@@ -1403,6 +1427,10 @@ impl Carrier<VirtualClock> for Leaving {
         Ok(ascetic_ddd_load_run::carrier::AttemptCosts::NOTHING)
     }
 
+    fn gate_bytes(&self) -> ascetic_ddd_load_run::stand::GateBytes {
+        ascetic_ddd_load_run::stand::GateBytes::NONE
+    }
+
     fn probe(
         &self,
         _: u32,
@@ -1483,6 +1511,10 @@ impl Carrier<VirtualClock> for Twice {
     ) -> Result<ascetic_ddd_load_run::carrier::AttemptCosts, ascetic_ddd_load_run::carrier::Unstated>
     {
         Ok(ascetic_ddd_load_run::carrier::AttemptCosts::NOTHING)
+    }
+
+    fn gate_bytes(&self) -> ascetic_ddd_load_run::stand::GateBytes {
+        ascetic_ddd_load_run::stand::GateBytes::NONE
     }
 
     fn probe(
@@ -1673,6 +1705,10 @@ impl Carrier<VirtualClock> for Minting {
     ) -> Result<ascetic_ddd_load_run::carrier::AttemptCosts, ascetic_ddd_load_run::carrier::Unstated>
     {
         Ok(ascetic_ddd_load_run::carrier::AttemptCosts::NOTHING)
+    }
+
+    fn gate_bytes(&self) -> ascetic_ddd_load_run::stand::GateBytes {
+        ascetic_ddd_load_run::stand::GateBytes::NONE
     }
 
     fn probe(
