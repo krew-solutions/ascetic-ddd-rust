@@ -291,6 +291,10 @@ impl Egress for GatedTcp {
         vec![ports; sources as usize]
     }
 
+    fn total(&self) -> usize {
+        self.ports(0)
+    }
+
     fn ports(&self, _: u32) -> usize {
         62
     }
@@ -566,6 +570,10 @@ impl Egress for RefusingFirst {
         vec![ports; sources as usize]
     }
 
+    fn total(&self) -> usize {
+        self.ports(0)
+    }
+
     fn ports(&self, _: u32) -> usize {
         62
     }
@@ -771,6 +779,10 @@ impl Egress for RefusedAt {
 
     fn caps(&self, ports: usize, sources: u32) -> Vec<usize> {
         vec![ports; sources as usize]
+    }
+
+    fn total(&self) -> usize {
+        self.ports(0)
     }
 
     fn ports(&self, _: u32) -> usize {

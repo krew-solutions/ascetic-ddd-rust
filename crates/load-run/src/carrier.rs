@@ -225,6 +225,21 @@ pub trait Carrier<C: Clock>: Send + Sync + 'static {
     /// carrier with no stand, none.
     fn gate_bytes(&self) -> crate::stand::GateBytes;
 
+    /// Its egress's total of ports, the knob a memory refusal's remedy names
+    /// (ADR-0047 decision 22, K2b-7e-2b-3d-2); none for a carrier with no
+    /// such knob.
+    fn ports(&self) -> Option<usize> {
+        None
+    }
+
+    /// Each of `sources` sources' cap at a total of `ports`, as its egress
+    /// divides them — the map a remedy searches over; none for a carrier
+    /// with no such knob.
+    fn caps_at(&self, ports: usize, sources: u32) -> Option<Vec<usize>> {
+        let _ = (ports, sources);
+        None
+    }
+
     /// Its sockets of `source` probed before T0 (decision 20): one connect
     /// to each endpoint it declares for it, all at once, each within `bound`
     /// µs of `clock`, nothing sent — the failures; none, passed. Run on the

@@ -94,6 +94,10 @@ impl Egress for TcpEgress {
 
     /// As `with_ports(ports)` would: a bound source the whole, the system's
     /// sharing it.
+    fn total(&self) -> usize {
+        self.ports
+    }
+
     fn caps(&self, ports: usize, sources: u32) -> Vec<usize> {
         let unbound = self.sources.iter().filter(|s| s.is_none()).count().max(1);
         (0..usize::try_from(sources).unwrap_or(usize::MAX))

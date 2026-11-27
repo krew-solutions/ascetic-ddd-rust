@@ -18,7 +18,7 @@ use ascetic_ddd_command_log::record::{Record, Rest};
 use ascetic_ddd_command_log::render::RunSecret;
 use ascetic_ddd_command_log::validate::Peaks;
 use ascetic_ddd_load_run::clock::RealClock;
-use ascetic_ddd_load_run::live::{Descriptors, Live};
+use ascetic_ddd_load_run::live::{Descriptors, Limit, Live};
 use ascetic_ddd_load_run::memory::Memory;
 use ascetic_ddd_load_run::rest::{Config, RestCarrier};
 use ascetic_ddd_load_run::run::{
@@ -146,6 +146,7 @@ fn a_run_at_the_descriptors_bound_hits_no_emfile() {
             carrier(),
             Journal::new(64, 0),
             Memory::declared(1 << 40),
+            Limit::assumed(Some((1 << 40, 0)), None),
         )
     };
     // A soft limit one below: refused before T0, before anything is built.

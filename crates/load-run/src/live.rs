@@ -109,6 +109,96 @@ impl Descriptors {
     }
 }
 
+/// The memory the process's cgroup tree allows (ADR-0047 decision 22,
+/// K2b-7e-2b-3d-2): the least `memory.max` and the least `memory.high` over
+/// the process's own cgroup and its ancestors up to the root, each with its
+/// depth — 0 the process's own —; none where every one is `max`. A process
+/// fact, read, never stated: its one constructor is [`Limit::read`], beside a
+/// test's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limit {
+    max: Option<(u64, usize)>,
+    high: Option<(u64, usize)>,
+}
+
+impl Limit {
+    /// The process's, from cgroup v2: `/proc/self/cgroup`'s unified line and
+    /// the tree under `/sys/fs/cgroup`.
+    pub fn read() -> io::Result<Limit> {
+        let cgroups = std::fs::read_to_string("/proc/self/cgroup")?;
+        let path = cgroups
+            .lines()
+            .find_map(|l| l.strip_prefix("0::"))
+            .ok_or_else(|| io::Error::other("no cgroup v2 line in /proc/self/cgroup"))?;
+        Ok(Limit::walk(std::path::Path::new("/sys/fs/cgroup"), path))
+    }
+
+    /// The walk from `path` under `root` up to `root`: each directory's
+    /// `memory.max` and `memory.high`, the least finite of each and its
+    /// depth; a file missing or `max` no limit.
+    fn walk(root: &std::path::Path, path: &str) -> Limit {
+        let mut dir = root.join(path.trim_start_matches('/'));
+        let mut limit = Limit {
+            max: None,
+            high: None,
+        };
+        let mut depth = 0usize;
+        loop {
+            let read = |file: &str| {
+                std::fs::read_to_string(dir.join(file))
+                    .ok()
+                    .and_then(|v| v.trim().parse::<u64>().ok())
+            };
+            for (file, slot) in [
+                ("memory.max", &mut limit.max),
+                ("memory.high", &mut limit.high),
+            ] {
+                if let Some(v) = read(file)
+                    && slot.is_none_or(|(least, _)| v < least)
+                {
+                    *slot = Some((v, depth));
+                }
+            }
+            if dir == root || !dir.pop() || !dir.starts_with(root) {
+                return limit;
+            }
+            depth = depth.saturating_add(1);
+        }
+    }
+
+    /// A tree's walk: `path` under `root` — a test's tree.
+    #[cfg(feature = "testing")]
+    pub fn read_from(root: &std::path::Path, path: &str) -> Limit {
+        Limit::walk(root, path)
+    }
+
+    /// A test's limit: `max` and `high`, each its bytes and depth.
+    #[cfg(feature = "testing")]
+    pub fn assumed(max: Option<(u64, usize)>, high: Option<(u64, usize)>) -> Limit {
+        Limit { max, high }
+    }
+
+    /// The least `memory.max`, and its depth.
+    pub fn max(&self) -> Option<(u64, usize)> {
+        self.max
+    }
+
+    /// The least `memory.high`, and its depth.
+    pub fn high(&self) -> Option<(u64, usize)> {
+        self.high
+    }
+
+    /// The least of both, and which it is.
+    pub fn least(&self) -> Option<(u64, usize, &'static str)> {
+        let max = self.max.map(|(v, d)| (v, d, "memory.max"));
+        let high = self.high.map(|(v, d)| (v, d, "memory.high"));
+        match (max, high) {
+            (Some(a), Some(b)) => Some(if b.0 < a.0 { b } else { a }),
+            (a, b) => a.or(b),
+        }
+    }
+}
+
 /// The events each source's driver takes a turn for `caps` by source: its
 /// cap and its driver's own (decision 20) — computed before anything is
 /// built, so a host can price them first (ADR-0047 decision 22,

@@ -439,6 +439,14 @@ impl<C: Clock, S: Stand, E: Egress, D: Decorator> Carrier<C> for RestCarrier<S, 
     fn gate_bytes(&self) -> crate::stand::GateBytes {
         self.inner.stand.gate_bytes()
     }
+
+    fn ports(&self) -> Option<usize> {
+        Some(self.inner.egress.total())
+    }
+
+    fn caps_at(&self, ports: usize, sources: u32) -> Option<Vec<usize>> {
+        Some(self.inner.egress.caps(ports, sources))
+    }
 }
 
 /// Every future of `futures` to its end, polled together: their outputs in

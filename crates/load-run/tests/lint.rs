@@ -190,8 +190,8 @@ fn every_assumption_is_a_test_s() {
         }
     }
     // A plan's, the runtimes' two, the descriptors', a ready run's, a
-    // journal's.
-    assert_eq!(held, 6);
+    // journal's, a memory limit's (K2b-7e-2b-3d-2).
+    assert_eq!(held, 7);
 }
 
 /// The journal that keeps every line is a test's (ADR-0047 K2b-7e-2b-2b): no
@@ -219,23 +219,53 @@ fn the_journal_kept_whole_is_a_test_s() {
     }
 }
 
-/// Runtimes of events no cap checked are a test's (ADR-0047 K2b-7e-2b-2c-1):
-/// a host builds its own by `Live::for_caps`, its events priced first.
-#[test]
-fn runtimes_of_unchecked_events_are_a_test_s() {
-    let (_, text) = SOURCES.iter().find(|(name, _)| *name == "live.rs").unwrap();
-    let lines: Vec<&str> = text.lines().collect();
-    let i = lines
-        .iter()
-        .position(|l| l.trim_start().starts_with("pub fn start("))
-        .expect("live.rs: no `pub fn start(`");
-    let gated = lines[..i]
+/// Whether `lines[i]` is gated to a test's: a `testing` cfg among the
+/// attributes and docs just before it.
+fn gated(lines: &[&str], i: usize) -> bool {
+    lines[..i]
         .iter()
         .rev()
         .map(|l| l.trim_start())
         .take_while(|l| l.starts_with("#[") || l.starts_with("///"))
-        .any(|l| l == "#[cfg(feature = \"testing\")]");
-    assert!(gated, "live.rs:{}: `Live::start` not a test's", i + 1);
+        .any(|l| l == "#[cfg(feature = \"testing\")]")
+}
+
+/// Runtimes of events no fit priced are a test's (ADR-0047 K2b-7e-2b-2c-1,
+/// K2b-7e-2b-3d-1): a host builds its own by `Live::fitted` alone.
+#[test]
+fn runtimes_of_unchecked_events_are_a_test_s() {
+    let (_, text) = SOURCES.iter().find(|(name, _)| *name == "live.rs").unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    for item in ["pub fn start(", "pub fn for_caps("] {
+        let i = lines
+            .iter()
+            .position(|l| l.trim_start().starts_with(item))
+            .unwrap_or_else(|| panic!("live.rs: no `{item}`"));
+        assert!(gated(&lines, i), "live.rs:{}: `{item}` not a test's", i + 1);
+    }
+}
+
+/// The process's memory limit is read, never stated (ADR-0047 K2b-7e-2b-3d-2):
+/// of the functions making a `Limit`, `read` alone is not a test's.
+#[test]
+fn a_limit_is_read_alone() {
+    let (_, text) = SOURCES.iter().find(|(name, _)| *name == "live.rs").unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    let makers: Vec<usize> = (0..lines.len())
+        .filter(|&i| {
+            let l = lines[i].trim_start();
+            l.starts_with("pub fn ") && l.contains("-> Limit") || l.contains("-> io::Result<Limit>")
+        })
+        .collect();
+    assert!(makers.len() >= 3, "{makers:?}");
+    for i in makers {
+        let read = lines[i].contains("pub fn read(");
+        assert!(
+            read || gated(&lines, i),
+            "live.rs:{}: a `Limit` made outside `read` and a test's",
+            i + 1
+        );
+    }
 }
 
 /// A driver's event is stated by the system and arch it is built for

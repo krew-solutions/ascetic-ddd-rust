@@ -77,6 +77,10 @@ impl Egress for Tcp {
         vec![ports; sources as usize]
     }
 
+    fn total(&self) -> usize {
+        self.ports(0)
+    }
+
     fn ports(&self, _: u32) -> usize {
         62
     }

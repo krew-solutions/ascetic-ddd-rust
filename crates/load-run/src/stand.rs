@@ -194,6 +194,11 @@ pub trait Egress: Send + Sync + 'static {
     /// a remedy names a total by — the knob the host turns.
     fn caps(&self, ports: usize, sources: u32) -> Vec<usize>;
 
+    /// The total of ports its sources share as it is built — what
+    /// [`caps`](Egress::caps) divides, the knob's value now (ADR-0047
+    /// decision 22, K2b-7e-2b-3d-2).
+    fn total(&self) -> usize;
+
     /// Whether it carries `sources` sources at all (decision 20), no packet
     /// sent: each one's own, its address the host's and no other's.
     fn admits(&self, sources: u32) -> Result<(), Unfit>;

@@ -19,7 +19,7 @@ use ascetic_ddd_load_run::carrier::{
     AttemptCosts, Carrier, Costs, Needs, SourceCosts, Unprobed, Unstated,
 };
 use ascetic_ddd_load_run::clock::{Clock, RealClock};
-use ascetic_ddd_load_run::live::Live;
+use ascetic_ddd_load_run::live::{Limit, Live};
 use ascetic_ddd_load_run::memory::{Memory, Part};
 use ascetic_ddd_load_run::run::{Fitted, Inadmissible, RunError, admit, fit};
 use ascetic_ddd_load_run::sink::Journal;
@@ -154,6 +154,7 @@ fn fitted(
         Arc::new(Capped { cap, needed }),
         Journal::new(64, 0),
         Memory::declared(memory),
+        Limit::assumed(Some((PLENTY, 0)), None),
     )
 }
 
@@ -272,4 +273,191 @@ fn the_least_memory_admits_and_a_byte_less_does_not() {
         _ => None,
     });
     assert!(behind.is_some_and(|b| b < 64), "{behind:?}: {why}");
+}
+
+/// K2b-7e-2b-3d-2: the cgroup tree's limits walked from the process's own up
+/// to the root — the least `memory.max` and `memory.high`, each with its
+/// depth; `max` and a missing file no limit.
+#[test]
+fn the_limit_is_the_least_over_the_tree() {
+    let root = tempfile::tempdir().unwrap();
+    let leaf = root.path().join("a/b/c");
+    std::fs::create_dir_all(&leaf).unwrap();
+    let write = |dir: &str, file: &str, v: &str| {
+        std::fs::write(root.path().join(dir).join(file), v).unwrap();
+    };
+    // Every level `max`, the root's files missing: no limit.
+    for dir in ["a", "a/b", "a/b/c"] {
+        write(dir, "memory.max", "max\n");
+        write(dir, "memory.high", "max\n");
+    }
+    let read = || Limit::read_from(root.path(), "/a/b/c");
+    assert_eq!(read(), Limit::assumed(None, None));
+    // The first finite above the leaf, two up.
+    write("a", "memory.max", "5000\n");
+    assert_eq!(read().max(), Some((5000, 2)));
+    // A lesser one nearer: the least, and its depth.
+    write("a/b", "memory.max", "3000\n");
+    assert_eq!(read().max(), Some((3000, 1)));
+    // The leaf's own, lesser still.
+    write("a/b/c", "memory.max", "1000\n");
+    assert_eq!(read().max(), Some((1000, 0)));
+    // A greater one at the root changes nothing.
+    std::fs::write(root.path().join("memory.max"), "9000\n").unwrap();
+    assert_eq!(read().max(), Some((1000, 0)));
+    // `memory.high` apart; the least of both is the lesser.
+    write("a/b", "memory.high", "500\n");
+    assert_eq!(read().high(), Some((500, 1)));
+    assert_eq!(read().least(), Some((500, 1, "memory.high")));
+}
+
+/// The memory stated within the tree's least limit admitted, a byte past it
+/// refused, naming the file and its depth.
+#[test]
+fn a_memory_past_the_limit_is_refused() {
+    let fit_at = |stated: u64, limit: Limit| {
+        let mut header = fixture::header();
+        header.profile.sources = 1;
+        fit::<RealClock, _>(
+            Plan::assumed(Arc::new(header), Peaks::default()),
+            0,
+            Arc::new(Capped { cap: 8, needed: 1 }),
+            Journal::new(64, 0),
+            Memory::declared(stated),
+            limit,
+        )
+    };
+    let at = 1u64 << 32;
+    assert!(fit_at(at, Limit::assumed(Some((at, 0)), None)).is_ok());
+    let why = refused(fit_at(at + 1, Limit::assumed(Some((at, 0)), None)));
+    assert!(
+        why.each().contains(&Inadmissible::Limit {
+            stated: at + 1,
+            limit: at,
+            file: "memory.max",
+            depth: 0,
+        }),
+        "{why}"
+    );
+    // The scope rule: the pool's count unheld until the read gate is held by
+    // the process's own cgroup — none refused, one up refused, its own
+    // admitted.
+    for limit in [
+        Limit::assumed(None, None),
+        Limit::assumed(Some((1 << 40, 1)), None),
+    ] {
+        let why = refused(fit_at(at, limit));
+        assert!(
+            why.each()
+                .contains(&Inadmissible::Scope { max: limit.max() }),
+            "{why}"
+        );
+        assert!(why.to_string().contains("MemoryMax"), "{why}");
+    }
+    assert!(fit_at(at, Limit::assumed(Some((1 << 40, 0)), None)).is_ok());
+}
+
+/// A carrier with a knob: `ports` in total, each source the whole of a total.
+struct Knobbed {
+    ports: usize,
+    needed: u64,
+}
+
+impl<C: Clock> Carrier<C> for Knobbed {
+    fn carries(&self, _: &Header) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn needs(&self, _: &Peaks, _: u32) -> Result<Needs, String> {
+        Ok(Needs::Sockets {
+            needed: self.needed,
+            cap: self.ports,
+            costs: Costs {
+                connection: 4_096,
+                io: 0,
+                answer: 65_536,
+            },
+        })
+    }
+
+    fn source_costs(&self, _: &Peaks, _: u32) -> Result<SourceCosts, String> {
+        Ok(SourceCosts::NOTHING)
+    }
+
+    fn attempts(&self, _: &Peaks) -> Result<AttemptCosts, Unstated> {
+        Ok(AttemptCosts::NOTHING)
+    }
+
+    fn gate_bytes(&self) -> GateBytes {
+        GateBytes::NONE
+    }
+
+    fn ports(&self) -> Option<usize> {
+        Some(self.ports)
+    }
+
+    fn caps_at(&self, ports: usize, sources: u32) -> Option<Vec<usize>> {
+        Some(vec![ports; sources as usize])
+    }
+
+    fn probe(
+        &self,
+        _: u32,
+        _: Arc<C>,
+        _: u64,
+    ) -> impl std::future::Future<Output = Vec<Unprobed>> + Send + 'static {
+        std::future::ready(Vec::new())
+    }
+
+    fn carry(&self, _: Attempt<C>) -> impl std::future::Future<Output = ()> + Send + 'static {
+        std::future::ready(())
+    }
+}
+
+/// The carrier's knob a remedy (K2b-7e-2b-3d-2): its ports at most a total
+/// no less than the plan needs of each source; refitted at it, admitted.
+#[test]
+fn the_carrier_s_ports_are_a_remedy() {
+    let fit_at = |ports: usize, memory: u64| {
+        let mut header = fixture::header();
+        header.profile.sources = 2;
+        fit::<RealClock, _>(
+            Plan::assumed(Arc::new(header), Peaks::default()),
+            0,
+            Arc::new(Knobbed { ports, needed: 16 }),
+            Journal::new(64, 0),
+            Memory::declared(memory),
+            Limit::assumed(Some((PLENTY, 0)), None),
+        )
+    };
+    // Its least memory at 1,024 ports, and half way to the needed 16's.
+    let least = |ports| {
+        refused(fit_at(ports, 1_000))
+            .each()
+            .iter()
+            .find_map(|w| match w {
+                Inadmissible::Memory(r) => r.unfit.least,
+                _ => None,
+            })
+            .unwrap()
+    };
+    let memory = (least(1_024) + least(16)) / 2;
+    let why = refused(fit_at(1_024, memory));
+    let ports = why.each().iter().find_map(|w| match w {
+        Inadmissible::Memory(r) => r.remedies.remedies.iter().find_map(|m| match m {
+            ascetic_ddd_load_run::memory::Remedy::Ports { at_most } => Some(*at_most),
+            _ => None,
+        }),
+        _ => None,
+    });
+    let ports = ports.unwrap_or_else(|| panic!("no ports remedy: {why}"));
+    // The least memory at the needed sockets: the floor's, 16 ports.
+    let at_needed = why.each().iter().find_map(|w| match w {
+        Inadmissible::Memory(r) => r.remedies.least_at_needed,
+        _ => None,
+    });
+    assert_eq!(at_needed, Some(least(16)), "{why}");
+    assert!((16..1_024).contains(&ports), "{ports}");
+    assert!(fit_at(ports, memory).is_ok(), "refitted at {ports} ports");
+    assert!(fit_at(ports + 1, memory).is_err(), "one past {ports} ports");
 }

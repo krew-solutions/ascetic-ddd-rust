@@ -271,6 +271,26 @@ pub enum Inadmissible {
         /// As fitted.
         fitted: Option<u64>,
     },
+    /// The memory stated past what the process's cgroup tree allows
+    /// (decision 22, K2b-7e-2b-3d-2): the kernel would reclaim or kill first.
+    Limit {
+        /// The memory stated.
+        stated: u64,
+        /// The least limit over the tree.
+        limit: u64,
+        /// Which: `memory.max` or `memory.high`.
+        file: &'static str,
+        /// Its depth: 0 the process's own cgroup.
+        depth: usize,
+    },
+    /// A run with a count no enforcer holds — its pool, until the read gate
+    /// (K2b-7e-3) — outside a scope of its own with a finite `memory.max`
+    /// (decision 22, K2b-7e-2b-3d-2): the ADR's own first host run inside a
+    /// scope with `MemoryMax`, executed.
+    Scope {
+        /// The least `memory.max` over the tree and its depth, if any.
+        max: Option<(u64, usize)>,
+    },
     /// Every refusal at once (decision 22): raising one limit to be refused
     /// on the next is wasted work.
     All(Vec<Inadmissible>),
@@ -362,6 +382,28 @@ impl fmt::Display for Inadmissible {
                 "source {source}'s runtime holds {built:?} B as built, {fitted:?} B as fitted: \
                  build it by `Live::fitted`"
             ),
+            Inadmissible::Limit {
+                stated,
+                limit,
+                file,
+                depth,
+            } => write!(
+                f,
+                "the stated memory {stated} B past the {file} of {limit} B {depth} cgroups up"
+            ),
+            Inadmissible::Scope { max } => {
+                let held = match max {
+                    Some((bytes, depth)) => {
+                        format!("its least memory.max {bytes} B {depth} cgroups up")
+                    }
+                    None => "no memory.max".to_owned(),
+                };
+                write!(
+                    f,
+                    "its pool's count held by no enforcer until the read gate, and {held}: run it \
+                     inside a scope of its own — `systemd-run --user --scope -p MemoryMax=<bytes>`"
+                )
+            }
             Inadmissible::All(all) => {
                 let each: Vec<String> = all.iter().map(ToString::to_string).collect();
                 write!(f, "{}", each.join("; "))
@@ -717,15 +759,28 @@ fn planned<C: Clock, X: Carrier<C>>(
         ..*r
     });
     let of = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+    // Each source's cap at the knob's total of ports, where the carrier has
+    // one: as its egress divides them.
+    let count = u32::try_from(sources.len()).unwrap_or(u32::MAX);
+    let caps = carrier
+        .ports()
+        .and_then(|_| carrier.caps_at(knobs.ports, count));
     Ok(crate::memory::Planned {
-        sources: sources
-            .iter()
-            .map(|s| crate::memory::SourcePart {
-                runtime: crate::live::events_for(&[s.cap])
+        sources: (0usize..)
+            .zip(sources)
+            .map(|(i, s)| {
+                let cap = match (&caps, s.costs) {
+                    (Some(c), Some(_)) => c.get(i).copied().unwrap_or(s.cap),
+                    _ => s.cap,
+                };
+                (cap, s)
+            })
+            .map(|(cap, s)| crate::memory::SourcePart {
+                runtime: crate::live::events_for(&[cap])
                     .ok()
                     .and_then(|e| e.first().copied())
                     .and_then(runtime_own),
-                cap: of(s.cap),
+                cap: of(cap),
                 connection: s.costs.map_or(0, |c| c.connection),
                 io: s.costs.map_or(0, |c| c.io),
                 answer: s.costs.map_or(0, |c| c.answer),
@@ -796,13 +851,16 @@ impl<C, X> Fitted<C, X> {
 /// cannot carry it or tell a source's needs, a source needing more sockets
 /// under the plan's bound than its cap (decision 20's I2), a cap past what a
 /// driver sizes, the descriptors its caps and runtimes would hold past the
-/// soft limit as read now, a part no owner states, the memory.
+/// soft limit as read now, a part no owner states, the memory, the memory
+/// past what `limit` allows, a pool no enforcer holds outside a scope of its
+/// own with a finite `memory.max`.
 pub fn fit<C: Clock, X: Carrier<C>>(
     plan: Plan,
     read_ahead: u64,
     carrier: Arc<X>,
     journal: crate::sink::Journal,
     memory: crate::memory::Memory,
+    limit: crate::live::Limit,
 ) -> Result<Fitted<C, X>, RunError> {
     let header = plan.header().clone();
     // The machine's own refusals: a read-ahead past the header's.
@@ -867,8 +925,18 @@ pub fn fit<C: Clock, X: Carrier<C>>(
             refused.push(why);
         }
     }
+    if let Some((least, depth, file)) = limit.least()
+        && memory.bytes() > least
+    {
+        refused.push(Inadmissible::Limit {
+            stated: memory.bytes(),
+            limit: least,
+            file,
+            depth,
+        });
+    }
     let knobs = crate::memory::Knobs {
-        ports: 0,
+        ports: carrier.ports().unwrap_or(0),
         ahead: plan.reader().map_or(0, |r| r.ahead),
         behind: journal.behind(),
         answer_cap: header.profile.answer_cap,
@@ -881,29 +949,43 @@ pub fn fit<C: Clock, X: Carrier<C>>(
                 });
                 None
             }
-            Ok(planned) => match crate::memory::fit(&planned, memory) {
-                Ok(fit) => Some((planned, fit)),
-                Err(unfit) => {
-                    // Each knob the library owns moved alone: the records
-                    // ahead and the lines behind, down to one; the carrier's
-                    // own and the plan's answer cap are their owners'.
-                    let floors = crate::memory::Knobs {
-                        ahead: knobs.ahead.min(1),
-                        behind: 1,
-                        ..knobs
-                    };
-                    let at = |k: &crate::memory::Knobs| {
-                        planned_of(&plan, carrier.as_ref(), &journal, &sources, k, &planned)
-                    };
-                    let remedies = crate::memory::remedies(memory, knobs, floors, at);
-                    refused.push(Inadmissible::Memory(Box::new(crate::memory::Refused {
-                        memory,
-                        unfit,
-                        remedies,
-                    })));
-                    None
+            Ok(planned) => {
+                // A count no enforcer holds — the pool's, until the read
+                // gate — is held by the process's own cgroup, or refused.
+                let unheld = crate::memory::terms(&planned)
+                    .iter()
+                    .any(|t| matches!(t.held, crate::memory::Held::Gate { built: false }));
+                if unheld && limit.max().is_none_or(|(_, depth)| depth > 0) {
+                    refused.push(Inadmissible::Scope { max: limit.max() });
                 }
-            },
+                fitted_or_refused(
+                    crate::memory::fit(&planned, memory),
+                    planned,
+                    &mut refused,
+                    |unfit, planned| {
+                        // Each knob moved alone: the records ahead and the
+                        // lines behind down to one, the carrier's ports down
+                        // to the least that gives each source the sockets the
+                        // plan needs of it; the plan's answer cap is its
+                        // author's.
+                        let floors = crate::memory::Knobs {
+                            ports: least_ports(carrier.as_ref(), &sources, knobs.ports),
+                            ahead: knobs.ahead.min(1),
+                            behind: 1,
+                            ..knobs
+                        };
+                        let at = |k: &crate::memory::Knobs| {
+                            planned_of(&plan, carrier.as_ref(), &journal, &sources, k, planned)
+                        };
+                        let remedies = crate::memory::remedies(memory, knobs, floors, at);
+                        Inadmissible::Memory(Box::new(crate::memory::Refused {
+                            memory,
+                            unfit,
+                            remedies,
+                        }))
+                    },
+                )
+            }
         }
     } else {
         None
@@ -925,6 +1007,52 @@ pub fn fit<C: Clock, X: Carrier<C>>(
             part: "the plan's sources",
         })),
     }
+}
+
+/// The fit's outcome: `planned` and its fit, or none and its refusal — made
+/// by `refuse` from the unfit — pushed beside the others.
+fn fitted_or_refused(
+    fit: Result<crate::memory::Fit, crate::memory::Unfit>,
+    planned: crate::memory::Planned,
+    refused: &mut Vec<Inadmissible>,
+    refuse: impl FnOnce(crate::memory::Unfit, &crate::memory::Planned) -> Inadmissible,
+) -> Option<(crate::memory::Planned, crate::memory::Fit)> {
+    match fit {
+        Ok(fit) => Some((planned, fit)),
+        Err(unfit) => {
+            refused.push(refuse(unfit, &planned));
+            None
+        }
+    }
+}
+
+/// The least total of ports, at most `ports`, that gives each source with
+/// sockets the sockets the plan needs of it, as `carrier`'s egress divides
+/// them; `ports` itself where it has no such knob or none gives them.
+fn least_ports<C: Clock, X: Carrier<C>>(carrier: &X, sources: &[Source], ports: usize) -> usize {
+    let count = u32::try_from(sources.len()).unwrap_or(u32::MAX);
+    let enough = |p: usize| {
+        carrier.caps_at(p, count).is_some_and(|caps| {
+            sources
+                .iter()
+                .zip(&caps)
+                .all(|(s, &c)| s.costs.is_none() || u64::try_from(c).is_ok_and(|c| c >= s.needed))
+        })
+    };
+    if carrier.ports().is_none() || !enough(ports) {
+        return ports;
+    }
+    // `enough` is monotone in the total: the least it holds at.
+    let (mut lo, mut hi) = (0usize, ports);
+    while lo < hi {
+        let mid = lo.saturating_add(hi.saturating_sub(lo) / 2);
+        if enough(mid) {
+            hi = mid;
+        } else {
+            lo = mid.saturating_add(1);
+        }
+    }
+    hi
 }
 
 /// [`planned`] at `knobs`, or `base` where a part goes unstated — which no
@@ -1086,8 +1214,9 @@ pub fn admit<C: Clock, X: Carrier<C>>(
     })
 }
 
-/// A test's admission: `plan` fitted to a memory no run exceeds, then admitted
-/// on `runtimes` — [`fit`] and [`admit`] in turn.
+/// A test's admission: `plan` fitted to a memory no run exceeds, in a scope
+/// of its own that holds it, then admitted on `runtimes` — [`fit`] and
+/// [`admit`] in turn.
 #[cfg(feature = "testing")]
 pub fn admitted<C: Clock, X: Carrier<C>>(
     plan: Plan,
@@ -1096,12 +1225,14 @@ pub fn admitted<C: Clock, X: Carrier<C>>(
     runtimes: &Runtimes,
     journal: crate::sink::Journal,
 ) -> Result<Admitted<C, X>, RunError> {
+    let memory = u64::MAX / 4;
     let fitted = fit(
         plan,
         read_ahead,
         carrier,
         journal,
-        crate::memory::Memory::declared(u64::MAX / 4),
+        crate::memory::Memory::declared(memory),
+        crate::live::Limit::assumed(Some((memory, 0)), None),
     )?;
     admit(fitted, runtimes)
 }
