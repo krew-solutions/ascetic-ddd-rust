@@ -262,6 +262,7 @@ fn once(how: &Source) -> Option<bool> {
         header,
         ascetic_ddd_command_log::validate::Peaks {
             pending: K as u64,
+            sockets: vec![K as u64],
             ..Default::default()
         },
     );

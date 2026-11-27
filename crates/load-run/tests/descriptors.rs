@@ -96,6 +96,7 @@ fn a_run_at_the_descriptors_bound_hits_no_emfile() {
             header.clone(),
             Peaks {
                 pending: CAP as u64,
+                sockets: vec![CAP as u64],
                 ..Default::default()
             },
         )

@@ -495,6 +495,8 @@ struct Connects {
     ports: usize,
     /// The plan's pending steps at once, as admission reads them.
     pending: u64,
+    /// Each source's steps taking its sockets at once, if not `pending`.
+    by_source: Option<u64>,
     /// The source's events a driver turn.
     events: usize,
     /// The sources the carrier's own header has, if not the plan's.
@@ -510,6 +512,7 @@ const CONNECTS: Connects = Connects {
     refusal: || Connect::Stand(StandConnect::Refused),
     ports: 1_000,
     pending: 0,
+    by_source: None,
     events: 1_024,
     carrier_sources: None,
     descriptors: None,
@@ -582,11 +585,13 @@ fn run_rest_refused(
             runtimes = runtimes.with_descriptors(d);
         }
         // A refusal before T0 comes back as it is: no run, no journal.
+        let sources = usize::try_from(header.profile.sources.max(1)).unwrap_or(1);
         let ran = match admit(
             ascetic_ddd_load_run::source::Plan::assumed(
                 header,
                 ascetic_ddd_command_log::validate::Peaks {
                     pending: connects.pending,
+                    sockets: vec![connects.by_source.unwrap_or(connects.pending); sources],
                     ..Default::default()
                 },
             ),
@@ -2587,6 +2592,37 @@ fn admission_holds_a_source_s_sockets() {
             cap: usize::MAX,
             events: Some(cap + 2),
         }
+    );
+    // K2b-7e-2b-3a-3: each source needs its own steps' sockets, not the
+    // plan's whole pending — two sources whose steps at once total twice the
+    // cap, each within it: admitted; one past it on each: refused, naming it.
+    let mut two = header.clone();
+    two.profile.sources = 2;
+    let split = |each: u64| {
+        run_rest_refused(
+            two.clone(),
+            &[call("read", 1, 0, 0, 0)],
+            vec![ok(10, 0)],
+            AT_ONCE,
+            0,
+            Connects {
+                pending: 2 * pending,
+                by_source: Some(each),
+                ..exact
+            },
+            None,
+            None,
+            &|_| {},
+        )
+        .0
+    };
+    assert!(split(pending).is_ok(), "each source within its cap");
+    assert!(
+        matches!(
+            split(pending + 1),
+            Err(RunError::Inadmissible(Inadmissible::Sockets { source: 0, needed, .. })) if needed == pending + 1
+        ),
+        "a source past its cap"
     );
     // A plan of two sources, a carrier built from a header of its own, of
     // one: refused — its header not the plan's (decision 20).

@@ -505,11 +505,13 @@ fn chained(
         TcpEgress::new(BTreeMap::from([("gateway".to_owned(), addr)]), vec![None]).with_ports(100),
         Config::new(ascetic_ddd_command_log::render::RunSecret::new([7; 32])),
     );
+    let sources = usize::try_from(h.profile.sources.max(1)).unwrap_or(1);
     let admitted = admit::<RealClock, _>(
         Plan::assumed(
             h,
             ascetic_ddd_command_log::validate::Peaks {
                 pending: 1,
+                sockets: vec![1; sources],
                 ..Default::default()
             },
         ),
@@ -748,11 +750,13 @@ fn no_socket_the_shell_closes_waits_in_time_wait() {
         Config::new(ascetic_ddd_command_log::render::RunSecret::new([7; 32])),
     );
     let before = time_waits(ip);
+    let sources = usize::try_from(h.profile.sources.max(1)).unwrap_or(1);
     let admitted = admit::<RealClock, _>(
         Plan::assumed(
             h,
             ascetic_ddd_command_log::validate::Peaks {
                 pending: 3,
+                sockets: vec![3; sources],
                 ..Default::default()
             },
         ),

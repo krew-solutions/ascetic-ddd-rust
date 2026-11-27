@@ -344,6 +344,7 @@ fn healthy_with(gap: u64, steps: u64, every: u64, size: u64) -> Replayed {
             header.clone(),
             ascetic_ddd_command_log::validate::Peaks {
                 pending: 2_000,
+                sockets: vec![2_000],
                 ..Default::default()
             },
         ),

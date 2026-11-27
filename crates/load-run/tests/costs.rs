@@ -27,7 +27,8 @@ use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll, Waker};
 
-use ascetic_ddd_command_log::fills::Namespace;
+use ascetic_ddd_command_log::answer::TAKEN;
+use ascetic_ddd_command_log::fills::{Captured, Namespace};
 use ascetic_ddd_command_log::record::{Header, Record, Rest};
 use ascetic_ddd_command_log::render::RunSecret;
 use ascetic_ddd_command_log::validate::Peaks;
@@ -38,6 +39,7 @@ use ascetic_ddd_load_run::run::{ATTEMPT, Ready, Runtimes, admit, run};
 use ascetic_ddd_load_run::sink::JournalSink;
 use ascetic_ddd_load_run::source::{Plan, Records};
 use ascetic_ddd_load_run::stand::{Connect, Egress, Route, Stand, Unfit};
+use ascetic_ddd_scheduler::fits::VALUE;
 use ascetic_ddd_scheduler::journal::{self, JournalError};
 use ascetic_ddd_scheduler::machine::Judgement;
 use ascetic_ddd_scheduler::sim;
@@ -407,6 +409,9 @@ struct Row {
     chunked: bool,
     /// The reads' requests by class (K2b-7e-2b-3a-2).
     req: Req,
+    /// Each read's `If-Match` a writer's captured value of `VALUE` bytes,
+    /// the writer answered at once before it (K2b-7e-2b-3a-3).
+    captured: bool,
 }
 
 /// A read's request beyond its group: a path value of `target` spaces (each
@@ -429,6 +434,7 @@ fn answer(row: Row, at: u64) -> Vec<(u64, Vec<u8>)> {
         repeated,
         chunked,
         req: _,
+        captured: _,
     } = row;
     let framing = if chunked {
         "transfer-encoding: chunked".to_owned()
@@ -589,9 +595,23 @@ fn plan(n: u64, row: Row) -> (Header, Vec<Record>) {
     h.channels.clear();
     h.calls.clear();
     h.profile.answer_cap = row.body as u64;
-    let mut records: Vec<Record> = (1..=n)
-        .map(|g| requested(call("read", g, 0, AT, 0), row.req))
-        .collect();
+    let mut records: Vec<Record> = Vec::new();
+    if row.captured {
+        // The writers first, at the reads' instant and answered at once, each
+        // capturing its group's ETag; then the reads that send it, released
+        // at its answer.
+        records.extend((1..=n).map(|g| captures_etag(call("update", g, 0, AT, 0), g)));
+    }
+    records.extend((1..=n).map(|g| {
+        let r = requested(call("read", g, 0, AT, 0), row.req);
+        if !row.captured {
+            return r;
+        }
+        let writer = id("device", g, "update", 0);
+        let mut r = after(r, &writer, ascetic_ddd_command_log::record::On::Expected);
+        r.action = read_etag("read", g, &writer);
+        r
+    }));
     records.extend(
         PROBES
             .iter()
@@ -632,9 +652,28 @@ fn requested(mut r: Record, req: Req) -> Record {
 /// The script `sim` and the scripted carrier run: the reads answered after
 /// [`ANSWERED`], the probes at once; `seen` called at each probe's dispatch.
 fn script(n: u64, seen: impl Fn() + Send + Sync + 'static) -> Arc<common::Script> {
-    Arc::new(move |line: u64, _: u32, _: &Record| {
-        // Lines from 2: the reads, then the probes.
-        let read = line <= n + 1;
+    Arc::new(move |line: u64, _: u32, r: &Record| {
+        // The writers, answered at once with their capture; the reads, after
+        // [`ANSWERED`]; then the probes.
+        if let Some(c) = r.capture.first() {
+            let mut value = Vec::with_capacity(VALUE as usize);
+            value.push(b'"');
+            value.extend(std::iter::repeat_n(*b"\\\"", TAKEN).flatten());
+            value.push(b'"');
+            assert_eq!(value.len() as u64, VALUE);
+            return sim::Attempt {
+                sent_after: 0,
+                answer_after: Some(10),
+                judgement: Judgement::Expected(vec![Captured {
+                    subject: c.subject.clone(),
+                    slot: c.slot.clone(),
+                    value,
+                }]),
+                after: None,
+            };
+        }
+        let read = r.at < PROBES[0];
+        let _ = (line, n);
         if !read {
             seen();
         }
@@ -726,6 +765,7 @@ fn shell(n: u64, row: Row, scripted: bool) -> Held {
             header.clone(),
             Peaks {
                 pending: n + 4,
+                sockets: vec![n + 4],
                 ..Default::default()
             },
         );
@@ -802,11 +842,22 @@ struct Costs {
     mid: u64,
 }
 
+/// The shell's own share a read, beside the machine at the same state: a
+/// carrier that holds nothing of its own, held at its open or at its
+/// dispatch's burst.
+fn shell_share(row: Row, (a, b): (u64, u64)) -> u64 {
+    let _ = (machine(1, row), shell(1, row, true));
+    let (ma, mb) = (machine(a, row), machine(b, row));
+    let (sa, sb) = (shell(a, row, true), shell(b, row, true));
+    let p = |x: usize, y: usize| per(x, y, a, b);
+    (p(sa[1].0, sb[1].0).saturating_sub(p(ma.open, mb.open)))
+        .max(p(sa[0].1, sb[0].1).saturating_sub(p(ma.peak, mb.peak)))
+}
+
 fn costs(row: Row, (a, b): (u64, u64)) -> Costs {
     // Warmed: what a process allocates once, at its first run of each.
     let _ = (machine(1, row), shell(1, row, true), shell(1, row, false));
     let (ma, mb) = (machine(a, row), machine(b, row));
-    let (sa, sb) = (shell(a, row, true), shell(b, row, true));
     let (ra, rb) = (shell(a, row, false), shell(b, row, false));
     let p = |x: usize, y: usize| per(x, y, a, b);
     let (m_open, m_peak, m_idle) = (
@@ -817,8 +868,7 @@ fn costs(row: Row, (a, b): (u64, u64)) -> Costs {
     let held = |h: &Held, i: usize| h[i].0;
     let peak = |h: &Held, i: usize| h[i].1;
     // By `SAMPLED`'s index: 0 dispatched, 1 open, 2 heads, 3 mid, 4 done, 5 idle.
-    let shell = (p(held(&sa, 1), held(&sb, 1)).saturating_sub(m_open))
-        .max(p(peak(&sa, 0), peak(&sb, 0)).saturating_sub(m_peak));
+    let shell = shell_share(row, (a, b));
     let idle = p(held(&ra, 5), held(&rb, 5)).saturating_sub(m_idle);
     let open = p(held(&ra, 1), held(&rb, 1));
     let attempt = (open.saturating_sub(m_open))
@@ -927,6 +977,7 @@ const SMALL: Row = Row {
         header: 0,
         body: 0,
     },
+    captured: false,
 };
 
 /// A body of 2^16 + 1 bytes at the cap, its first 20,000 with the head.
@@ -1039,6 +1090,28 @@ fn rest_states_its_source_costs_from_the_plan() {
         "the plan's record and the problem charged"
     );
     assert!(unknown.is_err(), "{unknown:?}");
+}
+
+/// K2b-7e-2b-3a-3: the shell's share of an attempt whose hole a writer's
+/// captured value of `VALUE` bytes fills — its own and its copy of the value
+/// — as `run::attempt_share` prices it.
+#[test]
+fn the_shell_holds_its_stated_share_of_a_captured_hole() {
+    let _alone = alone();
+    let row = Row {
+        captured: true,
+        ..SMALL
+    };
+    let share = shell_share(row, (257, 513));
+    let (_, records) = plan(1, row);
+    let read = ascetic_ddd_command_log::shape::shape(&records[1]);
+    assert_eq!(read.holes, 1, "the read's hole");
+    within(
+        "the shell's share of an attempt with a captured hole",
+        share,
+        ascetic_ddd_load_run::run::attempt_share(&read),
+        0.9,
+    );
 }
 
 /// A connection idle in its pool, an attempt open beside it: as the REST

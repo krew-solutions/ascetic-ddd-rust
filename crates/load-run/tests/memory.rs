@@ -227,6 +227,7 @@ fn measured(n: u64, delay: f64, size: usize) -> (Samples, usize, usize, (usize, 
             header.clone(),
             ascetic_ddd_command_log::validate::Peaks {
                 pending: n + 16,
+                sockets: vec![n + 16],
                 ..Default::default()
             },
         ),

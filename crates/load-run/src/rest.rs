@@ -293,9 +293,10 @@ impl<C: Clock, S: Stand, E: Egress, D: Decorator> Carrier<C> for RestCarrier<S, 
         Ok(())
     }
 
-    /// A socket an attempt not ended, under the plan's bound its pending
-    /// steps (one HTTP/1.1 request a connection); its cap the egress's; an
-    /// answer charged its body at the profile's cap and its head at its worst.
+    /// A socket an attempt not ended, under the plan's bound its source's
+    /// steps taking sockets (one HTTP/1.1 request a connection); its cap the
+    /// egress's; an answer charged its body at the profile's cap and its head
+    /// at its worst.
     fn needs(
         &self,
         peaks: &ascetic_ddd_command_log::validate::Peaks,
@@ -306,7 +307,13 @@ impl<C: Clock, S: Stand, E: Egress, D: Decorator> Carrier<C> for RestCarrier<S, 
             .and_then(|s| self.inner.sockets.get(s))
             .ok_or_else(|| format!("no source {source} in the carrier's own header"))?;
         Ok(Needs::Sockets {
-            needed: peaks.pending,
+            // Its own source's steps taking its sockets, not the plan's
+            // whole pending (K2b-7e-2b-3a-3); a source with none, none.
+            needed: usize::try_from(source)
+                .ok()
+                .and_then(|s| peaks.sockets.get(s))
+                .copied()
+                .unwrap_or(0),
             cap: sockets.cap(),
             costs: Costs {
                 connection: CONNECTION

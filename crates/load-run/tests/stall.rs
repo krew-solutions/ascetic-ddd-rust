@@ -170,6 +170,7 @@ fn a_whole_process_stalled_makes_no_root() {
             header.clone(),
             ascetic_ddd_command_log::validate::Peaks {
                 pending: 2_000,
+                sockets: vec![2_000],
                 ..Default::default()
             },
         ),

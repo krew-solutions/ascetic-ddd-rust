@@ -163,6 +163,25 @@ pub const DESCRIPTORS_RESERVE: u64 = 16;
 /// by `tests/costs.rs` against a carrier that holds nothing of its own.
 pub const ATTEMPT: u64 = 1_536;
 
+/// A captured hole's value as an attempt holds it (ADR-0047 decision 22,
+/// K2b-7e-2b-3a-3): the shell's copy the machine dispatches it with, at most
+/// [`VALUE`](ascetic_ddd_scheduler::fits::VALUE) bytes, and its entry.
+pub const CAPTURED: u64 = ascetic_ddd_scheduler::fits::VALUE
+    .saturating_add(size_of::<ascetic_ddd_command_log::fills::Captured>() as u64);
+
+/// The bytes the shell holds of the attempts of records summed into `shape`
+/// (decision 22, K2b-7e-2b-3a-3), whatever carries them: its share
+/// [`ATTEMPT`] each, and its copy of each captured hole's value — at most
+/// [`CAPTURED`] with its subject's and slot's bytes. The carrier's beside it
+/// (`Carrier::attempts`).
+#[must_use]
+pub fn attempt_share(shape: &ascetic_ddd_command_log::shape::Shape) -> u64 {
+    ATTEMPT
+        .saturating_mul(shape.records)
+        .saturating_add(CAPTURED.saturating_mul(shape.holes))
+        .saturating_add(shape.hole_bytes)
+}
+
 /// The I/O events a source's driver spends a turn on its own (decision 20):
 /// its waker, and its signal receiver when tokio's `signal` feature is
 /// compiled in — an upper bound.

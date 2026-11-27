@@ -126,19 +126,76 @@ fn keeping(k: &Kept) -> u64 {
         .saturating_add(k.capture_bytes)
 }
 
+/// What a machine of these peaks holds, term by term (ADR-0047 decision 22,
+/// K2b-7e-2b-3a-3): its records apart, which admission's pool prices at the
+/// steps late by a jitter instead — a record outlives its step's end while
+/// an attempt's handle holds it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Terms {
+    /// Its cells: those held ended, those pending live.
+    pub cells: u64,
+    /// Its barrier keys, each kept for the run, and their bytes.
+    pub barriers: u64,
+    /// The records of the steps not ended, decoded.
+    pub records: u64,
+    /// The producers they are bound to, and their waiters.
+    pub bound_to: u64,
+    /// What the held keep once ended.
+    pub keeping: u64,
+    /// One record's bindings while its step is taken.
+    pub binding: u64,
+}
+
+impl Terms {
+    /// Their sum.
+    #[must_use]
+    pub fn sum(&self) -> u64 {
+        let Terms {
+            cells,
+            barriers,
+            records,
+            bound_to,
+            keeping,
+            binding,
+        } = *self;
+        [cells, barriers, records, bound_to, keeping, binding]
+            .into_iter()
+            .fold(0u64, u64::saturating_add)
+    }
+}
+
+/// The terms a plan of these peaks needs.
+#[must_use]
+pub fn terms(peaks: &Peaks) -> Terms {
+    let live = LIVE_CELL.saturating_sub(ENDED_CELL);
+    Terms {
+        cells: peaks
+            .held
+            .saturating_mul(ENDED_CELL)
+            .saturating_add(peaks.pending.saturating_mul(live)),
+        barriers: peaks
+            .barriers
+            .saturating_mul(BARRIER)
+            .saturating_add(peaks.barrier_bytes),
+        records: shape::bound(&peaks.pending_shape),
+        bound_to: bound_to(&peaks.pending_shape),
+        keeping: keeping(&peaks.kept),
+        binding: binding(&peaks.record),
+    }
+}
+
+/// The records a run holds of the steps late by a jitter (K2b-7e-2b-3a-3):
+/// those not ended and those an attempt's handle holds past its end — what
+/// admission's pool charges in place of [`Terms::records`], each count of
+/// `late_shape` at least `pending_shape`'s.
+#[must_use]
+pub fn late_records(peaks: &Peaks) -> u64 {
+    shape::bound(&peaks.late_shape)
+}
+
 /// The bytes a plan of these peaks needs.
 pub fn needed(peaks: &Peaks) -> u64 {
-    let live = LIVE_CELL.saturating_sub(ENDED_CELL);
-    peaks
-        .held
-        .saturating_mul(ENDED_CELL)
-        .saturating_add(peaks.pending.saturating_mul(live))
-        .saturating_add(peaks.barriers.saturating_mul(BARRIER))
-        .saturating_add(peaks.barrier_bytes)
-        .saturating_add(shape::bound(&peaks.pending_shape))
-        .saturating_add(bound_to(&peaks.pending_shape))
-        .saturating_add(keeping(&peaks.kept))
-        .saturating_add(binding(&peaks.record))
+    terms(peaks).sum()
 }
 
 /// Whether a machine of `budget`, reading `read_ahead` ahead, holds the plan

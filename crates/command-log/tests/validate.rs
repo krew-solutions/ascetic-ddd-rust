@@ -1815,3 +1815,24 @@ fn a_call_from_a_source_past_the_profile_s_breaks_operation() {
     }
     assert!(pairs(&run(&[polling])).contains(&(2, Rule::Operation)));
 }
+
+/// K2b-7e-2b-3a-3 of ADR-0047 (decision 22): the steps late by a jitter hold
+/// the steps not ended — each count of the late shape at least the pending
+/// shape's, as admission's pool takes the late records in place of the
+/// pending ones — over the corpus, under its header and with a jitter.
+#[test]
+fn the_late_shape_holds_the_pending_shape() {
+    for (name, records) in fixture::corpus::logs() {
+        for jitter in [0, 250] {
+            let mut header = fixture::corpus::corpus_header();
+            header.profile.jitter = jitter;
+            let p = run_with(header, &records, &NoHost, 3).peaks;
+            assert_eq!(
+                p.late_shape.most(p.pending_shape),
+                p.late_shape,
+                "{name} at a jitter of {jitter}"
+            );
+            assert!(p.late >= p.pending, "{name} at a jitter of {jitter}");
+        }
+    }
+}
