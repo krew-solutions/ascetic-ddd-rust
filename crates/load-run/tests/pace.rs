@@ -298,6 +298,25 @@ fn healthy(gap: u64, steps: u64) -> Replayed {
 
 /// [`healthy`], every `every`-th answer `size` bytes of numbers.
 fn healthy_with(gap: u64, steps: u64, every: u64, size: u64) -> Replayed {
+    let (lines, j) = journal_of(gap, steps, every, size, 1);
+    let shapes = [0, 10, 50, 100, 200]
+        .into_iter()
+        .flat_map(|r| [false, true].map(|pairwise| (r, pairwise)))
+        .map(|(r, pairwise)| (r, pairwise, shaped(&lines, j, r, pairwise)))
+        .collect();
+    (paced(&lines, j), shapes)
+}
+
+/// The journal of a healthy run of `steps` reads `gap` µs apart over
+/// `sources` sources in turn, every `every`-th answer `size` bytes of
+/// numbers; and the run's jitter.
+fn journal_of(
+    gap: u64,
+    steps: u64,
+    every: u64,
+    size: u64,
+    sources: u32,
+) -> (Vec<journal::Line>, u64) {
     let _ = Descriptors::raise().unwrap();
     let port = {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -326,28 +345,42 @@ fn healthy_with(gap: u64, steps: u64, every: u64, size: u64) -> Replayed {
     header.channels.clear();
     header.calls.clear();
     header.profile.jitter = 2_000;
+    header.profile.sources = sources;
     header
         .operations
         .iter_mut()
         .for_each(|o| o.timeout = 500_000);
+    let n = usize::try_from(sources).unwrap();
     let records: Vec<Record> = (0..steps)
-        .map(|i| call("read", i + 1, 0, i * gap, 0))
+        .map(|i| {
+            call(
+                "read",
+                i + 1,
+                0,
+                i * gap,
+                u32::try_from(i % u64::from(sources)).unwrap(),
+            )
+        })
         .collect();
     let header = Arc::new(header);
     const CAP: usize = 4_000;
     let carrier = RestCarrier::new(
         header.clone(),
         OneStand,
-        TcpEgress::new(BTreeMap::from([("gateway".to_owned(), addr)]), vec![None]).with_ports(CAP),
+        TcpEgress::new(
+            BTreeMap::from([("gateway".to_owned(), addr)]),
+            vec![None; n],
+        )
+        .with_ports(CAP * n),
         Config::new(RunSecret::new([7; 32])),
     );
-    let live = Live::for_caps(&[CAP]).unwrap();
+    let live = Live::for_caps(&vec![CAP; n]).unwrap();
     let admitted = admit(
         Plan::assumed(
             header.clone(),
             ascetic_ddd_command_log::validate::Peaks {
                 pending: 2_000,
-                sockets: vec![2_000],
+                sockets: vec![2_000; n],
                 ..Default::default()
             },
         ),
@@ -368,13 +401,52 @@ fn healthy_with(gap: u64, steps: u64, every: u64, size: u64) -> Replayed {
         ))
         .unwrap()
         .journal;
-    let j = header.profile.jitter;
-    let shapes = [0, 10, 50, 100, 200]
-        .into_iter()
-        .flat_map(|r| [false, true].map(|pairwise| (r, pairwise)))
-        .map(|(r, pairwise)| (r, pairwise, shaped(&lines, j, r, pairwise)))
-        .collect();
-    (paced(&lines, j), shapes)
+    (lines, header.profile.jitter)
+}
+
+/// Each attempt's lateness split (decision 21's second round, § Owed): the
+/// machine's — dispatched past its due, a judging floor holding its wakes
+/// among the causes — and the hand-off's — handed past its dispatch, its
+/// source's thread busy. For each, the attempts past J and their excess over
+/// J summed, µs.
+fn split(lines: &[journal::Line], j: u64) -> ((usize, u64), (usize, u64)) {
+    let mut due: BTreeMap<(u64, u32), u64> = BTreeMap::new();
+    let mut dispatched: BTreeMap<(u64, u32), u64> = BTreeMap::new();
+    let mut handed: BTreeMap<(u64, u32), u64> = BTreeMap::new();
+    for l in lines {
+        match l {
+            journal::Line::Released(r) => {
+                due.insert((r.line, 1), r.intended);
+            }
+            journal::Line::Dispatch(d) => {
+                if d.attempt > 1 {
+                    due.insert((d.line, d.attempt), d.due);
+                }
+                dispatched.entry((d.line, d.attempt)).or_insert(d.at);
+            }
+            journal::Line::Sent(s) => {
+                handed.entry((s.line, s.attempt)).or_insert(s.handed);
+            }
+            _ => {}
+        }
+    }
+    let past = |v: Vec<u64>| {
+        let late: Vec<u64> = v.into_iter().filter(|&x| x > j).map(|x| x - j).collect();
+        (late.len(), late.iter().sum::<u64>())
+    };
+    let machine = past(
+        dispatched
+            .iter()
+            .filter_map(|(k, &at)| due.get(k).map(|&d| at.saturating_sub(d)))
+            .collect(),
+    );
+    let hand = past(
+        handed
+            .iter()
+            .filter_map(|(k, &h)| dispatched.get(k).map(|&at| h.saturating_sub(at)))
+            .collect(),
+    );
+    (machine, hand)
 }
 
 #[test]
@@ -422,6 +494,35 @@ fn the_pace_replayed_with_large_answers() {
                         s.missed, s.largest, s.late
                     );
                 }
+            }
+        }
+    }
+}
+
+/// The judging floor's share of a run's shift (decision 21's second round,
+/// § Owed): 1,000 reads a second for 30 s over 1, 4 and 16 sources, 5, 20
+/// and 83 answers a second large, at 64 and 256 KiB — the shift with no
+/// catch-up, split into the machine's lateness (its judging floor among the
+/// causes) and the hand-off's (a source's thread busy). On an optimised
+/// build, on the load server. Measured on purpose (`--ignored`).
+#[test]
+#[ignore = "a measurement, run on purpose"]
+fn the_floor_s_share_of_the_shift() {
+    for size in [65_536, 262_144] {
+        for every in [200, 50, 12] {
+            for sources in [1, 4, 16] {
+                let (lines, j) = journal_of(1_000, 30_000, every, size, sources);
+                let s = shaped(&lines, j, 0, true);
+                let ((m, m_sum), (h, h_sum)) = split(&lines, j);
+                eprintln!(
+                    "MEASURED floor: {size} B, one answer in {every} large ({} a second), {sources} \
+                     sources: shift at κ = 0 {} µs, {}‰ handed past J, {} never handed; the machine \
+                     past J {m} times by {m_sum} µs, the hand-off past J {h} times by {h_sum} µs",
+                    1_000 / every,
+                    s.largest,
+                    s.late,
+                    s.missed
+                );
             }
         }
     }
