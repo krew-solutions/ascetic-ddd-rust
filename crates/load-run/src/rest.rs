@@ -31,7 +31,7 @@ use http_body::{Body, Frame as BodyFrame, SizeHint};
 use hyper::client::conn::http1::{self, SendRequest};
 use tokio::task::AbortHandle;
 
-use crate::carrier::{Carrier, Costs, Needs, Unprobed};
+use crate::carrier::{Carrier, Costs, Needs, SourceCosts, StatedBy, Unprobed};
 use crate::clock::Clock;
 use crate::decorate::{Decoration, Decorator, Undecorated};
 use crate::io::{Held, Io, Probe, Slot, Sockets};
@@ -313,6 +313,28 @@ impl<C: Clock, S: Stand, E: Egress, D: Decorator> Carrier<C> for RestCarrier<S, 
         })
     }
 
+    /// Its scratch a source's thread, a head copied at a time, and one
+    /// answered tail a source — the parse at the profile's cap of the
+    /// plan's largest record, judged.
+    fn source_costs(
+        &self,
+        peaks: &ascetic_ddd_command_log::validate::Peaks,
+        source: u32,
+    ) -> Result<SourceCosts, String> {
+        usize::try_from(source)
+            .ok()
+            .and_then(|s| self.inner.sockets.get(s))
+            .ok_or_else(|| format!("no source {source} in the carrier's own header"))?;
+        let profile = &self.inner.header.profile;
+        let problem = u64::try_from(profile.problem.len()).unwrap_or(u64::MAX);
+        Ok(SourceCosts {
+            scratch: SCRATCH,
+            head: HEAD_COPY,
+            tail: ascetic_ddd_scheduler::judge::bound(profile.answer_cap, &peaks.record, problem),
+            stated_by: StatedBy::Library,
+        })
+    }
+
     /// One connect to each endpoint `source` declares, all at once, each
     /// raced against the bound; a stream got, dropped — reset, no byte.
     fn probe(
@@ -529,6 +551,67 @@ pub const ATTEMPT: u64 = 5_120;
 /// it, the copy the judge reads — a head of [`READ`] bytes in a hundred
 /// fields, its bulk in their names (hyper copies a name; a value it slices).
 pub const HEAD: u64 = 77_824;
+
+/// The most fields a head holds: hyper's default, left unset — setting it
+/// moves hyper's parse of every head to the heap; a head past it a fault,
+/// `rest.head` (decision 22).
+pub const FIELDS: u64 = 100;
+
+/// The bytes a source's thread copies its reads through (decision 22): one
+/// scratch a thread, not one a connection.
+pub const SCRATCH: u64 = crate::io::SCRATCH as u64;
+
+/// The bytes an answer's head holds at most as it is copied (decision 22,
+/// K2b-7e-2b-2c-4): each field's name and value owned — at most the [`READ`]
+/// bytes of the head — and the vector of its [`FIELDS`] sized at once. One a
+/// source: the copy is a plain function.
+pub const HEAD_COPY: u64 =
+    (READ as u64).saturating_add(FIELDS.saturating_mul(size_of::<(String, Vec<u8>)>() as u64));
+
+/// An answer's head copied (decision 22): what the judge reads of it once
+/// hyper's parts are let go.
+#[derive(Debug)]
+pub struct Head {
+    /// Its status.
+    pub status: u16,
+    /// Each field's name and value, owned.
+    pub fields: Vec<(String, Vec<u8>)>,
+    /// The length it states, if any.
+    pub length: Option<usize>,
+}
+
+/// An answer's head copied (decision 22): each field's name and value owned —
+/// the vector sized at once, never grown by doubling, a name repeated or not —
+/// and the length it states. A plain function: a source's thread copies one
+/// head at a time.
+fn head(parts: &http::response::Parts) -> Head {
+    let mut fields = Vec::with_capacity(parts.headers.len());
+    fields.extend(
+        parts
+            .headers
+            .iter()
+            .map(|(n, v)| (n.as_str().to_owned(), v.as_bytes().to_vec())),
+    );
+    let length = parts
+        .headers
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|l| usize::try_from(l).unwrap_or(usize::MAX));
+    Head {
+        status: parts.status.as_u16(),
+        fields,
+        length,
+    }
+}
+
+/// An answer's head copied as the carrier copies it, for its executor
+/// (`tests/head.rs`).
+#[cfg(feature = "testing")]
+#[must_use]
+pub fn copied(parts: &http::response::Parts) -> Head {
+    head(parts)
+}
 
 /// The one HTTP/1.1 client builder every connection takes (decision 22): reads
 /// of exactly [`READ`]; writes vectored — a body queued, never copied into the
@@ -859,18 +942,11 @@ impl<S: Stand, E: Egress, D: Decorator> Inner<S, E, D> {
         // The head copied and its parts dropped before the body (decision
         // 22): a header slices hyper's read buffer, and pinned it while the
         // body came.
-        let status = parts.status.as_u16();
-        let headers: Vec<(String, Vec<u8>)> = parts
-            .headers
-            .iter()
-            .map(|(n, v)| (n.as_str().to_owned(), v.as_bytes().to_vec()))
-            .collect();
-        let length = parts
-            .headers
-            .get(hyper::header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .map(|l| usize::try_from(l).unwrap_or(usize::MAX));
+        let Head {
+            status,
+            fields: headers,
+            length,
+        } = head(&parts);
         drop(parts);
         // The body sized at once, never grown (decision 22): its length, at
         // most the cap — a length past the cap unreadable at its head, unread

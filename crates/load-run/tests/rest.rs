@@ -1052,6 +1052,14 @@ impl Carrier<VirtualClock> for Mixed {
         Carrier::<VirtualClock>::needs(&self.rest, peaks, source)
     }
 
+    fn source_costs(
+        &self,
+        peaks: &ascetic_ddd_command_log::validate::Peaks,
+        source: u32,
+    ) -> Result<ascetic_ddd_load_run::carrier::SourceCosts, String> {
+        Carrier::<VirtualClock>::source_costs(&self.rest, peaks, source)
+    }
+
     fn probe(
         &self,
         source: u32,

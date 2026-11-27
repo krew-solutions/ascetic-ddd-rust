@@ -269,7 +269,7 @@ pub(crate) struct Io<T> {
 }
 
 /// The most a read copies at once.
-const SCRATCH: usize = 16 * 1024;
+pub(crate) const SCRATCH: usize = 16 * 1024;
 
 std::thread_local! {
     /// The read's scratch, one a thread, not one a connection (ADR-0047

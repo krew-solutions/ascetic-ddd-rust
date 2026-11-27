@@ -42,6 +42,14 @@ impl<C: Clock> Carrier<C> for Scripted {
         Ok(ascetic_ddd_load_run::carrier::Needs::Nothing)
     }
 
+    fn source_costs(
+        &self,
+        _: &ascetic_ddd_command_log::validate::Peaks,
+        _: u32,
+    ) -> Result<ascetic_ddd_load_run::carrier::SourceCosts, String> {
+        Ok(ascetic_ddd_load_run::carrier::SourceCosts::NOTHING)
+    }
+
     fn probe(
         &self,
         _: u32,

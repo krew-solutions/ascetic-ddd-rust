@@ -402,6 +402,8 @@ struct Row {
     head: usize,
     fields: usize,
     names: bool,
+    /// One name for every field past its own two, its bulk in it.
+    repeated: bool,
     chunked: bool,
 }
 
@@ -413,6 +415,7 @@ fn answer(row: Row, at: u64) -> Vec<(u64, Vec<u8>)> {
         head,
         fields,
         names,
+        repeated,
         chunked,
     } = row;
     let framing = if chunked {
@@ -426,12 +429,16 @@ fn answer(row: Row, at: u64) -> Vec<(u64, Vec<u8>)> {
     // the head to `head` bytes.
     let extra = fields.saturating_sub(2);
     let room = head.saturating_sub(own.len() + 2);
+    // One name repeated: its share the same each field, `x-` and its bulk.
+    let each = (room / extra.max(1)).saturating_sub(8).max(1);
     for i in 0..extra {
         let left = room.saturating_sub(text.len() - own.len());
         let share = left / (extra - i);
         // `x-NN`, `: `, `\r\n`: eight bytes beside the bulk.
         let bulk = share.saturating_sub(8).max(1);
-        if names {
+        if repeated {
+            text.push_str(&format!("x-aa{}: a\r\n", "a".repeat(each - 1)));
+        } else if names {
             text.push_str(&format!("x-{i:02}{}: a\r\n", "a".repeat(bulk - 1)));
         } else {
             text.push_str(&format!("x-{i:02}: {}\r\n", "a".repeat(bulk)));
@@ -788,17 +795,15 @@ fn costs(row: Row, (a, b): (u64, u64)) -> Costs {
     }
 }
 
-/// The REST carrier's stated costs for `row`'s profile.
-fn stated(row: Row) -> ascetic_ddd_load_run::carrier::Costs {
-    let (h, _) = plan(1, row);
-    let header = Arc::new(h);
+/// `f` of the REST carrier of `header`.
+fn with_carrier<T>(header: Header, f: impl FnOnce(&RestCarrier<OneStand, Pipes>) -> T) -> T {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .unwrap();
     let _in = rt.enter();
     let carrier = RestCarrier::new(
-        header,
+        Arc::new(header),
         OneStand,
         Pipes {
             clock: Arc::new(VirtualClock::start(0)),
@@ -810,10 +815,18 @@ fn stated(row: Row) -> ascetic_ddd_load_run::carrier::Costs {
         },
         Config::new(RunSecret::new([7; 32])),
     );
-    match Carrier::<VirtualClock>::needs(&carrier, &Peaks::default(), 0) {
-        Ok(Needs::Sockets { costs, .. }) => costs,
-        other => panic!("{other:?}"),
-    }
+    f(&carrier)
+}
+
+/// The REST carrier's stated costs for `row`'s profile.
+fn stated(row: Row) -> ascetic_ddd_load_run::carrier::Costs {
+    let (h, _) = plan(1, row);
+    with_carrier(h, |carrier| {
+        match Carrier::<VirtualClock>::needs(carrier, &Peaks::default(), 0) {
+            Ok(Needs::Sockets { costs, .. }) => costs,
+            other => panic!("{other:?}"),
+        }
+    })
 }
 
 /// `measured` within `[floor · stated, stated]`: an upper bound, and not a
@@ -840,6 +853,7 @@ const SMALL: Row = Row {
     head: 0,
     fields: 2,
     names: false,
+    repeated: false,
     chunked: false,
 };
 
@@ -859,6 +873,13 @@ const WORST: Row = Row {
     ..SMALL
 };
 
+/// The worst head's bytes in a hundred fields of one name: a name hyper
+/// keeps once, its copy each field's own (K2b-7e-2b-2c-4).
+const REPEATED: Row = Row {
+    repeated: true,
+    ..WORST
+};
+
 /// One test measuring at a time: the allocator counts the whole process,
 /// and the harness runs a binary's tests at once.
 fn alone() -> std::sync::MutexGuard<'static, ()> {
@@ -876,6 +897,62 @@ fn the_shell_holds_its_stated_share_an_attempt() {
     let _alone = alone();
     let c = costs(SMALL, (4_097, 8_193));
     within("the shell's share an attempt", c.shell, ATTEMPT, 0.8);
+}
+
+/// A head of one name repeated: within what REST charges an answer's head.
+#[test]
+fn a_head_of_one_name_repeated_holds_what_rest_charges() {
+    let _alone = alone();
+    assert!(head_of(REPEATED) <= READ, "{} B", head_of(REPEATED));
+    assert!(head_of(REPEATED) > READ - 256, "{} B", head_of(REPEATED));
+    let c = costs(REPEATED, SIZES);
+    within(
+        "a head of one name repeated",
+        c.answer,
+        stated(REPEATED).answer,
+        0.5,
+    );
+}
+
+/// What the REST carrier holds a source beside its sockets, as its needs
+/// tell it: its read scratch, a head copied, one tail — the parse at the
+/// cap of the plan's largest record, judged; a source it does not know,
+/// refused.
+#[test]
+fn rest_states_its_source_costs_from_the_plan() {
+    use ascetic_ddd_load_run::carrier::{SourceCosts, StatedBy};
+    use ascetic_ddd_load_run::rest::{HEAD_COPY, SCRATCH};
+    let (h, records) = plan(1, LARGE);
+    let cap = h.profile.answer_cap;
+    let problem = u64::try_from(h.profile.problem.len()).unwrap();
+    let mut record = ascetic_ddd_command_log::shape::shape(&records[0]);
+    record.captures.elements = 3;
+    record.captures.sequences = 1;
+    record.capture_bytes = 4_096;
+    let peaks = Peaks {
+        record,
+        ..Peaks::default()
+    };
+    let (costs, unknown) = with_carrier(h, |carrier| {
+        (
+            Carrier::<VirtualClock>::source_costs(carrier, &peaks, 0),
+            Carrier::<VirtualClock>::source_costs(carrier, &peaks, 1),
+        )
+    });
+    assert_eq!(
+        costs,
+        Ok(SourceCosts {
+            scratch: SCRATCH,
+            head: HEAD_COPY,
+            tail: ascetic_ddd_scheduler::judge::bound(cap, &peaks.record, problem),
+            stated_by: StatedBy::Library,
+        })
+    );
+    assert!(
+        costs.unwrap().tail > ascetic_ddd_scheduler::judge::bound(cap, &Default::default(), 0),
+        "the plan's record and the problem charged"
+    );
+    assert!(unknown.is_err(), "{unknown:?}");
 }
 
 /// A connection idle in its pool, an attempt open beside it: as the REST

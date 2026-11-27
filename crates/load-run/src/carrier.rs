@@ -47,6 +47,52 @@ pub struct Costs {
     pub answer: u64,
 }
 
+/// Who states a carrier's costs (ADR-0047 decision 22): the library, for its
+/// own carrier, its executors holding them; or a host, by its word.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatedBy {
+    /// The library's own carrier.
+    Library,
+    /// A host's carrier.
+    Host,
+}
+
+/// What a carrier holds a source beside its sockets (ADR-0047 decision 22,
+/// K2b-7e-2b-2c-4): on the source's thread, whatever its sockets do, each an
+/// upper bound over the part's life — charged summed, not their largest, since
+/// a host's carrier may hold them at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceCosts {
+    /// Its scratch a source's thread: what its reads copy through.
+    pub scratch: u64,
+    /// An answer's head as it is copied, one at a time a source.
+    pub head: u64,
+    /// The most a source's answered tails hold at once: its answers read,
+    /// parsed and judged.
+    pub tail: u64,
+    /// Who states them.
+    pub stated_by: StatedBy,
+}
+
+impl SourceCosts {
+    /// A carrier holding nothing on its source's thread — a test's script —
+    /// by its own word.
+    pub const NOTHING: SourceCosts = SourceCosts {
+        scratch: 0,
+        head: 0,
+        tail: 0,
+        stated_by: StatedBy::Host,
+    };
+
+    /// What they charge a source: their sum.
+    #[must_use]
+    pub const fn total(&self) -> u64 {
+        self.scratch
+            .saturating_add(self.head)
+            .saturating_add(self.tail)
+    }
+}
+
 /// A probe's failure (decision 20): the declared endpoint's index, and how —
 /// a dotted part (`refused`, `unanswered`, `egress_local`, …), never the
 /// host's text.
@@ -67,6 +113,11 @@ pub trait Carrier<C: Clock>: Send + Sync + 'static {
     /// What it needs of `source` under the plan's `peaks` (decision 20); a
     /// source it does not know, refused — never none.
     fn needs(&self, peaks: &Peaks, source: u32) -> Result<Needs, String>;
+
+    /// What it holds of `source` beside its sockets under the plan's `peaks`
+    /// (decision 22): its own to tell, socketless or not; a source it does
+    /// not know, refused — never none.
+    fn source_costs(&self, peaks: &Peaks, source: u32) -> Result<SourceCosts, String>;
 
     /// Its sockets of `source` probed before T0 (decision 20): one connect
     /// to each endpoint it declares for it, all at once, each within `bound`
@@ -91,5 +142,31 @@ pub trait Carrier<C: Clock>: Send + Sync + 'static {
         _opening: Opening<'_>,
     ) -> impl Future<Output = Option<Result<String, Refused>>> + Send {
         std::future::ready(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SourceCosts, StatedBy};
+
+    /// A carrier's source costs charged summed, not their largest, and
+    /// saturating.
+    #[test]
+    fn source_costs_are_charged_summed() {
+        let c = SourceCosts {
+            scratch: 1,
+            head: 20,
+            tail: 300,
+            stated_by: StatedBy::Host,
+        };
+        assert_eq!(c.total(), 321);
+        assert_eq!(
+            SourceCosts {
+                tail: u64::MAX,
+                ..c
+            }
+            .total(),
+            u64::MAX
+        );
     }
 }
