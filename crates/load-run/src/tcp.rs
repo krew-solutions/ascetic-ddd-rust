@@ -92,6 +92,21 @@ impl Egress for TcpEgress {
         0
     }
 
+    /// As `with_ports(ports)` would: a bound source the whole, the system's
+    /// sharing it.
+    fn caps(&self, ports: usize, sources: u32) -> Vec<usize> {
+        let unbound = self.sources.iter().filter(|s| s.is_none()).count().max(1);
+        (0..usize::try_from(sources).unwrap_or(usize::MAX))
+            .map(|s| {
+                if self.sources.get(s).copied().flatten().is_some() {
+                    ports
+                } else {
+                    ports / unbound
+                }
+            })
+            .collect()
+    }
+
     /// Every source listed; the bound ones on addresses of their own, each
     /// the host's — a throwaway socket bound to it, no packet sent.
     fn admits(&self, sources: u32) -> Result<(), Unfit> {
@@ -214,6 +229,31 @@ impl Egress for TcpEgress {
             // A request's bytes leave as hyper flushes them.
             stream.set_nodelay(true).map_err(socket_error)?;
             Ok(stream)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use super::TcpEgress;
+    use crate::stand::Egress;
+
+    /// K2b-7e-2b-3c-2: a total's caps as `with_ports` divides it — a bound
+    /// source the whole, the system's sharing it — for each source.
+    #[test]
+    fn a_total_s_caps_are_with_ports_own() {
+        let e = TcpEgress::new(
+            BTreeMap::new(),
+            vec![Some(IpAddr::V4(Ipv4Addr::LOCALHOST)), None, None],
+        );
+        assert_eq!(e.caps(300, 3), vec![300, 150, 150]);
+        let divided = e.with_ports(300);
+        let caps = divided.caps(300, 3);
+        for s in 0..3u32 {
+            assert_eq!(caps[s as usize], divided.ports(s), "source {s}");
         }
     }
 }

@@ -611,3 +611,198 @@ fn binding(terms: &[Term], bind: Phase) -> Option<usize> {
         .max_by_key(|(_, t)| t.bytes)
         .map(|(i, _)| i)
 }
+
+/// A remedy for a run that does not fit (decision 22, K2b-7e-2b-3c-2): each
+/// its owner's knob, its number found by bisection over the same fit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Remedy {
+    /// The operator's: at least this memory.
+    Memory {
+        /// Bytes.
+        at_least: u64,
+    },
+    /// The carrier's egress: at most these ports, as it divides them.
+    Ports {
+        /// Ports.
+        at_most: usize,
+    },
+    /// The host's reader: at most these records ahead.
+    Ahead {
+        /// Records.
+        at_most: usize,
+    },
+    /// The host's journal: at most these lines behind.
+    Behind {
+        /// Lines.
+        at_most: usize,
+    },
+    /// The plan's author: an answer cap at most this — a new dry run, the
+    /// largest answer by operation owed.
+    AnswerCap {
+        /// Bytes.
+        at_most: u64,
+    },
+    /// A slice that would lower the binding part: named, not a number.
+    Slice {
+        /// The part.
+        part: Part,
+        /// The slice.
+        slice: &'static str,
+    },
+}
+
+/// The knobs a run's parts follow: the egress's ports, the reader's records
+/// ahead, the journal's lines behind, the plan's answer cap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Knobs {
+    /// The ports the egress divides among its sources.
+    pub ports: usize,
+    /// The reader's records ahead.
+    pub ahead: usize,
+    /// The journal's lines behind.
+    pub behind: usize,
+    /// The plan's answer cap.
+    pub answer_cap: u64,
+}
+
+/// The remedies for a run of `planned(knobs)` short of `memory`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Remedies {
+    /// The least memory at the knobs given.
+    pub least: Option<u64>,
+    /// The least memory with each source's cap the plan's need of it: the
+    /// knobs at their floors' ports.
+    pub least_at_needed: Option<u64>,
+    /// Each knob's, where moving it alone admits the run.
+    pub remedies: Vec<Remedy>,
+}
+
+/// The largest `v` in `[lo, hi]` with `fits(v)`, `fits` monotone — true up to
+/// some value, false past it; none if `fits(lo)` is false.
+fn largest(lo: u64, hi: u64, fits: impl Fn(u64) -> bool) -> Option<u64> {
+    if lo > hi || !fits(lo) {
+        return None;
+    }
+    if fits(hi) {
+        return Some(hi);
+    }
+    // `fits(ok)`, not `fits(bad)`, `ok < bad`.
+    let (mut ok, mut bad) = (lo, hi);
+    while bad.saturating_sub(ok) > 1 {
+        let mid = ok.saturating_add(bad.saturating_sub(ok) / 2);
+        if fits(mid) {
+            ok = mid;
+        } else {
+            bad = mid;
+        }
+    }
+    Some(ok)
+}
+
+/// The slice that would lower `part`, if any.
+fn slice(part: Part) -> Option<&'static str> {
+    match part {
+        Part::Cells
+        | Part::Records
+        | Part::BoundTo
+        | Part::Kept
+        | Part::ShellAttempts
+        | Part::CarrierAttempts => Some("K2b-7e-3, the read gate"),
+        Part::CarrierSource | Part::Judging => Some("K2b-7e-4, the parse"),
+        Part::Reader
+        | Part::Decoder
+        | Part::Runtime
+        | Part::Keeping
+        | Part::Journal
+        | Part::Connections
+        | Part::Io
+        | Part::Answers
+        | Part::Probes
+        | Part::GateStages
+        | Part::GateRun
+        | Part::Barriers
+        | Part::Binding => None,
+    }
+}
+
+/// The remedies for a run of `planned(knobs)` short of `memory`, each knob
+/// moved alone between its floor and its value (decision 22,
+/// K2b-7e-2b-3c-2): its number the largest that admits the run, by bisection
+/// over the same fit — monotone in every knob above its floor, the ports'
+/// floor the least that gives each source the sockets the plan needs of it.
+pub fn remedies(
+    memory: Memory,
+    knobs: Knobs,
+    floors: Knobs,
+    planned: impl Fn(&Knobs) -> Planned,
+) -> Remedies {
+    let at = |k: &Knobs| fit(&planned(k), memory);
+    let need = |k: &Knobs| match fit(&planned(k), Memory::declared(u64::MAX)) {
+        Ok(f) => Some(f.need),
+        Err(u) => u.least,
+    };
+    let mut remedies = Vec::new();
+    let least = need(&knobs);
+    if let Some(at_least) = least {
+        remedies.push(Remedy::Memory { at_least });
+    }
+    let usize_of = |v: u64| usize::try_from(v).unwrap_or(usize::MAX);
+    let u64_of = |v: usize| u64::try_from(v).unwrap_or(u64::MAX);
+    if let Some(p) = largest(u64_of(floors.ports), u64_of(knobs.ports), |v| {
+        at(&Knobs {
+            ports: usize_of(v),
+            ..knobs
+        })
+        .is_ok()
+    }) {
+        remedies.push(Remedy::Ports {
+            at_most: usize_of(p),
+        });
+    }
+    if let Some(a) = largest(u64_of(floors.ahead), u64_of(knobs.ahead), |v| {
+        at(&Knobs {
+            ahead: usize_of(v),
+            ..knobs
+        })
+        .is_ok()
+    }) {
+        remedies.push(Remedy::Ahead {
+            at_most: usize_of(a),
+        });
+    }
+    if let Some(b) = largest(u64_of(floors.behind), u64_of(knobs.behind), |v| {
+        at(&Knobs {
+            behind: usize_of(v),
+            ..knobs
+        })
+        .is_ok()
+    }) {
+        remedies.push(Remedy::Behind {
+            at_most: usize_of(b),
+        });
+    }
+    if let Some(c) = largest(floors.answer_cap, knobs.answer_cap, |v| {
+        at(&Knobs {
+            answer_cap: v,
+            ..knobs
+        })
+        .is_ok()
+    }) {
+        remedies.push(Remedy::AnswerCap { at_most: c });
+    }
+    if let Err(u) = at(&knobs)
+        && let Some(b) = u.binding
+        && let Some(part) = u.terms.get(b).map(|t| t.part)
+        && let Some(slice) = slice(part)
+    {
+        remedies.push(Remedy::Slice { part, slice });
+    }
+    Remedies {
+        least,
+        least_at_needed: need(&Knobs {
+            ports: floors.ports,
+            ..knobs
+        }),
+        remedies,
+    }
+}

@@ -270,3 +270,151 @@ fn the_pool_is_priced_at_the_catch_up() {
         Failed::Pool
     );
 }
+
+/// A run whose parts follow its knobs: a source's cap its ports, the reader's
+/// records ahead, the journal's lines behind, the answer cap.
+fn knobbed(k: &ascetic_ddd_load_run::memory::Knobs) -> Planned {
+    let mut v = [0u64; 16];
+    v[0] = 100 * k.ahead as u64;
+    v[2] = 50 * k.behind as u64;
+    v[3] = 10 * k.answer_cap;
+    v[12] = 7_000; // the late records
+    planned(
+        vec![source([500, k.ports as u64, 1_000, 0, k.answer_cap, 0, 0])],
+        v,
+        0,
+    )
+}
+
+/// K2b-7e-2b-3c-2: each knob's remedy the largest of it that admits the run,
+/// one past it refused; the least memory at the knobs and at the floors'
+/// ports; a knob whose floor does not admit the run no remedy; the binding
+/// pool's slice named.
+#[test]
+fn each_remedy_is_its_knob_s_largest_that_fits() {
+    use ascetic_ddd_load_run::memory::{Knobs, Remedy, remedies};
+    let knobs = Knobs {
+        ports: 400,
+        ahead: 64,
+        behind: 64,
+        answer_cap: 4_096,
+    };
+    let floors = Knobs {
+        ports: 10,
+        ahead: 1,
+        behind: 1,
+        answer_cap: 2,
+    };
+    let need_at = |k: &Knobs| fit(&knobbed(k), Memory::declared(u64::MAX)).unwrap().need;
+    let memory = Memory::declared(need_at(&knobs) / 2);
+    let r = remedies(memory, knobs, floors, knobbed);
+    assert_eq!(r.least, Some(need_at(&knobs)));
+    assert_eq!(
+        r.least_at_needed,
+        Some(need_at(&Knobs { ports: 10, ..knobs }))
+    );
+    let fits = |k: Knobs| fit(&knobbed(&k), memory).is_ok();
+    let mut seen = 0;
+    for remedy in &r.remedies {
+        match *remedy {
+            Remedy::Memory { at_least } => {
+                assert!(fit(&knobbed(&knobs), Memory::declared(at_least)).is_ok());
+                assert!(fit(&knobbed(&knobs), Memory::declared(at_least - 1)).is_err());
+            }
+            Remedy::Ports { at_most } => {
+                assert!(fits(Knobs {
+                    ports: at_most,
+                    ..knobs
+                }));
+                assert!(!fits(Knobs {
+                    ports: at_most + 1,
+                    ..knobs
+                }));
+                seen += 1;
+            }
+            Remedy::Ahead { at_most } => {
+                assert!(
+                    fits(Knobs {
+                        ahead: at_most,
+                        ..knobs
+                    }) || at_most == knobs.ahead
+                );
+                assert!(!fits(Knobs {
+                    ahead: at_most + 1,
+                    ..knobs
+                }));
+                seen += 1;
+            }
+            Remedy::Behind { at_most } => {
+                assert!(fits(Knobs {
+                    behind: at_most,
+                    ..knobs
+                }));
+                assert!(!fits(Knobs {
+                    behind: at_most + 1,
+                    ..knobs
+                }));
+                seen += 1;
+            }
+            Remedy::AnswerCap { at_most } => {
+                assert!(fits(Knobs {
+                    answer_cap: at_most,
+                    ..knobs
+                }));
+                assert!(!fits(Knobs {
+                    answer_cap: at_most + 1,
+                    ..knobs
+                }));
+                seen += 1;
+            }
+            Remedy::Slice { part, .. } => assert_ne!(part, Part::Reader),
+        }
+    }
+    // The ports and the answer cap each admit the run alone; the reader's and
+    // the journal's are too small to.
+    assert!(r.remedies.iter().any(|x| matches!(x, Remedy::Ports { .. })));
+    assert!(
+        r.remedies
+            .iter()
+            .any(|x| matches!(x, Remedy::AnswerCap { .. }))
+    );
+    assert!(!r.remedies.iter().any(|x| matches!(x, Remedy::Ahead { .. })));
+    assert!(seen >= 2);
+    // No remedy below its knob's floor; none where the floor itself does not
+    // fit — the ports' floor the sockets the plan needs.
+    for remedy in &r.remedies {
+        if let Remedy::Ports { at_most } = *remedy {
+            assert!(at_most >= floors.ports, "{at_most} below the floor");
+        }
+    }
+    let high = Knobs {
+        ports: 300,
+        ..floors
+    };
+    let short = Memory::declared(
+        need_at(&Knobs {
+            ports: 300,
+            ..knobs
+        }) - 1,
+    );
+    let r = remedies(short, knobs, high, knobbed);
+    assert!(
+        !r.remedies.iter().any(|x| matches!(x, Remedy::Ports { .. })),
+        "{:?}",
+        r.remedies
+    );
+    // The pool binding: its slice named.
+    let pooled = |_: &Knobs| {
+        let mut v = [0u64; 16];
+        v[12] = 1_000_000;
+        planned(vec![source([10, 0, 0, 0, 0, 0, 0])], v, 0)
+    };
+    let r = remedies(Memory::declared(1_000), knobs, floors, pooled);
+    assert!(r.remedies.iter().any(|x| matches!(
+        x,
+        Remedy::Slice {
+            part: Part::Records,
+            ..
+        }
+    )));
+}

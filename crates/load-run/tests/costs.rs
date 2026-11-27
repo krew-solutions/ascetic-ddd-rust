@@ -525,6 +525,10 @@ impl Egress for Pipes {
         self.io as u64
     }
 
+    fn caps(&self, ports: usize, sources: u32) -> Vec<usize> {
+        vec![ports; sources as usize]
+    }
+
     fn ports(&self, _: u32) -> usize {
         100_000
     }

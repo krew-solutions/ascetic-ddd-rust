@@ -79,6 +79,10 @@ impl Egress for Tcp {
         0
     }
 
+    fn caps(&self, ports: usize, sources: u32) -> Vec<usize> {
+        vec![ports; sources as usize]
+    }
+
     fn ports(&self, _: u32) -> usize {
         K
     }

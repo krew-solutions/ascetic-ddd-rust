@@ -189,6 +189,11 @@ pub trait Egress: Send + Sync + 'static {
     /// K2b-7e-2b-3b).
     fn io_bytes(&self) -> u64;
 
+    /// The cap each of `sources` sources would get of a total of `ports`, as
+    /// this egress divides them (ADR-0047 decision 22, K2b-7e-2b-3c-2): what
+    /// a remedy names a total by — the knob the host turns.
+    fn caps(&self, ports: usize, sources: u32) -> Vec<usize>;
+
     /// Whether it carries `sources` sources at all (decision 20), no packet
     /// sent: each one's own, its address the host's and no other's.
     fn admits(&self, sources: u32) -> Result<(), Unfit>;

@@ -14,7 +14,7 @@ mod fixture;
 use ascetic_ddd_command_log::record::{Header, On, Record};
 use ascetic_ddd_command_log::shape::Shape;
 use ascetic_ddd_command_log::validate::{Kept, NoHost, Peaks};
-use ascetic_ddd_scheduler::fits::{Budget, Refusal, fits, needed};
+use ascetic_ddd_scheduler::fits::needed;
 use ascetic_ddd_scheduler::machine::{End, Judgement};
 use ascetic_ddd_scheduler::sim::{Attempt, Run, run};
 use fixture::*;
@@ -183,10 +183,11 @@ fn a_reader_late_past_the_plan_breaks_the_bound() {
     );
 }
 
-/// `fits`: at its budget a plan fits, a byte short it does not, and a
-/// read-ahead past the header's is refused whatever the budget.
+/// What a machine of these peaks needs rises with each count it holds, and a
+/// read-ahead past the header's is the machine's refusal: admission's fit
+/// (`load-run`'s `memory::fit`) prices the rest (K2b-7e-2b-3c-2).
 #[test]
-fn fits_refuses_at_and_past_each_boundary() {
+fn needed_rises_with_each_count_and_a_read_ahead_is_refused() {
     let peaks = Peaks {
         held: 1_000,
         pending: 200,
@@ -195,18 +196,13 @@ fn fits_refuses_at_and_past_each_boundary() {
     };
     let h = plan_header(T);
     let need = needed(&peaks);
-    assert_eq!(fits(&peaks, &h, L, &Budget { bytes: need }), Ok(need));
-    assert!(matches!(
-        fits(&peaks, &h, L, &Budget { bytes: need - 1 }),
-        Err(Refusal::Bytes { needed, budget, .. }) if needed == need && budget == need - 1
-    ));
-    assert_eq!(
-        fits(&peaks, &h, L + 1, &Budget { bytes: u64::MAX }),
-        Err(Refusal::ReadAhead {
-            asked: L + 1,
-            planned: L
-        })
+    assert!(
+        ascetic_ddd_scheduler::machine::Machine::new(std::sync::Arc::new(h.clone()), L).is_ok()
     );
+    assert!(matches!(
+        ascetic_ddd_scheduler::machine::Machine::new(std::sync::Arc::new(h), L + 1),
+        Err(ascetic_ddd_command_log::LogError::Malformed { .. })
+    ));
     // Each part counts: the cells, the keys, and every count of a record's
     // shape and of what the held keep that a price takes (decision 22).
     let shaped = |f: fn(&mut Shape)| {

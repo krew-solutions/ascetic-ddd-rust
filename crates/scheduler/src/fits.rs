@@ -1,6 +1,8 @@
-//! Whether a machine holds a plan (ADR-0047 decision 7, K1e-2): the plan's
-//! own bound, which the validator committed, against one budget of bytes — a
-//! refusal before T0, naming the part, never a machine killed hours in.
+//! What a machine holds of a plan (ADR-0047 decision 7, K1e-2): the plan's
+//! own bound, which the validator committed, priced term by term — what
+//! admission's fit (`load-run`'s `memory::fit`, K2b-7e-2b-3c) charges its
+//! pool, a refusal before T0 naming the part, never a machine killed hours
+//! in.
 //!
 //! A step a machine holds weighs [`ENDED_CELL`] once it ended, [`LIVE_CELL`]
 //! while it has not — its cell, its wake, its inputs in flight, its share of
@@ -20,7 +22,7 @@ use std::mem::size_of;
 
 use ascetic_ddd_command_log::answer::TAKEN;
 use ascetic_ddd_command_log::fills::Captured;
-use ascetic_ddd_command_log::record::{Header, Name, On, Subject};
+use ascetic_ddd_command_log::record::{Name, On, Subject};
 use ascetic_ddd_command_log::shape::{self, Shape};
 use ascetic_ddd_command_log::validate::{Kept, Peaks};
 
@@ -39,39 +41,6 @@ pub const BARRIER: u64 = 768;
 /// The bytes a captured value holds at most: a carried text of at most
 /// `TAKEN` bytes, quoted, each byte escaped at worst (`answer::take`).
 pub const VALUE: u64 = 2 * TAKEN as u64 + 2;
-
-/// What a machine may hold.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Budget {
-    /// Its memory for the run, in bytes.
-    pub bytes: u64,
-}
-
-/// Why a plan does not fit.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Refusal {
-    /// A read-ahead past the header's: the bound assumes no more.
-    ReadAhead {
-        /// The run's.
-        asked: u64,
-        /// The header's.
-        planned: u64,
-    },
-    /// More bytes than the budget.
-    Bytes {
-        /// What the plan needs.
-        needed: u64,
-        /// What the machine has.
-        budget: u64,
-        /// The steps held, those not ended, and the barrier keys, by which
-        /// the need was counted.
-        held: u64,
-        /// See `held`.
-        pending: u64,
-        /// See `held`.
-        barriers: u64,
-    },
-}
 
 fn bytes_of(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
@@ -196,32 +165,4 @@ pub fn late_records(peaks: &Peaks) -> u64 {
 /// The bytes a plan of these peaks needs.
 pub fn needed(peaks: &Peaks) -> u64 {
     terms(peaks).sum()
-}
-
-/// Whether a machine of `budget`, reading `read_ahead` ahead, holds the plan
-/// of `header` whose commitment carries `peaks`: the bytes it needs, or why
-/// not.
-pub fn fits(
-    peaks: &Peaks,
-    header: &Header,
-    read_ahead: u64,
-    budget: &Budget,
-) -> Result<u64, Refusal> {
-    if read_ahead > header.read_ahead {
-        return Err(Refusal::ReadAhead {
-            asked: read_ahead,
-            planned: header.read_ahead,
-        });
-    }
-    let needed = needed(peaks);
-    if needed > budget.bytes {
-        return Err(Refusal::Bytes {
-            needed,
-            budget: budget.bytes,
-            held: peaks.held,
-            pending: peaks.pending,
-            barriers: peaks.barriers,
-        });
-    }
-    Ok(needed)
 }
