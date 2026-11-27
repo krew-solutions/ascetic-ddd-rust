@@ -213,3 +213,62 @@ fn a_pointer_s_tokens_hold_within_their_bound() {
         assert!(held <= pointer_bound(p.len() as u64), "{p:?}: {held}");
     }
 }
+
+/// K2b-7e-4a of ADR-0047 (decision 23): a body no one reads is never parsed —
+/// an answer read for its status, its problem's code below 400 and no
+/// predicate, holds no tree —; its first reader parses it once, within its
+/// bound; a second reader parses nothing more; a problem's code at 400 or
+/// past it reads the body.
+#[test]
+fn a_body_is_parsed_on_its_first_reader_alone() {
+    use ascetic_ddd_command_log::answer::{Reply, read};
+    use ascetic_ddd_command_log::fills::{Fills, Namespace};
+    use ascetic_ddd_command_log::record::{Predicate, Test};
+    use ascetic_ddd_command_log::render::RunSecret;
+    let doc = forest(65);
+    let body = doc.as_bytes();
+    let secret = RunSecret::new([0; 32]);
+    let fills = Fills {
+        namespace: Namespace(0),
+        secret: &secret,
+        run_start: 0,
+        sent: 0,
+        captured: &[],
+    };
+    let problem = [(
+        "content-type".to_owned(),
+        b"application/problem+json".to_vec(),
+    )];
+    let exists = [Predicate {
+        pointer: "/0".to_owned(),
+        test: Test::Exists,
+    }];
+    // Read for its status alone, and a code below 400, and no predicate.
+    let ok = Reply {
+        status: 200,
+        headers: &problem,
+        body: Some(body),
+    };
+    let r = read(&ok);
+    let none = peak_of(|| (r.status(), r.code("/code"), r.holds(&[], &fills).unwrap()));
+    assert!(none < 64, "{none} B held with nothing reading the body");
+    // Its first reader: one tree, within its bound.
+    let first = peak_of(|| r.holds(&exists, &fills).unwrap());
+    let len = u64::try_from(body.len()).unwrap();
+    assert!(first > len, "{first} B: no tree for its reader");
+    assert!(
+        first <= bound(len) + pointer_bound(2),
+        "{first} B past its bound"
+    );
+    // A second reader: the tree kept, none built again.
+    let again = peak_of(|| r.holds(&exists, &fills).unwrap());
+    assert!(again < 1_024, "{again} B: the body parsed again");
+    // A problem's code at 400 or past it: the body read.
+    let refused = Reply {
+        status: 404,
+        headers: &problem,
+        body: Some(br#"{"code":"route.not_found"}"#),
+    };
+    let r = read(&refused);
+    assert_eq!(r.code("/code").as_deref(), Some("route.not_found"));
+}

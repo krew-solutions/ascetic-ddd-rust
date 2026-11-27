@@ -59,7 +59,9 @@ impl fmt::Debug for Reply<'_> {
     }
 }
 
-/// An answer read: its body parsed once. Neither `Send` nor `Sync` (ADR-0047
+/// An answer read: its body parsed once, on its first reader — a problem's
+/// code, a predicate, a capture (ADR-0047 decision 23, K2b-7e-4a): a body no
+/// one reads is never parsed, its tree never built. Neither `Send` nor `Sync` (ADR-0047
 /// decision 22, K2b-7e-2b-2c-3): a carrier's attempt is a `Send` future, so
 /// no carrier holds a body's tree across an await — a source's thread holds
 /// one tree at a time, as its memory is charged, not one an attempt waiting.
@@ -80,7 +82,7 @@ impl fmt::Debug for Reply<'_> {
 /// ```
 pub struct Read<'a> {
     reply: &'a Reply<'a>,
-    body: Option<Json>,
+    body: std::cell::OnceCell<Option<Json>>,
     here: std::marker::PhantomData<*const ()>,
 }
 
@@ -88,7 +90,7 @@ impl fmt::Debug for Read<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Read")
             .field("reply", self.reply)
-            .field("body", &self.body)
+            .field("body", &self.body.get())
             .finish()
     }
 }
@@ -116,12 +118,11 @@ impl fmt::Display for PredicateError {
 
 impl std::error::Error for PredicateError {}
 
-/// The answer read: its body parsed, if it is JSON.
+/// The answer read: its body to be parsed, if it is JSON, when first read.
 pub fn read<'a>(reply: &'a Reply<'a>) -> Read<'a> {
-    let body = reply.body.and_then(|b| json::parse(b).ok());
     Read {
         reply,
-        body,
+        body: std::cell::OnceCell::new(),
         here: std::marker::PhantomData,
     }
 }
@@ -336,6 +337,14 @@ impl Read<'_> {
         self.reply.status
     }
 
+    /// Its body's tree, if it is JSON: parsed on this first call, kept for
+    /// the next — every reader of the body asks here, none decides before.
+    fn parsed(&self) -> Option<&Json> {
+        self.body
+            .get_or_init(|| self.reply.body.and_then(|b| json::parse(b).ok()))
+            .as_ref()
+    }
+
     /// The problem's code, at `pointer`.
     pub fn code(&self, pointer: &str) -> Option<String> {
         if self.reply.status < 400 {
@@ -347,7 +356,7 @@ impl Read<'_> {
         if !essence.eq_ignore_ascii_case("application/problem+json") {
             return None;
         }
-        let body @ Json::Object(_) = self.body.as_ref()? else {
+        let body @ Json::Object(_) = self.parsed()? else {
             return None;
         };
         match body.at(pointer).ok()?? {
@@ -370,7 +379,7 @@ impl Read<'_> {
                 Test::Equals(v) | Test::Contains(v) => Some(expected(v, fills)?),
             };
             json::tokens(&p.pointer).map_err(|_| PredicateError::Pointer)?;
-            let found = match &self.body {
+            let found = match self.parsed() {
                 Some(body) => body.at(&p.pointer).map_err(|_| PredicateError::Pointer)?,
                 None => None,
             };
@@ -396,7 +405,7 @@ impl Read<'_> {
                 let location = std::str::from_utf8(one(self.reply, "location")?).ok()?;
                 text(&segment(location)?)
             }
-            Source::Json(pointer) => match self.body.as_ref()?.at(pointer).ok()?? {
+            Source::Json(pointer) => match self.parsed()?.at(pointer).ok()?? {
                 Json::String(s) => text(s),
                 // A number as written, within what a use carries: a value
                 // taken is at most `TAKEN` bytes, whatever its kind (ADR-0047
