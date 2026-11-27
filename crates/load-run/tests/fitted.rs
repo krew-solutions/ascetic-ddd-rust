@@ -461,3 +461,64 @@ fn the_carrier_s_ports_are_a_remedy() {
     assert!(fit_at(ports, memory).is_ok(), "refitted at {ports} ports");
     assert!(fit_at(ports + 1, memory).is_err(), "one past {ports} ports");
 }
+
+/// A carrier whose egress divides its own total otherwise than its needs
+/// state the caps: refused — a remedy would price caps no build makes.
+#[test]
+fn a_carrier_s_map_is_its_needs_at_its_own_total() {
+    struct Askew(Knobbed);
+    impl<C: Clock> Carrier<C> for Askew {
+        fn carries(&self, h: &Header) -> Result<(), String> {
+            Carrier::<C>::carries(&self.0, h)
+        }
+        fn needs(&self, p: &Peaks, s: u32) -> Result<Needs, String> {
+            Carrier::<C>::needs(&self.0, p, s)
+        }
+        fn source_costs(&self, p: &Peaks, s: u32) -> Result<SourceCosts, String> {
+            Carrier::<C>::source_costs(&self.0, p, s)
+        }
+        fn attempts(&self, p: &Peaks) -> Result<AttemptCosts, Unstated> {
+            Carrier::<C>::attempts(&self.0, p)
+        }
+        fn gate_bytes(&self) -> GateBytes {
+            GateBytes::NONE
+        }
+        fn ports(&self) -> Option<usize> {
+            Some(self.0.ports)
+        }
+        // Half of what its needs give each source.
+        fn caps_at(&self, ports: usize, sources: u32) -> Option<Vec<usize>> {
+            Some(vec![ports / 2; sources as usize])
+        }
+        fn probe(
+            &self,
+            _: u32,
+            _: Arc<C>,
+            _: u64,
+        ) -> impl std::future::Future<Output = Vec<Unprobed>> + Send + 'static {
+            std::future::ready(Vec::new())
+        }
+        fn carry(&self, _: Attempt<C>) -> impl std::future::Future<Output = ()> + Send + 'static {
+            std::future::ready(())
+        }
+    }
+    let mut header = fixture::header();
+    header.profile.sources = 1;
+    let why = refused(fit::<RealClock, _>(
+        Plan::assumed(Arc::new(header), Peaks::default()),
+        0,
+        Arc::new(Askew(Knobbed {
+            ports: 64,
+            needed: 1,
+        })),
+        Journal::new(64, 0),
+        Memory::declared(PLENTY),
+        Limit::assumed(Some((PLENTY, 0)), None),
+    ));
+    assert!(
+        why.each()
+            .iter()
+            .any(|w| matches!(w, Inadmissible::Carrier(t) if t.contains("divides its 64 ports"))),
+        "{why}"
+    );
+}

@@ -760,10 +760,12 @@ fn planned<C: Clock, X: Carrier<C>>(
     });
     let of = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
     // Each source's cap at the knob's total of ports, where the carrier has
-    // one: as its egress divides them.
+    // one and the knob is moved: as its egress divides them — at its own
+    // total, its needs' caps, which `fit` holds equal to that map.
     let count = u32::try_from(sources.len()).unwrap_or(u32::MAX);
     let caps = carrier
         .ports()
+        .filter(|&own| own != knobs.ports)
         .and_then(|_| carrier.caps_at(knobs.ports, count));
     Ok(crate::memory::Planned {
         sources: (0usize..)
@@ -912,6 +914,24 @@ pub fn fit<C: Clock, X: Carrier<C>>(
             }
         };
         sources.push(s);
+    }
+    // The carrier's map at its own total is its needs' caps: what a remedy
+    // prices at another total is what would be built at it.
+    if let Some(ports) = carrier.ports()
+        && let Some(map) = carrier.caps_at(ports, count)
+    {
+        for (source, s) in (0u32..).zip(&sources) {
+            let mapped = map
+                .get(usize::try_from(source).unwrap_or(usize::MAX))
+                .copied();
+            if s.costs.is_some() && mapped != Some(s.cap) {
+                refused.push(Inadmissible::Carrier(format!(
+                    "source {source}: a cap of {} as its needs state it, {mapped:?} as its egress \
+                     divides its {ports} ports",
+                    s.cap
+                )));
+            }
+        }
     }
     // The descriptors as read now — after the host raised them —, the caps'
     // and each runtime's own, before they are built.

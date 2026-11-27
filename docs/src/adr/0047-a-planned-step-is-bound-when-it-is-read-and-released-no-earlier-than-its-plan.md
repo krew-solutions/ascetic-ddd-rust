@@ -2256,7 +2256,11 @@ process's own cgroup has a finite `memory.max` (`Inadmissible::Scope`, naming `s
 MemoryMax=…`): the ADR's own "the first host run inside a scope with `MemoryMax`", executed; a host runs inside one
 from now. The carrier's knob joins the remedies: `Carrier::ports` and `Carrier::caps_at`, the REST carrier stating them
 from its egress (`Egress::total`, required), the floor the least total that gives each source the sockets the plan
-needs of it. Mutants: nine, each red.
+needs of it. Mutants: nine, each red. **A defect found after, by K2b-7e-2b-3d-3's blind solver**: `planned` took each
+source's cap from the carrier's map at its own total while the runtimes and the admission's rows took its needs' — two
+statements nothing tied by type, a host's egress free to make them differ, and then the fit priced caps no build
+makes. Fixed (2026-11-28): the fit refuses a carrier whose map at its own total is not its needs' caps, and prices the
+map only at a moved total; its row an askew carrier, its mutant red.
 
 **K2b-7e-2b-3d-1 — what was fitted runs** (2026-11-28, decision 22's K2b-7e-2b-3 rule 1 and rule 9): `run::fit(plan,
 read_ahead, carrier, journal, memory)` is pure and builds nothing; it prices every part from what it binds — the
@@ -3670,6 +3674,7 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-28: M-a rerun after K2b-7e-4b-4 on the load server (R4, R5, R7 still refuted by smaller margins; R6
   refuted on the densest shapes) and K2b-7e-4b-5 built (§ Measured): a plain string compared over its text; K2b-7e-4b-4's
   unit test's escapes restored — its record named escapes it no longer held.
+- 2026-11-28: K2b-7e-2b-3d-2's defect fixed (§ Measured): the carrier's map held to its needs' caps at its own total.
 - 2026-11-28: K2b-7e-2b-3d-2 built (§ Measured): `Limit::read`, the limit's refusal, the scope rule, the carrier's
   ports a remedy.
 - 2026-11-28: K2b-7e-2b-3d cut in four; K2b-7e-2b-3d-1 built (§ Measured): `fit`, `Fitted`, `Live::fitted`,
