@@ -542,8 +542,14 @@ fn each_term_of_the_answer_s_bound_binds() {
         held + n / 2 > stated,
         "{held} B against {stated}: the code's term loose"
     );
-    // A string past what a use carries, refused with nothing decoded.
-    let long = format!("{{\"s\":\"{}\"}}", "A".repeat(1 << 20));
+    // A string past what a use carries, refused with nothing decoded: its
+    // first run exactly `TAKEN` bytes, escapes after it — a count that
+    // stops at `TAKEN` would decode them all.
+    let long = format!(
+        "{{\"s\":\"{}{}\"}}",
+        "A".repeat(TAKEN),
+        "\\u0041".repeat(1 << 17)
+    );
     let reply = Reply {
         status: 200,
         headers: &[],

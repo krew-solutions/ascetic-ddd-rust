@@ -537,6 +537,10 @@ def verdict(text, clock="cursor"):
             if p["test"] != "exists":
                 (value,) = p["test"].values()
                 if "literal" in value:
+                    # Parsed every judgement: at most what a use carries
+                    # (ADR-0047 K2b-7e-4b-4).
+                    if len(value["literal"].encode()) > 8 * 1024:
+                        v.add("predicate")
                     try:
                         answers.read(value["literal"].encode())
                     except answers.Unreadable:

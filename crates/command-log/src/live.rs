@@ -48,7 +48,7 @@ use crate::validate::{Host, Limits, Report, Rule, spill_need, validate_on};
 /// missed; 13: K2b-7e-2b-2c — its largest predicate literal and its
 /// longest pointer; 14: K2b-7e-2b-3a — a request's bytes and holes by
 /// class, its target, headers and body apart).
-pub const RULES_REVISION: u32 = 15;
+pub const RULES_REVISION: u32 = 16;
 
 /// The validator's identity: its revision and its rules' names.
 pub fn validator() -> String {

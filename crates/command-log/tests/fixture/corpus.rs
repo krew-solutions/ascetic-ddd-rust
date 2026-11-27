@@ -633,9 +633,15 @@ fn mutant(records: &[Record], which: &str, k: &Key) -> Option<Vec<Record>> {
                 .filter(|&i| matches!(&m[i].action, Action::Observe(_)))
                 .collect();
             let i = pick("i", &watched)?;
-            let (pointer, test) = match draw(k, "how", 3) {
+            let long = format!("\"{}\"", "x".repeat(ascetic_ddd_command_log::answer::TAKEN));
+            let (pointer, test) = match draw(k, "how", 4) {
                 0 => ("state", ascetic_ddd_command_log::record::Test::Exists),
                 1 => ("/s~2", ascetic_ddd_command_log::record::Test::Exists),
+                // A literal past what a use carries (K2b-7e-4b-4).
+                2 => (
+                    "/state",
+                    ascetic_ddd_command_log::record::Test::Equals(Value::Literal(long)),
+                ),
                 _ => (
                     "/state",
                     ascetic_ddd_command_log::record::Test::Equals(Value::Literal("done".into())),

@@ -239,7 +239,7 @@ fn a_whole_process_stalled_makes_no_root() {
     // makes it the system's own: owed, decision 21).
     let lines: Vec<journal::Line> = open().collect::<Result<_, _>>().unwrap();
     let j = header.profile.jitter;
-    let (mut censors, mut burst, mut other) = (0, 0, 0);
+    let (mut censors, mut burst, mut refused, mut other) = (0, 0, 0, 0);
     for (i, c) in folded.classes.iter().enumerate() {
         if *c != Class::Root {
             continue;
@@ -251,7 +251,25 @@ fn a_whole_process_stalled_makes_no_root() {
         let late = lines.iter().any(|l| {
             matches!(l, journal::Line::Released(r) if r.line == line && r.released.saturating_sub(r.intended) > j)
         });
-        if censored {
+        // An attempt handed on time whose connect the stand refused — its
+        // listener closed, or its backlog reset —: a Root by decision 19,
+        // the stand's like the backlog's resets, not the stall's (its path
+        // seen at the second sighting, K2b-7e-4b-4).
+        let due = |attempt: u32| {
+            lines.iter().find_map(|l| match l {
+                journal::Line::Dispatch(d) if d.line == line && d.attempt == attempt => Some(d.due),
+                _ => None,
+            })
+        };
+        let stand = lines.iter().any(|l| {
+            matches!(l, journal::Line::Answer(a) if a.line == line && a.unsent.as_ref().is_some_and(|u| {
+                u.refused_by.is_some()
+                    && u.handed.zip(due(a.attempt)).is_some_and(|(h, d)| h.saturating_sub(d) <= j)
+            }))
+        });
+        if stand {
+            refused += 1;
+        } else if censored {
             censors += 1;
             // Its path whole, kept for the next sighting: the journal's
             // lines of its step.
@@ -273,16 +291,17 @@ fn a_whole_process_stalled_makes_no_root() {
         }
     }
     eprintln!(
-        "MEASURED stall: verdict {:?}; roots {} (censors {censors}, late-released answers {burst}, other \
-         {other}), undecided {}, passed {}; reports {:?}",
+        "MEASURED stall: verdict {:?}; roots {} (censors {censors}, late-released answers {burst}, refused on \
+         time by the stand {refused}, other {other}), undecided {}, passed {}; reports {:?}",
         folded.verdict,
         count(Class::Root),
         count(Class::Undecided),
         count(Class::Passed),
         ran.unsent
     );
-    // A stand resetting what its listener's backlog held at its close fails
-    // on its own: those Roots are true. A censor is the stall's alone.
+    // A stand resetting what its listener's backlog held at its close, or
+    // refusing a connect while it is closed, fails on its own: those Roots
+    // are true. Any other censor is the stall's alone.
     assert_eq!(censors, 0, "a censor the stall made a Root");
     assert!(count(Class::Undecided) > 0, "the stall voided nothing");
 }

@@ -942,6 +942,10 @@ fn the_rules_meaning_is_pinned_to_its_revision() {
             15,
             "1d2b81c2cc72a25d55bc1f2cb9daa7f36eb8fa292c7025bc038bacf57d1dcc30",
         ),
+        (
+            16,
+            "fd9acbce2c12d4d8fbe0a8280f915d078d54f7fa5f7ebd471c5837c828bb9216",
+        ),
     ];
     let mut digest = Sha256::new();
     for line in fixture::corpus::lines() {
@@ -1557,6 +1561,14 @@ fn predicate() {
         Rule::Predicate,
         &[until("/a", Test::Equals(lit("{\"n\":1.5}")))],
         &[until("/a", Test::Equals(lit("one")))],
+    );
+    // A literal at most what a use carries (K2b-7e-4b-4).
+    let taken = ascetic_ddd_command_log::answer::TAKEN;
+    let long = |n: usize| format!("\"{}\"", "x".repeat(n - 2));
+    twins(
+        Rule::Predicate,
+        &[until("/a", Test::Equals(lit(&long(taken))))],
+        &[until("/a", Test::Contains(lit(&long(taken + 1))))],
     );
     twins(
         Rule::Predicate,

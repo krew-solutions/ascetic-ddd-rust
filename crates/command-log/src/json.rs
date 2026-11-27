@@ -42,6 +42,7 @@
     clippy::unreachable
 )]
 
+use std::cmp::Ordering;
 use std::fmt;
 
 /// The deepest an answer nests: arrays and objects inside one another.
@@ -613,9 +614,14 @@ impl<'a> Iterator for Pieces<'a> {
         }
         let bytes = self.text.as_bytes();
         let start = self.at;
-        while matches!(bytes.get(self.at), Some(&b) if b != b'"' && b != b'\\' && b >= 0x20) {
-            self.at = self.at.saturating_add(1);
-        }
+        // A run to its first quote, backslash or control byte, searched over
+        // the slice at once (K2b-7e-4b-4).
+        let rest = bytes.get(start..).unwrap_or_default();
+        let run = rest
+            .iter()
+            .position(|&b| b == b'"' || b == b'\\' || b < 0x20)
+            .unwrap_or(rest.len());
+        self.at = start.saturating_add(run);
         if self.at > start {
             // Every stop is at an ASCII byte, so the run is whole characters.
             let run = self.text.get(start..self.at).map(Piece::Run);
@@ -718,15 +724,115 @@ fn decode(text: &str, from: usize, feed: &mut impl Feed) -> Result<usize, JsonEr
 }
 
 /// The decoded bytes of the string whose opening quote is at `quote`, in a
-/// text the grammar read: an escape it refused ends them.
-fn decoded(text: &str, quote: usize) -> impl Iterator<Item = u8> + '_ {
-    Pieces {
-        text,
-        at: quote.saturating_add(1),
-        done: false,
+/// text the grammar read, a piece at a time — a run's bytes at once, an
+/// escape's character's (K2b-7e-4b-4): compared by slices, not byte by byte.
+/// An escape the grammar refused ends them.
+struct Decoded<'a> {
+    pieces: Pieces<'a>,
+    run: &'a [u8],
+    char: [u8; 4],
+    from: usize,
+    to: usize,
+}
+
+impl<'a> Decoded<'a> {
+    fn new(text: &'a str, quote: usize) -> Decoded<'a> {
+        Decoded {
+            pieces: Pieces {
+                text,
+                at: quote.saturating_add(1),
+                done: false,
+            },
+            run: &[],
+            char: [0; 4],
+            from: 0,
+            to: 0,
+        }
     }
-    .map_while(Result::ok)
-    .flat_map(|p| p.bytes())
+
+    /// The bytes of the current piece not yet taken — the next piece's once
+    /// it is done —; none at the end.
+    fn chunk(&mut self) -> &[u8] {
+        loop {
+            if !self.run.is_empty() {
+                return self.run;
+            }
+            if self.from < self.to {
+                return self.char.get(self.from..self.to).unwrap_or_default();
+            }
+            match self.pieces.next() {
+                Some(Ok(Piece::Run(s))) => self.run = s.as_bytes(),
+                Some(Ok(Piece::Char(c))) => {
+                    self.from = 0;
+                    self.to = c.encode_utf8(&mut self.char).len();
+                }
+                Some(Err(_)) | None => return &[],
+            }
+        }
+    }
+
+    /// `n` bytes of the current chunk taken.
+    fn take(&mut self, n: usize) {
+        if self.run.is_empty() {
+            self.from = self.from.saturating_add(n).min(self.to);
+        } else {
+            self.run = self.run.get(n..).unwrap_or_default();
+        }
+    }
+
+    /// Its count, up to `most + 1`.
+    fn len_within(mut self, most: usize) -> usize {
+        let mut len = 0usize;
+        loop {
+            let n = self.chunk().len();
+            if n == 0 || len > most {
+                return len;
+            }
+            len = len.saturating_add(n);
+            self.take(n);
+        }
+    }
+}
+
+/// How the decoded bytes of the string at `quote` compare with `other`.
+fn compare(text: &str, quote: usize, other: &[u8]) -> Ordering {
+    let mut a = Decoded::new(text, quote);
+    let mut rest = other;
+    loop {
+        let x = a.chunk();
+        if x.is_empty() || rest.is_empty() {
+            // The shorter, its bytes all equal, is the lesser.
+            return (!x.is_empty()).cmp(&!rest.is_empty());
+        }
+        let n = x.len().min(rest.len());
+        let o = x.get(..n).cmp(&rest.get(..n));
+        if o != Ordering::Equal {
+            return o;
+        }
+        a.take(n);
+        rest = rest.get(n..).unwrap_or_default();
+    }
+}
+
+/// How the decoded bytes of the strings at `a` and `b` compare.
+fn compare_both(text: &str, a: usize, b: usize) -> Ordering {
+    let mut a = Decoded::new(text, a);
+    let mut b = Decoded::new(text, b);
+    loop {
+        let x = a.chunk();
+        let y = b.chunk();
+        if x.is_empty() || y.is_empty() {
+            // The shorter, its bytes all equal, is the lesser.
+            return (!x.is_empty()).cmp(&!y.is_empty());
+        }
+        let n = x.len().min(y.len());
+        let o = x.get(..n).cmp(&y.get(..n));
+        if o != Ordering::Equal {
+            return o;
+        }
+        a.take(n);
+        b.take(n);
+    }
 }
 
 /// A number lexed: its text, and its decimal value's parts over that text.
@@ -768,11 +874,13 @@ impl Lexed<'_> {
 fn lex(text: &str, start: usize) -> Result<(Lexed<'_>, usize), JsonError> {
     let b = text.as_bytes();
     let digits = |at: &mut usize| {
-        let from = *at;
-        while matches!(b.get(*at), Some(b'0'..=b'9')) {
-            *at = at.saturating_add(1);
-        }
-        at.saturating_sub(from)
+        let rest = b.get(*at..).unwrap_or_default();
+        let n = rest
+            .iter()
+            .position(|d| !d.is_ascii_digit())
+            .unwrap_or(rest.len());
+        *at = at.saturating_add(n);
+        n
     };
     let mut at = start;
     let negative = b.get(at) == Some(&b'-');
@@ -1021,12 +1129,10 @@ impl<S: Sink> Parser<'_, S> {
                 return Ok(());
             };
             if same.len() > 1 {
-                same.sort_unstable_by(|a, b| {
-                    decoded(text, place(a.1)).cmp(decoded(text, place(b.1)))
-                });
+                same.sort_unstable_by(|a, b| compare_both(text, place(a.1), place(b.1)));
                 for pair in same.windows(2) {
                     if let [a, b] = pair
-                        && decoded(text, place(a.1)).eq(decoded(text, place(b.1)))
+                        && compare_both(text, place(a.1), place(b.1)) == Ordering::Equal
                     {
                         return Err(JsonError::Duplicate {
                             at: place(a.1.max(b.1)),
@@ -1302,9 +1408,7 @@ impl<'t> Node<'t> {
         if self.kind() != Kind::String {
             return None;
         }
-        let len = decoded(self.text, self.start())
-            .take(most.saturating_add(1))
-            .count();
+        let len = Decoded::new(self.text, self.start()).len_within(most);
         if len > most {
             return None;
         }
@@ -1347,7 +1451,7 @@ impl<'t> Node<'t> {
                     && self.members().count() == o.len()
                     && self.members().all(|(k, v)| {
                         o.binary_search_by(|(name, _)| {
-                            name.bytes().cmp(decoded(self.text, k.start()))
+                            compare(self.text, k.start(), name.as_bytes()).reverse()
                         })
                         .ok()
                         .and_then(|i| o.get(i))
@@ -1359,7 +1463,8 @@ impl<'t> Node<'t> {
 
     /// Whether it is a string whose text decoded is `s`.
     pub fn is(&self, s: &str) -> bool {
-        self.kind() == Kind::String && decoded(self.text, self.start()).eq(s.bytes())
+        self.kind() == Kind::String
+            && compare(self.text, self.start(), s.as_bytes()) == Ordering::Equal
     }
 
     /// Its elements, if it is an array; none otherwise.
@@ -1448,5 +1553,56 @@ impl<'t> Iterator for Members<'t> {
         let value = self.node.at_index(self.at.saturating_add(1));
         self.at = value.next();
         Some((name, value))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+mod tests {
+    use super::{Ordering, compare, compare_both};
+
+    /// The decoded comparisons piece by piece order as the decoded strings
+    /// do (K2b-7e-4b-4): a prefix the lesser, an escape by what it decodes
+    /// to, a run split by an escape compared across it.
+    #[test]
+    fn decoded_strings_compare_as_their_text() {
+        let strings = [
+            r#""""#,
+            r#""a""#,
+            r#""ab""#,
+            r#""ab""#,
+            r#""abc""#,
+            r#""abd""#,
+            r#""b""#,
+            r#""é""#,
+            r#""é""#,
+            r#""😀""#,
+            r#""\/""#,
+        ];
+        let decoded = |s: &str| -> String {
+            match crate::json::parse(s.as_bytes()) {
+                Ok(crate::json::Json::String(t)) => t,
+                _ => String::from("?"),
+            }
+        };
+        let text = strings.join(" ");
+        let mut at = Vec::new();
+        let mut offset = 0;
+        for s in &strings {
+            at.push(offset);
+            offset += s.len() + 1;
+        }
+        for (i, a) in strings.iter().enumerate() {
+            for (j, b) in strings.iter().enumerate() {
+                let want = decoded(a).as_bytes().cmp(decoded(b).as_bytes());
+                assert_eq!(compare_both(&text, at[i], at[j]), want, "{a} against {b}");
+                assert_eq!(
+                    compare(&text, at[i], decoded(b).as_bytes()),
+                    want,
+                    "{a} against {b}"
+                );
+            }
+        }
+        assert_eq!(compare(&text, at[1], b"a"), Ordering::Equal);
     }
 }

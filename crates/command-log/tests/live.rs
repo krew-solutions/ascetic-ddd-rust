@@ -349,7 +349,7 @@ fn a_dry_run_commits_only_what_is_clean() {
 fn the_validator_s_identity_is_its_rules() {
     assert_eq!(
         validator(),
-        "15: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent frame predicate expect secret"
+        "16: header order duplicate edge barrier producer stale writers stream gap span profile operation required deviation rate key feasible measure cause until sent frame predicate expect secret"
     );
 }
 

@@ -1712,6 +1712,15 @@ impl<H: Host> Pass<'_, H> {
             match &p.test {
                 Test::Exists => {}
                 Test::Equals(v) | Test::Contains(v) => match v {
+                    // Its tree is parsed every judgement (ADR-0047 decision
+                    // 23, K2b-7e-4b-4): at most what a use carries.
+                    Value::Literal(s) if s.len() > crate::answer::TAKEN => {
+                        found.push(format!(
+                            "{}: a literal past {} bytes",
+                            p.pointer,
+                            crate::answer::TAKEN
+                        ));
+                    }
                     Value::Literal(s) if crate::json::check(s.as_bytes()).is_err() => {
                         found.push(format!("{}: a literal that is not JSON text", p.pointer));
                     }
