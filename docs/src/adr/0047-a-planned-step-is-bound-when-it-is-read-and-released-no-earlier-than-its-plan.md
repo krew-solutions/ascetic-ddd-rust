@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a, K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3), K2b-7e-2b-2c-1 to K2b-7e-2b-2c-4 built, K2b-7e-2b-3 decided and cut in five, K2b-7e-2b-3a-1 built, K2b-7e-2b-3a-2 next; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a, K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3), K2b-7e-2b-2c-1 to K2b-7e-2b-2c-4 built, K2b-7e-2b-3 decided and cut in five, K2b-7e-2b-3a-1 and K2b-7e-2b-3a-2 built, K2b-7e-2b-3a-3 next; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -1142,6 +1142,7 @@ which `admit` never called; § Alternatives Considered keeps what each refuted):
 | K2b-7e-2b-1b | K2b | `vectors/reference.py` folding each line's shape over the pending, late and held sets by definition and agreeing with the validator's byte peaks on every corpus log, deriving a shape's key, captures and source itself, refusing a corpus that reaches no late step, socket, held capture or captured hole; the commitment's largest line and chunk against a log of 19 steps in chunks of four; the validator's identity at revision 10 | a step past its end not kept late; the late kept past the jitter; what the window drops kept still; what the held let go kept still; a source's sockets never let go; a pending shape never let go; the barrier keys' bytes not counted; the largest line not taken; a chunk's bytes carried past its prefix |
 | K2b-7e-2b-1c | K2b | the scheduler's `tests/costs.rs`: thirteen rows — ended in the window, not ended, bursts of host calls and REST reads at one instant, REST updates of 4 KiB bodies, barrier keys of 1 KiB labels, writers keeping captures, captured values sent back, a step awaiting the 65 before it — each within what `fits` counts of its counts and shapes, the rows a constant or a price is pinned on at least 70–80 % of it; `fits`' boundary pair and every count of a shape and of what the held keep raising its need; the judge's golden: a number of 8,192 digits taken, of 8,193 not, its twin in `vectors/judge.py` | the records' shapes, a captured value, what the held keep, the barrier keys' bytes not priced; a live cell as before the shapes, doubled; an ended cell a quarter lighter; a captured number taken past `TAKEN`; (survives: a dependency's binding not priced — owed) |
 | K2b-7e-2b-2c-3 | K2b | `command-log`'s doctests: a `Read` sent between threads does not compile, one read where it is made does; `load-run`'s `stamps.rs`: keeping an answer's captures holds exactly what `run::ending` states of its record; `tests/shell.rs`: a value no take makes — an array behind whitespace, an escape no take writes — a carrier fault, the run stopped, its answer never journaled; `tests/judging.rs` (a counting allocator by thread): each shape's document at the cap no larger than the cap, stage 2's judging within `stages::judging_bound` at caps of 4,097 and 65,537 | a read sent between threads; a document grown; the keeping's slots, its names unpriced; a value no take makes kept (survives: the stage's document unpriced — its executor one-sided) |
+| K2b-7e-2b-3a-2 | K2b | `load-run`'s `tests/frame.rs` (a counting allocator by thread): REST's copy of the captured, its frame and the request built of it, each class at its worst — a target of 16,385 spaces, a target's, a header's and a body's hole of `TAKEN` quotes, a header and a body of 65,537 bytes, 1,025 fields — within `AttemptCosts::price` and above 95 % by class; `tests/costs.rs`: a connection after a head just past 16 KiB within `CONNECTION` and hyper's head buffer at the plan's largest head, and above 80 %, an attempt with a target, a header and a body within its price (one-sided: its request's copies written before the next read), a decorating plan's attempts unstated; `command-log`'s own: a JSON string's escaped length `serde_json`'s, every byte below 0x80 and any text | each coefficient down and up a step; a hole's copy without its value; the body unpriced; a JSON token grown by doubling; a control byte escaped in two; the head buffer at the head; the head's target unencoded; the connection without its head buffer; a decorating plan stated |
 | K2b-7e-2b-3a-1 | K2b | `command-log`'s `tests/shape.rs`: a request's target (path values, the query's names and values), headers (names and values) and body, each its bytes and holes apart; `tests/request.rs`: every golden case's frame and a row whose target encodes past its values and whose body fills past its spans, each sized at once (capacity its length); the reference deriving the six counts from each record over a corpus that now queries a call, the validator's identity and revision 14's digest | headers counted as the target's; a body's holes as the target's; the target's holes uncounted; the headers walked as the target; the twin without the headers' names, without the query's (it survived a corpus with no query; red once a corpus mutant added one); an encoded length by its bytes; the query's separators uncounted; the body grown from its template |
 | K2b-7e-2b-2c-4 | K2b | `load-run`'s `tests/head.rs` (a counting allocator by thread): a head's copy at hyper's hundred fields filling `READ`, distinct names and one name, within `rest::HEAD_COPY` and above 95 % of it; one name repeated at 33 and 65 fields within it; `tests/costs.rs`: a head of one name repeated within what REST charges an answer, and REST's source costs from the plan — the scratch, the head's copy, the tail at the cap of the plan's largest record and its problem, stated by the library, a source it does not know refused; `carrier.rs`' own: the costs charged summed | the copy grown by doubling; the fields' bound short (red once the executor took hyper's limit, not the constant it checks), loose; the head, the scratch uncharged; the tail of no record, at no cap, without the problem; a host's word for the library's; an unknown source stated; the largest, not the sum |
 | K2b-7e-2b-2c-2 | K2b | `command-log/tests/parse.rs` (a counting allocator by thread, a block moved counted new before old): the densest input — a forest of chains just past a power of two — at 99.7–99.8 % of `json::bound`, cut inputs within it and some past two nodes a byte, nested objects within it, any bytes and every prefix of generated documents within it, the bound saturating; a pointer's tokens at 95 % of `json::pointer_bound`; `scheduler/tests/tail.rs`: judging within `judge::bound`, each term the one that decides a row of its own — a literal the body's size, a value at `VALUE` under names of 8 KiB, a hole of `TAKEN` digits, a `Location` decoded into `TAKEN` quotes, a pointer of 65 tokens —, a host's array in a hole never parsed, `is_taken` refusing what no take makes; the validator's identity at revision 13, `vectors/reference.py` deriving the largest literal and the longest pointer, `tests/shape.rs` a capture's pointer the longest and the largest literal not their sum | the bound's added slot dropped; the bound a depth looser; one node a byte; objects pre-sized; a token's slot held once; a literal not walked; a capture's pointer not walked; the literals summed at their most; a hole's value, a segment's decoding, a pointer's tokens unpriced; the body and a value read at their largest; a segment sized by its escapes; a take's value checked by its first byte; a structure parsed; a value taken, its names unpriced |
@@ -2116,6 +2117,40 @@ a connection of its own (retired at once); the journal folded, each Root classed
 - A hog over the deadline while connecting or writing on a thread others hold is the source thread's lag (K2b-7c-2's
   twins, the path's lag counted from the thread's last blocked park); the stall twin is its whole-process case.
 
+**K2b-7e-2b-3a-2 — the carrier's attempt by class, hyper's head buffer** (2026-11-27, decision 22 as amended for
+K2b-7e-2b-3): a carrier states what it holds an attempt, process-wide — `Carrier::attempts(peaks) -> Result<AttemptCosts,
+Unstated>`, coefficients the shell multiplies by a shape's counts (`AttemptCosts::price`): each attempt's own part, a
+target's literal byte and hole, a header's, a field, a body's byte and hole, a captured hole's copied value and its names'
+bytes. `Costs.attempt` left `Needs`: one fact, one statement. REST's: each attempt `ATTEMPT`; a target's byte 6 (encoded
+at most `%XX` in its frame, and the URI's copy), its hole `6·TAKEN`; a header's byte 2 (the frame's and the header
+map's), its hole `2·TAKEN`; a field 296 (its slot and its map entry, grown by doubling: 292 measured past 1,024 fields);
+a body's byte 2 (the frame's, its copy in the request), its hole `2·VALUE`; a captured hole `VALUE` and its entry (REST
+copies the attempt's captured). A decorating plan's attempts are unstated until its decorator states its decorations
+(K2b-7e-2b-3b). A JSON token's written value is sized at once — `serde_json::to_vec` grew it by doubling, a hole of
+quotes holding 73,389 B where 49,317 B are its own. The connection carries hyper's head buffer, 8 KiB at first, grown to
+the largest head it writes and never shrunk: `head_buffer(head_bound(record, header))`, twice the head past 8 KiB, the
+head bounded by the plan's largest record (its target encoded, its holes at `TAKEN`, its headers, each field's
+separators, the operations' method, path and content type, the correlation, `HEAD_FIXED` 512 for the rest). Measured
+(`tests/frame.rs`, `tests/costs.rs`):
+
+| | measured | stated |
+|---|---|---|
+| a target of 16,385 spaces, past a small request's | 98,308 B | 98,304 B by class (100 %) |
+| a target's hole of `TAKEN` quotes | 65,647 B | 65,643 B (100 %) |
+| a header of 65,537 bytes | 131,132 B | 131,380 B (99.8 %) |
+| a header's hole of `TAKEN` quotes | 32,939 B | 33,187 B (99.3 %) |
+| 1,025 fields | 312,967 B | 317,750 B (98.5 %) |
+| a body of 65,537 bytes | 131,118 B | 131,074 B by class, its content type within each attempt's part |
+| a body's hole of `TAKEN` quotes | 49,317 B | 49,275 B by class, likewise |
+| a connection after a head just past 16 KiB | 56,281 B | 66,498 B (85 %: hyper's buffer grows to between the head and twice it) |
+| an attempt in a run, a target, a header and a body | 46,493 B | 70,972 B (66 %: its request's copies written before the next read runs) |
+
+Found with it: a target longer than the URI's 65,534 bytes encoded cannot be built — a `rest.request` fault at its
+dispatch, which the validator does not refuse (§ Owed). Mutants: each coefficient down and up a step, a captured
+hole's copy without its value, the body unpriced, a JSON token grown by doubling, a control byte escaped in two, the head
+buffer at the head, the head's target unencoded, the connection without its head buffer, a decorating plan stated —
+seventeen, each red.
+
 **K2b-7e-2b-3a-1 — a request's bytes by class, its frame sized at once** (2026-11-27, decision 22 as amended for
 K2b-7e-2b-3): a record's shape commits its request's bytes and holes by the class a carrier renders them by — its
 target (path values, the query's names and values: encoded), its headers, its body — where one role summed them
@@ -2828,6 +2863,10 @@ only and measures move to the 12-core box.
   K2b-9b-3 to 9b-5 by whatever it decides. The owner's call before it is built.
   With it: **an observation's last "not yet" under a shift** — the harness's lateness left its polls fewer; whether
   its final answer stays the system's (decision 17 says so) is the fold's question, owed to K2b-9b-5.
+- **A target past the URI's limit** (2026-11-27, found by K2b-7e-2b-3a-2): `http::Uri` holds at most 65,534 bytes,
+  so a request whose target encodes past it is a `rest.request` fault at its dispatch, which stops the run. The
+  validator's frame rule should refuse it before T0 — a literal path value or query past the limit encoded, a hole's
+  past it at `TAKEN` — with a row at the limit and one byte past it.
 - **Decision 21 at κ = 0 — two rounds, not yet a decision** (2026-11-25 and 2026-11-27). The owner chose the direction
   on 2026-11-25: no catch-up, each attempt's deadline from its hand-off.
   - **The first round** (the main position, a blind solver and a discriminator on Fable; Distributed Systems,
@@ -3158,3 +3197,5 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   `memory` line's form.
 - 2026-11-27: K2b-7e-2b-3a-1 built (§ Measured): a request's bytes and holes by class (the validator's revision 14),
   a frame's target and body sized at once.
+- 2026-11-27: K2b-7e-2b-3a-2 built (§ Measured): `Carrier::attempts` and `AttemptCosts` by class, `Costs.attempt` out of
+  `Needs`, REST's coefficients measured two-sided, a JSON token sized at once, hyper's head buffer in the connection.

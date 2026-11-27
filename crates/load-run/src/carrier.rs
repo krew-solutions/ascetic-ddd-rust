@@ -36,15 +36,103 @@ pub enum Needs {
 /// (`tests/costs.rs`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Costs {
-    /// A connection, pooled or in use: its buffers, its task, its place in
-    /// its pool.
+    /// A connection, pooled or in use: its buffers — the head buffer at the
+    /// plan's largest request head (K2b-7e-2b-3a-2) —, its task, its place
+    /// in its pool.
     pub connection: u64,
-    /// An attempt beside its connection: its task, its frame, its request in
-    /// flight.
-    pub attempt: u64,
     /// An answer being read at the profile's cap: its body, and its head as
     /// it is read and copied.
     pub answer: u64,
+}
+
+/// What a carrier holds an attempt beside its connection and the shell's
+/// share (ADR-0047 decision 22, K2b-7e-2b-3a-2), process-wide: a part each,
+/// and its request by the record's request bytes by class — coefficients the
+/// shell multiplies by a shape's counts ([`price`](AttemptCosts::price)), so
+/// the plan's own shapes price every attempt it holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttemptCosts {
+    /// Each attempt's own: its task, its small parts.
+    pub each: u64,
+    /// A target's literal byte.
+    pub target: u64,
+    /// A target's hole.
+    pub target_hole: u64,
+    /// A header's literal byte.
+    pub header: u64,
+    /// A header's hole.
+    pub header_hole: u64,
+    /// A query's or a header's field.
+    pub field: u64,
+    /// A body's byte.
+    pub body: u64,
+    /// A body's hole.
+    pub body_hole: u64,
+    /// A captured hole of the record's: the value the carrier copies.
+    pub hole: u64,
+    /// A byte of a captured hole's subject and slot.
+    pub hole_bytes: u64,
+    /// Who states them.
+    pub stated_by: StatedBy,
+}
+
+impl AttemptCosts {
+    /// A carrier holding nothing an attempt — a test's script — by its own
+    /// word.
+    pub const NOTHING: AttemptCosts = AttemptCosts {
+        each: 0,
+        target: 0,
+        target_hole: 0,
+        header: 0,
+        header_hole: 0,
+        field: 0,
+        body: 0,
+        body_hole: 0,
+        hole: 0,
+        hole_bytes: 0,
+        stated_by: StatedBy::Host,
+    };
+
+    /// What the attempts of records summed into `s` hold: each one's part,
+    /// and every class's bytes and holes at their coefficients.
+    #[must_use]
+    pub fn price(&self, s: &ascetic_ddd_command_log::shape::Shape) -> u64 {
+        let AttemptCosts {
+            each,
+            target,
+            target_hole,
+            header,
+            header_hole,
+            field,
+            body,
+            body_hole,
+            hole,
+            hole_bytes,
+            stated_by: _,
+        } = *self;
+        [
+            (each, s.records),
+            (target, s.target),
+            (target_hole, s.target_holes),
+            (header, s.headers),
+            (header_hole, s.header_holes),
+            (field, s.fields.elements),
+            (body, s.body),
+            (body_hole, s.body_holes),
+            (hole, s.holes),
+            (hole_bytes, s.hole_bytes),
+        ]
+        .into_iter()
+        .fold(0u64, |sum, (c, n)| sum.saturating_add(c.saturating_mul(n)))
+    }
+}
+
+/// A part whose bytes its owner does not state: which (ADR-0047 decision 22,
+/// K2b-7e-2b-3) — admission refuses it, never charges it nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Unstated {
+    /// The part.
+    pub part: &'static str,
 }
 
 /// Who states a carrier's costs (ADR-0047 decision 22): the library, for its
@@ -118,6 +206,11 @@ pub trait Carrier<C: Clock>: Send + Sync + 'static {
     /// (decision 22): its own to tell, socketless or not; a source it does
     /// not know, refused — never none.
     fn source_costs(&self, peaks: &Peaks, source: u32) -> Result<SourceCosts, String>;
+
+    /// What it holds an attempt under the plan's `peaks` (decision 22,
+    /// K2b-7e-2b-3a-2), process-wide: its coefficients by class; a part it
+    /// cannot state, unstated.
+    fn attempts(&self, peaks: &Peaks) -> Result<AttemptCosts, Unstated>;
 
     /// Its sockets of `source` probed before T0 (decision 20): one connect
     /// to each endpoint it declares for it, all at once, each within `bound`

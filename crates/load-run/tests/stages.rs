@@ -145,6 +145,14 @@ impl Carrier<VirtualClock> for Gated {
         Ok(ascetic_ddd_load_run::carrier::SourceCosts::NOTHING)
     }
 
+    fn attempts(
+        &self,
+        _: &ascetic_ddd_command_log::validate::Peaks,
+    ) -> Result<ascetic_ddd_load_run::carrier::AttemptCosts, ascetic_ddd_load_run::carrier::Unstated>
+    {
+        Ok(ascetic_ddd_load_run::carrier::AttemptCosts::NOTHING)
+    }
+
     fn probe(
         &self,
         _: u32,

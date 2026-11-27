@@ -299,13 +299,33 @@ pub(crate) fn rfc3339(micros: i64) -> Result<String, FillError> {
     ))
 }
 
+/// The length of `s` as one JSON string, quotes and all, as `serde_json`
+/// escapes it: a quote, a backslash, `\b`, `\f`, `\n`, `\r`, `\t` two
+/// bytes, any other control byte six, every other byte as it is.
+fn escaped(s: &str) -> usize {
+    s.bytes().fold(2usize, |n, b| {
+        n.saturating_add(match b {
+            b'"' | b'\\' | 0x08 | 0x0C | b'\n' | b'\r' | b'\t' => 2,
+            0..=0x1F => 6,
+            _ => 1,
+        })
+    })
+}
+
 /// The bytes `filled` is written as in `span`'s form.
 fn written(span: &Span, filled: Filled) -> Result<Vec<u8>, FillError> {
     let form = || FillError::Form {
         field: span.field.clone(),
     };
     let bytes = match (span.form, filled) {
-        (Form::JsonToken, Filled::Text(s)) => serde_json::to_vec(&s).map_err(|_| form())?,
+        (Form::JsonToken, Filled::Text(s)) => {
+            // Sized at once (ADR-0047 decision 22, K2b-7e-2b-3a-2): the
+            // escaped length counted, then written — `to_vec` grew it by
+            // doubling.
+            let mut out = Vec::with_capacity(escaped(&s));
+            serde_json::to_writer(&mut out, &s).map_err(|_| form())?;
+            out
+        }
         (Form::JsonToken, Filled::Integer(i)) => i.to_string().into_bytes(),
         (Form::JsonToken, Filled::Json(text)) => {
             serde_json::from_str::<serde::de::IgnoredAny>(&text).map_err(|_| form())?;
@@ -364,4 +384,28 @@ pub fn fill(
     }
     out.extend_from_slice(payload.bytes.get(at..).ok_or(FillError::Span)?);
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::escaped;
+
+    /// K2b-7e-2b-3a-2: a JSON string's length counted as `serde_json` writes
+    /// it — every byte below 0x80 alone, and any text.
+    #[test]
+    fn a_string_s_escaped_length_is_serde_json_s() {
+        for b in 0u8..0x80 {
+            let s = char::from(b).to_string();
+            assert_eq!(
+                escaped(&s),
+                serde_json::to_vec(&s).unwrap().len(),
+                "{b:#04x}"
+            );
+        }
+        proptest!(|(s in any::<String>())| {
+            prop_assert_eq!(escaped(&s), serde_json::to_vec(&s).unwrap().len());
+        });
+    }
 }

@@ -405,6 +405,17 @@ struct Row {
     /// One name for every field past its own two, its bulk in it.
     repeated: bool,
     chunked: bool,
+    /// The reads' requests by class (K2b-7e-2b-3a-2).
+    req: Req,
+}
+
+/// A read's request beyond its group: a path value of `target` spaces (each
+/// encoded `%20`), a header of `header` bytes, a body of `body` bytes.
+#[derive(Clone, Copy, Debug, Default)]
+struct Req {
+    target: usize,
+    header: usize,
+    body: usize,
 }
 
 /// The row's answer, its parts' instants after the request.
@@ -417,6 +428,7 @@ fn answer(row: Row, at: u64) -> Vec<(u64, Vec<u8>)> {
         names,
         repeated,
         chunked,
+        req: _,
     } = row;
     let framing = if chunked {
         "transfer-encoding: chunked".to_owned()
@@ -577,7 +589,9 @@ fn plan(n: u64, row: Row) -> (Header, Vec<Record>) {
     h.channels.clear();
     h.calls.clear();
     h.profile.answer_cap = row.body as u64;
-    let mut records: Vec<Record> = (1..=n).map(|g| call("read", g, 0, AT, 0)).collect();
+    let mut records: Vec<Record> = (1..=n)
+        .map(|g| requested(call("read", g, 0, AT, 0), row.req))
+        .collect();
     records.extend(
         PROBES
             .iter()
@@ -585,6 +599,34 @@ fn plan(n: u64, row: Row) -> (Header, Vec<Record>) {
             .map(|(&at, g)| call("read", n + g, 0, at, 0)),
     );
     (h, records)
+}
+
+/// `r`'s request grown by `req`'s classes.
+fn requested(mut r: Record, req: Req) -> Record {
+    use ascetic_ddd_command_log::record::{Action, Codec, Field, Payload, Value};
+    let Action::Rest(rest) = &mut r.action else {
+        return r;
+    };
+    if req.target > 0 {
+        rest.path = vec![Value::Literal(" ".repeat(req.target))];
+    }
+    if req.header > 0 {
+        rest.headers.push(Field {
+            name: "x-pad".into(),
+            value: Value::Literal("a".repeat(req.header)),
+        });
+    }
+    if req.body > 1 {
+        let mut bytes = vec![b'a'; req.body];
+        bytes[0] = b'"';
+        bytes[req.body - 1] = b'"';
+        rest.body = Some(Payload {
+            codec: Codec::Json,
+            bytes,
+            holes: vec![],
+        });
+    }
+    r
 }
 
 /// The script `sim` and the scripted carrier run: the reads answered after
@@ -701,7 +743,10 @@ fn shell(n: u64, row: Row, scripted: bool) -> Held {
                 Pipes {
                     clock: clock.clone(),
                     answers,
-                    ring: row.head + row.body + 8_192,
+                    ring: row.head
+                        + row.body
+                        + 3 * (row.req.target + row.req.header + row.req.body)
+                        + 8_192,
                 },
                 Config::new(RunSecret::new([7; 32])),
             );
@@ -818,14 +863,36 @@ fn with_carrier<T>(header: Header, f: impl FnOnce(&RestCarrier<OneStand, Pipes>)
     f(&carrier)
 }
 
+/// The peaks of `row`'s plan as REST prices them: its largest record, a
+/// read's.
+fn row_peaks(row: Row) -> (Header, Peaks, ascetic_ddd_command_log::shape::Shape) {
+    let (h, records) = plan(1, row);
+    let read = ascetic_ddd_command_log::shape::shape(&records[0]);
+    let peaks = Peaks {
+        record: read,
+        ..Peaks::default()
+    };
+    (h, peaks, read)
+}
+
 /// The REST carrier's stated costs for `row`'s profile.
 fn stated(row: Row) -> ascetic_ddd_load_run::carrier::Costs {
-    let (h, _) = plan(1, row);
+    let (h, peaks, _) = row_peaks(row);
     with_carrier(h, |carrier| {
-        match Carrier::<VirtualClock>::needs(carrier, &Peaks::default(), 0) {
+        match Carrier::<VirtualClock>::needs(carrier, &peaks, 0) {
             Ok(Needs::Sockets { costs, .. }) => costs,
             other => panic!("{other:?}"),
         }
+    })
+}
+
+/// What the REST carrier states an attempt of `row`'s reads holds.
+fn stated_attempt(row: Row) -> u64 {
+    let (h, peaks, read) = row_peaks(row);
+    with_carrier(h, |carrier| {
+        Carrier::<VirtualClock>::attempts(carrier, &peaks)
+            .unwrap()
+            .price(&read)
     })
 }
 
@@ -855,6 +922,11 @@ const SMALL: Row = Row {
     names: false,
     repeated: false,
     chunked: false,
+    req: Req {
+        target: 0,
+        header: 0,
+        body: 0,
+    },
 };
 
 /// A body of 2^16 + 1 bytes at the cap, its first 20,000 with the head.
@@ -914,6 +986,20 @@ fn a_head_of_one_name_repeated_holds_what_rest_charges() {
     );
 }
 
+/// K2b-7e-2b-3a-2: a decorating plan's attempts are unstated until its
+/// decorator states its decorations (K2b-7e-2b-3b); a plain one's stated by
+/// the library.
+#[test]
+fn rest_leaves_a_decorated_attempt_unstated() {
+    use ascetic_ddd_load_run::carrier::{StatedBy, Unstated};
+    let (mut h, peaks, _) = row_peaks(SMALL);
+    let plain = with_carrier(h.clone(), |c| Carrier::<VirtualClock>::attempts(c, &peaks));
+    assert_eq!(plain.map(|a| a.stated_by), Ok(StatedBy::Library));
+    h.operations[0].decorated = vec!["authorization".into()];
+    let decorated = with_carrier(h, |c| Carrier::<VirtualClock>::attempts(c, &peaks));
+    assert_eq!(decorated, Err(Unstated { part: "decorator" }));
+}
+
 /// What the REST carrier holds a source beside its sockets, as its needs
 /// tell it: its read scratch, a head copied, one tail — the parse at the
 /// cap of the plan's largest record, judged; a source it does not know,
@@ -966,10 +1052,62 @@ fn a_connection_and_an_attempt_hold_what_rest_states() {
     within(
         "an attempt beside its connection",
         c.attempt,
-        s.attempt,
+        stated_attempt(SMALL),
         0.8,
     );
     within("a small answer", c.answer, s.answer, 0.0);
+}
+
+/// K2b-7e-2b-3a-2: a connection idle after writing a head just past 16 KiB —
+/// a target of spaces, each encoded `%20` — holds hyper's head buffer, never
+/// shrunk, within what REST charges a connection at the plan's largest head;
+/// its attempts, a target and a header and a body at once, within what REST
+/// states an attempt holds.
+#[test]
+fn a_large_head_s_buffer_and_its_attempt_hold_what_rest_states() {
+    let _alone = alone();
+    let small = costs(SMALL, SIZES);
+    let row = Row {
+        req: Req {
+            target: 5_434,
+            header: 0,
+            body: 0,
+        },
+        ..SMALL
+    };
+    let c = costs(row, SIZES);
+    // hyper's buffer grows to between the head and twice it — exactly to a
+    // head past twice its capacity, doubled past one within it: the bound is
+    // twice, reached only by the second.
+    within(
+        "a connection after a head of 16 KiB",
+        c.idle,
+        stated(row).connection,
+        0.8,
+    );
+    assert!(
+        c.idle > small.idle + 16_384,
+        "the head buffer not seen: {} B against {} B",
+        c.idle,
+        small.idle
+    );
+    let row = Row {
+        req: Req {
+            target: 4_097,
+            header: 4_097,
+            body: 16_385,
+        },
+        ..SMALL
+    };
+    let c = costs(row, SIZES);
+    // One-sided where a request's copies are written before the next read
+    // runs, as here: `tests/frame.rs` holds each class's coefficient two-sided.
+    within(
+        "an attempt with a target, a header and a body",
+        c.attempt,
+        stated_attempt(row),
+        0.5,
+    );
 }
 
 /// An answer's body sized at once, never grown: its length's or, of no

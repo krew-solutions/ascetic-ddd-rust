@@ -19,11 +19,12 @@ use std::pin::{Pin, pin};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 
-use ascetic_ddd_command_log::answer::{self, Reply};
+use ascetic_ddd_command_log::answer::{self, Reply, TAKEN};
 use ascetic_ddd_command_log::fills::Fills;
 use ascetic_ddd_command_log::record::{Action, Header, Operation, Record};
 use ascetic_ddd_command_log::render::{self, RunSecret};
 use ascetic_ddd_command_log::request::{self, Frame};
+use ascetic_ddd_scheduler::fits::VALUE;
 use ascetic_ddd_scheduler::judge::{Contract, Transport, judge};
 use ascetic_ddd_scheduler::machine::Refusal;
 use bytes::Bytes;
@@ -31,7 +32,9 @@ use http_body::{Body, Frame as BodyFrame, SizeHint};
 use hyper::client::conn::http1::{self, SendRequest};
 use tokio::task::AbortHandle;
 
-use crate::carrier::{Carrier, Costs, Needs, SourceCosts, StatedBy, Unprobed};
+use crate::carrier::{
+    AttemptCosts, Carrier, Costs, Needs, SourceCosts, StatedBy, Unprobed, Unstated,
+};
 use crate::clock::Clock;
 use crate::decorate::{Decoration, Decorator, Undecorated};
 use crate::io::{Held, Io, Probe, Slot, Sockets};
@@ -306,10 +309,42 @@ impl<C: Clock, S: Stand, E: Egress, D: Decorator> Carrier<C> for RestCarrier<S, 
             needed: peaks.pending,
             cap: sockets.cap(),
             costs: Costs {
-                connection: CONNECTION,
-                attempt: ATTEMPT,
+                connection: CONNECTION
+                    .saturating_add(head_buffer(head_bound(&peaks.record, &self.inner.header))),
                 answer: self.inner.header.profile.answer_cap.saturating_add(HEAD),
             },
+        })
+    }
+
+    /// Each attempt's own, and its request by class: its frame — the target
+    /// encoded, its headers, its body filled —, the request built of it
+    /// before hyper takes it, its copy of the captured values. A decorating
+    /// plan's decorations its decorator's to state (K2b-7e-2b-3b).
+    fn attempts(
+        &self,
+        _: &ascetic_ddd_command_log::validate::Peaks,
+    ) -> Result<AttemptCosts, Unstated> {
+        if self
+            .inner
+            .header
+            .operations
+            .iter()
+            .any(|o| !o.decorated.is_empty())
+        {
+            return Err(Unstated { part: "decorator" });
+        }
+        Ok(AttemptCosts {
+            each: ATTEMPT,
+            target: TARGET,
+            target_hole: TARGET_HOLE,
+            header: HEADER,
+            header_hole: HEADER_HOLE,
+            field: FIELD,
+            body: BODY,
+            body_hole: BODY_HOLE,
+            hole: HOLE,
+            hole_bytes: 1,
+            stated_by: StatedBy::Library,
         })
     }
 
@@ -543,8 +578,92 @@ pub const READ: usize = 16 * 1024;
 pub const CONNECTION: u64 = 40_960;
 
 /// The bytes an attempt holds at most beside its connection and the shell's
-/// own share (decision 22): its task, its frame, its request in flight.
+/// own share (decision 22): its task, a small request's frame and request —
+/// a larger's by class beside it (`AttemptCosts`).
 pub const ATTEMPT: u64 = 5_120;
+
+/// A target's literal byte as an attempt holds it (decision 22,
+/// K2b-7e-2b-3a-2): encoded in its frame, at most `%XX`, and the URI's copy.
+pub const TARGET: u64 = 6;
+
+/// A target's hole: its value at most [`TAKEN`] bytes, encoded and copied as
+/// a literal's.
+pub const TARGET_HOLE: u64 = 6 * TAKEN as u64;
+
+/// A header's literal byte: in its frame, and the request's header map.
+pub const HEADER: u64 = 2;
+
+/// A header's hole: its value at most [`TAKEN`] bytes, as a literal's.
+pub const HEADER_HOLE: u64 = 2 * TAKEN as u64;
+
+/// A field — a query's or a header's — beside its bytes: its slot in the
+/// frame and its entry in the header map, each grown by doubling; measured
+/// at 292 B past 1,024 fields (`tests/frame.rs`).
+pub const FIELD: u64 = 296;
+
+/// A body's byte: the frame's, and its copy in the request.
+pub const BODY: u64 = 2;
+
+/// A body's hole: its value written at most [`VALUE`] bytes, as the body's.
+pub const BODY_HOLE: u64 = 2 * VALUE;
+
+/// A captured hole's value as the carrier copies the attempt's captured:
+/// at most [`VALUE`] bytes, and its entry.
+pub const HOLE: u64 =
+    VALUE.saturating_add(size_of::<ascetic_ddd_command_log::fills::Captured>() as u64);
+
+/// hyper's buffer for a request's head (decision 22): 8 KiB at first, grown
+/// by doubling to the largest head a connection writes and never shrunk.
+pub const HEAD_BUFFER: u64 = 8_192;
+
+/// The head beside a request's own bytes: the request line's method and
+/// version, `host` (an authority at most 255 bytes and a port), the
+/// correlation, the content type and length, their separators.
+pub const HEAD_FIXED: u64 = 512;
+
+/// The largest request head a plan whose largest record is `record` writes,
+/// under `header`'s operations: its target encoded (an operation's path,
+/// each literal byte at most `%XX`, each hole at most [`TAKEN`] bytes
+/// encoded), its headers' bytes and holes with each field's `: ` and line
+/// end, the query's separators, and [`HEAD_FIXED`].
+#[must_use]
+pub fn head_bound(record: &ascetic_ddd_command_log::shape::Shape, header: &Header) -> u64 {
+    let taken = TAKEN as u64;
+    let op = header
+        .operations
+        .iter()
+        .map(|o| {
+            [o.method.len(), o.path.len(), o.content_type.len()]
+                .into_iter()
+                .fold(0u64, |n, l| n.saturating_add(l as u64))
+        })
+        .max()
+        .unwrap_or(0);
+    [
+        record.target.saturating_mul(3),
+        record.target_holes.saturating_mul(3 * taken),
+        record.headers,
+        record.header_holes.saturating_mul(taken),
+        record.fields.elements.saturating_mul(4),
+        op,
+        header.profile.correlation.len() as u64,
+        HEAD_FIXED,
+    ]
+    .into_iter()
+    .fold(0u64, u64::saturating_add)
+}
+
+/// What hyper's head buffer holds past its first [`HEAD_BUFFER`] once a
+/// connection wrote a head of `head` bytes: doubled to past it, at most
+/// twice it.
+#[must_use]
+pub fn head_buffer(head: u64) -> u64 {
+    if head <= HEAD_BUFFER {
+        0
+    } else {
+        head.saturating_mul(2).saturating_sub(HEAD_BUFFER)
+    }
+}
 
 /// The bytes an answer's head holds at most as it is read and copied
 /// (decision 22): the read block it pins until it is copied, hyper's map of
@@ -611,6 +730,18 @@ fn head(parts: &http::response::Parts) -> Head {
 #[must_use]
 pub fn copied(parts: &http::response::Parts) -> Head {
     head(parts)
+}
+
+/// The request REST builds of `frame` to `authority`, built and let go: what
+/// it holds beside its frame, for its executor (`tests/frame.rs`).
+#[cfg(feature = "testing")]
+#[must_use]
+pub fn built(frame: &Frame, authority: &str, correlation: (&str, &str)) -> bool {
+    let route = Route {
+        authority: authority.to_owned(),
+        endpoint: String::new(),
+    };
+    build(frame, &route, correlation, &[]).is_ok()
 }
 
 /// The one HTTP/1.1 client builder every connection takes (decision 22): reads

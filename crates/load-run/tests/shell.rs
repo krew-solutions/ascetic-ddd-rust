@@ -253,6 +253,14 @@ impl Carrier<VirtualClock> for Forgetful {
         Ok(ascetic_ddd_load_run::carrier::SourceCosts::NOTHING)
     }
 
+    fn attempts(
+        &self,
+        _: &ascetic_ddd_command_log::validate::Peaks,
+    ) -> Result<ascetic_ddd_load_run::carrier::AttemptCosts, ascetic_ddd_load_run::carrier::Unstated>
+    {
+        Ok(ascetic_ddd_load_run::carrier::AttemptCosts::NOTHING)
+    }
+
     fn probe(
         &self,
         _: u32,
@@ -314,6 +322,14 @@ impl Carrier<VirtualClock> for Refusing {
         _: u32,
     ) -> Result<ascetic_ddd_load_run::carrier::SourceCosts, String> {
         Ok(ascetic_ddd_load_run::carrier::SourceCosts::NOTHING)
+    }
+
+    fn attempts(
+        &self,
+        _: &ascetic_ddd_command_log::validate::Peaks,
+    ) -> Result<ascetic_ddd_load_run::carrier::AttemptCosts, ascetic_ddd_load_run::carrier::Unstated>
+    {
+        Ok(ascetic_ddd_load_run::carrier::AttemptCosts::NOTHING)
     }
 
     fn probe(
@@ -667,6 +683,14 @@ impl<C: Clock> Carrier<C> for Judging {
         Ok(ascetic_ddd_load_run::carrier::SourceCosts::NOTHING)
     }
 
+    fn attempts(
+        &self,
+        _: &ascetic_ddd_command_log::validate::Peaks,
+    ) -> Result<ascetic_ddd_load_run::carrier::AttemptCosts, ascetic_ddd_load_run::carrier::Unstated>
+    {
+        Ok(ascetic_ddd_load_run::carrier::AttemptCosts::NOTHING)
+    }
+
     fn probe(
         &self,
         _: u32,
@@ -821,6 +845,16 @@ fn a_late_hand_off_is_journaled() {
             _: u32,
         ) -> Result<ascetic_ddd_load_run::carrier::SourceCosts, String> {
             Ok(ascetic_ddd_load_run::carrier::SourceCosts::NOTHING)
+        }
+
+        fn attempts(
+            &self,
+            _: &ascetic_ddd_command_log::validate::Peaks,
+        ) -> Result<
+            ascetic_ddd_load_run::carrier::AttemptCosts,
+            ascetic_ddd_load_run::carrier::Unstated,
+        > {
+            Ok(ascetic_ddd_load_run::carrier::AttemptCosts::NOTHING)
         }
 
         fn probe(
@@ -1161,6 +1195,14 @@ impl Carrier<Poisoning> for Poisoner {
         Ok(ascetic_ddd_load_run::carrier::SourceCosts::NOTHING)
     }
 
+    fn attempts(
+        &self,
+        _: &ascetic_ddd_command_log::validate::Peaks,
+    ) -> Result<ascetic_ddd_load_run::carrier::AttemptCosts, ascetic_ddd_load_run::carrier::Unstated>
+    {
+        Ok(ascetic_ddd_load_run::carrier::AttemptCosts::NOTHING)
+    }
+
     fn probe(
         &self,
         _: u32,
@@ -1245,6 +1287,14 @@ impl Carrier<VirtualClock> for Lingering {
         _: u32,
     ) -> Result<ascetic_ddd_load_run::carrier::SourceCosts, String> {
         Ok(ascetic_ddd_load_run::carrier::SourceCosts::NOTHING)
+    }
+
+    fn attempts(
+        &self,
+        _: &ascetic_ddd_command_log::validate::Peaks,
+    ) -> Result<ascetic_ddd_load_run::carrier::AttemptCosts, ascetic_ddd_load_run::carrier::Unstated>
+    {
+        Ok(ascetic_ddd_load_run::carrier::AttemptCosts::NOTHING)
     }
 
     fn probe(
@@ -1345,6 +1395,14 @@ impl Carrier<VirtualClock> for Leaving {
         Ok(ascetic_ddd_load_run::carrier::SourceCosts::NOTHING)
     }
 
+    fn attempts(
+        &self,
+        _: &ascetic_ddd_command_log::validate::Peaks,
+    ) -> Result<ascetic_ddd_load_run::carrier::AttemptCosts, ascetic_ddd_load_run::carrier::Unstated>
+    {
+        Ok(ascetic_ddd_load_run::carrier::AttemptCosts::NOTHING)
+    }
+
     fn probe(
         &self,
         _: u32,
@@ -1417,6 +1475,14 @@ impl Carrier<VirtualClock> for Twice {
         _: u32,
     ) -> Result<ascetic_ddd_load_run::carrier::SourceCosts, String> {
         Ok(ascetic_ddd_load_run::carrier::SourceCosts::NOTHING)
+    }
+
+    fn attempts(
+        &self,
+        _: &ascetic_ddd_command_log::validate::Peaks,
+    ) -> Result<ascetic_ddd_load_run::carrier::AttemptCosts, ascetic_ddd_load_run::carrier::Unstated>
+    {
+        Ok(ascetic_ddd_load_run::carrier::AttemptCosts::NOTHING)
     }
 
     fn probe(
@@ -1599,6 +1665,14 @@ impl Carrier<VirtualClock> for Minting {
         _: u32,
     ) -> Result<ascetic_ddd_load_run::carrier::SourceCosts, String> {
         Ok(ascetic_ddd_load_run::carrier::SourceCosts::NOTHING)
+    }
+
+    fn attempts(
+        &self,
+        _: &ascetic_ddd_command_log::validate::Peaks,
+    ) -> Result<ascetic_ddd_load_run::carrier::AttemptCosts, ascetic_ddd_load_run::carrier::Unstated>
+    {
+        Ok(ascetic_ddd_load_run::carrier::AttemptCosts::NOTHING)
     }
 
     fn probe(
