@@ -39,6 +39,7 @@ nix = { version = "0.30.1", default-features = false, features = ["resource"] }
 # The command log's test fixture and corpus, shared by path.
 ascetic-ddd-faker = { path = "../faker" }
 ascetic-ddd-load-run = { path = ".", features = ["testing"] }
+proptest = "1.11.0"
 serde_json = { workspace = true }
 sha2 = "0.10"
 tempfile = "3"

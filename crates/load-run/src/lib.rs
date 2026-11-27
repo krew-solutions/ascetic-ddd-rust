@@ -12,6 +12,7 @@ pub mod clock;
 pub mod decorate;
 mod io;
 pub mod live;
+pub mod memory;
 pub mod rest;
 pub mod run;
 pub mod sink;

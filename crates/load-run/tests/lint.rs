@@ -4,13 +4,14 @@
 //! takes its branches in is the order written; every task spawned at the one
 //! place that times it (decision 18).
 
-const SOURCES: [(&str, &str); 15] = [
+const SOURCES: [(&str, &str); 16] = [
     ("carrier.rs", include_str!("../src/carrier.rs")),
     ("clock.rs", include_str!("../src/clock.rs")),
     ("decorate.rs", include_str!("../src/decorate.rs")),
     ("io.rs", include_str!("../src/io.rs")),
     ("lib.rs", include_str!("../src/lib.rs")),
     ("live.rs", include_str!("../src/live.rs")),
+    ("memory.rs", include_str!("../src/memory.rs")),
     ("rest.rs", include_str!("../src/rest.rs")),
     ("run.rs", include_str!("../src/run.rs")),
     ("sink.rs", include_str!("../src/sink.rs")),
