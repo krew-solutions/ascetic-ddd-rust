@@ -254,7 +254,8 @@ fn a_limit_is_read_alone() {
     let makers: Vec<usize> = (0..lines.len())
         .filter(|&i| {
             let l = lines[i].trim_start();
-            l.starts_with("pub fn ") && l.contains("-> Limit") || l.contains("-> io::Result<Limit>")
+            l.starts_with("pub fn ")
+                && (l.contains("-> Limit {") || l.contains("-> io::Result<Limit> {"))
         })
         .collect();
     assert!(makers.len() >= 3, "{makers:?}");

@@ -292,7 +292,11 @@ fn the_limit_is_the_least_over_the_tree() {
         write(dir, "memory.high", "max\n");
     }
     let read = || Limit::read_from(root.path(), "/a/b/c");
-    assert_eq!(read(), Limit::assumed(None, None));
+    assert_eq!((read().max(), read().high()), (None, None));
+    assert_eq!(
+        read().origin(),
+        ascetic_ddd_load_run::live::LimitOrigin::Tree
+    );
     // The first finite above the leaf, two up.
     write("a", "memory.max", "5000\n");
     assert_eq!(read().max(), Some((5000, 2)));
@@ -521,4 +525,77 @@ fn a_carrier_s_map_is_its_needs_at_its_own_total() {
             .any(|w| matches!(w, Inadmissible::Carrier(t) if t.contains("divides its 64 ports"))),
         "{why}"
     );
+}
+
+/// K2b-7e-2b-3d-3a: κ by one call — the fit's and the header's `catch_up`
+/// the same at κ 1 and 999 —, and a reserve whose κ is 1000 refused by name.
+#[test]
+fn kappa_is_one_call_and_refused_by_name() {
+    use ascetic_ddd_command_log::fills::Namespace;
+    use ascetic_ddd_load_run::stages::{Identity, journal_header};
+    let fitted_at = |reserve: u32| {
+        let mut header = fixture::header();
+        header.profile.sources = 1;
+        header.profile.reserve = reserve;
+        fit::<RealClock, _>(
+            Plan::assumed(Arc::new(header), Peaks::default()),
+            0,
+            Arc::new(Capped { cap: 8, needed: 1 }),
+            Journal::new(64, 0),
+            Memory::declared(PLENTY),
+            Limit::assumed(Some((PLENTY, 0)), None),
+        )
+    };
+    for kappa in [1u32, 999] {
+        let fitted = fitted_at(2 * kappa).unwrap();
+        let live = Live::fitted(&fitted).unwrap();
+        let admitted = admit(fitted, live.runtimes()).unwrap();
+        let header = journal_header(
+            &admitted,
+            Identity {
+                source: "test".into(),
+                log: "ab".repeat(32),
+                validator: "v".into(),
+                namespace: Namespace(0),
+            },
+            None,
+            vec![],
+            None,
+        );
+        assert_eq!(header.catch_up, kappa, "the header's catch-up at κ {kappa}");
+        assert_eq!(
+            ascetic_ddd_load_run::run::kappa(&admitted.header().profile),
+            Some(u64::from(kappa))
+        );
+    }
+    let why = refused(fitted_at(2_000));
+    assert!(
+        why.each()
+            .contains(&Inadmissible::Reserve { reserve: 2_000 }),
+        "{why}"
+    );
+}
+
+/// A limit's origin journaled apart: read, a test's tree, a test's
+/// assumption; the parts no enforcer holds yet, the gate's, each once in
+/// their order.
+#[test]
+fn a_limit_s_origin_and_the_unheld_parts() {
+    use ascetic_ddd_load_run::live::LimitOrigin;
+    use ascetic_ddd_load_run::memory::{Held, Part};
+    if let Ok(read) = Limit::read() {
+        assert_eq!(read.origin(), LimitOrigin::Read);
+    }
+    assert_eq!(Limit::assumed(None, None).origin(), LimitOrigin::Assumed);
+    let fitted = fitted(8, 1, 1, PLENTY).unwrap();
+    let unheld = &fitted.fit().unheld;
+    let gate: Vec<Part> = fitted
+        .fit()
+        .terms
+        .iter()
+        .filter(|t| matches!(t.held, Held::Gate { built: None }))
+        .map(|t| t.part)
+        .collect();
+    assert!(!unheld.is_empty());
+    assert_eq!(unheld, &gate);
 }

@@ -528,9 +528,12 @@ pub fn journal_header<C, X>(
         read_ahead: admitted.read_ahead(),
         jitter: h.profile.jitter,
         resend: h.profile.resend,
-        // Half the reserve until K2b-9c gives the run its own κ at
-        // admission (ADR-0047 decision 21): the other half the resends'.
-        catch_up: h.profile.reserve / 2,
+        // The κ the fit priced the pool at, by the one call (ADR-0047
+        // decision 21; decision 22, K2b-7e-2b-3d-3a): admitted, so not
+        // refused.
+        catch_up: crate::run::kappa(&h.profile)
+            .and_then(|k| u32::try_from(k).ok())
+            .unwrap_or(h.profile.reserve / 2),
         namespace: identity.namespace.0,
         t0,
         gates,

@@ -171,7 +171,7 @@ proptest! {
         prop_assert_eq!(fits.need, need);
         prop_assert_eq!(fits.slack, 0);
         prop_assert!(fits.pool <= fits.budget);
-        prop_assert!(!fits.held, "the pool's count is held by nothing yet");
+        prop_assert!(!fits.unheld.is_empty(), "the pool's count is held by nothing yet");
         if need > 0 {
             let refused = fit(&p, Memory::declared(need - 1)).unwrap_err();
             prop_assert_eq!(refused.least, Some(need));

@@ -271,6 +271,12 @@ pub enum Inadmissible {
         /// As fitted.
         fitted: Option<u64>,
     },
+    /// A reserve whose catch-up is 1000 per mille or past it (decision 21):
+    /// no pool is priced at it.
+    Reserve {
+        /// The reserve, per mille.
+        reserve: u32,
+    },
     /// The memory stated past what the process's cgroup tree allows
     /// (decision 22, K2b-7e-2b-3d-2): the kernel would reclaim or kill first.
     Limit {
@@ -381,6 +387,11 @@ impl fmt::Display for Inadmissible {
                 f,
                 "source {source}'s runtime holds {built:?} B as built, {fitted:?} B as fitted: \
                  build it by `Live::fitted`"
+            ),
+            Inadmissible::Reserve { reserve } => write!(
+                f,
+                "a reserve of {reserve} per mille: its catch-up, half of it, at 1000 or past it \
+                 prices no pool"
             ),
             Inadmissible::Limit {
                 stated,
@@ -627,6 +638,10 @@ pub struct Admitted<C, X> {
     runtimes: Runtimes,
     /// What it was fitted to (decision 22): the journal's evidence.
     fit: crate::memory::Fit,
+    /// The memory stated.
+    memory: crate::memory::Memory,
+    /// The process's limit, and its origin.
+    limit: crate::live::Limit,
     /// The clock it is carried by: the run's.
     clock: PhantomData<fn() -> C>,
 }
@@ -635,6 +650,16 @@ impl<C, X> Admitted<C, X> {
     /// What it was fitted to: every term, what it needs, its slack.
     pub fn fit(&self) -> &crate::memory::Fit {
         &self.fit
+    }
+
+    /// The memory it was fitted to.
+    pub fn memory(&self) -> crate::memory::Memory {
+        self.memory
+    }
+
+    /// The process's limit it was fitted within.
+    pub fn limit(&self) -> crate::live::Limit {
+        self.limit
     }
 
     /// The log's header.
@@ -716,10 +741,12 @@ pub(crate) fn descriptors_fit(
 /// (`tests/descriptors.rs`), counted by the fit before they exist.
 pub const RUNTIME_DESCRIPTORS: u64 = 3;
 
-/// The run's catch-up, per mille (decision 21): what the header journals and
-/// the pool's prediction is priced at — one function for both.
-pub fn kappa(profile: &ascetic_ddd_command_log::record::Profile) -> u64 {
-    u64::from(profile.reserve / 2)
+/// The run's catch-up, per mille (decision 21): half the reserve until
+/// K2b-9c gives the run its own — what the header journals as `catch_up` and
+/// the pool's prediction is priced at, one call for both; none at 1000 or
+/// past it, which no prediction prices.
+pub fn kappa(profile: &ascetic_ddd_command_log::record::Profile) -> Option<u64> {
+    Some(u64::from(profile.reserve / 2)).filter(|k| *k < 1000)
 }
 
 /// The bytes a runtime holds of its own with `events` a driver turn
@@ -805,7 +832,7 @@ fn planned<C: Clock, X: Carrier<C>>(
         shell_attempts: attempt_share(&peaks.late_shape),
         carrier_attempts: attempts.price(&peaks.late_shape),
         carrier_stated: attempts.stated_by,
-        kappa: kappa(&plan.header().profile),
+        kappa: kappa(&plan.header().profile).unwrap_or(999),
     })
 }
 
@@ -819,6 +846,7 @@ pub struct Fitted<C, X> {
     carrier: Arc<X>,
     journal: crate::sink::Journal,
     memory: crate::memory::Memory,
+    limit: crate::live::Limit,
     planned: crate::memory::Planned,
     fit: crate::memory::Fit,
     sources: Vec<Source>,
@@ -868,6 +896,11 @@ pub fn fit<C: Clock, X: Carrier<C>>(
     // The machine's own refusals: a read-ahead past the header's.
     drop(Machine::new(header.clone(), read_ahead)?);
     let mut refused = Vec::new();
+    if kappa(&header.profile).is_none() {
+        refused.push(Inadmissible::Reserve {
+            reserve: header.profile.reserve,
+        });
+    }
     if let Err(why) = carrier.carries(&header) {
         refused.push(Inadmissible::Carrier(why));
     }
@@ -972,9 +1005,7 @@ pub fn fit<C: Clock, X: Carrier<C>>(
             Ok(planned) => {
                 // A count no enforcer holds — the pool's, until the read
                 // gate — is held by the process's own cgroup, or refused.
-                let unheld = crate::memory::terms(&planned)
-                    .iter()
-                    .any(|t| matches!(t.held, crate::memory::Held::Gate { built: false }));
+                let unheld = !crate::memory::unheld(&crate::memory::terms(&planned)).is_empty();
                 if unheld && limit.max().is_none_or(|(_, depth)| depth > 0) {
                     refused.push(Inadmissible::Scope { max: limit.max() });
                 }
@@ -1018,6 +1049,7 @@ pub fn fit<C: Clock, X: Carrier<C>>(
             carrier,
             journal,
             memory,
+            limit,
             planned,
             fit,
             sources,
@@ -1126,7 +1158,8 @@ pub fn admit<C: Clock, X: Carrier<C>>(
         read_ahead,
         carrier,
         journal,
-        memory: _,
+        memory,
+        limit,
         planned,
         fit,
         sources,
@@ -1230,6 +1263,8 @@ pub fn admit<C: Clock, X: Carrier<C>>(
         carrier,
         runtimes: runtimes.clone(),
         fit,
+        memory,
+        limit,
         clock: PhantomData,
     })
 }

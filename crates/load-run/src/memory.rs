@@ -136,11 +136,30 @@ pub enum Held {
     /// The read gate (K2b-7e-3), once built; until then the plan's bound,
     /// nothing enforcing it.
     Gate {
-        /// Whether it is built.
-        built: bool,
+        /// Its proof of being built: none until the read gate mints one.
+        built: Option<GateBuilt>,
     },
     /// The host's word.
     Host,
+}
+
+/// The read gate's proof of being built (decision 22, K2b-7e-2b-3d-3a): an
+/// uninhabited witness until K2b-7e-3 gives the gate a type that mints it —
+/// no part held by the gate is claimed held before, a test's build included.
+///
+/// ```
+/// use ascetic_ddd_load_run::memory::Held;
+/// let held = Held::Gate { built: None };
+/// assert!(matches!(held, Held::Gate { built: None }));
+/// ```
+///
+/// ```compile_fail,E0451
+/// use ascetic_ddd_load_run::memory::{GateBuilt, Held};
+/// let held = Held::Gate { built: Some(GateBuilt { witness: unreachable!() }) };
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GateBuilt {
+    witness: std::convert::Infallible,
 }
 
 /// What a part's bytes are counted against.
@@ -249,8 +268,9 @@ pub struct Fit {
     pub budget: u64,
     /// The pool's prediction at the run's catch-up.
     pub pool: u64,
-    /// Whether every count is held: the pool's is not until the read gate.
-    pub held: bool,
+    /// The parts whose count no enforcer holds yet — the pool's, until the
+    /// read gate is built.
+    pub unheld: Vec<Part>,
 }
 
 /// A run that does not fit: every term, what failed, the term that binds
@@ -380,7 +400,7 @@ pub fn terms(planned: &Planned) -> Vec<Term> {
             ),
         ]);
     }
-    let gate = Held::Gate { built: false };
+    let gate = Held::Gate { built: None };
     let m = planned.machine;
     out.extend([
         term(
@@ -584,17 +604,27 @@ pub fn fit(planned: &Planned, memory: Memory) -> Result<Fit, Unfit> {
     };
     // The run's phase within `need`, within the stated bytes.
     let budget = memory.bytes.saturating_sub(fixed.saturating_add(run));
-    let held = !terms
-        .iter()
-        .any(|t| matches!(t.held, Held::Gate { built: false }));
+    let unheld = unheld(&terms);
     Ok(Fit {
         terms,
         need,
         slack,
         budget,
         pool: predicted,
-        held,
+        unheld,
     })
+}
+
+/// The parts of `terms` held by a gate not built, each once, in their order.
+#[must_use]
+pub fn unheld(terms: &[Term]) -> Vec<Part> {
+    let mut parts: Vec<Part> = Vec::new();
+    for t in terms {
+        if matches!(t.held, Held::Gate { built: None }) && !parts.contains(&t.part) {
+            parts.push(t.part);
+        }
+    }
+    parts
 }
 
 /// The largest term of the phase `bind` that binds: its own, or the fixed

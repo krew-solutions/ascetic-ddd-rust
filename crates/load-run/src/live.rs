@@ -119,6 +119,19 @@ impl Descriptors {
 pub struct Limit {
     max: Option<(u64, usize)>,
     high: Option<(u64, usize)>,
+    origin: LimitOrigin,
+}
+
+/// Where a [`Limit`] came from (decision 22, K2b-7e-2b-3d-3a): the evidence
+/// says so apart, never folded into another assumption.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LimitOrigin {
+    /// Read from the process's own cgroups.
+    Read,
+    /// Walked from a test's tree.
+    Tree,
+    /// A test's assumption.
+    Assumed,
 }
 
 impl Limit {
@@ -130,17 +143,22 @@ impl Limit {
             .lines()
             .find_map(|l| l.strip_prefix("0::"))
             .ok_or_else(|| io::Error::other("no cgroup v2 line in /proc/self/cgroup"))?;
-        Ok(Limit::walk(std::path::Path::new("/sys/fs/cgroup"), path))
+        Ok(Limit::walk(
+            std::path::Path::new("/sys/fs/cgroup"),
+            path,
+            LimitOrigin::Read,
+        ))
     }
 
     /// The walk from `path` under `root` up to `root`: each directory's
     /// `memory.max` and `memory.high`, the least finite of each and its
     /// depth; a file missing or `max` no limit.
-    fn walk(root: &std::path::Path, path: &str) -> Limit {
+    fn walk(root: &std::path::Path, path: &str, origin: LimitOrigin) -> Limit {
         let mut dir = root.join(path.trim_start_matches('/'));
         let mut limit = Limit {
             max: None,
             high: None,
+            origin,
         };
         let mut depth = 0usize;
         loop {
@@ -169,13 +187,22 @@ impl Limit {
     /// A tree's walk: `path` under `root` — a test's tree.
     #[cfg(feature = "testing")]
     pub fn read_from(root: &std::path::Path, path: &str) -> Limit {
-        Limit::walk(root, path)
+        Limit::walk(root, path, LimitOrigin::Tree)
     }
 
     /// A test's limit: `max` and `high`, each its bytes and depth.
     #[cfg(feature = "testing")]
     pub fn assumed(max: Option<(u64, usize)>, high: Option<(u64, usize)>) -> Limit {
-        Limit { max, high }
+        Limit {
+            max,
+            high,
+            origin: LimitOrigin::Assumed,
+        }
+    }
+
+    /// Where it came from.
+    pub fn origin(&self) -> LimitOrigin {
+        self.origin
     }
 
     /// The least `memory.max`, and its depth.
