@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a, K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3), K2b-7e-2b-2c-1 to K2b-7e-2b-2c-4 built, K2b-7e-2b-3 decided and cut in five, K2b-7e-2b-3a-1 to K2b-7e-2b-3a-3, K2b-7e-2b-3b, K2b-7e-2b-3c-1 and K2b-7e-2b-3c-2 built, K2b-7e-2b-3d cut in four, K2b-7e-2b-3d-1 and K2b-7e-2b-3d-2 built, K2b-7e-2b-3d-3 next; decision 23 decided, K2b-7e-4a built, K2b-7e-4b decided and cut in three, K2b-7e-4b-1 and K2b-7e-4b-2 built, K2b-7e-4b-3 measured — four refutations, one remedy each —, K2b-7e-4b-4 and K2b-7e-4b-5 built and measured, K2b-7e-4 done (decision 23's steps 1 and 2), decision 23's step 3b on the owner's confirmation; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a, K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3), K2b-7e-2b-2c-1 to K2b-7e-2b-2c-4 built, K2b-7e-2b-3 decided and cut in five, K2b-7e-2b-3a-1 to K2b-7e-2b-3a-3, K2b-7e-2b-3b, K2b-7e-2b-3c-1 and K2b-7e-2b-3c-2 built, K2b-7e-2b-3d cut in four, K2b-7e-2b-3d-1 and K2b-7e-2b-3d-2 built, K2b-7e-2b-3d-3 decided and cut in two, K2b-7e-2b-3d-3a next; decision 23 decided, K2b-7e-4a built, K2b-7e-4b decided and cut in three, K2b-7e-4b-1 and K2b-7e-4b-2 built, K2b-7e-4b-3 measured — four refutations, one remedy each —, K2b-7e-4b-4 and K2b-7e-4b-5 built and measured, K2b-7e-4 done (decision 23's steps 1 and 2), decision 23's step 3b on the owner's confirmation; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -53,8 +53,11 @@ To be built in slices, each a commit of its own:
   statements, **K2b-7e-2b-3c** the pure fit, in two (**K2b-7e-2b-3c-1** the fit and its properties, **K2b-7e-2b-3c-2**
   the remedies, `Egress::caps`, `fits::fits` retired), **K2b-7e-2b-3d** the wiring and version 10, in four
   (**K2b-7e-2b-3d-1** `fit`, `Fitted`, `Live::fitted` and `admit(fitted, &runtimes)`, the descriptors read ahead, every
-  refusal at once; **K2b-7e-2b-3d-2** `Limit::read` and the scope rule; **K2b-7e-2b-3d-3** journal version 10, its
-  twins and the tampered headers; **K2b-7e-2b-3d-4** the whole-run measurement), **K2b-7e-2b-3e** the evidence
+  refusal at once; **K2b-7e-2b-3d-2** `Limit::read` and the scope rule; **K2b-7e-2b-3d-3** journal version 10, in
+  two — **K2b-7e-2b-3d-3a** the terms by count, cost and rest, the parts, one source by type, the `Model`, the
+  provenance, `GateBuilt`, no journal change; **K2b-7e-2b-3d-3b** version 10's `admission.memory`, the versioned
+  recheck in the fold and `verdict.py`, the self-check, the twins' census, the pins split —; **K2b-7e-2b-3d-4** the
+  whole-run measurement), **K2b-7e-2b-3e** the evidence — the `memory` line with its producer among it
   after a kill —, **K2b-7e-2c** the cgroup's memory, after the read gate;
   **K2b-7e-3** the read gate; **K2b-7e-4** the parse, in two (decision 23) — **K2b-7e-4a** a body parsed on its first
   reader and a late answer holding nothing, **K2b-7e-4b** the tape (decision 23's step 2), in three — **K2b-7e-4b-1**
@@ -73,7 +76,7 @@ To be built in slices, each a commit of its own:
   stalled; **K2b-9** the harness shaping at the hand-off (decision 21), in four — **K2b-9a** the machine's poll grid at
   the plan's instant; **K2b-9b** in parts — **K2b-9b-1** journal version 9's bytes, **K2b-9b-2** the pure pace and
   its band, **K2b-9b-3** the raw dues in the machine (decision 21's raw-due rule, refuted while building, under the
-  gate), **K2b-9b-4** `sim` paced, **K2b-9b-5** the fold's revision 8; **K2b-9c** the
+  gate), **K2b-9b-4** `sim` paced, **K2b-9b-5** the fold's next revision (8 is K2b-7e-2b-3d-3's); **K2b-9c** the
   shell's gate, its type, I2 and κ at admission; **K2b-9d** the twins.
 - **The first host run:** REST only, on the compose stand, `sources = 1` — a correctness run.
 - **K3** facts and the bus; **K4** shaping and the emulated client's retries; **K5** the report.
@@ -716,7 +719,7 @@ amends decision 17; § Alternatives Considered keeps what each round refuted):
   - **every carrier through it**, by type: no connect or send without a pass; `sim` paces by the same pure
     `scheduler::pace`, its scripted hand-offs drawn from it;
   - **admission's I2 at the compressed rate**: `⌈needed·1000/(1000 − κ)⌉ ≤ cap(s)`.
-- **The fold** (revision 8):
+- **The fold** (its next revision; 8 taken by K2b-7e-2b-3d-3):
   - coherence: the pace over hand-offs in hand-off order, final by reports — a hand-off is final when every attempt
     dispatched at or before its instant has reported (`Sent`, a closing report, an answer found at the look, which
     now carries its `handed`: its bytes reached the system);
@@ -869,6 +872,27 @@ which `admit` never called; § Alternatives Considered keeps what each refuted):
     arithmetic and refusing tampered headers; the `memory` line's form fixed with it (anon, file and sock apart, heap
     in use and free, the limit as read), sent through a one-slot mailbox the writer drains first, and read from a
     journal the kernel cut. `fits::fits` and `Budget` retired, their loop carried to `fit`.
+  - **Amended for K2b-7e-2b-3d-3** (2026-11-28, under the gate: the main position, a blind solver and a discriminator on
+    Fable, two roles — Verifiability, Evolution — on Opus; § Alternatives Considered keeps what each refuted). **The
+    fold rechecks admission's aggregation and its cross-references, never its prices**: it has the journal, not the
+    plan's peaks, and several costs are owners' statements. A term is `count · cost + rest`, checked, its count the
+    enforcer's (0 for an absent part, 1 for a part held once), its cost refused on overflow whatever its count; the
+    parts gain `Pending`, `JournalOut`, `Decorations` and the probes' io, each labelled by who states it (Connections
+    and Answers by the carrier's own word, not the library's); `Planned` holds each shared count once and a closed
+    `Model` of the constants the fold binds where a cost is one verbatim; κ journaled once, as `catch_up`, from one
+    call, a reserve of 2000 or more refused by name; the limit's and the runtimes' origins journaled apart, the
+    runtime-events check exempt on the runtimes' own; `GateBuilt` uninhabited until the read gate mints it. **Version
+    10** carries `admission.memory` alone — the `memory` line enters with its producer, K2b-7e-2b-3e, as decision 14
+    says each line kind does —; `Reader::new` reads the version first; the recheck is versioned, `recheck(&Header)`
+    dispatching on it, version 10's rules and its part table — a data file the Rust fold, `verdict.py` and load-run's
+    `terms()` are held equal to — frozen when 11 lands; a pure `admission(fit, rows, limit)` the only producer of
+    `Admitted`'s admission, calling the recheck; the fold voids an incoherent header; the tamper census as twins with a
+    closed `why`, `verdict.py` counting each rule reached; consistent headers' results pinned by version, refusals by
+    (version, fold revision), append-only, a CI step failing on a modified line whose key did not move; a few headers
+    made by load-run pinned and settled at every change; the fold's revision the next free one, 8 — decision 21's
+    becomes the next after. Executors two-sided: each owner's count tested, the shadow exact for budget, pool and
+    unheld with a κ that does not divide, a property editing one field of a consistent evidence and refusing it unless
+    the field is on a pinned free list.
 - **The read gate** (K2b-7e-3): no line read while the attempts alive reach their cap or the machine's live cost its
   share — a late read, the harness's; starved past the longest timeout, a fault and a stop.
 - **The parse bounded** (K2b-7e-4): the body's state journaled (whole, cut at the cap, unparsed and why) — an answer
@@ -1095,6 +1119,19 @@ waits for the owner's confirmation:
   decision 21's decided I2 silently; Software Design, Verifiability); **the cgroup as the number's source before the
   read gate** (the discriminator); **the first refusal only, one binding term, remedies from another owner**
   (Operability, Software Design, Verifiability).
+- **Decision 22, K2b-7e-2b-3d-3's journal** (2026-11-28): the main position's **bytes = count · cost for every term**
+  (nine parts are sums or polynomials; the discriminator), **an open map for the `Model`** (the schema checker's key
+  order refuses it; the discriminator), **admission required whenever T0 exists** (it would void every golden run and
+  the reference corpus; the discriminator), **tampered twins in the byte-form golden** (it is never folded; the
+  discriminator); the solver's **a cross-check `BoundTo = Pending`** (two variables, fixtures differ: a false refusal;
+  the discriminator) and **a sample consistent and extreme** (unneeded; the discriminator); the synthesis's
+  **`recheck(catch_up, &Admission)`, unversioned** (a later reader cannot judge a first-host-run journal by its rules;
+  Evolution), **the `memory` line in version 10** (no producer and no reader for two of its groups; Evolution), **κ
+  journaled twice** (Evolution), **the limit's origin ORed into `assumed`** (the runtime-events check then refuses a
+  test's runtimes or is exempt everywhere; Verifiability), **the fold's revision 8 taken silently** (decision 21's
+  promise; Evolution), **pins keyed by the journal's version alone** (a fold's rule over unchanged bytes forces the
+  wrong bump; Evolution), **executors run on admission's own output** (consistent by construction: no rule-deleting
+  mutant dies; Verifiability), **a `compile_fail` doctest without its code** (any error passes it; Verifiability).
 - **Decision 23's step 2, the tape** (2026-11-27, K2b-7e-4b's round): **a pointer set registered for one pass**
   (the main position, the solver: about 1.6 × cap — invisible to the fit, a source's answers charged at sockets × cap;
   the judgement then depends on the registration, which needs a fallback pass or a narrowed API; the discriminator),
@@ -3333,6 +3370,10 @@ only and measures move to the 12-core box.
     share of σ at 1, 4 and 16 sources and 5 to 80 large answers a second. K2b-9b-3 onward waits for both. Both done
     (2026-11-27): the floor is the whole shift measured (§ Measured), decision 23 decided; K2b-9b-3 onward waits for
     its steps and the owner's confirmation of decision 21.
+- **For the owner, from K2b-7e-2b-3d-3's round** (2026-11-28): this ADR's lines on the journal's versions disagree for
+  journals written between the first host run and K5 — "journals before K5 are disposable" against "from the first host
+  run on a reader accepts the versions it lists". Version 10 is the section the first host run carries; the versioned
+  recheck makes either answer buildable, but this ADR must say which.
 - **K2b-7e-2b-3d-1's owed** (2026-11-28): the remedies searched over the carrier's knob — its ports through
   `Egress::caps`, a method the `Carrier` states — and over the plan's answer cap, whose costs the carrier states for the
   cap it was built with: each needs the carrier to price a knob it was not built at. The ports' done in K2b-7e-2b-3d-2;
@@ -3550,7 +3591,7 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-24: the receive twin's flake found — a release late past the read-ahead moved the deadline the twin's driver
   assumes; the twin now requires its step's deadline before judging a run (§ Measured K2b-8d-2, its third sighting).
 - 2026-11-24: **decision 21 decided** after round 3's four roles (§ Decision 21; § Alternatives Considered round 3):
-  the pace, its raw dues, κ, the band gate, the fold's revision 8, decision 17 amended; K2b-9 its cut. The replays
+  the pace, its raw dues, κ, the band gate, the fold's next revision, decision 17 amended; K2b-9 its cut. The replays
   rerun optimised (§ Measured): the earlier ones were on opt-level 0, and their "this box cannot offer 2,000 a second"
   withdrawn; judgements of large answers found holding the machine — the judge's speed owed with H-1's trigger.
 - 2026-11-24: K2b-9a built (§ Measured): machine revision 5, a poll's grid at its line's planned instant, its
@@ -3674,6 +3715,9 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-28: M-a rerun after K2b-7e-4b-4 on the load server (R4, R5, R7 still refuted by smaller margins; R6
   refuted on the densest shapes) and K2b-7e-4b-5 built (§ Measured): a plain string compared over its text; K2b-7e-4b-4's
   unit test's escapes restored — its record named escapes it no longer held.
+- 2026-11-28: K2b-7e-2b-3d-3 decided under the gate (§ Decision 22, amended for K2b-7e-2b-3d-3) and cut in two; the
+  `memory` line moved to K2b-7e-2b-3e with its producer; the fold's revision 8 taken, decision 21's the next after; the
+  owner asked which journals a reader must accept from the first host run on.
 - 2026-11-28: K2b-7e-2b-3d-2's defect fixed (§ Measured): the carrier's map held to its needs' caps at its own total.
 - 2026-11-28: K2b-7e-2b-3d-2 built (§ Measured): `Limit::read`, the limit's refusal, the scope rule, the carrier's
   ports a remedy.
