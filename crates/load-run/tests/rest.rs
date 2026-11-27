@@ -25,7 +25,7 @@ use ascetic_ddd_command_log::record::{Action, Codec, Header, Payload, Record, Re
 use ascetic_ddd_command_log::render::{self, RunSecret};
 use ascetic_ddd_load_run::clock::{Clock, VirtualClock};
 use ascetic_ddd_load_run::rest::{Config, RestCarrier};
-use ascetic_ddd_load_run::run::{RunError, Runtimes, admit, run};
+use ascetic_ddd_load_run::run::{RunError, Runtimes, admitted, run};
 use ascetic_ddd_load_run::sink::Lines;
 use ascetic_ddd_load_run::source::Records;
 use ascetic_ddd_load_run::stand::{Connect, Egress, Route, Stand, StandConnect};
@@ -597,7 +597,7 @@ fn run_rest_refused(
         }
         // A refusal before T0 comes back as it is: no run, no journal.
         let sources = usize::try_from(header.profile.sources.max(1)).unwrap_or(1);
-        let ran = match admit(
+        let ran = match admitted(
             ascetic_ddd_load_run::source::Plan::assumed(
                 header,
                 ascetic_ddd_command_log::validate::Peaks {
@@ -1212,7 +1212,7 @@ fn over_rest_the_shell_journals_what_sim_journals() {
                 clock
                     .within(run(
                         ascetic_ddd_load_run::run::Ready::assumed(
-                            admit(
+                            admitted(
                                 ascetic_ddd_load_run::source::Plan::assumed(
                                     header,
                                     Default::default(),
@@ -1435,7 +1435,7 @@ fn looked(lags: &[(u64, u64)], answer: Answer) -> Vec<Line> {
         inner
             .within(run(
                 ascetic_ddd_load_run::run::Ready::assumed(
-                    admit(
+                    admitted(
                         ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
                         W,
                         Arc::new(carrier),
@@ -1643,7 +1643,7 @@ fn run_decorated(
         let ran = clock
             .within(run(
                 ascetic_ddd_load_run::run::Ready::assumed(
-                    admit(
+                    admitted(
                         ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
                         W,
                         Arc::new(carrier),
@@ -2611,17 +2611,19 @@ fn admission_holds_a_source_s_sockets() {
             events: Some(cap + 1),
         }
     );
-    // A cap past any count of events.
-    assert_eq!(
-        refused(Connects {
-            ports: usize::MAX,
-            ..exact
-        }),
-        Inadmissible::Events {
+    // A cap past any count of events: refused by the fit, before anything is
+    // built (K2b-7e-2b-3d), beside what else such a cap refuses.
+    let past = refused(Connects {
+        ports: usize::MAX,
+        ..exact
+    });
+    assert!(
+        past.each().contains(&Inadmissible::Events {
             source: 0,
             cap: usize::MAX,
-            events: Some(cap + 2),
-        }
+            events: None,
+        }),
+        "{past}"
     );
     // K2b-7e-2b-3a-3: each source needs its own steps' sockets, not the
     // plan's whole pending — two sources whose steps at once total twice the
@@ -2647,13 +2649,24 @@ fn admission_holds_a_source_s_sockets() {
         .0
     };
     assert!(split(pending).is_ok(), "each source within its cap");
-    assert!(
-        matches!(
-            split(pending + 1),
-            Err(RunError::Inadmissible(Inadmissible::Sockets { source: 0, needed, .. })) if needed == pending + 1
+    // Each past its cap, each named at once (K2b-7e-2b-3d).
+    match split(pending + 1) {
+        Err(RunError::Inadmissible(why)) => {
+            for source in [0, 1] {
+                assert!(
+                    why.each().iter().any(|w| matches!(
+                        w,
+                        Inadmissible::Sockets { source: s, needed, .. } if *s == source && *needed == pending + 1
+                    )),
+                    "source {source} past its cap unnamed: {why}"
+                );
+            }
+        }
+        other => panic!(
+            "a source past its cap admitted: {:?}",
+            other.map(|j| j.len())
         ),
-        "a source past its cap"
-    );
+    }
     // A plan of two sources, a carrier built from a header of its own, of
     // one: refused — its header not the plan's (decision 20).
     let mut two = header.clone();
@@ -2675,10 +2688,17 @@ fn admission_holds_a_source_s_sockets() {
     )
     .0
     {
-        Err(RunError::Inadmissible(Inadmissible::Carrier(why))) => why,
+        Err(RunError::Inadmissible(why)) => why,
         other => panic!("{:?}", other.map(|j| j.len())),
     };
-    assert_eq!(why, "the carrier's header is not the plan's");
+    // Among every refusal at once (K2b-7e-2b-3d): the source it cannot tell
+    // follows from it.
+    assert!(
+        why.each().contains(&Inadmissible::Carrier(
+            "the carrier's header is not the plan's".into()
+        )),
+        "{why}"
+    );
     // The process's descriptors: the caps, those open and the reserve within
     // the soft limit, one source or two summed.
     use ascetic_ddd_load_run::live::Descriptors;
@@ -2906,7 +2926,7 @@ fn stop_leaves_no_request(connect: u64, throttle: Throttle) {
         let ran = clock
             .within(run(
                 ascetic_ddd_load_run::run::Ready::assumed(
-                    admit(
+                    admitted(
                         ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
                         W,
                         Arc::new(carrier),
@@ -2988,7 +3008,7 @@ fn a_run_dropped_takes_its_attempts_with_it() {
         let runtimes = Runtimes::assumed(vec![tokio::runtime::Handle::current()], 1_024);
         let running = run(
             ascetic_ddd_load_run::run::Ready::assumed(
-                admit(
+                admitted(
                     ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
                     W,
                     Arc::new(carrier),
@@ -3084,7 +3104,7 @@ fn the_rest_carrier_s_gates_are_its_stand_s() {
             Config::new(RunSecret::new([7; 32])),
         );
         let runtimes = Runtimes::assumed(vec![tokio::runtime::Handle::current()], 1_024);
-        let admitted = admit(
+        let admitted = admitted(
             ascetic_ddd_load_run::source::Plan::assumed(header.clone(), Default::default()),
             W,
             Arc::new(carrier),

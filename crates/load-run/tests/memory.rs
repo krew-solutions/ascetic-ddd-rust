@@ -27,7 +27,7 @@ use ascetic_ddd_command_log::render::RunSecret;
 use ascetic_ddd_load_run::clock::{Clock, RealClock};
 use ascetic_ddd_load_run::live::{Descriptors, Live};
 use ascetic_ddd_load_run::rest::{Config, RestCarrier};
-use ascetic_ddd_load_run::run::{Ready, admit, run};
+use ascetic_ddd_load_run::run::{Ready, admitted, run};
 use ascetic_ddd_load_run::sink::JournalSink;
 use ascetic_ddd_load_run::source::{Plan, Records};
 use ascetic_ddd_load_run::stand::{Route, Stand};
@@ -225,7 +225,7 @@ fn measured(n: u64, delay: f64, size: usize) -> (Samples, usize, usize, (usize, 
         Config::new(RunSecret::new([7; 32])),
     );
     let live = Live::for_caps(&[CAP]).unwrap();
-    let admitted = admit(
+    let admitted = admitted(
         Plan::assumed(
             header.clone(),
             ascetic_ddd_command_log::validate::Peaks {
@@ -366,7 +366,7 @@ fn burst(k: u64) -> usize {
     let seen = rt.block_on(async {
         let clock = Arc::new(VirtualClock::start(0));
         let runtimes = Runtimes::assumed(vec![tokio::runtime::Handle::current()], 1_024);
-        let admitted = admit(
+        let admitted = admitted(
             Plan::assumed(Arc::new(header()), Default::default()),
             W,
             Arc::new(common::Scripted::new(Arc::new(|_, _, _: &Record| {

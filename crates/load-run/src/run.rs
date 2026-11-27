@@ -45,16 +45,19 @@ pub struct Runtimes {
 }
 
 impl Runtimes {
+    /// The runtimes built: `assumed` if their events are a test's choice,
+    /// not a fit's — exempt by name from being the runtimes fitted.
     pub(crate) fn new(
         sources: Vec<Handle>,
         events: Vec<usize>,
         descriptors: Option<Descriptors>,
+        assumed: bool,
     ) -> Runtimes {
         Runtimes {
             sources,
             events,
             descriptors,
-            assumed: false,
+            assumed,
         }
     }
 
@@ -107,8 +110,7 @@ impl Runtimes {
         if self.assumed {
             return None;
         }
-        let events = u64::try_from(self.events(s)?).ok()?;
-        RUNTIME.checked_add(events.checked_mul(EVENT?)?)
+        runtime_own(self.events(s)?)
     }
 }
 
@@ -249,6 +251,49 @@ pub enum Inadmissible {
         /// The most [`sink::THREAD`](crate::sink::THREAD) states.
         most: usize,
     },
+    /// A run that does not fit the memory stated (decision 22, K2b-7e-2b-3d):
+    /// its terms, what failed, the term that binds, the least memory, each
+    /// remedy on its owner's knob.
+    Memory(Box<crate::memory::Refused>),
+    /// A part whose bytes no owner states (decision 22): refused, never left
+    /// no room.
+    Unstated {
+        /// The part.
+        part: &'static str,
+    },
+    /// A source's runtime as built not the one fitted (decision 22,
+    /// K2b-7e-2b-3d): what admission priced is not what runs.
+    Runtime {
+        /// The source.
+        source: u32,
+        /// Its runtime's own as built.
+        built: Option<u64>,
+        /// As fitted.
+        fitted: Option<u64>,
+    },
+    /// Every refusal at once (decision 22): raising one limit to be refused
+    /// on the next is wasted work.
+    All(Vec<Inadmissible>),
+}
+
+impl Inadmissible {
+    /// `refusals` as one: itself if there is one, all of them if more — each
+    /// a single refusal, as `fit` and `admit` push them.
+    fn of(mut refusals: Vec<Inadmissible>) -> Option<Inadmissible> {
+        match refusals.len() {
+            0 => None,
+            1 => refusals.pop(),
+            _ => Some(Inadmissible::All(refusals)),
+        }
+    }
+
+    /// Each refusal it holds.
+    pub fn each(&self) -> &[Inadmissible] {
+        match self {
+            Inadmissible::All(all) => all,
+            one => std::slice::from_ref(one),
+        }
+    }
 }
 
 impl fmt::Display for Inadmissible {
@@ -306,6 +351,21 @@ impl fmt::Display for Inadmissible {
                 f,
                 "the lines read {ahead} records ahead, their plan admitted with {admitted}"
             ),
+            Inadmissible::Memory(refused) => write!(f, "{refused}"),
+            Inadmissible::Unstated { part } => write!(f, "{part}: its bytes stated by no owner"),
+            Inadmissible::Runtime {
+                source,
+                built,
+                fitted,
+            } => write!(
+                f,
+                "source {source}'s runtime holds {built:?} B as built, {fitted:?} B as fitted: \
+                 build it by `Live::fitted`"
+            ),
+            Inadmissible::All(all) => {
+                let each: Vec<String> = all.iter().map(ToString::to_string).collect();
+                write!(f, "{}", each.join("; "))
+            }
             Inadmissible::Output { size, most } => write!(
                 f,
                 "the journal's output holds {size} bytes inline, at most {most}: box it"
@@ -523,11 +583,18 @@ pub struct Admitted<C, X> {
     read_ahead: u64,
     carrier: Arc<X>,
     runtimes: Runtimes,
+    /// What it was fitted to (decision 22): the journal's evidence.
+    fit: crate::memory::Fit,
     /// The clock it is carried by: the run's.
     clock: PhantomData<fn() -> C>,
 }
 
 impl<C, X> Admitted<C, X> {
+    /// What it was fitted to: every term, what it needs, its slack.
+    pub fn fit(&self) -> &crate::memory::Fit {
+        &self.fit
+    }
+
     /// The log's header.
     pub fn header(&self) -> &Arc<Header> {
         &self.header
@@ -601,25 +668,324 @@ pub(crate) fn descriptors_fit(
     })
 }
 
-/// Admits `plan`, read `read_ahead` µs ahead, its attempts carried by
-/// `carrier` on `runtimes`, its journal `journal` — or refuses it, before any
-/// journal exists: a
-/// carrier that cannot carry it, a runtime not `current_thread`, fewer
-/// runtimes than sources, a read-ahead past the header's; a source whose cap
-/// with its driver's own exceeds the events a turn (decision 20's I1), or
-/// whose sockets needed under the plan's bound exceed its cap (I2).
-pub fn admit<C: Clock, X: Carrier<C>>(
+/// The descriptors a source's runtime holds of its own (decision 22,
+/// K2b-7e-2b-3d): its driver's epoll, its waker's eventfd and one more of
+/// tokio's I/O driver — measured on Linux, three a runtime
+/// (`tests/descriptors.rs`), counted by the fit before they exist.
+pub const RUNTIME_DESCRIPTORS: u64 = 3;
+
+/// The run's catch-up, per mille (decision 21): what the header journals and
+/// the pool's prediction is priced at — one function for both.
+pub fn kappa(profile: &ascetic_ddd_command_log::record::Profile) -> u64 {
+    u64::from(profile.reserve / 2)
+}
+
+/// The bytes a runtime holds of its own with `events` a driver turn
+/// (decision 22, K2b-7e-2b-2c-1): [`RUNTIME`] and the events at [`EVENT`]
+/// each; none where no event's size is stated.
+fn runtime_own(events: usize) -> Option<u64> {
+    let events = u64::try_from(events).ok()?;
+    RUNTIME.checked_add(events.checked_mul(EVENT?)?)
+}
+
+/// A source as `fit` found it: its sockets' cap, what its carrier states of
+/// its parts, the plan's need of its sockets.
+#[derive(Clone, Copy, Debug)]
+struct Source {
+    cap: usize,
+    needed: u64,
+    costs: Option<crate::carrier::Costs>,
+    own: crate::carrier::SourceCosts,
+}
+
+/// What admission fixes of `plan` carried by `carrier` at `knobs` (decision
+/// 22, K2b-7e-2b-3d): each part's bytes at its count — its sources', its
+/// reader's at the records ahead, its journal's at the lines behind, the
+/// stages', the gates', the machine's and the pool's.
+fn planned<C: Clock, X: Carrier<C>>(
+    plan: &Plan,
+    carrier: &X,
+    journal: &crate::sink::Journal,
+    sources: &[Source],
+    knobs: &crate::memory::Knobs,
+) -> Result<crate::memory::Planned, crate::carrier::Unstated> {
+    let peaks = plan.peaks();
+    let record = &peaks.record;
+    let attempts = carrier.attempts(peaks)?;
+    let reader = plan.reader().map(|r| crate::source::Reader {
+        ahead: knobs.ahead,
+        ..*r
+    });
+    let of = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+    Ok(crate::memory::Planned {
+        sources: sources
+            .iter()
+            .map(|s| crate::memory::SourcePart {
+                runtime: crate::live::events_for(&[s.cap])
+                    .ok()
+                    .and_then(|e| e.first().copied())
+                    .and_then(runtime_own),
+                cap: of(s.cap),
+                connection: s.costs.map_or(0, |c| c.connection),
+                io: s.costs.map_or(0, |c| c.io),
+                answer: s.costs.map_or(0, |c| c.answer),
+                carrier: s.own.total(),
+                carrier_stated: s.own.stated_by,
+                keeping: ending(record),
+            })
+            .collect(),
+        reader: reader.map_or(0, |r| r.bytes(record)),
+        decoder: if reader.is_some() {
+            ascetic_ddd_command_log::live::DECODER
+        } else {
+            0
+        },
+        journal: crate::sink::Journal::new(knobs.behind, journal.out()).bytes(record),
+        judging: crate::stages::judging_bound(plan.header()),
+        gates: carrier.gate_bytes(),
+        machine: ascetic_ddd_scheduler::fits::terms(peaks),
+        records: ascetic_ddd_scheduler::fits::late_records(peaks),
+        shell_attempts: attempt_share(&peaks.late_shape),
+        carrier_attempts: attempts.price(&peaks.late_shape),
+        carrier_stated: attempts.stated_by,
+        kappa: kappa(&plan.header().profile),
+    })
+}
+
+/// A run fitted to the memory stated (decision 22, K2b-7e-2b-3d): its plan,
+/// its carrier, its journal and its read-ahead bound by value to what they
+/// price — the only way to [`Live::fitted`](crate::live::Live::fitted) and to
+/// [`admit`]; a host fitting one journal and running another cannot.
+pub struct Fitted<C, X> {
     plan: Plan,
     read_ahead: u64,
     carrier: Arc<X>,
-    runtimes: &Runtimes,
     journal: crate::sink::Journal,
-) -> Result<Admitted<C, X>, RunError> {
+    memory: crate::memory::Memory,
+    planned: crate::memory::Planned,
+    fit: crate::memory::Fit,
+    sources: Vec<Source>,
+    clock: PhantomData<fn() -> C>,
+}
+
+impl<C, X> Fitted<C, X> {
+    /// The fit: every term, what the run needs, its slack.
+    pub fn fit(&self) -> &crate::memory::Fit {
+        &self.fit
+    }
+
+    /// The memory stated.
+    pub fn memory(&self) -> crate::memory::Memory {
+        self.memory
+    }
+
+    /// Its sources' caps, as the runtimes are to be built for them.
+    pub fn caps(&self) -> Vec<usize> {
+        self.sources.iter().map(|s| s.cap).collect()
+    }
+
+    /// The log's header.
+    pub fn header(&self) -> &Arc<Header> {
+        self.plan.header()
+    }
+}
+
+/// Fits `plan`, read `read_ahead` µs ahead, its attempts carried by
+/// `carrier`, its journal `journal`, to `memory` (decision 22, K2b-7e-2b-3d) —
+/// pure, before anything is built, every refusal at once: a carrier that
+/// cannot carry it or tell a source's needs, a source needing more sockets
+/// under the plan's bound than its cap (decision 20's I2), a cap past what a
+/// driver sizes, the descriptors its caps and runtimes would hold past the
+/// soft limit as read now, a part no owner states, the memory.
+pub fn fit<C: Clock, X: Carrier<C>>(
+    plan: Plan,
+    read_ahead: u64,
+    carrier: Arc<X>,
+    journal: crate::sink::Journal,
+    memory: crate::memory::Memory,
+) -> Result<Fitted<C, X>, RunError> {
     let header = plan.header().clone();
-    let refused = |i| RunError::Inadmissible(i);
-    carrier
-        .carries(&header)
-        .map_err(|why| refused(Inadmissible::Carrier(why)))?;
+    // The machine's own refusals: a read-ahead past the header's.
+    drop(Machine::new(header.clone(), read_ahead)?);
+    let mut refused = Vec::new();
+    if let Err(why) = carrier.carries(&header) {
+        refused.push(Inadmissible::Carrier(why));
+    }
+    let count = header.profile.sources.max(1);
+    let mut sources = Vec::new();
+    for source in 0..count {
+        let needs = carrier.needs(plan.peaks(), source);
+        let own = carrier.source_costs(plan.peaks(), source);
+        let (needs, own) = match (needs, own) {
+            (Ok(n), Ok(o)) => (n, o),
+            (Err(why), _) | (_, Err(why)) => {
+                refused.push(Inadmissible::Carrier(why));
+                continue;
+            }
+        };
+        let s = match needs {
+            Needs::Nothing => Source {
+                cap: 0,
+                needed: 0,
+                costs: None,
+                own,
+            },
+            Needs::Sockets { needed, cap, costs } => {
+                if u64::try_from(cap).is_ok_and(|c| needed > c) {
+                    refused.push(Inadmissible::Sockets {
+                        source,
+                        needed,
+                        cap,
+                    });
+                }
+                if crate::live::events_for(&[cap]).is_err() {
+                    refused.push(Inadmissible::Events {
+                        source,
+                        cap,
+                        events: None,
+                    });
+                }
+                Source {
+                    cap,
+                    needed,
+                    costs: Some(costs),
+                    own,
+                }
+            }
+        };
+        sources.push(s);
+    }
+    // The descriptors as read now — after the host raised them —, the caps'
+    // and each runtime's own, before they are built.
+    let caps: u64 = sources
+        .iter()
+        .map(|s| u64::try_from(s.cap).unwrap_or(u64::MAX))
+        .fold(0, u64::saturating_add);
+    if caps > 0 {
+        let runtimes = u64::from(count).saturating_mul(RUNTIME_DESCRIPTORS);
+        if let Err(why) = descriptors_fit(caps.saturating_add(runtimes), Descriptors::read().ok()) {
+            refused.push(why);
+        }
+    }
+    let knobs = crate::memory::Knobs {
+        ports: 0,
+        ahead: plan.reader().map_or(0, |r| r.ahead),
+        behind: journal.behind(),
+        answer_cap: header.profile.answer_cap,
+    };
+    let fitted = if sources.len() == usize::try_from(count).unwrap_or(usize::MAX) {
+        match planned(&plan, carrier.as_ref(), &journal, &sources, &knobs) {
+            Err(unstated) => {
+                refused.push(Inadmissible::Unstated {
+                    part: unstated.part,
+                });
+                None
+            }
+            Ok(planned) => match crate::memory::fit(&planned, memory) {
+                Ok(fit) => Some((planned, fit)),
+                Err(unfit) => {
+                    // Each knob the library owns moved alone: the records
+                    // ahead and the lines behind, down to one; the carrier's
+                    // own and the plan's answer cap are their owners'.
+                    let floors = crate::memory::Knobs {
+                        ahead: knobs.ahead.min(1),
+                        behind: 1,
+                        ..knobs
+                    };
+                    let at = |k: &crate::memory::Knobs| {
+                        planned_of(&plan, carrier.as_ref(), &journal, &sources, k, &planned)
+                    };
+                    let remedies = crate::memory::remedies(memory, knobs, floors, at);
+                    refused.push(Inadmissible::Memory(Box::new(crate::memory::Refused {
+                        memory,
+                        unfit,
+                        remedies,
+                    })));
+                    None
+                }
+            },
+        }
+    } else {
+        None
+    };
+    match (Inadmissible::of(refused), fitted) {
+        (Some(why), _) => Err(RunError::Inadmissible(why)),
+        (None, Some((planned, fit))) => Ok(Fitted {
+            plan,
+            read_ahead,
+            carrier,
+            journal,
+            memory,
+            planned,
+            fit,
+            sources,
+            clock: PhantomData,
+        }),
+        (None, None) => Err(RunError::Inadmissible(Inadmissible::Unstated {
+            part: "the plan's sources",
+        })),
+    }
+}
+
+/// [`planned`] at `knobs`, or `base` where a part goes unstated — which no
+/// knob changes.
+fn planned_of<C: Clock, X: Carrier<C>>(
+    plan: &Plan,
+    carrier: &X,
+    journal: &crate::sink::Journal,
+    sources: &[Source],
+    knobs: &crate::memory::Knobs,
+    base: &crate::memory::Planned,
+) -> crate::memory::Planned {
+    planned(plan, carrier, journal, sources, knobs).unwrap_or_else(|_| base.clone())
+}
+
+/// Admits `fitted` on `runtimes` (decision 20; decision 22, K2b-7e-2b-3d) —
+/// nothing else: what was fitted runs. Refused, every refusal at once: a
+/// runtime not `current_thread`, fewer runtimes than sources, a source whose
+/// cap with its driver's own exceeds the events a turn (decision 20's I1),
+/// the descriptors past the soft limit as the runtimes left them, a runtime's
+/// own not the one fitted — a test's assumed runtimes exempt by name.
+///
+/// Admission takes what `fit` made:
+///
+/// ```
+/// use ascetic_ddd_load_run::carrier::Carrier;
+/// use ascetic_ddd_load_run::clock::RealClock;
+/// use ascetic_ddd_load_run::run::{Fitted, Runtimes, admit};
+/// fn host<X: Carrier<RealClock>>(fitted: Fitted<RealClock, X>, runtimes: &Runtimes) {
+///     let _ = admit(fitted, runtimes);
+/// }
+/// ```
+///
+/// and nothing else — a plan is no fit:
+///
+/// ```compile_fail
+/// use ascetic_ddd_load_run::carrier::Carrier;
+/// use ascetic_ddd_load_run::clock::RealClock;
+/// use ascetic_ddd_load_run::run::{Fitted, Runtimes, admit};
+/// use ascetic_ddd_load_run::source::Plan;
+/// fn host<X: Carrier<RealClock>>(fitted: Plan, runtimes: &Runtimes) {
+///     let _ = admit::<RealClock, X>(fitted, runtimes);
+/// }
+/// ```
+pub fn admit<C: Clock, X: Carrier<C>>(
+    fitted: Fitted<C, X>,
+    runtimes: &Runtimes,
+) -> Result<Admitted<C, X>, RunError> {
+    let Fitted {
+        plan,
+        read_ahead,
+        carrier,
+        journal,
+        memory: _,
+        planned,
+        fit,
+        sources,
+        clock: _,
+    } = fitted;
+    let header = plan.header().clone();
+    let mut refused = Vec::new();
     // A source's driver turns only between its tasks on a `current_thread`
     // runtime: what an attempt's look verifies (decision 17).
     if let Some(source) = runtimes
@@ -627,64 +993,70 @@ pub fn admit<C: Clock, X: Carrier<C>>(
         .iter()
         .position(|h| h.runtime_flavor() != tokio::runtime::RuntimeFlavor::CurrentThread)
     {
-        return Err(refused(Inadmissible::Flavour { source }));
+        refused.push(Inadmissible::Flavour { source });
     }
-    let sources = header.profile.sources.max(1);
-    if runtimes.sources.len() < usize::try_from(sources).unwrap_or(usize::MAX) {
-        return Err(refused(Inadmissible::Runtimes {
+    let count = header.profile.sources.max(1);
+    if runtimes.sources.len() < usize::try_from(count).unwrap_or(usize::MAX) {
+        refused.push(Inadmissible::Runtimes {
             have: runtimes.sources.len(),
             sources: header.profile.sources,
-        }));
+        });
     }
-    // The caps of the sources needing sockets, summed: the process's share.
     let mut caps: Option<u64> = None;
-    let mut fitted = Vec::new();
-    for source in 0..sources {
-        let needs = carrier
-            .needs(plan.peaks(), source)
-            .map_err(|why| refused(Inadmissible::Carrier(why)))?;
-        if let Needs::Sockets { needed, cap, .. } = needs {
-            // I1: a look's verified turn sees every ready socket.
-            let events = runtimes.events(source);
-            let fits = cap
-                .checked_add(DRIVER_EVENTS)
-                .zip(events)
-                .is_some_and(|(want, have)| want <= have);
-            if !fits {
-                return Err(refused(Inadmissible::Events {
+    let mut rows = Vec::new();
+    for (source, s) in (0u32..).zip(&sources) {
+        if !runtimes.assumed {
+            let fitted = planned
+                .sources
+                .get(usize::try_from(source).unwrap_or(usize::MAX));
+            let fitted = fitted.and_then(|p| p.runtime);
+            let built = runtimes.own(source);
+            if built != fitted {
+                refused.push(Inadmissible::Runtime {
                     source,
-                    cap,
-                    events,
-                }));
+                    built,
+                    fitted,
+                });
             }
-            // I2: the plan's bound within the cap.
-            if u64::try_from(cap).is_ok_and(|c| needed > c) {
-                return Err(refused(Inadmissible::Sockets {
-                    source,
-                    needed,
-                    cap,
-                }));
-            }
-            let cap = u64::try_from(cap).unwrap_or(u64::MAX);
-            caps = Some(caps.unwrap_or(0).saturating_add(cap));
-            fitted.push(journal::SourceFit {
+        }
+        if s.costs.is_none() {
+            continue;
+        }
+        // I1: a look's verified turn sees every ready socket.
+        let events = runtimes.events(source);
+        let fits = s
+            .cap
+            .checked_add(DRIVER_EVENTS)
+            .zip(events)
+            .is_some_and(|(want, have)| want <= have);
+        if !fits {
+            refused.push(Inadmissible::Events {
                 source,
-                needed,
-                cap,
-                events: events
-                    .and_then(|e| u64::try_from(e).ok())
-                    .unwrap_or(u64::MAX),
+                cap: s.cap,
+                events,
             });
         }
+        let cap = u64::try_from(s.cap).unwrap_or(u64::MAX);
+        caps = Some(caps.unwrap_or(0).saturating_add(cap));
+        rows.push(journal::SourceFit {
+            source,
+            needed: s.needed,
+            cap,
+            events: events
+                .and_then(|e| u64::try_from(e).ok())
+                .unwrap_or(u64::MAX),
+        });
     }
-    // I1: every cap's sockets, with those open and the reserve, within the
-    // soft limit — EMFILE never before a cap's own wait.
-    if let Some(caps) = caps {
-        let descriptors = runtimes.descriptors();
-        descriptors_fit(caps, descriptors).map_err(refused)?;
+    // I1: every cap's sockets, with those open — the runtimes' own among
+    // them now — and the reserve, within the soft limit.
+    if let Some(caps) = caps
+        && let Err(why) = descriptors_fit(caps, runtimes.descriptors())
+    {
+        refused.push(why);
     }
-    // The machine's own refusals: a read-ahead past the header's.
-    drop(Machine::new(header.clone(), read_ahead)?);
+    if let Some(why) = Inadmissible::of(refused) {
+        return Err(RunError::Inadmissible(why));
+    }
     let descriptors = caps
         .and(runtimes.descriptors())
         .map(|d| journal::DescriptorsRead {
@@ -695,7 +1067,7 @@ pub fn admit<C: Clock, X: Carrier<C>>(
         });
     Ok(Admitted {
         admission: journal::Admission {
-            sources: fitted,
+            sources: rows,
             descriptors,
             assumed: runtimes.assumed || plan.is_assumed(),
         },
@@ -709,8 +1081,29 @@ pub fn admit<C: Clock, X: Carrier<C>>(
         read_ahead,
         carrier,
         runtimes: runtimes.clone(),
+        fit,
         clock: PhantomData,
     })
+}
+
+/// A test's admission: `plan` fitted to a memory no run exceeds, then admitted
+/// on `runtimes` — [`fit`] and [`admit`] in turn.
+#[cfg(feature = "testing")]
+pub fn admitted<C: Clock, X: Carrier<C>>(
+    plan: Plan,
+    read_ahead: u64,
+    carrier: Arc<X>,
+    runtimes: &Runtimes,
+    journal: crate::sink::Journal,
+) -> Result<Admitted<C, X>, RunError> {
+    let fitted = fit(
+        plan,
+        read_ahead,
+        carrier,
+        journal,
+        crate::memory::Memory::declared(u64::MAX / 4),
+    )?;
+    admit(fitted, runtimes)
 }
 
 /// A run ready at T0 (decision 20): admitted, measured and gated — its

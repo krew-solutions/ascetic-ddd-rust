@@ -1,8 +1,9 @@
 //! Before T0 (ADR-0047 decision 18): three stages, by one predicate — a
 //! journal exists if and only if something outside the process was touched.
 //!
-//! 1. [`admit`](crate::run::admit): pure, the plan against its carrier and
-//!    runtimes; refused, no journal.
+//! 1. [`fit`](crate::run::fit), then [`admit`](crate::run::admit): pure,
+//!    the plan against its carrier and its memory, then against the runtimes
+//!    built for it; refused, no journal.
 //! 2. [`measure`]: the judging time at the profile's cap, on a source's
 //!    runtime, by a stopwatch — never the run's clock, whose start is T0;
 //!    evidence for the journal's header, not a refusal, until a plan claims

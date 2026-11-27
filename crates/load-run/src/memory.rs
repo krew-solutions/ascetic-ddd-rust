@@ -708,8 +708,11 @@ fn slice(part: Part) -> Option<&'static str> {
         | Part::Kept
         | Part::ShellAttempts
         | Part::CarrierAttempts => Some("K2b-7e-3, the read gate"),
-        Part::CarrierSource | Part::Judging => Some("K2b-7e-4, the parse"),
-        Part::Reader
+        // The parse is the tape's since K2b-7e-4: no slice lowers it further;
+        // its remedy is the plan's answer cap.
+        Part::CarrierSource
+        | Part::Judging
+        | Part::Reader
         | Part::Decoder
         | Part::Runtime
         | Part::Keeping
@@ -804,5 +807,58 @@ pub fn remedies(
             ..knobs
         }),
         remedies,
+    }
+}
+
+/// A run refused on its memory (decision 22, K2b-7e-2b-3d): the memory
+/// stated, why the run does not fit and each remedy found for it. Its least
+/// memory is predicted with the pool's count unheld until the read gate
+/// (K2b-7e-3): not a safe number while the counted heap's factor against the
+/// process's resident memory is unmeasured (K2b-7e-2b-3e).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refused {
+    /// The memory stated.
+    pub memory: Memory,
+    /// Why it does not fit.
+    pub unfit: Unfit,
+    /// The remedies.
+    pub remedies: Remedies,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let failed = match self.unfit.failed {
+            Failed::Memory => "a phase needs more".to_owned(),
+            Failed::Pool => "the pool's prediction past its budget".to_owned(),
+            Failed::Overflow(part) => format!("{part:?} past any count"),
+            Failed::Unstated(part) => format!("{part:?} stated by no owner"),
+        };
+        write!(f, "the stated memory {} B: {failed}", self.memory.bytes())?;
+        if let Some(t) = self.unfit.binding.and_then(|i| self.unfit.terms.get(i)) {
+            match t.source {
+                Some(s) => write!(f, ", binding {:?} of source {s} at {} B", t.part, t.bytes)?,
+                None => write!(f, ", binding {:?} at {} B", t.part, t.bytes)?,
+            }
+        }
+        if let Some(least) = self.unfit.least {
+            write!(f, ", the least {least} B (predicted, the pool unheld)")?;
+        }
+        let remedies: Vec<String> = self
+            .remedies
+            .remedies
+            .iter()
+            .map(|r| match r {
+                Remedy::Memory { at_least } => format!("memory at least {at_least} B"),
+                Remedy::Ports { at_most } => format!("ports at most {at_most}"),
+                Remedy::Ahead { at_most } => format!("records ahead at most {at_most}"),
+                Remedy::Behind { at_most } => format!("lines behind at most {at_most}"),
+                Remedy::AnswerCap { at_most } => format!("an answer cap at most {at_most} B"),
+                Remedy::Slice { part, slice } => format!("{part:?} lowered by {slice}"),
+            })
+            .collect();
+        if !remedies.is_empty() {
+            write!(f, "; remedies: {}", remedies.join(", "))?;
+        }
+        Ok(())
     }
 }

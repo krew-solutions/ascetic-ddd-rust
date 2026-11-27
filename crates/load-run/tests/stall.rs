@@ -24,7 +24,7 @@ use ascetic_ddd_command_log::render::RunSecret;
 use ascetic_ddd_load_run::clock::{Clock, RealClock};
 use ascetic_ddd_load_run::live::{Descriptors, Live};
 use ascetic_ddd_load_run::rest::{Config, RestCarrier};
-use ascetic_ddd_load_run::run::{Ready, admit, run};
+use ascetic_ddd_load_run::run::{Ready, admitted, run};
 use ascetic_ddd_load_run::sink::Written;
 use ascetic_ddd_load_run::source::{Plan, Records};
 use ascetic_ddd_load_run::stand::{Route, Stand};
@@ -168,7 +168,7 @@ fn a_whole_process_stalled_makes_no_root() {
         },
     );
     let live = Live::for_caps(&[CAP]).unwrap();
-    let admitted = admit(
+    let admitted = admitted(
         Plan::assumed(
             header.clone(),
             ascetic_ddd_command_log::validate::Peaks {

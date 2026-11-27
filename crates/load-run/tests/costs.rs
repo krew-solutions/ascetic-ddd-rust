@@ -35,7 +35,7 @@ use ascetic_ddd_command_log::validate::Peaks;
 use ascetic_ddd_load_run::carrier::{Carrier, Needs};
 use ascetic_ddd_load_run::clock::{Clock, VirtualClock};
 use ascetic_ddd_load_run::rest::{Config, READ, RestCarrier};
-use ascetic_ddd_load_run::run::{ATTEMPT, Ready, Runtimes, admit, run};
+use ascetic_ddd_load_run::run::{ATTEMPT, Ready, Runtimes, admitted, run};
 use ascetic_ddd_load_run::sink::JournalSink;
 use ascetic_ddd_load_run::source::{Plan, Records};
 use ascetic_ddd_load_run::stand::{Connect, Egress, Route, Stand, Unfit};
@@ -838,7 +838,7 @@ async fn go<X: Carrier<VirtualClock>>(
     clock: Arc<VirtualClock>,
     records: Vec<Record>,
 ) {
-    let admitted = admit(plan, W, Arc::new(carrier), runtimes, Journal::new(64, 0)).unwrap();
+    let admitted = admitted(plan, W, Arc::new(carrier), runtimes, Journal::new(64, 0)).unwrap();
     clock
         .within(run(
             Ready::assumed(admitted, clock.clone(), Unkept, Namespace(1)),

@@ -15,7 +15,7 @@ use ascetic_ddd_command_log::fills::Namespace;
 use ascetic_ddd_command_log::record::Header;
 use ascetic_ddd_load_run::carrier::Carrier;
 use ascetic_ddd_load_run::clock::{Clock, VirtualClock};
-use ascetic_ddd_load_run::run::{Runtimes, admit};
+use ascetic_ddd_load_run::run::{Runtimes, admitted};
 use ascetic_ddd_load_run::sink::{Lines, Written};
 use ascetic_ddd_load_run::stages::{
     self, Identity, RUNS, SHAPES, document, gates, journal_header, judging, measure, refused,
@@ -212,7 +212,7 @@ fn gated(
         let clock = Arc::new(VirtualClock::start(0));
         let runtimes = Runtimes::assumed(vec![tokio::runtime::Handle::current()], 1_024);
         let h = Arc::new(header());
-        let admitted = admit(
+        let admitted = admitted(
             ascetic_ddd_load_run::source::Plan::assumed(h.clone(), Default::default()),
             W,
             Arc::new(Gated {
@@ -290,7 +290,7 @@ fn a_gate_s_refusal_is_journaled_alone() {
     let admitted = rt.block_on(async {
         let runtimes = Runtimes::assumed(vec![tokio::runtime::Handle::current()], 1_024);
         let clock = Arc::new(VirtualClock::start(0));
-        admit(
+        admitted(
             ascetic_ddd_load_run::source::Plan::assumed(h.clone(), Default::default()),
             W,
             Arc::new(Gated {
@@ -354,7 +354,7 @@ fn the_judging_time_is_measured_on_a_source() {
         let runtimes = Runtimes::assumed(vec![tokio::runtime::Handle::current()], 1_024);
         let mut h = header();
         h.profile.answer_cap = 2_048;
-        let admitted = admit(
+        let admitted = admitted(
             ascetic_ddd_load_run::source::Plan::assumed(Arc::new(h), Default::default()),
             W,
             Arc::new(Gated {
@@ -384,7 +384,7 @@ fn a_read_ahead_past_the_header_s_is_refused_at_admission() {
         let runtimes = Runtimes::assumed(vec![tokio::runtime::Handle::current()], 1_024);
         let h = header();
         let past = h.read_ahead + 1;
-        admit(
+        admitted(
             ascetic_ddd_load_run::source::Plan::assumed(Arc::new(h), Default::default()),
             past,
             Arc::new(Gated {
@@ -456,9 +456,10 @@ fn a_replayed_plan_carries_its_commitment_s_peaks() {
     assert_eq!(*plan.peaks(), commitment.peaks);
     assert_eq!(**plan.header(), header());
     assert_eq!(plan.log(), commitment.sha256);
-    // Read, not assumed: admitted on `Live`, its evidence says so.
+    // Read, not assumed: admitted on runtimes built for its carrier's caps —
+    // none, the gated carrier's —, its evidence says so.
     assert!(!plan.is_assumed());
-    let live = ascetic_ddd_load_run::live::Live::start(1, 64).unwrap();
+    let live = ascetic_ddd_load_run::live::Live::for_caps(&[0]).unwrap();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
@@ -466,7 +467,7 @@ fn a_replayed_plan_carries_its_commitment_s_peaks() {
     let clock = rt.block_on(async { Arc::new(VirtualClock::start(0)) });
     let admitted = |runtimes: &Runtimes| {
         rt.block_on(async {
-            admit(
+            admitted(
                 plan.clone(),
                 W,
                 Arc::new(Gated {
@@ -528,7 +529,7 @@ fn a_run_reading_past_its_admitted_reader_is_refused() {
     let clock = rt.block_on(async { Arc::new(VirtualClock::start(0)) });
     let runtimes = Runtimes::assumed(vec![rt.handle().clone()], 1_024);
     let admitted = rt.block_on(async {
-        admit(
+        admitted(
             plan,
             W,
             Arc::new(Gated {

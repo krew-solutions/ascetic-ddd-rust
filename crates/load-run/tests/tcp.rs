@@ -223,7 +223,7 @@ impl ascetic_ddd_load_run::stand::Stand for Declaring {
 fn admission_refuses_an_endpoint_unreached() {
     use ascetic_ddd_load_run::clock::VirtualClock;
     use ascetic_ddd_load_run::rest::{Config, RestCarrier};
-    use ascetic_ddd_load_run::run::{Inadmissible, RunError, Runtimes, admit};
+    use ascetic_ddd_load_run::run::{Inadmissible, RunError, Runtimes, admitted as admit_test};
     use ascetic_ddd_load_run::source::Plan;
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -243,7 +243,7 @@ fn admission_refuses_an_endpoint_unreached() {
                 .with_ports(100),
             Config::new(ascetic_ddd_command_log::render::RunSecret::new([7; 32])),
         );
-        admit::<VirtualClock, _>(
+        admit_test::<VirtualClock, _>(
             Plan::assumed(h.clone(), Default::default()),
             fixture::W,
             std::sync::Arc::new(carrier),
@@ -328,7 +328,7 @@ fn probed<E: Egress>(
 ) -> Result<ascetic_ddd_scheduler::journal::Gate, ascetic_ddd_load_run::stand::Refused> {
     use ascetic_ddd_load_run::clock::RealClock;
     use ascetic_ddd_load_run::rest::{Config, RestCarrier};
-    use ascetic_ddd_load_run::run::admit;
+    use ascetic_ddd_load_run::run::admitted as admit_test;
     use ascetic_ddd_load_run::source::Plan;
     let mut h = fixture::header();
     h.channels.clear();
@@ -341,7 +341,7 @@ fn probed<E: Egress>(
         egress,
         Config::new(ascetic_ddd_command_log::render::RunSecret::new([7; 32])),
     );
-    let admitted = admit::<RealClock, _>(
+    let admitted = admit_test::<RealClock, _>(
         Plan::assumed(h, Default::default()),
         fixture::W,
         std::sync::Arc::new(carrier),
@@ -501,7 +501,7 @@ fn chained(
 ) {
     use ascetic_ddd_load_run::clock::RealClock;
     use ascetic_ddd_load_run::rest::{Config, RestCarrier};
-    use ascetic_ddd_load_run::run::admit;
+    use ascetic_ddd_load_run::run::admitted as admit_test;
     use ascetic_ddd_load_run::source::Plan;
     let mut h = fixture::header();
     h.channels.clear();
@@ -517,7 +517,7 @@ fn chained(
         Config::new(ascetic_ddd_command_log::render::RunSecret::new([7; 32])),
     );
     let sources = usize::try_from(h.profile.sources.max(1)).unwrap_or(1);
-    let admitted = admit::<RealClock, _>(
+    let admitted = admit_test::<RealClock, _>(
         Plan::assumed(
             h,
             ascetic_ddd_command_log::validate::Peaks {
@@ -701,7 +701,7 @@ fn no_socket_the_shell_closes_waits_in_time_wait() {
     use ascetic_ddd_load_run::clock::{Clock, RealClock};
     use ascetic_ddd_load_run::live::Live;
     use ascetic_ddd_load_run::rest::{Config, RestCarrier};
-    use ascetic_ddd_load_run::run::{Ready, admit, run};
+    use ascetic_ddd_load_run::run::{Ready, admitted as admit_test, run};
     use ascetic_ddd_load_run::sink::Lines;
     use ascetic_ddd_load_run::source::{Plan, Records};
     use std::io::Write;
@@ -762,7 +762,7 @@ fn no_socket_the_shell_closes_waits_in_time_wait() {
     );
     let before = time_waits(ip);
     let sources = usize::try_from(h.profile.sources.max(1)).unwrap_or(1);
-    let admitted = admit::<RealClock, _>(
+    let admitted = admit_test::<RealClock, _>(
         Plan::assumed(
             h,
             ascetic_ddd_command_log::validate::Peaks {

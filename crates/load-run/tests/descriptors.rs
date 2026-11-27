@@ -19,8 +19,11 @@ use ascetic_ddd_command_log::render::RunSecret;
 use ascetic_ddd_command_log::validate::Peaks;
 use ascetic_ddd_load_run::clock::RealClock;
 use ascetic_ddd_load_run::live::{Descriptors, Live};
+use ascetic_ddd_load_run::memory::Memory;
 use ascetic_ddd_load_run::rest::{Config, RestCarrier};
-use ascetic_ddd_load_run::run::{DESCRIPTORS_RESERVE, Inadmissible, RunError, admit, run};
+use ascetic_ddd_load_run::run::{
+    DESCRIPTORS_RESERVE, Inadmissible, RUNTIME_DESCRIPTORS, RunError, admit, fit, run,
+};
 use ascetic_ddd_load_run::sink::Lines;
 use ascetic_ddd_load_run::source::{Plan, Records};
 use ascetic_ddd_load_run::stand::{Route, Stand};
@@ -118,31 +121,48 @@ fn a_run_at_the_descriptors_bound_hits_no_emfile() {
     };
     // What a `Live` of one source holds with everything else open: its
     // bound, the caps, those open and the reserve.
+    let without = Descriptors::read().unwrap().open();
     let open = {
         let live = Live::for_caps(&[CAP]).unwrap();
+        // A runtime's own, as the fit counts them before it is built.
+        assert_eq!(
+            live.runtimes().descriptors().unwrap().open() - without,
+            RUNTIME_DESCRIPTORS,
+            "a runtime's own descriptors"
+        );
         let open = live.runtimes().descriptors().unwrap().open();
         // Read once its runtimes exist: theirs counted.
         assert_eq!(open, listed());
         open
     };
     let bound = CAP as u64 + open + DESCRIPTORS_RESERVE;
-    // A soft limit one below: refused before T0.
+    // As a host goes (K2b-7e-2b-3d): fitted with its runtimes not yet built,
+    // their own descriptors counted ahead — an epoll and an eventfd each —,
+    // then built as fitted and admitted.
+    let fitted = || {
+        fit::<RealClock, _>(
+            plan(),
+            W,
+            carrier(),
+            Journal::new(64, 0),
+            Memory::declared(1 << 40),
+        )
+    };
+    // A soft limit one below: refused before T0, before anything is built.
     setrlimit(Resource::RLIMIT_NOFILE, bound - 1, hard).unwrap();
-    {
-        let live = Live::for_caps(&[CAP]).unwrap();
-        assert_eq!(live.runtimes().descriptors().unwrap().open(), open);
-        match admit::<RealClock, _>(plan(), W, carrier(), live.runtimes(), Journal::new(64, 0)) {
-            Err(RunError::Inadmissible(Inadmissible::Descriptors { needed, .. })) => {
-                assert_eq!(needed, bound);
-            }
-            other => panic!("{:?}", other.err()),
+    match fitted() {
+        Err(RunError::Inadmissible(Inadmissible::Descriptors { needed, .. })) => {
+            assert_eq!(needed, bound);
         }
+        other => panic!("{:?}", other.err()),
     }
     // At the bound: admitted, every source's cap filled — each request out,
     // none answered — and no `EMFILE`.
     setrlimit(Resource::RLIMIT_NOFILE, bound, hard).unwrap();
-    let live = Live::for_caps(&[CAP]).unwrap();
-    let admitted = admit(plan(), W, carrier(), live.runtimes(), Journal::new(64, 0)).unwrap();
+    let fitted = fitted().unwrap();
+    let live = Live::fitted(&fitted).unwrap();
+    assert_eq!(live.runtimes().descriptors().unwrap().open(), open);
+    let admitted = admit(fitted, live.runtimes()).unwrap();
     // Stage 3's re-read: within; past the reserve once more were opened
     // since admission (decision 20).
     assert!(ascetic_ddd_load_run::stages::descriptors(&admitted).is_ok());

@@ -27,7 +27,7 @@ use ascetic_ddd_command_log::record::{Record, Rest};
 use ascetic_ddd_command_log::render::RunSecret;
 use ascetic_ddd_load_run::clock::{Clock, RealClock};
 use ascetic_ddd_load_run::rest::{Config, RestCarrier};
-use ascetic_ddd_load_run::run::{Runtimes, admit, run};
+use ascetic_ddd_load_run::run::{Runtimes, admitted, run};
 use ascetic_ddd_load_run::sink::Lines;
 use ascetic_ddd_load_run::source::Records;
 use ascetic_ddd_load_run::stand::{Connect, Egress, Route, Stand};
@@ -273,7 +273,7 @@ fn attempt_once(prodded: bool) -> Option<Vec<Line>> {
     let journal = rt
         .block_on(run(
             ascetic_ddd_load_run::run::Ready::assumed(
-                admit(
+                admitted(
                     ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
                     W,
                     Arc::new(carrier),
@@ -406,7 +406,7 @@ fn calls_over_tcp_from_a_live_source_are_answered() {
     let journal = rt
         .block_on(run(
             ascetic_ddd_load_run::run::Ready::assumed(
-                admit(
+                admitted(
                     ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
                     W,
                     Arc::new(carrier),

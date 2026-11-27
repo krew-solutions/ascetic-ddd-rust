@@ -139,20 +139,28 @@ pub struct Live {
 impl Live {
     /// `sources` runtimes, each taking `events` a driver turn — no fewer than
     /// the source's cap and its driver's own (decision 20): a test's, its
-    /// events unchecked.
+    /// events unchecked and its runtimes assumed — never the ones fitted.
     #[cfg(feature = "testing")]
     pub fn start(sources: usize, events: usize) -> io::Result<Live> {
-        Live::with_events(&vec![events; sources])
+        Live::with_events(&vec![events; sources], true)
+    }
+
+    /// The runtimes `fitted` was priced with (decision 22, K2b-7e-2b-3d): a
+    /// runtime per source, each taking its cap and its driver's own events a
+    /// turn — the only way a host builds them, so that what runs is what was
+    /// fitted.
+    pub fn fitted<C, X>(fitted: &crate::run::Fitted<C, X>) -> io::Result<Live> {
+        Live::with_events(&events_for(&fitted.caps())?, false)
     }
 
     /// A runtime per source, each taking its cap and its driver's own events
-    /// a turn (decision 20): `caps` by source — a carrier's
-    /// [`Needs`](crate::carrier::Needs).
+    /// a turn (decision 20): `caps` by source — a test's, its caps its own.
+    #[cfg(feature = "testing")]
     pub fn for_caps(caps: &[usize]) -> io::Result<Live> {
-        Live::with_events(&events_for(caps)?)
+        Live::with_events(&events_for(caps)?, false)
     }
 
-    fn with_events(events: &[usize]) -> io::Result<Live> {
+    fn with_events(events: &[usize], assumed: bool) -> io::Result<Live> {
         let sources = events.len();
         let mut handles = Vec::with_capacity(sources);
         let mut stops = Vec::with_capacity(sources);
@@ -183,7 +191,7 @@ impl Live {
         // Read once the runtimes exist: their own counted (decision 20).
         let descriptors = Descriptors::read().ok();
         Ok(Live {
-            runtimes: Runtimes::new(handles, events, descriptors),
+            runtimes: Runtimes::new(handles, events, descriptors, assumed),
             stops,
             threads,
         })

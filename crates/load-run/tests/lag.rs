@@ -28,7 +28,7 @@ use ascetic_ddd_load_run::clock::{Clock, RealClock};
 use ascetic_ddd_load_run::decorate::{Decoration, Decorator};
 use ascetic_ddd_load_run::live::Live;
 use ascetic_ddd_load_run::rest::{Config, RestCarrier};
-use ascetic_ddd_load_run::run::{admit, run};
+use ascetic_ddd_load_run::run::{admitted, run};
 use ascetic_ddd_load_run::sink::Lines;
 use ascetic_ddd_load_run::source::Records;
 use ascetic_ddd_load_run::stamps::Attempt;
@@ -154,7 +154,7 @@ fn waiting_lag(write_at: u64) -> Option<u64> {
     let journal = rt
         .block_on(run(
             ascetic_ddd_load_run::run::Ready::assumed(
-                admit(
+                admitted(
                     ascetic_ddd_load_run::source::Plan::assumed(Arc::new(h), Default::default()),
                     W,
                     Arc::new(Waiting {
@@ -425,7 +425,7 @@ fn connection_lag(early: bool) -> Option<u64> {
     let journal = rt
         .block_on(run(
             ascetic_ddd_load_run::run::Ready::assumed(
-                admit(
+                admitted(
                     ascetic_ddd_load_run::source::Plan::assumed(h, Default::default()),
                     W,
                     Arc::new(carrier),
@@ -636,7 +636,7 @@ fn late_floor_lag() -> Option<u64> {
     let journal = rt
         .block_on(run(
             ascetic_ddd_load_run::run::Ready::assumed(
-                admit(
+                admitted(
                     ascetic_ddd_load_run::source::Plan::assumed(h, Default::default()),
                     W,
                     Arc::new(carrier),
@@ -725,7 +725,7 @@ fn decorated_lag() -> Option<journal::Sent> {
     let journal = rt
         .block_on(run(
             ascetic_ddd_load_run::run::Ready::assumed(
-                admit(
+                admitted(
                     ascetic_ddd_load_run::source::Plan::assumed(h, Default::default()),
                     W,
                     Arc::new(carrier),
@@ -855,7 +855,7 @@ fn stalled_report() -> Option<journal::Unsent> {
     let journal = rt
         .block_on(run(
             ascetic_ddd_load_run::run::Ready::assumed(
-                admit(
+                admitted(
                     ascetic_ddd_load_run::source::Plan::assumed(h, Default::default()),
                     W,
                     Arc::new(carrier),
@@ -916,7 +916,7 @@ fn slow_refusal_sent() -> Option<journal::Sent> {
     let journal = rt
         .block_on(run(
             ascetic_ddd_load_run::run::Ready::assumed(
-                admit(
+                admitted(
                     ascetic_ddd_load_run::source::Plan::assumed(h, Default::default()),
                     W,
                     Arc::new(carrier),

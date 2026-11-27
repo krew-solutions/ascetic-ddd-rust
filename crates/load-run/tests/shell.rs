@@ -18,7 +18,7 @@ use ascetic_ddd_command_log::validate::NoHost;
 use ascetic_ddd_faker::{Key, Seed};
 use ascetic_ddd_load_run::carrier::Carrier;
 use ascetic_ddd_load_run::clock::{Clock, VirtualClock};
-use ascetic_ddd_load_run::run::{Ran, RunEnd, RunError, Runtimes, Stop, admit, run};
+use ascetic_ddd_load_run::run::{Ran, RunEnd, RunError, Runtimes, Stop, admitted, run};
 use ascetic_ddd_load_run::sink::Lines;
 use ascetic_ddd_load_run::source::{LineSource, Records};
 use ascetic_ddd_load_run::stamps::{Attempt, Harness};
@@ -74,7 +74,7 @@ fn shell_from<S: LineSource, X: Carrier<VirtualClock>>(
         let sources = header.profile.sources.max(1) as usize;
         let runtimes = Runtimes::assumed(vec![tokio::runtime::Handle::current(); sources], 1_024);
         // A refusal before T0 comes back as it is: no run, no journal.
-        let admitted = admit(
+        let admitted = admitted(
             ascetic_ddd_load_run::source::Plan::assumed(
                 Arc::new(header.clone()),
                 Default::default(),
@@ -373,7 +373,7 @@ fn a_log_the_carrier_cannot_carry_is_refused_before_t0() {
     // Fewer runtimes than sources: refused at admission, no run begun.
     let err = rt.block_on(async {
         let runtimes = Runtimes::assumed(vec![tokio::runtime::Handle::current()], 1_024);
-        admit::<VirtualClock, _>(
+        admitted::<VirtualClock, _>(
             ascetic_ddd_load_run::source::Plan::assumed(Arc::new(wide), Default::default()),
             W,
             Arc::new(Scripted::new(Arc::new(script(1, "refused")))),
@@ -522,7 +522,7 @@ fn stress<C: Clock>(make: impl Fn(u64) -> C, seeds: u64, calls: u64) {
             let sink = Written::assumed(Vec::new(), journal_header, 1_024).unwrap();
             let ran = run(
                 ascetic_ddd_load_run::run::Ready::assumed(
-                    admit(
+                    admitted(
                         ascetic_ddd_load_run::source::Plan::assumed(
                             Arc::new(header.clone()),
                             Default::default(),
@@ -794,7 +794,7 @@ fn a_carrier_stuck_on_its_thread_is_a_harness_fault() {
         let clock = Arc::new(RealClock::start(2_000).unwrap());
         run(
             ascetic_ddd_load_run::run::Ready::assumed(
-                admit(
+                admitted(
                     ascetic_ddd_load_run::source::Plan::assumed(
                         Arc::new(h.clone()),
                         Default::default(),
@@ -909,7 +909,7 @@ fn a_late_hand_off_is_journaled() {
         let clock = Arc::new(RealClock::start(2_000).unwrap());
         run(
             ascetic_ddd_load_run::run::Ready::assumed(
-                admit(
+                admitted(
                     ascetic_ddd_load_run::source::Plan::assumed(
                         Arc::new(header()),
                         Default::default(),
@@ -959,7 +959,7 @@ fn a_source_not_on_a_current_thread_runtime_is_refused() {
         .build()
         .unwrap();
     let err = rt.block_on(async {
-        admit::<VirtualClock, _>(
+        admitted::<VirtualClock, _>(
             ascetic_ddd_load_run::source::Plan::assumed(Arc::new(header()), Default::default()),
             W,
             Arc::new(Scripted::new(Arc::new(script(1, "flavor")))),
@@ -1262,7 +1262,7 @@ fn a_poisoned_lock_stops_the_run() {
         virtual_clock
             .within(run(
                 ascetic_ddd_load_run::run::Ready::assumed(
-                    admit(
+                    admitted(
                         ascetic_ddd_load_run::source::Plan::assumed(
                             Arc::new(header()),
                             Default::default(),

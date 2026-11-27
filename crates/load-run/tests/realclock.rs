@@ -24,7 +24,7 @@ use ascetic_ddd_load_run::carrier::Carrier;
 use ascetic_ddd_load_run::clock::{Clock, RealClock};
 use ascetic_ddd_load_run::live::Live;
 use ascetic_ddd_load_run::rest::{Config, RestCarrier};
-use ascetic_ddd_load_run::run::{RunError, admit, run};
+use ascetic_ddd_load_run::run::{RunError, admitted, run};
 use ascetic_ddd_load_run::sink::Lines;
 use ascetic_ddd_load_run::source::Records;
 use ascetic_ddd_load_run::stamps::Attempt;
@@ -166,7 +166,7 @@ fn over_tcp(
         .unwrap();
     rt.block_on(run(
         ascetic_ddd_load_run::run::Ready::assumed(
-            admit(
+            admitted(
                 ascetic_ddd_load_run::source::Plan::assumed(header, Default::default()),
                 W,
                 Arc::new(carrier),
@@ -330,7 +330,7 @@ fn drill_timed(
         .unwrap();
     let ran = rt.block_on(run(
         ascetic_ddd_load_run::run::Ready::assumed(
-            admit(
+            admitted(
                 ascetic_ddd_load_run::source::Plan::assumed(Arc::new(header), Default::default()),
                 W,
                 Arc::new(carrier),

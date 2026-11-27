@@ -28,7 +28,7 @@ use ascetic_ddd_command_log::render::{self, RunSecret};
 use ascetic_ddd_load_run::clock::{Clock, RealClock};
 use ascetic_ddd_load_run::live::Live;
 use ascetic_ddd_load_run::rest::{Config, RestCarrier};
-use ascetic_ddd_load_run::run::{Ready, Runtimes, admit, run};
+use ascetic_ddd_load_run::run::{Ready, Runtimes, admitted, run};
 use ascetic_ddd_load_run::sink::Lines;
 use ascetic_ddd_load_run::source::{Plan, Records};
 use ascetic_ddd_load_run::stand::{Connect, Egress, Route, Stand};
@@ -277,7 +277,7 @@ fn once(how: &Source) -> Option<bool> {
             ..Default::default()
         },
     );
-    let admitted = admit(plan, W, Arc::new(carrier), &runtimes, Journal::new(64, 0)).unwrap();
+    let admitted = admitted(plan, W, Arc::new(carrier), &runtimes, Journal::new(64, 0)).unwrap();
     let journal = machine
         .block_on(run(
             Ready::assumed(admitted, clock.clone(), Lines::new(), Namespace(1)),
