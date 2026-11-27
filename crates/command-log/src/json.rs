@@ -794,8 +794,66 @@ impl<'a> Decoded<'a> {
     }
 }
 
-/// How the decoded bytes of the string at `quote` compare with `other`.
+/// A byte a string's text holds as itself: neither its end, an escape, nor a
+/// control byte.
+fn plain(b: u8) -> bool {
+    b != b'"' && b != b'\\' && b >= 0x20
+}
+
+/// How the decoded bytes of the string at `quote` compare with `other`:
+/// over its text while its bytes are plain — they are their own decoding,
+/// and most names differ from another in their first bytes, so the walk
+/// stops early —, decoded from the start at its first escape
+/// (K2b-7e-4b-5). Searching a string's plain end first and comparing its
+/// text at once measured slower: it reads the whole name to find what its
+/// first bytes decide.
 fn compare(text: &str, quote: usize, other: &[u8]) -> Ordering {
+    let raw = text
+        .as_bytes()
+        .get(quote.saturating_add(1)..)
+        .unwrap_or_default();
+    for (i, &b) in raw.iter().enumerate() {
+        if b == b'"' {
+            return i.cmp(&other.len());
+        }
+        if !plain(b) {
+            return compare_decoded(text, quote, other);
+        }
+        match other.get(i) {
+            None => return Ordering::Greater,
+            Some(&o) if o != b => return b.cmp(&o),
+            Some(_) => {}
+        }
+    }
+    compare_decoded(text, quote, other)
+}
+
+/// How the decoded bytes of the strings at `a` and `b` compare: over their
+/// texts while both are plain, decoded from the start at an escape in either.
+fn compare_both(text: &str, a: usize, b: usize) -> Ordering {
+    let bytes = text.as_bytes();
+    let x = bytes.get(a.saturating_add(1)..).unwrap_or_default();
+    let y = bytes.get(b.saturating_add(1)..).unwrap_or_default();
+    for (&p, &q) in x.iter().zip(y) {
+        match (p == b'"', q == b'"') {
+            (true, true) => return Ordering::Equal,
+            (true, false) if plain(q) => return Ordering::Less,
+            (false, true) if plain(p) => return Ordering::Greater,
+            _ => {}
+        }
+        if !plain(p) || !plain(q) {
+            return compare_both_decoded(text, a, b);
+        }
+        if p != q {
+            return p.cmp(&q);
+        }
+    }
+    compare_both_decoded(text, a, b)
+}
+
+/// How the decoded bytes of the string at `quote` compare with `other`,
+/// piece by piece.
+fn compare_decoded(text: &str, quote: usize, other: &[u8]) -> Ordering {
     let mut a = Decoded::new(text, quote);
     let mut rest = other;
     loop {
@@ -814,8 +872,9 @@ fn compare(text: &str, quote: usize, other: &[u8]) -> Ordering {
     }
 }
 
-/// How the decoded bytes of the strings at `a` and `b` compare.
-fn compare_both(text: &str, a: usize, b: usize) -> Ordering {
+/// How the decoded bytes of the strings at `a` and `b` compare, piece by
+/// piece.
+fn compare_both_decoded(text: &str, a: usize, b: usize) -> Ordering {
     let mut a = Decoded::new(text, a);
     let mut b = Decoded::new(text, b);
     loop {
@@ -1559,25 +1618,29 @@ impl<'t> Iterator for Members<'t> {
 #[cfg(test)]
 #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 mod tests {
-    use super::{Ordering, compare, compare_both};
+    use super::{Ordering, compare, compare_both, compare_both_decoded, compare_decoded};
 
-    /// The decoded comparisons piece by piece order as the decoded strings
-    /// do (K2b-7e-4b-4): a prefix the lesser, an escape by what it decodes
-    /// to, a run split by an escape compared across it.
+    /// The decoded comparisons — over the text while plain, and piece by
+    /// piece — order as the decoded strings do (K2b-7e-4b-4, K2b-7e-4b-5): a
+    /// prefix the lesser, an escape by what it decodes to, a run split by an
+    /// escape compared across it, an escape after a plain prefix.
     #[test]
     fn decoded_strings_compare_as_their_text() {
         let strings = [
             r#""""#,
             r#""a""#,
             r#""ab""#,
-            r#""ab""#,
-            r#""abc""#,
+            r#""\u0061b""#,
+            r#""a\u0062c""#,
             r#""abd""#,
             r#""b""#,
             r#""é""#,
-            r#""é""#,
-            r#""😀""#,
+            r#""\u00e9""#,
+            r#""\ud83d\ude00""#,
             r#""\/""#,
+            r#""a/""#,
+            r#""a\/b""#,
+            r#""é\u00e9""#,
         ];
         let decoded = |s: &str| -> String {
             match crate::json::parse(s.as_bytes()) {
@@ -1596,6 +1659,16 @@ mod tests {
             for (j, b) in strings.iter().enumerate() {
                 let want = decoded(a).as_bytes().cmp(decoded(b).as_bytes());
                 assert_eq!(compare_both(&text, at[i], at[j]), want, "{a} against {b}");
+                assert_eq!(
+                    compare_both_decoded(&text, at[i], at[j]),
+                    want,
+                    "{a} against {b}"
+                );
+                assert_eq!(
+                    compare_decoded(&text, at[i], decoded(b).as_bytes()),
+                    want,
+                    "{a} against {b}"
+                );
                 assert_eq!(
                     compare(&text, at[i], decoded(b).as_bytes()),
                     want,
