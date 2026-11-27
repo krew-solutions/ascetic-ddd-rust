@@ -6,7 +6,9 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use ascetic_ddd_command_log::json::{DEPTH, Json, JsonError, Malformed, parse, tokens};
+use ascetic_ddd_command_log::json::{
+    DEPTH, Json, JsonError, Kind, Malformed, Node, parse, tape, tokens,
+};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
@@ -14,8 +16,98 @@ fn read(s: &str) -> Result<Json, JsonError> {
     parse(s.as_bytes())
 }
 
+/// Whether a text is readable — the tape reading it so exactly when the
+/// tree does (K2b-7e-4b-1).
 fn readable(s: &str) -> bool {
-    read(s).is_ok()
+    let tree = read(s);
+    let taped = tape(s.as_bytes());
+    assert_eq!(taped.is_ok(), tree.is_ok(), "{s:?}");
+    if let (Ok(v), Ok(t)) = (&tree, &taped) {
+        assert!(alike(t.root(), v), "{s:?}");
+    }
+    tree.is_ok()
+}
+
+/// A tape's value is the tree's: numbers by their text, strings decoded,
+/// containers member by member in the order written.
+fn alike(n: Node<'_>, v: &Json) -> bool {
+    match v {
+        Json::Null => n.kind() == Kind::Null,
+        Json::Bool(b) => n.kind() == Kind::Bool && n.bool() == Some(*b),
+        Json::Number(x) => n.number() == Some(x.text()),
+        Json::String(s) => n.string().as_deref() == Some(s.as_str()) && n.is(s),
+        Json::Array(a) => {
+            n.kind() == Kind::Array
+                && n.items().count() == a.len()
+                && n.items().zip(a).all(|(m, w)| alike(m, w))
+        }
+        Json::Object(o) => {
+            n.kind() == Kind::Object
+                && n.members().count() == o.len()
+                && n.members().zip(o).all(|((k, m), (l, w))| {
+                    k.string().as_deref() == Some(l.as_str()) && k.is(l) && alike(m, w)
+                })
+        }
+    }
+}
+
+/// FNV-1a over bytes, the test's own: the names' check's hash.
+fn fnv(s: &str) -> u32 {
+    s.bytes().fold(0x811c_9dc5, |h: u32, b| {
+        (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
+    })
+}
+
+/// K2b-7e-4b-1 of ADR-0047 (decision 23): a name is one by its decoded
+/// bytes, not by its hash nor by its text — two names of one hash are two,
+/// a third equal to the first is a duplicate whatever stands between them,
+/// an escape names what it decodes to; each object's names apart from its
+/// parent's and its siblings'.
+#[test]
+fn a_name_is_one_by_its_decoded_bytes() {
+    assert_eq!(
+        fnv("m9tcqis_"),
+        fnv("i7giss29"),
+        "the pair no longer collides"
+    );
+    assert_eq!(fnv("m9tcqis_"), 0x1425_5c12);
+    for (doc, ok) in [
+        (r#"{"m9tcqis_":0,"i7giss29":0}"#, true),
+        (r#"{"m9tcqis_":0,"i7giss29":0,"m9tcqis_":0}"#, false),
+        (r#"{"i7giss29":0,"m9tcqis_":0,"i7giss29":0}"#, false),
+        (r#"{"a":1,"\u0061":2}"#, false),
+        (r#"{"c\u006fde":1,"code":2}"#, false),
+        (r#"{"\u00e9":1,"é":2}"#, false),
+        (r#"{"\/":1,"/":2}"#, false),
+        (r#"{"a":1,"b":2}"#, true),
+        (r#"{"a":{"a":1},"b":{"a":2}}"#, true),
+        (r#"{"x":{"m9tcqis_":0,"i7giss29":0,"m9tcqis_":1}}"#, false),
+        (r#"[{"a":1},{"a":1}]"#, true),
+        (r#"{"a":[{"a":1,"a":2}]}"#, false),
+    ] {
+        assert_eq!(readable(doc), ok, "{doc}");
+        if !ok {
+            assert!(
+                matches!(read(doc), Err(JsonError::Duplicate { .. })),
+                "{doc}"
+            );
+        }
+    }
+}
+
+/// The densest documents read alike on the tape: zeros of both parities,
+/// chains as deep as an answer nests, short distinct names.
+#[test]
+fn the_densest_documents_read_alike() {
+    for k in [0usize, 1, 2, 999, 1_000] {
+        assert!(readable(&format!("[{}]", vec!["0"; k].join(","))));
+        let names: Vec<String> = (0..k).map(|i| format!("\"{i}\":{i}")).collect();
+        assert!(readable(&format!("{{{}}}", names.join(","))));
+    }
+    let chain = format!("{}1{}", "[".repeat(DEPTH), "]".repeat(DEPTH));
+    assert!(readable(&chain));
+    let objects = format!("{}1{}", "{\"\":".repeat(DEPTH), "}".repeat(DEPTH));
+    assert!(readable(&objects));
 }
 
 fn equal(a: &str, b: &str) -> bool {
@@ -254,6 +346,10 @@ const NUMBERS: &[&str] = &[
     "3.14159",
     "1e-7",
     "7E+0",
+    "0.05",
+    "5e-2",
+    "-0.0500e1",
+    "0.050",
 ];
 
 const PIECES: &[&str] = &[
@@ -278,7 +374,24 @@ const PIECES: &[&str] = &[
     "\u{7f}",
 ];
 
-const NAMES: &[&str] = &["a", "b", "code", "-", "", "x/y", "m~n", "0"];
+/// Names as written: some equal only decoded (`a` and `\u0061`), a pair of
+/// one hash (`m9tcqis_`, `i7giss29`), not ASCII (K2b-7e-4b-1).
+const NAMES: &[&str] = &[
+    "a",
+    "b",
+    "code",
+    "-",
+    "",
+    "x/y",
+    "m~n",
+    "0",
+    "\\u0061",
+    "c\\u006fde",
+    "é",
+    "\\u00e9",
+    "m9tcqis_",
+    "i7giss29",
+];
 
 /// A value drawn, before it is written.
 enum G {
@@ -326,7 +439,9 @@ fn write(g: &G, style: &mut Option<Draw>) -> String {
                 match d.below(4) {
                     1 if plain => format!("{n}e0"),
                     2 if plain && !n.contains('.') => format!("{n}.000"),
-                    3 if plain => format!("{n}0e-1"),
+                    // A digit more and a tenth: the same value for an
+                    // integer only.
+                    3 if plain && !n.contains('.') => format!("{n}0e-1"),
                     _ => (*n).to_owned(),
                 }
             }
@@ -457,6 +572,36 @@ fn canon(v: &Json) -> String {
     }
 }
 
+/// The strata `g` reaches: objects naming two members equal only decoded,
+/// and objects naming both names of one hash.
+fn strata_of(g: &G, counts: &mut [usize; 2]) {
+    match g {
+        G::Array(items) => items.iter().for_each(|x| strata_of(x, counts)),
+        G::Object(members) => {
+            let decoded: Vec<Option<Json>> = members
+                .iter()
+                .map(|(k, _)| parse(format!("\"{k}\"").as_bytes()).ok())
+                .collect();
+            let twins = members
+                .iter()
+                .zip(&decoded)
+                .enumerate()
+                .any(|(i, ((k, _), a))| {
+                    members
+                        .iter()
+                        .zip(&decoded)
+                        .skip(i + 1)
+                        .any(|((l, _), b)| k != l && a == b)
+                });
+            counts[0] += usize::from(twins);
+            let names: Vec<&str> = members.iter().map(|(k, _)| *k).collect();
+            counts[1] += usize::from(names.contains(&"m9tcqis_") && names.contains(&"i7giss29"));
+            members.iter().for_each(|(_, x)| strata_of(x, counts));
+        }
+        _ => {}
+    }
+}
+
 /// Pointers into a value: its every place, and tokens beside them.
 fn pointers(v: &Json, here: String, out: &mut Vec<String>) {
     out.push(here.clone());
@@ -515,8 +660,13 @@ fn the_reader_agrees_with_python_s_json_and_decimal() {
     let mut cases = Vec::new();
     let (mut readable, mut unreadable, mut equal, mut unequal) = (0, 0, 0, 0);
     let mut docs: Vec<(Vec<u8>, Json)> = Vec::new();
+    // Objects naming two members equal only decoded, and the pair of one
+    // hash (K2b-7e-4b-1).
+    let mut strata = [0usize; 2];
     for i in 0..6000 {
-        let mut text = write(&draw(&mut d, 0), &mut None);
+        let g = draw(&mut d, 0);
+        strata_of(&g, &mut strata);
+        let mut text = write(&g, &mut None);
         if i % 40 == 0 {
             let n = DEPTH - 2 + d.below(5);
             text = format!("{}{text}{}", "[".repeat(n), "]".repeat(n));
@@ -530,12 +680,28 @@ fn the_reader_agrees_with_python_s_json_and_decimal() {
             text.into_bytes()
         };
         let read = parse(&bytes);
+        let taped = tape(&bytes);
+        assert_eq!(
+            taped.is_ok(),
+            read.is_ok(),
+            "{:?}",
+            String::from_utf8_lossy(&bytes)
+        );
         let mut at = Vec::new();
-        if let Ok(v) = &read {
+        if let (Ok(v), Ok(t)) = (&read, &taped) {
             readable += 1;
+            assert!(alike(t.root(), v), "{:?}", String::from_utf8_lossy(&bytes));
             let mut ps = Vec::new();
             pointers(v, String::new(), &mut ps);
             ps.extend(["a", "/a~", "/~2x"].map(str::to_owned));
+            for p in &ps {
+                let agree = match (v.at(p), t.root().at(p)) {
+                    (Err(Malformed), Err(Malformed)) | (Ok(None), Ok(None)) => true,
+                    (Ok(Some(x)), Ok(Some(y))) => alike(y, x),
+                    _ => false,
+                };
+                assert!(agree, "{:?} at {p:?}", String::from_utf8_lossy(&bytes));
+            }
             for p in ps.into_iter().take(40) {
                 let got = match v.at(&p) {
                     Err(Malformed) => "malformed".to_owned(),
@@ -590,6 +756,11 @@ fn the_reader_agrees_with_python_s_json_and_decimal() {
         ("unreadable", unreadable),
         ("equal", equal),
         ("unequal", unequal),
+        (
+            "objects naming two members equal only decoded",
+            strata[0] * 5,
+        ),
+        ("objects naming the pair of one hash", strata[1] * 5),
     ] {
         assert!(n > 100, "{n} {name}");
     }
@@ -605,9 +776,15 @@ fn the_reader_agrees_with_python_s_json_and_decimal() {
         "absent",
         "found",
     ] {
+        // Each rule reached ten times or more, not merely once.
+        let count = reached
+            .split(&format!("'{rule}': "))
+            .nth(1)
+            .and_then(|r| r.split([',', '}']).next())
+            .and_then(|n| n.trim().parse::<usize>().ok());
         assert!(
-            reached.contains(&format!("'{rule}'")),
-            "{rule} not reached: {reached}"
+            count.is_some_and(|n| n >= 10),
+            "{rule} reached {count:?} times: {reached}"
         );
     }
     println!("{reached}");

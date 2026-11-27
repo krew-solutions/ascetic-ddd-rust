@@ -7,7 +7,9 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use ascetic_ddd_command_log::json::{self, NODE, bound, pointer_bound};
+use ascetic_ddd_command_log::json::{
+    self, ENTRY, JsonError, LONGEST, NODE, bound, names_bound, pointer_bound, tape, tape_bound,
+};
 use proptest::prelude::*;
 
 /// The system allocator, counting the bytes each thread holds and their peak.
@@ -36,6 +38,16 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: the caller's contract, passed on.
         let p = unsafe { System.alloc(layout) };
+        if !p.is_null() {
+            counted(size(layout.size()));
+        }
+        p
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: the caller's contract, passed on: zeroed by the system, its
+        // pages untouched until read.
+        let p = unsafe { System.alloc_zeroed(layout) };
         if !p.is_null() {
             counted(size(layout.size()));
         }
@@ -88,7 +100,8 @@ fn forest(k: usize) -> String {
 
 /// The densest input holds what its bound states, near enough: a forest of
 /// chains just past a power of two — its outer array moved at its last
-/// growth — at 99 % or more.
+/// growth — at 99 % or more of the tree's part; it has no object, so no
+/// names' check (K2b-7e-4b-1).
 #[test]
 fn the_densest_input_holds_near_its_bound() {
     assert_eq!(NODE, size_of::<json::Json>());
@@ -97,14 +110,15 @@ fn the_densest_input_holds_near_its_bound() {
         let n = doc.len() as u64;
         let held = parsed(doc.as_bytes());
         let stated = bound(n);
+        let tree = stated - names_bound(n);
         eprintln!(
-            "MEASURED {k} chains, {n} B: {held} B at the peak, {stated} B bound ({:.2} %)",
-            100.0 * held as f64 / stated as f64
+            "MEASURED {k} chains, {n} B: {held} B at the peak, {tree} B the tree's bound ({:.2} %)",
+            100.0 * held as f64 / tree as f64
         );
-        assert!(held <= stated, "{k} chains: {held} > {stated}");
+        assert!(held <= tree, "{k} chains: {held} > {tree}");
         assert!(
-            held as f64 >= 0.99 * stated as f64,
-            "{k} chains: {held} of {stated}"
+            held as f64 >= 0.99 * tree as f64,
+            "{k} chains: {held} of {tree}"
         );
     }
 }
@@ -192,7 +206,9 @@ proptest! {
 #[test]
 fn the_bound_saturates() {
     assert_eq!(bound(u64::MAX), u64::MAX);
-    assert_eq!(bound(0), 2 * NODE as u64);
+    assert_eq!(bound(0), 2 * NODE as u64 + 8);
+    assert_eq!(names_bound(u64::MAX), u64::MAX);
+    assert_eq!(tape_bound(u64::MAX), u64::MAX);
     assert_eq!(pointer_bound(u64::MAX), u64::MAX);
 }
 
@@ -271,4 +287,86 @@ fn a_body_is_parsed_on_its_first_reader_alone() {
     };
     let r = read(&refused);
     assert_eq!(r.code("/code").as_deref(), Some("route.not_found"));
+}
+
+/// What [`tape`] holds.
+fn taped(bytes: &[u8]) -> u64 {
+    peak_of(|| tape(bytes))
+}
+
+/// K2b-7e-4b-1 of ADR-0047 (decision 23): a tape holds its entries sized at
+/// once from its length — an entry each two bytes and one more, which an
+/// array of zeros of odd length fills, its last value at its last slot —,
+/// and nothing past them for a document with no object.
+#[test]
+fn a_tape_holds_its_entries_sized_once() {
+    for k in [1usize, 2, 1_000, 1_001] {
+        let doc = format!("[{}]", vec!["0"; k].join(","));
+        let n = doc.len() as u64;
+        let held = taped(doc.as_bytes());
+        let entries = ENTRY as u64 * (n / 2 + 1);
+        assert_eq!(held, entries, "{k} zeros, {n} B");
+        assert!(held <= tape_bound(n));
+    }
+    let chain = format!("{}1{}", "[".repeat(json::DEPTH), "]".repeat(json::DEPTH));
+    let n = chain.len() as u64;
+    assert_eq!(taped(chain.as_bytes()), ENTRY as u64 * (n / 2 + 1));
+}
+
+/// The names' check holds its stack sized once at the first object — a
+/// member each five bytes of what is left and one more, which members named
+/// `""` fill, a name twice found only at the close —, in a tape and in a
+/// tree alike.
+#[test]
+fn the_names_check_is_sized_once() {
+    for k in [1usize, 2, 999, 1_000] {
+        let named_twice = format!("{{{}}}", vec!["\"\":0"; k].join(","));
+        let distinct: Vec<String> = (0..k).map(|i| format!("\"{i}\":0")).collect();
+        let distinct = format!("{{{}}}", distinct.join(","));
+        for doc in [named_twice, distinct] {
+            let n = doc.len() as u64;
+            let held = taped(doc.as_bytes());
+            let stated = ENTRY as u64 * (n / 2 + 1) + names_bound(n);
+            assert_eq!(held, stated, "{k} members, {n} B");
+            assert_eq!(stated, tape_bound(n));
+            assert!(parsed(doc.as_bytes()) <= bound(n));
+        }
+    }
+    // An object first, then the densest arrays: the stack and the tree at
+    // once, within the bound.
+    let chains: Vec<String> = (0..17).map(|_| chain(json::DEPTH - 1)).collect();
+    let mixed = format!("[{{}},{}]", chains.join(","));
+    let n = mixed.len() as u64;
+    let held = parsed(mixed.as_bytes());
+    assert!(held <= bound(n), "{held} > {}", bound(n));
+    // The same document with an empty array for its object: the same tree,
+    // no stack.
+    let alone = parsed(format!("[[],{}]", chains.join(",")).as_bytes());
+    let stack = 8 * ((n - 1) / 5 + 1);
+    assert_eq!(held, alone + stack, "the stack, {stack} B, not held once");
+}
+
+/// A document longer than `LONGEST` is unreadable, and nothing is held for
+/// it: neither its entries nor its text checked (K2b-7e-4b-1). Its bytes are
+/// zeroed by the system and never touched; skipped where it refuses them.
+#[test]
+fn a_document_past_the_longest_is_unreadable_and_holds_nothing() {
+    let n = usize::try_from(LONGEST).unwrap() + 1;
+    let layout = Layout::array::<u8>(n).unwrap();
+    // SAFETY: a nonzero size; freed below with the same layout.
+    let p = unsafe { std::alloc::alloc_zeroed(layout) };
+    if p.is_null() {
+        eprintln!("SKIPPED: the system refused {n} zeroed bytes");
+        return;
+    }
+    // SAFETY: `n` bytes allocated and zeroed at `p`, borrowed until freed.
+    let bytes = unsafe { std::slice::from_raw_parts(p, n) };
+    let mut read = None;
+    let held = peak_of(|| {
+        read = Some((tape(bytes).err(), json::parse(bytes).err()));
+    });
+    // SAFETY: allocated above with this layout, no borrow left.
+    unsafe { std::alloc::dealloc(p, layout) };
+    assert_eq!(read, Some((Some(JsonError::Long), Some(JsonError::Long))));
+    assert!(held < 1_024, "{held} B held for a document too long");
 }

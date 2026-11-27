@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a, K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3), K2b-7e-2b-2c-1 to K2b-7e-2b-2c-4 built, K2b-7e-2b-3 decided and cut in five, K2b-7e-2b-3a-1 to K2b-7e-2b-3a-3, K2b-7e-2b-3b, K2b-7e-2b-3c-1 and K2b-7e-2b-3c-2 built, K2b-7e-2b-3d next; decision 23 decided, K2b-7e-4a built, K2b-7e-4b next; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a, K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3), K2b-7e-2b-2c-1 to K2b-7e-2b-2c-4 built, K2b-7e-2b-3 decided and cut in five, K2b-7e-2b-3a-1 to K2b-7e-2b-3a-3, K2b-7e-2b-3b, K2b-7e-2b-3c-1 and K2b-7e-2b-3c-2 built, K2b-7e-2b-3d next; decision 23 decided, K2b-7e-4a built, K2b-7e-4b decided and cut in three, K2b-7e-4b-1 built, K2b-7e-4b-2 next; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -54,7 +54,10 @@ To be built in slices, each a commit of its own:
   the remedies, `Egress::caps`, `fits::fits` retired), **K2b-7e-2b-3d** the wiring and version 10, **K2b-7e-2b-3e** the evidence
   after a kill —, **K2b-7e-2c** the cgroup's memory, after the read gate;
   **K2b-7e-3** the read gate; **K2b-7e-4** the parse, in two (decision 23) — **K2b-7e-4a** a body parsed on its first
-  reader and a late answer holding nothing, **K2b-7e-4b** a streaming judge; **K2b-7e-5** a waiting budget, if a real plan needs it; **K2b-8** a censored attempt's connection, its closing report and the ports (decision 19), in
+  reader and a late answer holding nothing, **K2b-7e-4b** the tape (decision 23's step 2), in three — **K2b-7e-4b-1**
+  the grammar over two sinks, the names' check, the tape and its differential against the tree; **K2b-7e-4b-2** the
+  readers on the tape, the frozen tree readers, the bound, rules revision 15; **K2b-7e-4b-3** M-a and the floor's
+  measurement with bodies read, their predictions written first —; **K2b-7e-5** a waiting budget, if a real plan needs it; **K2b-8** a censored attempt's connection, its closing report and the ports (decision 19), in
   four: **K2b-8a** journal version 7 in the pure fold; **K2b-8b** the shell's censor, report and connect errors, in two — **K2b-8b-1** a connect's failure classed, zero
   linger, no shutdown, saturation by age; **K2b-8b-2** the reset at the censor, no byte or hand-over at the deadline,
   an unused connection pooled, a timer's exact lag;
@@ -908,10 +911,41 @@ waits for the owner's confirmation:
   whole judgement, a shell test of a late answer's judging not holding an independent step; the floor measurement
   rerun, refutable (the shift at most the 64 KiB row's), and its large answers as polls with `until` (what laziness
   cannot do for host-shaped plans).
-- **Step 2 (K2b-7e-4b)**: a streaming, validating judge resolving every pointer of a record in one pass, a subtree only
-  for a structural `Equals` or `Contains`, a name set per open object; its differential against the tree; its own worst
-  shapes in stage 2; their time, p99 and maximum over 200 runs, on the laptop and the server, idle and every core busy,
-  against J/2 — the cap below which steps 3 and 4 are not needed.
+- **Step 2 (K2b-7e-4b)**, decided in its own round (2026-11-27: a blind solver and a discriminator, Performance and
+  Verifiability; § Alternatives Considered): **a tape**. The tree's cost is allocation — per number three strings, per
+  member a name cloned into a set: 4.2 ms at 64 KiB of numbers and 306 ms at 4 MiB on the laptop, two nodes a byte. The
+  round refuted this step's first sketch twice: a subtree budgeted by its literal's nodes does not bound its bytes
+  (`Equals("1")` against `1.000…0` of 4 MiB is one node, megabytes, and equal), and a pointer set registered for one
+  pass makes the judgement depend on what was registered. The rules:
+  - **One grammar, two sinks.** The parser generic over a private sink — the tree (`parse`, its acceptance and values
+    unchanged; literals, fills and the validator use it) and the tape —, its string decoder generic over what it feeds
+    (a string, a name's hash, a comparison, nothing). Validity is one implementation for both.
+  - **A name twice, in the grammar.** Per open object, `(FNV-1a of the decoded name, start)` on one stack allocated at
+    the first `{`, sorted by hash at the object's close, names compared decoded only inside a run of equal hashes (the
+    run sorted decoded: n log n at worst). `json::bound` gains the stack; a scalar — a hole's value — allocates none.
+  - **The tape.** One entry a value, its start and its next sibling's index (`u32`, `u32`), sized once from the body's
+    length (at most `n/2 + 1` values). A body past `u32::MAX` bytes reads as unreadable, and the validator refuses an
+    `answer_cap` past `u32::MAX` (rules revision 15): the one exception to "every judgement today's", reached only by
+    a host's carrier past its cap.
+  - **Validity, not error-exactness.** The judge reads `parse(b).ok()`; which of two errors is named first may differ.
+  - **The readers read the tape; their signatures, order and errors are today's, the judge unchanged.** `at` is
+    today's walk; `code` a string at an object root, sized at once; `take` decoded only to `TAKEN + 1`; `Equals` a
+    walk against the want, its objects sorted in place once and searched; numbers by `same` over the text; `Contains`
+    each element.
+  - **The bound:** the tape; at its build the names' stack with a predicate's want alive (it is parsed before the
+    first reader builds); after it one reader's holding, the code alive. About 6 × cap against 128 × cap.
+  - **Not changed now:** the literal's per-answer parse (§ Owed, its row in M-a), stage 2's judged record and
+    `Judging.shape`.
+  - **Executors:** the tape against the tree by value — numbers by their text, strings decoded, containers
+    recursively — for every pointer, over generated and mutated documents with escaped and non-ASCII names, a colliding
+    pair and the densest documents; `vectors/json.py` on the tape's validity; twins (`{"m9tcqis_":0,"i7giss29":0}`
+    readable, a pair whose FNV-1a collides, and unreadable with its first name again; `{"a":1,"\u0061":2}`
+    unreadable); the readers against a frozen copy of today's tree readers — lazy against eager over stratified
+    answers, step 1's differential, not built at K2b-7e-4a —, the copy pinned by digest; `same` and the walk against
+    the tree's equality over pairs both ways and NUMBERS × NUMBERS; hand rows; a counting allocator two-sided over
+    documents and records; the `u32` rows.
+  - **M-a** in the scheduler's tests: read, judge and drop timed together, 64 KiB to 4 MiB, shapes and readers as the
+    roles named; its predictions and refutations written into § Measured before it runs.
 - **Step 3a**: `sim`'s scripted judging delay under today's floor (the machine unchanged, its zero-delay digests equal)
   — a baseline for step 3b to settle against, not to re-pin.
 - **Step 3b**: `Arrived` at A (carrying an early reply's `Sent`, cancelling the backstop), `Judged` at T (carrying A),
@@ -1058,6 +1092,19 @@ waits for the owner's confirmation:
   decision 21's decided I2 silently; Software Design, Verifiability); **the cgroup as the number's source before the
   read gate** (the discriminator); **the first refusal only, one binding term, remedies from another owner**
   (Operability, Software Design, Verifiability).
+- **Decision 23's step 2, the tape** (2026-11-27, K2b-7e-4b's round): **a pointer set registered for one pass**
+  (the main position, the solver: about 1.6 × cap — invisible to the fit, a source's answers charged at sockets × cap;
+  the judgement then depends on the registration, which needs a fallback pass or a narrowed API; the discriminator),
+  **comparators listening inside the pass** (every want alive at once, raised before `code` has the fills; the
+  discriminator), **a resumable scan fed while the body is read** (it moves the work off the floor, not off the thread;
+  it holds a scan across awaits; step 3b removes the floors; the discriminator), **a subtree budgeted by its literal's
+  nodes** (unbounded bytes; both), **or by its normalised size** (an allocation an element under `Contains`; the
+  discriminator), **names in an open-addressed index** (a rehash in one piece, quadratic under collisions; the
+  solver's own failure), **names sorted at the close by their decoded text** (the body read in every comparison; the
+  discriminator), **names checked per sink** (the riskiest rule twice; Verifiability), **judging off the thread first**
+  (the floor stands whichever thread judges; the discriminator), **an object's `Equals` by a linear find** (quadratic:
+  minutes at 4 MiB; Performance), **a frozen judge** (a copy of `judge.rs` that drifts; equal readers give an equal
+  judgement; Verifiability).
 - **Decision 23, the judging floor** (2026-11-27): the main position's **answer pushed at its judged instant** (an
   in-time answer read late at the machine's own check: a false Unknown; the solver, the discriminator) and **its
   admission check, judging at the cap within J** (admission states, it does not certify: decision 21's second round);
@@ -1207,6 +1254,7 @@ waits for the owner's confirmation:
 | K2b-7e-2b-2c-3 | K2b | `command-log`'s doctests: a `Read` sent between threads does not compile, one read where it is made does; `load-run`'s `stamps.rs`: keeping an answer's captures holds exactly what `run::ending` states of its record; `tests/shell.rs`: a value no take makes — an array behind whitespace, an escape no take writes — a carrier fault, the run stopped, its answer never journaled; `tests/judging.rs` (a counting allocator by thread): each shape's document at the cap no larger than the cap, stage 2's judging within `stages::judging_bound` at caps of 4,097 and 65,537 | a read sent between threads; a document grown; the keeping's slots, its names unpriced; a value no take makes kept (survives: the stage's document unpriced — its executor one-sided) |
 | K2b-7e-2b-3c-2 | K2b | `load-run`'s `tests/fit.rs`: over a run whose parts follow its knobs, each knob's remedy the largest of it that admits the run and one past it refused, the memory's at the least, the least at the needed caps the floors' ports'; no remedy below a knob's floor, none where the floor itself does not fit; the binding pool's slice named; `tcp.rs`' own: a total's caps as `with_ports` divides it; `scheduler/tests/bound.rs`: the need rising with each count, a read-ahead past the header's the machine's refusal | the bisection a step past; a floor that does not fit searched; the ports searched from none; the least at the needed caps the given; the read gate's slice unnamed; a bound source sharing |
 | K2b-7e-4a | K2b | `command-log`'s `tests/parse.rs` (a counting allocator by thread): an answer read for its status, its problem's code below 400 and no predicate holding no tree; its first reader one tree within `json::bound`; a second none; a problem's code at 404 read from its body; `scheduler`'s `tests/judge.rs` against the independent vectors, a gateway's 404 problem against an expectation of none among them | parsed always; parsed never; a problem's code read only once parsed |
+| K2b-7e-4b-1 | K2b | `command-log`'s `tests/json.rs`: every twin read by the tape as by the tree, by value; names one by their decoded bytes — a pair of one FNV-1a hash two, a third equal to the first a duplicate past the other, escapes naming what they decode to, each object's names apart; the densest documents alike; `the_reader_agrees_with_python_s_json_and_decimal` with the tape's validity and every pointer's value against the tree's, names escaped, not ASCII and of one hash, each rule reached ten times or more; `tests/parse.rs` (a counting allocator by thread): a tape's entries sized once, exactly, zeros of odd length filling them; the names' stack sized once at the first object, exactly, beside the tree; a document past `LONGEST` unreadable holding nothing | a name twice unchecked; one hash taken for one name; a run compared by adjacency alone; names compared raw; a child's names left on its parent's; one level deeper; the tape one entry short; the names' stack a sixth; a container's end unpatched; an element one further; a member's value skipped by one; the tape's length unchecked |
 | K2b-7e-2b-3c-1 | K2b | `load-run`'s `tests/fit.rs`, against a shadow of the decision's sentence in u128 over arbitrary parts, catch-ups 0 to 999: the need the largest of the stages', the gates' and the run's phases with the fixed parts, the pool at the catch-up's rate; at the need admitted with no slack, a byte less refused naming it; every part (`Part::ALL`, matched without `_`) moving the need as the shadow does; the binding term the binding phase's; stage 2 binding a socketless run; a part saturated, a sum past any count, a runtime of no stated events refused; the pool refused as the pool's | the phases summed; the pool outside the largest phase; the reader the run's; the catch-up dropped; a saturated part admitted; a sum saturating; the pool's failure the memory's; the binding term any phase's; held with no gate |
 | K2b-7e-2b-3b | K2b | `load-run`'s `tests/costs.rs`: a connection whose egress's `Io` holds 32 KiB of its own within `CONNECTION` and the egress's statement, above 90 %; REST pricing an attempt's decorations at the bound its decorator states, none undecorated, unstated where its decorator cannot state; a stand's gates' client relayed; `tests/frame.rs`: four decorations of 8 KiB copied into the request within their price, above 95 %; `tests/rest.rs`: a decoration past its decorator's bound a `rest.decorator` fault, the run stopped; `carrier.rs`' own: an attempt's price its parts' sum, its decorations each attempt's | the egress's heap unstated; a decoration past its bound passed; the bound's bytes unchecked; the gates' client not the stand's; decorations at one copy; decorations unpriced |
 | K2b-7e-2b-3a-3 | K2b | `load-run`'s `tests/rest.rs`: two sources whose steps at once total twice the cap, each within it, admitted, one past it on each refused naming source 0; `tests/costs.rs`: the shell's share of an attempt whose header a writer's captured value of `VALUE` bytes fills, within `run::attempt_share` and above 90 %; `command-log`'s `tests/validate.rs`: over the corpus at jitters 0 and 250, each count of the late shape at least the pending shape's | needs the plan's whole pending; the shell's copy of a hole unpriced; the copy without its value; a read's late steps not summed; the records left out of the machine's sum |
@@ -2185,6 +2233,21 @@ a connection of its own (retired at once); the journal folded, each Root classed
 - A hog over the deadline while connecting or writing on a thread others hold is the source thread's lag (K2b-7c-2's
   twins, the path's lag counted from the thread's last blocked park); the stall twin is its whole-process case.
 
+**K2b-7e-4b-1 — one grammar, two sinks, the names' check, the tape** (2026-11-27, decision 23's step 2): `json.rs`'s
+parser is generic over a private sink — the tree, which `parse` returns as before, and the tape's recorder —, its
+strings decoded by one iterator of pieces feeding a string, a name's hash or nothing, its numbers lexed once with
+their value's parts over their text (the tree's `Number` built from them with two allocations, not three). A member
+named twice is the grammar's check for both: `(FNV-1a of the decoded name, place)` on one stack sized at the first
+object (`names_bound`), sorted at the object's close, names compared decoded only inside a run of one hash; the
+tree's `BTreeSet` of cloned names is gone. `json::tape` reads a body into entries (`ENTRY`, 8 B: a start and the
+index past the last descendant) sized once (`tape_bound`), viewed by `Node` — its kind, a number's text, a string
+decoded, whether it is a given string, its items, its members, `at` as `Json::at`. A document past `LONGEST`
+(`u32::MAX`) bytes is unreadable by both, before its text is checked. `json::bound` gains the names' stack. Not yet
+read by the judge (K2b-7e-4b-2). Measured: a tape of zeros of odd length holds exactly its `n/2 + 1` entries; the
+names' stack exactly `n/5 + 1` entries beside the tree; a 4 GiB document holds under 1 KiB. Mutants: twelve, each
+red (§ the table). Two not run: the length check dropped from the grammar itself (a 4 GiB text read whole by the
+laptop), and the hash made constant — correct and slow, an equivalent mutant only M-a's colliding row sees.
+
 **K2b-7e-4a — a body parsed on its first reader** (2026-11-27, decision 23): `answer::Read` parses its body when a
 reader first asks — a problem's code at 400 or past it, a predicate, a JSON capture — and keeps the tree for the next;
 a body no one reads is never parsed. Nothing decides it before: a laziness decided from the record would pass a
@@ -2696,6 +2759,13 @@ The shift is the machine's — the judging floor —, the number of sources dilu
 it: judging runs on the source's thread, and a held machine dispatches nothing to hand. A hold at 256 KiB is about 6 ms
 on this box (about 24 ns a byte for the tree; the laptop's about 153). The reads here assert their status alone: all of
 it is a tree nobody reads. Decided upon it: decision 23.
+Rerun after K2b-7e-4a (2026-11-27; the tree of `dabcc9b`, `FLOOR_READS_BODY` choosing the reads): **M-0**, the reads
+asserting their status alone — at 256 KiB and 83 large answers a second 2.9–3.4 ms in 30 s, the machine past J 3–4
+times, the 64 KiB rows' level (the same rows were at the 500 ms cap); the floor of a body nobody reads is gone, as
+predicted. **M-0′**, every read a predicate on its body — at 256 KiB unchanged (380–507 ms; at 20 and 83 a second the
+cap, 5,654–23,786 never handed), at 64 KiB some 3 ms: what laziness cannot spare, which K2b-7e-4b and decision 23's
+later steps are for. A residue of about 3 ms, three or four late wakes, stands in nearly every row at either size and
+rate — not the floor's; unattributed.
 
 **Decision 21 at κ = 0, measured on the load server and on the laptop** (2026-11-26/27; commit `effcfad`, optimised,
 one test at a time): the laptop's replay with large answers (`tests/pace.rs`, `the_pace_replayed_with_large_answers`,
@@ -3078,6 +3148,17 @@ only and measures move to the 12-core box.
     share of σ at 1, 4 and 16 sources and 5 to 80 large answers a second. K2b-9b-3 onward waits for both. Both done
     (2026-11-27): the floor is the whole shift measured (§ Measured), decision 23 decided; K2b-9b-3 onward waits for
     its steps and the owner's confirmation of decision 21.
+- **Decision 23's step 2, the tape — owed** (2026-11-27, its roles):
+  - **A literal is parsed by the tree on every judgement**, and the validator bounds no literal: a 40 KiB `Equals` is
+    about 1 ms on the server whatever the body. M-a's want row at 1, 8 and 64 KiB decides; a literal's parse past the
+    body's build at the same size gets a remedy — parsed once a record, or bounded by the validator.
+  - **A capture's JSON pointer is never checked by the validator**: a malformed one is a silent missing value. Planned
+    into rules revision 15 (K2b-7e-4b-2).
+  - **Contingencies, each with its threshold in M-a**: the tape against a null sink at 1 MiB with cold caches past
+    25 % (smaller entries, or registration reconsidered); four lookups costing more than the build (each object's hash
+    run kept and searched); a `Contains` walk past half the build (`same`'s fast paths); p99 up 20 % under a low mmap
+    threshold (a tape reused by the source, the read dropped after its end); colliding names past the tree's time at
+    the same size (a keyed hash).
 - **Decision 21's owed** (2026-11-24, its roles): **a hung decorator holds the band's front** to its deadline (up to
   the route timeout) — a bound on a head not arrived, trigger: H-1's decorations measured past J; the Decorator
   contract stated now (shared credentials refreshed ahead, off the attempt's path; headers valid to the attempt's
@@ -3371,3 +3452,10 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
   difference from a small connection (a test-only fix): it asserted the difference exact at 32,768 B, and a small
   connection's own idle varies by some tens of bytes — 96 B of margin in its own runs, short under `make all`. Its
   two-sided `within` is unchanged.
+- 2026-11-27: the floor's measurement rerun after K2b-7e-4a (§ Measured: M-0, M-0′) and K2b-7e-4b decided in its own
+  round (§ Decision 23, step 2): a tape; the step's first sketch refuted; cut in three. Recorded with it: K2b-7e-4a's
+  stratified differential was not built — its executors were the counting allocator and the judge's vectors —, and is
+  K2b-7e-4b-2's.
+- 2026-11-27: K2b-7e-4b-1 built (§ Measured): one grammar over a tree and a tape, the names' check in it, the tape
+  and its views; `json::bound` restated with the names' stack, `the_densest_input_holds_near_its_bound` held against
+  the tree's part.
