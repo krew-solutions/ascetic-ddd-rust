@@ -298,7 +298,7 @@ fn healthy(gap: u64, steps: u64) -> Replayed {
 
 /// [`healthy`], every `every`-th answer `size` bytes of numbers.
 fn healthy_with(gap: u64, steps: u64, every: u64, size: u64) -> Replayed {
-    let (lines, j) = journal_of(gap, steps, every, size, 1);
+    let (lines, j) = journal_of(gap, steps, every, size, 1, false);
     let shapes = [0, 10, 50, 100, 200]
         .into_iter()
         .flat_map(|r| [false, true].map(|pairwise| (r, pairwise)))
@@ -309,13 +309,16 @@ fn healthy_with(gap: u64, steps: u64, every: u64, size: u64) -> Replayed {
 
 /// The journal of a healthy run of `steps` reads `gap` µs apart over
 /// `sources` sources in turn, every `every`-th answer `size` bytes of
-/// numbers; and the run's jitter.
+/// numbers — each read's expectation, when `reads_body`, a predicate on the
+/// body every answer holds, so that every body is parsed —; and the run's
+/// jitter.
 fn journal_of(
     gap: u64,
     steps: u64,
     every: u64,
     size: u64,
     sources: u32,
+    reads_body: bool,
 ) -> (Vec<journal::Line>, u64) {
     let _ = Descriptors::raise().unwrap();
     let port = {
@@ -353,13 +356,25 @@ fn journal_of(
     let n = usize::try_from(sources).unwrap();
     let records: Vec<Record> = (0..steps)
         .map(|i| {
-            call(
+            let mut r = call(
                 "read",
                 i + 1,
                 0,
                 i * gap,
                 u32::try_from(i % u64::from(sources)).unwrap(),
-            )
+            );
+            if reads_body {
+                use ascetic_ddd_command_log::record::{Outcome, Predicate, Test};
+                r.expect = vec![Outcome::Response {
+                    status: 200,
+                    problem: None,
+                    body: vec![Predicate {
+                        pointer: String::new(),
+                        test: Test::Exists,
+                    }],
+                }];
+            }
+            r
         })
         .collect();
     let header = Arc::new(header);
@@ -500,22 +515,26 @@ fn the_pace_replayed_with_large_answers() {
 }
 
 /// The judging floor's share of a run's shift (decision 21's second round,
-/// § Owed): 1,000 reads a second for 30 s over 1, 4 and 16 sources, 5, 20
-/// and 83 answers a second large, at 64 and 256 KiB — the shift with no
-/// catch-up, split into the machine's lateness (its judging floor among the
-/// causes) and the hand-off's (a source's thread busy). On an optimised
-/// build, on the load server. Measured on purpose (`--ignored`).
+/// § Owed; decision 23): 1,000 reads a second for 30 s over 1, 4 and 16
+/// sources, 5, 20 and 83 answers a second large, at 64 and 256 KiB — the
+/// shift with no catch-up, split into the machine's lateness (its judging
+/// floor among the causes) and the hand-off's (a source's thread busy). Its
+/// reads assert their status alone (M-0: no body parsed since K2b-7e-4a);
+/// with `FLOOR_READS_BODY` set, a predicate on every body (M-0′: what
+/// laziness cannot spare). On an optimised build, on the load server.
+/// Measured on purpose (`--ignored`).
 #[test]
 #[ignore = "a measurement, run on purpose"]
 fn the_floor_s_share_of_the_shift() {
+    let reads_body = std::env::var_os("FLOOR_READS_BODY").is_some();
     for size in [65_536, 262_144] {
         for every in [200, 50, 12] {
             for sources in [1, 4, 16] {
-                let (lines, j) = journal_of(1_000, 30_000, every, size, sources);
+                let (lines, j) = journal_of(1_000, 30_000, every, size, sources, reads_body);
                 let s = shaped(&lines, j, 0, true);
                 let ((m, m_sum), (h, h_sum)) = split(&lines, j);
                 eprintln!(
-                    "MEASURED floor: {size} B, one answer in {every} large ({} a second), {sources} \
+                    "MEASURED floor (reads body: {reads_body}): {size} B, one answer in {every} large ({} a second), {sources} \
                      sources: shift at κ = 0 {} µs, {}‰ handed past J, {} never handed; the machine \
                      past J {m} times by {m_sum} µs, the hand-off past J {h} times by {h_sum} µs",
                     1_000 / every,
