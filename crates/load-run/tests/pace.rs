@@ -527,7 +527,17 @@ fn the_pace_replayed_with_large_answers() {
 #[ignore = "a measurement, run on purpose"]
 fn the_floor_s_share_of_the_shift() {
     let reads_body = std::env::var_os("FLOOR_READS_BODY").is_some();
-    for size in [65_536, 262_144] {
+    // `FLOOR_SIZES`: the large answers' sizes in KiB, comma-separated (M-b,
+    // K2b-7e-4b-3).
+    let sizes: Vec<u64> = std::env::var("FLOOR_SIZES").map_or_else(
+        |_| vec![65_536, 262_144],
+        |v| {
+            v.split(',')
+                .map(|k| k.trim().parse::<u64>().unwrap() * 1_024)
+                .collect()
+        },
+    );
+    for size in sizes {
         for every in [200, 50, 12] {
             for sources in [1, 4, 16] {
                 let (lines, j) = journal_of(1_000, 30_000, every, size, sources, reads_body);

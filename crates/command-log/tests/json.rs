@@ -7,7 +7,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use ascetic_ddd_command_log::json::{
-    DEPTH, Json, JsonError, Kind, Malformed, Node, Sorted, parse, tape, tokens,
+    DEPTH, Json, JsonError, Kind, Malformed, Node, Sorted, check, parse, tape, tokens,
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -22,6 +22,7 @@ fn readable(s: &str) -> bool {
     let tree = read(s);
     let taped = tape(s.as_bytes());
     assert_eq!(taped.is_ok(), tree.is_ok(), "{s:?}");
+    assert_eq!(check(s.as_bytes()).is_ok(), tree.is_ok(), "{s:?}");
     if let (Ok(v), Ok(t)) = (&tree, &taped) {
         assert!(alike(t.root(), v), "{s:?}");
     }
@@ -707,6 +708,7 @@ fn the_reader_agrees_with_python_s_json_and_decimal() {
         };
         let read = parse(&bytes);
         let taped = tape(&bytes);
+        assert_eq!(check(&bytes).is_ok(), read.is_ok());
         assert_eq!(
             taped.is_ok(),
             read.is_ok(),

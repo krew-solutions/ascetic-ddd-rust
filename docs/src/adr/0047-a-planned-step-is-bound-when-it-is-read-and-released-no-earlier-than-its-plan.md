@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a, K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3), K2b-7e-2b-2c-1 to K2b-7e-2b-2c-4 built, K2b-7e-2b-3 decided and cut in five, K2b-7e-2b-3a-1 to K2b-7e-2b-3a-3, K2b-7e-2b-3b, K2b-7e-2b-3c-1 and K2b-7e-2b-3c-2 built, K2b-7e-2b-3d next; decision 23 decided, K2b-7e-4a built, K2b-7e-4b decided and cut in three, K2b-7e-4b-1 and K2b-7e-4b-2 built, K2b-7e-4b-3 next; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a, K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3), K2b-7e-2b-2c-1 to K2b-7e-2b-2c-4 built, K2b-7e-2b-3 decided and cut in five, K2b-7e-2b-3a-1 to K2b-7e-2b-3a-3, K2b-7e-2b-3b, K2b-7e-2b-3c-1 and K2b-7e-2b-3c-2 built, K2b-7e-2b-3d next; decision 23 decided, K2b-7e-4a built, K2b-7e-4b decided and cut in three, K2b-7e-4b-1 and K2b-7e-4b-2 built, K2b-7e-4b-3's measurements predicted and their run next; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -2786,6 +2786,34 @@ cap, 5,654–23,786 never handed), at 64 KiB some 3 ms: what laziness cannot spa
 later steps are for. A residue of about 3 ms, three or four late wakes, stands in nearly every row at either size and
 rate — not the floor's; unattributed.
 
+**M-a and M-b, predicted before their run** (2026-11-27, K2b-7e-4b-3; the predictions the Performance role's, written
+in K2b-7e-4b's round before any build). M-a is `scheduler`'s `tests/judging_time.rs`: an answer read, judged and
+dropped, timed together, 200 runs a row (thirty past 20 ms), twice; twelve shapes — 5-digit numbers, zeros, strings,
+strings not ASCII, whitespace, an array of records, members in order and shuffled, 2^15 names of one FNV-1a hash, long
+names, chains 127 deep, an object 127 deep of wide levels —; 64 KiB to 4 MiB; readers none, `Exists ""`, a capture of
+the last value, `Equals` of it, `Contains` of an absent string, 1, 4 and 16 lookups; the grammar alone (`json::check`)
+and the tree beside them; a want of 1, 8 and 64 KiB; variants cold (64 MiB written between runs, outside the clock),
+busy (spinning threads, a null judgement its control) and under `GLIBC_TUNABLES=glibc.malloc.mmap_threshold=131072`.
+M-b is the floor's measurement with every body read (`FLOOR_READS_BODY`) at 64 KiB to 4 MiB (`FLOOR_SIZES`).
+Predicted on the load server, idle, J = 2 ms: `Exists ""` at p99 0.7–2 ns a byte on strings, whitespace and text not
+ASCII; 2–4 on numbers; 2.5–3 on members; 5–7 on zeros and chains; S* — the largest size within J/2 — 256 KiB on the
+typical shapes and 64 KiB on the densest, 4 MiB on none; the laptop a size lower. M-b: 256 KiB at the 64 KiB rows'
+level, 1 MiB adding up, 4 MiB at or past M-0′'s 256 KiB. Refuted, each with its remedy (§ Owed, decision 23's step
+2), by:
+- **R1**: `Exists` past J/2 at p99 at 256 KiB on numbers, strings or members, idle;
+- **R2**: M-b's 256 KiB rows past the 64 KiB rows' shift, or an attempt never handed;
+- **R3**: the tape past the grammar alone by 25 % at 1 MiB cold on zeros or chains;
+- **R4**: four lookups past twice `Exists` at S*;
+- **R5**: `Contains` of an absent string past `Exists` by half of it at S*;
+- **R6**: p99 up 20 % under the low mmap threshold at 1 MiB;
+- **R7**: the names of one hash past four times the members' grammar at the same size — the tree shares the names'
+  check now, so it is no reference;
+- **R8**: a want of 64 KiB past `Exists` on 64 KiB of numbers.
+
+A smoke run at 64 KiB on the laptop (4 cores at 1.6 GHz under a load of 2.4 to 3.7) preceded this text and already
+shows R4 and R7 there: four lookups on members 3.9 ms at p99 against `Exists` 1.5 ms; the names of one hash 10.6 ms
+against the members' 1.5 ms. The server decides.
+
 **Decision 21 at κ = 0, measured on the load server and on the laptop** (2026-11-26/27; commit `effcfad`, optimised,
 one test at a time): the laptop's replay with large answers (`tests/pace.rs`, `the_pace_replayed_with_large_answers`,
 500 reads a second for 30 s, one answer in 100 large) put S past 500 ms at κ = 0 at 64 KiB — the roles' prediction that
@@ -3481,3 +3509,6 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-27: K2b-7e-4b-2 built (§ Measured): the readers on the tape, `answer::bound` by phase, rules revision 15
   (an answer cap past `LONGEST`, a capture's malformed pointer); decision 23's step 1 differential built against frozen
   eager readers.
+- 2026-11-27: K2b-7e-4b-3's measurements predicted before their run (§ Measured, M-a and M-b): the harness
+  (`scheduler`'s `tests/judging_time.rs`, `FLOOR_SIZES`), the predictions and eight refutations; `json::check`, the
+  grammar alone, the validator's check of a literal.

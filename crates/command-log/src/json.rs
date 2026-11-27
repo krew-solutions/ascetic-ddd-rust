@@ -267,6 +267,13 @@ pub fn tape(bytes: &[u8]) -> Result<Tape<'_>, JsonError> {
     })
 }
 
+/// Whether a document is readable: the grammar alone, nothing kept but the
+/// names' check (K2b-7e-4b-3) — a plan's literal checked, a tape's cost
+/// measured against the grammar's own.
+pub fn check(bytes: &[u8]) -> Result<(), JsonError> {
+    read(bytes, Nothing).map(|_| ())
+}
+
 fn long(bytes: &[u8]) -> Result<(), JsonError> {
     if u64::try_from(bytes.len()).is_ok_and(|n| n <= LONGEST) {
         Ok(())
@@ -386,6 +393,41 @@ impl Sink for Tree {
     fn object_end(&mut self, members: Vec<(String, Json)>) -> Json {
         Json::Object(members)
     }
+}
+
+/// Nothing kept: the grammar's own work.
+struct Nothing;
+
+impl Sink for Nothing {
+    type Value = ();
+    type Items = ();
+    type Members = ();
+    type Name = ();
+    type Text = ();
+
+    fn word(&mut self, _: usize, _: Word) {}
+
+    fn number(&mut self, _: usize, _: &Lexed<'_>) {}
+
+    fn text(&mut self, _: usize) {}
+
+    fn string(&mut self, (): ()) {}
+
+    fn name(&mut self, _: usize) {}
+
+    fn named(&mut self, (): ()) {}
+
+    fn array(&mut self, _: usize) {}
+
+    fn item(&mut self, (): &mut (), (): ()) {}
+
+    fn array_end(&mut self, (): ()) {}
+
+    fn object(&mut self, _: usize) {}
+
+    fn member(&mut self, (): &mut (), (): (), (): ()) {}
+
+    fn object_end(&mut self, (): ()) {}
 }
 
 /// The tape's entries, each pushed at its value's start.

@@ -1712,7 +1712,7 @@ impl<H: Host> Pass<'_, H> {
             match &p.test {
                 Test::Exists => {}
                 Test::Equals(v) | Test::Contains(v) => match v {
-                    Value::Literal(s) if crate::json::parse(s.as_bytes()).is_err() => {
+                    Value::Literal(s) if crate::json::check(s.as_bytes()).is_err() => {
                         found.push(format!("{}: a literal that is not JSON text", p.pointer));
                     }
                     Value::Hole(Hole::Rendered {
