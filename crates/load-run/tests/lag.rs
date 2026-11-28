@@ -74,6 +74,10 @@ struct Waiting {
 }
 
 impl Carrier<RealClock> for Waiting {
+    fn sockets(&self) -> Option<u64> {
+        None
+    }
+
     fn carries(&self, _: &Header) -> Result<(), String> {
         Ok(())
     }

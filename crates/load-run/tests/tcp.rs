@@ -590,10 +590,67 @@ fn the_stages_are_a_chain_its_evidence_the_library_s() {
         assert_eq!(ready.sink().behind(), 37);
         (ready, at)
     });
+    // The loop's counts watched while it runs (K2b-7e-2b-3e-2b): a step read
+    // and not ended, its attempt alive, seen at some turn.
+    let gauges = ready.gauges().clone();
+    let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let watcher = {
+        let running = running.clone();
+        std::thread::spawn(move || {
+            let (mut pending, mut alive, mut slept) = (0, 0, false);
+            while running.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Some(l) = gauges.try_load() {
+                    pending = pending.max(l.pending);
+                    alive = alive.max(l.alive);
+                    slept |= l.wakes.is_some();
+                }
+                std::thread::yield_now();
+            }
+            (pending, alive, slept)
+        })
+    };
     let ran = root
         .block_on(run(ready, Records::new(records.into_iter())))
         .unwrap();
+    running.store(false, std::sync::atomic::Ordering::Relaxed);
+    let (pending, alive, slept) = watcher.join().unwrap();
+    assert!(
+        pending >= 1 && alive >= 1,
+        "the loop's counts never showed its step: {pending}, {alive}"
+    );
+    assert!(slept, "the loop never showed the instant it sleeps until");
     let (bytes, _) = ran.journal;
+    // The run's memory sampled by its writer (version 11, K2b-7e-2b-3e): a
+    // baseline first, a finish last, the loop's counts in them — the
+    // carrier's sockets its own word, the run's lines all ended at its end.
+    let samples: Vec<_> = Reader::new(std::io::Cursor::new(bytes.clone()))
+        .unwrap()
+        .map(Result::unwrap)
+        .filter_map(|l| match l {
+            ascetic_ddd_scheduler::journal::Line::Sample(s) => Some(*s),
+            _ => None,
+        })
+        .collect();
+    use ascetic_ddd_scheduler::journal::SampleWhy;
+    assert_eq!(samples.first().map(|s| s.why), Some(SampleWhy::Baseline));
+    let last = samples.last().expect("the finish's sample");
+    assert_eq!(last.why, SampleWhy::Finish);
+    assert!(last.live.turn > 0, "{:?}", last.live);
+    assert_eq!(
+        (last.live.pending, last.live.alive),
+        (0, 0),
+        "{:?}",
+        last.live
+    );
+    assert!(last.live.sockets.is_some(), "{:?}", last.live);
+    assert!(
+        matches!(
+            last.process,
+            ascetic_ddd_scheduler::journal::Reading::Read(_)
+        ),
+        "{:?}",
+        last.process
+    );
     let reader = Reader::new(std::io::Cursor::new(bytes)).unwrap();
     let h = reader.header().clone();
     assert_eq!(h.namespace, 7);

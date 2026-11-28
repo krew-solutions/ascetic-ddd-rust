@@ -193,10 +193,25 @@ impl<X> Gated<RealClock, X> {
             Some(judging),
         );
         let journal = *admitted.journal();
-        // The run's sampler waits on its live counts, K2b-7e-2b-3e-2b's:
-        // until then its writer samples nothing.
-        let sink = Written::start(out, header, journal, None).map_err(RunError::Journal)?;
-        Ok(Ready::new(admitted, clock, sink, namespace))
+        // The run's memory sampled by its journal's writer, as admission priced
+        // it (ADR-0047 decision 22, K2b-7e-2b-3e): the loop's counts, the
+        // process's and its groups' files, the binding limit's depth.
+        let gauges = Arc::new(crate::sample::Gauges::default());
+        let sampler = journal.period().map(|period| {
+            crate::sample::Sampler::new(
+                clock.clone(),
+                gauges.clone(),
+                crate::sample::Roots::system(),
+                admitted
+                    .limit()
+                    .max()
+                    .and_then(|(_, depth)| u32::try_from(depth).ok()),
+                period,
+                namespace.0,
+            )
+        });
+        let sink = Written::start(out, header, journal, sampler).map_err(RunError::Journal)?;
+        Ok(Ready::new(admitted, clock, sink, namespace, gauges))
     }
 }
 

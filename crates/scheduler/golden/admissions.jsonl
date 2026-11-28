@@ -80,10 +80,6 @@
 {"case":"admission: rows apart","fold":null,"header":"37af4bc50d6c6ee5af2780bd11acbe6df13e657172562aad5d761cac7606d7cd","journal":11,"verdict":"pass","why":null}
 {"case":"admission: no source","fold":null,"header":"90a47793263023b245e2eb2ad46ac4adb49d7695659649e91c40ae8291bcb1ba","journal":11,"verdict":"pass","why":null}
 {"case":"admission: a test's runtimes","fold":null,"header":"162b91a5b5a814806e40c8c4b61fb18bd5df415ae0b2d3be1105265241d0d58f","journal":11,"verdict":"pass","why":null}
-{"case":"admitted by load-run: no-reader-host-carrier","fold":null,"header":"431bbf00b914bc12a09e8eaf98e6d6bfbb2728e8e8736fcecf7c6d2d9a0a2f2b","journal":11,"verdict":"pass","why":null}
-{"case":"admitted by load-run: nine-sources","fold":null,"header":"c77b820b7bad2a0922f5f7746b4c74dce7a6068c0251a598085cc62305648326","journal":11,"verdict":"pass","why":null}
-{"case":"admitted by load-run: one-rest-source","fold":null,"header":"4d085a2364cf4239d4d9598d2f9a17e4f038102f6b616435a499b1c59ae0aeae","journal":11,"verdict":"pass","why":null}
-{"case":"admitted by load-run: replayed-reader","fold":null,"header":"9a80f9197ef6b4eccfee73a9a15c7b014a4bbbda2bc1f686d25e178fb3bfc1d4","journal":11,"verdict":"pass","why":null}
 {"case":"admission: κ at 1000","fold":8,"header":"faa1f147fa1d709cc0d8843d69cf7edff1baf0cbb41d8f09973cac67e29a8811","journal":11,"verdict":"void:incoherent","why":"admission_kappa"}
 {"case":"admission: κ past 1000","fold":8,"header":"e433fc2b0563582b2e1f8d3aa9f9940e69c6756fd72e31d80c03f8cc1e7dd50f","journal":11,"verdict":"void:incoherent","why":"admission_kappa"}
 {"case":"admission: a part missing","fold":8,"header":"56c231228b45d28dbee692c3b220cd05c6f802d6698e3f039a9204009dc7b733","journal":11,"verdict":"void:incoherent","why":"admission_term_set"}
@@ -150,3 +146,7 @@
 {"case":"admission: an unheld pool and a max above the process's group","fold":8,"header":"b8ef3009c3ea8b041a4a1fee158311f1c890b053361f279070539dd9fdd7bd3a","journal":11,"verdict":"void:incoherent","why":"admission_scope"}
 {"case":"admission: a memory past the max","fold":8,"header":"c68812a9fbbf622869294a86ef6bada96146f94f72ad1edb79ddbc5ea80c522c","journal":11,"verdict":"void:incoherent","why":"admission_limit"}
 {"case":"admission: a memory past the high, below the max","fold":8,"header":"76add5472f3cad03d18784a7e1a73ef93c2fb99b28e5048dfc26bc49f16d92af","journal":11,"verdict":"void:incoherent","why":"admission_limit"}
+{"case":"admitted by load-run: no-reader-host-carrier","fold":null,"header":"986af21c7003248933ea1145fb412a66f0aa0fedceed7b4be4799a5865478ce3","journal":11,"verdict":"pass","why":null}
+{"case":"admitted by load-run: nine-sources","fold":null,"header":"c03c02b5626f96c8f931afa5ff68ae3d36bc456662b5b70f31982f7965130cee","journal":11,"verdict":"pass","why":null}
+{"case":"admitted by load-run: one-rest-source","fold":null,"header":"fd487abb5c98063c72081866028167bdd1e91d557e1d2acec3df8101d039bebd","journal":11,"verdict":"pass","why":null}
+{"case":"admitted by load-run: replayed-reader","fold":null,"header":"026ae2398d90b5b6877f361252e7368a0f1923dfc38cd8a8b9036e1aa4a4c051","journal":11,"verdict":"pass","why":null}

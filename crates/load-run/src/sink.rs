@@ -42,6 +42,11 @@ pub const OUT: usize = 256;
 /// waited on an empty channel).
 pub const THREAD: u64 = 2_048;
 
+/// The sampling period a journal takes by default, microseconds (ADR-0047
+/// decision 22, K2b-7e-2b-3e): a second, until measurements at a launch's
+/// states set it.
+pub const PERIOD: u64 = 1_000_000;
+
 /// The journal a run is admitted with (ADR-0047 decision 22, K2b-7e-2b-2b):
 /// the lines its channel holds behind the machine, at least one, and what its
 /// output holds on the heap, as its host states it. Admission holds it, and a
@@ -60,7 +65,16 @@ impl Journal {
         Journal {
             behind: behind.max(1),
             out,
+            sampling: Some(PERIOD),
+        }
+    }
+
+    /// The same, its writer sampling nothing: a run's journal with no memory
+    /// evidence — a host's choice, the sampler unpriced.
+    pub fn unsampled(self) -> Journal {
+        Journal {
             sampling: None,
+            ..self
         }
     }
 
@@ -172,6 +186,12 @@ enum Message {
 /// as truncated. Only the stages build a run's, from what admission holds.
 pub struct Written<W: Write + Send + 'static> {
     tx: mpsc::SyncSender<Message>,
+    /// Where a send that found the channel full is counted, and its wait
+    /// timed: its sampler's (ADR-0047 decision 22, K2b-7e-2b-3e).
+    meter: Option<(
+        std::sync::Arc<crate::sample::Gauges>,
+        std::sync::Arc<crate::clock::RealClock>,
+    )>,
     thread: Option<JoinHandle<Ended<W>>>,
     #[cfg_attr(not(feature = "testing"), allow(dead_code))]
     behind: usize,
@@ -191,6 +211,9 @@ impl<W: Write + Send + 'static> Written<W> {
         sampler: Option<crate::sample::Sampler>,
     ) -> Result<Written<W>, JournalError> {
         let writer = Writer::new(out, header)?;
+        let meter = sampler
+            .as_ref()
+            .map(|s| (s.gauges().clone(), s.clock().clone()));
         let (tx, rx) = mpsc::sync_channel::<Message>(journal.behind());
         let thread = std::thread::Builder::new()
             .name("load-run-journal".to_owned())
@@ -198,6 +221,7 @@ impl<W: Write + Send + 'static> Written<W> {
             .map_err(io)?;
         Ok(Written {
             tx,
+            meter,
             thread: Some(thread),
             behind: journal.behind(),
         })
@@ -250,9 +274,26 @@ impl<W: Write + Send + 'static> JournalSink for Written<W> {
     type Finished = (W, Trailer);
 
     fn line(&mut self, line: Line) -> Result<(), JournalError> {
+        use crate::clock::Clock as _;
+        let message = Message::Line(line);
+        // A send that finds the channel full is counted and its wait timed,
+        // where a sampler reads them.
+        let sent = match &self.meter {
+            Some((gauges, clock)) => match self.tx.try_send(message) {
+                Ok(()) => Ok(()),
+                Err(mpsc::TrySendError::Full(m)) => {
+                    let at = clock.now();
+                    let sent = self.tx.send(m).map_err(drop);
+                    gauges.waited(clock.now().saturating_sub(at));
+                    sent
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => Err(()),
+            },
+            None => self.tx.send(message).map_err(drop),
+        };
         // A writer gone failed on a line before: its error, now, so the run
         // stops within `behind` lines of it rather than at its end.
-        if self.tx.send(Message::Line(line)).is_err() {
+        if sent.is_err() {
             return Err(match self.join() {
                 Err(e) => e,
                 Ok(_) => io(std::io::Error::other("the journal's writer stopped")),

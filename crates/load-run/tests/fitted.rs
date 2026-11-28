@@ -97,6 +97,10 @@ struct Capped {
 }
 
 impl<C: Clock> Carrier<C> for Capped {
+    fn sockets(&self) -> Option<u64> {
+        None
+    }
+
     fn carries(&self, _: &Header) -> Result<(), String> {
         Ok(())
     }
@@ -370,6 +374,10 @@ struct Knobbed {
 }
 
 impl<C: Clock> Carrier<C> for Knobbed {
+    fn sockets(&self) -> Option<u64> {
+        None
+    }
+
     fn carries(&self, _: &Header) -> Result<(), String> {
         Ok(())
     }
@@ -474,6 +482,10 @@ fn the_carrier_s_ports_are_a_remedy() {
 fn a_carrier_s_map_is_its_needs_at_its_own_total() {
     struct Askew(Knobbed);
     impl<C: Clock> Carrier<C> for Askew {
+        fn sockets(&self) -> Option<u64> {
+            None
+        }
+
         fn carries(&self, h: &Header) -> Result<(), String> {
             Carrier::<C>::carries(&self.0, h)
         }

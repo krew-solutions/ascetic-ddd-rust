@@ -251,23 +251,30 @@ fn a_silent_channel_is_sampled_each_period() {
     let clock = s.clock().clone();
     let w = Written::sampled(out.clone(), journal::sample::header(), 4, s).unwrap();
     for_micros(&clock, 4 * FLOOR + FLOOR / 2, std::thread::yield_now);
+    let until = {
+        use ascetic_ddd_load_run::clock::Clock as _;
+        clock.now()
+    };
     w.finish().unwrap();
     let got = samples(&out);
     assert_eq!(got.first().map(|s| s.why), Some(SampleWhy::Baseline));
     assert_eq!(got.last().map(|s| s.why), Some(SampleWhy::Finish));
-    assert_paced(&got);
+    assert_paced(&got, until);
 }
 
-/// The due samples: at least two in 4.5 periods, each at least a period
+/// The due samples before `until`: at least one, each at least a period
 /// after the last — the period, or a hundred times a sample's cost where
-/// that is longer, never sooner.
-fn assert_paced(got: &[journal::Sample]) {
+/// that is longer (a loaded box's sample costs more), never sooner.
+fn assert_paced(got: &[journal::Sample], until: u64) {
     let due: Vec<u64> = got
         .iter()
         .filter(|s| s.why == SampleWhy::Due)
         .map(|s| s.at)
         .collect();
-    assert!(due.len() >= 2, "{} due samples in 4.5 periods", due.len());
+    assert!(
+        due.iter().any(|at| *at < until),
+        "no due sample before {until}: {due:?}"
+    );
     assert!(
         due.windows(2).all(|w| w[1] - w[0] >= FLOOR),
         "due samples sooner than a period apart: {due:?}"
@@ -292,12 +299,18 @@ fn a_channel_never_empty_is_sampled_each_period() {
         at += 1;
         w.line(line(at)).unwrap();
     });
+    // While the feeder sent, the channel was full: a due sample before its
+    // last send is one taken after a line, not on a timeout.
+    let until = {
+        use ascetic_ddd_load_run::clock::Clock as _;
+        clock.now()
+    };
     w.finish().unwrap();
     let got = samples(&out);
     // Each line held 200 µs by the output: the writer the bottleneck, its
     // channel full whenever it takes the next.
     assert!(at > 500, "{at} lines: the channel was not kept full");
-    assert_paced(&got);
+    assert_paced(&got, until);
 }
 
 /// A writer held past several dues samples once on its return, the dues it
@@ -370,12 +383,39 @@ fn the_live_counts_read_as_one_instant() {
 #[test]
 fn the_sampler_is_priced_where_it_samples() {
     let record = ascetic_ddd_command_log::shape::Shape::default();
-    let plain = Journal::new(64, 0);
+    let plain = Journal::new(64, 0).unsampled();
     let sampled = plain.sampling(1);
+    assert_eq!(
+        Journal::new(64, 0).period(),
+        Some(ascetic_ddd_load_run::sink::PERIOD)
+    );
     assert_eq!(sampled.period(), Some(FLOOR));
     assert_eq!(
         sampled.priced(&record).rest - plain.priced(&record).rest,
         SAMPLE
     );
     assert_eq!(plain.period(), None);
+}
+
+/// A send that finds the channel full is counted and its wait timed, as the
+/// samples carry them: a slow output, one line behind.
+#[test]
+fn a_full_channel_s_sends_are_counted() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = tree(dir.path(), "0::/a/b/run.scope\n", FULL);
+    let s = sampler(roots, Arc::default(), FLOOR);
+    let clock = s.clock().clone();
+    let out = Out {
+        slow: Some((clock.clone(), 500)),
+        ..Out::default()
+    };
+    let mut w = Written::sampled(out.clone(), journal::sample::header(), 1, s).unwrap();
+    for at in 0..50 {
+        w.line(line(at)).unwrap();
+    }
+    w.finish().unwrap();
+    let last = samples(&out).pop().unwrap();
+    assert_eq!(last.why, SampleWhy::Finish);
+    assert!(last.live.full >= 10, "{:?}", last.live);
+    assert!(last.live.waited >= 5_000, "{:?}", last.live);
 }

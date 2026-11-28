@@ -248,6 +248,12 @@ pub trait Carrier<C: Clock>: Send + Sync + 'static {
     /// carrier with no stand, none.
     fn gate_bytes(&self) -> crate::stand::GateBytes;
 
+    /// The sockets it holds open now, by its own word (ADR-0047 decision 22,
+    /// K2b-7e-2b-3e): the run's samples journal it beside the kernel's socket
+    /// memory; none only where it says it holds none it counts. Required, so
+    /// that a carrier states it or says why not.
+    fn sockets(&self) -> Option<u64>;
+
     /// Its egress's total of ports, the knob a memory refusal's remedy names
     /// (ADR-0047 decision 22, K2b-7e-2b-3d-2); none for a carrier with no
     /// such knob.

@@ -201,6 +201,11 @@ impl Sampler {
         &self.clock
     }
 
+    /// The counts it reads, which the journal's sends add to.
+    pub fn gauges(&self) -> &Arc<Gauges> {
+        &self.gauges
+    }
+
     /// A sample now, for `why`; a due one sets the next due instant past it,
     /// the dues it passed counted, none caught up.
     pub fn sample(&mut self, why: SampleWhy) -> Sample {

@@ -293,7 +293,9 @@ fn a_journal_holds_what_it_states() {
     let mut levels = Vec::new();
     for behind in [64, 128, 4, 1, 0] {
         let (held, peak) = held(behind, &line);
-        let stated = Journal::new(behind, OUT_HEAP as u64).bytes(&s);
+        // A test's journal samples nothing (`Written::assumed`): its price
+        // without the sampler's.
+        let stated = Journal::new(behind, OUT_HEAP as u64).unsampled().bytes(&s);
         eprintln!(
             "MEASURED a journal {behind} behind, lines of {bound} B: held {held}, peak {peak}, stated {stated} ({:.1} %)",
             100.0 * held as f64 / stated as f64
@@ -309,7 +311,7 @@ fn a_journal_holds_what_it_states() {
         levels.push((behind, held));
     }
     let at = |b: usize| levels.iter().find(|(x, _)| *x == b).unwrap().1;
-    let stated = |b: usize| Journal::new(b, OUT_HEAP as u64).bytes(&s);
+    let stated = |b: usize| Journal::new(b, OUT_HEAP as u64).unsampled().bytes(&s);
     // Within what the thread's own may differ by between runs — whether its
     // writer waited on an empty channel, 72 B —, less than a slot's stamp
     // over 64 slots.

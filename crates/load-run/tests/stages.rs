@@ -127,6 +127,10 @@ struct Gated {
 }
 
 impl Carrier<VirtualClock> for Gated {
+    fn sockets(&self) -> Option<u64> {
+        None
+    }
+
     fn carries(&self, _: &Header) -> Result<(), String> {
         Ok(())
     }

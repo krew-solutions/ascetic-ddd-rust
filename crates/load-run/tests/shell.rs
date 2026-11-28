@@ -233,6 +233,10 @@ struct Forgetful {
 }
 
 impl Carrier<VirtualClock> for Forgetful {
+    fn sockets(&self) -> Option<u64> {
+        None
+    }
+
     fn carries(&self, _: &Header) -> Result<(), String> {
         Ok(())
     }
@@ -308,6 +312,10 @@ fn an_attempt_dropped_unended_is_a_harness_fault() {
 struct Refusing;
 
 impl Carrier<VirtualClock> for Refusing {
+    fn sockets(&self) -> Option<u64> {
+        None
+    }
+
     fn carries(&self, _: &Header) -> Result<(), String> {
         Err("no such transport".to_owned())
     }
@@ -672,6 +680,10 @@ struct Judging {
 }
 
 impl<C: Clock> Carrier<C> for Judging {
+    fn sockets(&self) -> Option<u64> {
+        None
+    }
+
     fn carries(&self, _: &Header) -> Result<(), String> {
         Ok(())
     }
@@ -840,6 +852,10 @@ fn a_late_hand_off_is_journaled() {
     let records = [call("read", 1, 0, 0, 0), call("read", 2, 0, 0, 0)];
     struct Blocking;
     impl<C: Clock> Carrier<C> for Blocking {
+        fn sockets(&self) -> Option<u64> {
+            None
+        }
+
         fn carries(&self, _: &Header) -> Result<(), String> {
             Ok(())
         }
@@ -1192,6 +1208,10 @@ impl Clock for Poisoning {
 struct Poisoner;
 
 impl Carrier<Poisoning> for Poisoner {
+    fn sockets(&self) -> Option<u64> {
+        None
+    }
+
     fn carries(&self, _: &Header) -> Result<(), String> {
         Ok(())
     }
@@ -1290,6 +1310,10 @@ fn a_poisoned_lock_stops_the_run() {
 struct Lingering;
 
 impl Carrier<VirtualClock> for Lingering {
+    fn sockets(&self) -> Option<u64> {
+        None
+    }
+
     fn carries(&self, _: &Header) -> Result<(), String> {
         Ok(())
     }
@@ -1400,6 +1424,10 @@ fn a_saturated_source_stops_the_run() {
 struct Leaving;
 
 impl Carrier<VirtualClock> for Leaving {
+    fn sockets(&self) -> Option<u64> {
+        None
+    }
+
     fn carries(&self, _: &Header) -> Result<(), String> {
         Ok(())
     }
@@ -1486,6 +1514,10 @@ fn a_source_with_no_runtime_stops_the_run_at_its_dispatch() {
 struct Twice;
 
 impl Carrier<VirtualClock> for Twice {
+    fn sockets(&self) -> Option<u64> {
+        None
+    }
+
     fn carries(&self, _: &Header) -> Result<(), String> {
         Ok(())
     }
@@ -1680,6 +1712,10 @@ fn a_carrier_s_captures_within_the_specs_are_taken() {
 struct Minting;
 
 impl Carrier<VirtualClock> for Minting {
+    fn sockets(&self) -> Option<u64> {
+        None
+    }
+
     fn carries(&self, _: &Header) -> Result<(), String> {
         Ok(())
     }

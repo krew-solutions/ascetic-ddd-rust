@@ -30,6 +30,10 @@ impl Scripted {
 }
 
 impl<C: Clock> Carrier<C> for Scripted {
+    fn sockets(&self) -> Option<u64> {
+        None
+    }
+
     fn carries(&self, _: &Header) -> Result<(), String> {
         Ok(())
     }

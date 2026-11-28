@@ -252,6 +252,10 @@ struct Drill {
 }
 
 impl<C: Clock> Carrier<C> for Drill {
+    fn sockets(&self) -> Option<u64> {
+        None
+    }
+
     fn carries(&self, _: &Header) -> Result<(), String> {
         Ok(())
     }

@@ -1386,6 +1386,9 @@ pub struct Ready<C, X, K> {
     clock: Arc<C>,
     sink: K,
     namespace: Namespace,
+    /// The loop's live counts, for its journal's sampler (ADR-0047 decision
+    /// 22, K2b-7e-2b-3e).
+    gauges: Arc<crate::sample::Gauges>,
 }
 
 impl<C, X, K> Ready<C, X, K> {
@@ -1394,13 +1397,22 @@ impl<C, X, K> Ready<C, X, K> {
         clock: Arc<C>,
         sink: K,
         namespace: Namespace,
+        gauges: Arc<crate::sample::Gauges>,
     ) -> Ready<C, X, K> {
         Ready {
             admitted,
             clock,
             sink,
             namespace,
+            gauges,
         }
+    }
+
+    /// The loop's live counts, as its journal's sampler reads them: a test's
+    /// view.
+    #[cfg(feature = "testing")]
+    pub fn gauges(&self) -> &Arc<crate::sample::Gauges> {
+        &self.gauges
     }
 
     /// A test's: `admitted` run by `clock` into `sink` under `namespace`,
@@ -1412,7 +1424,7 @@ impl<C, X, K> Ready<C, X, K> {
         sink: K,
         namespace: Namespace,
     ) -> Ready<C, X, K> {
-        Ready::new(admitted, clock, sink, namespace)
+        Ready::new(admitted, clock, sink, namespace, Arc::default())
     }
 
     /// Its journal's sink: a test's view of what the stages built.
@@ -1477,6 +1489,7 @@ where
         clock,
         mut sink,
         namespace,
+        gauges,
     } = ready;
     let Admitted {
         header,
@@ -1537,16 +1550,27 @@ where
         // go between them, and the run end with its answer unread. A fault
         // is read with them: an attempt raises its own before it leaves the
         // count (decision 18), so none alive is never read without it.
-        let (now, work, floor, oldest, alive) = {
+        let (now, work, floor, oldest, alive, past) = {
             let (g, now) = stamps.lock();
             let f = &g.frontier;
             let work = [f.next_pushed(), f.next_deadline()]
                 .into_iter()
                 .flatten()
                 .min();
-            (now, work, f.floor(), f.oldest_hold(), g.alive())
+            (now, work, f.floor(), f.oldest_hold(), g.alive(), g.past(now))
         };
         let (alive, oldest_deadline) = alive?;
+        // The turn's counts, one instant's, for the journal's sampler
+        // (ADR-0047 decision 22, K2b-7e-2b-3e).
+        let turn = crate::sample::Turn {
+            turn: now,
+            wakes: None,
+            pending: u64::try_from(live.len()).unwrap_or(u64::MAX),
+            past_deadline: past,
+            alive: u64::try_from(alive).unwrap_or(u64::MAX),
+            sockets: carrier.sockets(),
+        };
+        gauges.store(turn);
         // An attempt outliving its deadline by the route timeout: a source
         // that cannot keep up (decision 19) — by age, not count: any number
         // of steps may share a deadline, each alive until its last look.
@@ -1607,6 +1631,10 @@ where
             if sleep.is_some_and(|s| s <= now) {
                 return Err(Harness::Stalled { at: now }.into());
             }
+            gauges.store(crate::sample::Turn {
+                wakes: sleep,
+                ..turn
+            });
             tokio::select! {
                 biased;
                 () = stamps.notified() => {}

@@ -258,6 +258,18 @@ impl<S: Stand, E: Egress, D: Decorator> RestCarrier<S, E, D> {
 }
 
 impl<C: Clock, S: Stand, E: Egress, D: Decorator> Carrier<C> for RestCarrier<S, E, D> {
+    /// Its sources' sockets open now, summed: its own count of what its
+    /// caps hold (ADR-0047 decision 22, K2b-7e-2b-3e).
+    fn sockets(&self) -> Option<u64> {
+        Some(
+            self.inner
+                .sockets
+                .iter()
+                .map(|s| u64::try_from(s.open()).unwrap_or(u64::MAX))
+                .fold(0, u64::saturating_add),
+        )
+    }
+
     fn carries(&self, header: &Header) -> Result<(), String> {
         // The plan's header, not one of its own (decision 20).
         if !std::ptr::eq(header, &*self.inner.header) {

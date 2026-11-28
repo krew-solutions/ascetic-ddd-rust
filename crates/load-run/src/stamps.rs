@@ -219,6 +219,17 @@ impl State {
     /// The fault raised, or else how many attempt handles are alive and the
     /// earliest deadline among them: the count is never read without the
     /// fault (decision 18).
+    /// The alive handles past their deadline at `now` — a deadline before it
+    /// — counted inside the lock the turn already holds (ADR-0047 decision
+    /// 22, K2b-7e-2b-3e): the samples' `past_deadline`, not admission's
+    /// `late`.
+    pub(crate) fn past(&self, now: u64) -> u64 {
+        self.deadlines
+            .range(..now)
+            .map(|(_, n)| u64::try_from(*n).unwrap_or(u64::MAX))
+            .fold(0, u64::saturating_add)
+    }
+
     pub(crate) fn alive(&self) -> Result<(usize, Option<u64>), Harness> {
         match &self.fault {
             Some(f) => Err(f.clone()),
@@ -1068,6 +1079,35 @@ fn kept(record: &Record, judgement: Judgement) -> Result<Judgement, (&'static st
 #[cfg(test)]
 mod tests {
     use super::{ATTEMPT, CONNECTION, Feeds, OFF, Path, Stamps};
+
+    /// K2b-7e-2b-3e-2b: the handles past their deadline are those whose
+    /// deadline is before now — none at it —, each counted, two on one
+    /// deadline two.
+    #[test]
+    fn the_handles_past_their_deadline_are_those_before_now() {
+        use std::sync::Arc;
+
+        use crate::clock::RealClock;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let stamps = Stamps::new(
+                Arc::new(RealClock::start(0).unwrap()),
+                ascetic_ddd_command_log::fills::Namespace(0),
+            );
+            let (mut g, _) = stamps.lock();
+            g.enter(10);
+            g.enter(10);
+            g.enter(20);
+            assert_eq!(
+                [g.past(10), g.past(11), g.past(20), g.past(21)],
+                [0, 2, 2, 3]
+            );
+            g.leave(10, None);
+            assert_eq!(g.past(21), 2);
+        });
+    }
 
     /// Decision 22: a task lets go of its handle as it ends — after a burst
     /// of tasks all ended, and one aborted, none is kept, though no spawn
