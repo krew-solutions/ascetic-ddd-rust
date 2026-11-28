@@ -72,9 +72,9 @@ done
 done
 endef
 
-.PHONY: all stand check clippy doc test test-pg host-features test-vault test-kafka proofs proofs-groups traces fmt help
+.PHONY: all stand check clippy doc test test-pg host-features vectors append-only test-vault test-kafka proofs proofs-groups traces fmt help
 
-all: check clippy doc test test-pg host-features ## everything CI runs on a push: a PostgreSQL beside it
+all: check clippy doc test test-pg host-features vectors ## everything CI runs on a push: a PostgreSQL beside it
 
 stand: all test-vault test-kafka ## every tier a full stand serves: PostgreSQL, Vault and Kafka
 
@@ -100,11 +100,28 @@ test-pg: ## the tests ignored for want of PostgreSQL, at ASCETIC_DDD_TEST_PG_URL
 # of its own, since this one tests with `--all-features`.
 HOST_FEATURES := --manifest-path verify/inbox-features/Cargo.toml
 
-host-features: ## the stream id's golden table and properties under serde_json's arbitrary_precision and preserve_order, then raw_value too (verify/inbox-features)
+host-features: ## the stream id's golden table and properties, the command log's golden log and the scheduler's golden journal, under serde_json's arbitrary_precision and preserve_order, then raw_value too (verify/inbox-features)
 	$(CARGO) fmt $(HOST_FEATURES) -- --check
 	$(CARGO) clippy $(HOST_FEATURES) --all-targets --all-features -- -D warnings
 	$(CARGO) test $(HOST_FEATURES)
 	$(CARGO) test $(HOST_FEATURES) --features raw_value
+
+vectors: ## byte forms checked outside the crates, python3's standard library only: faker's SipHash against the reference implementation's published vector, the command log's golden log and the scheduler's golden journal and golden runs and load-run's pinned headers against their normative schemas and their trailers, its renderings against golden/render.txt, its REST frames against golden/frames.txt, the scheduler's judgements against golden/judgements.txt, its compressed logs through the zstd CLI
+	python3 -I crates/faker/vectors/key_vectors.py > /dev/null
+	python3 -I crates/command-log/vectors/format.py crates/command-log/golden/c1.jsonl
+	python3 -I crates/scheduler/vectors/journal.py crates/scheduler/golden/journal.jsonl
+	for f in crates/scheduler/golden/runs/*.jsonl; do python3 -I crates/scheduler/vectors/journal.py $$f > /dev/null || exit 1; done
+	for f in crates/load-run/golden/admitted/*.jsonl; do python3 -I crates/scheduler/vectors/journal.py $$f > /dev/null || exit 1; done
+	python3 -I crates/command-log/vectors/render.py | diff - crates/command-log/golden/render.txt
+	python3 -I crates/command-log/vectors/request.py | diff - crates/command-log/golden/frames.txt
+	python3 -I crates/scheduler/vectors/judge.py | diff - crates/scheduler/golden/judgements.txt
+	$(CARGO) run -q -p ascetic-ddd-command-log --example zstd_golden | zstd -dc | cmp - crates/command-log/golden/c1.jsonl
+	zstd -dc crates/command-log/golden/c1.jsonl.zst | cmp - crates/command-log/golden/c1.jsonl
+
+BASE ?= origin/main
+
+append-only: ## the pinned results' files appended to, never edited, against git revision BASE (origin/main by default): CI runs it against the branch's base
+	python3 -I crates/scheduler/vectors/append_only.py $(BASE) crates/scheduler/golden/admissions.jsonl
 
 test-vault: ## the tests ignored for want of a Vault dev server, at ASCETIC_DDD_TEST_VAULT_ADDR
 	$(call run_ignored,$(NEEDS_VAULT))
@@ -140,6 +157,7 @@ traces: ## the traces recorded again by the live tests at ASCETIC_DDD_TEST_PG_UR
 	trap 'rm -rf "$$recorded"' EXIT
 	ASCETIC_DDD_TRACE_DIR="$$recorded" $(CARGO) test -p ascetic-ddd-outbox -p ascetic-ddd-inbox \
 	  --all-features --test pg --test bridge --test outage -- --include-ignored --test-threads=1
+	ASCETIC_DDD_TRACE_DIR="$$recorded" $(CARGO) test -p ascetic-ddd-scheduler --test trace
 	gone=0
 	for kept in verify/tla/traces/*.jsonl; do
 	  if [ -f "$$recorded/$${kept##*/}" ]; then cp "$$recorded/$${kept##*/}" "$$kept"

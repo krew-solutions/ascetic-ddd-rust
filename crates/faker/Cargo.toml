@@ -1,0 +1,33 @@
+[package]
+name = "ascetic-ddd-faker"
+description = "Generated data for load tests: every value drawn from the key of its identity, by stated laws, on any number of threads."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[features]
+# The key audit (ADR-0045, C1 and M2): every derivation and draw counted in a
+# thread-local ledger while `testing::audit` runs. For tests, the crate's and a
+# host's; off, it compiles to nothing.
+audit = []
+
+[dependencies]
+# Pinned exactly: the PRF is part of every generated value, so a host's lock
+# must not move it (ADR-0045 decision 2).
+siphasher = { version = "=1.0.3", default-features = false }
+# Pinned exactly, for the same reason: every quantile goes through it
+# (ADR-0045 decision 3). Without `arch`; on x86_64 that feature replaces only
+# `sqrt` and `fma`, both correctly rounded, so a host that enables it changes
+# no value.
+libm = { version = "=0.2.16", default-features = false }
+uuid = { version = "1", default-features = false }
+
+[dev-dependencies]
+proptest = "1.11.0"

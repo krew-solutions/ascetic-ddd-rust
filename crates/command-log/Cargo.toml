@@ -1,0 +1,35 @@
+[package]
+name = "ascetic-ddd-command-log"
+description = "The planned steps of a load, in the order of their planned time: records, holes, a canonical byte form, a validator, a generation engine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[dependencies]
+ascetic-ddd-faker = { path = "../faker" }
+base64 = "0.22"
+# The machine's limits and filesystems, safely (ADR-0046 decision 15): free
+# space, a filesystem's kind, the open-file limit.
+rustix = { version = "=1.1.6", default-features = false, features = ["std", "fs", "process"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+# The order-independent digest of a generation's lines (ADR-0046 decision 15):
+# the same pinned SipHash as faker's keys.
+siphasher = "=1.0.3"
+# libzstd, bundled and built by cc (ADR-0046 decision 15): logs and spills.
+zstd = { version = "=0.14.4", default-features = false }
+
+[dev-dependencies]
+# SIGXFSZ ignored in the partial-write executor, so a write past RLIMIT_FSIZE
+# fails with EFBIG instead of killing the test.
+libc = "=0.2.189"
+proptest = "1.11.0"
+tempfile = "3"

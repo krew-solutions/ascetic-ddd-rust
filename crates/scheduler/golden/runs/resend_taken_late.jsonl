@@ -1,0 +1,8 @@
+{"header":{"journal":11,"machine":5,"source":"verdict","log":"e24ca81e5fa1cdbfc08c2da83b3df332fbe2320c6f2db572043ca5bd8258ab73","validator":"a test's validator","read_ahead":"1000","jitter":"200","resend":"100","catch_up":0,"namespace":"1","t0":"1763640000000000","gates":[],"judging":null,"admission":null}}
+{"read":{"at":"0","line":"2","key":{"kind":"device","scope":"Bw==","label":"read","n":0},"action":"rest","safety":"not_taken","cause":null,"after":[],"planned":"0","refusal":false}}
+{"released":{"at":"0","line":"2","intended":"0","released":"0","deadline":"311"}}
+{"dispatch":{"at":"0","line":"2","attempt":1,"deadline":"311","due":"0"}}
+{"sent":{"at":"0","line":"2","attempt":1,"decorated":"0","handed":"0","connected":"0","lag":"0"}}
+{"answer":{"at":"10","line":"2","attempt":1,"judged":"not_taken","captured":[],"ignored":null,"status":null,"code":null,"after":null,"censored":false,"found":null,"unsent":null}}
+{"end":{"at":"112","line":"2","end":"unexpected","read":"0","ready":"0","intended":"0","released":"0","dispatched":"0","sent":"0","ended":"112","attempts":1,"critical":null,"bound":[],"fault":false,"wake":"110"}}
+{"trailer":{"events":"6","steps":"1","sha256":"fa4ad284b4722be308ce0e1ebb6a52ab13266e3cdeb6adcc43df318cdc616b4d"}}

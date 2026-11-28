@@ -1,0 +1,26 @@
+{"header":{"journal":11,"machine":5,"source":"verdict","log":"2a272881dd5b2e795f2cf483a9a3f9c987ab5c3f136ec138f2d32cb42e4fbbef","validator":"a test's validator","read_ahead":"1000","jitter":"200","resend":"100","catch_up":0,"namespace":"1","t0":"1763640000000000","gates":[],"judging":null,"admission":null}}
+{"read":{"at":"0","line":"2","key":{"kind":"device","scope":"Bw==","label":"read","n":0},"action":"rest","safety":"never","cause":null,"after":[],"planned":"0","refusal":false}}
+{"released":{"at":"0","line":"2","intended":"0","released":"0","deadline":"10000000"}}
+{"dispatch":{"at":"0","line":"2","attempt":1,"deadline":"10000000","due":"0"}}
+{"sent":{"at":"0","line":"2","attempt":1,"decorated":"0","handed":"0","connected":"0","lag":"0"}}
+{"read":{"at":"0","line":"3","key":{"kind":"device","scope":"Bw==","label":"read","n":0},"action":"rest","safety":"never","cause":null,"after":[],"planned":"10","refusal":false}}
+{"released":{"at":"0","line":"3","intended":"10","released":"10","deadline":"10000010"}}
+{"read":{"at":"0","line":"4","key":{"kind":"device","scope":"Bw==","label":"update","n":0},"action":"rest","safety":"never","cause":null,"after":[],"planned":"50","refusal":false}}
+{"released":{"at":"0","line":"4","intended":"50","released":"50","deadline":"10000050"}}
+{"read":{"at":"0","line":"5","key":{"kind":"device","scope":"Bw==","label":"report","n":0},"action":"host","safety":"idempotent","cause":null,"after":[{"each":{"on":"settled","key":{"kind":"device","scope":"Bw==","label":"read","n":0},"members":"2"}},{"step":{"on":"sent","line":"4"}}],"planned":"200","refusal":false}}
+{"dispatch":{"at":"10","line":"3","attempt":1,"deadline":"10000010","due":"10"}}
+{"sent":{"at":"10","line":"3","attempt":1,"decorated":"10","handed":"10","connected":"10","lag":"0"}}
+{"dispatch":{"at":"50","line":"4","attempt":1,"deadline":"10000050","due":"50"}}
+{"sent":{"at":"50","line":"4","attempt":1,"decorated":"50","handed":"50","connected":"50","lag":"0"}}
+{"answer":{"at":"60","line":"3","attempt":1,"judged":"unknown","captured":[],"ignored":null,"status":null,"code":null,"after":null,"censored":false,"found":null,"unsent":null}}
+{"end":{"at":"60","line":"3","end":"unknown","read":"0","ready":"0","intended":"10","released":"10","dispatched":"10","sent":"10","ended":"60","attempts":1,"critical":null,"bound":[],"fault":false,"wake":null}}
+{"answer":{"at":"100","line":"2","attempt":1,"judged":"expected","captured":[],"ignored":null,"status":null,"code":null,"after":null,"censored":false,"found":null,"unsent":null}}
+{"end":{"at":"100","line":"2","end":"expected","read":"0","ready":"0","intended":"0","released":"0","dispatched":"0","sent":"0","ended":"100","attempts":1,"critical":null,"bound":[],"fault":false,"wake":null}}
+{"released":{"at":"100","line":"5","intended":"200","released":"200","deadline":"10000200"}}
+{"answer":{"at":"150","line":"4","attempt":1,"judged":"expected","captured":[],"ignored":null,"status":null,"code":null,"after":null,"censored":false,"found":null,"unsent":null}}
+{"end":{"at":"150","line":"4","end":"expected","read":"0","ready":"0","intended":"50","released":"50","dispatched":"50","sent":"50","ended":"150","attempts":1,"critical":null,"bound":[],"fault":false,"wake":null}}
+{"dispatch":{"at":"200","line":"5","attempt":1,"deadline":"10000200","due":"200"}}
+{"sent":{"at":"200","line":"5","attempt":1,"decorated":"200","handed":"200","connected":"200","lag":"0"}}
+{"answer":{"at":"300","line":"5","attempt":1,"judged":"expected","captured":[],"ignored":null,"status":null,"code":null,"after":null,"censored":false,"found":null,"unsent":null}}
+{"end":{"at":"300","line":"5","end":"expected","read":"0","ready":"100","intended":"200","released":"200","dispatched":"200","sent":"200","ended":"300","attempts":1,"critical":{"member":"2"},"bound":["4"],"fault":false,"wake":null}}
+{"trailer":{"events":"24","steps":"4","sha256":"238babbc4ed86fa5e493038a2b46dfb74a4274ae3a3f98f775cd3a42e2869fae"}}

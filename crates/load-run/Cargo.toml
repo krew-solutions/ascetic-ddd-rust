@@ -1,0 +1,46 @@
+[package]
+name = "ascetic-ddd-load-run"
+description = "The scheduler's shell: a command log run against a stand — the clock, the frontier's lock, the machine's loop, the attempts and the journal."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[features]
+# The virtual clock (ADR-0047 decision 16): tokio's paused time as the idle
+# signal, for the shell's tests and a host's own.
+testing = ["tokio/test-util"]
+
+# The shell's dependencies are an allowlist (ADR-0047 decision 16): HTTP over
+# hyper's own connection, no pool or client of anyone else's, no TLS.
+# `tests/allowlist.rs` holds this list; it grows slice by slice.
+[dependencies]
+ascetic-ddd-command-log = { path = "../command-log" }
+ascetic-ddd-scheduler = { path = "../scheduler" }
+bytes = "1.12.1"
+http = "1.5.0"
+http-body = "1.1.0"
+# hyper's own HTTP/1.1 connection: no client, no pool, no TLS of its.
+hyper = { version = "1.11.1", features = ["client", "http1"] }
+tokio = { version = "1.53.1", features = ["macros", "net", "rt", "sync", "time"] }
+
+# A thread's voluntary context switches: whether a runtime's park blocked
+# (ADR-0047 decision 18). Linux only; elsewhere the lag is over-counted.
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.30.1", default-features = false, features = ["resource"] }
+
+[dev-dependencies]
+# The command log's test fixture and corpus, shared by path.
+ascetic-ddd-faker = { path = "../faker" }
+ascetic-ddd-load-run = { path = ".", features = ["testing"] }
+proptest = "1.11.0"
+serde_json = { workspace = true }
+sha2 = "0.10"
+tempfile = "3"
+tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "test-util", "time"] }

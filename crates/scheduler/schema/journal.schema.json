@@ -1,0 +1,2298 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/krew-solutions/ascetic-ddd-rust/crates/scheduler/schema/journal.schema.json",
+  "title": "A line of a scheduler's journal (ADR-0047 decision 14), version 11",
+  "description": "Normative. Every object's properties are listed in the order a line writes them: the canonical order. A line is the compact JSON of one of these, then a newline; the first line is a header and only it, the last a trailer, whose sha256 is of every line before it and events the number of lines between the two. Every u64 is a decimal string.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "header": {
+          "$ref": "#/$defs/header"
+        }
+      },
+      "required": [
+        "header"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "read": {
+          "$ref": "#/$defs/read"
+        }
+      },
+      "required": [
+        "read"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "released": {
+          "$ref": "#/$defs/released"
+        }
+      },
+      "required": [
+        "released"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "dispatch": {
+          "$ref": "#/$defs/dispatch"
+        }
+      },
+      "required": [
+        "dispatch"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "sent": {
+          "$ref": "#/$defs/sent"
+        }
+      },
+      "required": [
+        "sent"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "answer": {
+          "$ref": "#/$defs/answer"
+        }
+      },
+      "required": [
+        "answer"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "end": {
+          "$ref": "#/$defs/ended"
+        }
+      },
+      "required": [
+        "end"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "fault": {
+          "$ref": "#/$defs/fault"
+        }
+      },
+      "required": [
+        "fault"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "sample": {
+          "$ref": "#/$defs/sample"
+        }
+      },
+      "required": [
+        "sample"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "trailer": {
+          "$ref": "#/$defs/trailer"
+        }
+      },
+      "required": [
+        "trailer"
+      ],
+      "additionalProperties": false
+    }
+  ],
+  "$defs": {
+    "u64": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$"
+    },
+    "u32": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "b64": {
+      "type": "string",
+      "pattern": "^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+    },
+    "name": {
+      "type": "string"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "on": {
+      "enum": [
+        "sent",
+        "expected",
+        "settled"
+      ]
+    },
+    "action": {
+      "enum": [
+        "rest",
+        "bus",
+        "observe",
+        "poll",
+        "host"
+      ]
+    },
+    "judged": {
+      "enum": [
+        "expected",
+        "unexpected",
+        "not_taken",
+        "unknown"
+      ]
+    },
+    "ignored": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "enum": [
+            "ended",
+            "stale",
+            "late"
+          ]
+        }
+      ]
+    },
+    "fault_class": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "backstop": {
+              "type": "object",
+              "properties": {
+                "line": {
+                  "$ref": "#/$defs/u64"
+                }
+              },
+              "required": [
+                "line"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "backstop"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "below": {
+              "type": "object",
+              "properties": {
+                "stamp": {
+                  "$ref": "#/$defs/u64"
+                },
+                "released": {
+                  "$ref": "#/$defs/u64"
+                }
+              },
+              "required": [
+                "stamp",
+                "released"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "below"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "disordered": {
+              "type": "object",
+              "properties": {
+                "stamp": {
+                  "$ref": "#/$defs/u64"
+                },
+                "last": {
+                  "$ref": "#/$defs/u64"
+                }
+              },
+              "required": [
+                "stamp",
+                "last"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "disordered"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "backdated": {
+              "type": "object",
+              "properties": {
+                "stamp": {
+                  "$ref": "#/$defs/u64"
+                },
+                "now": {
+                  "$ref": "#/$defs/u64"
+                }
+              },
+              "required": [
+                "stamp",
+                "now"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "backdated"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "dropped": {
+              "type": "object",
+              "properties": {
+                "line": {
+                  "$ref": "#/$defs/u64"
+                },
+                "attempt": {
+                  "$ref": "#/$defs/u32"
+                }
+              },
+              "required": [
+                "line",
+                "attempt"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "dropped"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "carrier": {
+              "type": "object",
+              "properties": {
+                "line": {
+                  "$ref": "#/$defs/u64"
+                },
+                "attempt": {
+                  "$ref": "#/$defs/u32"
+                },
+                "cannot": {
+                  "$ref": "#/$defs/name_code"
+                }
+              },
+              "required": [
+                "line",
+                "attempt",
+                "cannot"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "carrier"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "held": {
+              "type": "object",
+              "properties": {
+                "line": {
+                  "$ref": "#/$defs/u64"
+                },
+                "attempt": {
+                  "$ref": "#/$defs/u32"
+                },
+                "since": {
+                  "$ref": "#/$defs/u64"
+                }
+              },
+              "required": [
+                "line",
+                "attempt",
+                "since"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "held"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "const": "stalled"
+        },
+        {
+          "const": "poisoned"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "saturated": {
+              "type": "object",
+              "properties": {
+                "alive": {
+                  "$ref": "#/$defs/u64"
+                }
+              },
+              "required": [
+                "alive"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "saturated"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "const": "clock"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "log": {
+              "$ref": "#/$defs/log_fault"
+            }
+          },
+          "required": [
+            "log"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "gate": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "$ref": "#/$defs/name_code"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "gate"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "key": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/name"
+        },
+        "scope": {
+          "$ref": "#/$defs/b64"
+        },
+        "label": {
+          "$ref": "#/$defs/name"
+        },
+        "n": {
+          "$ref": "#/$defs/u32"
+        }
+      },
+      "required": [
+        "kind",
+        "scope",
+        "label",
+        "n"
+      ],
+      "additionalProperties": false
+    },
+    "dep": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "step": {
+              "type": "object",
+              "properties": {
+                "on": {
+                  "$ref": "#/$defs/on"
+                },
+                "line": {
+                  "$ref": "#/$defs/u64"
+                }
+              },
+              "required": [
+                "on",
+                "line"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "step"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "each": {
+              "type": "object",
+              "properties": {
+                "on": {
+                  "$ref": "#/$defs/on"
+                },
+                "key": {
+                  "$ref": "#/$defs/key"
+                },
+                "members": {
+                  "$ref": "#/$defs/u64"
+                }
+              },
+              "required": [
+                "on",
+                "key",
+                "members"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "each"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "subject": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/name"
+        },
+        "scope": {
+          "$ref": "#/$defs/b64"
+        },
+        "index": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "kind",
+        "scope",
+        "index"
+      ],
+      "additionalProperties": false
+    },
+    "slot": {
+      "type": "object",
+      "properties": {
+        "subject": {
+          "$ref": "#/$defs/subject"
+        },
+        "slot": {
+          "$ref": "#/$defs/name"
+        }
+      },
+      "required": [
+        "subject",
+        "slot"
+      ],
+      "additionalProperties": false
+    },
+    "found": {
+      "type": "object",
+      "properties": {
+        "absent": {
+          "$ref": "#/$defs/u64"
+        },
+        "deadline": {
+          "$ref": "#/$defs/u64"
+        },
+        "handed": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        }
+      },
+      "required": [
+        "absent",
+        "deadline",
+        "handed"
+      ],
+      "additionalProperties": false
+    },
+    "skip": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "dependency": {
+              "$ref": "#/$defs/u64"
+            }
+          },
+          "required": [
+            "dependency"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "member": {
+              "$ref": "#/$defs/u64"
+            }
+          },
+          "required": [
+            "member"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "missing_capture": {
+              "$ref": "#/$defs/u64"
+            }
+          },
+          "required": [
+            "missing_capture"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "end": {
+      "oneOf": [
+        {
+          "enum": [
+            "expected",
+            "unexpected",
+            "unknown"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "skipped": {
+              "$ref": "#/$defs/skip"
+            }
+          },
+          "required": [
+            "skipped"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "critical": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "step": {
+              "$ref": "#/$defs/u64"
+            }
+          },
+          "required": [
+            "step"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "member": {
+              "$ref": "#/$defs/u64"
+            }
+          },
+          "required": [
+            "member"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "header": {
+      "type": "object",
+      "properties": {
+        "journal": {
+          "const": 11
+        },
+        "machine": {
+          "$ref": "#/$defs/u32"
+        },
+        "source": {
+          "type": "string"
+        },
+        "log": {
+          "$ref": "#/$defs/sha256"
+        },
+        "validator": {
+          "type": "string"
+        },
+        "read_ahead": {
+          "$ref": "#/$defs/u64"
+        },
+        "jitter": {
+          "$ref": "#/$defs/u64"
+        },
+        "resend": {
+          "$ref": "#/$defs/u64"
+        },
+        "catch_up": {
+          "$ref": "#/$defs/u32"
+        },
+        "namespace": {
+          "$ref": "#/$defs/u64"
+        },
+        "t0": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/i64"
+            }
+          ]
+        },
+        "gates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/gate"
+          }
+        },
+        "judging": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/judging"
+            }
+          ]
+        },
+        "admission": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/admission"
+            }
+          ]
+        }
+      },
+      "required": [
+        "journal",
+        "machine",
+        "source",
+        "log",
+        "validator",
+        "read_ahead",
+        "jitter",
+        "resend",
+        "catch_up",
+        "namespace",
+        "t0",
+        "gates",
+        "judging",
+        "admission"
+      ],
+      "additionalProperties": false
+    },
+    "read": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/u64"
+        },
+        "line": {
+          "$ref": "#/$defs/u64"
+        },
+        "key": {
+          "$ref": "#/$defs/key"
+        },
+        "action": {
+          "$ref": "#/$defs/action"
+        },
+        "safety": {
+          "$ref": "#/$defs/safety"
+        },
+        "cause": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "after": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dep"
+          }
+        },
+        "planned": {
+          "$ref": "#/$defs/u64"
+        },
+        "refusal": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "at",
+        "line",
+        "key",
+        "action",
+        "safety",
+        "cause",
+        "after",
+        "planned",
+        "refusal"
+      ],
+      "additionalProperties": false
+    },
+    "released": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/u64"
+        },
+        "line": {
+          "$ref": "#/$defs/u64"
+        },
+        "intended": {
+          "$ref": "#/$defs/u64"
+        },
+        "released": {
+          "$ref": "#/$defs/u64"
+        },
+        "deadline": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "at",
+        "line",
+        "intended",
+        "released",
+        "deadline"
+      ],
+      "additionalProperties": false
+    },
+    "dispatch": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/u64"
+        },
+        "line": {
+          "$ref": "#/$defs/u64"
+        },
+        "attempt": {
+          "$ref": "#/$defs/u32"
+        },
+        "deadline": {
+          "$ref": "#/$defs/u64"
+        },
+        "due": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "at",
+        "line",
+        "attempt",
+        "deadline",
+        "due"
+      ],
+      "additionalProperties": false
+    },
+    "sent": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/u64"
+        },
+        "line": {
+          "$ref": "#/$defs/u64"
+        },
+        "attempt": {
+          "$ref": "#/$defs/u32"
+        },
+        "decorated": {
+          "$ref": "#/$defs/u64"
+        },
+        "handed": {
+          "$ref": "#/$defs/u64"
+        },
+        "connected": {
+          "$ref": "#/$defs/u64"
+        },
+        "lag": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "at",
+        "line",
+        "attempt",
+        "decorated",
+        "handed",
+        "connected",
+        "lag"
+      ],
+      "additionalProperties": false
+    },
+    "answer": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/u64"
+        },
+        "line": {
+          "$ref": "#/$defs/u64"
+        },
+        "attempt": {
+          "$ref": "#/$defs/u32"
+        },
+        "judged": {
+          "$ref": "#/$defs/judged"
+        },
+        "captured": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/slot"
+          }
+        },
+        "ignored": {
+          "$ref": "#/$defs/ignored"
+        },
+        "status": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u16"
+            }
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/code"
+        },
+        "after": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "censored": {
+          "type": "boolean"
+        },
+        "found": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/found"
+            }
+          ]
+        },
+        "unsent": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/unsent"
+            }
+          ]
+        }
+      },
+      "required": [
+        "at",
+        "line",
+        "attempt",
+        "judged",
+        "captured",
+        "ignored",
+        "status",
+        "code",
+        "after",
+        "censored",
+        "found",
+        "unsent"
+      ],
+      "additionalProperties": false
+    },
+    "ended": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/u64"
+        },
+        "line": {
+          "$ref": "#/$defs/u64"
+        },
+        "end": {
+          "$ref": "#/$defs/end"
+        },
+        "read": {
+          "$ref": "#/$defs/u64"
+        },
+        "ready": {
+          "$ref": "#/$defs/u64"
+        },
+        "intended": {
+          "$ref": "#/$defs/u64"
+        },
+        "released": {
+          "$ref": "#/$defs/u64"
+        },
+        "dispatched": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "sent": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "ended": {
+          "$ref": "#/$defs/u64"
+        },
+        "attempts": {
+          "$ref": "#/$defs/u32"
+        },
+        "critical": {
+          "$ref": "#/$defs/critical"
+        },
+        "bound": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/u64"
+          }
+        },
+        "fault": {
+          "type": "boolean"
+        },
+        "wake": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        }
+      },
+      "required": [
+        "at",
+        "line",
+        "end",
+        "read",
+        "ready",
+        "intended",
+        "released",
+        "dispatched",
+        "sent",
+        "ended",
+        "attempts",
+        "critical",
+        "bound",
+        "fault",
+        "wake"
+      ],
+      "additionalProperties": false
+    },
+    "fault": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "$ref": "#/$defs/u64"
+        },
+        "class": {
+          "$ref": "#/$defs/fault_class"
+        }
+      },
+      "required": [
+        "at",
+        "class"
+      ],
+      "additionalProperties": false
+    },
+    "trailer": {
+      "type": "object",
+      "properties": {
+        "events": {
+          "$ref": "#/$defs/u64"
+        },
+        "steps": {
+          "$ref": "#/$defs/u64"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "required": [
+        "events",
+        "steps",
+        "sha256"
+      ],
+      "additionalProperties": false
+    },
+    "i64": {
+      "type": "string",
+      "pattern": "^(0|-?[1-9][0-9]{0,18})$"
+    },
+    "u16": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    "safety": {
+      "enum": [
+        "never",
+        "not_taken",
+        "idempotent"
+      ]
+    },
+    "code": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "const": "other"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "named": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "named"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "name_code": {
+      "oneOf": [
+        {
+          "const": "other"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "named": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "named"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "gate": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/name_code"
+        },
+        "took": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "name",
+        "took"
+      ],
+      "additionalProperties": false
+    },
+    "shape": {
+      "enum": [
+        "flat",
+        "objects",
+        "numbers",
+        "strings"
+      ]
+    },
+    "judging": {
+      "type": "object",
+      "properties": {
+        "cap": {
+          "$ref": "#/$defs/u64"
+        },
+        "took": {
+          "$ref": "#/$defs/u64"
+        },
+        "shape": {
+          "$ref": "#/$defs/shape"
+        }
+      },
+      "required": [
+        "cap",
+        "took",
+        "shape"
+      ],
+      "additionalProperties": false
+    },
+    "admission": {
+      "type": "object",
+      "properties": {
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source_fit"
+          }
+        },
+        "descriptors": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/descriptors_read"
+            }
+          ]
+        },
+        "assumed": {
+          "$ref": "#/$defs/assumed"
+        },
+        "memory": {
+          "$ref": "#/$defs/memory_fit"
+        }
+      },
+      "required": [
+        "sources",
+        "descriptors",
+        "assumed",
+        "memory"
+      ],
+      "additionalProperties": false
+    },
+    "source_fit": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/u32"
+        },
+        "needed": {
+          "$ref": "#/$defs/u64"
+        },
+        "cap": {
+          "$ref": "#/$defs/u64"
+        },
+        "events": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "source",
+        "needed",
+        "cap",
+        "events"
+      ],
+      "additionalProperties": false
+    },
+    "descriptors_read": {
+      "type": "object",
+      "properties": {
+        "soft": {
+          "$ref": "#/$defs/u64"
+        },
+        "hard": {
+          "$ref": "#/$defs/u64"
+        },
+        "open": {
+          "$ref": "#/$defs/u64"
+        },
+        "raised": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "soft",
+        "hard",
+        "open",
+        "raised"
+      ],
+      "additionalProperties": false
+    },
+    "log_fault": {
+      "enum": [
+        "diverged",
+        "truncated",
+        "malformed",
+        "io"
+      ]
+    },
+    "refusal": {
+      "enum": [
+        "refused",
+        "reset",
+        "aborted",
+        "closed"
+      ]
+    },
+    "unsent": {
+      "type": "object",
+      "properties": {
+        "decorated": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "handed": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "connected": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "lag": {
+          "$ref": "#/$defs/u64"
+        },
+        "refused": {
+          "$ref": "#/$defs/u32"
+        },
+        "refused_by": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/refusal"
+            }
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/name_code"
+        }
+      },
+      "required": [
+        "decorated",
+        "handed",
+        "connected",
+        "lag",
+        "refused",
+        "refused_by",
+        "code"
+      ],
+      "additionalProperties": false
+    },
+    "assumed": {
+      "type": "object",
+      "properties": {
+        "plan": {
+          "type": "boolean"
+        },
+        "runtimes": {
+          "type": "boolean"
+        },
+        "journal": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "plan",
+        "runtimes",
+        "journal"
+      ],
+      "additionalProperties": false
+    },
+    "memory_fit": {
+      "type": "object",
+      "properties": {
+        "stated": {
+          "$ref": "#/$defs/u64"
+        },
+        "origin": {
+          "$ref": "#/$defs/memory_origin"
+        },
+        "limit": {
+          "$ref": "#/$defs/limit_read"
+        },
+        "model": {
+          "$ref": "#/$defs/model"
+        },
+        "terms": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/memory_term"
+          }
+        },
+        "unheld": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/part"
+          }
+        },
+        "budget": {
+          "$ref": "#/$defs/u64"
+        },
+        "pool": {
+          "$ref": "#/$defs/u64"
+        },
+        "need": {
+          "$ref": "#/$defs/u64"
+        },
+        "slack": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "stated",
+        "origin",
+        "limit",
+        "model",
+        "terms",
+        "unheld",
+        "budget",
+        "pool",
+        "need",
+        "slack"
+      ],
+      "additionalProperties": false
+    },
+    "memory_origin": {
+      "enum": [
+        "declared"
+      ]
+    },
+    "limit_read": {
+      "type": "object",
+      "properties": {
+        "max": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/bound"
+            }
+          ]
+        },
+        "high": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/bound"
+            }
+          ]
+        },
+        "origin": {
+          "$ref": "#/$defs/limit_origin"
+        }
+      },
+      "required": [
+        "max",
+        "high",
+        "origin"
+      ],
+      "additionalProperties": false
+    },
+    "bound": {
+      "type": "object",
+      "properties": {
+        "bytes": {
+          "$ref": "#/$defs/u64"
+        },
+        "depth": {
+          "$ref": "#/$defs/u32"
+        }
+      },
+      "required": [
+        "bytes",
+        "depth"
+      ],
+      "additionalProperties": false
+    },
+    "limit_origin": {
+      "enum": [
+        "read",
+        "tree",
+        "assumed"
+      ]
+    },
+    "model": {
+      "type": "object",
+      "properties": {
+        "ended_cell": {
+          "$ref": "#/$defs/u64"
+        },
+        "live_cell": {
+          "$ref": "#/$defs/u64"
+        },
+        "barrier": {
+          "$ref": "#/$defs/u64"
+        },
+        "record": {
+          "$ref": "#/$defs/u64"
+        },
+        "decoder": {
+          "$ref": "#/$defs/u64"
+        },
+        "attempt": {
+          "$ref": "#/$defs/u64"
+        },
+        "runtime": {
+          "$ref": "#/$defs/u64"
+        },
+        "event": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "term": {
+          "$ref": "#/$defs/u64"
+        },
+        "row": {
+          "$ref": "#/$defs/u64"
+        },
+        "part": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "ended_cell",
+        "live_cell",
+        "barrier",
+        "record",
+        "decoder",
+        "attempt",
+        "runtime",
+        "event",
+        "term",
+        "row",
+        "part"
+      ],
+      "additionalProperties": false
+    },
+    "memory_term": {
+      "type": "object",
+      "properties": {
+        "part": {
+          "$ref": "#/$defs/part"
+        },
+        "source": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u32"
+            }
+          ]
+        },
+        "phase": {
+          "$ref": "#/$defs/phase"
+        },
+        "count": {
+          "$ref": "#/$defs/u64"
+        },
+        "cost": {
+          "$ref": "#/$defs/u64"
+        },
+        "rest": {
+          "$ref": "#/$defs/u64"
+        },
+        "bytes": {
+          "$ref": "#/$defs/u64"
+        },
+        "held": {
+          "$ref": "#/$defs/held"
+        },
+        "stated": {
+          "$ref": "#/$defs/stated_by"
+        },
+        "basis": {
+          "$ref": "#/$defs/basis"
+        }
+      },
+      "required": [
+        "part",
+        "source",
+        "phase",
+        "count",
+        "cost",
+        "rest",
+        "bytes",
+        "held",
+        "stated",
+        "basis"
+      ],
+      "additionalProperties": false
+    },
+    "part": {
+      "enum": [
+        "reader",
+        "decoder",
+        "runtime",
+        "carrier_source",
+        "keeping",
+        "journal",
+        "journal_out",
+        "connections",
+        "io",
+        "answers",
+        "judging",
+        "probes",
+        "probes_io",
+        "gate_stages",
+        "gate_run",
+        "cells",
+        "pending",
+        "barriers",
+        "records",
+        "bound_to",
+        "kept",
+        "binding",
+        "shell_attempts",
+        "carrier_attempts",
+        "decorations",
+        "evidence",
+        "probe"
+      ]
+    },
+    "phase": {
+      "enum": [
+        "fixed",
+        "stages",
+        "gates",
+        "run",
+        "pool"
+      ]
+    },
+    "held": {
+      "oneOf": [
+        {
+          "enum": [
+            "built",
+            "channel",
+            "cap",
+            "once",
+            "host"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "gate": {
+              "type": "object",
+              "properties": {
+                "built": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "built"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "gate"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "stated_by": {
+      "enum": [
+        "library",
+        "host"
+      ]
+    },
+    "basis": {
+      "enum": [
+        "heap",
+        "outside"
+      ]
+    },
+    "sample": {
+      "type": "object",
+      "properties": {
+        "why": {
+          "enum": [
+            "baseline",
+            "due",
+            "finish"
+          ]
+        },
+        "at": {
+          "$ref": "#/$defs/u64"
+        },
+        "due": {
+          "$ref": "#/$defs/u64"
+        },
+        "skipped": {
+          "$ref": "#/$defs/u64"
+        },
+        "process": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "read": {
+                  "$ref": "#/$defs/process"
+                }
+              },
+              "required": [
+                "read"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "unread": {
+                  "$ref": "#/$defs/unread"
+                }
+              },
+              "required": [
+                "unread"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "cgroup": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "read": {
+                  "$ref": "#/$defs/cgroup"
+                }
+              },
+              "required": [
+                "read"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "unread": {
+                  "$ref": "#/$defs/unread"
+                }
+              },
+              "required": [
+                "unread"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "host": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "read": {
+                  "$ref": "#/$defs/pressure"
+                }
+              },
+              "required": [
+                "read"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "unread": {
+                  "$ref": "#/$defs/unread"
+                }
+              },
+              "required": [
+                "unread"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "live": {
+          "$ref": "#/$defs/live"
+        },
+        "allocator": {
+          "$ref": "#/$defs/allocator"
+        }
+      },
+      "required": [
+        "why",
+        "at",
+        "due",
+        "skipped",
+        "process",
+        "cgroup",
+        "host",
+        "live",
+        "allocator"
+      ],
+      "additionalProperties": false
+    },
+    "unread": {
+      "enum": [
+        "absent",
+        "permission",
+        "no_cgroup_v2",
+        "failed"
+      ]
+    },
+    "process": {
+      "type": "object",
+      "properties": {
+        "rss": {
+          "$ref": "#/$defs/u64"
+        },
+        "rss_anon": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "rss_file": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "rss_shmem": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "swap": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "hwm": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "threads": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "took": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "rss",
+        "rss_anon",
+        "rss_file",
+        "rss_shmem",
+        "swap",
+        "hwm",
+        "threads",
+        "took"
+      ],
+      "additionalProperties": false
+    },
+    "cgroup": {
+      "type": "object",
+      "properties": {
+        "procs": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "current": {
+          "$ref": "#/$defs/u64"
+        },
+        "peak": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "anon": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "anon_thp": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "file": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "sock": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "kernel_stack": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "pagetables": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "slab": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "swap": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "events": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/events"
+            }
+          ]
+        },
+        "pressure": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/pressure"
+            }
+          ]
+        },
+        "binding": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/binds"
+            }
+          ]
+        },
+        "took": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "procs",
+        "current",
+        "peak",
+        "anon",
+        "anon_thp",
+        "file",
+        "sock",
+        "kernel_stack",
+        "pagetables",
+        "slab",
+        "swap",
+        "events",
+        "pressure",
+        "binding",
+        "took"
+      ],
+      "additionalProperties": false
+    },
+    "events": {
+      "type": "object",
+      "properties": {
+        "high": {
+          "$ref": "#/$defs/u64"
+        },
+        "max": {
+          "$ref": "#/$defs/u64"
+        },
+        "oom": {
+          "$ref": "#/$defs/u64"
+        },
+        "oom_kill": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "high",
+        "max",
+        "oom",
+        "oom_kill"
+      ],
+      "additionalProperties": false
+    },
+    "pressure": {
+      "type": "object",
+      "properties": {
+        "some_avg10": {
+          "$ref": "#/$defs/u32"
+        },
+        "some_total": {
+          "$ref": "#/$defs/u64"
+        },
+        "full_avg10": {
+          "$ref": "#/$defs/u32"
+        },
+        "full_total": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "some_avg10",
+        "some_total",
+        "full_avg10",
+        "full_total"
+      ],
+      "additionalProperties": false
+    },
+    "binds": {
+      "type": "object",
+      "properties": {
+        "depth": {
+          "$ref": "#/$defs/u32"
+        },
+        "events": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/events"
+            }
+          ]
+        },
+        "pressure": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/pressure"
+            }
+          ]
+        }
+      },
+      "required": [
+        "depth",
+        "events",
+        "pressure"
+      ],
+      "additionalProperties": false
+    },
+    "live": {
+      "type": "object",
+      "properties": {
+        "turn": {
+          "$ref": "#/$defs/u64"
+        },
+        "wakes": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "pending": {
+          "$ref": "#/$defs/u64"
+        },
+        "past_deadline": {
+          "$ref": "#/$defs/u64"
+        },
+        "alive": {
+          "$ref": "#/$defs/u64"
+        },
+        "sockets": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "full": {
+          "$ref": "#/$defs/u64"
+        },
+        "waited": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "turn",
+        "wakes",
+        "pending",
+        "past_deadline",
+        "alive",
+        "sockets",
+        "full",
+        "waited"
+      ],
+      "additionalProperties": false
+    },
+    "allocator": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": [
+            "unstated",
+            "failed",
+            "skipped",
+            "read"
+          ]
+        },
+        "name": {
+          "$ref": "#/$defs/code"
+        },
+        "in_use": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "free": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "mapped": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "chunks": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        },
+        "took": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "state",
+        "name",
+        "in_use",
+        "free",
+        "mapped",
+        "chunks",
+        "took"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

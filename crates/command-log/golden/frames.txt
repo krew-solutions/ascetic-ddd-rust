@@ -1,0 +1,93 @@
+case a custom method
+method POST
+target /devices/d1:retire
+body none
+case a collection's verb
+method POST
+target /policies:simulate
+header content-type: application/json
+body 7b22647279223a747275657d
+case values encoded, literals not
+method GET
+target /tenants/a%3Ab%2Fc%25d%20e~-._/devices/%C3%A9%2B%40%21:status
+body none
+case a query in order, encoded
+method GET
+target /devices?page%20size=10%26x%3D1&filter=&filter=a%2Bb%20%C3%A9
+body none
+case rendered values
+method GET
+target /devices/54a1270e-1e4c-4040-997b-1e06f0049dc4?t=1763640000123
+header X-Hex: 5df92a94be9e2383
+body none
+case times from the run's start and the send
+method GET
+target /clock
+header X-At: 2025-11-20T12:00:02.621956Z
+header X-Millis: 1763640000124
+body none
+case captured values in a path, a header and a body
+method PUT
+target /devices/dev%3A7%2Fa%20b?n=12345678901234567890123
+header If-Match: "v-1"
+header content-type: application/json
+body 7b2265746167223a225c22762d315c22222c22636f756e74223a31323334353637383930313233343536373839303132332c226964223a226465763a372f612062222c226174223a22323032352d31312d32305431323a30303a30322e3632333435365a227d
+case key material in a raw body
+method POST
+target /keys
+header content-type: application/x-protobuf
+body 0a200ef9e69901bc597617fa7efcbe847f9bce1c7e5075ec9803e2094899531de5f6121054a1270e1e4c4040997b1e06f0049dc4
+case arity
+error arity
+case an empty segment
+error segment
+case a captured dot segment
+error segment
+case a literal's percent
+error literal
+case a literal's query
+error literal
+case a placeholder unclosed
+error template
+case a brace alone
+error template
+case a template not rooted
+error template
+case a method not a token
+error method
+case a header name not a token
+error header_name
+case a header value with a line break
+error header_value
+case a header value's trailing blank
+error header_value
+case a header value outside ASCII
+error header_value
+case a host header
+error reserved
+case a Content-Length header
+error reserved
+case a decorated name planned
+error reserved
+case the correlation header planned
+error reserved
+case a decorated name reserved
+error reserved
+case the correlation header decorated
+error reserved
+case a capture missing
+error hole missing
+case bytes in a plain value
+error hole not_text
+case a captured object
+error hole not_scalar
+case a captured value not JSON
+error hole not_json
+case a captured line break into a header
+error header_value
+case no content type for a body
+error content_type
+case key material in a short raw span
+error fill length
+case key material as a JSON token
+error fill form

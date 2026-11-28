@@ -67,6 +67,18 @@ jobs:
       - name: make all
         run: make all
 
+  append-only:
+    name: the pinned results appended to, never edited
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The base to compare against: a pull request's target, or the
+          # commit a push to main followed.
+          fetch-depth: 0
+      - name: make append-only
+        run: make append-only BASE=${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+
   traces:
     name: traces recorded again by the live tests, checked against the models
     runs-on: ubuntu-24.04
