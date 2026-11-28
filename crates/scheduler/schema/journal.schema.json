@@ -661,7 +661,7 @@
       "type": "object",
       "properties": {
         "journal": {
-          "const": 9
+          "const": 10
         },
         "machine": {
           "$ref": "#/$defs/u32"
@@ -1227,13 +1227,17 @@
           ]
         },
         "assumed": {
-          "type": "boolean"
+          "$ref": "#/$defs/assumed"
+        },
+        "memory": {
+          "$ref": "#/$defs/memory_fit"
         }
       },
       "required": [
         "sources",
         "descriptors",
-        "assumed"
+        "assumed",
+        "memory"
       ],
       "additionalProperties": false
     },
@@ -1364,6 +1368,328 @@
         "code"
       ],
       "additionalProperties": false
+    },
+    "assumed": {
+      "type": "object",
+      "properties": {
+        "plan": {
+          "type": "boolean"
+        },
+        "runtimes": {
+          "type": "boolean"
+        },
+        "journal": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "plan",
+        "runtimes",
+        "journal"
+      ],
+      "additionalProperties": false
+    },
+    "memory_fit": {
+      "type": "object",
+      "properties": {
+        "stated": {
+          "$ref": "#/$defs/u64"
+        },
+        "origin": {
+          "$ref": "#/$defs/memory_origin"
+        },
+        "limit": {
+          "$ref": "#/$defs/limit_read"
+        },
+        "model": {
+          "$ref": "#/$defs/model"
+        },
+        "terms": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/memory_term"
+          }
+        },
+        "unheld": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/part"
+          }
+        },
+        "budget": {
+          "$ref": "#/$defs/u64"
+        },
+        "pool": {
+          "$ref": "#/$defs/u64"
+        },
+        "need": {
+          "$ref": "#/$defs/u64"
+        },
+        "slack": {
+          "$ref": "#/$defs/u64"
+        }
+      },
+      "required": [
+        "stated",
+        "origin",
+        "limit",
+        "model",
+        "terms",
+        "unheld",
+        "budget",
+        "pool",
+        "need",
+        "slack"
+      ],
+      "additionalProperties": false
+    },
+    "memory_origin": {
+      "enum": [
+        "declared"
+      ]
+    },
+    "limit_read": {
+      "type": "object",
+      "properties": {
+        "max": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/bound"
+            }
+          ]
+        },
+        "high": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/bound"
+            }
+          ]
+        },
+        "origin": {
+          "$ref": "#/$defs/limit_origin"
+        }
+      },
+      "required": [
+        "max",
+        "high",
+        "origin"
+      ],
+      "additionalProperties": false
+    },
+    "bound": {
+      "type": "object",
+      "properties": {
+        "bytes": {
+          "$ref": "#/$defs/u64"
+        },
+        "depth": {
+          "$ref": "#/$defs/u32"
+        }
+      },
+      "required": [
+        "bytes",
+        "depth"
+      ],
+      "additionalProperties": false
+    },
+    "limit_origin": {
+      "enum": [
+        "read",
+        "tree",
+        "assumed"
+      ]
+    },
+    "model": {
+      "type": "object",
+      "properties": {
+        "ended_cell": {
+          "$ref": "#/$defs/u64"
+        },
+        "live_cell": {
+          "$ref": "#/$defs/u64"
+        },
+        "barrier": {
+          "$ref": "#/$defs/u64"
+        },
+        "record": {
+          "$ref": "#/$defs/u64"
+        },
+        "decoder": {
+          "$ref": "#/$defs/u64"
+        },
+        "attempt": {
+          "$ref": "#/$defs/u64"
+        },
+        "runtime": {
+          "$ref": "#/$defs/u64"
+        },
+        "event": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u64"
+            }
+          ]
+        }
+      },
+      "required": [
+        "ended_cell",
+        "live_cell",
+        "barrier",
+        "record",
+        "decoder",
+        "attempt",
+        "runtime",
+        "event"
+      ],
+      "additionalProperties": false
+    },
+    "memory_term": {
+      "type": "object",
+      "properties": {
+        "part": {
+          "$ref": "#/$defs/part"
+        },
+        "source": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/u32"
+            }
+          ]
+        },
+        "phase": {
+          "$ref": "#/$defs/phase"
+        },
+        "count": {
+          "$ref": "#/$defs/u64"
+        },
+        "cost": {
+          "$ref": "#/$defs/u64"
+        },
+        "rest": {
+          "$ref": "#/$defs/u64"
+        },
+        "bytes": {
+          "$ref": "#/$defs/u64"
+        },
+        "held": {
+          "$ref": "#/$defs/held"
+        },
+        "stated": {
+          "$ref": "#/$defs/stated_by"
+        },
+        "basis": {
+          "$ref": "#/$defs/basis"
+        }
+      },
+      "required": [
+        "part",
+        "source",
+        "phase",
+        "count",
+        "cost",
+        "rest",
+        "bytes",
+        "held",
+        "stated",
+        "basis"
+      ],
+      "additionalProperties": false
+    },
+    "part": {
+      "enum": [
+        "reader",
+        "decoder",
+        "runtime",
+        "carrier_source",
+        "keeping",
+        "journal",
+        "journal_out",
+        "connections",
+        "io",
+        "answers",
+        "judging",
+        "probes",
+        "probes_io",
+        "gate_stages",
+        "gate_run",
+        "cells",
+        "pending",
+        "barriers",
+        "records",
+        "bound_to",
+        "kept",
+        "binding",
+        "shell_attempts",
+        "carrier_attempts",
+        "decorations"
+      ]
+    },
+    "phase": {
+      "enum": [
+        "fixed",
+        "stages",
+        "gates",
+        "run",
+        "pool"
+      ]
+    },
+    "held": {
+      "oneOf": [
+        {
+          "enum": [
+            "built",
+            "channel",
+            "cap",
+            "once",
+            "host"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "gate": {
+              "type": "object",
+              "properties": {
+                "built": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "built"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "gate"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "stated_by": {
+      "enum": [
+        "library",
+        "host"
+      ]
+    },
+    "basis": {
+      "enum": [
+        "heap",
+        "outside"
+      ]
     }
   }
 }

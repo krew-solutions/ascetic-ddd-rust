@@ -1255,12 +1255,21 @@ pub fn admit<C: Clock, X: Carrier<C>>(
             open: d.open(),
             raised: d.raised(),
         });
+    let assumed = journal::Assumed {
+        plan: plan.is_assumed(),
+        runtimes: runtimes.assumed,
+        journal: false,
+    };
     Ok(Admitted {
-        admission: journal::Admission {
-            sources: rows,
+        admission: admission(
+            &fit,
+            memory,
+            limit,
+            planned.model,
+            rows,
             descriptors,
-            assumed: runtimes.assumed || plan.is_assumed(),
-        },
+            assumed,
+        ),
         header,
         log: plan.log().to_owned(),
         validator: plan.validator().to_owned(),
@@ -1276,6 +1285,48 @@ pub fn admit<C: Clock, X: Carrier<C>>(
         limit,
         clock: PhantomData,
     })
+}
+
+/// Admission's evidence (decision 20; decision 22, K2b-7e-2b-3d-3b), pure:
+/// each source's sockets as it held them, the descriptors, what a test
+/// assumed, and the memory it fitted — what was stated, the limit, the
+/// constants, every term and what the fit made of them. The only maker of an
+/// [`Admitted`]'s.
+#[must_use]
+pub fn admission(
+    fit: &crate::memory::Fit,
+    memory: crate::memory::Memory,
+    limit: crate::live::Limit,
+    model: crate::memory::Model,
+    sources: Vec<journal::SourceFit>,
+    descriptors: Option<journal::DescriptorsRead>,
+    assumed: journal::Assumed,
+) -> journal::Admission {
+    let crate::memory::Fit {
+        terms,
+        need,
+        slack,
+        budget,
+        pool,
+        unheld,
+    } = fit;
+    journal::Admission {
+        sources,
+        descriptors,
+        assumed,
+        memory: journal::MemoryFit {
+            stated: memory.bytes(),
+            origin: journal::MemoryOrigin::Declared,
+            limit: limit.into(),
+            model: model.into(),
+            terms: terms.iter().map(Into::into).collect(),
+            unheld: unheld.iter().copied().map(Into::into).collect(),
+            budget: *budget,
+            pool: *pool,
+            need: *need,
+            slack: *slack,
+        },
+    }
 }
 
 /// A test's admission: `plan` fitted to a memory no run exceeds, in a scope

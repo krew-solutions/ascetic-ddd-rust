@@ -54,7 +54,7 @@ def fault_class(v):
 
 # The journal version this definition reads (K2b-7e-2b-3d-3b): another's
 # rules are another's, so a journal of it is no case of this one.
-VERSION = 9
+VERSION = 10
 
 
 class Run:

@@ -178,6 +178,103 @@ fn fault_kind(f: &FaultClass) -> usize {
     }
 }
 
+/// K2b-7e-2b-3d-3b of ADR-0047: the golden's header holds the memory's whole
+/// vocabulary (version 10) — every part once, in order, every phase, holder,
+/// stater and basis, a term of no source and of one, a limit present and
+/// absent. A variant added fails to compile here until it is given a number.
+#[test]
+fn the_golden_holds_the_memory_s_vocabulary() {
+    use ascetic_ddd_scheduler::journal::{Basis, Held, Part, Phase, StatedBy};
+    let part = |p: Part| match p {
+        Part::Reader => 0,
+        Part::Decoder => 1,
+        Part::Runtime => 2,
+        Part::CarrierSource => 3,
+        Part::Keeping => 4,
+        Part::Journal => 5,
+        Part::JournalOut => 6,
+        Part::Connections => 7,
+        Part::Io => 8,
+        Part::Answers => 9,
+        Part::Judging => 10,
+        Part::Probes => 11,
+        Part::ProbesIo => 12,
+        Part::GateStages => 13,
+        Part::GateRun => 14,
+        Part::Cells => 15,
+        Part::Pending => 16,
+        Part::Barriers => 17,
+        Part::Records => 18,
+        Part::BoundTo => 19,
+        Part::Kept => 20,
+        Part::Binding => 21,
+        Part::ShellAttempts => 22,
+        Part::CarrierAttempts => 23,
+        Part::Decorations => 24,
+    };
+    let phase = |p: Phase| match p {
+        Phase::Fixed => 0,
+        Phase::Stages => 1,
+        Phase::Gates => 2,
+        Phase::Run => 3,
+        Phase::Pool => 4,
+    };
+    let held = |h: Held| match h {
+        Held::Built => 0,
+        Held::Channel => 1,
+        Held::Cap => 2,
+        Held::Once => 3,
+        Held::Gate { built: false } => 4,
+        Held::Gate { built: true } => 5,
+        Held::Host => 6,
+    };
+    let stated = |s: StatedBy| match s {
+        StatedBy::Library => 0,
+        StatedBy::Host => 1,
+    };
+    let basis = |b: Basis| match b {
+        Basis::Heap => 0,
+        Basis::Outside => 1,
+    };
+    let (header, _) = read_all(GOLDEN).unwrap();
+    let memory = header.admission.unwrap().memory;
+    let all = |f: &dyn Fn(&journal::MemoryTerm) -> usize, n: usize| {
+        let seen: BTreeSet<usize> = memory.terms.iter().map(f).collect();
+        assert_eq!(seen, (0..n).collect(), "{n}");
+    };
+    assert_eq!(
+        memory
+            .terms
+            .iter()
+            .map(|t| part(t.part))
+            .collect::<Vec<_>>(),
+        (0..25).collect::<Vec<_>>()
+    );
+    all(&|t| phase(t.phase), 5);
+    all(&|t| held(t.held), 7);
+    all(&|t| stated(t.stated), 2);
+    all(&|t| basis(t.basis), 2);
+    all(&|t| usize::from(t.source.is_some()), 2);
+    assert!(memory.limit.max.is_some() && memory.limit.high.is_none());
+    assert!(memory.model.event.is_none());
+}
+
+/// The memory's origins by name (version 10): the golden holds one limit's
+/// and one memory's, these the rest.
+#[test]
+fn the_memory_s_origins_are_named() {
+    use ascetic_ddd_scheduler::journal::{LimitOrigin, MemoryOrigin};
+    assert_eq!(
+        [LimitOrigin::Read, LimitOrigin::Tree, LimitOrigin::Assumed]
+            .map(|o| serde_json::to_string(&o).unwrap()),
+        [r#""read""#, r#""tree""#, r#""assumed""#]
+    );
+    assert_eq!(
+        serde_json::to_string(&MemoryOrigin::Declared).unwrap(),
+        r#""declared""#
+    );
+}
+
 /// The golden holds every variant of every enum its lines carry, both sides
 /// of every optional field, and a `u64` at its top in every kind of field.
 #[test]

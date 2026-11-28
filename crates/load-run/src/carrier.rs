@@ -168,6 +168,15 @@ pub enum StatedBy {
     Host,
 }
 
+impl From<StatedBy> for ascetic_ddd_scheduler::journal::StatedBy {
+    fn from(s: StatedBy) -> ascetic_ddd_scheduler::journal::StatedBy {
+        match s {
+            StatedBy::Library => ascetic_ddd_scheduler::journal::StatedBy::Library,
+            StatedBy::Host => ascetic_ddd_scheduler::journal::StatedBy::Host,
+        }
+    }
+}
+
 /// What a carrier holds a source beside its sockets (ADR-0047 decision 22,
 /// K2b-7e-2b-2c-4): on the source's thread, whatever its sockets do, each an
 /// upper bound over the part's life — charged summed, not their largest, since

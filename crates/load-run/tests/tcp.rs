@@ -623,7 +623,14 @@ fn the_stages_are_a_chain_its_evidence_the_library_s() {
         .as_ref()
         .expect("the descriptors read");
     assert!(read.open > 0 && read.open < read.soft, "{read:?}");
-    assert!(admission.assumed);
+    // The plan a test's, the runtimes built for its cap (version 10).
+    assert_eq!(
+        admission.assumed,
+        ascetic_ddd_scheduler::journal::Assumed {
+            plan: true,
+            ..Default::default()
+        }
+    );
     let t0 = h.t0.expect("T0's wall instant");
     assert!(
         t0 + i64::try_from(jitter).unwrap() >= gated_at,

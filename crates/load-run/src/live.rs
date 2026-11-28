@@ -330,3 +330,26 @@ impl Drop for Live {
         }
     }
 }
+
+impl From<Limit> for ascetic_ddd_scheduler::journal::LimitRead {
+    /// The journal's evidence of a limit (version 10, K2b-7e-2b-3d-3b): a depth
+    /// past a `u32` — no cgroup tree is so deep — journaled at its most.
+    fn from(l: Limit) -> ascetic_ddd_scheduler::journal::LimitRead {
+        use ascetic_ddd_scheduler::journal::{Bound, LimitOrigin as Origin, LimitRead};
+        let bound = |b: Option<(u64, usize)>| {
+            b.map(|(bytes, depth)| Bound {
+                bytes,
+                depth: u32::try_from(depth).unwrap_or(u32::MAX),
+            })
+        };
+        LimitRead {
+            max: bound(l.max),
+            high: bound(l.high),
+            origin: match l.origin {
+                LimitOrigin::Read => Origin::Read,
+                LimitOrigin::Tree => Origin::Tree,
+                LimitOrigin::Assumed => Origin::Assumed,
+            },
+        }
+    }
+}

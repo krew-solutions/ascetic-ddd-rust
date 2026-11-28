@@ -194,7 +194,7 @@ impl<W: Write + Send + 'static> Written<W> {
     #[cfg(feature = "testing")]
     pub fn assumed(out: W, mut header: Header, behind: usize) -> Result<Written<W>, JournalError> {
         if let Some(a) = header.admission.as_mut() {
-            a.assumed = true;
+            a.assumed.journal = true;
         }
         Written::start(out, header, Journal::new(behind, 0))
     }

@@ -108,7 +108,7 @@ fn a_failing_writer_is_heard_within_its_lag() {
 fn an_assumed_journal_says_so() {
     let mut header = sample::header();
     if let Some(a) = header.admission.as_mut() {
-        a.assumed = false;
+        a.assumed = Default::default();
     }
     assert!(header.admission.is_some());
     let (out, buf, gone) = shared(None);
@@ -117,5 +117,12 @@ fn an_assumed_journal_says_so() {
     gone.recv().unwrap();
     let bytes = buf.lock().unwrap().clone();
     let read = Reader::new(Cursor::new(bytes)).unwrap();
-    assert!(read.header().admission.as_ref().is_some_and(|a| a.assumed));
+    // The journal's assumption alone, apart (version 10).
+    assert_eq!(
+        read.header().admission.as_ref().map(|a| a.assumed),
+        Some(ascetic_ddd_scheduler::journal::Assumed {
+            journal: true,
+            ..Default::default()
+        })
+    );
 }

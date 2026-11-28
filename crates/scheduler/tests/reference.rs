@@ -220,6 +220,15 @@ const JOURNALS: &[(u32, u32, &str)] = &[
         5,
         "c8d241b45c10ea54dd973c6b8660495dae42095baad8eed4dba59d74e4ff5c6a",
     ),
+    // Version 10 (decision 22, K2b-7e-2b-3d-3b-2): admission's memory, which
+    // no journal of the corpus carries; settled against version 9 run by run —
+    // line 1 the same with its version restored, every line after it the same
+    // but the trailer's digest.
+    (
+        10,
+        5,
+        "307d736f43406778be0a36a3346056698a40ddc79f198410c27d8778f9d2be5e",
+    ),
 ];
 
 /// What the fold decided of the differential's runs, the digest of their
@@ -305,6 +314,15 @@ const CLASSES: &[(u32, u32, u32, &str)] = &[
     // the last pins', measured.
     (
         9,
+        5,
+        7,
+        "c8dd9df07b94987b394344beda3d648f88a492b5d21a98370b9f2f379ac01cc3",
+    ),
+    // Version 10 (decision 22, K2b-7e-2b-3d-3b-2): admission's memory; the
+    // corpus's journals journal no admission, the fold reads none — the same
+    // classes.
+    (
+        10,
         5,
         7,
         "c8dd9df07b94987b394344beda3d648f88a492b5d21a98370b9f2f379ac01cc3",

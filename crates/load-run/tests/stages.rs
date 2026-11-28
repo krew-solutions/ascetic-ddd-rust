@@ -482,10 +482,17 @@ fn a_replayed_plan_carries_its_commitment_s_peaks() {
             .assumed
         })
     };
-    assert!(!admitted(live.runtimes()));
-    // The same plan on a test's runtimes: assumed.
+    assert_eq!(admitted(live.runtimes()), Default::default());
+    // The same plan on a test's runtimes: the runtimes' assumption alone,
+    // apart (version 10).
     let assumed = Runtimes::assumed(vec![rt.handle().clone()], 1_024);
-    assert!(admitted(&assumed));
+    assert_eq!(
+        admitted(&assumed),
+        ascetic_ddd_scheduler::journal::Assumed {
+            runtimes: true,
+            ..Default::default()
+        }
+    );
 }
 
 /// Decision 22: a run reading its lines through a reader holding more records

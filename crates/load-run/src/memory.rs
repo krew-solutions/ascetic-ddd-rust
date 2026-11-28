@@ -7,6 +7,8 @@
 //! pool's budget is what the run's fixed parts leave, its prediction priced
 //! at the run's catch-up.
 
+use ascetic_ddd_scheduler::journal;
+
 use crate::carrier::StatedBy;
 use crate::stand::GateBytes;
 
@@ -1016,5 +1018,131 @@ impl std::fmt::Display for Refused {
             write!(f, "; remedies: {}", remedies.join(", "))?;
         }
         Ok(())
+    }
+}
+
+// The journal's evidence of the fit (version 10, K2b-7e-2b-3d-3b): each of
+// the fit's own, by name, every variant matched — a part added fails to
+// compile here until the journal names it.
+
+impl From<Part> for journal::Part {
+    fn from(p: Part) -> journal::Part {
+        match p {
+            Part::Reader => journal::Part::Reader,
+            Part::Decoder => journal::Part::Decoder,
+            Part::Runtime => journal::Part::Runtime,
+            Part::CarrierSource => journal::Part::CarrierSource,
+            Part::Keeping => journal::Part::Keeping,
+            Part::Journal => journal::Part::Journal,
+            Part::JournalOut => journal::Part::JournalOut,
+            Part::Connections => journal::Part::Connections,
+            Part::Io => journal::Part::Io,
+            Part::Answers => journal::Part::Answers,
+            Part::Judging => journal::Part::Judging,
+            Part::Probes => journal::Part::Probes,
+            Part::ProbesIo => journal::Part::ProbesIo,
+            Part::GateStages => journal::Part::GateStages,
+            Part::GateRun => journal::Part::GateRun,
+            Part::Cells => journal::Part::Cells,
+            Part::Pending => journal::Part::Pending,
+            Part::Barriers => journal::Part::Barriers,
+            Part::Records => journal::Part::Records,
+            Part::BoundTo => journal::Part::BoundTo,
+            Part::Kept => journal::Part::Kept,
+            Part::Binding => journal::Part::Binding,
+            Part::ShellAttempts => journal::Part::ShellAttempts,
+            Part::CarrierAttempts => journal::Part::CarrierAttempts,
+            Part::Decorations => journal::Part::Decorations,
+        }
+    }
+}
+
+impl From<Phase> for journal::Phase {
+    fn from(p: Phase) -> journal::Phase {
+        match p {
+            Phase::Fixed => journal::Phase::Fixed,
+            Phase::Stages => journal::Phase::Stages,
+            Phase::Gates => journal::Phase::Gates,
+            Phase::Run => journal::Phase::Run,
+            Phase::Pool => journal::Phase::Pool,
+        }
+    }
+}
+
+impl From<Held> for journal::Held {
+    fn from(h: Held) -> journal::Held {
+        match h {
+            Held::Built => journal::Held::Built,
+            Held::Channel => journal::Held::Channel,
+            Held::Cap => journal::Held::Cap,
+            Held::Once => journal::Held::Once,
+            Held::Gate { built } => journal::Held::Gate {
+                built: built.is_some(),
+            },
+            Held::Host => journal::Held::Host,
+        }
+    }
+}
+
+impl From<Basis> for journal::Basis {
+    fn from(b: Basis) -> journal::Basis {
+        match b {
+            Basis::Heap => journal::Basis::Heap,
+            Basis::Outside => journal::Basis::Outside,
+        }
+    }
+}
+
+impl From<Model> for journal::Model {
+    fn from(m: Model) -> journal::Model {
+        let Model {
+            ended_cell,
+            live_cell,
+            barrier,
+            record,
+            decoder,
+            attempt,
+            runtime,
+            event,
+        } = m;
+        journal::Model {
+            ended_cell,
+            live_cell,
+            barrier,
+            record,
+            decoder,
+            attempt,
+            runtime,
+            event,
+        }
+    }
+}
+
+impl From<&Term> for journal::MemoryTerm {
+    fn from(t: &Term) -> journal::MemoryTerm {
+        let Term {
+            part,
+            source,
+            phase,
+            count,
+            cost,
+            rest,
+            bytes,
+            held,
+            stated,
+            basis,
+        } = *t;
+        journal::MemoryTerm {
+            part: part.into(),
+            source,
+            phase: phase.into(),
+            count,
+            cost,
+            rest,
+            bytes,
+            held: held.into(),
+            stated: stated.into(),
+            basis: basis.into(),
+        }
     }
 }

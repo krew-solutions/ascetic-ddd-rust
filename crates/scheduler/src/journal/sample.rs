@@ -6,9 +6,11 @@
 use ascetic_ddd_command_log::record::{On, Safety, Subject};
 
 use super::{
-    Action, Admission, Answer, Code, Critical, Dep, DescriptorsRead, Dispatch, End, Ended, Fault,
-    FaultClass, Found, Gate, Header, Ignored, JOURNAL_VERSION, Judged, Judging, Key, Line,
-    LogFault, Read, Refusal, Released, Sent, Shape, Skip, Slot, SourceFit, Unsent,
+    Action, Admission, Answer, Assumed, Basis, Bound, Code, Critical, Dep, DescriptorsRead,
+    Dispatch, End, Ended, Fault, FaultClass, Found, Gate, Header, Held, Ignored, JOURNAL_VERSION,
+    Judged, Judging, Key, LimitOrigin, LimitRead, Line, LogFault, MemoryFit, MemoryOrigin,
+    MemoryTerm, Model, Part, Phase, Read, Refusal, Released, Sent, Shape, Skip, Slot, SourceFit,
+    StatedBy, Unsent,
 };
 use crate::machine::MACHINE_REVISION;
 
@@ -64,8 +66,107 @@ pub fn header() -> Header {
                 open: u64::MAX,
                 raised: true,
             }),
-            assumed: false,
+            assumed: Assumed {
+                plan: true,
+                runtimes: false,
+                journal: true,
+            },
+            memory: memory(),
         }),
+    }
+}
+
+/// Every part once, in order (version 10): the vocabulary of the memory's
+/// evidence, beside each phase, holder, stater and basis.
+const PARTS: [Part; 25] = [
+    Part::Reader,
+    Part::Decoder,
+    Part::Runtime,
+    Part::CarrierSource,
+    Part::Keeping,
+    Part::Journal,
+    Part::JournalOut,
+    Part::Connections,
+    Part::Io,
+    Part::Answers,
+    Part::Judging,
+    Part::Probes,
+    Part::ProbesIo,
+    Part::GateStages,
+    Part::GateRun,
+    Part::Cells,
+    Part::Pending,
+    Part::Barriers,
+    Part::Records,
+    Part::BoundTo,
+    Part::Kept,
+    Part::Binding,
+    Part::ShellAttempts,
+    Part::CarrierAttempts,
+    Part::Decorations,
+];
+
+/// The memory's evidence: every part, phase, holder, stater and basis, both
+/// sides of each option, numbers at their extremes — no fit's, unfolded.
+fn memory() -> MemoryFit {
+    let phases = [
+        Phase::Fixed,
+        Phase::Stages,
+        Phase::Gates,
+        Phase::Run,
+        Phase::Pool,
+    ];
+    let held = [
+        Held::Built,
+        Held::Channel,
+        Held::Cap,
+        Held::Once,
+        Held::Gate { built: false },
+        Held::Gate { built: true },
+        Held::Host,
+    ];
+    let terms = (0usize..)
+        .zip(PARTS)
+        .map(|(i, part)| MemoryTerm {
+            part,
+            source: [None, Some(0), Some(u32::MAX)][i % 3],
+            phase: phases[i % 5],
+            count: [u64::MAX, 0, 1][i % 3],
+            cost: [0, u64::MAX, 7][i % 3],
+            rest: [1, 0, u64::MAX][i % 3],
+            bytes: [u64::MAX, 0][i % 2],
+            held: held[i % 7],
+            stated: [StatedBy::Library, StatedBy::Host][i % 2],
+            basis: [Basis::Heap, Basis::Outside][i % 2],
+        })
+        .collect();
+    MemoryFit {
+        stated: u64::MAX,
+        origin: MemoryOrigin::Declared,
+        limit: LimitRead {
+            max: Some(Bound {
+                bytes: u64::MAX,
+                depth: u32::MAX,
+            }),
+            high: None,
+            origin: LimitOrigin::Tree,
+        },
+        model: Model {
+            ended_cell: u64::MAX,
+            live_cell: 0,
+            barrier: 1,
+            record: u64::MAX,
+            decoder: 0,
+            attempt: u64::MAX,
+            runtime: 0,
+            event: None,
+        },
+        terms,
+        unheld: vec![Part::Decorations, Part::Reader],
+        budget: u64::MAX,
+        pool: 0,
+        need: u64::MAX,
+        slack: 0,
     }
 }
 

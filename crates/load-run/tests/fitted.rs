@@ -726,3 +726,172 @@ fn a_carrier_s_attempts_are_its_price_by_their_count() {
         5 * 43 + 7 * 47 + 11 * 53 + 13 * 59 + 17 * 79 + 19 * 61 + 23 * 67 + 29 * 71 + 31 * 73
     );
 }
+
+/// K2b-7e-2b-3d-3b-2: admission's evidence is its fit journaled — the memory
+/// stated, the limit and its origin, the library's constants, every term by
+/// its count, cost and rest with its phase, holder, stater and basis, the
+/// unheld parts, the budget, the pool, the need and the slack —, and a header
+/// carrying it reads back as itself.
+#[test]
+fn the_admission_is_the_fit_journaled() {
+    use ascetic_ddd_command_log::fills::Namespace;
+    use ascetic_ddd_load_run::memory::Model;
+    use ascetic_ddd_load_run::stages::{Identity, journal_header};
+    use ascetic_ddd_scheduler::journal::{
+        self, Bound, LimitOrigin, LimitRead, MemoryOrigin, Reader, Writer,
+    };
+    let mut header = fixture::header();
+    header.profile.sources = 2;
+    let fitted = fit::<RealClock, _>(
+        Plan::assumed(Arc::new(header), Peaks::default()),
+        0,
+        Arc::new(Capped { cap: 8, needed: 1 }),
+        Journal::new(64, 123),
+        Memory::declared(PLENTY),
+        Limit::assumed(Some((PLENTY, 0)), Some((PLENTY + 1, 3))),
+    )
+    .unwrap();
+    let fit = fitted.fit().clone();
+    let live = Live::fitted(&fitted).unwrap();
+    let admitted = admit(fitted, live.runtimes()).unwrap();
+    let memory = &admitted.admission().memory;
+    assert_eq!(
+        (memory.stated, memory.origin),
+        (PLENTY, MemoryOrigin::Declared)
+    );
+    assert_eq!(
+        memory.limit,
+        LimitRead {
+            max: Some(Bound {
+                bytes: PLENTY,
+                depth: 0
+            }),
+            high: Some(Bound {
+                bytes: PLENTY + 1,
+                depth: 3
+            }),
+            origin: LimitOrigin::Assumed,
+        }
+    );
+    assert_eq!(memory.model, journal::Model::from(Model::LIBRARY));
+    assert_eq!(
+        (memory.need, memory.slack, memory.budget, memory.pool),
+        (fit.need, fit.slack, fit.budget, fit.pool)
+    );
+    assert_ne!(fit.need, fit.slack);
+    assert_eq!(memory.terms.len(), fit.terms.len());
+    for (j, t) in memory.terms.iter().zip(&fit.terms) {
+        assert_eq!(
+            (j.source, j.count, j.cost, j.rest, j.bytes),
+            (t.source, t.count, t.cost, t.rest, t.bytes),
+            "{t:?}"
+        );
+        assert_eq!(j.part, t.part.into());
+        assert_eq!(j.phase, t.phase.into());
+        assert_eq!(j.held, t.held.into());
+        assert_eq!(j.stated, t.stated.into());
+        assert_eq!(j.basis, t.basis.into());
+    }
+    assert!(
+        memory
+            .terms
+            .iter()
+            .any(|t| t.held == journal::Held::Gate { built: false })
+    );
+    assert!(!memory.unheld.is_empty());
+    assert_eq!(
+        memory.unheld,
+        fit.unheld.iter().map(|p| (*p).into()).collect::<Vec<_>>()
+    );
+    let header = journal_header(
+        &admitted,
+        Identity {
+            source: "test".into(),
+            log: "ab".repeat(32),
+            validator: "v".into(),
+            namespace: Namespace(0),
+        },
+        None,
+        vec![],
+        None,
+    );
+    let bytes = Writer::new(Vec::new(), header.clone())
+        .unwrap()
+        .finish()
+        .unwrap()
+        .0;
+    let read = Reader::new(std::io::Cursor::new(bytes)).unwrap();
+    assert_eq!(*read.header(), header);
+}
+
+/// K2b-7e-2b-3d-3b-2: each of the fit's names is journaled as itself — its
+/// own name in snake case, not another part's, phase's, holder's, stater's,
+/// basis' or origin's.
+#[test]
+fn each_name_is_journaled_as_itself() {
+    use ascetic_ddd_load_run::carrier::StatedBy;
+    use ascetic_ddd_load_run::live::LimitOrigin;
+    use ascetic_ddd_load_run::memory::{Basis, Held, Phase};
+    use ascetic_ddd_scheduler::journal;
+    fn snake(debug: &str) -> String {
+        let mut out = String::new();
+        for (i, c) in debug.chars().enumerate() {
+            if c.is_ascii_uppercase() {
+                if i > 0 {
+                    out.push('_');
+                }
+                out.push(c.to_ascii_lowercase());
+            } else {
+                out.push(c);
+            }
+        }
+        format!("{out:?}")
+    }
+    fn same<A: std::fmt::Debug>(a: A, journaled: serde_json::Result<String>) {
+        assert_eq!(journaled.unwrap(), snake(&format!("{a:?}")));
+    }
+    let json = serde_json::to_string::<journal::Part>;
+    for p in Part::ALL {
+        same(p, json(&p.into()));
+    }
+    for p in [
+        Phase::Fixed,
+        Phase::Stages,
+        Phase::Gates,
+        Phase::Run,
+        Phase::Pool,
+    ] {
+        same(p, serde_json::to_string(&journal::Phase::from(p)));
+    }
+    for h in [
+        Held::Built,
+        Held::Channel,
+        Held::Cap,
+        Held::Once,
+        Held::Host,
+    ] {
+        same(h, serde_json::to_string(&journal::Held::from(h)));
+    }
+    assert_eq!(
+        journal::Held::from(Held::Gate { built: None }),
+        journal::Held::Gate { built: false }
+    );
+    for b in [Basis::Heap, Basis::Outside] {
+        same(b, serde_json::to_string(&journal::Basis::from(b)));
+    }
+    for s in [StatedBy::Library, StatedBy::Host] {
+        same(s, serde_json::to_string(&journal::StatedBy::from(s)));
+    }
+    let origin = |l: Limit| journal::LimitRead::from(l).origin;
+    let dir = tempfile::tempdir().unwrap();
+    for (limit, named) in [
+        (Limit::assumed(None, None), LimitOrigin::Assumed),
+        (Limit::read_from(dir.path(), "/"), LimitOrigin::Tree),
+    ] {
+        assert_eq!(limit.origin(), named);
+        same(named, serde_json::to_string(&origin(limit)));
+    }
+    if let Ok(read) = Limit::read() {
+        same(LimitOrigin::Read, serde_json::to_string(&origin(read)));
+    }
+}

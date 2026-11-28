@@ -1,4 +1,4 @@
-{"header":{"journal":9,"machine":5,"source":"verdict","log":"f5acac58ce55b705ca2f588b77b7c4ebfd0826046ed467634d6743dbc90471c1","validator":"a test's validator","read_ahead":"1000","jitter":"200","resend":"100","catch_up":0,"namespace":"1","t0":"1763640000000000","gates":[],"judging":null,"admission":null}}
+{"header":{"journal":10,"machine":5,"source":"verdict","log":"f5acac58ce55b705ca2f588b77b7c4ebfd0826046ed467634d6743dbc90471c1","validator":"a test's validator","read_ahead":"1000","jitter":"200","resend":"100","catch_up":0,"namespace":"1","t0":"1763640000000000","gates":[],"judging":null,"admission":null}}
 {"read":{"at":"0","line":"2","key":{"kind":"device","scope":"Bw==","label":"update","n":0},"action":"rest","safety":"not_taken","cause":null,"after":[],"planned":"1000","refusal":false}}
 {"released":{"at":"0","line":"2","intended":"1000","released":"1000","deadline":"4000"}}
 {"dispatch":{"at":"1101","line":"2","attempt":1,"deadline":"4000","due":"1000"}}
@@ -8,4 +8,4 @@
 {"sent":{"at":"1312","line":"2","attempt":2,"decorated":"1312","handed":"1312","connected":"1312","lag":"0"}}
 {"answer":{"at":"4000","line":"2","attempt":2,"judged":"unknown","captured":[],"ignored":null,"status":null,"code":null,"after":null,"censored":true,"found":null,"unsent":null}}
 {"end":{"at":"4000","line":"2","end":"unknown","read":"0","ready":"0","intended":"1000","released":"1000","dispatched":"1101","sent":"1101","ended":"4000","attempts":2,"critical":null,"bound":[],"fault":false,"wake":null}}
-{"trailer":{"events":"9","steps":"1","sha256":"9caea95260cdc3b71f9f60ce5f768b9a08a2f3b11564d6e82bec717d8fdd9ce8"}}
+{"trailer":{"events":"9","steps":"1","sha256":"0e6319f45d0b3a2063a141d1a2b259bb5f4203c56c2de3f8daf4196566573d13"}}

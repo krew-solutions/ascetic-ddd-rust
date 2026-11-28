@@ -26,13 +26,13 @@ use crate::machine::{self, Binding, Input, Judgement, Line as Number, Output};
 pub mod sample;
 
 /// The version a reader accepts and a writer writes: exactly this one.
-pub const JOURNAL_VERSION: u32 = 9;
+pub const JOURNAL_VERSION: u32 = 10;
 
 /// The byte form's identity: the SHA-256 of the golden journal
 /// (`golden/journal.jsonl`, [`sample`]), which holds every line and variant. A
 /// change to how any line is written changes the golden journal, and so this,
 /// in the same edit.
-pub const JOURNAL: &str = "f91f8cd1a26235227bd68667e08b0e66990cfbe0e4c39960e6acbb22e4731256";
+pub const JOURNAL: &str = "a912423ac1922b86c0873eaa63e4cbbc1adc9b3645477cfe42c1effc12c92fbc";
 
 /// A journal's line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,7 +106,8 @@ pub struct Header {
     pub admission: Option<Admission>,
 }
 
-/// Admission's evidence (version 8, decision 20).
+/// Admission's evidence (version 8, decision 20; version 10, decision 22's
+/// memory, K2b-7e-2b-3d-3b).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Admission {
@@ -115,8 +116,282 @@ pub struct Admission {
     /// The process's descriptors, read once its runtimes existed; none if
     /// no source needed sockets.
     pub descriptors: Option<DescriptorsRead>,
-    /// Whether any of it was assumed by a test rather than read.
-    pub assumed: bool,
+    /// What of it a test assumed rather than read, each apart (version 10).
+    pub assumed: Assumed,
+    /// The memory it was fitted to (version 10).
+    pub memory: MemoryFit,
+}
+
+/// What of admission's evidence a test assumed, each apart (version 10): no
+/// assumption folded into another.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Assumed {
+    /// The plan: a test's peaks, no commitment's.
+    pub plan: bool,
+    /// The runtimes: a test's, not built for the caps fitted.
+    pub runtimes: bool,
+    /// The journal: a test's, no admission sized its lines behind.
+    pub journal: bool,
+}
+
+impl Assumed {
+    /// Whether any of it was.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.plan || self.runtimes || self.journal
+    }
+}
+
+/// The memory a run was fitted to (version 10, decision 22): what was stated,
+/// the process's limit, the library's constants, every term, and what the fit
+/// made of them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryFit {
+    /// The memory stated, in bytes.
+    #[serde(with = "u64s")]
+    pub stated: u64,
+    /// Where it was stated.
+    pub origin: MemoryOrigin,
+    /// The process's limit as admission read it.
+    pub limit: LimitRead,
+    /// The library's constants a cost is one of.
+    pub model: Model,
+    /// Every term.
+    pub terms: Vec<MemoryTerm>,
+    /// The parts whose count no enforcer holds yet.
+    pub unheld: Vec<Part>,
+    /// The pool's budget: the stated memory less the fixed and the run's parts.
+    #[serde(with = "u64s")]
+    pub budget: u64,
+    /// The pool's prediction at the run's catch-up, the header's `catch_up`.
+    #[serde(with = "u64s")]
+    pub pool: u64,
+    /// What the process needs at its largest phase.
+    #[serde(with = "u64s")]
+    pub need: u64,
+    /// The stated memory less the need.
+    #[serde(with = "u64s")]
+    pub slack: u64,
+}
+
+/// Where the memory stated came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryOrigin {
+    /// Declared by the host.
+    Declared,
+}
+
+/// The process's cgroup limits as admission read them: the least of each,
+/// with its depth above the process's own group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LimitRead {
+    /// The least `memory.max`; none where none is finite.
+    pub max: Option<Bound>,
+    /// The least `memory.high`; none where none is finite.
+    pub high: Option<Bound>,
+    /// Where it came from.
+    pub origin: LimitOrigin,
+}
+
+/// A limit's bytes and its depth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Bound {
+    /// Its bytes.
+    #[serde(with = "u64s")]
+    pub bytes: u64,
+    /// Its depth above the process's own group: 0 for that group.
+    pub depth: u32,
+}
+
+/// Where a limit came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitOrigin {
+    /// Read from the process's own cgroups.
+    Read,
+    /// Read from a test's tree.
+    Tree,
+    /// A test's assumption.
+    Assumed,
+}
+
+/// The library's constants a part's cost is one of, as the fit took them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Model {
+    /// An ended step's cell.
+    #[serde(with = "u64s")]
+    pub ended_cell: u64,
+    /// A step not ended's cell.
+    #[serde(with = "u64s")]
+    pub live_cell: u64,
+    /// A barrier key beside its own bytes.
+    #[serde(with = "u64s")]
+    pub barrier: u64,
+    /// A record's `Arc`.
+    #[serde(with = "u64s")]
+    pub record: u64,
+    /// The log's decompressor.
+    #[serde(with = "u64s")]
+    pub decoder: u64,
+    /// The shell's share of an attempt.
+    #[serde(with = "u64s")]
+    pub attempt: u64,
+    /// A runtime's own beside its events.
+    #[serde(with = "u64s")]
+    pub runtime: u64,
+    /// A driver's event, where its size is stated.
+    #[serde(with = "u64s_option")]
+    pub event: Option<u64>,
+}
+
+/// A part's term: `count · cost + rest`, its phase, who holds its count, who
+/// states its cost and what it is counted against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryTerm {
+    /// The part.
+    pub part: Part,
+    /// Its source, if it is a source's.
+    pub source: Option<u32>,
+    /// Its phase.
+    pub phase: Phase,
+    /// The things its enforcer bounds.
+    #[serde(with = "u64s")]
+    pub count: u64,
+    /// What each holds.
+    #[serde(with = "u64s")]
+    pub cost: u64,
+    /// What does not scale with them.
+    #[serde(with = "u64s")]
+    pub rest: u64,
+    /// `count · cost + rest`.
+    #[serde(with = "u64s")]
+    pub bytes: u64,
+    /// Who holds its count.
+    pub held: Held,
+    /// Who states its cost.
+    pub stated: StatedBy,
+    /// What it is counted against.
+    pub basis: Basis,
+}
+
+/// A part of what a run holds (decision 22): the fit's own, by name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Part {
+    /// The reader's records ahead.
+    Reader,
+    /// The log's decompressor.
+    Decoder,
+    /// A source's runtime.
+    Runtime,
+    /// The carrier's own of a source.
+    CarrierSource,
+    /// The shell's keeping, one a source.
+    Keeping,
+    /// The journal's lines behind.
+    Journal,
+    /// The journal's output.
+    JournalOut,
+    /// A source's connections.
+    Connections,
+    /// A source's connections' own heap.
+    Io,
+    /// A source's answers.
+    Answers,
+    /// Stage 2's judging.
+    Judging,
+    /// A gate's probes' connections.
+    Probes,
+    /// A gate's probes' own heap.
+    ProbesIo,
+    /// The gates' client before the run.
+    GateStages,
+    /// The gates' client during it.
+    GateRun,
+    /// The cells of the steps held, as ended.
+    Cells,
+    /// The steps not ended, beyond their cells as ended.
+    Pending,
+    /// The barrier keys.
+    Barriers,
+    /// The late steps' records.
+    Records,
+    /// The producers the records not ended are bound to.
+    BoundTo,
+    /// What the held keep once ended.
+    Kept,
+    /// One record's bindings.
+    Binding,
+    /// The shell's attempts.
+    ShellAttempts,
+    /// The carrier's attempts.
+    CarrierAttempts,
+    /// The attempts' decorations.
+    Decorations,
+}
+
+/// A part's phase: when its bytes are held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    /// Throughout.
+    Fixed,
+    /// The stages before T0.
+    Stages,
+    /// The gates' probes.
+    Gates,
+    /// The run.
+    Run,
+    /// The run's pool, at its catch-up.
+    Pool,
+}
+
+/// Who holds a part's count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Held {
+    /// What is built holds it.
+    Built,
+    /// A bounded channel.
+    Channel,
+    /// A source's cap.
+    Cap,
+    /// It is held once.
+    Once,
+    /// A gate: the read gate, built or not.
+    Gate {
+        /// Whether it is built.
+        built: bool,
+    },
+    /// The host.
+    Host,
+}
+
+/// Who states a part's cost.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatedBy {
+    /// The library.
+    Library,
+    /// The host.
+    Host,
+}
+
+/// What a part is counted against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Basis {
+    /// The heap.
+    Heap,
+    /// Outside the heap.
+    Outside,
 }
 
 /// A source's sockets as admission held them.
@@ -1419,9 +1694,24 @@ impl Heap {
             sources,
             descriptors: _,
             assumed: _,
+            memory:
+                MemoryFit {
+                    stated: _,
+                    origin: _,
+                    limit: _,
+                    model: _,
+                    terms,
+                    unheld,
+                    budget: _,
+                    pool: _,
+                    need: _,
+                    slack: _,
+                },
         }) = admission
         {
             self.vec(sources);
+            self.vec(terms);
+            self.vec(unheld);
         }
     }
 
