@@ -100,8 +100,8 @@ ROWS = {
     "L1-250-thp-off": dict(mode="held", n=250, size=MIB, body=0, cap=256, timeout=10_000_000, zstd=0, most="3G", thp="off"),
     "L1-250-thp-on": dict(mode="held", n=250, size=MIB, body=0, cap=256, timeout=10_000_000, zstd=0, most="3G",
                           env={"GLIBC_TUNABLES": "glibc.malloc.hugetlb=1"}),
-    "L1-4x-250": dict(mode="held", n=250, size=MIB, body=0, cap=128, timeout=10_000_000, zstd=0, most="4G", sources=4),
-    "L1-4x-250-arena1": dict(mode="held", n=250, size=MIB, body=0, cap=128, timeout=10_000_000, zstd=0, most="4G",
+    "L1-4x-250": dict(mode="held", n=250, size=MIB, body=0, cap=256, timeout=10_000_000, zstd=0, most="4G", sources=4),
+    "L1-4x-250-arena1": dict(mode="held", n=250, size=MIB, body=0, cap=256, timeout=10_000_000, zstd=0, most="4G",
                              sources=4, env={"MALLOC_ARENA_MAX": "1"}),
 }
 

@@ -124,9 +124,9 @@ unsafe extern "C" {
 /// `PR_SET_THP_DISABLE`: no transparent huge page for the process.
 const PR_SET_THP_DISABLE: i32 = 41;
 
-/// The threads' stacks resident: each anonymous writable mapping that
-/// follows a guard page (`---p`), its `Rss` summed, and their number; the
-/// main thread's `[stack]` among them.
+/// The threads' stacks resident: each anonymous writable mapping right above
+/// a guard of one page (`---p`, 4 KiB), its `Rss` summed, and their number;
+/// the main thread's `[stack]` among them.
 fn stacks() -> (u64, u64) {
     let Ok(smaps) = std::fs::read_to_string("/proc/self/smaps") else {
         return (0, 0);
@@ -139,8 +139,13 @@ fn stacks() -> (u64, u64) {
         if first.contains('-') && first.chars().next().is_some_and(|c| c.is_ascii_hexdigit()) {
             let perms = fields.next().unwrap_or("");
             let path = line.split_whitespace().nth(5);
+            let size = first.split_once('-').and_then(|(a, b)| {
+                Some(u64::from_str_radix(b, 16).ok()? - u64::from_str_radix(a, 16).ok()?)
+            });
             guarded = path == Some("[stack]") || (after_guard && perms == "rw-p" && path.is_none());
-            after_guard = perms == "---p" && path.is_none();
+            // A thread's guard is one page below its stack; glibc's arenas
+            // leave larger reservations, which are no guard.
+            after_guard = perms == "---p" && path.is_none() && size == Some(4_096);
         } else if first == "Rss:" && guarded {
             bytes += fields
                 .next()
