@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a, K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3), K2b-7e-2b-2c-1 to K2b-7e-2b-2c-4 built, K2b-7e-2b-3 decided and cut in five, K2b-7e-2b-3a-1 to K2b-7e-2b-3a-3, K2b-7e-2b-3b, K2b-7e-2b-3c-1 and K2b-7e-2b-3c-2 built, K2b-7e-2b-3d cut in four, K2b-7e-2b-3d-1 and K2b-7e-2b-3d-2 built, K2b-7e-2b-3d-3 decided and cut in two, K2b-7e-2b-3d-3a in two, K2b-7e-2b-3d-3a-1 and K2b-7e-2b-3d-3a-2 built, K2b-7e-2b-3d-3b cut in four, K2b-7e-2b-3d-3b-1 and K2b-7e-2b-3d-3b-2 built, K2b-7e-2b-3d-3b-3 cut in two, K2b-7e-2b-3d-3b-3a and K2b-7e-2b-3d-3b-3b built, K2b-7e-2b-3d-3b-4 cut in three, K2b-7e-2b-3d-3b-4a to K2b-7e-2b-3d-3b-4c built, K2b-7e-2b-3d-3b done, K2b-7e-2b-3d-4 next; decision 23 decided, K2b-7e-4a built, K2b-7e-4b decided and cut in three, K2b-7e-4b-1 and K2b-7e-4b-2 built, K2b-7e-4b-3 measured — four refutations, one remedy each —, K2b-7e-4b-4 and K2b-7e-4b-5 built and measured, K2b-7e-4 done (decision 23's steps 1 and 2), decision 23's step 3b on the owner's confirmation; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a, K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3), K2b-7e-2b-2c-1 to K2b-7e-2b-2c-4 built, K2b-7e-2b-3 decided and cut in five, K2b-7e-2b-3a-1 to K2b-7e-2b-3a-3, K2b-7e-2b-3b, K2b-7e-2b-3c-1 and K2b-7e-2b-3c-2 built, K2b-7e-2b-3d cut in four, K2b-7e-2b-3d-1 and K2b-7e-2b-3d-2 built, K2b-7e-2b-3d-3 decided and cut in two, K2b-7e-2b-3d-3a in two, K2b-7e-2b-3d-3a-1 and K2b-7e-2b-3d-3a-2 built, K2b-7e-2b-3d-3b cut in four, K2b-7e-2b-3d-3b-1 and K2b-7e-2b-3d-3b-2 built, K2b-7e-2b-3d-3b-3 cut in two, K2b-7e-2b-3d-3b-3a and K2b-7e-2b-3d-3b-3b built, K2b-7e-2b-3d-3b-4 cut in three, K2b-7e-2b-3d-3b-4a to K2b-7e-2b-3d-3b-4c built, K2b-7e-2b-3d-3b done, K2b-7e-2b-3d-4 decided and cut in three, K2b-7e-2b-3d-4a next; decision 23 decided, K2b-7e-4a built, K2b-7e-4b decided and cut in three, K2b-7e-4b-1 and K2b-7e-4b-2 built, K2b-7e-4b-3 measured — four refutations, one remedy each —, K2b-7e-4b-4 and K2b-7e-4b-5 built and measured, K2b-7e-4 done (decision 23's steps 1 and 2), decision 23's step 3b on the owner's confirmation; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -62,7 +62,9 @@ To be built in slices, each a commit of its own:
   fold, the part table as data, the self-check, the census in Rust; **K2b-7e-2b-3d-3b-3b** `verdict.py`'s twin, the
   census through both, the two-sided property —; **K2b-7e-2b-3d-3b-4** in three — **K2b-7e-2b-3d-3b-4a** the pins split and
   the CI step, **K2b-7e-2b-3d-3b-4b** load-run's pinned headers, **K2b-7e-2b-3d-3b-4c** the evidence priced —) —; **K2b-7e-2b-3d-4** the
-  whole-run measurement), **K2b-7e-2b-3e** the evidence — the `memory` line with its producer among it
+  whole-run measurement, in three — **K2b-7e-2b-3d-4a** the harness and its first rows (the control, the answers
+  held, the attempts and the late records, the decoder) with their predictions, **K2b-7e-2b-3d-4b** the sources, the
+  kernel's sockets and the process's factors, **K2b-7e-2b-3d-4c** the server's matrix and the stall's curve —), **K2b-7e-2b-3e** the evidence — the `memory` line with its producer among it
   after a kill —, **K2b-7e-2c** the cgroup's memory, after the read gate;
   **K2b-7e-3** the read gate; **K2b-7e-4** the parse, in two (decision 23) — **K2b-7e-4a** a body parsed on its first
   reader and a late answer holding nothing, **K2b-7e-4b** the tape (decision 23's step 2), in three — **K2b-7e-4b-1**
@@ -898,6 +900,27 @@ which `admit` never called; § Alternatives Considered keeps what each refuted):
     becomes the next after. Executors two-sided: each owner's count tested, the shadow exact for budget, pool and
     unheld with a κ that does not divide, a property editing one field of a consistent evidence and refusing it unless
     the field is on a pinned free list.
+  - **Decided for K2b-7e-2b-3d-4** (2026-11-28, under the gate: the main position, a blind solver and a discriminator on
+    Fable; § Alternatives Considered keeps what each refuted). **The whole-run measurement is a set of differenced rows,
+    not a total**: one process-wide counter (a moved block counted at both sizes, a live count) in an ignored test binary
+    of its own, run by hand one row a process, zeroed before the plan is opened — its reader fills its channel before
+    the fit —, its peak taken at the edges the stages' calls give; each phase's peak compared with the sum of its
+    heap-basis terms read back from the header it journaled, never priced again; what the counter cannot see read
+    apart (`mallinfo2`'s in-use less the counter: zstd's C side allocates through libc). Each row reaches the state it
+    prices — the guard: its realised counts from its journal, below 0.9 of the priced a row that tests nothing —,
+    states its prediction in this record before it runs, and has a mutant of the constant it prices (`CONNECTION`
+    halved, `HEAD` dropped, `ATTEMPT` cut by a third) that must turn it red in a scratch build. The rows: a control;
+    answers held — the stand holding every body's last byte until all are out, then releasing them one a source, so
+    that each source judges while the rest are held —, at two counts for the per-answer slope; attempts never answered
+    at two counts and two body sizes, for the per-attempt slope and the late records' coefficient
+    (K2b-7e-2b-3a-3's owed row); sources one and four; the decoder with and without zstd; the kernel's sockets with the
+    reads withheld. The process is reported beside them as factors, not verdicts — resident high-water, anonymous huge
+    pages, the threads' stacks, glibc's arenas; THP off by `prctl` and on by glibc's tunable, each confirmed or the row
+    void; resident can read below counted (bodies are reserved at the cap). The run sits in a scope of its own without
+    swap, the stand in another; no row lets the cgroup judge the need until the sockets are measured, since the
+    kernel's queued bytes would make it undiscriminating. **No verdict on κ**: nothing paces the run, so a stalled row
+    measures the backlog against the stop's length, below the deadline plus the route's timeout — evidence for
+    decision 21's direction either way.
 - **The read gate** (K2b-7e-3): no line read while the attempts alive reach their cap or the machine's live cost its
   share — a late read, the harness's; starved past the longest timeout, a fault and a stop.
 - **The parse bounded** (K2b-7e-4): the body's state journaled (whole, cut at the cap, unparsed and why) — an answer
@@ -1137,6 +1160,18 @@ waits for the owner's confirmation:
   promise; Evolution), **pins keyed by the journal's version alone** (a fold's rule over unchanged bytes forces the
   wrong bump; Evolution), **executors run on admission's own output** (consistent by construction: no rule-deleting
   mutant dies; Verifiability), **a `compile_fail` doctest without its code** (any error passes it; Verifiability).
+- **Decision 22, K2b-7e-2b-3d-4's measurement** (2026-11-28): the main position's **totals and a stated band on them**
+  (a floor on the total shares the sentence it checks, ADR K2b-7e-2b-3's synthesis; slack in one term absorbs another's
+  under-price — 2.6 MB of the decoder alone; the discriminator), **the pool's peak against its prediction at κ** (the
+  pool is unheld by declaration and nothing paces: the result is fixed by arithmetic; the solver, the discriminator),
+  **`tests/tcp.rs`'s stand and `tests/stall.rs`'s late clock** (neither is what the position names; the
+  discriminator), **THP on and off by `prctl` alone** (under `madvise` the two are one row; the discriminator), **the
+  cgroup's current less the resident set as the sockets' memory, at most their defaults** (autotuning grows them; the
+  current carries page cache, stacks and slab; the discriminator), **swap left on** (the high-water under-reads at the
+  limit; the discriminator); the solver's **the cgroup as judge of the need** (the kernel's queued bytes make it come
+  true either way; the discriminator), **two body sizes alone for the attempts** (they give the record's coefficient,
+  not the per-attempt constant; the discriminator), **`tests/memory.rs`'s counter** (its `realloc` counts the
+  difference only, the defect that once hid a 30 % under-count; the discriminator).
 - **Decision 23's step 2, the tape** (2026-11-27, K2b-7e-4b's round): **a pointer set registered for one pass**
   (the main position, the solver: about 1.6 × cap — invisible to the fit, a source's answers charged at sockets × cap;
   the judgement then depends on the registration, which needs a fallback pass or a narrowed API; the discriminator),
@@ -3846,6 +3881,8 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-28: M-a rerun after K2b-7e-4b-4 on the load server (R4, R5, R7 still refuted by smaller margins; R6
   refuted on the densest shapes) and K2b-7e-4b-5 built (§ Measured): a plain string compared over its text; K2b-7e-4b-4's
   unit test's escapes restored — its record named escapes it no longer held.
+- 2026-11-28: K2b-7e-2b-3d-4 decided under the gate (§ Decision 22, decided for K2b-7e-2b-3d-4) and cut in three: the
+  whole-run measurement as differenced rows, each guarded, predicted and mutated; no verdict on κ.
 - 2026-11-28: K2b-7e-2b-3d-3b-4c built (§ Measured): the evidence a part of its own, one copy kept; K2b-7e-2b-3d-3b
   done.
 - 2026-11-28: K2b-7e-2b-3d-3b-4b built (§ Measured): four of admission's headers pinned, folded by both folds.
