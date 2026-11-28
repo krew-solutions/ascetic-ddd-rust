@@ -13,9 +13,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering, fence};
 
 use ascetic_ddd_scheduler::journal::{
-    Allocator, AllocatorState, Binds, Cgroup, Events, Live, Pressure, Process, Reading, Sample,
-    SampleWhy, Unread,
+    Allocator, AllocatorState, Binds, Cgroup, Code, Events, Live, Pressure, Process, Reading,
+    Sample, SampleWhy, Unread,
 };
+use ascetic_ddd_scheduler::machine;
 
 use crate::clock::{Clock, RealClock};
 
@@ -153,6 +154,82 @@ pub struct Sampler {
     draw: u64,
     buf: Vec<u8>,
     live: Live,
+    probe: Option<Stated>,
+}
+
+/// The allocator's own figures, as a host's probe reads them (ADR-0047
+/// decision 22, K2b-7e-2b-3e): its bytes in use, its bytes free and kept,
+/// its bytes mapped apart, its free chunks where it counts them — the
+/// allocator's word, never the counted heap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Heap {
+    /// Its bytes in use.
+    pub in_use: u64,
+    /// Its bytes free and kept.
+    pub free: u64,
+    /// Its bytes mapped apart.
+    pub mapped: u64,
+    /// Its free chunks: what a walk of it is as long as.
+    pub chunks: Option<u64>,
+}
+
+/// A host's probe of its allocator (ADR-0047 decision 22, K2b-7e-2b-3e):
+/// load-run forbids `unsafe`, so its host reads its allocator's own figures
+/// — glibc's `mallinfo2`, say. Read on the journal's writer, outside any
+/// runtime, under `catch_unwind` — a panic its group's failure, never the
+/// journal's end —, at a run's baseline and finish only, until measurements
+/// at a launch's states move it: an allocator's walk may take its arenas'
+/// locks, which the machine's threads wait on.
+pub trait Probe: Send + Sync {
+    /// Its allocator, a dotted name (`glibc.2.39`, say): read once, as the
+    /// journal is configured.
+    fn allocator(&self) -> &str;
+    /// The bytes a read holds at most while it runs, as its host states them
+    /// — version 11's `probe` part: read once, as the journal is configured.
+    fn bytes(&self) -> u64;
+    /// The figures now; none where it cannot read them.
+    fn read(&self) -> Option<Heap>;
+}
+
+/// A probe with what it stated as the journal was configured: its bytes and
+/// its allocator's name.
+#[derive(Clone)]
+pub struct Stated {
+    probe: Arc<dyn Probe>,
+    bytes: u64,
+    name: Option<Code>,
+}
+
+impl Stated {
+    /// `probe`'s word, read now under `catch_unwind`: a probe that panics
+    /// stating none states no bytes and no name, and is read as failing.
+    pub fn of(probe: Arc<dyn Probe>) -> Stated {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let bytes = catch_unwind(AssertUnwindSafe(|| probe.bytes())).ok();
+        let name = catch_unwind(AssertUnwindSafe(|| {
+            Code::from(&machine::Code::of(probe.allocator()))
+        }))
+        .ok();
+        Stated {
+            probe,
+            bytes: bytes.unwrap_or(0),
+            name,
+        }
+    }
+
+    /// The bytes it stated a read holds.
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+}
+
+impl std::fmt::Debug for Stated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Stated")
+            .field("bytes", &self.bytes)
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Sampler {
@@ -188,7 +265,13 @@ impl Sampler {
                 full: 0,
                 waited: 0,
             },
+            probe: None,
         }
+    }
+
+    /// The same, reading `probe` at its baseline and its finish.
+    pub fn probing(self, probe: Option<Stated>) -> Sampler {
+        Sampler { probe, ..self }
     }
 
     /// The instant the next sample is due.
@@ -216,6 +299,7 @@ impl Sampler {
         } else {
             0
         };
+        let allocator = self.allocator(why);
         let process = self.process();
         let cgroup = self.cgroup();
         let host = self
@@ -243,14 +327,47 @@ impl Sampler {
             cgroup,
             host,
             live,
-            allocator: Allocator {
-                state: AllocatorState::Unstated,
-                name: None,
-                in_use: None,
-                free: None,
-                mapped: None,
-                chunks: None,
-                took: 0,
+            allocator,
+        }
+    }
+
+    /// The allocator's figures for `why`: none stated, unstated; at a due
+    /// sample, skipped; else read under `catch_unwind`, a panic or none a
+    /// failure, its time taken either way.
+    fn allocator(&self, why: SampleWhy) -> Allocator {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let none = |state, name| Allocator {
+            state,
+            name,
+            in_use: None,
+            free: None,
+            mapped: None,
+            chunks: None,
+            took: 0,
+        };
+        let Some(stated) = &self.probe else {
+            return none(AllocatorState::Unstated, None);
+        };
+        let name = stated.name.clone();
+        if why == SampleWhy::Due {
+            return none(AllocatorState::Skipped, name);
+        }
+        let at = self.clock.now();
+        let read = catch_unwind(AssertUnwindSafe(|| stated.probe.read()));
+        let took = self.clock.now().saturating_sub(at);
+        match (read, &name) {
+            (Ok(Some(h)), Some(_)) => Allocator {
+                state: AllocatorState::Read,
+                name,
+                in_use: Some(h.in_use),
+                free: Some(h.free),
+                mapped: Some(h.mapped),
+                chunks: h.chunks,
+                took,
+            },
+            _ => Allocator {
+                took,
+                ..none(AllocatorState::Failed, name)
             },
         }
     }

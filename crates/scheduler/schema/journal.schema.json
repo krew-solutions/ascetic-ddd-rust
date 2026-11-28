@@ -1658,7 +1658,8 @@
         "shell_attempts",
         "carrier_attempts",
         "decorations",
-        "evidence"
+        "evidence",
+        "probe"
       ]
     },
     "phase": {
@@ -2231,6 +2232,7 @@
           "enum": [
             "unstated",
             "failed",
+            "skipped",
             "read"
           ]
         },

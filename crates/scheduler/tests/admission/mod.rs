@@ -1,4 +1,4 @@
-//! Consistent admission evidence of version 10 and its tampers, each refused
+//! Consistent admission evidence of versions 10 and 11 and its tampers, each refused
 //! by one rule's code (ADR-0047 decision 22, K2b-7e-2b-3d-3b-3): shared by the
 //! recheck's tests and the fold's twins against the definition.
 
@@ -8,7 +8,7 @@ use ascetic_ddd_scheduler::journal::{
     self, Admission, Assumed, Bound, Held, LimitOrigin, LimitRead, MemoryFit, MemoryOrigin,
     MemoryTerm, Model, Part, Phase, SourceFit, StatedBy,
 };
-use ascetic_ddd_scheduler::recheck::{HeldBy, PARTS_10, Row, Stater};
+use ascetic_ddd_scheduler::recheck::{HeldBy, PARTS_11, Row, Stater};
 
 /// What a consistent evidence is made of: the catch-up, stage 2's and the
 /// gates' bytes, each source's row by its cap — none for a source with no
@@ -55,7 +55,7 @@ pub const MODEL: Model = Model {
 };
 
 pub fn row_of(part: Part) -> Row {
-    PARTS_10.into_iter().find(|r| r.part == part).unwrap()
+    PARTS_11.into_iter().find(|r| r.part == part).unwrap()
 }
 
 pub fn term(part: Part, source: Option<u32>, count: u64, cost: u64, rest: u64) -> MemoryTerm {
@@ -88,6 +88,12 @@ pub fn term(part: Part, source: Option<u32>, count: u64, cost: u64, rest: u64) -
 /// The evidence `b` makes, consistent: every term in the journal's order, its
 /// sums, its pool at the catch-up, its need, a slack of 1,000, its limit above.
 pub fn consistent(b: &Base) -> (u32, Admission) {
+    consistent_at(b, ascetic_ddd_scheduler::journal::JOURNAL_VERSION)
+}
+
+/// The evidence `b` makes at `version`: version 11's with the host's probe
+/// (K2b-7e-2b-3e-2c), a read of 4 KiB stated.
+pub fn consistent_at(b: &Base, version: u32) -> (u32, Admission) {
     let m = MODEL;
     let late = 9;
     let mut terms = vec![
@@ -134,6 +140,10 @@ pub fn consistent(b: &Base) -> (u32, Admission) {
         term(Part::CarrierAttempts, None, late, 7, 9),
         term(Part::Decorations, None, late, 3, 0),
     ]);
+    // Version 11's probe, a host's read of 4 KiB stated (K2b-7e-2b-3e-2c).
+    if version >= 11 {
+        terms.push(term(Part::Probe, None, 1, 4_096, 0));
+    }
     // The evidence: two copies, each its terms (this one with them), a row a
     // source and the unheld parts.
     let unheld = terms

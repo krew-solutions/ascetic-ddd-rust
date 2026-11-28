@@ -45,6 +45,7 @@ fn planned(sources: Vec<SourcePart>, v: [u64; 16], kappa: u64) -> Planned {
         reader: Some(one(v[0])),
         journal: one(v[2]),
         journal_out: 0,
+        probe: 0,
         judging: v[3],
         gates: GateBytes {
             stages: v[4],
@@ -107,7 +108,7 @@ fn phases(p: &Planned) -> Phases {
     // The evidence: two copies, each its terms — the run's 18 with it, 8 a
     // source —, a row a source and the pool's 8 unheld parts.
     let n = w(p.sources.len() as u64);
-    let evidence = 2 * ((18 + 8 * n) * w(m.term) + n * w(m.row) + 8 * w(m.part));
+    let evidence = 2 * ((19 + 8 * n) * w(m.term) + n * w(m.row) + 8 * w(m.part));
     let fixed = reader
         + decoder
         + evidence
@@ -123,6 +124,7 @@ fn phases(p: &Planned) -> Phases {
             .sum::<u128>();
     let run = priced(&p.journal)
         + w(p.journal_out)
+        + w(p.probe)
         + w(p.gates.run)
         + p.sources
             .iter()
@@ -173,7 +175,8 @@ fn stated(p: &Planned, part: Part, source: Option<u32>) -> StatedBy {
         | Part::JournalOut
         | Part::GateStages
         | Part::GateRun
-        | Part::Decorations => StatedBy::Host,
+        | Part::Decorations
+        | Part::Probe => StatedBy::Host,
         Part::CarrierSource | Part::Connections | Part::Answers | Part::Probes => carrier(),
         Part::CarrierAttempts => p.carrier_stated,
         Part::Reader
@@ -207,7 +210,8 @@ fn phase(part: Part) -> Phase {
         | Part::Connections
         | Part::Io
         | Part::Answers
-        | Part::GateRun => Phase::Run,
+        | Part::GateRun
+        | Part::Probe => Phase::Run,
         Part::Cells
         | Part::Pending
         | Part::Barriers
@@ -263,6 +267,7 @@ fn raised(mut p: Planned, part: Part, d: u64) -> Planned {
         Part::Decorations => p.decorations += d,
         // A term of the evidence a byte more: every term of both copies.
         Part::Evidence => p.model.term += d,
+        Part::Probe => p.probe += d,
     }
     p
 }
@@ -332,7 +337,7 @@ fn arbitrary() -> impl Strategy<Value = Planned> {
             counts,
             model,
         ),
-        (prop::array::uniform8(cost()), stater()),
+        (prop::array::uniform9(cost()), stater()),
         prop::sample::select(vec![0u64, 1, 10, 500, 999]),
     )
         .prop_map(
@@ -341,6 +346,7 @@ fn arbitrary() -> impl Strategy<Value = Planned> {
                 reader,
                 journal,
                 journal_out: v[0],
+                probe: v[8],
                 judging: v[1],
                 gates: GateBytes {
                     stages: v[2],

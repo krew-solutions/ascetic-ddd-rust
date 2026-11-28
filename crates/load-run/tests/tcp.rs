@@ -533,10 +533,32 @@ fn chained(
         fixture::W,
         std::sync::Arc::new(carrier),
         live.runtimes(),
-        Journal::new(37, 0),
+        Journal::new(37, 0).probing(std::sync::Arc::new(Probed)),
     )
     .unwrap();
     (admitted, vec![fixture::call("read", 1, 0, 0, 0)])
+}
+
+/// A host's allocator probe whose figures are a test's.
+struct Probed;
+
+impl ascetic_ddd_load_run::sample::Probe for Probed {
+    fn allocator(&self) -> &str {
+        "test.probe"
+    }
+
+    fn bytes(&self) -> u64 {
+        4_096
+    }
+
+    fn read(&self) -> Option<ascetic_ddd_load_run::sample::Heap> {
+        Some(ascetic_ddd_load_run::sample::Heap {
+            in_use: 1,
+            free: 2,
+            mapped: 3,
+            chunks: None,
+        })
+    }
 }
 
 /// The wall clock now, in microseconds since the epoch.
@@ -643,6 +665,16 @@ fn the_stages_are_a_chain_its_evidence_the_library_s() {
         last.live
     );
     assert!(last.live.sockets.is_some(), "{:?}", last.live);
+    // The host's probe the stages gave the sampler, read at the finish.
+    assert_eq!(
+        (last.allocator.state, last.allocator.in_use),
+        (
+            ascetic_ddd_scheduler::journal::AllocatorState::Read,
+            Some(1)
+        ),
+        "{:?}",
+        last.allocator
+    );
     assert!(
         matches!(
             last.process,

@@ -15,7 +15,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ascetic_ddd_load_run::clock::RealClock;
-use ascetic_ddd_load_run::sample::{FLOOR, Gauges, Roots, SAMPLE, Sampler, Turn};
+use ascetic_ddd_load_run::sample::{
+    FLOOR, Gauges, Heap, Probe, Roots, SAMPLE, Sampler, Stated, Turn,
+};
 use ascetic_ddd_load_run::sink::{Journal, JournalSink, Written};
 use ascetic_ddd_scheduler::journal::{self, Line, Reader, Reading, Released, SampleWhy, Unread};
 
@@ -384,7 +386,7 @@ fn the_live_counts_read_as_one_instant() {
 fn the_sampler_is_priced_where_it_samples() {
     let record = ascetic_ddd_command_log::shape::Shape::default();
     let plain = Journal::new(64, 0).unsampled();
-    let sampled = plain.sampling(1);
+    let sampled = plain.clone().sampling(1);
     assert_eq!(
         Journal::new(64, 0).period(),
         Some(ascetic_ddd_load_run::sink::PERIOD)
@@ -418,4 +420,118 @@ fn a_full_channel_s_sends_are_counted() {
     assert_eq!(last.why, SampleWhy::Finish);
     assert!(last.live.full >= 10, "{:?}", last.live);
     assert!(last.live.waited >= 5_000, "{:?}", last.live);
+}
+
+/// How a test's probe answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum How {
+    Reads,
+    Gives,
+    Panics,
+    PanicsStating,
+}
+
+/// A test's allocator probe, its reads counted.
+struct Probed {
+    how: How,
+    reads: AtomicU64,
+}
+
+impl Probe for Probed {
+    fn allocator(&self) -> &str {
+        assert!(self.how != How::PanicsStating, "a probe's own fault");
+        "test.probe"
+    }
+
+    fn bytes(&self) -> u64 {
+        assert!(self.how != How::PanicsStating, "a probe's own fault");
+        4_096
+    }
+
+    fn read(&self) -> Option<Heap> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        match self.how {
+            How::Reads | How::PanicsStating => Some(Heap {
+                in_use: 10,
+                free: 20,
+                mapped: 30,
+                chunks: Some(4),
+            }),
+            How::Gives => None,
+            How::Panics => panic!("a probe's own fault"),
+        }
+    }
+}
+
+/// K2b-7e-2b-3e-2c: the host's probe is read at the baseline and the finish
+/// only — a due sample skips it, named —, its figures where it reads them; a
+/// probe that gives none, panics reading or panics stating itself fails
+/// there, and the journal ends whole; none stated, unstated.
+#[test]
+fn the_probe_is_read_at_the_baseline_and_the_finish() {
+    use ascetic_ddd_scheduler::journal::{AllocatorState, Code};
+    let dir = tempfile::tempdir().unwrap();
+    let roots = tree(dir.path(), "0::/a/b/run.scope\n", FULL);
+    let run = |probe: Option<Arc<Probed>>| {
+        let out = Out::default();
+        let s = sampler(roots.clone(), Arc::default(), FLOOR)
+            .probing(probe.clone().map(|p| Stated::of(p as Arc<dyn Probe>)));
+        let clock = s.clock().clone();
+        let w = Written::sampled(out.clone(), journal::sample::header(), 4, s).unwrap();
+        for_micros(&clock, 4 * FLOOR + FLOOR / 2, std::thread::yield_now);
+        w.finish().unwrap();
+        samples(&out)
+    };
+    let named = Some(Code::Named("test.probe".to_owned()));
+    for (how, state, name) in [
+        (How::Reads, AllocatorState::Read, named.clone()),
+        (How::Gives, AllocatorState::Failed, named.clone()),
+        (How::Panics, AllocatorState::Failed, named.clone()),
+        (How::PanicsStating, AllocatorState::Failed, None),
+    ] {
+        let probe = Arc::new(Probed {
+            how,
+            reads: AtomicU64::new(0),
+        });
+        let got = run(Some(probe.clone()));
+        let ends = [got.first().unwrap(), got.last().unwrap()];
+        assert_eq!(
+            ends.map(|s| s.why),
+            [SampleWhy::Baseline, SampleWhy::Finish]
+        );
+        for s in ends {
+            let a = &s.allocator;
+            assert_eq!((a.state, &a.name), (state, &name), "{how:?}");
+            let figures = (a.in_use, a.free, a.mapped, a.chunks);
+            if state == AllocatorState::Read {
+                assert_eq!(figures, (Some(10), Some(20), Some(30), Some(4)));
+            } else {
+                assert_eq!(figures, (None, None, None, None), "{how:?}");
+            }
+        }
+        let dues: Vec<_> = got.iter().filter(|s| s.why == SampleWhy::Due).collect();
+        assert!(!dues.is_empty(), "{how:?}: no due sample");
+        for s in dues {
+            assert_eq!(
+                (s.allocator.state, &s.allocator.name, s.allocator.in_use),
+                (AllocatorState::Skipped, &name, None),
+                "{how:?}"
+            );
+        }
+        assert_eq!(probe.reads.load(Ordering::Relaxed), 2, "{how:?}");
+    }
+    let unstated = run(None);
+    assert!(
+        unstated
+            .iter()
+            .all(|s| (s.allocator.state, &s.allocator.name) == (AllocatorState::Unstated, &None)),
+        "{:?}",
+        unstated.first().map(|s| &s.allocator)
+    );
+    // A probe that panics stating itself states nothing.
+    let stated = Stated::of(Arc::new(Probed {
+        how: How::PanicsStating,
+        reads: AtomicU64::new(0),
+    }));
+    assert_eq!(stated.bytes(), 0);
 }

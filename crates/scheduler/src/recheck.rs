@@ -132,8 +132,25 @@ pub const PARTS_10: [Row; 26] = {
 };
 
 /// Version 11's table (K2b-7e-2b-3e), its data file `schema/parts-11.json`:
-/// version 10's rows, its rules version 10's.
-pub const PARTS_11: [Row; 26] = PARTS_10;
+/// version 10's rows and the host's allocator probe's, its rules version
+/// 10's.
+pub const PARTS_11: [Row; 27] = {
+    let mut rows = [PARTS_10[0]; 27];
+    let mut i = 0;
+    while i < 26 {
+        rows[i] = PARTS_10[i];
+        i += 1;
+    }
+    rows[26] = row(
+        Part::Probe,
+        Scope::Global,
+        Phase::Run,
+        Basis::Heap,
+        HeldBy::Once,
+        Stater::Host,
+    );
+    rows
+};
 
 /// Every code a refusal of version 10's rules gives, in the order the rules
 /// are checked.

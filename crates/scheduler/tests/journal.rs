@@ -147,7 +147,8 @@ fn sample_kinds(
     seen[15].insert(match s.allocator.state {
         AllocatorState::Unstated => 0,
         AllocatorState::Failed => 1,
-        AllocatorState::Read => 2,
+        AllocatorState::Skipped => 2,
+        AllocatorState::Read => 3,
     });
 }
 
@@ -284,6 +285,7 @@ fn the_golden_holds_the_memory_s_vocabulary() {
         Part::CarrierAttempts => 23,
         Part::Decorations => 24,
         Part::Evidence => 25,
+        Part::Probe => 26,
     };
     let phase = |p: Phase| match p {
         Phase::Fixed => 0,
@@ -321,7 +323,7 @@ fn the_golden_holds_the_memory_s_vocabulary() {
             .iter()
             .map(|t| part(t.part))
             .collect::<Vec<_>>(),
-        (0..26).collect::<Vec<_>>()
+        (0..27).collect::<Vec<_>>()
     );
     all(&|t| phase(t.phase), 5);
     all(&|t| held(t.held), 7);
@@ -413,7 +415,7 @@ fn the_golden_holds_every_variant() {
             Line::Trailer(_) => unreachable!("the reader hands no trailer out"),
         }
     }
-    let counts = [10, 2, 3, 4, 4, 6, 3, 16, 5, 3, 3, 2, 5, 3, 4, 3];
+    let counts = [10, 2, 3, 4, 4, 6, 3, 16, 5, 3, 3, 2, 5, 3, 4, 4];
     for (i, n) in counts.iter().enumerate() {
         assert_eq!(seen[i], (0..*n).collect(), "enum {i}");
     }

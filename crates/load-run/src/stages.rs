@@ -192,7 +192,7 @@ impl<X> Gated<RealClock, X> {
             gates,
             Some(judging),
         );
-        let journal = *admitted.journal();
+        let journal = admitted.journal().clone();
         // The run's memory sampled by its journal's writer, as admission priced
         // it (ADR-0047 decision 22, K2b-7e-2b-3e): the loop's counts, the
         // process's and its groups' files, the binding limit's depth.
@@ -209,6 +209,7 @@ impl<X> Gated<RealClock, X> {
                 period,
                 namespace.0,
             )
+            .probing(journal.probe().cloned())
         });
         let sink = Written::start(out, header, journal, sampler).map_err(RunError::Journal)?;
         Ok(Ready::new(admitted, clock, sink, namespace, gauges))

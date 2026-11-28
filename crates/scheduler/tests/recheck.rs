@@ -31,8 +31,8 @@ fn the_table_is_its_data_file_s() {
 #[test]
 fn consistent_evidence_passes() {
     for (name, b) in bases() {
-        let (k, a) = consistent(&b);
         for v in VERSIONS {
+            let (k, a) = consistent_at(&b, v);
             assert_eq!(recheck::admission(v, k, &a), Ok(()), "{name} at {v}");
         }
     }
@@ -73,9 +73,9 @@ fn consistent_evidence_passes() {
 fn each_rule_refuses_its_tampers_by_its_code() {
     let mut reached = std::collections::BTreeSet::new();
     for (name, b, tamper, why) in census() {
-        let (mut k, mut a) = consistent(&b);
-        tamper(&mut k, &mut a);
         for v in VERSIONS {
+            let (mut k, mut a) = consistent_at(&b, v);
+            tamper(&mut k, &mut a);
             assert_eq!(recheck::admission(v, k, &a), Err(why), "{name} at {v}");
         }
         reached.insert(why);
@@ -147,6 +147,7 @@ fn free(part: Part, edit: Edit, source: Option<u32>, assumed: bool) -> bool {
                     | Cells
                     | Pending
                     | Barriers
+                    | Probe
             ) || (part == Runtime && (source == Some(0) || assumed))
         }
         Edit::Cost => matches!(
@@ -165,6 +166,7 @@ fn free(part: Part, edit: Edit, source: Option<u32>, assumed: bool) -> bool {
                 | Binding
                 | CarrierAttempts
                 | Decorations
+                | Probe
         ),
         Edit::Rest => !matches!(part, Runtime | Evidence),
         Edit::Stater => matches!(
@@ -188,33 +190,60 @@ fn every_single_edit_is_refused_but_the_free_ones() {
             ..base()
         },
     ] {
-        let (k, consistent) = consistent(&b);
-        for i in 0..consistent.memory.terms.len() {
-            for edit in [Edit::Count, Edit::Cost, Edit::Rest, Edit::Stater] {
-                let mut a = consistent.clone();
-                let t = &mut a.memory.terms[i];
-                match edit {
-                    Edit::Count => t.count += 1,
-                    Edit::Cost => t.cost += 1,
-                    Edit::Rest => t.rest += 1,
-                    Edit::Stater => {
-                        t.stated = match t.stated {
-                            StatedBy::Library => StatedBy::Host,
-                            StatedBy::Host => StatedBy::Library,
+        for v in VERSIONS {
+            let (k, consistent) = consistent_at(&b, v);
+            for i in 0..consistent.memory.terms.len() {
+                for edit in [Edit::Count, Edit::Cost, Edit::Rest, Edit::Stater] {
+                    let mut a = consistent.clone();
+                    let t = &mut a.memory.terms[i];
+                    match edit {
+                        Edit::Count => t.count += 1,
+                        Edit::Cost => t.cost += 1,
+                        Edit::Rest => t.rest += 1,
+                        Edit::Stater => {
+                            t.stated = match t.stated {
+                                StatedBy::Library => StatedBy::Host,
+                                StatedBy::Host => StatedBy::Library,
+                            }
                         }
                     }
+                    t.bytes = t.count * t.cost + t.rest;
+                    let (part, source) = (t.part, t.source);
+                    settle(&mut a.memory, k, 1_000);
+                    let got = recheck::admission(v, k, &a);
+                    assert_eq!(
+                        got.is_ok(),
+                        free(part, edit, source, b.assumed),
+                        "{part:?} at {source:?}, {edit:?}, version {v}: {got:?}"
+                    );
                 }
-                t.bytes = t.count * t.cost + t.rest;
-                let (part, source) = (t.part, t.source);
-                settle(&mut a.memory, k, 1_000);
-                let got = recheck::admission(10, k, &a);
-                assert_eq!(recheck::admission(11, k, &a), got, "{part:?} at 11");
-                assert_eq!(
-                    got.is_ok(),
-                    free(part, edit, source, b.assumed),
-                    "{part:?} at {source:?}, {edit:?}: {got:?}"
-                );
             }
         }
     }
+}
+
+/// K2b-7e-2b-3e-2c: the probe is version 11's part — its evidence refused at
+/// version 10, version 10's without it refused at 11, each by its term set;
+/// a probe stated by the library refused by the table.
+#[test]
+fn the_probe_is_version_11_s() {
+    let b = base();
+    let (k, eleven) = consistent_at(&b, 11);
+    let (_, ten) = consistent_at(&b, 10);
+    assert_eq!(recheck::admission(11, k, &eleven), Ok(()));
+    assert_eq!(recheck::admission(10, k, &ten), Ok(()));
+    assert_eq!(
+        recheck::admission(10, k, &eleven),
+        Err("admission_term_set")
+    );
+    assert_eq!(recheck::admission(11, k, &ten), Err("admission_term_set"));
+    let mut library = eleven.clone();
+    let t = library
+        .memory
+        .terms
+        .iter_mut()
+        .find(|t| t.part == Part::Probe)
+        .unwrap();
+    t.stated = journal::StatedBy::Library;
+    assert_eq!(recheck::admission(11, k, &library), Err("admission_table"));
 }

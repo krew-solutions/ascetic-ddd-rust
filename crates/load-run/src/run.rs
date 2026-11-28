@@ -834,8 +834,9 @@ fn planned<C: Clock, X: Carrier<C>>(
             })
             .collect(),
         reader: reader.map(|r| r.priced(record)),
-        journal: crate::sink::Journal::new(knobs.behind, journal.out()).priced(record),
+        journal: journal.behind_at(knobs.behind).priced(record),
         journal_out: journal.out(),
+        probe: journal.probe_bytes(),
         judging: crate::stages::judging_bound(plan.header()),
         gates: carrier.gate_bytes(),
         machine: ascetic_ddd_scheduler::fits::counts(peaks),

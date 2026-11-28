@@ -82,7 +82,7 @@ pub fn header() -> Header {
 
 /// Every part once, in order (version 10): the vocabulary of the memory's
 /// evidence, beside each phase, holder, stater and basis.
-const PARTS: [Part; 26] = [
+const PARTS: [Part; 27] = [
     Part::Reader,
     Part::Decoder,
     Part::Runtime,
@@ -109,6 +109,7 @@ const PARTS: [Part; 26] = [
     Part::CarrierAttempts,
     Part::Decorations,
     Part::Evidence,
+    Part::Probe,
 ];
 
 /// The memory's evidence: every part, phase, holder, stater and basis, both
@@ -640,7 +641,7 @@ fn samples() -> Vec<Line> {
                 Unread::Failed,
                 Unread::Failed,
                 Unread::Absent,
-                AllocatorState::Unstated,
+                AllocatorState::Skipped,
             )
         })),
     ]

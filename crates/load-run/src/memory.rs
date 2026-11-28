@@ -105,11 +105,14 @@ pub enum Part {
     Decorations,
     /// Admission's evidence itself, its copies at once (K2b-7e-2b-3d-3b-4c).
     Evidence,
+    /// The host's allocator probe, a read's bytes as its host states them
+    /// (version 11, K2b-7e-2b-3e).
+    Probe,
 }
 
 impl Part {
     /// Every part.
-    pub const ALL: [Part; 26] = [
+    pub const ALL: [Part; 27] = [
         Part::Reader,
         Part::Decoder,
         Part::Runtime,
@@ -135,6 +138,7 @@ impl Part {
         Part::ShellAttempts,
         Part::CarrierAttempts,
         Part::Decorations,
+        Part::Probe,
         Part::Evidence,
     ];
 }
@@ -297,6 +301,8 @@ pub struct Planned {
     pub journal: ascetic_ddd_scheduler::fits::Priced,
     /// Its output's, as its host states it.
     pub journal_out: u64,
+    /// Its probe's read, as its host states it; none without one.
+    pub probe: u64,
     /// Stage 2's judging at the cap.
     pub judging: u64,
     /// The stand's gates' client.
@@ -644,6 +650,15 @@ pub fn terms(planned: &Planned) -> Vec<Term> {
             host,
             Basis::Heap,
         ),
+        term(
+            Part::Probe,
+            None,
+            Phase::Run,
+            once(planned.probe),
+            Held::Once,
+            host,
+            Basis::Heap,
+        ),
     ]);
     // The evidence itself (K2b-7e-2b-3d-3b-4c): two copies at once —
     // admission's and the header's while it is written —, each every term
@@ -917,7 +932,8 @@ fn slice(part: Part) -> Option<&'static str> {
         | Part::GateRun
         | Part::Barriers
         | Part::Binding
-        | Part::Evidence => None,
+        | Part::Evidence
+        | Part::Probe => None,
     }
 }
 
@@ -1089,6 +1105,7 @@ impl From<Part> for journal::Part {
             Part::CarrierAttempts => journal::Part::CarrierAttempts,
             Part::Decorations => journal::Part::Decorations,
             Part::Evidence => journal::Part::Evidence,
+            Part::Probe => journal::Part::Probe,
         }
     }
 }

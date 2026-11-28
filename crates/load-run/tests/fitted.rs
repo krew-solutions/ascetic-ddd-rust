@@ -694,6 +694,62 @@ fn each_part_s_count_is_its_enforcer_s() {
     assert_eq!(one(Part::Decorations).0, 7);
 }
 
+/// K2b-7e-2b-3e-2c: the fit prices the journal its host configured — the
+/// sampler's bytes where it samples and not where it does not, the probe's
+/// stated read where it samples with one, none else, the host's word.
+#[test]
+fn the_fit_prices_the_journal_as_configured() {
+    use ascetic_ddd_load_run::carrier::StatedBy;
+    use ascetic_ddd_load_run::sample::{Heap, Probe, SAMPLE};
+    struct Probed;
+    impl Probe for Probed {
+        fn allocator(&self) -> &str {
+            "test.probe"
+        }
+        fn bytes(&self) -> u64 {
+            4_096
+        }
+        fn read(&self) -> Option<Heap> {
+            None
+        }
+    }
+    let terms = |journal: Journal| {
+        let mut header = fixture::header();
+        header.profile.sources = 2;
+        let fitted = fit::<RealClock, _>(
+            Plan::assumed(Arc::new(header), Peaks::default()),
+            0,
+            Arc::new(Capped { cap: 8, needed: 1 }),
+            journal,
+            Memory::declared(PLENTY),
+            Limit::assumed(Some((PLENTY, 0)), None),
+        )
+        .unwrap();
+        let of = |part: Part| {
+            let t = fitted.fit().terms.iter().find(|t| t.part == part).unwrap();
+            (t.count, t.cost, t.rest, t.stated)
+        };
+        (of(Part::Journal), of(Part::Probe))
+    };
+    let probe: Arc<dyn Probe> = Arc::new(Probed);
+    let sampled = terms(Journal::new(64, 0));
+    let plain = terms(Journal::new(64, 0).unsampled());
+    let probing = terms(Journal::new(64, 0).probing(probe.clone()));
+    let idle = terms(Journal::new(64, 0).probing(probe).unsampled());
+    assert_eq!(sampled.0.2 - plain.0.2, SAMPLE);
+    let host = StatedBy::Host;
+    assert_eq!(
+        [sampled.1, plain.1, probing.1, idle.1],
+        [
+            (1, 0, 0, host),
+            (1, 0, 0, host),
+            (1, 4_096, 0, host),
+            (1, 0, 0, host)
+        ]
+    );
+    assert_eq!((probing.0, idle.0), (sampled.0, plain.0));
+}
+
 /// K2b-7e-2b-3d-3a: a carrier's attempts priced by their count — each one's
 /// part a late step, the classes' bytes and holes beside — and their
 /// decorations apart, the decorator's: together the price, every class

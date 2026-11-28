@@ -51,11 +51,12 @@ pub const PERIOD: u64 = 1_000_000;
 /// the lines its channel holds behind the machine, at least one, and what its
 /// output holds on the heap, as its host states it. Admission holds it, and a
 /// run's journal is built from it alone.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Journal {
     behind: usize,
     out: u64,
     sampling: Option<u64>,
+    probe: Option<crate::sample::Stated>,
 }
 
 impl Journal {
@@ -66,6 +67,36 @@ impl Journal {
             behind: behind.max(1),
             out,
             sampling: Some(PERIOD),
+            probe: None,
+        }
+    }
+
+    /// The same, its sampler reading `probe` at the run's baseline and finish
+    /// (ADR-0047 decision 22, K2b-7e-2b-3e): its stated bytes priced as
+    /// version 11's `probe` part while it samples, read now.
+    pub fn probing(self, probe: std::sync::Arc<dyn crate::sample::Probe>) -> Journal {
+        Journal {
+            probe: Some(crate::sample::Stated::of(probe)),
+            ..self
+        }
+    }
+
+    /// Its probe, if it samples with one.
+    pub fn probe(&self) -> Option<&crate::sample::Stated> {
+        self.sampling.and(self.probe.as_ref())
+    }
+
+    /// The bytes its probe states a read holds: none where it reads none.
+    pub fn probe_bytes(&self) -> u64 {
+        self.probe().map_or(0, crate::sample::Stated::bytes)
+    }
+
+    /// The same at `behind` lines behind, at least one: a knob moved, the
+    /// rest the host's.
+    pub(crate) fn behind_at(&self, behind: usize) -> Journal {
+        Journal {
+            behind: behind.max(1),
+            ..self.clone()
         }
     }
 

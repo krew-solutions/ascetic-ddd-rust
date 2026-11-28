@@ -32,7 +32,7 @@ pub const JOURNAL_VERSION: u32 = 11;
 /// (`golden/journal.jsonl`, [`sample`]), which holds every line and variant. A
 /// change to how any line is written changes the golden journal, and so this,
 /// in the same edit.
-pub const JOURNAL: &str = "e9cc420c3fa8bcfb6f7589e4b9271a8072a6ae9f657ca016c4f78e333f81d937";
+pub const JOURNAL: &str = "625abefb014879ddabf9572a8be8d9e9452a6ebe8c1524f5c8691f9deb06739e";
 
 /// A journal's line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -323,6 +323,9 @@ pub enum AllocatorState {
     Unstated,
     /// A probe stated, its read failed (it panicked or gave none).
     Failed,
+    /// A probe stated, not read at this sample: only a baseline's and a
+    /// finish's are, until measurements at a launch's states move it.
+    Skipped,
     /// Read.
     Read,
 }
@@ -615,6 +618,9 @@ pub enum Part {
     Decorations,
     /// Admission's evidence itself, its copies at once (K2b-7e-2b-3d-3b-4c).
     Evidence,
+    /// The host's allocator probe, a read's bytes as the host states them
+    /// (version 11, K2b-7e-2b-3e-2c).
+    Probe,
 }
 
 /// A part's phase: when its bytes are held.

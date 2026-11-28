@@ -206,5 +206,13 @@
     "basis": "heap",
     "held": "built",
     "stated": "library"
+  },
+  {
+    "part": "probe",
+    "scope": "global",
+    "phase": "run",
+    "basis": "heap",
+    "held": "once",
+    "stated": "host"
   }
 ]
