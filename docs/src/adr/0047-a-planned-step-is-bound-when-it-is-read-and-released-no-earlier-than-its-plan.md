@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a, K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3), K2b-7e-2b-2c-1 to K2b-7e-2b-2c-4 built, K2b-7e-2b-3 decided and cut in five, K2b-7e-2b-3a-1 to K2b-7e-2b-3a-3, K2b-7e-2b-3b, K2b-7e-2b-3c-1 and K2b-7e-2b-3c-2 built, K2b-7e-2b-3d cut in four, K2b-7e-2b-3d-1 and K2b-7e-2b-3d-2 built, K2b-7e-2b-3d-3 decided and cut in two, K2b-7e-2b-3d-3a in two, K2b-7e-2b-3d-3a-1 and K2b-7e-2b-3d-3a-2 built, K2b-7e-2b-3d-3b cut in four, K2b-7e-2b-3d-3b-1 and K2b-7e-2b-3d-3b-2 built, K2b-7e-2b-3d-3b-3 cut in two, K2b-7e-2b-3d-3b-3a and K2b-7e-2b-3d-3b-3b built, K2b-7e-2b-3d-3b-4 cut in three, K2b-7e-2b-3d-3b-4a to K2b-7e-2b-3d-3b-4c built, K2b-7e-2b-3d-3b done, K2b-7e-2b-3d-4 decided and cut in three, K2b-7e-2b-3d-4a built and measured — P4 refuted as stated, its rows' guard twice "no test" —, K2b-7e-2b-3d-4b built and measured — P6 no test at idle, P10's first reader void —, K2b-7e-2b-3d-4c next; decision 23 decided, K2b-7e-4a built, K2b-7e-4b decided and cut in three, K2b-7e-4b-1 and K2b-7e-4b-2 built, K2b-7e-4b-3 measured — four refutations, one remedy each —, K2b-7e-4b-4 and K2b-7e-4b-5 built and measured, K2b-7e-4 done (decision 23's steps 1 and 2), decision 23's step 3b on the owner's confirmation; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a, K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3), K2b-7e-2b-2c-1 to K2b-7e-2b-2c-4 built, K2b-7e-2b-3 decided and cut in five, K2b-7e-2b-3a-1 to K2b-7e-2b-3a-3, K2b-7e-2b-3b, K2b-7e-2b-3c-1 and K2b-7e-2b-3c-2 built, K2b-7e-2b-3d cut in four, K2b-7e-2b-3d-1 and K2b-7e-2b-3d-2 built, K2b-7e-2b-3d-3 decided and cut in two, K2b-7e-2b-3d-3a in two, K2b-7e-2b-3d-3a-1 and K2b-7e-2b-3d-3a-2 built, K2b-7e-2b-3d-3b cut in four, K2b-7e-2b-3d-3b-1 and K2b-7e-2b-3d-3b-2 built, K2b-7e-2b-3d-3b-3 cut in two, K2b-7e-2b-3d-3b-3a and K2b-7e-2b-3d-3b-3b built, K2b-7e-2b-3d-3b-4 cut in three, K2b-7e-2b-3d-3b-4a to K2b-7e-2b-3d-3b-4c built, K2b-7e-2b-3d-3b done, K2b-7e-2b-3d-4 decided and cut in three, K2b-7e-2b-3d-4a built and measured — P4 refuted as stated, its rows' guard twice "no test" —, K2b-7e-2b-3d-4b built and measured — P6 no test at idle, P10's first reader void —, K2b-7e-2b-3d-4c's harness and predictions built, its rows next; decision 23 decided, K2b-7e-4a built, K2b-7e-4b decided and cut in three, K2b-7e-4b-1 and K2b-7e-4b-2 built, K2b-7e-4b-3 measured — four refutations, one remedy each —, K2b-7e-4b-4 and K2b-7e-4b-5 built and measured, K2b-7e-4 done (decision 23's steps 1 and 2), decision 23's step 3b on the owner's confirmation; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -2335,6 +2335,25 @@ a connection of its own (retired at once); the journal folded, each Root classed
 - A hog over the deadline while connecting or writing on a thread others hold is the source thread's lag (K2b-7c-2's
   twins, the path's lag counted from the thread's last blocked park); the stall twin is its whole-process case.
 
+**K2b-7e-2b-3d-4c, the harness and its predictions** (2026-11-28, written before its rows run): the plan can spread
+its reads at a rate; the harness marks its run's start, from which the runner stops the whole process for a length and
+continues it; the journal's counts add the steps released and not ended at once. The late handles cannot be counted
+from the journal: an attempt given up at its deadline journals the deadline's instant, not the wall's after a stop (a
+smoke row found one), so they are read as bytes — a stop past the deadlines against the same row unstopped. The
+rows: S3, 1,200 reads at 200 a second answered at once, stopped 2 s in for 0, 0.25, 0.5 and 1 s (below the 3 s
+deadlines; past them plus the route's timeout a run ends saturated); S3-late, 400 calls never answered at 500 ms
+deadlines, stopped for 1 s, beside S3-late-0 unstopped; on the load server, S1 (900 answers of 1 MiB held at a cap of
+1,000 — one source with THP off and on, four sources with one arena and the default) and S2 (900 bodies of 1 MiB sent
+at once, the kernel's sockets).
+- **P11, the stall's curve**: the steps released and not ended at once rise by the rate times the stop, within
+  0.8 to 1.2 of 200 a second times it, the counted run window with them — nothing paces the run; the price at κ = 50
+  is a fixed point on this line, not its bound.
+- **P12, the late handles as bytes**: what the stopped row holds beyond the unstopped one, within the late terms
+  (records, the shell's and the carrier's attempts) its journal prices.
+- **P13, the server's matrix**: P2's per-answer slope, P8's THP and P9's arenas at a cap of 1,000 and nine hundred
+  answers.
+- **P14, the kernel's sockets at scale**: S2's `sock` at most below twice the bodies in flight, as P7.
+
 **K2b-7e-2b-3d-4b, measured** (2026-11-28, the laptop, against 9f81d0d, `--release`). Two harness defects found
 by the rows and fixed before the rows that read them ran again: the four-source rows' 128 ports are the egress's total,
 32 a source against 63 needed, refused by admission — set to 256; the stacks' reader counted every anonymous mapping
@@ -3971,6 +3990,8 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-28: M-a rerun after K2b-7e-4b-4 on the load server (R4, R5, R7 still refuted by smaller margins; R6
   refuted on the densest shapes) and K2b-7e-4b-5 built (§ Measured): a plain string compared over its text; K2b-7e-4b-4's
   unit test's escapes restored — its record named escapes it no longer held.
+- 2026-11-28: K2b-7e-2b-3d-4c's harness built and its predictions written (§ Measured), before its rows; the late
+  handles read as bytes.
 - 2026-11-28: K2b-7e-2b-3d-4b measured (§ Measured): P7, P8, P9 held, P10 with the stacks' reader fixed; P6 no test
   at idle; P4 restated as a reading.
 - 2026-11-28: K2b-7e-2b-3d-4b's harness built and its predictions written (§ Measured), before its rows; the late

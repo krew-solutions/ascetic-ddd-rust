@@ -13,10 +13,12 @@ standard library only.
 
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 STAND = r'''
@@ -105,6 +107,25 @@ ROWS = {
                              sources=4, env={"MALLOC_ARENA_MAX": "1"}),
 }
 
+# K2b-7e-2b-3d-4c: 1,200 reads at 200 a second, answered at once, the process
+# stopped 2 s into its run for 0, 0.25, 0.5 and 1 s — below the operation's
+# 3 s; and at 500 ms timeouts, a stop of 1 s past them (the late handles).
+for stop in (0, 0.25, 0.5, 1.0):
+    ROWS[f"S3-{stop}"] = dict(mode="now", n=1200, size=4096, body=0, cap=1024, timeout=3_000_000, zstd=0, most="3G",
+                              every=5_000, stop=stop, stop_at=2.0)
+ROWS["S3-late"] = dict(mode="never", n=400, size=0, body=1024, cap=512, timeout=500_000, zstd=0, most="2G",
+                       every=5_000, stop=1.0, stop_at=0.6)
+ROWS["S3-late-0"] = dict(mode="never", n=400, size=0, body=1024, cap=512, timeout=500_000, zstd=0, most="2G",
+                         every=5_000)
+# The server's matrix: answers held at a cap of 1,000, one source and four,
+# THP off and on, one arena and the default; every body sent at once.
+ROWS["S1-1"] = dict(mode="held", n=900, size=MIB, body=0, cap=1000, timeout=10_000_000, zstd=0, most="12G")
+ROWS["S1-1-thp-off"] = dict(ROWS["S1-1"], thp="off")
+ROWS["S1-1-thp-on"] = dict(ROWS["S1-1"], env={"GLIBC_TUNABLES": "glibc.malloc.hugetlb=1"})
+ROWS["S1-4"] = dict(mode="held", n=900, size=MIB, body=0, cap=4000, timeout=10_000_000, zstd=0, most="24G", sources=4)
+ROWS["S1-4-arena1"] = dict(ROWS["S1-4"], env={"MALLOC_ARENA_MAX": "1"})
+ROWS["S2"] = dict(mode="now", n=900, size=MIB, body=0, cap=1000, timeout=10_000_000, zstd=0, most="12G")
+
 CGROUP = ("anon", "sock", "kernel_stack", "file", "shmem", "pagetables", "slab_unreclaimable")
 
 
@@ -117,6 +138,19 @@ def cgroup_of(unit):
             return "/sys/fs/cgroup" + shown
         time.sleep(0.01)
     return None
+
+
+def stopped(proc, d, at, length):
+    """The harness stopped `at` s after its run starts, for `length` s: a
+    whole process stalled (K2b-7e-2b-3d-4c)."""
+    marker = os.path.join(d, "started")
+    while not os.path.exists(marker) and proc.poll() is None:
+        time.sleep(0.005)
+    time.sleep(at)
+    if proc.poll() is None:
+        os.kill(proc.pid, signal.SIGSTOP)
+        time.sleep(length)
+        os.kill(proc.pid, signal.SIGCONT)
 
 
 def sampled(proc, unit):
@@ -154,17 +188,23 @@ def listening(port, within=10.0):
     sys.exit(f"the stand never listened on {port}")
 
 
-def journal_of(path):
-    """The header's memory and the realised counts: the attempts in flight at
-    once (sent, not answered) and the steps ended while their attempt was
-    not yet answered, each at its most."""
+def journal_of(path, timeout):
+    """The header's memory and the realised counts, each at its most at once:
+    the attempts in flight (sent, not answered), the handles late (past their
+    step's deadline, its release and `timeout`, until their answer — what
+    `late_shape` prices), the steps released and not ended."""
     with open(path) as f:
         lines = [json.loads(l) for l in f]
     memory = lines[0]["header"]["admission"]["memory"]
-    inflight = most_inflight = late = most_late = 0
+    inflight = most_inflight = late = most_late = pending = most_pending = 0
     ended, answered = set(), set()
     for l in lines[1:-1]:
         (kind, v), = l.items()
+        if kind == "released":
+            pending += 1
+            most_pending = max(most_pending, pending)
+        if kind == "end":
+            pending = max(0, pending - 1)
         if kind == "sent":
             inflight += 1
             most_inflight = max(most_inflight, inflight)
@@ -181,7 +221,23 @@ def journal_of(path):
             if key not in answered:
                 late += 1
                 most_late = max(most_late, late)
-    return memory, most_inflight, most_late
+    released_at, answered_at = {}, {}
+    for l in lines[1:-1]:
+        (kind, v), = l.items()
+        if kind == "released":
+            released_at[v["line"]] = int(v["at"])
+        elif kind == "answer" and v.get("ignored") is None:
+            answered_at.setdefault(v["line"], int(v["at"]))
+    events = []
+    for line, at in answered_at.items():
+        deadline = released_at.get(line, 0) + timeout
+        if at > deadline:
+            events += [(deadline, 1), (at, -1)]
+    now = most_late = 0
+    for _, d in sorted(events):
+        now += d
+        most_late = max(most_late, now)
+    return memory, most_inflight, most_late, most_pending
 
 
 def sums(memory):
@@ -209,26 +265,30 @@ def row(binary, name):
             listening(port)
             env = {"WHOLE_PORT": str(port), "WHOLE_N": str(r["n"]), "WHOLE_BODY": str(r["body"]), "WHOLE_CAP": str(r["cap"]),
                    "WHOLE_TIMEOUT": str(r["timeout"]), "WHOLE_ZSTD": str(r["zstd"]), "WHOLE_DIR": d,
-                   "WHOLE_SOURCES": str(r.get("sources", 1)), "WHOLE_THP": r.get("thp", "default"), **r.get("env", {})}
+                   "WHOLE_SOURCES": str(r.get("sources", 1)), "WHOLE_THP": r.get("thp", "default"),
+                   "WHOLE_EVERY": str(r.get("every", 0)), **r.get("env", {})}
             unit = f"whole-{name}-{os.getpid()}".replace(".", "-") + ".scope"
             cmd = ["systemd-run", "--user", "--scope", "-q", f"--unit={unit}", "-p", f"MemoryMax={r['most']}",
                    "-p", "MemorySwapMax=0", "--", "env"]
             cmd += [f"{k}={v}" for k, v in env.items()]
             cmd += [binary, "--ignored", "--exact", "row", "--nocapture", "--test-threads=1"]
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if r.get("stop"):
+                stopper = threading.Thread(target=stopped, args=(proc, d, r["stop_at"], r["stop"]))
+                stopper.start()
             cgroup = sampled(proc, unit)
             stdout, stderr = proc.communicate(timeout=600)
             got = [l[l.index("WHOLE {") + len("WHOLE "):] for l in stdout.splitlines() if "WHOLE {" in l]
             if proc.returncode or not got:
                 sys.exit(f"{name}: {proc.returncode}\n{stdout[-3000:]}\n{stderr[-3000:]}")
             line = json.loads(got[0])
-            memory, inflight, late = journal_of(line["journal"])
+            memory, inflight, late, pending = journal_of(line["journal"], r["timeout"])
         finally:
             stand.terminate()
             stand.wait(timeout=10)
     phases, named = sums(memory)
     return {"row": name, **r, "need": line["need"], "edges": line["edges"], "phases": phases,
-            "named": named, "inflight": inflight, "late": late, "cgroup": cgroup}
+            "named": named, "inflight": inflight, "late": late, "pending": pending, "cgroup": cgroup}
 
 
 def window(reading, edge):
@@ -293,6 +353,14 @@ def compare(path):
         r = e(name, "ran")
         if "stacks" in r:
             print(f"P10: {name}: stacks {r['stacks']} B over {r['threads']} threads ({r['stacks'] // max(r['threads'], 1)} B each)")
+    stalls = sorted((rows[n]["stop"], n) for n in rows if n.startswith("S3-") and n[3:].replace(".", "").isdigit())
+    for stop, name in stalls:
+        print(f"P11: stop {stop} s: pending at most {rows[name]['pending']}, in flight {rows[name]['inflight']}, "
+              f"counted {ran(name)}; 200 a second over the stop is {200 * stop:.0f}")
+    if {"S3-late", "S3-late-0"} <= rows.keys():
+        late = sum(int(t[3]) for p in ("records", "shell_attempts", "carrier_attempts") for t in rows["S3-late"]["named"][p])
+        print(f"P12: the stop past the deadlines holds {ran('S3-late') - ran('S3-late-0')} B more, "
+              f"the late terms price {late}")
     if {"L0", "L5"} <= rows.keys():
         d = lambda n: e(n, "opened")["uordblks"] - e(n, "opened")["now"]
         print(f"P5: zstd's outside the counter {d('L5') - d('L0')} B, its term {cost('L5', 'decoder')}")

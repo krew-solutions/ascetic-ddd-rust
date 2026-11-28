@@ -271,7 +271,7 @@ fn row() {
     let records: Vec<Record> = (0..n)
         .map(|i| {
             let source = u32::try_from(i % u64::from(sources)).unwrap();
-            let mut r = call("read", i + 1, 0, 200_000, source);
+            let mut r = call("read", i + 1, 0, 200_000 + i * num("WHOLE_EVERY"), source);
             if body > 0
                 && let ascetic_ddd_command_log::record::Action::Rest(rest) = &mut r.action
             {
@@ -370,6 +370,8 @@ fn row() {
         .start("whole".to_owned(), || std::fs::File::create(&journal))
         .unwrap();
     edges.push(edge("started"));
+    // The runner may stop the process from here (K2b-7e-2b-3d-4c's stall).
+    std::fs::write(dir.join("started"), b"").unwrap();
     let ran = root.block_on(run(ready, replayed)).unwrap();
     edges.push(edge("ran"));
     drop(ran);
