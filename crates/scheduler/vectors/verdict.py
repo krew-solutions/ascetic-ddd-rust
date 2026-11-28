@@ -13,9 +13,16 @@ tests/reference.rs.
 
 import collections
 import json
+import pathlib
 import sys
 
 REACHED = collections.Counter()
+
+# Version 10's part table (K2b-7e-2b-3d-3b-3): the data file the fold's own
+# table is held equal to.
+PARTS_10 = json.loads(
+    (pathlib.Path(__file__).resolve().parent.parent / "schema" / "parts-10.json").read_text()
+)
 
 
 class Incoherent(Exception):
@@ -28,6 +35,127 @@ class AnotherLog(Exception):
 
 def u(v):
     return None if v is None else int(v)
+
+
+def refuse(why):
+    REACHED[why] += 1
+    raise Incoherent(why)
+
+
+def admission_10(catch_up, a):
+    """Version 10's recheck of admission's evidence (ADR-0047 decision 22,
+    K2b-7e-2b-3d-3b-3), each rule from the decision's sentence, in its order:
+    what the journal alone makes a theorem of admission's own output."""
+    table = {r["part"]: r for r in PARTS_10}
+    m = a["memory"]
+    kappa = catch_up
+    if kappa >= 1000:
+        refuse("admission_kappa")
+    terms = m["terms"]
+    n = sum(1 for t in terms if t["part"] == "runtime")
+    # Each run's part once, each source's part once a source of the runtimes'.
+    seen = set()
+    for t in terms:
+        r = table.get(t["part"])
+        s = t["source"]
+        placed = r is not None and (
+            (r["scope"] == "global" and s is None)
+            or (r["scope"] == "source" and s is not None and s < n)
+        )
+        if not placed or (t["part"], s) in seen:
+            refuse("admission_term_set")
+        seen.add((t["part"], s))
+    runs = sum(1 for r in PARTS_10 if r["scope"] == "global")
+    if len(seen) != runs + (len(PARTS_10) - runs) * n:
+        refuse("admission_term_set")
+    for t in terms:
+        r = table[t["part"]]
+        held = "gate" if isinstance(t["held"], dict) else t["held"]
+        stated = r["stated"] in ("either", t["stated"])
+        if t["phase"] != r["phase"] or t["basis"] != r["basis"] or held != r["held"] or not stated:
+            refuse("admission_table")
+    if any(isinstance(t["held"], dict) and t["held"]["gate"]["built"] for t in terms):
+        refuse("admission_built")
+    if any(int(t["count"]) * int(t["cost"]) + int(t["rest"]) != int(t["bytes"]) for t in terms):
+        refuse("admission_bytes")
+
+    def run(p):
+        return next(t for t in terms if t["part"] == p)
+
+    def at(p, s):
+        return next(t for t in terms if t["part"] == p and t["source"] == s)
+
+    model = m["model"]
+    ended, live = int(model["ended_cell"]), int(model["live_cell"])
+    if live < ended or model["event"] is None:
+        refuse("admission_model")
+    bound = [
+        ("cells", ended),
+        ("pending", live - ended),
+        ("barriers", int(model["barrier"])),
+        ("records", int(model["record"])),
+        ("shell_attempts", int(model["attempt"])),
+        ("decoder", int(model["decoder"])),
+    ]
+    runtimes = [t for t in terms if t["part"] == "runtime"]
+    if any(int(run(p)["cost"]) != c for p, c in bound) or any(
+        int(t["cost"]) != int(model["event"]) or int(t["rest"]) != int(model["runtime"])
+        for t in runtimes
+    ):
+        refuse("admission_model")
+    if int(run("decoder")["count"]) != (1 if int(run("reader")["count"]) > 0 else 0):
+        refuse("admission_decoder")
+    for s in range(n):
+        c, io = at("connections", s), at("io", s)
+        if (
+            any(int(at(p, s)["count"]) != int(c["count"]) for p in ("io", "answers", "probes", "probes_io"))
+            or at("probes", s)["cost"] != c["cost"]
+            or at("probes_io", s)["cost"] != io["cost"]
+        ):
+            refuse("admission_shared")
+    late = run("records")["count"]
+    if any(run(p)["count"] != late for p in ("shell_attempts", "carrier_attempts", "decorations")):
+        refuse("admission_shared")
+    rows = a["sources"]
+    ids = [r["source"] for r in rows]
+    if any(i >= n for i in ids) or len(set(ids)) != len(ids):
+        refuse("admission_rows")
+    for s in range(n):
+        sockets = int(at("connections", s)["count"])
+        row = next((r for r in rows if r["source"] == s), None)
+        if row is None:
+            fits = sockets == 0
+        else:
+            fits = sockets == int(row["cap"]) and (
+                a["assumed"]["runtimes"] or int(at("runtime", s)["count"]) == int(row["events"])
+            )
+        if not fits:
+            refuse("admission_rows")
+    total = {ph: sum(int(t["bytes"]) for t in terms if t["phase"] == ph)
+             for ph in ("fixed", "stages", "gates", "run", "pool")}
+    # The pool at the catch-up's rate, rounded up.
+    if -(-total["pool"] * 1000 // (1000 - kappa)) != int(m["pool"]):
+        refuse("admission_pool")
+    f = total["fixed"]
+    need = max(f + total["stages"], f + total["gates"], f + total["run"] + int(m["pool"]))
+    if need != int(m["need"]):
+        refuse("admission_need")
+    stated = int(m["stated"])
+    if stated < need or stated - need != int(m["slack"]):
+        refuse("admission_slack")
+    if stated - (f + total["run"]) != int(m["budget"]):
+        refuse("admission_budget")
+    unheld = []
+    for t in terms:
+        if isinstance(t["held"], dict) and t["part"] not in unheld:
+            unheld.append(t["part"])
+    if unheld != m["unheld"]:
+        refuse("admission_unheld")
+    top = m["limit"]["max"]
+    if unheld and (top is None or top["depth"] != 0):
+        refuse("admission_scope")
+    if any(b is not None and stated > int(b["bytes"]) for b in (top, m["limit"]["high"])):
+        refuse("admission_limit")
 
 
 def end_kind(e):
@@ -62,6 +190,9 @@ class Run:
         header = lines[0]["header"]
         if header["journal"] != VERSION:
             raise SystemExit(f"journal version {header['journal']}: the definition reads {VERSION}")
+        # Admission's evidence, by its version's rules (ADR-0047 decision 22).
+        if header["admission"] is not None:
+            admission_10(header["catch_up"], header["admission"])
         if header["log"] != log["sha256"]:
             raise AnotherLog()
         self.j = int(header["jitter"])
@@ -582,9 +713,10 @@ def verdict(lines, log):
         # Decision 18: a stopped run is classed not at all.
         classes = [] if run.stop else run.classes()
     except AnotherLog:
-        return "void:another_log", [], None
-    except Incoherent:
-        return "void:incoherent", [], None
+        return "void:another_log", [], None, None
+    except Incoherent as e:
+        why = e.args[0] if e.args else None
+        return "void:incoherent", [], None, why if str(why).startswith("admission_") else None
     if run.stop:
         REACHED[f"stop_{run.stop}"] += 1
         v = "void:fault"
@@ -599,17 +731,17 @@ def verdict(lines, log):
     else:
         v = "void:incoherent"
     REACHED[v] += 1
-    return v, classes, run.stop
+    return v, classes, run.stop, None
 
 
 def main():
     runs = 0
     for raw in sys.stdin:
         case = json.loads(raw)
-        v, classes, stop = verdict(case["journal"], case["log"])
-        got = (case["verdict"], case["classes"], case.get("stop"))
-        if (v, classes, stop) != got:
-            print(f"{case['name']}: by definition {v} {classes} {stop}, the fold {got[0]} {got[1]} {got[2]}")
+        v, classes, stop, why = verdict(case["journal"], case["log"])
+        got = (case["verdict"], case["classes"], case.get("stop"), case.get("why"))
+        if (v, classes, stop, why) != got:
+            print(f"{case['name']}: by definition {v} {classes} {stop} {why}, the fold {got[0]} {got[1]} {got[2]} {got[3]}")
             sys.exit(1)
         runs += 1
     print(f"{runs} verdicts agree; reached {dict(REACHED)}")

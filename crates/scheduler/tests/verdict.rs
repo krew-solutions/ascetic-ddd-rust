@@ -9,6 +9,8 @@
 #[allow(unused_imports, clippy::disallowed_methods, clippy::disallowed_types)]
 mod fixture;
 
+mod admission;
+
 use std::io::{Cursor, Write as _};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -96,6 +98,14 @@ fn case(name: &str, bytes: &[u8], log: &Log, folded: &Folded) -> serde_json::Val
         }
         _ => None,
     };
+    // Admission's evidence refused (K2b-7e-2b-3d-3b-3): by its rule's code,
+    // which the definition must name the same.
+    let why = match &folded.verdict {
+        Verdict::Void(Void::Incoherent { line: 0, why }) if why.starts_with("admission_") => {
+            Some(*why)
+        }
+        _ => None,
+    };
     serde_json::json!({
         "name": name,
         "log": {"sha256": log.sha256, "records": log.records},
@@ -103,6 +113,7 @@ fn case(name: &str, bytes: &[u8], log: &Log, folded: &Folded) -> serde_json::Val
         "verdict": verdict_name(&folded.verdict),
         "classes": folded.classes.iter().map(|c| c.name()).collect::<Vec<_>>(),
         "stop": stop,
+        "why": why,
     })
 }
 
@@ -2311,4 +2322,41 @@ fn a_never_sent_censor_is_its_report_s_to_decide() {
         "{:?}",
         folded.verdict
     );
+}
+
+/// K2b-7e-2b-3d-3b-3b of ADR-0047 (decision 22): admission's evidence by
+/// both folds — consistent, read on; each tamper of the recheck's census void
+/// by its rule's code, the definition naming the same, every code reached by
+/// the definition too.
+#[test]
+fn admission_s_evidence_folds_as_the_definition_does() {
+    let log = log_of(&header_j(), &[]);
+    let journaled = |k: u32, a: journal::Admission| {
+        let mut h = journal_header(&header_j(), &log);
+        h.catch_up = k;
+        h.admission = Some(a);
+        write(&h, &[])
+    };
+    let mut cases = Vec::new();
+    let (k, a) = admission::consistent(&admission::base());
+    let bytes = journaled(k, a);
+    let folded = fold_bytes(&bytes, &log);
+    assert_eq!(folded.verdict, Verdict::Pass);
+    cases.push(case("admission: consistent", &bytes, &log, &folded));
+    for (name, b, tamper, why) in admission::census() {
+        let (mut k, mut a) = admission::consistent(&b);
+        tamper(&mut k, &mut a);
+        let bytes = journaled(k, a);
+        let folded = fold_bytes(&bytes, &log);
+        assert_eq!(
+            folded.verdict,
+            Verdict::Void(Void::Incoherent { line: 0, why }),
+            "{name}"
+        );
+        cases.push(case(&format!("admission: {name}"), &bytes, &log, &folded));
+    }
+    let reached = by_definition(&cases);
+    for why in ascetic_ddd_scheduler::recheck::WHYS_10 {
+        assert!(reached.contains(&format!("'{why}'")), "{why}: {reached}");
+    }
 }
