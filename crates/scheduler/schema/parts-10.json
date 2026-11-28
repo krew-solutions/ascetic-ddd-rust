@@ -1,0 +1,202 @@
+[
+  {
+    "part": "reader",
+    "scope": "global",
+    "phase": "fixed",
+    "basis": "heap",
+    "held": "channel",
+    "stated": "library"
+  },
+  {
+    "part": "decoder",
+    "scope": "global",
+    "phase": "fixed",
+    "basis": "outside",
+    "held": "built",
+    "stated": "library"
+  },
+  {
+    "part": "runtime",
+    "scope": "source",
+    "phase": "fixed",
+    "basis": "heap",
+    "held": "built",
+    "stated": "library"
+  },
+  {
+    "part": "carrier_source",
+    "scope": "source",
+    "phase": "run",
+    "basis": "heap",
+    "held": "once",
+    "stated": "either"
+  },
+  {
+    "part": "keeping",
+    "scope": "source",
+    "phase": "run",
+    "basis": "heap",
+    "held": "once",
+    "stated": "library"
+  },
+  {
+    "part": "journal",
+    "scope": "global",
+    "phase": "run",
+    "basis": "heap",
+    "held": "channel",
+    "stated": "library"
+  },
+  {
+    "part": "journal_out",
+    "scope": "global",
+    "phase": "run",
+    "basis": "heap",
+    "held": "once",
+    "stated": "host"
+  },
+  {
+    "part": "connections",
+    "scope": "source",
+    "phase": "run",
+    "basis": "heap",
+    "held": "cap",
+    "stated": "either"
+  },
+  {
+    "part": "io",
+    "scope": "source",
+    "phase": "run",
+    "basis": "heap",
+    "held": "cap",
+    "stated": "host"
+  },
+  {
+    "part": "answers",
+    "scope": "source",
+    "phase": "run",
+    "basis": "heap",
+    "held": "cap",
+    "stated": "either"
+  },
+  {
+    "part": "judging",
+    "scope": "global",
+    "phase": "stages",
+    "basis": "heap",
+    "held": "once",
+    "stated": "library"
+  },
+  {
+    "part": "probes",
+    "scope": "source",
+    "phase": "gates",
+    "basis": "heap",
+    "held": "cap",
+    "stated": "either"
+  },
+  {
+    "part": "probes_io",
+    "scope": "source",
+    "phase": "gates",
+    "basis": "heap",
+    "held": "cap",
+    "stated": "host"
+  },
+  {
+    "part": "gate_stages",
+    "scope": "global",
+    "phase": "gates",
+    "basis": "heap",
+    "held": "host",
+    "stated": "host"
+  },
+  {
+    "part": "gate_run",
+    "scope": "global",
+    "phase": "run",
+    "basis": "heap",
+    "held": "host",
+    "stated": "host"
+  },
+  {
+    "part": "cells",
+    "scope": "global",
+    "phase": "pool",
+    "basis": "heap",
+    "held": "gate",
+    "stated": "library"
+  },
+  {
+    "part": "pending",
+    "scope": "global",
+    "phase": "pool",
+    "basis": "heap",
+    "held": "gate",
+    "stated": "library"
+  },
+  {
+    "part": "barriers",
+    "scope": "global",
+    "phase": "pool",
+    "basis": "heap",
+    "held": "once",
+    "stated": "library"
+  },
+  {
+    "part": "records",
+    "scope": "global",
+    "phase": "pool",
+    "basis": "heap",
+    "held": "gate",
+    "stated": "library"
+  },
+  {
+    "part": "bound_to",
+    "scope": "global",
+    "phase": "pool",
+    "basis": "heap",
+    "held": "gate",
+    "stated": "library"
+  },
+  {
+    "part": "kept",
+    "scope": "global",
+    "phase": "pool",
+    "basis": "heap",
+    "held": "gate",
+    "stated": "library"
+  },
+  {
+    "part": "binding",
+    "scope": "global",
+    "phase": "pool",
+    "basis": "heap",
+    "held": "once",
+    "stated": "library"
+  },
+  {
+    "part": "shell_attempts",
+    "scope": "global",
+    "phase": "pool",
+    "basis": "heap",
+    "held": "gate",
+    "stated": "library"
+  },
+  {
+    "part": "carrier_attempts",
+    "scope": "global",
+    "phase": "pool",
+    "basis": "heap",
+    "held": "gate",
+    "stated": "either"
+  },
+  {
+    "part": "decorations",
+    "scope": "global",
+    "phase": "pool",
+    "basis": "heap",
+    "held": "gate",
+    "stated": "host"
+  }
+]

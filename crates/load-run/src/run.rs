@@ -280,6 +280,14 @@ pub enum Inadmissible {
         /// As fitted.
         fitted: Option<u64>,
     },
+    /// Admission's own evidence refused by the fold's recheck (decision 22,
+    /// K2b-7e-2b-3d-3b-3): what it would journal disagrees with itself — a
+    /// defect of admission, refused before anything outside the process is
+    /// touched.
+    Evidence {
+        /// The rule it breaks, by the fold's code.
+        why: &'static str,
+    },
     /// A reserve whose catch-up is 1000 per mille or past it (decision 21):
     /// no pool is priced at it.
     Reserve {
@@ -396,6 +404,11 @@ impl fmt::Display for Inadmissible {
                 f,
                 "source {source}'s runtime holds {built:?} B as built, {fitted:?} B as fitted: \
                  build it by `Live::fitted`"
+            ),
+            Inadmissible::Evidence { why } => write!(
+                f,
+                "admission's evidence disagrees with itself ({why}): a defect of admission, not of \
+                 the run"
             ),
             Inadmissible::Reserve { reserve } => write!(
                 f,
@@ -1260,16 +1273,22 @@ pub fn admit<C: Clock, X: Carrier<C>>(
         runtimes: runtimes.assumed,
         journal: false,
     };
+    let catch_up = kappa(&header.profile)
+        .and_then(|k| u32::try_from(k).ok())
+        .unwrap_or(1000);
+    let admission = admission(
+        &fit,
+        memory,
+        limit,
+        planned.model,
+        rows,
+        descriptors,
+        assumed,
+        catch_up,
+    )
+    .map_err(RunError::Inadmissible)?;
     Ok(Admitted {
-        admission: admission(
-            &fit,
-            memory,
-            limit,
-            planned.model,
-            rows,
-            descriptors,
-            assumed,
-        ),
+        admission,
         header,
         log: plan.log().to_owned(),
         validator: plan.validator().to_owned(),
@@ -1290,9 +1309,17 @@ pub fn admit<C: Clock, X: Carrier<C>>(
 /// Admission's evidence (decision 20; decision 22, K2b-7e-2b-3d-3b), pure:
 /// each source's sockets as it held them, the descriptors, what a test
 /// assumed, and the memory it fitted — what was stated, the limit, the
-/// constants, every term and what the fit made of them. The only maker of an
-/// [`Admitted`]'s.
-#[must_use]
+/// constants, every term and what the fit made of them —, rechecked by the
+/// fold's rules of the version it is journaled in at the run's catch-up
+/// `catch_up` (K2b-7e-2b-3d-3b-3). The only maker of an [`Admitted`]'s.
+///
+/// # Errors
+///
+/// [`Inadmissible::Evidence`]: the evidence disagrees with itself.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each is a part of the evidence, none derived from another"
+)]
 pub fn admission(
     fit: &crate::memory::Fit,
     memory: crate::memory::Memory,
@@ -1301,7 +1328,8 @@ pub fn admission(
     sources: Vec<journal::SourceFit>,
     descriptors: Option<journal::DescriptorsRead>,
     assumed: journal::Assumed,
-) -> journal::Admission {
+    catch_up: u32,
+) -> Result<journal::Admission, Inadmissible> {
     let crate::memory::Fit {
         terms,
         need,
@@ -1310,7 +1338,7 @@ pub fn admission(
         pool,
         unheld,
     } = fit;
-    journal::Admission {
+    let evidence = journal::Admission {
         sources,
         descriptors,
         assumed,
@@ -1326,7 +1354,10 @@ pub fn admission(
             need: *need,
             slack: *slack,
         },
-    }
+    };
+    ascetic_ddd_scheduler::recheck::admission(journal::JOURNAL_VERSION, catch_up, &evidence)
+        .map_err(|why| Inadmissible::Evidence { why })?;
+    Ok(evidence)
 }
 
 /// A test's admission: `plan` fitted to a memory no run exceeds, in a scope

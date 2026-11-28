@@ -895,3 +895,47 @@ fn each_name_is_journaled_as_itself() {
         same(LimitOrigin::Read, serde_json::to_string(&origin(read)));
     }
 }
+
+/// K2b-7e-2b-3d-3b-3: admission checks its own evidence by the fold's rules
+/// before it journals it — a fit whose need is off by a byte, or whose
+/// unheld parts are lost, is refused by the rule it breaks, a defect of
+/// admission's.
+#[test]
+fn admission_refuses_evidence_that_disagrees_with_itself() {
+    use ascetic_ddd_load_run::memory::Model;
+    use ascetic_ddd_load_run::run::admission;
+    let fitted = fitted(8, 1, 2, PLENTY).unwrap();
+    let fit = fitted.fit().clone();
+    let live = Live::fitted(&fitted).unwrap();
+    let admitted = admit(fitted, live.runtimes()).unwrap();
+    let a = admitted.admission();
+    let journal = |fit: &ascetic_ddd_load_run::memory::Fit| {
+        admission(
+            fit,
+            Memory::declared(PLENTY),
+            Limit::assumed(Some((PLENTY, 0)), None),
+            Model::LIBRARY,
+            a.sources.clone(),
+            a.descriptors.clone(),
+            a.assumed,
+            admitted.header().profile.reserve / 2,
+        )
+    };
+    assert_eq!(journal(&fit).as_ref(), Ok(a));
+    let mut off = fit.clone();
+    off.need += 1;
+    assert_eq!(
+        journal(&off).err(),
+        Some(Inadmissible::Evidence {
+            why: "admission_need"
+        })
+    );
+    let mut lost = fit;
+    lost.unheld.clear();
+    assert_eq!(
+        journal(&lost).err(),
+        Some(Inadmissible::Evidence {
+            why: "admission_unheld"
+        })
+    );
+}

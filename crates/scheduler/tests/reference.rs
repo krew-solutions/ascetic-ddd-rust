@@ -327,6 +327,14 @@ const CLASSES: &[(u32, u32, u32, &str)] = &[
         7,
         "c8dd9df07b94987b394344beda3d648f88a492b5d21a98370b9f2f379ac01cc3",
     ),
+    // Revision 8 (decision 22, K2b-7e-2b-3d-3b-3): admission's evidence
+    // rechecked; the corpus journals none — the same classes.
+    (
+        10,
+        5,
+        8,
+        "c8dd9df07b94987b394344beda3d648f88a492b5d21a98370b9f2f379ac01cc3",
+    ),
 ];
 
 /// The journal written, read back, and told against the run it journals

@@ -28,7 +28,7 @@ use crate::machine::Line as Number;
 /// What the fold decides, as a number: raised whenever the classes or the
 /// verdict it gives a journal change, which the goldens' and the differential's
 /// classes pin beside it.
-pub const FOLD_REVISION: u32 = 7;
+pub const FOLD_REVISION: u32 = 8;
 
 /// A line's class (decision 14), by precedence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -965,6 +965,11 @@ where
             },
             Vec::new(),
         );
+    }
+    // Admission's evidence, by its version's rules (revision 8, ADR-0047
+    // decision 22): a header that disagrees with itself is no run's.
+    if let Err(why) = crate::recheck::recheck(header) {
+        return void(Void::Incoherent { line: 0, why }, Vec::new());
     }
     let mut one = First {
         jitter: header.jitter,

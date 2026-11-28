@@ -15,5 +15,6 @@ pub mod judge;
 pub mod machine;
 pub mod order;
 pub mod pace;
+pub mod recheck;
 pub mod sim;
 pub mod verdict;

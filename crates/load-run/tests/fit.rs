@@ -420,6 +420,59 @@ proptest! {
     }
 }
 
+/// The evidence admission would journal of `p` fitted at `stated`, its fit's
+/// `fits` and the memory at `memory`: a row a source, its cap and its events
+/// as fitted, the limit the stated memory at the process's own group.
+fn evidence(
+    p: &Planned,
+    fits: &ascetic_ddd_load_run::memory::Fit,
+    memory: u64,
+) -> Result<ascetic_ddd_scheduler::journal::Admission, ascetic_ddd_load_run::run::Inadmissible> {
+    use ascetic_ddd_scheduler::journal::{Assumed, SourceFit};
+    let rows = (0u32..)
+        .zip(&p.sources)
+        .map(|(source, s)| SourceFit {
+            source,
+            needed: 0,
+            cap: s.cap,
+            events: s.events.unwrap(),
+        })
+        .collect();
+    ascetic_ddd_load_run::run::admission(
+        fits,
+        Memory::declared(memory),
+        ascetic_ddd_load_run::live::Limit::assumed(Some((memory.max(fits.need), 0)), None),
+        p.model,
+        rows,
+        None,
+        Assumed::default(),
+        u32::try_from(p.kappa).unwrap(),
+    )
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 512, failure_persistence: None, ..ProptestConfig::default() })]
+
+    /// K2b-7e-2b-3d-3b-3: admission's evidence of any run it fits passes the
+    /// fold's recheck — its terms are the table's, their arithmetic and their
+    /// shared counts and constants the recheck's —; of a memory a byte below
+    /// the need, refused by its slack, as `fit` refuses the run.
+    #[test]
+    fn admission_s_evidence_passes_the_fold_s_recheck(p in arbitrary(), more in 0u64..1 << 20) {
+        let need = u64::try_from(shadow(&p)).unwrap();
+        let fits = fit(&p, Memory::declared(need + more)).unwrap();
+        prop_assert!(evidence(&p, &fits, need + more).is_ok(), "{:?}", evidence(&p, &fits, need + more).err());
+        if need > 0 {
+            prop_assert!(fit(&p, Memory::declared(need - 1)).is_err());
+            let at_need = fit(&p, Memory::declared(need)).unwrap();
+            prop_assert_eq!(
+                evidence(&p, &at_need, need - 1).err(),
+                Some(ascetic_ddd_load_run::run::Inadmissible::Evidence { why: "admission_slack" })
+            );
+        }
+    }
+}
+
 /// The pool at a catch-up of 1 per mille, its bytes not divided by 999: the
 /// prediction rounded up, exactly — 1,000 bytes predicted at 1,002 — and a
 /// byte less than the least refused as the pool's.
