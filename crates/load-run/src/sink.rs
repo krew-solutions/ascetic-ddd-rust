@@ -50,6 +50,7 @@ pub const THREAD: u64 = 2_048;
 pub struct Journal {
     behind: usize,
     out: u64,
+    sampling: Option<u64>,
 }
 
 impl Journal {
@@ -59,7 +60,23 @@ impl Journal {
         Journal {
             behind: behind.max(1),
             out,
+            sampling: None,
         }
+    }
+
+    /// The same, its writer sampling the run's memory every `period` µs, at
+    /// least [`sample::FLOOR`](crate::sample::FLOOR) (ADR-0047 decision 22,
+    /// K2b-7e-2b-3e): the sampler's bytes priced in its term.
+    pub fn sampling(self, period: u64) -> Journal {
+        Journal {
+            sampling: Some(period.max(crate::sample::FLOOR)),
+            ..self
+        }
+    }
+
+    /// Its writer's sampling period, if it samples.
+    pub fn period(&self) -> Option<u64> {
+        self.sampling
     }
 
     /// The lines its channel holds.
@@ -98,7 +115,12 @@ impl Journal {
             rest: behind
                 .saturating_mul(slot)
                 .saturating_add(of(journal::BUFFER))
-                .saturating_add(THREAD),
+                .saturating_add(THREAD)
+                .saturating_add(if self.sampling.is_some() {
+                    crate::sample::SAMPLE
+                } else {
+                    0
+                }),
         }
     }
 }
@@ -166,21 +188,13 @@ impl<W: Write + Send + 'static> Written<W> {
         out: W,
         header: Header,
         journal: Journal,
+        sampler: Option<crate::sample::Sampler>,
     ) -> Result<Written<W>, JournalError> {
-        let mut writer = Writer::new(out, header)?;
+        let writer = Writer::new(out, header)?;
         let (tx, rx) = mpsc::sync_channel::<Message>(journal.behind());
         let thread = std::thread::Builder::new()
             .name("load-run-journal".to_owned())
-            .spawn(move || {
-                for w in rx {
-                    match w {
-                        Message::Line(line) => writer.line(&line)?,
-                        Message::Finish => return writer.finish().map(Some),
-                    }
-                }
-                // Dropped unfinished: no trailer.
-                Ok(None)
-            })
+            .spawn(move || write(writer, rx, sampler))
             .map_err(io)?;
         Ok(Written {
             tx,
@@ -196,7 +210,22 @@ impl<W: Write + Send + 'static> Written<W> {
         if let Some(a) = header.admission.as_mut() {
             a.assumed.journal = true;
         }
-        Written::start(out, header, Journal::new(behind, 0))
+        Written::start(out, header, Journal::new(behind, 0), None)
+    }
+
+    /// A test's journal as [`Written::assumed`], its writer sampling with
+    /// `sampler`.
+    #[cfg(feature = "testing")]
+    pub fn sampled(
+        out: W,
+        mut header: Header,
+        behind: usize,
+        sampler: crate::sample::Sampler,
+    ) -> Result<Written<W>, JournalError> {
+        if let Some(a) = header.admission.as_mut() {
+            a.assumed.journal = true;
+        }
+        Written::start(out, header, Journal::new(behind, 0), Some(sampler))
     }
 
     /// The lines its channel holds: a test's view of what admission sized.
@@ -240,6 +269,53 @@ impl<W: Write + Send + 'static> JournalSink for Written<W> {
             None => Err(io(std::io::Error::other(
                 "the journal's writer ended unfinished",
             ))),
+        }
+    }
+}
+
+/// The writer's thread: each line the machine sends, then the trailer when
+/// it finishes; with a sampler, a sample after the header, one whenever its
+/// due instant has passed — checked after every line taken and every
+/// timeout, so a channel never empty is sampled too —, and one before the
+/// trailer (ADR-0047 decision 22, K2b-7e-2b-3e).
+fn write<W: Write + Send>(
+    mut writer: Writer<W>,
+    rx: mpsc::Receiver<Message>,
+    mut sampler: Option<crate::sample::Sampler>,
+) -> Ended<W> {
+    use crate::clock::Clock as _;
+    use ascetic_ddd_scheduler::journal::SampleWhy;
+    let sample = |s: &mut crate::sample::Sampler, why| Line::Sample(Box::new(s.sample(why)));
+    if let Some(s) = sampler.as_mut() {
+        writer.line(&sample(s, SampleWhy::Baseline))?;
+    }
+    loop {
+        let message = match sampler.as_ref() {
+            Some(s) => match s.clock().recv_until(&rx, s.due()) {
+                Ok(m) => Some(m),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                // Dropped unfinished: no trailer.
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(None),
+            },
+            None => match rx.recv() {
+                Ok(m) => Some(m),
+                Err(mpsc::RecvError) => return Ok(None),
+            },
+        };
+        match message {
+            Some(Message::Line(line)) => writer.line(&line)?,
+            Some(Message::Finish) => {
+                if let Some(s) = sampler.as_mut() {
+                    writer.line(&sample(s, SampleWhy::Finish))?;
+                }
+                return writer.finish().map(Some);
+            }
+            None => {}
+        }
+        if let Some(s) = sampler.as_mut()
+            && s.clock().now() >= s.due()
+        {
+            writer.line(&sample(s, SampleWhy::Due))?;
         }
     }
 }

@@ -193,7 +193,9 @@ impl<X> Gated<RealClock, X> {
             Some(judging),
         );
         let journal = *admitted.journal();
-        let sink = Written::start(out, header, journal).map_err(RunError::Journal)?;
+        // The run's sampler waits on its live counts, K2b-7e-2b-3e-2b's:
+        // until then its writer samples nothing.
+        let sink = Written::start(out, header, journal, None).map_err(RunError::Journal)?;
         Ok(Ready::new(admitted, clock, sink, namespace))
     }
 }

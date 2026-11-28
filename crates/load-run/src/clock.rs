@@ -214,6 +214,30 @@ impl RealClock {
     }
 }
 
+impl RealClock {
+    /// What `rx` gives until the clock reads `at`: a second waiter on the
+    /// same clock, the journal's writer's (ADR-0047 decision 22,
+    /// K2b-7e-2b-3e) — the only timed wait outside this module's timer,
+    /// which the lint holds here.
+    ///
+    /// # Errors
+    ///
+    /// [`std::sync::mpsc::RecvTimeoutError::Timeout`] once `at` is reached
+    /// with nothing given; `Disconnected` when its senders are gone.
+    pub fn recv_until<T>(
+        &self,
+        rx: &std::sync::mpsc::Receiver<T>,
+        at: u64,
+    ) -> Result<T, std::sync::mpsc::RecvTimeoutError> {
+        let wait = at.saturating_sub(self.timer.now());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the clock's own timed wait: a waiter on its one clock (ADR-0047 decision 16)"
+        )]
+        rx.recv_timeout(Duration::from_micros(wait))
+    }
+}
+
 impl Timer {
     fn now(&self) -> u64 {
         micros(self.t0.elapsed())
@@ -245,6 +269,10 @@ fn serve(timer: &Timer) {
             s.at.first_key_value().map(|(k, _)| k.0.saturating_sub(now))
         };
         match next {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the timer's own wait: its one clock's sleepers (ADR-0047 decision 16)"
+            )]
             Some(wait) => std::thread::park_timeout(Duration::from_micros(wait)),
             None => std::thread::park(),
         }
