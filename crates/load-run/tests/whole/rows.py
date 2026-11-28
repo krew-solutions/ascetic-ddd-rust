@@ -90,7 +90,52 @@ ROWS = {
     "L2-200-1k": dict(mode="never", n=200, size=0, body=1024, cap=512, timeout=500_000, zstd=0, most="2G"),
     "L2-400-1k": dict(mode="never", n=400, size=0, body=1024, cap=512, timeout=500_000, zstd=0, most="2G"),
     "L2-400-64k": dict(mode="never", n=400, size=0, body=65536, cap=512, timeout=500_000, zstd=0, most="2G"),
+    # K2b-7e-2b-3d-4b: idle sources, one read each; the kernel's sockets with
+    # every body sent at once; THP off and on; arenas over four sources.
+    "L4-1-100": dict(mode="now", n=1, size=64, body=0, cap=100, timeout=3_000_000, zstd=0, most="1G", sources=1),
+    "L4-4-100": dict(mode="now", n=4, size=64, body=0, cap=100, timeout=3_000_000, zstd=0, most="1G", sources=4),
+    "L4-1-1000": dict(mode="now", n=1, size=64, body=0, cap=1000, timeout=3_000_000, zstd=0, most="4G", sources=1),
+    "L4-4-1000": dict(mode="now", n=4, size=64, body=0, cap=1000, timeout=3_000_000, zstd=0, most="8G", sources=4),
+    "L6": dict(mode="now", n=250, size=MIB, body=0, cap=256, timeout=10_000_000, zstd=0, most="3G"),
+    "L1-250-thp-off": dict(mode="held", n=250, size=MIB, body=0, cap=256, timeout=10_000_000, zstd=0, most="3G", thp="off"),
+    "L1-250-thp-on": dict(mode="held", n=250, size=MIB, body=0, cap=256, timeout=10_000_000, zstd=0, most="3G",
+                          env={"GLIBC_TUNABLES": "glibc.malloc.hugetlb=1"}),
+    "L1-4x-250": dict(mode="held", n=250, size=MIB, body=0, cap=128, timeout=10_000_000, zstd=0, most="4G", sources=4),
+    "L1-4x-250-arena1": dict(mode="held", n=250, size=MIB, body=0, cap=128, timeout=10_000_000, zstd=0, most="4G",
+                             sources=4, env={"MALLOC_ARENA_MAX": "1"}),
 }
+
+CGROUP = ("anon", "sock", "kernel_stack", "file", "shmem", "pagetables", "slab_unreclaimable")
+
+
+def cgroup_of(unit):
+    """The scope's cgroup directory, once systemd has made it."""
+    for _ in range(200):
+        shown = subprocess.run(["systemctl", "--user", "show", "-p", "ControlGroup", "--value", unit],
+                               capture_output=True, text=True).stdout.strip()
+        if shown and os.path.isdir("/sys/fs/cgroup" + shown):
+            return "/sys/fs/cgroup" + shown
+        time.sleep(0.01)
+    return None
+
+
+def sampled(proc, unit):
+    """The scope's memory, sampled from outside every 20 ms while `proc`
+    runs: each `memory.stat` field's most, and `memory.peak`'s last."""
+    most = {k: 0 for k in CGROUP}
+    peak = 0
+    path = cgroup_of(unit)
+    while proc.poll() is None and path:
+        try:
+            for line in open(path + "/memory.stat"):
+                k, v = line.split()
+                if k in most:
+                    most[k] = max(most[k], int(v))
+            peak = max(peak, int(open(path + "/memory.peak").read()))
+        except OSError:
+            break
+        time.sleep(0.02)
+    return {**most, "peak": peak}
 
 
 def free_port():
@@ -163,14 +208,19 @@ def row(binary, name):
         try:
             listening(port)
             env = {"WHOLE_PORT": str(port), "WHOLE_N": str(r["n"]), "WHOLE_BODY": str(r["body"]), "WHOLE_CAP": str(r["cap"]),
-                   "WHOLE_TIMEOUT": str(r["timeout"]), "WHOLE_ZSTD": str(r["zstd"]), "WHOLE_DIR": d}
-            cmd = ["systemd-run", "--user", "--scope", "-q", "-p", f"MemoryMax={r['most']}", "-p", "MemorySwapMax=0", "--", "env"]
+                   "WHOLE_TIMEOUT": str(r["timeout"]), "WHOLE_ZSTD": str(r["zstd"]), "WHOLE_DIR": d,
+                   "WHOLE_SOURCES": str(r.get("sources", 1)), "WHOLE_THP": r.get("thp", "default"), **r.get("env", {})}
+            unit = f"whole-{name}-{os.getpid()}".replace(".", "-") + ".scope"
+            cmd = ["systemd-run", "--user", "--scope", "-q", f"--unit={unit}", "-p", f"MemoryMax={r['most']}",
+                   "-p", "MemorySwapMax=0", "--", "env"]
             cmd += [f"{k}={v}" for k, v in env.items()]
             cmd += [binary, "--ignored", "--exact", "row", "--nocapture", "--test-threads=1"]
-            done = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-            got = [l[l.index("WHOLE {") + len("WHOLE "):] for l in done.stdout.splitlines() if "WHOLE {" in l]
-            if done.returncode or not got:
-                sys.exit(f"{name}: {done.returncode}\n{done.stdout[-3000:]}\n{done.stderr[-3000:]}")
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            cgroup = sampled(proc, unit)
+            stdout, stderr = proc.communicate(timeout=600)
+            got = [l[l.index("WHOLE {") + len("WHOLE "):] for l in stdout.splitlines() if "WHOLE {" in l]
+            if proc.returncode or not got:
+                sys.exit(f"{name}: {proc.returncode}\n{stdout[-3000:]}\n{stderr[-3000:]}")
             line = json.loads(got[0])
             memory, inflight, late = journal_of(line["journal"])
         finally:
@@ -178,7 +228,7 @@ def row(binary, name):
             stand.wait(timeout=10)
     phases, named = sums(memory)
     return {"row": name, **r, "need": line["need"], "edges": line["edges"], "phases": phases,
-            "named": named, "inflight": inflight, "late": late}
+            "named": named, "inflight": inflight, "late": late, "cgroup": cgroup}
 
 
 def window(reading, edge):
@@ -219,6 +269,30 @@ def compare(path):
         connection = cost("L2-400-1k", "connections")
         print(f"P4: {slope:.0f} B an attempt in flight, priced {priced:.0f} by the needs' slope, "
               f"{priced + connection:.0f} with a connection's {connection}")
+    if {"L4-1-100", "L4-4-100"} <= rows.keys() or {"L4-1-1000", "L4-4-1000"} <= rows.keys():
+        for cap in (100, 1000):
+            one, four = f"L4-1-{cap}", f"L4-4-{cap}"
+            if {one, four} <= rows.keys():
+                idle = (e(four, "started")["now"] - e(one, "started")["now"]) / 3
+                own = sum(int(t[3]) for part in ("runtime", "carrier_source", "keeping") for t in rows[one]["named"][part])
+                print(f"P6: a source's own at idle, cap {cap}: {idle:.0f} B counted, priced {own}")
+    if "L6" in rows:
+        c = rows["L6"]["cgroup"]
+        print(f"P7: the kernel's sockets {c['sock']} B at most, 250 bodies of 1 MiB in flight; anon {c['anon']}, "
+              f"kernel stacks {c['kernel_stack']}, the scope's peak {c['peak']}")
+    for name in ("L1-250-thp-off", "L1-250-thp-on"):
+        if name in rows:
+            r = e(name, "ran")
+            print(f"P8: {name}: anon huge {max(x['anon_huge'] for x in rows[name]['edges'])}, high-water rise "
+                  f"{r['hwm'] - e(name, 'started')['hwm']} of counted {ran(name)}")
+    if {"L1-4x-250", "L1-4x-250-arena1"} <= rows.keys():
+        for name in ("L1-4x-250", "L1-4x-250-arena1"):
+            r = e(name, "ran")
+            print(f"P9: {name}: high-water {r['hwm']}, counted {ran(name)}, glibc's arena {r['arena']}, free {r['fordblks']}")
+    for name in rows:
+        r = e(name, "ran")
+        if "stacks" in r:
+            print(f"P10: {name}: stacks {r['stacks']} B over {r['threads']} threads ({r['stacks'] // max(r['threads'], 1)} B each)")
     if {"L0", "L5"} <= rows.keys():
         d = lambda n: e(n, "opened")["uordblks"] - e(n, "opened")["now"]
         print(f"P5: zstd's outside the counter {d('L5') - d('L0')} B, its term {cost('L5', 'decoder')}")

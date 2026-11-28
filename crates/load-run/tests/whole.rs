@@ -118,6 +118,40 @@ struct Mallinfo2 {
 
 unsafe extern "C" {
     fn mallinfo2() -> Mallinfo2;
+    fn prctl(option: i32, ...) -> i32;
+}
+
+/// `PR_SET_THP_DISABLE`: no transparent huge page for the process.
+const PR_SET_THP_DISABLE: i32 = 41;
+
+/// The threads' stacks resident: each anonymous writable mapping that
+/// follows a guard page (`---p`), its `Rss` summed, and their number; the
+/// main thread's `[stack]` among them.
+fn stacks() -> (u64, u64) {
+    let Ok(smaps) = std::fs::read_to_string("/proc/self/smaps") else {
+        return (0, 0);
+    };
+    let (mut bytes, mut count) = (0, 0);
+    let (mut guarded, mut after_guard) = (false, false);
+    for line in smaps.lines() {
+        let mut fields = line.split_whitespace();
+        let first = fields.next().unwrap_or("");
+        if first.contains('-') && first.chars().next().is_some_and(|c| c.is_ascii_hexdigit()) {
+            let perms = fields.next().unwrap_or("");
+            let path = line.split_whitespace().nth(5);
+            guarded = path == Some("[stack]") || (after_guard && perms == "rw-p" && path.is_none());
+            after_guard = perms == "---p" && path.is_none();
+        } else if first == "Rss:" && guarded {
+            bytes += fields
+                .next()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0)
+                * 1024;
+            count += 1;
+            guarded = false;
+        }
+    }
+    (bytes, count)
 }
 
 /// A `/proc/self/status` or `/proc/self/smaps_rollup` field, in bytes.
@@ -154,6 +188,8 @@ fn edge(name: &str) -> serde_json::Value {
         "hwm": proc_kb("/proc/self/status", "VmHWM:"),
         "rss_anon": proc_kb("/proc/self/status", "RssAnon:"),
         "anon_huge": proc_kb("/proc/self/smaps_rollup", "AnonHugePages:"),
+        "stacks": stacks().0,
+        "threads": stacks().1,
     })
 }
 
@@ -206,6 +242,14 @@ fn row() {
     let cap = usize::try_from(num("WHOLE_CAP")).unwrap();
     let dir = std::path::PathBuf::from(var("WHOLE_DIR"));
     let addr: SocketAddr = format!("127.0.0.1:{}", num("WHOLE_PORT")).parse().unwrap();
+    let sources = u32::try_from(num("WHOLE_SOURCES")).unwrap();
+    if var("WHOLE_THP") == "off" {
+        // SAFETY: a plain call into the kernel, no pointer passed.
+        assert_eq!(
+            unsafe { prctl(PR_SET_THP_DISABLE, 1u64, 0u64, 0u64, 0u64) },
+            0
+        );
+    }
     let _ = ascetic_ddd_load_run::live::Descriptors::raise().unwrap();
     // The plan: `n` reads at one instant 200 ms in, each with a body of
     // `body` bytes, then their trailer; committed as a host would.
@@ -214,13 +258,15 @@ fn row() {
     header.calls.clear();
     header.profile.jitter = 200_000;
     header.profile.reserve = 100;
+    header.profile.sources = sources;
     header
         .operations
         .iter_mut()
         .for_each(|o| o.timeout = num("WHOLE_TIMEOUT"));
     let records: Vec<Record> = (0..n)
         .map(|i| {
-            let mut r = call("read", i + 1, 0, 200_000, 0);
+            let source = u32::try_from(i % u64::from(sources)).unwrap();
+            let mut r = call("read", i + 1, 0, 200_000, source);
             if body > 0
                 && let ascetic_ddd_command_log::record::Action::Rest(rest) = &mut r.action
             {
@@ -265,8 +311,11 @@ fn row() {
         Arc::new(RestCarrier::new(
             shared.clone(),
             OneStand,
-            TcpEgress::new(BTreeMap::from([("gateway".to_owned(), addr)]), vec![None])
-                .with_ports(cap),
+            TcpEgress::new(
+                BTreeMap::from([("gateway".to_owned(), addr)]),
+                vec![None; sources as usize],
+            )
+            .with_ports(cap),
             Config::new(RunSecret::new([7; 32])),
         ))
     };
