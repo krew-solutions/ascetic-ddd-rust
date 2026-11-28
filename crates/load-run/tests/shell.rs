@@ -579,7 +579,8 @@ fn a_stamp_read_slowly_under_the_lock_is_never_stale() {
     stress(|j| Sluggish(RealClock::start(j).unwrap()), 3, 200);
 }
 
-/// Every stamp the journal carries, in its order.
+/// Every stamp the journal's machine lines carry, in their order: a
+/// sample's is the writer's, not the machine's (version 11).
 fn stamps(lines: &[journal::Line]) -> Vec<u64> {
     lines
         .iter()
@@ -591,7 +592,7 @@ fn stamps(lines: &[journal::Line]) -> Vec<u64> {
             journal::Line::Answer(x) => Some(x.at),
             journal::Line::End(x) => Some(x.at),
             journal::Line::Fault(x) => Some(x.at),
-            journal::Line::Header(_) | journal::Line::Trailer(_) => None,
+            journal::Line::Header(_) | journal::Line::Sample(_) | journal::Line::Trailer(_) => None,
         })
         .collect()
 }

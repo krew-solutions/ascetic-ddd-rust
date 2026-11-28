@@ -229,6 +229,15 @@ const JOURNALS: &[(u32, u32, &str)] = &[
         5,
         "307d736f43406778be0a36a3346056698a40ddc79f198410c27d8778f9d2be5e",
     ),
+    // Version 11 (decision 22, K2b-7e-2b-3e-1): the run's samples, none in
+    // `sim`'s journals; settled against version 10 run by run — line 1 the
+    // same with its version restored, every line after it the same but the
+    // trailer's digest.
+    (
+        11,
+        5,
+        "399d6c395b1d60a63b86d69d4b818fe246cbae76c7aebd67298bf873ad3b3191",
+    ),
 ];
 
 /// What the fold decided of the differential's runs, the digest of their
@@ -331,6 +340,14 @@ const CLASSES: &[(u32, u32, u32, &str)] = &[
     // rechecked; the corpus journals none — the same classes.
     (
         10,
+        5,
+        8,
+        "c8dd9df07b94987b394344beda3d648f88a492b5d21a98370b9f2f379ac01cc3",
+    ),
+    // Version 11 (decision 22, K2b-7e-2b-3e-1): the run's samples, which
+    // `sim` writes none of and both folds drop — the same classes.
+    (
+        11,
         5,
         8,
         "c8dd9df07b94987b394344beda3d648f88a492b5d21a98370b9f2f379ac01cc3",
@@ -460,6 +477,8 @@ fn journal_of(
                 }
             }
             Line::Header(_) | Line::Trailer(_) => panic!("{name}: a header or trailer amid"),
+            // `sim` samples nothing (version 11): no sample in its journals.
+            Line::Sample(_) => panic!("{name}: a sample in a simulated run's journal"),
         }
     }
     // Reads in line order: the fold's second pass depends on it.

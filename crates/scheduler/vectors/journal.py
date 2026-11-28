@@ -32,6 +32,11 @@ _spec.loader.exec_module(fmt)
 
 
 def main(path):
+    # The schema's title names the version its header's `const` holds: a bump
+    # that moves one and not the other is refused (K2b-7e-2b-3e).
+    version = SCHEMA["$defs"]["header"]["properties"]["journal"]["const"]
+    if not SCHEMA["title"].endswith(f"version {version}"):
+        raise SystemExit(f"the schema's title is not its version {version}'s: {SCHEMA['title']}")
     data = pathlib.Path(path).read_bytes()
     if not data.endswith(b"\n"):
         raise SystemExit("the journal ends without its trailer, or mid-line")

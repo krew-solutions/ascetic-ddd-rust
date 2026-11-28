@@ -26,13 +26,13 @@ use crate::machine::{self, Binding, Input, Judgement, Line as Number, Output};
 pub mod sample;
 
 /// The version a reader accepts and a writer writes: exactly this one.
-pub const JOURNAL_VERSION: u32 = 10;
+pub const JOURNAL_VERSION: u32 = 11;
 
 /// The byte form's identity: the SHA-256 of the golden journal
 /// (`golden/journal.jsonl`, [`sample`]), which holds every line and variant. A
 /// change to how any line is written changes the golden journal, and so this,
 /// in the same edit.
-pub const JOURNAL: &str = "beda6ed6177fc854eb4407f7e749fda5f6d1bc168728d29e9bae97d15981eb92";
+pub const JOURNAL: &str = "e9cc420c3fa8bcfb6f7589e4b9271a8072a6ae9f657ca016c4f78e333f81d937";
 
 /// A journal's line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,8 +54,277 @@ pub enum Line {
     End(Box<Ended>),
     /// A harness fault.
     Fault(Fault),
+    /// The run's memory, sampled by the journal's writer (version 11,
+    /// decision 22, K2b-7e-2b-3e): evidence no fold reads.
+    Sample(Box<Sample>),
     /// The last line.
     Trailer(Trailer),
+}
+
+/// Why a sample was taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SampleWhy {
+    /// Right after the header: the stages' residue.
+    Baseline,
+    /// Its instant came.
+    Due,
+    /// The run finished, before the trailer.
+    Finish,
+}
+
+/// The run's memory at one instant (version 11): the process's, its
+/// cgroup's, the host's pressure, the shell's live counts and the
+/// allocator's, each group read or not and why.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sample {
+    /// Why it was taken.
+    pub why: SampleWhy,
+    /// The run's clock when it was read, microseconds.
+    #[serde(with = "u64s")]
+    pub at: u64,
+    /// The instant it was due: `at` for a baseline's and a finish's.
+    #[serde(with = "u64s")]
+    pub due: u64,
+    /// The due instants passed unsampled since the last sample.
+    #[serde(with = "u64s")]
+    pub skipped: u64,
+    /// The process's own, from `/proc/self/status`.
+    pub process: Reading<Process>,
+    /// Its cgroup's, from its own group's files.
+    pub cgroup: Reading<Cgroup>,
+    /// The host's memory pressure, `/proc/pressure/memory`.
+    pub host: Reading<Pressure>,
+    /// The shell's live counts, as its loop last stored them.
+    pub live: Live,
+    /// The allocator's, from a host-given probe.
+    pub allocator: Allocator,
+}
+
+/// A group read, or why not.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reading<T> {
+    /// Read.
+    Read(T),
+    /// Not read.
+    Unread(Unread),
+}
+
+/// Why a group was not read: its anchor's file absent, not permitted, no
+/// cgroup v2 here, or its read failed otherwise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Unread {
+    /// Its file is not there.
+    Absent,
+    /// Not permitted.
+    Permission,
+    /// No unified cgroup hierarchy.
+    NoCgroupV2,
+    /// Read, but not as expected.
+    Failed,
+}
+
+/// The process's memory, bytes: its anchor the resident set; each other
+/// field none where the kernel gives none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Process {
+    /// `VmRSS`.
+    #[serde(with = "u64s")]
+    pub rss: u64,
+    /// `RssAnon`.
+    #[serde(with = "u64s_option")]
+    pub rss_anon: Option<u64>,
+    /// `RssFile`.
+    #[serde(with = "u64s_option")]
+    pub rss_file: Option<u64>,
+    /// `RssShmem`.
+    #[serde(with = "u64s_option")]
+    pub rss_shmem: Option<u64>,
+    /// `VmSwap`.
+    #[serde(with = "u64s_option")]
+    pub swap: Option<u64>,
+    /// `VmHWM`: the resident set's high-water.
+    #[serde(with = "u64s_option")]
+    pub hwm: Option<u64>,
+    /// `Threads`.
+    #[serde(with = "u64s_option")]
+    pub threads: Option<u64>,
+    /// Microseconds its read took.
+    #[serde(with = "u64s")]
+    pub took: u64,
+}
+
+/// The process's cgroup's memory, bytes: its anchor `memory.current`; each
+/// other field none where the kernel gives none; the events and pressure
+/// of the group whose limit binds beside its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Cgroup {
+    /// The processes in it.
+    #[serde(with = "u64s_option")]
+    pub procs: Option<u64>,
+    /// `memory.current`.
+    #[serde(with = "u64s")]
+    pub current: u64,
+    /// `memory.peak`.
+    #[serde(with = "u64s_option")]
+    pub peak: Option<u64>,
+    /// `memory.stat`'s `anon`.
+    #[serde(with = "u64s_option")]
+    pub anon: Option<u64>,
+    /// `anon_thp`.
+    #[serde(with = "u64s_option")]
+    pub anon_thp: Option<u64>,
+    /// `file`: the page cache, the journal's own among it.
+    #[serde(with = "u64s_option")]
+    pub file: Option<u64>,
+    /// `sock`: the kernel's socket buffers.
+    #[serde(with = "u64s_option")]
+    pub sock: Option<u64>,
+    /// `kernel_stack`.
+    #[serde(with = "u64s_option")]
+    pub kernel_stack: Option<u64>,
+    /// `pagetables`.
+    #[serde(with = "u64s_option")]
+    pub pagetables: Option<u64>,
+    /// `slab`.
+    #[serde(with = "u64s_option")]
+    pub slab: Option<u64>,
+    /// `memory.swap.current`.
+    #[serde(with = "u64s_option")]
+    pub swap: Option<u64>,
+    /// Its own `memory.events`.
+    pub events: Option<Events>,
+    /// Its own `memory.pressure`.
+    pub pressure: Option<Pressure>,
+    /// The depth above it of the group whose `memory.max` binds, and that
+    /// group's events and pressure: an ancestor's limit counts there, not
+    /// here.
+    pub binding: Option<Binds>,
+    /// Microseconds its reads took.
+    #[serde(with = "u64s")]
+    pub took: u64,
+}
+
+/// A cgroup's `memory.events`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Events {
+    /// `high`.
+    #[serde(with = "u64s")]
+    pub high: u64,
+    /// `max`.
+    #[serde(with = "u64s")]
+    pub max: u64,
+    /// `oom`.
+    #[serde(with = "u64s")]
+    pub oom: u64,
+    /// `oom_kill`.
+    #[serde(with = "u64s")]
+    pub oom_kill: u64,
+}
+
+/// A pressure file's memory stall: `some` and `full`, each its ten-second
+/// average in hundredths of a percent and its total in microseconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Pressure {
+    /// `some avg10`, hundredths of a percent.
+    pub some_avg10: u32,
+    /// `some total`, microseconds.
+    #[serde(with = "u64s")]
+    pub some_total: u64,
+    /// `full avg10`, hundredths of a percent.
+    pub full_avg10: u32,
+    /// `full total`, microseconds.
+    #[serde(with = "u64s")]
+    pub full_total: u64,
+}
+
+/// The group whose limit binds, above the process's own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Binds {
+    /// Its depth: 0 for the process's own.
+    pub depth: u32,
+    /// Its `memory.events`.
+    pub events: Option<Events>,
+    /// Its `memory.pressure`.
+    pub pressure: Option<Pressure>,
+}
+
+/// The shell's live counts, as its loop stored them at its last turn: one
+/// instant's, never two turns' mixed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Live {
+    /// The run's clock at that turn: stale and past `wakes`, a stuck loop.
+    #[serde(with = "u64s")]
+    pub turn: u64,
+    /// The instant the loop sleeps until, if it sleeps.
+    #[serde(with = "u64s_option")]
+    pub wakes: Option<u64>,
+    /// The lines read and not ended.
+    #[serde(with = "u64s")]
+    pub pending: u64,
+    /// The attempts' handles past their deadline — not admission's `late`,
+    /// which counts the steps late by a jitter, ended or not.
+    #[serde(with = "u64s")]
+    pub past_deadline: u64,
+    /// The attempts alive.
+    #[serde(with = "u64s")]
+    pub alive: u64,
+    /// The carrier's sockets open, by its own word; none where it gives
+    /// none.
+    #[serde(with = "u64s_option")]
+    pub sockets: Option<u64>,
+    /// The journal's lines sent while its channel was full.
+    #[serde(with = "u64s")]
+    pub full: u64,
+    /// Microseconds the machine waited on a full channel.
+    #[serde(with = "u64s")]
+    pub waited: u64,
+}
+
+/// The allocator's own figures, from a host-given probe.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Allocator {
+    /// Whether a probe is stated, and how its read went.
+    pub state: AllocatorState,
+    /// The allocator, a dotted name the probe gives (`glibc.2.39`, say).
+    pub name: Option<Code>,
+    /// Its bytes in use.
+    #[serde(with = "u64s_option")]
+    pub in_use: Option<u64>,
+    /// Its bytes free and kept.
+    #[serde(with = "u64s_option")]
+    pub free: Option<u64>,
+    /// Its bytes mapped apart.
+    #[serde(with = "u64s_option")]
+    pub mapped: Option<u64>,
+    /// Its free chunks: what its walk is as long as.
+    #[serde(with = "u64s_option")]
+    pub chunks: Option<u64>,
+    /// Microseconds the probe took.
+    #[serde(with = "u64s")]
+    pub took: u64,
+}
+
+/// Whether the allocator was read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AllocatorState {
+    /// No probe stated: not this run's to read.
+    Unstated,
+    /// A probe stated, its read failed (it panicked or gave none).
+    Failed,
+    /// Read.
+    Read,
 }
 
 /// What anchors a run.
@@ -1611,6 +1880,12 @@ pub fn line_heap(line: &Line) -> u64 {
             n.ended(e);
         }
         Line::Fault(Fault { at: _, class }) => n.fault(class),
+        Line::Sample(sample) => {
+            n.size::<Sample>();
+            if let Some(name) = &sample.allocator.name {
+                n.code(name);
+            }
+        }
         Line::Trailer(Trailer {
             events: _,
             steps: _,

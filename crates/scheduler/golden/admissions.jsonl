@@ -74,3 +74,79 @@
 {"case":"admission: an unheld pool and a max above the process's group","fold":8,"header":"01caa57c20b12945c4d71304167b7923fafb077115d0a10036c0fcd0aef90566","journal":10,"verdict":"void:incoherent","why":"admission_scope"}
 {"case":"admission: a memory past the max","fold":8,"header":"7ff41a9796715bcf689ffec8fc2c48668ca6eee0368f581018b531b76b38a849","journal":10,"verdict":"void:incoherent","why":"admission_limit"}
 {"case":"admission: a memory past the high, below the max","fold":8,"header":"4723a919de29a03463d3118d4e4d032fd635830d42b251844958af5ee5e4c269","journal":10,"verdict":"void:incoherent","why":"admission_limit"}
+{"case":"admission: the run binds","fold":null,"header":"d1701c3624b3e80bad501b004110248c0ebfa874b87c3ba229033b26c7d2e9cb","journal":11,"verdict":"pass","why":null}
+{"case":"admission: stage 2 binds","fold":null,"header":"aa8b758cf5b5dae275c7f8cb309f9b285cb0b08838f97692fb17b665c5806e38","journal":11,"verdict":"pass","why":null}
+{"case":"admission: the gates bind","fold":null,"header":"3d01526f8e5f50d3c3b56e34bf5104be3aebd43ce77586679729cdcafd2f58c8","journal":11,"verdict":"pass","why":null}
+{"case":"admission: rows apart","fold":null,"header":"37af4bc50d6c6ee5af2780bd11acbe6df13e657172562aad5d761cac7606d7cd","journal":11,"verdict":"pass","why":null}
+{"case":"admission: no source","fold":null,"header":"90a47793263023b245e2eb2ad46ac4adb49d7695659649e91c40ae8291bcb1ba","journal":11,"verdict":"pass","why":null}
+{"case":"admission: a test's runtimes","fold":null,"header":"162b91a5b5a814806e40c8c4b61fb18bd5df415ae0b2d3be1105265241d0d58f","journal":11,"verdict":"pass","why":null}
+{"case":"admitted by load-run: no-reader-host-carrier","fold":null,"header":"431bbf00b914bc12a09e8eaf98e6d6bfbb2728e8e8736fcecf7c6d2d9a0a2f2b","journal":11,"verdict":"pass","why":null}
+{"case":"admitted by load-run: nine-sources","fold":null,"header":"c77b820b7bad2a0922f5f7746b4c74dce7a6068c0251a598085cc62305648326","journal":11,"verdict":"pass","why":null}
+{"case":"admitted by load-run: one-rest-source","fold":null,"header":"4d085a2364cf4239d4d9598d2f9a17e4f038102f6b616435a499b1c59ae0aeae","journal":11,"verdict":"pass","why":null}
+{"case":"admitted by load-run: replayed-reader","fold":null,"header":"9a80f9197ef6b4eccfee73a9a15c7b014a4bbbda2bc1f686d25e178fb3bfc1d4","journal":11,"verdict":"pass","why":null}
+{"case":"admission: κ at 1000","fold":8,"header":"faa1f147fa1d709cc0d8843d69cf7edff1baf0cbb41d8f09973cac67e29a8811","journal":11,"verdict":"void:incoherent","why":"admission_kappa"}
+{"case":"admission: κ past 1000","fold":8,"header":"e433fc2b0563582b2e1f8d3aa9f9940e69c6756fd72e31d80c03f8cc1e7dd50f","journal":11,"verdict":"void:incoherent","why":"admission_kappa"}
+{"case":"admission: a part missing","fold":8,"header":"56c231228b45d28dbee692c3b220cd05c6f802d6698e3f039a9204009dc7b733","journal":11,"verdict":"void:incoherent","why":"admission_term_set"}
+{"case":"admission: a part twice, another missing","fold":8,"header":"f7d456c35cbba4d9451a08cbfe87e7c60112fb90ccf7ea2943f46c16af5b2b9d","journal":11,"verdict":"void:incoherent","why":"admission_term_set"}
+{"case":"admission: a source's part at a source past the runtimes'","fold":8,"header":"048e79ebde57191f8819fb1872be0c63ef73072c96b73d005d2549e124f5e996","journal":11,"verdict":"void:incoherent","why":"admission_term_set"}
+{"case":"admission: a run's part given a source","fold":8,"header":"f4a0eb38e6c944e8c7d57eeb05307ab1219111a7dd1c4d87df1c0cd5934adc5f","journal":11,"verdict":"void:incoherent","why":"admission_term_set"}
+{"case":"admission: a source's part given none","fold":8,"header":"6428681a76751dc32d2b8b68cbe34e5260d7dee17d51c29261a0a8dc2ccbe39a","journal":11,"verdict":"void:incoherent","why":"admission_term_set"}
+{"case":"admission: a part twice, of nothing, beside every other","fold":8,"header":"29fd8599cffe0f69be52580e5466fa536965710178ad3af5c8ae04a4d34e8d42","journal":11,"verdict":"void:incoherent","why":"admission_term_set"}
+{"case":"admission: a part of nothing at a source past the runtimes', beside every other","fold":8,"header":"c3c9efbe76e33e0dbf50803d00c4c13d8ad2312be42b597b1c199a4f1e442099","journal":11,"verdict":"void:incoherent","why":"admission_term_set"}
+{"case":"admission: a phase moved","fold":8,"header":"68e9f75d6d136e29babf1ffa60606326e452763c3534000ab636c3438737ac39","journal":11,"verdict":"void:incoherent","why":"admission_table"}
+{"case":"admission: a basis moved","fold":8,"header":"dd09c9846d097c9f198999ea356a20c22e4979d8cbff6a101bd4588764f6f991","journal":11,"verdict":"void:incoherent","why":"admission_table"}
+{"case":"admission: a holder moved","fold":8,"header":"35e584c427ccd89c87adb60422d2d7740a74ca41a05f5979f81bd2275a57bd34","journal":11,"verdict":"void:incoherent","why":"admission_table"}
+{"case":"admission: a library's part the host's","fold":8,"header":"12dc1459950a9857518bb3a62f37734f21b532d7e34e97277f917585ec382ab3","journal":11,"verdict":"void:incoherent","why":"admission_table"}
+{"case":"admission: a host's part the library's","fold":8,"header":"d3db85315056caa113114cc58edccfbf8797d3621b2c2b94f38e9a32a6306150","journal":11,"verdict":"void:incoherent","why":"admission_table"}
+{"case":"admission: a gate built","fold":8,"header":"043a3d5c1ddefafbd5e2e1ee45bb111b7dd8dc75f22e85dcca24b538a632502e","journal":11,"verdict":"void:incoherent","why":"admission_built"}
+{"case":"admission: bytes one more","fold":8,"header":"fc6a25c6502c4b9975e45993cdf7745560fbc9d200d6014753aadf7543eefd3f","journal":11,"verdict":"void:incoherent","why":"admission_bytes"}
+{"case":"admission: bytes one less","fold":8,"header":"a53e0089621caebfb1d6039a5ec9039ff5730b4d702ef5f91b7276e9390a0502","journal":11,"verdict":"void:incoherent","why":"admission_bytes"}
+{"case":"admission: a product past 2^64, wrapped","fold":8,"header":"789012e294a6fa4c300523cda9efafbeccdf5f719c181ee2d44886b7925c0862","journal":11,"verdict":"void:incoherent","why":"admission_bytes"}
+{"case":"admission: the cells' cost","fold":8,"header":"42d18673f37132df27696c5db49a21c8055823669e8ef2de392063f632ff96a7","journal":11,"verdict":"void:incoherent","why":"admission_model"}
+{"case":"admission: the pending's cost","fold":8,"header":"40ed4bad870a298942edfcef9544750888c911712a7caa50e4dd1a3e13296326","journal":11,"verdict":"void:incoherent","why":"admission_model"}
+{"case":"admission: a key's cost","fold":8,"header":"6e465446f049d8e971577c628f75ef101ce27467cced7a7662905ee2fdbbe5df","journal":11,"verdict":"void:incoherent","why":"admission_model"}
+{"case":"admission: a record's cost","fold":8,"header":"19da869b90869a019f754b2ea3a5d829a7f8d5b6ee58992bdcf516936a75daad","journal":11,"verdict":"void:incoherent","why":"admission_model"}
+{"case":"admission: the shell's attempt's cost","fold":8,"header":"87ac78dc90cdddf75fcd01b292d32d0ae24c1bea2598813b85f0e7d1bc22544c","journal":11,"verdict":"void:incoherent","why":"admission_model"}
+{"case":"admission: the decoder's cost","fold":8,"header":"8497d329829455e217d1d633cb939ca63511df5771eddeb08bdf0b3b947d619a","journal":11,"verdict":"void:incoherent","why":"admission_model"}
+{"case":"admission: an event's cost","fold":8,"header":"3e51dca902ac67b70a85ea4d5afeaa3fe895a8eadfe586c50f4699c531f64e78","journal":11,"verdict":"void:incoherent","why":"admission_model"}
+{"case":"admission: a runtime's own","fold":8,"header":"970eb076071962335f716e7281fb981dd820011d91dca980349e08c605f999f8","journal":11,"verdict":"void:incoherent","why":"admission_model"}
+{"case":"admission: an event of no size","fold":8,"header":"4f59b4032a8fafbd03947a7946a2559a3bfe2d7027e1039502d9f1be4be9340a","journal":11,"verdict":"void:incoherent","why":"admission_model"}
+{"case":"admission: a live cell below an ended one","fold":8,"header":"1d32c9ef631115bde2954c6c059317cf079c6fbba5166a6fcb6a0a4c5553d11b","journal":11,"verdict":"void:incoherent","why":"admission_model"}
+{"case":"admission: a third copy of the evidence","fold":8,"header":"edbb9038197e92c4d83c4042e85b2c1dee01d1c7359b0b3d3c564272b34b791f","journal":11,"verdict":"void:incoherent","why":"admission_evidence"}
+{"case":"admission: the evidence a byte short","fold":8,"header":"b8865a14a73f3a3de6449d09f5117e8e617df213a42992940cf036fe212cd389","journal":11,"verdict":"void:incoherent","why":"admission_evidence"}
+{"case":"admission: the evidence's own beside it","fold":8,"header":"87f901dc7c77a1614f2c39e5d865abe374a2d179c1e626c63c1d1215a1b68e5b","journal":11,"verdict":"void:incoherent","why":"admission_evidence"}
+{"case":"admission: a term of the evidence a byte more","fold":8,"header":"4567868fc2e2b30563173fc66e64b3812ba551e8bb2ccb25549092d5b0f74472","journal":11,"verdict":"void:incoherent","why":"admission_evidence"}
+{"case":"admission: a row of the evidence a byte more","fold":8,"header":"b6f018efad691a8093cdbf2f045391e291915b4e9ffac9cbbfed66de5124c8a3","journal":11,"verdict":"void:incoherent","why":"admission_evidence"}
+{"case":"admission: a part of the evidence a byte more","fold":8,"header":"3abde316d34138bb1aa41d19e6cae98d06dcc14d87130efe309f2c8755aef5f7","journal":11,"verdict":"void:incoherent","why":"admission_evidence"}
+{"case":"admission: the decoder dropped","fold":8,"header":"8caf023af50d0ece25e01d5152ea48d869d3b65e0740cc6a14fa63346d52d7ba","journal":11,"verdict":"void:incoherent","why":"admission_decoder"}
+{"case":"admission: the reader dropped","fold":8,"header":"cd6fdf81797c1a55071e5eac9b694716234803f94b8da76bb55598746a981660","journal":11,"verdict":"void:incoherent","why":"admission_decoder"}
+{"case":"admission: a socket's io off the cap","fold":8,"header":"ac0302bf718d41be01c764a0e7fda041b3e42c4bea40c7c47fbbe2b68d7ce81c","journal":11,"verdict":"void:incoherent","why":"admission_shared"}
+{"case":"admission: a socket's answers off the cap","fold":8,"header":"167d5f715f55edf7ffc0bc2986f7b29731e207339c70d6b90bb550c0c806f85d","journal":11,"verdict":"void:incoherent","why":"admission_shared"}
+{"case":"admission: a probe's off the cap","fold":8,"header":"4e43bc817cac08b16311df1bb7f161c720b899cdcd4283b6095870a001ce23c0","journal":11,"verdict":"void:incoherent","why":"admission_shared"}
+{"case":"admission: a probe's io off the cap","fold":8,"header":"357ec15b3c5b513daa1468a16c67143cd2c8452c56cb7324b2d6504b50ce0e74","journal":11,"verdict":"void:incoherent","why":"admission_shared"}
+{"case":"admission: a probe's cost not the connection's","fold":8,"header":"60e0f0f139cea908214a8990d6aea29af38b72814e32adbdf07f23b11c4897f9","journal":11,"verdict":"void:incoherent","why":"admission_shared"}
+{"case":"admission: a probe's heap not the connection's","fold":8,"header":"80c3e5295e052896ffd76395c6bffd1d1f4248d92a477dc80b48885d3d7c33c6","journal":11,"verdict":"void:incoherent","why":"admission_shared"}
+{"case":"admission: the shell's attempts off the late steps","fold":8,"header":"67384cfe3f171f48170b6b76b860305b3e099e7a9d57351be9c7dfaec974e6ab","journal":11,"verdict":"void:incoherent","why":"admission_shared"}
+{"case":"admission: the carrier's attempts off the late steps","fold":8,"header":"d0f640ab7ddc217a8495e2350ba7fa1cd39c6b33cbdbb901d8296b3372b15fb9","journal":11,"verdict":"void:incoherent","why":"admission_shared"}
+{"case":"admission: the decorations off the late steps","fold":8,"header":"5a468ca2b187d1a90e0f84e9aefd1295b7daf54e564f2720e796545108b14eb6","journal":11,"verdict":"void:incoherent","why":"admission_shared"}
+{"case":"admission: every socket a cap past the row's","fold":8,"header":"831c74ab316d7f5094fa9378f4699a0b14104f0519b11f6d453b2a0cacbcfd25","journal":11,"verdict":"void:incoherent","why":"admission_rows"}
+{"case":"admission: a runtime's events not the row's","fold":8,"header":"54353d73d34ba6d576ae3f47669ea534386b8628849cdee8f6477b41cf133be9","journal":11,"verdict":"void:incoherent","why":"admission_rows"}
+{"case":"admission: a source with no row holding sockets","fold":8,"header":"8c873b877fc13d31108b26a3e5ccafccad3c59afd0e6663a0ca2abb7529327dc","journal":11,"verdict":"void:incoherent","why":"admission_rows"}
+{"case":"admission: a row of a source past the runtimes'","fold":8,"header":"f4004d4d4acd392a829682b9bf72cc7e7aa5c7094549f420d007aed55d401df3","journal":11,"verdict":"void:incoherent","why":"admission_rows"}
+{"case":"admission: a row twice","fold":8,"header":"fdcdbc5acbcec9b7b364f99660f246eb36d068815e9415ca8062eb671cac1fa6","journal":11,"verdict":"void:incoherent","why":"admission_rows"}
+{"case":"admission: the pool at the floor","fold":8,"header":"7e01d99e92f5de14657a661f6ddf6c397a028954919555b0191445a3fc4ab667","journal":11,"verdict":"void:incoherent","why":"admission_pool"}
+{"case":"admission: the pool unscaled","fold":8,"header":"ab1cbd756d7d7bc1d5cba254a5bb75d259f71ed3acc78ad5c8005f1ee21cdd28","journal":11,"verdict":"void:incoherent","why":"admission_pool"}
+{"case":"admission: the need the run's, one more","fold":8,"header":"5065b55e806ed76811d1bf0f3326537845b5c234aa33c3888d7999526c4ba810","journal":11,"verdict":"void:incoherent","why":"admission_need"}
+{"case":"admission: the need the run's, one less","fold":8,"header":"9257413418a4d03da91cbab9ff83da28d6c39582fb7ecd33fe443801cb296ee7","journal":11,"verdict":"void:incoherent","why":"admission_need"}
+{"case":"admission: the need stage 2's, one more","fold":8,"header":"e56476b713f46a044c955e0ea7b01f81b5ca273385ce01843277ffbe66ac2d0e","journal":11,"verdict":"void:incoherent","why":"admission_need"}
+{"case":"admission: the need the gates', one more","fold":8,"header":"cecc57cd4f2c1e2a1672284879d07ae43d76107e0bdb4fc2e0f62c3c38016fc4","journal":11,"verdict":"void:incoherent","why":"admission_need"}
+{"case":"admission: the slack one more","fold":8,"header":"40cb4bc384cc21c4ae30720e6c63f5d4411e120c1342a97c79cda9f9fb242aaf","journal":11,"verdict":"void:incoherent","why":"admission_slack"}
+{"case":"admission: a memory below the need, no slack","fold":8,"header":"c1643af4f597bb740e482d5c9e0f253a0339f7709c57f34bbe0840e14ce24d68","journal":11,"verdict":"void:incoherent","why":"admission_slack"}
+{"case":"admission: the budget one more","fold":8,"header":"e9112c7a806db96453efaa9a5dfc37ce8963c4a8bce6f6fb960909c3945aef26","journal":11,"verdict":"void:incoherent","why":"admission_budget"}
+{"case":"admission: the budget one less","fold":8,"header":"0951fb314ef0182157d54bdefeafff832becbbd9f3476825d54dca8e3d2da540","journal":11,"verdict":"void:incoherent","why":"admission_budget"}
+{"case":"admission: no part unheld","fold":8,"header":"aa581224e5dcdf7b30613d429bcc9fab91245857431334e50072df6e4f6a991c","journal":11,"verdict":"void:incoherent","why":"admission_unheld"}
+{"case":"admission: a part held once unheld","fold":8,"header":"24cee1307f933d212b427d0d8166e74695593b04a39cfbf0dd1ce1f32c123ecf","journal":11,"verdict":"void:incoherent","why":"admission_unheld"}
+{"case":"admission: an unheld pool and no max","fold":8,"header":"3d4f2caaf658394287f5ae721710e3eea50878a696555a94f993ff8a4a0b82fc","journal":11,"verdict":"void:incoherent","why":"admission_scope"}
+{"case":"admission: an unheld pool and a max above the process's group","fold":8,"header":"b8ef3009c3ea8b041a4a1fee158311f1c890b053361f279070539dd9fdd7bd3a","journal":11,"verdict":"void:incoherent","why":"admission_scope"}
+{"case":"admission: a memory past the max","fold":8,"header":"c68812a9fbbf622869294a86ef6bada96146f94f72ad1edb79ddbc5ea80c522c","journal":11,"verdict":"void:incoherent","why":"admission_limit"}
+{"case":"admission: a memory past the high, below the max","fold":8,"header":"76add5472f3cad03d18784a7e1a73ef93c2fb99b28e5048dfc26bc49f16d92af","journal":11,"verdict":"void:incoherent","why":"admission_limit"}

@@ -131,6 +131,10 @@ pub const PARTS_10: [Row; 26] = {
     ]
 };
 
+/// Version 11's table (K2b-7e-2b-3e), its data file `schema/parts-11.json`:
+/// version 10's rows, its rules version 10's.
+pub const PARTS_11: [Row; 26] = PARTS_10;
+
 /// Every code a refusal of version 10's rules gives, in the order the rules
 /// are checked.
 pub const WHYS_10: [&str; 17] = [
@@ -176,18 +180,22 @@ pub fn recheck(header: &Header) -> Result<(), &'static str> {
 /// with no rules of its own.
 pub fn admission(version: u32, catch_up: u32, a: &Admission) -> Result<(), &'static str> {
     match version {
-        10 => admission_10(catch_up, a),
+        10 => rules_10(&PARTS_10, catch_up, a),
+        11 => rules_10(&PARTS_11, catch_up, a),
         _ => Err("admission_version"),
     }
 }
 
-/// Version 10's rules over an admission journaled with catch-up `catch_up`,
-/// in [`WHYS_10`]'s order.
+/// The rules version 10 introduced, over an admission journaled with
+/// catch-up `catch_up` by a version whose table is `table`, in
+/// [`WHYS_10`]'s order: a later version whose rules are these runs them
+/// over its own table, so that version 10's rules run wherever any version
+/// they serve is read.
 ///
 /// # Errors
 ///
 /// The first rule it breaks, by its code.
-pub fn admission_10(catch_up: u32, a: &Admission) -> Result<(), &'static str> {
+pub fn rules_10(table: &[Row], catch_up: u32, a: &Admission) -> Result<(), &'static str> {
     let m = &a.memory;
     let kappa = u128::from(catch_up);
     if kappa >= 1000 {
@@ -199,7 +207,7 @@ pub fn admission_10(catch_up: u32, a: &Admission) -> Result<(), &'static str> {
     let sources = terms.iter().filter(|t| t.part == Part::Runtime).count();
     let mut seen = BTreeSet::new();
     for t in terms {
-        let r = of(t.part).ok_or("admission_term_set")?;
+        let r = of(table, t.part).ok_or("admission_term_set")?;
         let placed = match (r.scope, t.source) {
             (Scope::Global, None) => true,
             (Scope::Source, Some(s)) => usize::try_from(s).is_ok_and(|s| s < sources),
@@ -209,8 +217,8 @@ pub fn admission_10(catch_up: u32, a: &Admission) -> Result<(), &'static str> {
             return Err("admission_term_set");
         }
     }
-    let globals = PARTS_10.iter().filter(|r| r.scope == Scope::Global).count();
-    let each = PARTS_10.len().saturating_sub(globals);
+    let globals = table.iter().filter(|r| r.scope == Scope::Global).count();
+    let each = table.len().saturating_sub(globals);
     if Some(seen.len())
         != each
             .checked_mul(sources)
@@ -220,7 +228,7 @@ pub fn admission_10(catch_up: u32, a: &Admission) -> Result<(), &'static str> {
     }
     // Each term as its row has it.
     for t in terms {
-        let r = of(t.part).ok_or("admission_term_set")?;
+        let r = of(table, t.part).ok_or("admission_term_set")?;
         let held = matches!(
             (r.held, t.held),
             (HeldBy::Built, Held::Built)
@@ -428,6 +436,6 @@ fn w(n: u64) -> u128 {
 }
 
 /// A part's row in version 10's table.
-fn of(part: Part) -> Option<Row> {
-    PARTS_10.iter().copied().find(|r| r.part == part)
+fn of(table: &[Row], part: Part) -> Option<Row> {
+    table.iter().copied().find(|r| r.part == part)
 }

@@ -12,6 +12,10 @@ use super::{
     MemoryTerm, Model, Part, Phase, Read, Refusal, Released, Sent, Shape, Skip, Slot, SourceFit,
     StatedBy, Unsent,
 };
+use super::{
+    Allocator, AllocatorState, Binds, Cgroup, Events, Live, Pressure, Process, Reading, Sample,
+    SampleWhy, Unread,
+};
 use crate::machine::MACHINE_REVISION;
 
 /// The golden journal's header.
@@ -472,5 +476,172 @@ pub fn lines() -> Vec<Line> {
     for (at, class) in (9_000u64..).zip(stops) {
         lines.push(Line::Fault(Fault { at, class }));
     }
+    lines.extend(samples());
     lines
+}
+
+/// Two samples (version 11): every group read and every field given, at
+/// their extremes; then every group unread and every field none.
+fn samples() -> Vec<Line> {
+    let events = Events {
+        high: u64::MAX,
+        max: 0,
+        oom: 1,
+        oom_kill: u64::MAX,
+    };
+    let pressure = Pressure {
+        some_avg10: u32::MAX,
+        some_total: u64::MAX,
+        full_avg10: 0,
+        full_total: 0,
+    };
+    let full = Sample {
+        why: SampleWhy::Due,
+        at: u64::MAX,
+        due: 0,
+        skipped: u64::MAX,
+        process: Reading::Read(Process {
+            rss: u64::MAX,
+            rss_anon: Some(0),
+            rss_file: Some(u64::MAX),
+            rss_shmem: Some(1),
+            swap: Some(u64::MAX),
+            hwm: Some(u64::MAX),
+            threads: Some(0),
+            took: u64::MAX,
+        }),
+        cgroup: Reading::Read(Cgroup {
+            procs: Some(u64::MAX),
+            current: u64::MAX,
+            peak: Some(u64::MAX),
+            anon: Some(0),
+            anon_thp: Some(u64::MAX),
+            file: Some(1),
+            sock: Some(u64::MAX),
+            kernel_stack: Some(0),
+            pagetables: Some(u64::MAX),
+            slab: Some(0),
+            swap: Some(u64::MAX),
+            events: Some(events),
+            pressure: Some(pressure),
+            binding: Some(Binds {
+                depth: u32::MAX,
+                events: Some(events),
+                pressure: Some(pressure),
+            }),
+            took: 0,
+        }),
+        host: Reading::Read(pressure),
+        live: Live {
+            turn: u64::MAX,
+            wakes: Some(u64::MAX),
+            pending: u64::MAX,
+            past_deadline: 0,
+            alive: u64::MAX,
+            sockets: Some(u64::MAX),
+            full: u64::MAX,
+            waited: u64::MAX,
+        },
+        allocator: Allocator {
+            state: AllocatorState::Read,
+            name: Some(Code::Named("glibc.2.39".to_owned())),
+            in_use: Some(u64::MAX),
+            free: Some(u64::MAX),
+            mapped: Some(0),
+            chunks: Some(u64::MAX),
+            took: u64::MAX,
+        },
+    };
+    let none = |why, process, cgroup, host, state| Sample {
+        why,
+        at: 0,
+        due: 0,
+        skipped: 0,
+        process: Reading::Unread(process),
+        cgroup: Reading::Unread(cgroup),
+        host: Reading::Unread(host),
+        live: Live {
+            turn: 0,
+            wakes: None,
+            pending: 0,
+            past_deadline: u64::MAX,
+            alive: 0,
+            sockets: None,
+            full: 0,
+            waited: 0,
+        },
+        allocator: Allocator {
+            state,
+            name: None,
+            in_use: None,
+            free: None,
+            mapped: None,
+            chunks: None,
+            took: 0,
+        },
+    };
+    let mut nones = Cgroup {
+        procs: None,
+        current: 0,
+        peak: None,
+        anon: None,
+        anon_thp: None,
+        file: None,
+        sock: None,
+        kernel_stack: None,
+        pagetables: None,
+        slab: None,
+        swap: None,
+        events: None,
+        pressure: None,
+        binding: Some(Binds {
+            depth: 0,
+            events: None,
+            pressure: None,
+        }),
+        took: 0,
+    };
+    let partial = Sample {
+        why: SampleWhy::Finish,
+        process: Reading::Read(Process {
+            rss: 0,
+            rss_anon: None,
+            rss_file: None,
+            rss_shmem: None,
+            swap: None,
+            hwm: None,
+            threads: None,
+            took: 0,
+        }),
+        cgroup: Reading::Read(nones),
+        ..none(
+            SampleWhy::Finish,
+            Unread::Absent,
+            Unread::Absent,
+            Unread::Absent,
+            AllocatorState::Failed,
+        )
+    };
+    nones.binding = None;
+    vec![
+        Line::Sample(Box::new(full)),
+        Line::Sample(Box::new(none(
+            SampleWhy::Baseline,
+            Unread::Absent,
+            Unread::Permission,
+            Unread::NoCgroupV2,
+            AllocatorState::Unstated,
+        ))),
+        Line::Sample(Box::new(partial)),
+        Line::Sample(Box::new(Sample {
+            cgroup: Reading::Read(nones),
+            ..none(
+                SampleWhy::Due,
+                Unread::Failed,
+                Unread::Failed,
+                Unread::Absent,
+                AllocatorState::Unstated,
+            )
+        })),
+    ]
 }

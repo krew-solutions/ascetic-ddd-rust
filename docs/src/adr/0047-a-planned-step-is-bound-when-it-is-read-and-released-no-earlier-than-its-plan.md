@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a, K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3), K2b-7e-2b-2c-1 to K2b-7e-2b-2c-4 built, K2b-7e-2b-3 decided and cut in five, K2b-7e-2b-3a-1 to K2b-7e-2b-3a-3, K2b-7e-2b-3b, K2b-7e-2b-3c-1 and K2b-7e-2b-3c-2 built, K2b-7e-2b-3d cut in four, K2b-7e-2b-3d-1 and K2b-7e-2b-3d-2 built, K2b-7e-2b-3d-3 decided and cut in two, K2b-7e-2b-3d-3a in two, K2b-7e-2b-3d-3a-1 and K2b-7e-2b-3d-3a-2 built, K2b-7e-2b-3d-3b cut in four, K2b-7e-2b-3d-3b-1 and K2b-7e-2b-3d-3b-2 built, K2b-7e-2b-3d-3b-3 cut in two, K2b-7e-2b-3d-3b-3a and K2b-7e-2b-3d-3b-3b built, K2b-7e-2b-3d-3b-4 cut in three, K2b-7e-2b-3d-3b-4a to K2b-7e-2b-3d-3b-4c built, K2b-7e-2b-3d-3b done, K2b-7e-2b-3d-4 decided and cut in three, K2b-7e-2b-3d-4a built and measured — P4 refuted as stated, its rows' guard twice "no test" —, K2b-7e-2b-3d-4b built and measured — P6 no test at idle, P10's first reader void —, K2b-7e-2b-3d-4c built and measured, K2b-7e-2b-3d-4 done (four rows owed, § Owed), K2b-7e-2b-3e decided and cut in three, K2b-7e-2b-3e-1 next; decision 23 decided, K2b-7e-4a built, K2b-7e-4b decided and cut in three, K2b-7e-4b-1 and K2b-7e-4b-2 built, K2b-7e-4b-3 measured — four refutations, one remedy each —, K2b-7e-4b-4 and K2b-7e-4b-5 built and measured, K2b-7e-4 done (decision 23's steps 1 and 2), decision 23's step 3b on the owner's confirmation; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a, K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3), K2b-7e-2b-2c-1 to K2b-7e-2b-2c-4 built, K2b-7e-2b-3 decided and cut in five, K2b-7e-2b-3a-1 to K2b-7e-2b-3a-3, K2b-7e-2b-3b, K2b-7e-2b-3c-1 and K2b-7e-2b-3c-2 built, K2b-7e-2b-3d cut in four, K2b-7e-2b-3d-1 and K2b-7e-2b-3d-2 built, K2b-7e-2b-3d-3 decided and cut in two, K2b-7e-2b-3d-3a in two, K2b-7e-2b-3d-3a-1 and K2b-7e-2b-3d-3a-2 built, K2b-7e-2b-3d-3b cut in four, K2b-7e-2b-3d-3b-1 and K2b-7e-2b-3d-3b-2 built, K2b-7e-2b-3d-3b-3 cut in two, K2b-7e-2b-3d-3b-3a and K2b-7e-2b-3d-3b-3b built, K2b-7e-2b-3d-3b-4 cut in three, K2b-7e-2b-3d-3b-4a to K2b-7e-2b-3d-3b-4c built, K2b-7e-2b-3d-3b done, K2b-7e-2b-3d-4 decided and cut in three, K2b-7e-2b-3d-4a built and measured — P4 refuted as stated, its rows' guard twice "no test" —, K2b-7e-2b-3d-4b built and measured — P6 no test at idle, P10's first reader void —, K2b-7e-2b-3d-4c built and measured, K2b-7e-2b-3d-4 done (four rows owed, § Owed), K2b-7e-2b-3e decided and cut in three, K2b-7e-2b-3e-1 built, K2b-7e-2b-3e-2 next; decision 23 decided, K2b-7e-4a built, K2b-7e-4b decided and cut in three, K2b-7e-4b-1 and K2b-7e-4b-2 built, K2b-7e-4b-3 measured — four refutations, one remedy each —, K2b-7e-4b-4 and K2b-7e-4b-5 built and measured, K2b-7e-4 done (decision 23's steps 1 and 2), decision 23's step 3b on the owner's confirmation; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -564,8 +564,8 @@ Considered keeps what each refuted):
   connection task aborted (a registry whose drop aborts, so an error or a dropped run future stops them too), a
   connection with a byte out and no `Sent` closed at zero linger (hyper flushes a request it already took after the
   cancel is seen); their ends awaited, bounded (a thread stuck judging never quiesces); then the fault — at no earlier
-  than any line —, the trailer; `run` returns `Ran { .., end: Ended | Stopped }`. A stopped journal: lines read at most
-  the log's, steps unended allowed, the fault the last line before the trailer; `void:fault`; no classes (the second
+  than any machine line —, the trailer; `run` returns `Ran { .., end: Ended | Stopped }`. A stopped journal: lines read at most
+  the log's, steps unended allowed, the fault the last machine line before the trailer (a sample may follow it, version 11); `void:fault`; no classes (the second
   pass marks a line after its end, and classes an unended step Root); a dispatched unended attempt may have reached the
   stand. `Written` writes its trailer only when finished, never when dropped (version 5's writer thread wrote one when
   the channel closed: a faulted run's journal read complete, and a fault after the last end folded pass or fail).
@@ -879,7 +879,8 @@ which `admit` never called; § Alternatives Considered keeps what each refuted):
     host run inside a scope with `MemoryMax`" executed: a run whose pool nothing holds refused unless its own cgroup
     has a finite limit. **Version 10**: `admission.memory` required, the fold and `verdict.py` rechecking its
     arithmetic and refusing tampered headers; the `memory` line's form fixed with it (anon, file and sock apart, heap
-    in use and free, the limit as read), sent through a one-slot mailbox the writer drains first, and read from a
+    in use and free, the limit as read), sent through a one-slot mailbox the writer drains first — superseded by
+    K2b-7e-2b-3e's decision: the writer samples on its own timed wake, version 11's `sample` line —, and read from a
     journal the kernel cut. `fits::fits` and `Budget` retired, their loop carried to `fit`.
   - **Amended for K2b-7e-2b-3d-3** (2026-11-28, under the gate: the main position, a blind solver and a discriminator on
     Fable, two roles — Verifiability, Evolution — on Opus; § Alternatives Considered keeps what each refuted). **The
@@ -1390,6 +1391,7 @@ waits for the owner's confirmation:
 | K2b-7e-2b-3d-4a | K2b | `load-run`'s `tests/whole.rs` and `tests/whole/rows.py`, by hand, a row a process in scopes of its own, against e618d4b: each window within its phase's heap-basis sum; L1's per-answer slope within its journaled term; L1c's resident below its counted; zstd's bytes outside the counter within the decoder's term; the guard's realised counts | `HEAD` dropped from the answer's cost: P2 refuted (1,094,004 B an answer against 1,048,576); `ATTEMPT` cut by a third not run — P4 cannot tell it as stated |
 | K2b-7e-2b-3d-4b | K2b | `tests/whole/rows.py` by hand against 9f81d0d and its two harness fixes: a source's own at idle; the kernel's sockets beside the scope's anonymous memory; THP off and on, confirmed by anonymous huge pages; one arena against the default over four sources; the threads' stacks resident over the answers held and the sockets' cap | the stacks' first reader counted glibc's arena heaps (200 MB at 250 answers) — fixed to a guard of one page |
 | K2b-7e-2b-3d-4c | K2b | `tests/whole/rows.py` on the load server against 94486be (16 cores, THP `madvise`, `tcp_rmem` to 32 MiB): the stall's curve at stops of 0, 0.25, 0.5 and 1 s; a stop past the deadlines against the same row unstopped; 900 answers of 1 MiB held at a cap of 1,000 over one source and four, THP off and on, one arena and the default; 900 bodies sent at once | — (a measurement; its rows' bounds from their journals) |
+| K2b-7e-2b-3e-1 | K2b | `scheduler`'s `tests/verdict.rs`: a sample inserted before, between and after every line of every golden run, of a run stopped mid-run and once every step ended, of a gate's refusal, at 0, one past the line before it and u64's top, the journal resealed — every fold's verdict and classes the run's without it, the definition's the same; `tests/recheck.rs`: both versions' tables their data files', the census, the consistent bases and the single-edit property at versions 10 and 11; `tests/journal.rs`: the golden's samples, every variant and both sides of every option; a line no larger with a sample boxed; `vectors/journal.py`: the schema's title its version's; the golden, the 31 golden runs, load-run's four headers and the reference corpus's 4,932 journals settled against version 10 | no skip; the skip after the stop's rule; the definition's filter removed; version 11's rules removed; the schema's title another version's |
 | K2b-7e-2b-3c-1 | K2b | `load-run`'s `tests/fit.rs`, against a shadow of the decision's sentence in u128 over arbitrary parts, catch-ups 0 to 999: the need the largest of the stages', the gates' and the run's phases with the fixed parts, the pool at the catch-up's rate; at the need admitted with no slack, a byte less refused naming it; every part (`Part::ALL`, matched without `_`) moving the need as the shadow does; the binding term the binding phase's; stage 2 binding a socketless run; a part saturated, a sum past any count, a runtime of no stated events refused; the pool refused as the pool's | the phases summed; the pool outside the largest phase; the reader the run's; the catch-up dropped; a saturated part admitted; a sum saturating; the pool's failure the memory's; the binding term any phase's; held with no gate |
 | K2b-7e-2b-3b | K2b | `load-run`'s `tests/costs.rs`: a connection whose egress's `Io` holds 32 KiB of its own within `CONNECTION` and the egress's statement, above 90 %; REST pricing an attempt's decorations at the bound its decorator states, none undecorated, unstated where its decorator cannot state; a stand's gates' client relayed; `tests/frame.rs`: four decorations of 8 KiB copied into the request within their price, above 95 %; `tests/rest.rs`: a decoration past its decorator's bound a `rest.decorator` fault, the run stopped; `carrier.rs`' own: an attempt's price its parts' sum, its decorations each attempt's | the egress's heap unstated; a decoration past its bound passed; the bound's bytes unchecked; the gates' client not the stand's; decorations at one copy; decorations unpriced |
 | K2b-7e-2b-3a-3 | K2b | `load-run`'s `tests/rest.rs`: two sources whose steps at once total twice the cap, each within it, admitted, one past it on each refused naming source 0; `tests/costs.rs`: the shell's share of an attempt whose header a writer's captured value of `VALUE` bytes fills, within `run::attempt_share` and above 90 %; `command-log`'s `tests/validate.rs`: over the corpus at jitters 0 and 250, each count of the late shape at least the pending shape's | needs the plan's whole pending; the shell's copy of a hole unpriced; the copy without its value; a read's late steps not summed; the records left out of the machine's sum |
@@ -2373,6 +2375,25 @@ a connection of its own (retired at once); the journal folded, each Root classed
   floor across it, makes a Root under them is not established here.
 - A hog over the deadline while connecting or writing on a thread others hold is the source thread's lag (K2b-7c-2's
   twins, the path's lag counted from the thread's last blocked park); the stall twin is its whole-process case.
+
+**K2b-7e-2b-3e-1 — version 11, the sample line** (2026-11-28, K2b-7e-2b-3e's decision, its points 1 and 3):
+`JOURNAL_VERSION` 11; `Line::Sample`, boxed — why it was taken (baseline, due, finish), its instant, its due instant,
+the dues skipped; the process's group (`VmRSS` its anchor; anonymous, file and shared resident, swap, high-water and
+threads, each none alone), the cgroup's (`memory.current` its anchor; the processes, the peak, `memory.stat`'s
+anonymous, huge pages, page cache, sockets, kernel stacks, page tables and slab, swap, its events and pressure and those
+of the group whose limit binds, at its depth), the host's pressure, each group read or unread by a closed reason; the
+live counts (the loop's instant and the instant it sleeps until, the lines read and not ended, the handles past their
+deadline, the attempts alive, the carrier's sockets, the journal's channel full and waited); the allocator's figures,
+its state closed and its name given. The normative schema carries it, its title held to its version by `journal.py`
+(it had read "version 9" at version 10). **Both folds drop a sample before every rule** — the Rust fold before its
+first rule, the definition before it numbers the events — so `FOLD_REVISION` stays 8; decision 18's stop and the
+gate's refusal are the last and only machine line, decision 22's one-slot mailbox superseded. **The recheck's rules are
+named by the version that introduced them**: `rules_10` over a version's table, versions 10 and 11 dispatched to it,
+`PARTS_11` version 10's rows until K2b-7e-2b-3e-2 adds the probe's. Settled against version 10: the golden (line 1 the
+same with its version restored, four samples added, the trailer), the 31 golden runs, load-run's four headers and the
+reference corpus's 4,932 journals run by run (each the version and the trailer alone); the corpus's classes
+`(11, 5, 8)` equal to `(10, 5, 8)`'s; the admissions' results appended under version 11's keys. The producer is
+K2b-7e-2b-3e-2's: until it lands no run writes a sample, and the two reach `main` together. Mutants: five, each red.
 
 **K2b-7e-2b-3d-4c, measured** (2026-11-28, the load server under its semaphore, against 94486be, `--release`).
 - **P11 held**: the steps released and not ended at once were 51, 102 and 202 at stops of 0.25, 0.5 and 1 s — 200 a
@@ -3712,7 +3733,7 @@ only and measures move to the 12-core box.
     its steps and the owner's confirmation of decision 21.
 - **For the owner, from K2b-7e-2b-3d-3's round** (2026-11-28): this ADR's lines on the journal's versions disagree for
   journals written between the first host run and K5 — "journals before K5 are disposable" against "from the first host
-  run on a reader accepts the versions it lists". Version 10 is the section the first host run carries; the versioned
+  run on a reader accepts the versions it lists". Version 11 is the section the first host run carries (version 10 until K2b-7e-2b-3e); the versioned
   recheck makes either answer buildable, but this ADR must say which.
 - **K2b-7e-2b-3d-1's owed** (2026-11-28): the remedies searched over the carrier's knob — its ports through
   `Egress::caps`, a method the `Carrier` states — and over the plan's answer cap, whose costs the carrier states for the
@@ -4055,6 +4076,8 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-28: M-a rerun after K2b-7e-4b-4 on the load server (R4, R5, R7 still refuted by smaller margins; R6
   refuted on the densest shapes) and K2b-7e-4b-5 built (§ Measured): a plain string compared over its text; K2b-7e-4b-4's
   unit test's escapes restored — its record named escapes it no longer held.
+- 2026-11-28: K2b-7e-2b-3e-1 built (§ Measured): journal version 11, the sample line, both folds' skip, the recheck's
+  rules by their version; decisions 18's and 22's sentences amended.
 - 2026-11-28: K2b-7e-2b-3e decided under the gate (§ Decision 22, decided for K2b-7e-2b-3e) and cut in three: a
   `sample` line of version 11, written by the journal's writer, read by no fold.
 - 2026-11-28: K2b-7e-2b-3d-4c measured (§ Measured) on the load server: P11, P13, P9, P14 held; P12 refuted as stated

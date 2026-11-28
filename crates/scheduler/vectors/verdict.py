@@ -18,11 +18,16 @@ import sys
 
 REACHED = collections.Counter()
 
-# Version 10's part table (K2b-7e-2b-3d-3b-3): the data file the fold's own
-# table is held equal to.
-PARTS_10 = json.loads(
-    (pathlib.Path(__file__).resolve().parent.parent / "schema" / "parts-10.json").read_text()
-)
+
+def table(version):
+    return json.loads(
+        (pathlib.Path(__file__).resolve().parent.parent / "schema" / f"parts-{version}.json").read_text()
+    )
+
+
+# Each version's part table (K2b-7e-2b-3e): the data files the fold's own
+# tables are held equal to.
+PARTS = {10: table(10), 11: table(11)}
 
 
 class Incoherent(Exception):
@@ -42,11 +47,11 @@ def refuse(why):
     raise Incoherent(why)
 
 
-def admission_10(catch_up, a):
+def rules_10(parts, catch_up, a):
     """Version 10's recheck of admission's evidence (ADR-0047 decision 22,
     K2b-7e-2b-3d-3b-3), each rule from the decision's sentence, in its order:
     what the journal alone makes a theorem of admission's own output."""
-    table = {r["part"]: r for r in PARTS_10}
+    rows = {r["part"]: r for r in parts}
     m = a["memory"]
     kappa = catch_up
     if kappa >= 1000:
@@ -56,7 +61,7 @@ def admission_10(catch_up, a):
     # Each run's part once, each source's part once a source of the runtimes'.
     seen = set()
     for t in terms:
-        r = table.get(t["part"])
+        r = rows.get(t["part"])
         s = t["source"]
         placed = r is not None and (
             (r["scope"] == "global" and s is None)
@@ -65,11 +70,11 @@ def admission_10(catch_up, a):
         if not placed or (t["part"], s) in seen:
             refuse("admission_term_set")
         seen.add((t["part"], s))
-    runs = sum(1 for r in PARTS_10 if r["scope"] == "global")
-    if len(seen) != runs + (len(PARTS_10) - runs) * n:
+    runs = sum(1 for r in parts if r["scope"] == "global")
+    if len(seen) != runs + (len(parts) - runs) * n:
         refuse("admission_term_set")
     for t in terms:
-        r = table[t["part"]]
+        r = rows[t["part"]]
         held = "gate" if isinstance(t["held"], dict) else t["held"]
         stated = r["stated"] in ("either", t["stated"])
         if t["phase"] != r["phase"] or t["basis"] != r["basis"] or held != r["held"] or not stated:
@@ -189,7 +194,7 @@ def fault_class(v):
 
 # The journal version this definition reads (K2b-7e-2b-3d-3b): another's
 # rules are another's, so a journal of it is no case of this one.
-VERSION = 10
+VERSION = 11
 
 
 class Run:
@@ -199,20 +204,23 @@ class Run:
             raise SystemExit(f"journal version {header['journal']}: the definition reads {VERSION}")
         # Admission's evidence, by its version's rules (ADR-0047 decision 22).
         if header["admission"] is not None:
-            admission_10(header["catch_up"], header["admission"])
+            rules_10(PARTS[VERSION], header["catch_up"], header["admission"])
         if header["log"] != log["sha256"]:
             raise AnotherLog()
         self.j = int(header["jitter"])
         self.floor = int(header["resend"])
         # Decision 18: no T0 only for a run a gate refused before it began.
         unstarted = header["t0"] is None
-        body = lines[1:-1]
+        # A sample is evidence no rule reads (version 11): dropped before the
+        # events are numbered.
+        body = [l for l in lines[1:-1] if "sample" not in l]
         self.reads, self.ends, self.released = {}, {}, {}
         self.facts = {}
         self.events = collections.defaultdict(list)  # line -> [(index, kind, value)]
         self.faults = {}
         # Decision 18: a run's stop — any fault but the backstop's — is the
-        # journal's last line; a gate's refusal its only one, at 0.
+        # journal's last machine line; a gate's refusal its only one, at 0
+        # (samples dropped above, version 11).
         self.stop = None
         latest = 0
         for i, l in enumerate(body):
@@ -269,7 +277,7 @@ class Run:
             raise AnotherLog()
 
     def stop_coherent(self, name, fields, i, at, latest, unstarted):
-        """Decision 18: a gate's refusal the journal's only line, at 0, with no
+        """Decision 18: a gate's refusal the journal's only machine line, at 0, with no
         T0; any other stop no earlier than every line before it, the step it
         names read, and its attempt dispatched while the step is not ended."""
         if name == "gate":

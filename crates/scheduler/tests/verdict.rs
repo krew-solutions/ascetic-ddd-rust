@@ -1706,7 +1706,9 @@ fn read_lines(bytes: &[u8]) -> (journal::Header, Vec<Line>) {
     (h, r.collect::<Result<_, _>>().unwrap())
 }
 
-/// The latest instant among `lines`.
+/// The latest instant among `lines`' machine lines: a sample's instant
+/// is no stop's bound (version 11), so that a stop built at it can still
+/// fall before a sample.
 fn latest(lines: &[Line]) -> u64 {
     lines
         .iter()
@@ -1718,7 +1720,7 @@ fn latest(lines: &[Line]) -> u64 {
             Line::Answer(x) => x.at,
             Line::End(x) => x.at,
             Line::Fault(x) => x.at,
-            Line::Header(_) | Line::Trailer(_) => 0,
+            Line::Header(_) | Line::Sample(_) | Line::Trailer(_) => 0,
         })
         .max()
         .unwrap_or(0)
@@ -2540,4 +2542,118 @@ fn regenerate_admissions() {
         }
     }
     std::fs::write(ADMISSIONS, file).unwrap();
+}
+
+/// A sample at `at`, every group unread (version 11).
+fn sample_at(at: u64) -> Line {
+    use journal::{Allocator, AllocatorState, Live, Reading, Sample, SampleWhy, Unread};
+    Line::Sample(Box::new(Sample {
+        why: SampleWhy::Due,
+        at,
+        due: at,
+        skipped: 0,
+        process: Reading::Unread(Unread::Absent),
+        cgroup: Reading::Unread(Unread::Absent),
+        host: Reading::Unread(Unread::Absent),
+        live: Live {
+            turn: at,
+            wakes: None,
+            pending: 0,
+            past_deadline: 0,
+            alive: 0,
+            sockets: None,
+            full: 0,
+            waited: 0,
+        },
+        allocator: Allocator {
+            state: AllocatorState::Unstated,
+            name: None,
+            in_use: None,
+            free: None,
+            mapped: None,
+            chunks: None,
+            took: 0,
+        },
+    }))
+}
+
+/// K2b-7e-2b-3e-1 of ADR-0047 (decision 22): a sample changes no fold — one
+/// inserted before, between and after every line of every golden run, of a
+/// run stopped mid-run and once every step ended, of a backstop's, of a
+/// gate's refusal, at instant 0, one past the line before it and at u64's
+/// top, the journal resealed: each fold's verdict and classes the run's
+/// without it, the definition's the same.
+#[test]
+fn a_sample_changes_no_fold() {
+    use journal::FaultClass as F;
+    let goldens = golden_journals();
+    let mut bases: Vec<(String, journal::Header, Vec<Line>, Log)> = goldens
+        .iter()
+        .map(|g| {
+            let (h, lines) = read_lines(&g.bytes);
+            (g.name.clone(), h, lines, g.log.clone())
+        })
+        .collect();
+    let clean = goldens.iter().find(|g| g.name == "clean").unwrap();
+    let (h, lines) = read_lines(&clean.bytes);
+    let first_end = lines
+        .iter()
+        .position(|l| matches!(l, Line::End(_)))
+        .unwrap();
+    let mut mid = lines[..=first_end].to_vec();
+    mid.push(stop_at(latest(&mid), F::Stalled));
+    bases.push(("stopped mid-run".into(), h.clone(), mid, clean.log.clone()));
+    let mut all = lines.clone();
+    all.push(stop_at(latest(&lines), F::Poisoned));
+    bases.push((
+        "stopped once every step ended".into(),
+        h.clone(),
+        all,
+        clean.log.clone(),
+    ));
+    let unstarted = journal::Header {
+        t0: None,
+        ..h.clone()
+    };
+    let gate = stop_at(
+        0,
+        F::Gate {
+            name: journal::Code::Named("stand.namespace_unseen".to_owned()),
+        },
+    );
+    bases.push((
+        "a gate refused".into(),
+        unstarted,
+        vec![gate],
+        clean.log.clone(),
+    ));
+    let mut cases = Vec::new();
+    let mut checked = 0;
+    for (name, h, lines, log) in &bases {
+        let plain = fold_bytes(&write(h, lines), log);
+        for p in 0..=lines.len() {
+            let before = latest(&lines[..p]);
+            for at in [0, before.saturating_add(1), u64::MAX] {
+                let mut with = lines.clone();
+                with.insert(p, sample_at(at));
+                let bytes = write(h, &with);
+                let folded = fold_bytes(&bytes, log);
+                assert_eq!(
+                    (&folded.verdict, &folded.classes),
+                    (&plain.verdict, &plain.classes),
+                    "{name}: a sample at {at} before line {p}"
+                );
+                cases.push(case(
+                    &format!("{name}, a sample at {at} before {p}"),
+                    &bytes,
+                    log,
+                    &folded,
+                ));
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 300, "{checked}");
+    let reached = by_definition(&cases);
+    assert!(reached.contains("verdicts agree"), "{reached}");
 }

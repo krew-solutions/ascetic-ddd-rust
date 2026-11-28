@@ -75,8 +75,80 @@ fn line_kind(l: &Line) -> usize {
         Line::Answer(_) => 5,
         Line::End(_) => 6,
         Line::Fault(_) => 7,
-        Line::Trailer(_) => 8,
+        Line::Sample(_) => 8,
+        Line::Trailer(_) => 9,
     }
+}
+
+/// A sample's vocabulary (version 11): why it was taken, why a group was
+/// not read, the allocator's state.
+fn sample_kinds(
+    s: &journal::Sample,
+    seen: &mut [BTreeSet<usize>],
+    options: &mut BTreeSet<(&str, bool)>,
+) {
+    use journal::{AllocatorState, Reading, SampleWhy, Unread};
+    seen[13].insert(match s.why {
+        SampleWhy::Baseline => 0,
+        SampleWhy::Due => 1,
+        SampleWhy::Finish => 2,
+    });
+    let unread = |u: Unread| match u {
+        Unread::Absent => 0,
+        Unread::Permission => 1,
+        Unread::NoCgroupV2 => 2,
+        Unread::Failed => 3,
+    };
+    for (name, read, why) in [
+        (
+            "process",
+            matches!(s.process, Reading::Read(_)),
+            match s.process {
+                Reading::Unread(u) => Some(unread(u)),
+                Reading::Read(_) => None,
+            },
+        ),
+        (
+            "cgroup",
+            matches!(s.cgroup, Reading::Read(_)),
+            match s.cgroup {
+                Reading::Unread(u) => Some(unread(u)),
+                Reading::Read(_) => None,
+            },
+        ),
+        (
+            "host",
+            matches!(s.host, Reading::Read(_)),
+            match s.host {
+                Reading::Unread(u) => Some(unread(u)),
+                Reading::Read(_) => None,
+            },
+        ),
+    ] {
+        options.insert((name, read));
+        if let Some(w) = why {
+            seen[14].insert(w);
+        }
+    }
+    if let Reading::Read(p) = &s.process {
+        options.insert(("process.swap", p.swap.is_some()));
+    }
+    if let Reading::Read(c) = &s.cgroup {
+        options.insert(("cgroup.peak", c.peak.is_some()));
+        options.insert(("cgroup.events", c.events.is_some()));
+        options.insert(("cgroup.binding", c.binding.is_some()));
+        if let Some(b) = &c.binding {
+            options.insert(("binding.events", b.events.is_some()));
+        }
+    }
+    options.insert(("live.wakes", s.live.wakes.is_some()));
+    options.insert(("live.sockets", s.live.sockets.is_some()));
+    options.insert(("allocator.name", s.allocator.name.is_some()));
+    seen[15].insert(match s.allocator.state {
+        AllocatorState::Unstated => 0,
+        AllocatorState::Failed => 1,
+        AllocatorState::Read => 2,
+    });
 }
 
 fn dep_kind(d: &Dep) -> usize {
@@ -281,9 +353,9 @@ fn the_memory_s_origins_are_named() {
 #[test]
 fn the_golden_holds_every_variant() {
     let (_, lines) = read_all(GOLDEN).unwrap();
-    let mut seen: [BTreeSet<usize>; 13] = Default::default();
+    let mut seen: [BTreeSet<usize>; 16] = Default::default();
     // The header and the trailer are lines of every journal.
-    seen[0].extend([0, 8]);
+    seen[0].extend([0, 9]);
     let mut options = BTreeSet::new();
     for l in &lines {
         seen[0].insert(line_kind(l));
@@ -336,11 +408,12 @@ fn the_golden_holds_every_variant() {
                     seen[11].insert(code_kind(&Some(c.clone())) - 1);
                 }
             }
+            Line::Sample(sample) => sample_kinds(sample, &mut seen, &mut options),
             Line::Header(_) | Line::Released(_) | Line::Dispatch(_) | Line::Sent(_) => {}
             Line::Trailer(_) => unreachable!("the reader hands no trailer out"),
         }
     }
-    let counts = [9, 2, 3, 4, 4, 6, 3, 16, 5, 3, 3, 2, 5];
+    let counts = [10, 2, 3, 4, 4, 6, 3, 16, 5, 3, 3, 2, 5, 3, 4, 3];
     for (i, n) in counts.iter().enumerate() {
         assert_eq!(seen[i], (0..*n).collect(), "enum {i}");
     }
@@ -356,6 +429,17 @@ fn the_golden_holds_every_variant() {
         "unsent",
         "handed",
         "connected",
+        "process",
+        "cgroup",
+        "host",
+        "process.swap",
+        "cgroup.peak",
+        "cgroup.events",
+        "cgroup.binding",
+        "binding.events",
+        "live.wakes",
+        "live.sockets",
+        "allocator.name",
     ] {
         assert!(
             options.contains(&(name, true)) && options.contains(&(name, false)),
@@ -842,4 +926,18 @@ fn a_rate_deviation_is_read_as_a_refusal() {
     assert!(read(Some("rate")));
     assert!(!read(Some("timeout")));
     assert!(!read(None));
+}
+
+/// K2b-7e-2b-3e-1: a sample is boxed, so that a line's size — what the
+/// journal's channel prices each slot at (`load-run`'s `sink.rs`) — does
+/// not grow with it.
+#[test]
+fn a_sample_does_not_grow_a_line() {
+    assert!(
+        size_of::<Line>() <= size_of::<journal::Answer>() + 8,
+        "a line of {} bytes, an answer's {}",
+        size_of::<Line>(),
+        size_of::<journal::Answer>()
+    );
+    assert!(size_of::<journal::Sample>() > size_of::<Line>());
 }

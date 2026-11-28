@@ -9,15 +9,20 @@ mod admission;
 
 use admission::*;
 use ascetic_ddd_scheduler::journal::{self, Admission, Header, Part, Phase};
-use ascetic_ddd_scheduler::recheck::{self, PARTS_10, Row, WHYS_10};
+use ascetic_ddd_scheduler::recheck::{self, PARTS_10, PARTS_11, Row, WHYS_10};
+
+/// The versions version 10's rules serve (K2b-7e-2b-3e): each runs them
+/// over its own table, so that every census runs at each.
+const VERSIONS: [u32; 2] = [10, 11];
 use ascetic_ddd_scheduler::verdict::{Log, Verdict, Void, fold};
 
 /// The table is its data file's, row by row.
 #[test]
 fn the_table_is_its_data_file_s() {
-    let file = include_str!("../schema/parts-10.json");
-    let rows: Vec<Row> = serde_json::from_str(file).unwrap();
-    assert_eq!(rows, PARTS_10);
+    let ten: Vec<Row> = serde_json::from_str(include_str!("../schema/parts-10.json")).unwrap();
+    assert_eq!(ten, PARTS_10);
+    let eleven: Vec<Row> = serde_json::from_str(include_str!("../schema/parts-11.json")).unwrap();
+    assert_eq!(eleven, PARTS_11);
 }
 
 /// Consistent evidence passes whichever phase binds; a row matched by its
@@ -27,7 +32,9 @@ fn the_table_is_its_data_file_s() {
 fn consistent_evidence_passes() {
     for (name, b) in bases() {
         let (k, a) = consistent(&b);
-        assert_eq!(recheck::admission(10, k, &a), Ok(()), "{name}");
+        for v in VERSIONS {
+            assert_eq!(recheck::admission(v, k, &a), Ok(()), "{name} at {v}");
+        }
     }
     // The pool does not divide at the base's catch-up: its ceiling is read.
     let (k, a) = consistent(&base());
@@ -68,7 +75,9 @@ fn each_rule_refuses_its_tampers_by_its_code() {
     for (name, b, tamper, why) in census() {
         let (mut k, mut a) = consistent(&b);
         tamper(&mut k, &mut a);
-        assert_eq!(recheck::admission(10, k, &a), Err(why), "{name}");
+        for v in VERSIONS {
+            assert_eq!(recheck::admission(v, k, &a), Err(why), "{name} at {v}");
+        }
         reached.insert(why);
     }
     assert_eq!(reached, WHYS_10.into_iter().collect(), "every rule reached");
@@ -199,6 +208,7 @@ fn every_single_edit_is_refused_but_the_free_ones() {
                 let (part, source) = (t.part, t.source);
                 settle(&mut a.memory, k, 1_000);
                 let got = recheck::admission(10, k, &a);
+                assert_eq!(recheck::admission(11, k, &a), got, "{part:?} at 11");
                 assert_eq!(
                     got.is_ok(),
                     free(part, edit, source, b.assumed),

@@ -261,6 +261,13 @@ impl First {
     }
 
     fn take(&mut self, l: &Line) -> Result<(), Void> {
+        // A sample is evidence no rule reads (version 11, ADR-0047 decision
+        // 22, K2b-7e-2b-3e): dropped before every rule, its instant fed to
+        // none of them — the writer may sample later than a fault it then
+        // writes after.
+        if matches!(l, Line::Sample(_)) {
+            return Ok(());
+        }
         if self.stop.is_some() {
             return Err(incoherent(0, "a line after the run's stop"));
         }
@@ -272,7 +279,7 @@ impl First {
             Line::Answer(x) => x.at,
             Line::End(x) => x.at,
             Line::Fault(x) => x.at,
-            Line::Header(_) | Line::Trailer(_) => 0,
+            Line::Header(_) | Line::Sample(_) | Line::Trailer(_) => 0,
         };
         let taken = self.step(l);
         self.taken = self.taken.saturating_add(1);
@@ -294,6 +301,7 @@ impl First {
             Line::Header(_) | Line::Trailer(_) => {
                 Err(incoherent(0, "a header or a trailer amid the journal"))
             }
+            Line::Sample(_) => Ok(()),
             Line::Read(r) => {
                 if r.line != self.next {
                     return Err(incoherent(r.line, "the reads are not one a line, in order"));
