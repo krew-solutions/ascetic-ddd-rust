@@ -72,7 +72,7 @@ done
 done
 endef
 
-.PHONY: all stand check clippy doc test test-pg host-features vectors test-vault test-kafka proofs proofs-groups traces fmt help
+.PHONY: all stand check clippy doc test test-pg host-features vectors append-only test-vault test-kafka proofs proofs-groups traces fmt help
 
 all: check clippy doc test test-pg host-features vectors ## everything CI runs on a push: a PostgreSQL beside it
 
@@ -116,6 +116,11 @@ vectors: ## byte forms checked outside the crates, python3's standard library on
 	python3 -I crates/scheduler/vectors/judge.py | diff - crates/scheduler/golden/judgements.txt
 	$(CARGO) run -q -p ascetic-ddd-command-log --example zstd_golden | zstd -dc | cmp - crates/command-log/golden/c1.jsonl
 	zstd -dc crates/command-log/golden/c1.jsonl.zst | cmp - crates/command-log/golden/c1.jsonl
+
+BASE ?= origin/main
+
+append-only: ## the pinned results' files appended to, never edited, against git revision BASE (origin/main by default): CI runs it against the branch's base
+	python3 -I crates/scheduler/vectors/append_only.py $(BASE) crates/scheduler/golden/admissions.jsonl
 
 test-vault: ## the tests ignored for want of a Vault dev server, at ASCETIC_DDD_TEST_VAULT_ADDR
 	$(call run_ignored,$(NEEDS_VAULT))

@@ -2324,12 +2324,19 @@ fn a_never_sent_censor_is_its_report_s_to_decide() {
     );
 }
 
-/// K2b-7e-2b-3d-3b-3b of ADR-0047 (decision 22): admission's evidence by
-/// both folds — consistent, read on; each tamper of the recheck's census void
-/// by its rule's code, the definition naming the same, every code reached by
-/// the definition too.
-#[test]
-fn admission_s_evidence_folds_as_the_definition_does() {
+/// An admission journaled and folded: its case's name, the journal's bytes,
+/// its log, the fold, whether it is consistent.
+struct Admitted {
+    name: String,
+    bytes: Vec<u8>,
+    log: Log,
+    folded: Folded,
+    consistent: bool,
+}
+
+/// Every consistent base and every tamper of the recheck's census, each
+/// journaled as a header alone and folded (K2b-7e-2b-3d-3b-3).
+fn admissions() -> Vec<Admitted> {
     let log = log_of(&header_j(), &[]);
     let journaled = |k: u32, a: journal::Admission| {
         let mut h = journal_header(&header_j(), &log);
@@ -2337,26 +2344,165 @@ fn admission_s_evidence_folds_as_the_definition_does() {
         h.admission = Some(a);
         write(&h, &[])
     };
-    let mut cases = Vec::new();
-    let (k, a) = admission::consistent(&admission::base());
-    let bytes = journaled(k, a);
-    let folded = fold_bytes(&bytes, &log);
-    assert_eq!(folded.verdict, Verdict::Pass);
-    cases.push(case("admission: consistent", &bytes, &log, &folded));
-    for (name, b, tamper, why) in admission::census() {
+    let mut out = Vec::new();
+    for (name, b) in admission::bases() {
+        let (k, a) = admission::consistent(&b);
+        let bytes = journaled(k, a);
+        out.push(Admitted {
+            name: format!("admission: {name}"),
+            folded: fold_bytes(&bytes, &log),
+            bytes,
+            log: log.clone(),
+            consistent: true,
+        });
+    }
+    for (name, b, tamper, _) in admission::census() {
         let (mut k, mut a) = admission::consistent(&b);
         tamper(&mut k, &mut a);
         let bytes = journaled(k, a);
-        let folded = fold_bytes(&bytes, &log);
-        assert_eq!(
-            folded.verdict,
-            Verdict::Void(Void::Incoherent { line: 0, why }),
-            "{name}"
-        );
-        cases.push(case(&format!("admission: {name}"), &bytes, &log, &folded));
+        out.push(Admitted {
+            name: format!("admission: {name}"),
+            folded: fold_bytes(&bytes, &log),
+            bytes,
+            log: log.clone(),
+            consistent: false,
+        });
+    }
+    out
+}
+
+/// K2b-7e-2b-3d-3b-3b of ADR-0047 (decision 22): admission's evidence by
+/// both folds — consistent, read on; each tamper of the census void by its
+/// rule's code, the definition naming the same, every code reached by the
+/// definition too.
+#[test]
+fn admission_s_evidence_folds_as_the_definition_does() {
+    let census = admission::census();
+    let mut cases = Vec::new();
+    let mut tampers = census.iter();
+    for a in admissions() {
+        if a.consistent {
+            assert_eq!(a.folded.verdict, Verdict::Pass, "{}", a.name);
+        } else {
+            let (_, _, _, why) = tampers.next().unwrap();
+            assert_eq!(
+                a.folded.verdict,
+                Verdict::Void(Void::Incoherent { line: 0, why }),
+                "{}",
+                a.name
+            );
+        }
+        cases.push(case(&a.name, &a.bytes, &a.log, &a.folded));
     }
     let reached = by_definition(&cases);
     for why in ascetic_ddd_scheduler::recheck::WHYS_10 {
         assert!(reached.contains(&format!("'{why}'")), "{why}: {reached}");
     }
+}
+
+/// An admission's pinned line (K2b-7e-2b-3d-3b-4a): a consistent one's keyed
+/// by the journal's version alone — its rules frozen with it —, a tampered
+/// one's by the version and the fold's revision; the header it judged by its
+/// digest, the verdict and the code.
+fn pin(a: &Admitted) -> String {
+    use sha2::Digest as _;
+    let header = a.bytes.split(|b| *b == b'\n').next().unwrap();
+    let digest: String = sha2::Sha256::digest(header)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let why = match &a.folded.verdict {
+        Verdict::Void(Void::Incoherent { line: 0, why }) => Some(*why),
+        _ => None,
+    };
+    serde_json::json!({
+        "journal": JOURNAL_VERSION,
+        "fold": (!a.consistent).then_some(FOLD_REVISION),
+        "case": a.name,
+        "header": digest,
+        "verdict": verdict_name(&a.folded.verdict),
+        "why": why,
+    })
+    .to_string()
+}
+
+const ADMISSIONS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/golden/admissions.jsonl");
+
+/// A pinned line's key: its version, its revision where it has one, its case.
+fn key(line: &str) -> (String, String, String) {
+    let v: serde_json::Value = serde_json::from_str(line).unwrap();
+    (
+        v["journal"].to_string(),
+        v["fold"].to_string(),
+        v["case"].to_string(),
+    )
+}
+
+/// Whether `file` pins each of `lines`, one line a key; why not.
+fn pinned(file: &str, lines: &[String]) -> Result<(), String> {
+    let mut keys = std::collections::BTreeSet::new();
+    for line in file.lines() {
+        if !keys.insert(key(line)) {
+            return Err(format!("a key pinned twice: {line}"));
+        }
+    }
+    match lines.iter().find(|line| !file.lines().any(|l| l == *line)) {
+        Some(line) => Err(format!(
+            "not pinned: {line}; a result moved under its key moves the key (JOURNAL_VERSION, \
+             FOLD_REVISION), then append with the ignored `regenerate_admissions`"
+        )),
+        None => Ok(()),
+    }
+}
+
+/// K2b-7e-2b-3d-3b-4a: every admission's result is pinned, one line a key,
+/// the file appended to and never edited (CI's `append-only` holds the
+/// latter): a rule's change that moves a result cannot be re-pinned under
+/// the same key — a consistent one's moves the journal's version, a
+/// tampered one's the fold's revision. A key pinned twice is refused, so a
+/// moved result appended under its old key is too.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the pins are a file (ADR-0047 K1e-3 refuses files to the machine, not its tests)"
+)]
+fn admissions_are_pinned_one_line_a_key() {
+    let lines: Vec<String> = admissions().iter().map(pin).collect();
+    let file = std::fs::read_to_string(ADMISSIONS).unwrap();
+    assert_eq!(pinned(&file, &lines), Ok(()));
+    // The rule itself: a moved result re-pinned beside its old line under the
+    // same key, and one not pinned, each refused.
+    let first = &lines[0];
+    let moved = first.replace(r#""verdict":"pass""#, r#""verdict":"fail""#);
+    assert_ne!(&moved, first);
+    let twice = format!("{first}\n{moved}\n");
+    assert!(pinned(&twice, std::slice::from_ref(&moved)).is_err());
+    assert!(pinned(&format!("{first}\n"), std::slice::from_ref(&moved)).is_err());
+    assert_eq!(
+        pinned(&format!("{first}\n"), std::slice::from_ref(first)),
+        Ok(())
+    );
+}
+
+/// Appends the admissions' lines not pinned yet, refusing to change one
+/// pinned under its key. Run only on purpose.
+#[test]
+#[ignore = "appends to golden/admissions.jsonl"]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the pins are a file (ADR-0047 K1e-3 refuses files to the machine, not its tests)"
+)]
+fn regenerate_admissions() {
+    let mut file = std::fs::read_to_string(ADMISSIONS).unwrap_or_default();
+    for a in admissions() {
+        let line = pin(&a);
+        match file.lines().find(|l| key(l) == key(&line)) {
+            Some(l) => assert_eq!(l, line, "a pinned line changed under its key"),
+            None => {
+                file.push_str(&line);
+                file.push('\n');
+            }
+        }
+    }
+    std::fs::write(ADMISSIONS, file).unwrap();
 }

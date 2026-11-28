@@ -643,3 +643,47 @@ pub fn census() -> Vec<(&'static str, Base, Tamper, &'static str)> {
         ),
     ]
 }
+
+/// The consistent bases, by name: whichever phase binds, rows apart and in
+/// any order, no source, a test's runtimes whose rows' events are another's.
+pub fn bases() -> Vec<(&'static str, Base)> {
+    vec![
+        ("the run binds", base()),
+        (
+            "stage 2 binds",
+            Base {
+                judging: 1 << 40,
+                ..base()
+            },
+        ),
+        (
+            "the gates bind",
+            Base {
+                gate_stages: 1 << 40,
+                ..base()
+            },
+        ),
+        (
+            "rows apart",
+            Base {
+                rows: vec![Some(3), None, Some(0)],
+                ..base()
+            },
+        ),
+        (
+            "no source",
+            Base {
+                rows: vec![],
+                ..base()
+            },
+        ),
+        (
+            "a test's runtimes",
+            Base {
+                assumed: true,
+                off: 1_000,
+                ..base()
+            },
+        ),
+    ]
+}

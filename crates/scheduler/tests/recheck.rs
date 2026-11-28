@@ -25,32 +25,9 @@ fn the_table_is_its_data_file_s() {
 /// assumed the runtimes.
 #[test]
 fn consistent_evidence_passes() {
-    for b in [
-        base(),
-        Base {
-            judging: 1 << 40,
-            ..base()
-        },
-        Base {
-            gate_stages: 1 << 40,
-            ..base()
-        },
-        Base {
-            rows: vec![Some(3), None, Some(0)],
-            ..base()
-        },
-        Base {
-            rows: vec![],
-            ..base()
-        },
-        Base {
-            assumed: true,
-            off: 1_000,
-            ..base()
-        },
-    ] {
+    for (name, b) in bases() {
         let (k, a) = consistent(&b);
-        assert_eq!(recheck::admission(10, k, &a), Ok(()), "{:?}", b.rows);
+        assert_eq!(recheck::admission(10, k, &a), Ok(()), "{name}");
     }
     // The pool does not divide at the base's catch-up: its ceiling is read.
     let (k, a) = consistent(&base());
