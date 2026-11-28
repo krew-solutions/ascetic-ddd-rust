@@ -1538,6 +1538,15 @@
               "$ref": "#/$defs/u64"
             }
           ]
+        },
+        "term": {
+          "$ref": "#/$defs/u64"
+        },
+        "row": {
+          "$ref": "#/$defs/u64"
+        },
+        "part": {
+          "$ref": "#/$defs/u64"
         }
       },
       "required": [
@@ -1548,7 +1557,10 @@
         "decoder",
         "attempt",
         "runtime",
-        "event"
+        "event",
+        "term",
+        "row",
+        "part"
       ],
       "additionalProperties": false
     },
@@ -1633,7 +1645,8 @@
         "binding",
         "shell_attempts",
         "carrier_attempts",
-        "decorations"
+        "decorations",
+        "evidence"
       ]
     },
     "phase": {

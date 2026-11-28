@@ -658,8 +658,6 @@ pub struct Admitted<C, X> {
     read_ahead: u64,
     carrier: Arc<X>,
     runtimes: Runtimes,
-    /// What it was fitted to (decision 22): the journal's evidence.
-    fit: crate::memory::Fit,
     /// The memory stated.
     memory: crate::memory::Memory,
     /// The process's limit, and its origin.
@@ -669,11 +667,6 @@ pub struct Admitted<C, X> {
 }
 
 impl<C, X> Admitted<C, X> {
-    /// What it was fitted to: every term, what it needs, its slack.
-    pub fn fit(&self) -> &crate::memory::Fit {
-        &self.fit
-    }
-
     /// The memory it was fitted to.
     pub fn memory(&self) -> crate::memory::Memory {
         self.memory
@@ -1203,7 +1196,9 @@ pub fn admit<C: Clock, X: Carrier<C>>(
         });
     }
     let mut caps: Option<u64> = None;
-    let mut rows = Vec::new();
+    // A row a source at most, its capacity theirs: the evidence's part prices
+    // a row a source (K2b-7e-2b-3d-3b-4c).
+    let mut rows = Vec::with_capacity(sources.len());
     for (source, s) in (0u32..).zip(&sources) {
         if !runtimes.assumed {
             let fitted = planned
@@ -1299,7 +1294,6 @@ pub fn admit<C: Clock, X: Carrier<C>>(
         read_ahead,
         carrier,
         runtimes: runtimes.clone(),
-        fit,
         memory,
         limit,
         clock: PhantomData,

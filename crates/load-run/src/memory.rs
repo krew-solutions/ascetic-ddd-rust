@@ -103,11 +103,13 @@ pub enum Part {
     Pending,
     /// The attempts' decorations, as their decorator states them.
     Decorations,
+    /// Admission's evidence itself, its copies at once (K2b-7e-2b-3d-3b-4c).
+    Evidence,
 }
 
 impl Part {
     /// Every part.
-    pub const ALL: [Part; 25] = [
+    pub const ALL: [Part; 26] = [
         Part::Reader,
         Part::Decoder,
         Part::Runtime,
@@ -133,6 +135,7 @@ impl Part {
         Part::ShellAttempts,
         Part::CarrierAttempts,
         Part::Decorations,
+        Part::Evidence,
     ];
 }
 
@@ -206,6 +209,12 @@ pub struct Model {
     pub runtime: u64,
     /// A driver's event, where its size is stated.
     pub event: Option<u64>,
+    /// A term of the evidence, as it is held (K2b-7e-2b-3d-3b-4c).
+    pub term: u64,
+    /// A row of the evidence: a source's sockets.
+    pub row: u64,
+    /// A part named in the evidence.
+    pub part: u64,
 }
 
 impl Model {
@@ -219,6 +228,9 @@ impl Model {
         attempt: crate::run::ATTEMPT,
         runtime: crate::run::RUNTIME,
         event: crate::run::EVENT,
+        term: size_of::<journal::MemoryTerm>() as u64,
+        row: size_of::<journal::SourceFit>() as u64,
+        part: size_of::<journal::Part>() as u64,
     };
 }
 
@@ -633,6 +645,28 @@ pub fn terms(planned: &Planned) -> Vec<Term> {
             Basis::Heap,
         ),
     ]);
+    // The evidence itself (K2b-7e-2b-3d-3b-4c): two copies at once —
+    // admission's and the header's while it is written —, each every term
+    // (this one with them), a row a source and the unheld parts.
+    let unheld = out
+        .iter()
+        .filter(|t| matches!(t.held, Held::Gate { .. }))
+        .count();
+    let of = |n: usize| u64::try_from(n).ok();
+    let copy = of(out.len().saturating_add(1))
+        .and_then(|n| n.checked_mul(m.term))
+        .zip(of(planned.sources.len()).and_then(|n| n.checked_mul(m.row)))
+        .zip(of(unheld).and_then(|n| n.checked_mul(m.part)))
+        .and_then(|((terms, rows), parts)| terms.checked_add(rows)?.checked_add(parts));
+    out.push(term(
+        Part::Evidence,
+        None,
+        Phase::Fixed,
+        copy.and_then(|cost| priced(2, cost, 0)),
+        Held::Built,
+        library,
+        Basis::Heap,
+    ));
     out
 }
 
@@ -882,7 +916,8 @@ fn slice(part: Part) -> Option<&'static str> {
         | Part::GateStages
         | Part::GateRun
         | Part::Barriers
-        | Part::Binding => None,
+        | Part::Binding
+        | Part::Evidence => None,
     }
 }
 
@@ -1053,6 +1088,7 @@ impl From<Part> for journal::Part {
             Part::ShellAttempts => journal::Part::ShellAttempts,
             Part::CarrierAttempts => journal::Part::CarrierAttempts,
             Part::Decorations => journal::Part::Decorations,
+            Part::Evidence => journal::Part::Evidence,
         }
     }
 }
@@ -1104,6 +1140,9 @@ impl From<Model> for journal::Model {
             attempt,
             runtime,
             event,
+            term,
+            row,
+            part,
         } = m;
         journal::Model {
             ended_cell,
@@ -1114,6 +1153,9 @@ impl From<Model> for journal::Model {
             attempt,
             runtime,
             event,
+            term,
+            row,
+            part,
         }
     }
 }

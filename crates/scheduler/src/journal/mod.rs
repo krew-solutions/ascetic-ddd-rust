@@ -32,7 +32,7 @@ pub const JOURNAL_VERSION: u32 = 10;
 /// (`golden/journal.jsonl`, [`sample`]), which holds every line and variant. A
 /// change to how any line is written changes the golden journal, and so this,
 /// in the same edit.
-pub const JOURNAL: &str = "a912423ac1922b86c0873eaa63e4cbbc1adc9b3645477cfe42c1effc12c92fbc";
+pub const JOURNAL: &str = "beda6ed6177fc854eb4407f7e749fda5f6d1bc168728d29e9bae97d15981eb92";
 
 /// A journal's line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,6 +248,15 @@ pub struct Model {
     /// A driver's event, where its size is stated.
     #[serde(with = "u64s_option")]
     pub event: Option<u64>,
+    /// A term of the evidence, as it is held (K2b-7e-2b-3d-3b-4c).
+    #[serde(with = "u64s")]
+    pub term: u64,
+    /// A row of the evidence.
+    #[serde(with = "u64s")]
+    pub row: u64,
+    /// A part named in the evidence.
+    #[serde(with = "u64s")]
+    pub part: u64,
 }
 
 /// A part's term: `count · cost + rest`, its phase, who holds its count, who
@@ -335,6 +344,8 @@ pub enum Part {
     CarrierAttempts,
     /// The attempts' decorations.
     Decorations,
+    /// Admission's evidence itself, its copies at once (K2b-7e-2b-3d-3b-4c).
+    Evidence,
 }
 
 /// A part's phase: when its bytes are held.

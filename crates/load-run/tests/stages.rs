@@ -554,13 +554,14 @@ fn a_run_reading_past_its_admitted_reader_is_refused() {
     // decoder once (K2b-7e-2b-3d-3a).
     let count = |part| {
         admitted
-            .fit()
+            .admission()
+            .memory
             .terms
             .iter()
             .find(|t| t.part == part)
             .map(|t| t.count)
     };
-    use ascetic_ddd_load_run::memory::Part;
+    use ascetic_ddd_scheduler::journal::Part;
     assert_eq!(
         (count(Part::Reader), count(Part::Decoder)),
         (Some(4 + 2), Some(1))

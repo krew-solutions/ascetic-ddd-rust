@@ -1103,3 +1103,42 @@ fn admitted_headers() -> Vec<(&'static str, Vec<u8>)> {
     out.push(("one-rest-source", pinned::header(rest)));
     out
 }
+
+/// K2b-7e-2b-3d-3b-4c: the evidence's own part prices its copies — the heap
+/// of one copy, as a clone of admission's allocates it, its cost exactly,
+/// at one source and at nine; two copies at once.
+#[test]
+fn the_evidence_prices_its_copies() {
+    for sources in [1, 9] {
+        let fitted = fitted(8, 1, sources, PLENTY).unwrap();
+        let live = Live::fitted(&fitted).unwrap();
+        let admitted = admit(fitted, live.runtimes()).unwrap();
+        let a = admitted.admission();
+        let evidence = a
+            .memory
+            .terms
+            .iter()
+            .find(|t| t.part == ascetic_ddd_scheduler::journal::Part::Evidence)
+            .copied()
+            .unwrap();
+        assert_eq!(a.sources.len(), sources as usize, "a row a source");
+        // Admission's own copy holds no more than a clone: each vector's
+        // capacity its length.
+        let m = &a.memory;
+        assert_eq!(
+            (
+                a.sources.capacity(),
+                m.terms.capacity(),
+                m.unheld.capacity()
+            ),
+            (a.sources.len(), m.terms.len(), m.unheld.len())
+        );
+        let copy = peak_of(|| a.clone());
+        assert!(copy > 0);
+        assert_eq!(
+            (evidence.count, evidence.cost, evidence.rest),
+            (2, copy, 0),
+            "{sources} sources"
+        );
+    }
+}

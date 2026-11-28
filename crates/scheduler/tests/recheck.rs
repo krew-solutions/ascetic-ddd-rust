@@ -157,7 +157,7 @@ fn free(part: Part, edit: Edit, source: Option<u32>, assumed: bool) -> bool {
                 | CarrierAttempts
                 | Decorations
         ),
-        Edit::Rest => part != Runtime,
+        Edit::Rest => !matches!(part, Runtime | Evidence),
         Edit::Stater => matches!(
             part,
             CarrierSource | Connections | Answers | Probes | CarrierAttempts

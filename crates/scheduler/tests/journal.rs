@@ -211,6 +211,7 @@ fn the_golden_holds_the_memory_s_vocabulary() {
         Part::ShellAttempts => 22,
         Part::CarrierAttempts => 23,
         Part::Decorations => 24,
+        Part::Evidence => 25,
     };
     let phase = |p: Phase| match p {
         Phase::Fixed => 0,
@@ -248,7 +249,7 @@ fn the_golden_holds_the_memory_s_vocabulary() {
             .iter()
             .map(|t| part(t.part))
             .collect::<Vec<_>>(),
-        (0..25).collect::<Vec<_>>()
+        (0..26).collect::<Vec<_>>()
     );
     all(&|t| phase(t.phase), 5);
     all(&|t| held(t.held), 7);

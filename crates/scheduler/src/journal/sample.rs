@@ -78,7 +78,7 @@ pub fn header() -> Header {
 
 /// Every part once, in order (version 10): the vocabulary of the memory's
 /// evidence, beside each phase, holder, stater and basis.
-const PARTS: [Part; 25] = [
+const PARTS: [Part; 26] = [
     Part::Reader,
     Part::Decoder,
     Part::Runtime,
@@ -104,6 +104,7 @@ const PARTS: [Part; 25] = [
     Part::ShellAttempts,
     Part::CarrierAttempts,
     Part::Decorations,
+    Part::Evidence,
 ];
 
 /// The memory's evidence: every part, phase, holder, stater and basis, both
@@ -160,6 +161,9 @@ fn memory() -> MemoryFit {
             attempt: u64::MAX,
             runtime: 0,
             event: None,
+            term: u64::MAX,
+            row: 0,
+            part: 1,
         },
         terms,
         unheld: vec![Part::Decorations, Part::Reader],

@@ -74,6 +74,9 @@ fn planned(sources: Vec<SourcePart>, v: [u64; 16], kappa: u64) -> Planned {
             attempt: v[13],
             runtime: 0,
             event: Some(1),
+            term: 0,
+            row: 0,
+            part: 0,
         },
         kappa: kappa.min(999),
     }
@@ -101,8 +104,13 @@ fn phases(p: &Planned) -> Phases {
     let c = p.machine;
     let reader = p.reader.as_ref().map_or(0, priced);
     let decoder = if p.reader.is_some() { w(m.decoder) } else { 0 };
+    // The evidence: two copies, each its terms — the run's 18 with it, 8 a
+    // source —, a row a source and the pool's 8 unheld parts.
+    let n = w(p.sources.len() as u64);
+    let evidence = 2 * ((18 + 8 * n) * w(m.term) + n * w(m.row) + 8 * w(m.part));
     let fixed = reader
         + decoder
+        + evidence
         + p.sources
             .iter()
             .map(|s| w(s.events.unwrap()) * w(m.event.unwrap()) + w(m.runtime))
@@ -181,14 +189,15 @@ fn stated(p: &Planned, part: Part, source: Option<u32>) -> StatedBy {
         | Part::BoundTo
         | Part::Kept
         | Part::Binding
-        | Part::ShellAttempts => StatedBy::Library,
+        | Part::ShellAttempts
+        | Part::Evidence => StatedBy::Library,
     }
 }
 
 /// The phase each part's bytes are held in, as the decision has them.
 fn phase(part: Part) -> Phase {
     match part {
-        Part::Reader | Part::Decoder | Part::Runtime => Phase::Fixed,
+        Part::Reader | Part::Decoder | Part::Runtime | Part::Evidence => Phase::Fixed,
         Part::Judging => Phase::Stages,
         Part::Probes | Part::ProbesIo | Part::GateStages => Phase::Gates,
         Part::CarrierSource
@@ -252,6 +261,8 @@ fn raised(mut p: Planned, part: Part, d: u64) -> Planned {
         Part::ShellAttempts => p.model.attempt += d,
         Part::CarrierAttempts => p.carrier_attempts.0 += d,
         Part::Decorations => p.decorations += d,
+        // A term of the evidence a byte more: every term of both copies.
+        Part::Evidence => p.model.term += d,
     }
     p
 }
@@ -291,18 +302,36 @@ fn arbitrary() -> impl Strategy<Value = Planned> {
             late: n[3],
             late_parts: n[4] << 8,
         });
-    let model = (prop::array::uniform8(cost())).prop_map(|c| Model {
-        ended_cell: c[0],
-        live_cell: c[0] + c[1],
-        barrier: c[2],
-        record: c[3],
-        decoder: c[4],
-        attempt: c[5],
-        runtime: c[6],
-        event: Some(c[7] >> 8),
-    });
+    let model = (
+        prop::array::uniform8(cost()),
+        prop::array::uniform3(0u64..256),
+    )
+        .prop_map(|(c, e)| Model {
+            ended_cell: c[0],
+            live_cell: c[0] + c[1],
+            barrier: c[2],
+            record: c[3],
+            decoder: c[4],
+            attempt: c[5],
+            runtime: c[6],
+            event: Some(c[7] >> 8),
+            term: e[0],
+            row: e[1],
+            part: e[2],
+        });
     (
-        (sources, prop::option::of(priced()), priced(), counts, model),
+        (
+            sources,
+            prop::option::of(priced().prop_map(|r| Priced {
+                // A reader's records are those ahead and the two beside: never
+                // none (`Reader::priced`), which the journal tells from no reader.
+                count: r.count.max(2),
+                ..r
+            })),
+            priced(),
+            counts,
+            model,
+        ),
         (prop::array::uniform8(cost()), stater()),
         prop::sample::select(vec![0u64, 1, 10, 500, 999]),
     )

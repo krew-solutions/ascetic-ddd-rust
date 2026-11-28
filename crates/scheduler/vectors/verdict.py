@@ -103,6 +103,13 @@ def admission_10(catch_up, a):
         for t in runtimes
     ):
         refuse("admission_model")
+    # The evidence itself: two copies, each its terms, a row a source and its
+    # unheld parts at the constants' sizes.
+    evidence = run("evidence")
+    gated = sum(1 for t in terms if isinstance(t["held"], dict))
+    copy = len(terms) * int(model["term"]) + n * int(model["row"]) + gated * int(model["part"])
+    if (int(evidence["count"]), int(evidence["cost"]), int(evidence["rest"])) != (2, copy, 0):
+        refuse("admission_evidence")
     if int(run("decoder")["count"]) != (1 if int(run("reader")["count"]) > 0 else 0):
         refuse("admission_decoder")
     for s in range(n):

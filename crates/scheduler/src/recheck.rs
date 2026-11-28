@@ -95,7 +95,7 @@ const fn row(
 
 /// Version 10's table, one row a part in the journal's order: the data file
 /// `schema/parts-10.json` is the same, which `vectors/verdict.py` reads.
-pub const PARTS_10: [Row; 25] = {
+pub const PARTS_10: [Row; 26] = {
     use Basis::{Heap, Outside};
     use HeldBy::{Built, Cap, Channel, Gate, Host as ByHost, Once};
     use Phase::{Fixed, Gates, Pool, Run, Stages};
@@ -127,18 +127,20 @@ pub const PARTS_10: [Row; 25] = {
         row(Part::ShellAttempts, Global, Pool, Heap, Gate, Library),
         row(Part::CarrierAttempts, Global, Pool, Heap, Gate, Either),
         row(Part::Decorations, Global, Pool, Heap, Gate, Host),
+        row(Part::Evidence, Global, Fixed, Heap, Built, Library),
     ]
 };
 
 /// Every code a refusal of version 10's rules gives, in the order the rules
 /// are checked.
-pub const WHYS_10: [&str; 16] = [
+pub const WHYS_10: [&str; 17] = [
     "admission_kappa",
     "admission_term_set",
     "admission_table",
     "admission_built",
     "admission_bytes",
     "admission_model",
+    "admission_evidence",
     "admission_decoder",
     "admission_shared",
     "admission_rows",
@@ -285,6 +287,29 @@ pub fn admission_10(catch_up: u32, a: &Admission) -> Result<(), &'static str> {
             .any(|t| t.cost != event || t.rest != model.runtime)
     {
         return Err("admission_model");
+    }
+    // The evidence itself: two copies at once — admission's and the header's
+    // while it is written —, each its terms, a row a source and its unheld
+    // parts at the constants' sizes.
+    let evidence = run(Part::Evidence)?;
+    let unheld_parts = terms
+        .iter()
+        .filter(|t| matches!(t.held, Held::Gate { .. }))
+        .count();
+    let copy = [
+        (terms.len(), model.term),
+        (usize::try_from(sources).unwrap_or(usize::MAX), model.row),
+        (unheld_parts, model.part),
+    ]
+    .iter()
+    .try_fold(0u64, |sum, (n, size)| {
+        u64::try_from(*n)
+            .ok()
+            .and_then(|n| n.checked_mul(*size))
+            .and_then(|b| sum.checked_add(b))
+    });
+    if (evidence.count, Some(evidence.cost), evidence.rest) != (2, copy, 0) {
+        return Err("admission_evidence");
     }
     if run(Part::Decoder)?.count != u64::from(run(Part::Reader)?.count > 0) {
         return Err("admission_decoder");

@@ -49,6 +49,9 @@ pub const MODEL: Model = Model {
     attempt: 1_536,
     runtime: 2_600,
     event: Some(12),
+    term: 96,
+    row: 32,
+    part: 1,
 };
 
 pub fn row_of(part: Part) -> Row {
@@ -131,6 +134,14 @@ pub fn consistent(b: &Base) -> (u32, Admission) {
         term(Part::CarrierAttempts, None, late, 7, 9),
         term(Part::Decorations, None, late, 3, 0),
     ]);
+    // The evidence: two copies, each its terms (this one with them), a row a
+    // source and the unheld parts.
+    let unheld = terms
+        .iter()
+        .filter(|t| matches!(t.held, Held::Gate { .. }))
+        .count() as u64;
+    let copy = (terms.len() as u64 + 1) * m.term + b.rows.len() as u64 * m.row + unheld * m.part;
+    terms.push(term(Part::Evidence, None, 2, copy, 0));
     let mut memory = MemoryFit {
         stated: 0,
         origin: MemoryOrigin::Declared,
@@ -412,6 +423,46 @@ pub fn census() -> Vec<(&'static str, Base, Tamper, &'static str)> {
             base(),
             |_, a| a.memory.model.live_cell = 0,
             "admission_model",
+        ),
+        (
+            "a third copy of the evidence",
+            base(),
+            |_, a| count(a, Part::Evidence, None, 1),
+            "admission_evidence",
+        ),
+        (
+            "the evidence a byte short",
+            base(),
+            |_, a| cost(a, Part::Evidence, None, -1),
+            "admission_evidence",
+        ),
+        (
+            "the evidence's own beside it",
+            base(),
+            |_, a| {
+                let t = at(a, Part::Evidence, None);
+                t.rest += 1;
+                t.bytes += 1;
+            },
+            "admission_evidence",
+        ),
+        (
+            "a term of the evidence a byte more",
+            base(),
+            |_, a| a.memory.model.term += 1,
+            "admission_evidence",
+        ),
+        (
+            "a row of the evidence a byte more",
+            base(),
+            |_, a| a.memory.model.row += 1,
+            "admission_evidence",
+        ),
+        (
+            "a part of the evidence a byte more",
+            base(),
+            |_, a| a.memory.model.part += 1,
+            "admission_evidence",
         ),
         (
             "the decoder dropped",

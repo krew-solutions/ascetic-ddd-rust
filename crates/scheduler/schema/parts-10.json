@@ -198,5 +198,13 @@
     "basis": "heap",
     "held": "gate",
     "stated": "host"
+  },
+  {
+    "part": "evidence",
+    "scope": "global",
+    "phase": "fixed",
+    "basis": "heap",
+    "held": "built",
+    "stated": "library"
   }
 ]
