@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a, K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3), K2b-7e-2b-2c-1 to K2b-7e-2b-2c-4 built, K2b-7e-2b-3 decided and cut in five, K2b-7e-2b-3a-1 to K2b-7e-2b-3a-3, K2b-7e-2b-3b, K2b-7e-2b-3c-1 and K2b-7e-2b-3c-2 built, K2b-7e-2b-3d cut in four, K2b-7e-2b-3d-1 and K2b-7e-2b-3d-2 built, K2b-7e-2b-3d-3 decided and cut in two, K2b-7e-2b-3d-3a in two, K2b-7e-2b-3d-3a-1 and K2b-7e-2b-3d-3a-2 built, K2b-7e-2b-3d-3b cut in four, K2b-7e-2b-3d-3b-1 and K2b-7e-2b-3d-3b-2 built, K2b-7e-2b-3d-3b-3 cut in two, K2b-7e-2b-3d-3b-3a and K2b-7e-2b-3d-3b-3b built, K2b-7e-2b-3d-3b-4 cut in three, K2b-7e-2b-3d-3b-4a to K2b-7e-2b-3d-3b-4c built, K2b-7e-2b-3d-3b done, K2b-7e-2b-3d-4 decided and cut in three, K2b-7e-2b-3d-4a built and measured — P4 refuted as stated, its rows' guard twice "no test" —, K2b-7e-2b-3d-4b built and measured — P6 no test at idle, P10's first reader void —, K2b-7e-2b-3d-4c built and measured, K2b-7e-2b-3d-4 done (four rows owed, § Owed), K2b-7e-2b-3e next; decision 23 decided, K2b-7e-4a built, K2b-7e-4b decided and cut in three, K2b-7e-4b-1 and K2b-7e-4b-2 built, K2b-7e-4b-3 measured — four refutations, one remedy each —, K2b-7e-4b-4 and K2b-7e-4b-5 built and measured, K2b-7e-4 done (decision 23's steps 1 and 2), decision 23's step 3b on the owner's confirmation; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
+Proposed (2026-11-21); slices K0a, K1 (K1a to K1e), K2a, K2b-0a, K2b-0b, K2b-1, K2b-2 (K2b-2a, K2b-2b) K2b-3 (K2b-3a, K2b-3b), K2b-4, K2b-5, K2b-6 (K2b-6a, K2b-6b), K2b-7a, K2b-7b, K2b-7c (K2b-7c-1, K2b-7c-2), K2b-7d, K2b-8a, K2b-8b (K2b-8b-1, K2b-8b-2), K2b-8c (K2b-8c-1 to K2b-8c-7b) and K2b-8d (K2b-8d-1, K2b-8d-2) built (§ Measured), decision 21 decided — the harness shapes at the hand-off (§ Decision 21); K2b-9a, K2b-9b-1 and K2b-9b-2 built (§ Measured); its raw-due rule refuted in two rounds, a dead end whose next question is no catch-up (§ Owed); then K2b-9b-3 to 9d; decision 22 decided (the shell's memory), K2b-7e-1, K2b-7e-2a, K2b-7e-2b-1 (K2b-7e-2b-1a to K2b-7e-2b-1c), K2b-7e-2b-2a, K2b-7e-2b-2b (K2b-7e-2b-2b-1 to K2b-7e-2b-2b-3), K2b-7e-2b-2c-1 to K2b-7e-2b-2c-4 built, K2b-7e-2b-3 decided and cut in five, K2b-7e-2b-3a-1 to K2b-7e-2b-3a-3, K2b-7e-2b-3b, K2b-7e-2b-3c-1 and K2b-7e-2b-3c-2 built, K2b-7e-2b-3d cut in four, K2b-7e-2b-3d-1 and K2b-7e-2b-3d-2 built, K2b-7e-2b-3d-3 decided and cut in two, K2b-7e-2b-3d-3a in two, K2b-7e-2b-3d-3a-1 and K2b-7e-2b-3d-3a-2 built, K2b-7e-2b-3d-3b cut in four, K2b-7e-2b-3d-3b-1 and K2b-7e-2b-3d-3b-2 built, K2b-7e-2b-3d-3b-3 cut in two, K2b-7e-2b-3d-3b-3a and K2b-7e-2b-3d-3b-3b built, K2b-7e-2b-3d-3b-4 cut in three, K2b-7e-2b-3d-3b-4a to K2b-7e-2b-3d-3b-4c built, K2b-7e-2b-3d-3b done, K2b-7e-2b-3d-4 decided and cut in three, K2b-7e-2b-3d-4a built and measured — P4 refuted as stated, its rows' guard twice "no test" —, K2b-7e-2b-3d-4b built and measured — P6 no test at idle, P10's first reader void —, K2b-7e-2b-3d-4c built and measured, K2b-7e-2b-3d-4 done (four rows owed, § Owed), K2b-7e-2b-3e decided and cut in three, K2b-7e-2b-3e-1 next; decision 23 decided, K2b-7e-4a built, K2b-7e-4b decided and cut in three, K2b-7e-4b-1 and K2b-7e-4b-2 built, K2b-7e-4b-3 measured — four refutations, one remedy each —, K2b-7e-4b-4 and K2b-7e-4b-5 built and measured, K2b-7e-4 done (decision 23's steps 1 and 2), decision 23's step 3b on the owner's confirmation; then the first host run, whose memory bound counts the connections K2b-8 decides. Stage 3 of three toward the host's
 fitness functions (ADR-0045 § Status): the scheduler that runs a command log (ADR-0046) against a stand — what is pure
 and what is the shell, how steps are bound, released, sent, judged and recorded, what voids a run.
 
@@ -65,7 +65,9 @@ To be built in slices, each a commit of its own:
   whole-run measurement, in three — **K2b-7e-2b-3d-4a** the harness and its first rows (the control, the answers
   held, the attempts and the late records, the decoder) with their predictions, **K2b-7e-2b-3d-4b** the sources, the
   kernel's sockets and the process's factors, **K2b-7e-2b-3d-4c** the server's matrix and the stall's curve —), **K2b-7e-2b-3e** the evidence — the `memory` line with its producer among it
-  after a kill —, **K2b-7e-2c** the cgroup's memory, after the read gate;
+  after a kill —, in three (**K2b-7e-2b-3e-1** the line, version 11, both folds' skip, the recheck's tables at both
+  versions; **K2b-7e-2b-3e-2** the producer, the gauges, the sockets, the probe and its part; **K2b-7e-2b-3e-3** the
+  trace of a killed journal, the kill row and the measurements that fix the period and the read's thread), **K2b-7e-2c** the cgroup's memory, after the read gate;
   **K2b-7e-3** the read gate; **K2b-7e-4** the parse, in two (decision 23) — **K2b-7e-4a** a body parsed on its first
   reader and a late answer holding nothing, **K2b-7e-4b** the tape (decision 23's step 2), in three — **K2b-7e-4b-1**
   the grammar over two sinks, the names' check, the tape and its differential against the tree; **K2b-7e-4b-2** the
@@ -921,6 +923,28 @@ which `admit` never called; § Alternatives Considered keeps what each refuted):
     kernel's queued bytes would make it undiscriminating. **No verdict on κ**: nothing paces the run, so a stalled row
     measures the backlog against the stop's length, below the deadline plus the route's timeout — evidence for
     decision 21's direction either way.
+  - **Decided for K2b-7e-2b-3e** (2026-11-28, under the gate: the main position, a blind solver and a discriminator on
+    Fable, five roles — Evolution, Verifiability, Operability, Performance, Software Design — on Opus; § Alternatives
+    Considered keeps what each refuted). **A run journals its memory while it runs, as evidence no fold reads**: a
+    `sample` line (version 11, boxed) at a baseline after the header, at each due instant and at the run's finish —
+    the process's resident, swapped and high-water bytes, its cgroup's (current, peak, anonymous, page cache, sockets,
+    kernel stacks, swap, events and pressure, at the limit's depth too), the host's pressure, the shell's live counts
+    (the lines read and not ended, the handles past their deadline — admission's `late` is another count —, the
+    attempts alive, the carrier's open sockets, the journal's channel full and waited, the loop's instant and the
+    instant it sleeps until), and the allocator's in-use and free bytes from a host-given probe, its state closed
+    (unstated, failed, read) and its allocator named; a field a kernel lacks null alone, a group null with a reason.
+    **The journal's writer samples**, after every line it takes and every timeout, when the due instant has passed —
+    no catch-up, the next due the larger of the period and a hundred times the sample's cost past it, offset by a draw
+    from the run's namespace —, its timed receive the clock module's, the timed waits disallowed elsewhere; the gauges
+    reach it through `Ready`, consistent at one instant; host code runs under `catch_unwind`, a panic its group's null,
+    never the journal's end; the sampler and the probe are configured in `sink::Journal`, which `fit` binds — the
+    library's reads a constant of the journal's term, the probe's stated bytes a host-stated part of version 11's
+    table. **The recheck's rules are named by the version that introduced them, each version its table**; both folds
+    drop the line before every rule, so `FOLD_REVISION` stays 8; decision 18's stop and the gate's refusal become the
+    last and only machine line. A killed journal's samples are read by their kind and fields alone, a staleness a
+    lower bound. The factor K2b-7e-2c needs is not one number: the touched fraction of the counted, a kernel term a
+    socket, the retained free bounded by an earlier phase's heap, the fixed parts — the line carries them at one
+    instant. The period and the probe's place wait on measurements at a launch's states (§ Measured, when made).
 - **The read gate** (K2b-7e-3): no line read while the attempts alive reach their cap or the machine's live cost its
   share — a late read, the harness's; starved past the longest timeout, a fault and a stop.
 - **The parse bounded** (K2b-7e-4): the body's state journaled (whole, cut at the cap, unparsed and why) — an answer
@@ -1160,6 +1184,20 @@ waits for the owner's confirmation:
   promise; Evolution), **pins keyed by the journal's version alone** (a fold's rule over unchanged bytes forces the
   wrong bump; Evolution), **executors run on admission's own output** (consistent by construction: no rule-deleting
   mutant dies; Verifiability), **a `compile_fail` doctest without its code** (any error passes it; Verifiability).
+- **Decision 22, K2b-7e-2b-3e's evidence** (2026-11-28): the main position's **a sampler thread with a one-slot
+  mailbox the writer drains first** (the writer blocks on its channel: a silent machine drains nothing; the solver,
+  the discriminator), its **late handles by wall time** (the journal's instants are logical; counted at the turn
+  instead; the discriminator), its **largest peak over need as the factor** (2.1 % and 97.5 % on one host: the ratio
+  is the workload's; the discriminator); the synthesis's **a sample on each timeout** (a busy channel never times out;
+  Operability, Performance, Verifiability, Software Design), **a sample on each missed due instant** (a catch-up holds
+  the machine; Verifiability, Software Design), **`late` for the handles past their deadline** (admission's word for
+  another count; Software Design, Verifiability), **the probe unpriced** (an owner states its bytes; Software Design,
+  Verifiability), **a group null on one missing file** (no `memory.peak` before Linux 5.19; Operability, Software
+  Design, Verifiability), **`sockets` provided and none by default** (a host carrier's journals would be refused by
+  K2b-7e-2c, silently; Evolution), **the clock rule's carve-out with no executor** (nothing forbids the timed waits;
+  Software Design, Verifiability), **a copy of the rules a version** (the frozen version's rules then run nowhere;
+  Evolution), **the measurements at S1's state** (no cost scales with the bytes held; Performance), **no pressure and
+  no swap** (an oomd kill, an ancestor's limit and a swapped heap read as nothing; Operability).
 - **Decision 22, K2b-7e-2b-3d-4's measurement** (2026-11-28): the main position's **totals and a stated band on them**
   (a floor on the total shares the sentence it checks, ADR K2b-7e-2b-3's synthesis; slack in one term absorbs another's
   under-price — 2.6 MB of the decoder alone; the discriminator), **the pool's peak against its prediction at κ** (the
@@ -4017,6 +4055,8 @@ lives), ADR-0088 (DPoP), QAS-SCALE-0001, QAS-SCALE-0002, QAS-PERF-0007, `tools/g
 - 2026-11-28: M-a rerun after K2b-7e-4b-4 on the load server (R4, R5, R7 still refuted by smaller margins; R6
   refuted on the densest shapes) and K2b-7e-4b-5 built (§ Measured): a plain string compared over its text; K2b-7e-4b-4's
   unit test's escapes restored — its record named escapes it no longer held.
+- 2026-11-28: K2b-7e-2b-3e decided under the gate (§ Decision 22, decided for K2b-7e-2b-3e) and cut in three: a
+  `sample` line of version 11, written by the journal's writer, read by no fold.
 - 2026-11-28: K2b-7e-2b-3d-4c measured (§ Measured) on the load server: P11, P13, P9, P14 held; P12 refuted as stated
   and confounded by the stop's backlog; P8's THP on void there; K2b-7e-2b-3d-4 done, four rows owed (§ Owed).
 - 2026-11-28: K2b-7e-2b-3d-4c's harness built and its predictions written (§ Measured), before its rows; the late
