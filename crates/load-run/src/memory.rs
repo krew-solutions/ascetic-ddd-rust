@@ -93,25 +93,36 @@ pub enum Part {
     ShellAttempts,
     /// The carrier's share of the attempts.
     CarrierAttempts,
+    /// The journal's output, as its host states it (K2b-7e-2b-3d-3a).
+    JournalOut,
+    /// A gate's probe's connection heap of its own, as its egress states it.
+    ProbesIo,
+    /// The steps not ended, beyond their cells as ended (K2b-7e-2b-3d-3a).
+    Pending,
+    /// The attempts' decorations, as their decorator states them.
+    Decorations,
 }
 
 impl Part {
     /// Every part.
-    pub const ALL: [Part; 21] = [
+    pub const ALL: [Part; 25] = [
         Part::Reader,
         Part::Decoder,
         Part::Runtime,
         Part::CarrierSource,
         Part::Keeping,
         Part::Journal,
+        Part::JournalOut,
         Part::Connections,
         Part::Io,
         Part::Answers,
         Part::Judging,
         Part::Probes,
+        Part::ProbesIo,
         Part::GateStages,
         Part::GateRun,
         Part::Cells,
+        Part::Pending,
         Part::Barriers,
         Part::Records,
         Part::BoundTo,
@@ -119,6 +130,7 @@ impl Part {
         Part::Binding,
         Part::ShellAttempts,
         Part::CarrierAttempts,
+        Part::Decorations,
     ];
 }
 
@@ -171,7 +183,46 @@ pub enum Basis {
     Outside,
 }
 
-/// A part's term: its bytes, where they are held and who states them.
+/// The library's constants a part's cost is one of (decision 22,
+/// K2b-7e-2b-3d-3a): taken by `fit` in `Planned` and journaled as the
+/// evidence's, so a constant perturbed moves both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Model {
+    /// An ended step's cell.
+    pub ended_cell: u64,
+    /// A step not ended's cell.
+    pub live_cell: u64,
+    /// A barrier key beside its own bytes.
+    pub barrier: u64,
+    /// A record's `Arc`.
+    pub record: u64,
+    /// The log's decompressor.
+    pub decoder: u64,
+    /// The shell's share of an attempt.
+    pub attempt: u64,
+    /// A runtime's own beside its events.
+    pub runtime: u64,
+    /// A driver's event, where its size is stated.
+    pub event: Option<u64>,
+}
+
+impl Model {
+    /// The library's, as built.
+    pub const LIBRARY: Model = Model {
+        ended_cell: ascetic_ddd_scheduler::fits::ENDED_CELL,
+        live_cell: ascetic_ddd_scheduler::fits::LIVE_CELL,
+        barrier: ascetic_ddd_scheduler::fits::BARRIER,
+        record: ascetic_ddd_command_log::shape::ARC as u64,
+        decoder: ascetic_ddd_command_log::live::DECODER,
+        attempt: crate::run::ATTEMPT,
+        runtime: crate::run::RUNTIME,
+        event: crate::run::EVENT,
+    };
+}
+
+/// A part's term: the things its enforcer bounds, what each holds and what
+/// does not scale with them, its bytes, where they are held and who states
+/// them (decision 22, K2b-7e-2b-3d-3a).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Term {
     /// The part.
@@ -180,7 +231,14 @@ pub struct Term {
     pub source: Option<u32>,
     /// Its phase.
     pub phase: Phase,
-    /// Its bytes.
+    /// The things its enforcer bounds: 0 for a part absent, 1 for one held
+    /// once.
+    pub count: u64,
+    /// What each holds.
+    pub cost: u64,
+    /// What does not scale with them.
+    pub rest: u64,
+    /// `count · cost + rest`; `u64::MAX` past any count, refused.
     pub bytes: u64,
     /// Who holds its count.
     pub held: Held,
@@ -193,9 +251,9 @@ pub struct Term {
 /// A source's parts as admission fixed them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SourcePart {
-    /// Its runtime's own and its events, as they will be built; none where
-    /// no event's size is stated.
-    pub runtime: Option<u64>,
+    /// Its runtime's events a driver turn, as it will be built; none where a
+    /// driver sizes none so many.
+    pub events: Option<u64>,
     /// Its sockets' cap.
     pub cap: u64,
     /// A connection's bytes, its head buffer at the plan's largest head.
@@ -206,38 +264,41 @@ pub struct SourcePart {
     pub answer: u64,
     /// The carrier's own of the source.
     pub carrier: u64,
-    /// Who states the carrier's.
+    /// Who states the carrier's — its connections and answers alike.
     pub carrier_stated: StatedBy,
     /// The shell's keeping, one a source.
     pub keeping: u64,
 }
 
-/// What admission fixed of a run (decision 22): each part's bytes at its
-/// count, the pool's priced at the plan's peaks.
+/// What admission fixed of a run (decision 22): each part by its count, the
+/// counts the pool's parts share held once, the costs that are constants
+/// in its `Model`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Planned {
     /// Each source's.
     pub sources: Vec<SourcePart>,
-    /// The reader's, at its records ahead.
-    pub reader: u64,
-    /// The log's decompressor's, outside the counted heap.
-    pub decoder: u64,
+    /// The reader's, at its records ahead; none without one.
+    pub reader: Option<ascetic_ddd_scheduler::fits::Priced>,
     /// The journal's, at its lines behind.
-    pub journal: u64,
+    pub journal: ascetic_ddd_scheduler::fits::Priced,
+    /// Its output's, as its host states it.
+    pub journal_out: u64,
     /// Stage 2's judging at the cap.
     pub judging: u64,
     /// The stand's gates' client.
     pub gates: GateBytes,
-    /// The machine's terms, its records apart.
-    pub machine: ascetic_ddd_scheduler::fits::Terms,
-    /// The records of the steps late by a jitter, in place of the machine's.
-    pub records: u64,
-    /// The shell's share of the attempts the plan holds at once.
-    pub shell_attempts: u64,
-    /// The carrier's share of them.
-    pub carrier_attempts: u64,
-    /// Who states the carrier's.
+    /// The machine's counts.
+    pub machine: ascetic_ddd_scheduler::fits::Counts,
+    /// The carrier's cost an attempt late, and its parts beside.
+    pub carrier_attempts: (u64, u64),
+    /// The shell's parts of the attempts late beside its share each.
+    pub shell_parts: u64,
+    /// The decorations' cost an attempt, as their decorator states it.
+    pub decorations: u64,
+    /// Who states the carrier's attempts.
     pub carrier_stated: StatedBy,
+    /// The constants.
+    pub model: Model,
     /// The run's catch-up, per mille: the pool's prediction at its rate.
     pub kappa: u64,
 }
@@ -295,26 +356,43 @@ fn at_kappa(bytes: u64, kappa: u64) -> Option<u64> {
     u64::try_from(up).ok()
 }
 
-/// The terms of `planned`, each part priced, its phase, holder and owner.
+/// The terms of `planned`, each part priced by its count, its phase, holder
+/// and owner; a cost derived past any count is `u64::MAX`, refused.
 #[must_use]
 pub fn terms(planned: &Planned) -> Vec<Term> {
+    use ascetic_ddd_scheduler::fits::Priced;
     let library = StatedBy::Library;
     let host = StatedBy::Host;
-    let term = |part, source, phase, bytes, held, stated, basis| Term {
-        part,
-        source,
-        phase,
-        bytes,
-        held,
-        stated,
-        basis,
+    let gate = Held::Gate { built: None };
+    let term = |part, source, phase, priced: Option<Priced>, held, stated, basis| {
+        let p = priced.unwrap_or(Priced {
+            count: 1,
+            cost: u64::MAX,
+            rest: 0,
+        });
+        Term {
+            part,
+            source,
+            phase,
+            count: p.count,
+            cost: p.cost,
+            rest: p.rest,
+            bytes: p.bytes().unwrap_or(u64::MAX),
+            held,
+            stated,
+            basis,
+        }
     };
+    let priced = |count, cost, rest| Some(Priced { count, cost, rest });
+    let once = |bytes| priced(1, bytes, 0);
+    let m = planned.model;
+    let c = planned.machine;
     let mut out = vec![
         term(
             Part::Reader,
             None,
             Phase::Fixed,
-            planned.reader,
+            Some(planned.reader.unwrap_or_default()),
             Held::Channel,
             library,
             Basis::Heap,
@@ -323,7 +401,7 @@ pub fn terms(planned: &Planned) -> Vec<Term> {
             Part::Decoder,
             None,
             Phase::Fixed,
-            planned.decoder,
+            priced(u64::from(planned.reader.is_some()), m.decoder, 0),
             Held::Built,
             library,
             Basis::Outside,
@@ -331,13 +409,16 @@ pub fn terms(planned: &Planned) -> Vec<Term> {
     ];
     for (s, p) in (0u32..).zip(&planned.sources) {
         let source = Some(s);
-        let connections = p.cap.saturating_mul(p.connection);
+        let runtime = p
+            .events
+            .zip(m.event)
+            .and_then(|(e, cost)| priced(e, cost, m.runtime));
         out.extend([
             term(
                 Part::Runtime,
                 source,
                 Phase::Fixed,
-                p.runtime.unwrap_or(u64::MAX),
+                runtime,
                 Held::Built,
                 library,
                 Basis::Heap,
@@ -346,7 +427,7 @@ pub fn terms(planned: &Planned) -> Vec<Term> {
                 Part::CarrierSource,
                 source,
                 Phase::Run,
-                p.carrier,
+                once(p.carrier),
                 Held::Once,
                 p.carrier_stated,
                 Basis::Heap,
@@ -355,7 +436,7 @@ pub fn terms(planned: &Planned) -> Vec<Term> {
                 Part::Keeping,
                 source,
                 Phase::Run,
-                p.keeping,
+                once(p.keeping),
                 Held::Once,
                 library,
                 Basis::Heap,
@@ -364,16 +445,16 @@ pub fn terms(planned: &Planned) -> Vec<Term> {
                 Part::Connections,
                 source,
                 Phase::Run,
-                connections,
+                priced(p.cap, p.connection, 0),
                 Held::Cap,
-                library,
+                p.carrier_stated,
                 Basis::Heap,
             ),
             term(
                 Part::Io,
                 source,
                 Phase::Run,
-                p.cap.saturating_mul(p.io),
+                priced(p.cap, p.io, 0),
                 Held::Cap,
                 host,
                 Basis::Heap,
@@ -382,41 +463,55 @@ pub fn terms(planned: &Planned) -> Vec<Term> {
                 Part::Answers,
                 source,
                 Phase::Run,
-                p.cap.saturating_mul(p.answer),
+                priced(p.cap, p.answer, 0),
                 Held::Cap,
-                library,
+                p.carrier_stated,
                 Basis::Heap,
             ),
-            // Stage 3's probes: a connect to each endpoint, each a socket
-            // under the cap.
             term(
                 Part::Probes,
                 source,
                 Phase::Gates,
-                p.cap.saturating_mul(p.connection.saturating_add(p.io)),
+                priced(p.cap, p.connection, 0),
                 Held::Cap,
-                library,
+                p.carrier_stated,
+                Basis::Heap,
+            ),
+            term(
+                Part::ProbesIo,
+                source,
+                Phase::Gates,
+                priced(p.cap, p.io, 0),
+                Held::Cap,
+                host,
                 Basis::Heap,
             ),
         ]);
     }
-    let gate = Held::Gate { built: None };
-    let m = planned.machine;
     out.extend([
         term(
             Part::Journal,
             None,
             Phase::Run,
-            planned.journal,
+            Some(planned.journal),
             Held::Channel,
             library,
+            Basis::Heap,
+        ),
+        term(
+            Part::JournalOut,
+            None,
+            Phase::Run,
+            once(planned.journal_out),
+            Held::Once,
+            host,
             Basis::Heap,
         ),
         term(
             Part::Judging,
             None,
             Phase::Stages,
-            planned.judging,
+            once(planned.judging),
             Held::Once,
             library,
             Basis::Heap,
@@ -425,7 +520,7 @@ pub fn terms(planned: &Planned) -> Vec<Term> {
             Part::GateStages,
             None,
             Phase::Gates,
-            planned.gates.stages,
+            once(planned.gates.stages),
             Held::Host,
             host,
             Basis::Heap,
@@ -434,7 +529,7 @@ pub fn terms(planned: &Planned) -> Vec<Term> {
             Part::GateRun,
             None,
             Phase::Run,
-            planned.gates.run,
+            once(planned.gates.run),
             Held::Host,
             host,
             Basis::Heap,
@@ -443,7 +538,18 @@ pub fn terms(planned: &Planned) -> Vec<Term> {
             Part::Cells,
             None,
             Phase::Pool,
-            m.cells,
+            priced(c.held, m.ended_cell, 0),
+            gate,
+            library,
+            Basis::Heap,
+        ),
+        term(
+            Part::Pending,
+            None,
+            Phase::Pool,
+            m.live_cell
+                .checked_sub(m.ended_cell)
+                .and_then(|cost| priced(c.pending, cost, 0)),
             gate,
             library,
             Basis::Heap,
@@ -452,7 +558,7 @@ pub fn terms(planned: &Planned) -> Vec<Term> {
             Part::Barriers,
             None,
             Phase::Pool,
-            m.barriers,
+            priced(c.barriers, m.barrier, c.barrier_bytes),
             Held::Once,
             library,
             Basis::Heap,
@@ -461,7 +567,7 @@ pub fn terms(planned: &Planned) -> Vec<Term> {
             Part::Records,
             None,
             Phase::Pool,
-            planned.records,
+            priced(c.late, m.record, c.late_parts),
             gate,
             library,
             Basis::Heap,
@@ -470,7 +576,7 @@ pub fn terms(planned: &Planned) -> Vec<Term> {
             Part::BoundTo,
             None,
             Phase::Pool,
-            m.bound_to,
+            priced(1, 0, c.bound_to),
             gate,
             library,
             Basis::Heap,
@@ -479,7 +585,7 @@ pub fn terms(planned: &Planned) -> Vec<Term> {
             Part::Kept,
             None,
             Phase::Pool,
-            m.keeping,
+            priced(1, 0, c.keeping),
             gate,
             library,
             Basis::Heap,
@@ -488,7 +594,7 @@ pub fn terms(planned: &Planned) -> Vec<Term> {
             Part::Binding,
             None,
             Phase::Pool,
-            m.binding,
+            priced(1, 0, c.binding),
             Held::Once,
             library,
             Basis::Heap,
@@ -497,7 +603,7 @@ pub fn terms(planned: &Planned) -> Vec<Term> {
             Part::ShellAttempts,
             None,
             Phase::Pool,
-            planned.shell_attempts,
+            priced(c.late, m.attempt, planned.shell_parts),
             gate,
             library,
             Basis::Heap,
@@ -506,9 +612,22 @@ pub fn terms(planned: &Planned) -> Vec<Term> {
             Part::CarrierAttempts,
             None,
             Phase::Pool,
-            planned.carrier_attempts,
+            priced(
+                c.late,
+                planned.carrier_attempts.0,
+                planned.carrier_attempts.1,
+            ),
             gate,
             planned.carrier_stated,
+            Basis::Heap,
+        ),
+        term(
+            Part::Decorations,
+            None,
+            Phase::Pool,
+            priced(c.late, planned.decorations, 0),
+            gate,
+            host,
             Basis::Heap,
         ),
     ]);
@@ -537,15 +656,18 @@ pub fn fit(planned: &Planned, memory: Memory) -> Result<Fit, Unfit> {
         binding: None,
         least: None,
     };
+    // A runtime whose events, or an event's size, nothing states.
+    if planned.model.event.is_none() || planned.sources.iter().any(|s| s.events.is_none()) {
+        return Err(unfit(terms, Failed::Unstated(Part::Runtime)));
+    }
+    // A count times its cost past any count saturates, and so does a cost or
+    // a rest derived past it, whatever its count (rule 1: a saturated cost
+    // times 0 is no term a memory admits): refused, never a term that a
+    // memory stated at its most would admit.
     if let Some(t) = terms
         .iter()
-        .find(|t| t.part == Part::Runtime && t.bytes == u64::MAX)
+        .find(|t| [t.bytes, t.cost, t.rest].contains(&u64::MAX))
     {
-        return Err(unfit(terms.clone(), Failed::Unstated(t.part)));
-    }
-    // A count times its cost past any count saturates: refused, never a
-    // term that a memory stated at its most would admit.
-    if let Some(t) = terms.iter().find(|t| t.bytes == u64::MAX) {
         return Err(unfit(terms.clone(), Failed::Overflow(t.part)));
     }
     let sums = [
@@ -733,15 +855,19 @@ fn largest(lo: u64, hi: u64, fits: impl Fn(u64) -> bool) -> Option<u64> {
 fn slice(part: Part) -> Option<&'static str> {
     match part {
         Part::Cells
+        | Part::Pending
         | Part::Records
         | Part::BoundTo
         | Part::Kept
         | Part::ShellAttempts
-        | Part::CarrierAttempts => Some("K2b-7e-3, the read gate"),
+        | Part::CarrierAttempts
+        | Part::Decorations => Some("K2b-7e-3, the read gate"),
         // The parse is the tape's since K2b-7e-4: no slice lowers it further;
         // its remedy is the plan's answer cap.
         Part::CarrierSource
         | Part::Judging
+        | Part::JournalOut
+        | Part::ProbesIo
         | Part::Reader
         | Part::Decoder
         | Part::Runtime

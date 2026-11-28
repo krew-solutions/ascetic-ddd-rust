@@ -541,6 +541,21 @@ fn a_run_reading_past_its_admitted_reader_is_refused() {
         )
         .unwrap()
     });
+    // Its reader priced by its records ahead and the two beside, its
+    // decoder once (K2b-7e-2b-3d-3a).
+    let count = |part| {
+        admitted
+            .fit()
+            .terms
+            .iter()
+            .find(|t| t.part == part)
+            .map(|t| t.count)
+    };
+    use ascetic_ddd_load_run::memory::Part;
+    assert_eq!(
+        (count(Part::Reader), count(Part::Decoder)),
+        (Some(4 + 2), Some(1))
+    );
     let ready = Ready::assumed(admitted, clock, Lines::new(), Namespace(1));
     match rt.block_on(run(ready, wider)) {
         Err(RunError::Inadmissible(Inadmissible::Reader { admitted, ahead })) => {

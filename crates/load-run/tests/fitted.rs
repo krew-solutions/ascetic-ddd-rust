@@ -599,3 +599,130 @@ fn a_limit_s_origin_and_the_unheld_parts() {
     assert!(!unheld.is_empty());
     assert_eq!(unheld, &gate);
 }
+
+/// K2b-7e-2b-3d-3a: each part's count is its enforcer's — a source's cap,
+/// its runtime's events, the journal's lines behind and the two beside, the
+/// cells held, the steps pending, the barrier keys, the late steps (here not
+/// the pending) —, its costs the library's model; the journal's output the
+/// host's term apart; no reader, neither its records nor its decoder; a
+/// host's carrier's connections, answers and probes the host's word.
+#[test]
+fn each_part_s_count_is_its_enforcer_s() {
+    use ascetic_ddd_command_log::live::DECODER;
+    use ascetic_ddd_command_log::shape::{ARC, Shape};
+    use ascetic_ddd_load_run::carrier::StatedBy;
+    use ascetic_ddd_load_run::memory::Term;
+    use ascetic_ddd_load_run::run::{ATTEMPT, DRIVER_EVENTS, EVENT, RUNTIME};
+    use ascetic_ddd_scheduler::fits::{BARRIER, ENDED_CELL, LIVE_CELL};
+    let peaks = Peaks {
+        held: 5,
+        pending: 3,
+        late: 7,
+        late_shape: Shape {
+            records: 7,
+            ..Shape::default()
+        },
+        barriers: 2,
+        barrier_bytes: 40,
+        ..Peaks::default()
+    };
+    assert_ne!(peaks.late, peaks.pending);
+    let mut header = fixture::header();
+    header.profile.sources = 2;
+    let fitted = fit::<RealClock, _>(
+        Plan::assumed(Arc::new(header), peaks),
+        0,
+        Arc::new(Capped { cap: 8, needed: 1 }),
+        Journal::new(64, 123),
+        Memory::declared(PLENTY),
+        Limit::assumed(Some((PLENTY, 0)), None),
+    )
+    .unwrap();
+    let terms = &fitted.fit().terms;
+    let each =
+        |part: Part| -> Vec<Term> { terms.iter().filter(|t| t.part == part).copied().collect() };
+    let one = |part: Part| -> (u64, u64, u64) {
+        let v = each(part);
+        assert_eq!(v.len(), 1, "{part:?}");
+        (v[0].count, v[0].cost, v[0].rest)
+    };
+    let sockets = [
+        (Part::Connections, 4_096),
+        (Part::Io, 0),
+        (Part::Answers, 65_536),
+        (Part::Probes, 4_096),
+        (Part::ProbesIo, 0),
+    ];
+    for (part, cost) in sockets {
+        let v = each(part);
+        assert_eq!(v.len(), 2, "{part:?}");
+        assert!(v.iter().all(|t| (t.count, t.cost) == (8, cost)), "{v:?}");
+        assert!(v.iter().all(|t| t.stated == StatedBy::Host), "{v:?}");
+    }
+    let runtimes = each(Part::Runtime);
+    assert_eq!(runtimes.len(), 2);
+    assert!(
+        runtimes
+            .iter()
+            .all(|t| (t.count, Some(t.cost), t.rest) == (8 + DRIVER_EVENTS as u64, EVENT, RUNTIME)),
+        "{runtimes:?}"
+    );
+    assert_eq!(one(Part::Reader), (0, 0, 0));
+    assert_eq!(one(Part::Decoder), (0, DECODER, 0));
+    assert_eq!(one(Part::Journal).0, 64 + 2);
+    assert_eq!(one(Part::JournalOut), (1, 123, 0));
+    assert_eq!(one(Part::Cells), (5, ENDED_CELL, 0));
+    assert_eq!(one(Part::Pending), (3, LIVE_CELL - ENDED_CELL, 0));
+    assert_eq!(one(Part::Barriers), (2, BARRIER, 40));
+    assert_eq!(one(Part::Records), (7, ARC as u64, 0));
+    assert_eq!(one(Part::ShellAttempts), (7, ATTEMPT, 0));
+    assert_eq!(one(Part::CarrierAttempts).0, 7);
+    assert_eq!(one(Part::Decorations).0, 7);
+}
+
+/// K2b-7e-2b-3d-3a: a carrier's attempts priced by their count — each one's
+/// part a late step, the classes' bytes and holes beside — and their
+/// decorations apart, the decorator's: together the price, every class
+/// counted once.
+#[test]
+fn a_carrier_s_attempts_are_its_price_by_their_count() {
+    use ascetic_ddd_command_log::shape::Shape;
+    use ascetic_ddd_load_run::carrier::StatedBy;
+    let costs = AttemptCosts {
+        each: 3,
+        target: 5,
+        target_hole: 7,
+        header: 11,
+        header_hole: 13,
+        field: 17,
+        body: 19,
+        body_hole: 23,
+        hole: 29,
+        hole_bytes: 31,
+        decorations: 37,
+        stated_by: StatedBy::Library,
+    };
+    let mut s = Shape {
+        records: 41,
+        target: 43,
+        target_holes: 47,
+        headers: 53,
+        header_holes: 59,
+        body: 61,
+        body_holes: 67,
+        holes: 71,
+        hole_bytes: 73,
+        ..Shape::default()
+    };
+    s.fields.elements = 79;
+    let (each, rest) = costs.priced(&s);
+    assert_eq!(each, 3);
+    assert_eq!(
+        s.records * (each + costs.decorations) + rest,
+        costs.price(&s)
+    );
+    assert_eq!(
+        rest,
+        5 * 43 + 7 * 47 + 11 * 53 + 13 * 59 + 17 * 79 + 19 * 61 + 23 * 67 + 29 * 71 + 31 * 73
+    );
+}

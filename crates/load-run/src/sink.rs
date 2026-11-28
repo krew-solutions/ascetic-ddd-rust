@@ -78,19 +78,28 @@ impl Journal {
     /// the machine waits to send, the one the thread writes —; the writer's
     /// buffer; the thread and the channel's own; the output's.
     pub fn bytes(&self, record: &Shape) -> u64 {
+        self.priced(record)
+            .bytes()
+            .unwrap_or(u64::MAX)
+            .saturating_add(self.out)
+    }
+
+    /// The library's of the same by its count, the output's apart — its
+    /// host's (ADR-0047 decision 22, K2b-7e-2b-3d-3a): `behind + 2` lines at
+    /// their bound; the channel's slots, its writer's buffer and its thread
+    /// beside.
+    pub fn priced(&self, record: &Shape) -> ascetic_ddd_scheduler::fits::Priced {
         let of = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
         let behind = of(self.behind);
         let slot = of(size_of::<Message>()).saturating_add(of(size_of::<usize>()));
-        behind
-            .saturating_mul(slot)
-            .saturating_add(
-                behind
-                    .saturating_add(2)
-                    .saturating_mul(journal::line_bound(record)),
-            )
-            .saturating_add(of(journal::BUFFER))
-            .saturating_add(THREAD)
-            .saturating_add(self.out)
+        ascetic_ddd_scheduler::fits::Priced {
+            count: behind.saturating_add(2),
+            cost: journal::line_bound(record),
+            rest: behind
+                .saturating_mul(slot)
+                .saturating_add(of(journal::BUFFER))
+                .saturating_add(THREAD),
+        }
     }
 }
 

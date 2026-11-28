@@ -153,6 +153,69 @@ pub fn terms(peaks: &Peaks) -> Terms {
     }
 }
 
+/// A part priced as admission journals it (ADR-0047 decision 22,
+/// K2b-7e-2b-3d-3a): the things its enforcer bounds, what each holds, and
+/// what does not scale with them — `count · cost + rest`, checked.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Priced {
+    /// The things its enforcer bounds.
+    pub count: u64,
+    /// What each holds.
+    pub cost: u64,
+    /// What does not scale with them.
+    pub rest: u64,
+}
+
+impl Priced {
+    /// `count · cost + rest`; none past any count.
+    #[must_use]
+    pub fn bytes(&self) -> Option<u64> {
+        self.count.checked_mul(self.cost)?.checked_add(self.rest)
+    }
+}
+
+/// What a machine of these peaks holds, by its counts (ADR-0047 decision 22,
+/// K2b-7e-2b-3d-3a): each count with what does not scale with it, its
+/// per-thing costs the constants above — the evidence's split of [`Terms`],
+/// whose bytes these make.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counts {
+    /// The ended steps held.
+    pub held: u64,
+    /// The steps not ended.
+    pub pending: u64,
+    /// The barrier keys.
+    pub barriers: u64,
+    /// The barrier keys' own bytes.
+    pub barrier_bytes: u64,
+    /// The producers the records not ended are bound to, and their waiters.
+    pub bound_to: u64,
+    /// What the held keep once ended.
+    pub keeping: u64,
+    /// One record's bindings while its step is taken.
+    pub binding: u64,
+    /// The records of the steps late by a jitter.
+    pub late: u64,
+    /// Their parts beside their `Arc`s.
+    pub late_parts: u64,
+}
+
+/// The counts a plan of these peaks holds.
+#[must_use]
+pub fn counts(peaks: &Peaks) -> Counts {
+    Counts {
+        held: peaks.held,
+        pending: peaks.pending,
+        barriers: peaks.barriers,
+        barrier_bytes: peaks.barrier_bytes,
+        bound_to: bound_to(&peaks.pending_shape),
+        keeping: keeping(&peaks.kept),
+        binding: binding(&peaks.record),
+        late: peaks.late,
+        late_parts: shape::parts(&peaks.late_shape),
+    }
+}
+
 /// The records a run holds of the steps late by a jitter (K2b-7e-2b-3a-3):
 /// those not ended and those an attempt's handle holds past its end — what
 /// admission's pool charges in place of [`Terms::records`], each count of

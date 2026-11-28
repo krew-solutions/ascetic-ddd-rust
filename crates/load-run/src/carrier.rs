@@ -100,6 +100,20 @@ impl AttemptCosts {
         stated_by: StatedBy::Host,
     };
 
+    /// The carrier's own of the attempts of records summed into `s`, by
+    /// their count (ADR-0047 decision 22, K2b-7e-2b-3d-3a): each one's part,
+    /// and every class's bytes and holes at their coefficients beside — its
+    /// decorations apart, the decorator's.
+    #[must_use]
+    pub fn priced(&self, s: &ascetic_ddd_command_log::shape::Shape) -> (u64, u64) {
+        let decorated = AttemptCosts {
+            each: 0,
+            decorations: 0,
+            ..*self
+        };
+        (self.each, decorated.price(s))
+    }
+
     /// What the attempts of records summed into `s` hold: each one's part,
     /// and every class's bytes and holes at their coefficients.
     #[must_use]

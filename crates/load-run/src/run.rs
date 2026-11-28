@@ -171,6 +171,16 @@ pub const ATTEMPT: u64 = 1_536;
 pub const CAPTURED: u64 = ascetic_ddd_scheduler::fits::VALUE
     .saturating_add(size_of::<ascetic_ddd_command_log::fills::Captured>() as u64);
 
+/// The shell's parts of the attempts of records summed into `shape` beside its
+/// share [`ATTEMPT`] each (ADR-0047 decision 22, K2b-7e-2b-3d-3a): its copy
+/// of each captured hole's value.
+#[must_use]
+pub fn attempt_parts(shape: &ascetic_ddd_command_log::shape::Shape) -> u64 {
+    CAPTURED
+        .saturating_mul(shape.holes)
+        .saturating_add(shape.hole_bytes)
+}
+
 /// The bytes the shell holds of the attempts of records summed into `shape`
 /// (decision 22, K2b-7e-2b-3a-3), whatever carries them: its share
 /// [`ATTEMPT`] each, and its copy of each captured hole's value — at most
@@ -180,8 +190,7 @@ pub const CAPTURED: u64 = ascetic_ddd_scheduler::fits::VALUE
 pub fn attempt_share(shape: &ascetic_ddd_command_log::shape::Shape) -> u64 {
     ATTEMPT
         .saturating_mul(shape.records)
-        .saturating_add(CAPTURED.saturating_mul(shape.holes))
-        .saturating_add(shape.hole_bytes)
+        .saturating_add(attempt_parts(shape))
 }
 
 /// The I/O events a source's driver spends a turn on its own (decision 20):
@@ -805,10 +814,10 @@ fn planned<C: Clock, X: Carrier<C>>(
                 (cap, s)
             })
             .map(|(cap, s)| crate::memory::SourcePart {
-                runtime: crate::live::events_for(&[cap])
+                events: crate::live::events_for(&[cap])
                     .ok()
                     .and_then(|e| e.first().copied())
-                    .and_then(runtime_own),
+                    .map(of),
                 cap: of(cap),
                 connection: s.costs.map_or(0, |c| c.connection),
                 io: s.costs.map_or(0, |c| c.io),
@@ -818,20 +827,17 @@ fn planned<C: Clock, X: Carrier<C>>(
                 keeping: ending(record),
             })
             .collect(),
-        reader: reader.map_or(0, |r| r.bytes(record)),
-        decoder: if reader.is_some() {
-            ascetic_ddd_command_log::live::DECODER
-        } else {
-            0
-        },
-        journal: crate::sink::Journal::new(knobs.behind, journal.out()).bytes(record),
+        reader: reader.map(|r| r.priced(record)),
+        journal: crate::sink::Journal::new(knobs.behind, journal.out()).priced(record),
+        journal_out: journal.out(),
         judging: crate::stages::judging_bound(plan.header()),
         gates: carrier.gate_bytes(),
-        machine: ascetic_ddd_scheduler::fits::terms(peaks),
-        records: ascetic_ddd_scheduler::fits::late_records(peaks),
-        shell_attempts: attempt_share(&peaks.late_shape),
-        carrier_attempts: attempts.price(&peaks.late_shape),
+        machine: ascetic_ddd_scheduler::fits::counts(peaks),
+        carrier_attempts: attempts.priced(&peaks.late_shape),
+        shell_parts: attempt_parts(&peaks.late_shape),
+        decorations: attempts.decorations,
         carrier_stated: attempts.stated_by,
+        model: crate::memory::Model::LIBRARY,
         kappa: kappa(&plan.header().profile).unwrap_or(999),
     })
 }
@@ -1190,7 +1196,10 @@ pub fn admit<C: Clock, X: Carrier<C>>(
             let fitted = planned
                 .sources
                 .get(usize::try_from(source).unwrap_or(usize::MAX));
-            let fitted = fitted.and_then(|p| p.runtime);
+            let fitted = fitted
+                .and_then(|p| p.events)
+                .and_then(|e| usize::try_from(e).ok())
+                .and_then(runtime_own);
             let built = runtimes.own(source);
             if built != fitted {
                 refused.push(Inadmissible::Runtime {

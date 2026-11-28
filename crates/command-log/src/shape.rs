@@ -376,8 +376,9 @@ pub fn parts(s: &Shape) -> u64 {
     )
 }
 
-/// An `Arc` of a record: its two counts and the record.
-const ARC: usize = 2 * size_of::<usize>() + size_of::<Record>();
+/// An `Arc` of a record: its two counts and the record — what a record held
+/// costs beside its [`parts`], each (ADR-0047 decision 22, K2b-7e-2b-3d-3a).
+pub const ARC: usize = 2 * size_of::<usize>() + size_of::<Record>();
 
 fn as_u64(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)

@@ -7,15 +7,16 @@
 //! binds, a saturated part refused, a runtime of no stated events refused.
 
 use ascetic_ddd_load_run::carrier::StatedBy;
-use ascetic_ddd_load_run::memory::{Failed, Memory, Part, Phase, Planned, SourcePart, fit};
+use ascetic_ddd_load_run::memory::{Failed, Memory, Model, Part, Phase, Planned, SourcePart, fit};
 use ascetic_ddd_load_run::stand::GateBytes;
-use ascetic_ddd_scheduler::fits::Terms;
+use ascetic_ddd_scheduler::fits::{Counts, Priced};
 use proptest::prelude::*;
 
-/// A source's parts of these values.
+/// A source's parts of these values: its runtime's bytes its events, each a
+/// byte (the builder's model prices an event at 1 and a runtime's own at 0).
 fn source(v: [u64; 7]) -> SourcePart {
     SourcePart {
-        runtime: Some(v[0]),
+        events: Some(v[0]),
         cap: v[1],
         connection: v[2],
         io: v[3],
@@ -26,42 +27,85 @@ fn source(v: [u64; 7]) -> SourcePart {
     }
 }
 
-/// A run's parts of these values.
+/// One of a cost: what a part held once is priced at.
+fn one(cost: u64) -> Priced {
+    Priced {
+        count: 1,
+        cost,
+        rest: 0,
+    }
+}
+
+/// A run's parts of these values, each part's bytes the value its index
+/// names (K2b-7e-2b-3d-3a): the counts the pool shares one, the costs that
+/// are constants the model's — drawn, not the library's.
 fn planned(sources: Vec<SourcePart>, v: [u64; 16], kappa: u64) -> Planned {
     Planned {
         sources,
-        reader: v[0],
-        decoder: v[1],
-        journal: v[2],
+        reader: Some(one(v[0])),
+        journal: one(v[2]),
+        journal_out: 0,
         judging: v[3],
         gates: GateBytes {
             stages: v[4],
             run: v[5],
         },
-        machine: Terms {
-            cells: v[6],
-            barriers: v[7],
-            records: v[8],
+        machine: Counts {
+            held: 1,
+            pending: 0,
+            barriers: 0,
+            barrier_bytes: v[7],
             bound_to: v[9],
             keeping: v[10],
             binding: v[11],
+            late: 1,
+            late_parts: 0,
         },
-        records: v[12],
-        shell_attempts: v[13],
-        carrier_attempts: v[14],
+        carrier_attempts: (v[14], 0),
+        shell_parts: 0,
+        decorations: 0,
         carrier_stated: StatedBy::Library,
+        model: Model {
+            ended_cell: v[6],
+            live_cell: v[6] + 1,
+            barrier: 0,
+            record: v[12],
+            decoder: v[1],
+            attempt: v[13],
+            runtime: 0,
+            event: Some(1),
+        },
         kappa: kappa.min(999),
     }
 }
 
-/// The decision's sentence, in u128.
+/// The decision's sentence, in u128: each part's count times its cost and
+/// its rest, the constants the model's — what the run needs.
 fn shadow(p: &Planned) -> u128 {
+    phases(p).need
+}
+
+/// The phases' sums the decision has, in u128.
+struct Phases {
+    fixed: u128,
+    run: u128,
+    /// The pool at the catch-up's rate.
+    pool: u128,
+    need: u128,
+}
+
+fn phases(p: &Planned) -> Phases {
     let w = u128::from;
-    let fixed = w(p.reader)
-        + w(p.decoder)
+    let priced = |q: &Priced| w(q.count) * w(q.cost) + w(q.rest);
+    let m = p.model;
+    let c = p.machine;
+    let reader = p.reader.as_ref().map_or(0, priced);
+    let decoder = if p.reader.is_some() { w(m.decoder) } else { 0 };
+    let fixed = reader
+        + decoder
         + p.sources
             .iter()
-            .map(|s| w(s.runtime.unwrap()))
+            .map(|s| w(s.events.unwrap()) * w(m.event.unwrap()) + w(m.runtime))
             .sum::<u128>();
     let stages = w(p.judging);
     let gates = w(p.gates.stages)
@@ -69,7 +113,8 @@ fn shadow(p: &Planned) -> u128 {
             .iter()
             .map(|s| w(s.cap) * (w(s.connection) + w(s.io)))
             .sum::<u128>();
-    let run = w(p.journal)
+    let run = priced(&p.journal)
+        + w(p.journal_out)
         + w(p.gates.run)
         + p.sources
             .iter()
@@ -77,19 +122,67 @@ fn shadow(p: &Planned) -> u128 {
                 w(s.carrier) + w(s.keeping) + w(s.cap) * (w(s.connection) + w(s.io) + w(s.answer))
             })
             .sum::<u128>();
-    // The machine's records are priced at the late steps' instead.
-    let m = p.machine;
-    let pool = w(m.cells)
-        + w(m.barriers)
-        + w(p.records)
-        + w(m.bound_to)
-        + w(m.keeping)
-        + w(m.binding)
-        + w(p.shell_attempts)
-        + w(p.carrier_attempts);
-    let c = 1000 - w(p.kappa);
-    let pool = (pool * 1000).div_ceil(c);
-    (fixed + stages).max(fixed + gates).max(fixed + run + pool)
+    let late = w(c.late);
+    let pool = w(c.held) * w(m.ended_cell)
+        + w(c.pending) * (w(m.live_cell) - w(m.ended_cell))
+        + w(c.barriers) * w(m.barrier)
+        + w(c.barrier_bytes)
+        + late * w(m.record)
+        + w(c.late_parts)
+        + w(c.bound_to)
+        + w(c.keeping)
+        + w(c.binding)
+        + late * w(m.attempt)
+        + w(p.shell_parts)
+        + late * w(p.carrier_attempts.0)
+        + w(p.carrier_attempts.1)
+        + late * w(p.decorations);
+    let k = 1000 - w(p.kappa);
+    let pool = (pool * 1000).div_ceil(k);
+    Phases {
+        fixed,
+        run,
+        pool,
+        need: (fixed + stages).max(fixed + gates).max(fixed + run + pool),
+    }
+}
+
+/// The parts no enforcer holds yet, as the decision has them: the pool's,
+/// but the barrier keys' and one record's bindings, each held once.
+fn gate_held(part: Part) -> bool {
+    phase(part) == Phase::Pool && !matches!(part, Part::Barriers | Part::Binding)
+}
+
+/// Who states each part, as the decision has them: the host its connections'
+/// own heap, its journal's output, its gates and its decorations; the
+/// carrier a source's own, its connections and answers, its probes' and its
+/// attempts'; the library the rest.
+fn stated(p: &Planned, part: Part, source: Option<u32>) -> StatedBy {
+    let carrier = || p.sources[source.unwrap() as usize].carrier_stated;
+    match part {
+        Part::Io
+        | Part::ProbesIo
+        | Part::JournalOut
+        | Part::GateStages
+        | Part::GateRun
+        | Part::Decorations => StatedBy::Host,
+        Part::CarrierSource | Part::Connections | Part::Answers | Part::Probes => carrier(),
+        Part::CarrierAttempts => p.carrier_stated,
+        Part::Reader
+        | Part::Decoder
+        | Part::Runtime
+        | Part::Keeping
+        | Part::Journal
+        | Part::Judging
+        | Part::Cells
+        | Part::Pending
+        | Part::Barriers
+        | Part::Records
+        | Part::BoundTo
+        | Part::Kept
+        | Part::Binding
+        | Part::ShellAttempts => StatedBy::Library,
+    }
 }
 
 /// The phase each part's bytes are held in, as the decision has them.
@@ -97,22 +190,25 @@ fn phase(part: Part) -> Phase {
     match part {
         Part::Reader | Part::Decoder | Part::Runtime => Phase::Fixed,
         Part::Judging => Phase::Stages,
-        Part::Probes | Part::GateStages => Phase::Gates,
+        Part::Probes | Part::ProbesIo | Part::GateStages => Phase::Gates,
         Part::CarrierSource
         | Part::Keeping
         | Part::Journal
+        | Part::JournalOut
         | Part::Connections
         | Part::Io
         | Part::Answers
         | Part::GateRun => Phase::Run,
         Part::Cells
+        | Part::Pending
         | Part::Barriers
         | Part::Records
         | Part::BoundTo
         | Part::Kept
         | Part::Binding
         | Part::ShellAttempts
-        | Part::CarrierAttempts => Phase::Pool,
+        | Part::CarrierAttempts
+        | Part::Decorations => Phase::Pool,
     }
 }
 
@@ -120,58 +216,172 @@ fn phase(part: Part) -> Phase {
 fn raised(mut p: Planned, part: Part, d: u64) -> Planned {
     let s0 = &mut p.sources[0];
     match part {
-        Part::Reader => p.reader += d,
-        Part::Decoder => p.decoder += d,
-        Part::Runtime => s0.runtime = s0.runtime.map(|r| r + d),
+        Part::Reader => {
+            p.reader = p.reader.map(|r| Priced {
+                cost: r.cost + d,
+                ..r
+            })
+        }
+        Part::Decoder => p.model.decoder += d,
+        Part::Runtime => s0.events = s0.events.map(|e| e + d),
         Part::CarrierSource => s0.carrier += d,
         Part::Keeping => s0.keeping += d,
-        Part::Journal => p.journal += d,
+        Part::Journal => p.journal.cost += d,
+        Part::JournalOut => p.journal_out += d,
         // A count's part raised by its cost: a socket more.
         Part::Connections => s0.connection += d,
         Part::Io => s0.io += d,
         Part::Answers => s0.answer += d,
         Part::Judging => p.judging += d,
         Part::Probes => s0.cap += d,
+        Part::ProbesIo => s0.io += d,
         Part::GateStages => p.gates.stages += d,
         Part::GateRun => p.gates.run += d,
-        Part::Cells => p.machine.cells += d,
-        Part::Barriers => p.machine.barriers += d,
+        // The ended cell raised with the live, the pending's cost unmoved.
+        Part::Cells => {
+            p.model.ended_cell += d;
+            p.model.live_cell += d;
+        }
+        Part::Pending => p.machine.pending += d,
+        Part::Barriers => p.machine.barrier_bytes += d,
         // The machine's own records are not the pool's: the late steps' are.
-        Part::Records => p.records += d,
+        Part::Records => p.model.record += d,
         Part::BoundTo => p.machine.bound_to += d,
         Part::Kept => p.machine.keeping += d,
         Part::Binding => p.machine.binding += d,
-        Part::ShellAttempts => p.shell_attempts += d,
-        Part::CarrierAttempts => p.carrier_attempts += d,
+        Part::ShellAttempts => p.model.attempt += d,
+        Part::CarrierAttempts => p.carrier_attempts.0 += d,
+        Part::Decorations => p.decorations += d,
     }
     p
 }
 
+/// A run of drawn parts: each count, each cost and each rest its own draw,
+/// the model's constants too — not the library's —, a reader or none, each
+/// stater the library or the host.
 fn arbitrary() -> impl Strategy<Value = Planned> {
+    let small = || 0u64..1 << 12;
+    let cost = || 0u64..1 << 20;
+    let stater = || prop::sample::select(vec![StatedBy::Library, StatedBy::Host]);
+    let sources = prop::collection::vec((prop::array::uniform7(cost()), small(), stater()), 1..4)
+        .prop_map(|v| {
+            v.into_iter()
+                .map(|(c, cap, by)| SourcePart {
+                    cap,
+                    carrier_stated: by,
+                    ..source(c)
+                })
+                .collect::<Vec<_>>()
+        });
+    let priced = move || {
+        (small(), cost(), cost()).prop_map(|(count, cost, rest)| Priced { count, cost, rest })
+    };
+    let counts = (
+        prop::array::uniform5(small()),
+        prop::array::uniform4(cost()),
+    )
+        .prop_map(|(n, b)| Counts {
+            held: n[0],
+            pending: n[1],
+            barriers: n[2],
+            barrier_bytes: b[0],
+            bound_to: b[1],
+            keeping: b[2],
+            binding: b[3],
+            late: n[3],
+            late_parts: n[4] << 8,
+        });
+    let model = (prop::array::uniform8(cost())).prop_map(|c| Model {
+        ended_cell: c[0],
+        live_cell: c[0] + c[1],
+        barrier: c[2],
+        record: c[3],
+        decoder: c[4],
+        attempt: c[5],
+        runtime: c[6],
+        event: Some(c[7] >> 8),
+    });
     (
-        prop::collection::vec(prop::array::uniform7(0u64..1 << 20), 1..4),
-        prop::array::uniform16(0u64..1 << 24),
+        (sources, prop::option::of(priced()), priced(), counts, model),
+        (prop::array::uniform8(cost()), stater()),
         prop::sample::select(vec![0u64, 1, 10, 500, 999]),
     )
-        .prop_map(|(sources, v, kappa)| {
-            planned(sources.into_iter().map(source).collect(), v, kappa)
-        })
+        .prop_map(
+            |((sources, reader, journal, machine, model), (v, by), kappa)| Planned {
+                sources,
+                reader,
+                journal,
+                journal_out: v[0],
+                judging: v[1],
+                gates: GateBytes {
+                    stages: v[2],
+                    run: v[3],
+                },
+                machine,
+                carrier_attempts: (v[4], v[5]),
+                shell_parts: v[6],
+                decorations: v[7],
+                carrier_stated: by,
+                model,
+                kappa,
+            },
+        )
+}
+
+/// `p` with its `i`th count raised by `d`: a source's cap, its runtime's
+/// events, the reader's records, the journal's lines, the cells held, the
+/// steps pending, the barrier keys, the late steps.
+const COUNTS: usize = 8;
+
+fn counted(mut p: Planned, i: usize, d: u64) -> Planned {
+    let s0 = &mut p.sources[0];
+    match i {
+        0 => s0.cap += d,
+        1 => s0.events = s0.events.map(|e| e + d),
+        2 => {
+            p.reader = p.reader.map(|r| Priced {
+                count: r.count + d,
+                ..r
+            })
+        }
+        3 => p.journal.count += d,
+        4 => p.machine.held += d,
+        5 => p.machine.pending += d,
+        6 => p.machine.barriers += d,
+        _ => p.machine.late += d,
+    }
+    p
 }
 
 proptest! {
     #![proptest_config(ProptestConfig { cases: 512, failure_persistence: None, ..ProptestConfig::default() })]
 
-    /// What a run needs is the shadow's; the least memory admits it with no
-    /// slack, one byte less refuses it naming that least; the pool's budget
-    /// what the run's fixed parts leave.
+    /// What a run needs is the shadow's, its pool at the catch-up's rate and
+    /// its budget what the fixed and the run's parts leave, exactly; the
+    /// least memory admits it with no slack, one byte less refuses it naming
+    /// that least; the parts no enforcer holds the pool's but the keys' and
+    /// the bindings'; each term `count · cost + rest`, stated as the decision
+    /// has it.
     #[test]
     fn a_run_needs_the_largest_phase(p in arbitrary()) {
-        let need = u64::try_from(shadow(&p)).unwrap();
+        let want = phases(&p);
+        let need = u64::try_from(want.need).unwrap();
         let fits = fit(&p, Memory::declared(need)).unwrap();
         prop_assert_eq!(fits.need, need);
         prop_assert_eq!(fits.slack, 0);
-        prop_assert!(fits.pool <= fits.budget);
-        prop_assert!(!fits.unheld.is_empty(), "the pool's count is held by nothing yet");
+        prop_assert_eq!(u128::from(fits.pool), want.pool);
+        prop_assert_eq!(u128::from(fits.budget), want.need - (want.fixed + want.run));
+        let gate: Vec<Part> = Part::ALL.into_iter().filter(|q| gate_held(*q)).collect();
+        prop_assert_eq!(&fits.unheld, &gate);
+        for t in &fits.terms {
+            prop_assert_eq!(
+                u128::from(t.bytes),
+                u128::from(t.count) * u128::from(t.cost) + u128::from(t.rest),
+                "{:?}", t
+            );
+            prop_assert_eq!(t.phase, phase(t.part), "{:?}", t);
+            prop_assert_eq!(t.stated, stated(&p, t.part, t.source), "{:?}", t);
+        }
         if need > 0 {
             let refused = fit(&p, Memory::declared(need - 1)).unwrap_err();
             prop_assert_eq!(refused.least, Some(need));
@@ -181,6 +391,7 @@ proptest! {
         }
         let more = fit(&p, Memory::declared(need.saturating_add(1_000))).unwrap();
         prop_assert_eq!(more.slack, 1_000);
+        prop_assert_eq!(u128::from(more.budget), want.need + 1_000 - (want.fixed + want.run));
     }
 
     /// Every part moves the need as the shadow does: by its bytes where its
@@ -195,6 +406,35 @@ proptest! {
             prop_assert_eq!(got, want, "{:?} in {:?} raised by {}", part, phase(part), d);
         }
     }
+
+    /// Every count moves the need as the shadow does: by its costs, each
+    /// count's every term at once where its phase binds.
+    #[test]
+    fn every_count_moves_the_need_by_its_costs(p in arbitrary(), d in 1u64..64) {
+        for i in 0..COUNTS {
+            let q = counted(p.clone(), i, d);
+            let want = u64::try_from(shadow(&q)).unwrap();
+            let got = fit(&q, Memory::declared(u64::MAX / 2)).unwrap().need;
+            prop_assert_eq!(got, want, "count {} raised by {}", i, d);
+        }
+    }
+}
+
+/// The pool at a catch-up of 1 per mille, its bytes not divided by 999: the
+/// prediction rounded up, exactly — 1,000 bytes predicted at 1,002 — and a
+/// byte less than the least refused as the pool's.
+#[test]
+fn the_pool_is_rounded_up_at_its_catch_up() {
+    let mut v = [0u64; 16];
+    v[6] = 1_000; // cells
+    let p = planned(vec![source([0; 7])], v, 1);
+    let fits = fit(&p, Memory::declared(u64::MAX / 2)).unwrap();
+    assert_eq!(fits.pool, 1_002);
+    assert_eq!(fits.need, 1_002);
+    assert_eq!(
+        fit(&p, Memory::declared(1_001)).unwrap_err().failed,
+        Failed::Pool
+    );
 }
 
 /// A run whose stage 2 holds its largest term while the run binds by more:
@@ -246,8 +486,30 @@ fn a_part_past_any_count_or_unstated_is_refused() {
         fit(&p, Memory::declared(u64::MAX)).unwrap_err().failed,
         Failed::Overflow(_)
     ));
+    // Rule 1: a cost past any count refused whatever its count — a cap of 0
+    // whose connection saturated.
+    let p = planned(vec![source([0, 0, u64::MAX, 0, 0, 0, 0])], v, 0);
+    assert_eq!(
+        fit(&p, Memory::declared(u64::MAX)).unwrap_err().failed,
+        Failed::Overflow(Part::Connections)
+    );
+    // A pending cell's cost below the ended one's: no cost, refused.
+    let mut p = planned(vec![source([0; 7])], v, 0);
+    p.model.live_cell = 0;
+    p.model.ended_cell = 1;
+    assert_eq!(
+        fit(&p, Memory::declared(u64::MAX)).unwrap_err().failed,
+        Failed::Overflow(Part::Pending)
+    );
+    // An event's size no driver states: the runtime unstated.
+    let mut p = planned(vec![source([0; 7])], v, 0);
+    p.model.event = None;
+    assert_eq!(
+        fit(&p, Memory::declared(u64::MAX)).unwrap_err().failed,
+        Failed::Unstated(Part::Runtime)
+    );
     let mut s = source([0; 7]);
-    s.runtime = None;
+    s.events = None;
     let p = planned(vec![s], v, 0);
     assert_eq!(
         fit(&p, Memory::declared(u64::MAX)).unwrap_err().failed,

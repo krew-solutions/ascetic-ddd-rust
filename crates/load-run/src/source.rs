@@ -69,20 +69,30 @@ impl Reader {
     /// waits to send, the one the run took and has not read yet — each in its
     /// `Arc` at the largest record; the channel's blocks; its thread.
     pub fn bytes(&self, record: &Shape) -> u64 {
+        self.priced(record).bytes().unwrap_or(u64::MAX)
+    }
+
+    /// The same by its count (ADR-0047 decision 22, K2b-7e-2b-3d-3a): its
+    /// records ahead and the two beside them, each at the largest record's
+    /// bound; its reading, its channel's blocks and its thread beside.
+    pub fn priced(&self, record: &Shape) -> ascetic_ddd_scheduler::fits::Priced {
         let records = u64::try_from(self.ahead.saturating_add(2)).unwrap_or(u64::MAX);
         let block = BLOCK
             .saturating_mul(size_of::<Message>())
             .saturating_add(4 * size_of::<usize>());
         let channel = blocks(self.ahead).saturating_mul(block);
         let thread = THREAD.saturating_add(size_of::<live::Replay>() as u64);
-        [
-            self.reading.heap(),
-            records.saturating_mul(bound(record)),
-            u64::try_from(channel).unwrap_or(u64::MAX),
-            thread,
-        ]
-        .into_iter()
-        .fold(0, u64::saturating_add)
+        ascetic_ddd_scheduler::fits::Priced {
+            count: records,
+            cost: bound(record),
+            rest: [
+                self.reading.heap(),
+                u64::try_from(channel).unwrap_or(u64::MAX),
+                thread,
+            ]
+            .into_iter()
+            .fold(0, u64::saturating_add),
+        }
     }
 }
 

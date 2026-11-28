@@ -408,3 +408,39 @@ fn the_model_s_bound_instance_has_the_validator_s_numbers() {
         (5, 4, 6)
     );
 }
+
+/// K2b-7e-2b-3d-3a of ADR-0047 (decision 22): the machine's counts make its
+/// terms — each count at its cost and its rest the term's bytes, the late
+/// steps at their records' `Arc`s with their parts the late records' — on a
+/// plan's peaks, with a jitter (the late steps past the pending) and without.
+#[test]
+fn the_counts_make_the_terms() {
+    use ascetic_ddd_command_log::shape::ARC;
+    use ascetic_ddd_scheduler::fits::{
+        BARRIER, ENDED_CELL, LIVE_CELL, counts, late_records, terms,
+    };
+    for jitter in [0, 3_000] {
+        let mut h = plan_header(T);
+        h.profile.jitter = jitter;
+        let report = run_with(h, &chains(), &NoHost, 1_000);
+        assert!(report.violations.is_empty(), "{:?}", report.violations);
+        let p = report.peaks;
+        let (c, t) = (counts(&p), terms(&p));
+        assert_eq!(
+            c.held * ENDED_CELL + c.pending * (LIVE_CELL - ENDED_CELL),
+            t.cells
+        );
+        assert_eq!(c.barriers * BARRIER + c.barrier_bytes, t.barriers);
+        assert_eq!(
+            (c.bound_to, c.keeping, c.binding),
+            (t.bound_to, t.keeping, t.binding)
+        );
+        assert_eq!(c.late * ARC as u64 + c.late_parts, late_records(&p));
+        assert!(c.held > 0 && c.pending > 0 && c.barriers > 0, "{c:?}");
+        assert_eq!(
+            c.late > c.pending,
+            jitter > 0,
+            "{c:?} at a jitter of {jitter}"
+        );
+    }
+}
