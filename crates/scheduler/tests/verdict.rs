@@ -2356,6 +2356,41 @@ fn admissions() -> Vec<Admitted> {
             consistent: true,
         });
     }
+    // The headers load-run's admission journals, pinned there (K2b-7e-2b-3d-3b-4b).
+    for (name, bytes) in [
+        (
+            "no-reader-host-carrier",
+            &include_bytes!("../../load-run/golden/admitted/no-reader-host-carrier.jsonl")[..],
+        ),
+        (
+            "nine-sources",
+            &include_bytes!("../../load-run/golden/admitted/nine-sources.jsonl")[..],
+        ),
+        (
+            "one-rest-source",
+            &include_bytes!("../../load-run/golden/admitted/one-rest-source.jsonl")[..],
+        ),
+        (
+            "replayed-reader",
+            &include_bytes!("../../load-run/golden/admitted/replayed-reader.jsonl")[..],
+        ),
+    ] {
+        let header = Reader::new(Cursor::new(bytes.to_vec()))
+            .unwrap()
+            .header()
+            .clone();
+        let log = Log {
+            sha256: header.log,
+            records: 0,
+        };
+        out.push(Admitted {
+            name: format!("admitted by load-run: {name}"),
+            folded: fold_bytes(bytes, &log),
+            bytes: bytes.to_vec(),
+            log,
+            consistent: true,
+        });
+    }
     for (name, b, tamper, _) in admission::census() {
         let (mut k, mut a) = admission::consistent(&b);
         tamper(&mut k, &mut a);

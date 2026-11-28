@@ -5,6 +5,8 @@
 #[allow(unused_imports, clippy::disallowed_methods, clippy::disallowed_types)]
 mod fixture;
 
+mod pinned;
+
 use ascetic_ddd_load_run::sink::Journal;
 use std::collections::VecDeque;
 use std::future::Future;
@@ -570,4 +572,73 @@ fn a_run_reading_past_its_admitted_reader_is_refused() {
         }
         other => panic!("{:?}", other.map(|_| ())),
     }
+}
+
+/// The header admission journals of a plan replayed through its reader
+/// (K2b-7e-2b-3d-3b-4b): its records ahead and its decoder counted, carried
+/// by a carrier of no sockets.
+fn replayed_header() -> Vec<u8> {
+    use ascetic_ddd_command_log::live::{Commitment, commit_file};
+    use ascetic_ddd_command_log::validate::NoHost;
+    use ascetic_ddd_load_run::live::Limit;
+    use ascetic_ddd_load_run::memory::Memory;
+    use ascetic_ddd_load_run::run::fit;
+    use ascetic_ddd_load_run::source::Replayed;
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("plan.jsonl");
+    let records: Vec<_> = (1..=3).map(|g| call("read", g, 0, 0, 0)).collect();
+    ascetic_ddd_command_log::write_file(
+        &log,
+        header(),
+        records,
+        ascetic_ddd_command_log::Compression::None,
+    )
+    .unwrap();
+    let path = dir.path().join("plan.commitment");
+    commit_file(
+        &log,
+        &NoHost,
+        &limits_in(dir.path()),
+        "build",
+        4,
+        &path,
+        &ascetic_ddd_command_log::disk::LocalDisk,
+    )
+    .unwrap();
+    let commitment = Commitment::read(&path).unwrap();
+    let (plan, _) = Replayed::open(&log, &commitment, 4).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let clock = rt.block_on(async { Arc::new(VirtualClock::start(0)) });
+    let memory = 1u64 << 40;
+    pinned::header(
+        fit(
+            plan,
+            W,
+            Arc::new(Gated {
+                clock,
+                gates: vec![],
+            }),
+            Journal::new(64, 0),
+            Memory::declared(memory),
+            Limit::assumed(Some((memory, 0)), None),
+        )
+        .unwrap(),
+    )
+}
+
+/// K2b-7e-2b-3d-3b-4b: a replayed plan's header, pinned.
+#[test]
+fn a_replayed_plan_s_header_is_pinned() {
+    pinned::check("replayed-reader", &replayed_header());
+}
+
+/// Writes the replayed plan's pinned header. Run only on purpose, after
+/// settling.
+#[test]
+#[ignore = "regenerates golden/admitted"]
+fn regenerate_admitted() {
+    pinned::write("replayed-reader", &replayed_header());
 }

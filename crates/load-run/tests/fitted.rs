@@ -9,6 +9,8 @@
 #[allow(unused_imports, clippy::disallowed_methods, clippy::disallowed_types)]
 mod fixture;
 
+mod pinned;
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::Arc;
@@ -938,4 +940,166 @@ fn admission_refuses_evidence_that_disagrees_with_itself() {
             why: "admission_unheld"
         })
     );
+}
+
+/// A stand of one endpoint and no gate: what a REST carrier routes to, for a
+/// fit — no run is made.
+struct Routed;
+
+impl ascetic_ddd_load_run::stand::Stand for Routed {
+    fn route(
+        &self,
+        _: &ascetic_ddd_command_log::record::Record,
+        _: &ascetic_ddd_command_log::record::Rest,
+    ) -> Result<ascetic_ddd_load_run::stand::Route, String> {
+        Ok(ascetic_ddd_load_run::stand::Route {
+            authority: "stand.test".to_owned(),
+            endpoint: "gateway".to_owned(),
+        })
+    }
+
+    fn endpoints(&self, _: &Header, _: u32) -> Vec<String> {
+        vec!["gateway".to_owned()]
+    }
+
+    fn gate(
+        &self,
+        _: usize,
+        _: ascetic_ddd_load_run::stand::Opening<'_>,
+    ) -> impl std::future::Future<
+        Output = Option<Result<String, ascetic_ddd_load_run::stand::Refused>>,
+    > + Send {
+        std::future::ready(None)
+    }
+
+    fn gate_bytes(&self) -> GateBytes {
+        GateBytes::NONE
+    }
+}
+
+/// An egress of `ports` a source that connects nowhere: for a fit.
+struct Nowhere {
+    ports: usize,
+}
+
+impl ascetic_ddd_load_run::stand::Egress for Nowhere {
+    type Io = tokio::io::DuplexStream;
+
+    fn ports(&self, _: u32) -> usize {
+        self.ports
+    }
+
+    fn io_bytes(&self) -> u64 {
+        2_048
+    }
+
+    fn caps(&self, ports: usize, sources: u32) -> Vec<usize> {
+        vec![ports; sources as usize]
+    }
+
+    fn total(&self) -> usize {
+        self.ports
+    }
+
+    fn admits(&self, _: u32) -> Result<(), ascetic_ddd_load_run::stand::Unfit> {
+        Ok(())
+    }
+
+    fn reaches(&self, _: u32, _: &str) -> Result<(), ascetic_ddd_load_run::stand::Unfit> {
+        Ok(())
+    }
+
+    fn connect(
+        &self,
+        _: u32,
+        _: &ascetic_ddd_load_run::stand::Route,
+    ) -> impl std::future::Future<Output = Result<Self::Io, ascetic_ddd_load_run::stand::Connect>> + Send
+    {
+        std::future::ready(Err(ascetic_ddd_load_run::stand::Connect::Harness {
+            cannot: "egress.nowhere",
+            detail: String::new(),
+        }))
+    }
+}
+
+/// K2b-7e-2b-3d-3b-4b: the headers admission journals, pinned — of a plan
+/// with no reader carried by a host's carrier over two sources, of nine
+/// sources, of one REST source carried by the library's carrier —, each
+/// rechecked by the fold and settled at every change to the section by its
+/// diff. The identity is fixed and the descriptors, the process's as read,
+/// are replaced by fixed ones; the rest is admission's own.
+#[test]
+fn admission_s_headers_are_pinned() {
+    for (name, bytes) in admitted_headers() {
+        pinned::check(name, &bytes);
+    }
+}
+
+/// Writes `golden/admitted/*.jsonl` from the headers as admission makes them
+/// now. Run only on purpose, after settling.
+#[test]
+#[ignore = "regenerates golden/admitted"]
+fn regenerate_admitted() {
+    for (name, bytes) in admitted_headers() {
+        pinned::write(name, &bytes);
+    }
+}
+
+fn admitted_headers() -> Vec<(&'static str, Vec<u8>)> {
+    use ascetic_ddd_command_log::render::RunSecret;
+    use ascetic_ddd_load_run::rest::{Config, RestCarrier};
+    let capped = |sources: u32| {
+        let mut header = fixture::header();
+        header.profile.sources = sources;
+        header.profile.reserve = 20;
+        // A pool to price at the catch-up: cells held and pending, keys, the
+        // late steps.
+        let peaks = Peaks {
+            held: 5,
+            pending: 3,
+            late: 7,
+            late_shape: ascetic_ddd_command_log::shape::Shape {
+                records: 7,
+                ..Default::default()
+            },
+            barriers: 2,
+            barrier_bytes: 40,
+            ..Peaks::default()
+        };
+        fit::<RealClock, _>(
+            Plan::assumed(Arc::new(header), peaks),
+            0,
+            Arc::new(Capped { cap: 8, needed: 1 }),
+            Journal::new(64, 4_096),
+            Memory::declared(PLENTY),
+            Limit::assumed(Some((PLENTY, 0)), Some((PLENTY, 2))),
+        )
+        .unwrap()
+    };
+    let mut out = vec![
+        ("no-reader-host-carrier", pinned::header(capped(2))),
+        ("nine-sources", pinned::header(capped(9))),
+    ];
+    // The bus and host calls are K3's: a REST source's log carries neither.
+    let mut header = fixture::header();
+    header.profile.sources = 1;
+    header.channels.clear();
+    header.calls.clear();
+    let header = Arc::new(header);
+    let rest = fit::<RealClock, _>(
+        Plan::assumed(header.clone(), Peaks::default()),
+        0,
+        Arc::new(RestCarrier::new(
+            header,
+            Routed,
+            Nowhere { ports: 16 },
+            Config::new(RunSecret::new([7; 32])),
+        )),
+        Journal::new(64, 0),
+        Memory::declared(PLENTY),
+        Limit::assumed(Some((PLENTY, 0)), None),
+    )
+    .unwrap();
+    out.push(("one-rest-source", pinned::header(rest)));
+    out
 }
