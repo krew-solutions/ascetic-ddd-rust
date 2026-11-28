@@ -84,9 +84,9 @@ MIB = 1 << 20
 ROWS = {
     "L0": dict(mode="now", n=1, size=64, body=0, cap=16, timeout=3_000_000, zstd=0, most="1G"),
     "L5": dict(mode="now", n=1, size=64, body=0, cap=16, timeout=3_000_000, zstd=1, most="1G"),
-    "L1-125": dict(mode="held", n=125, size=MIB, body=0, cap=256, timeout=20_000_000, zstd=0, most="3G"),
-    "L1-250": dict(mode="held", n=250, size=MIB, body=0, cap=256, timeout=20_000_000, zstd=0, most="3G"),
-    "L1c-250": dict(mode="chunked", n=250, size=2, body=0, cap=256, timeout=20_000_000, zstd=0, most="3G"),
+    "L1-125": dict(mode="held", n=125, size=MIB, body=0, cap=256, timeout=10_000_000, zstd=0, most="3G"),
+    "L1-250": dict(mode="held", n=250, size=MIB, body=0, cap=256, timeout=10_000_000, zstd=0, most="3G"),
+    "L1c-250": dict(mode="chunked", n=250, size=2, body=0, cap=256, timeout=10_000_000, zstd=0, most="3G"),
     "L2-200-1k": dict(mode="never", n=200, size=0, body=1024, cap=512, timeout=500_000, zstd=0, most="2G"),
     "L2-400-1k": dict(mode="never", n=400, size=0, body=1024, cap=512, timeout=500_000, zstd=0, most="2G"),
     "L2-400-64k": dict(mode="never", n=400, size=0, body=65536, cap=512, timeout=500_000, zstd=0, most="2G"),
@@ -188,7 +188,46 @@ def window(reading, edge):
     return e["peak"] - base
 
 
+def compare(path):
+    """The predictions' slopes and readings, from the rows OUT.jsonl holds, each
+    bound read from the rows' own journals (the terms), never a constant."""
+    rows = {}
+    for l in open(path):
+        r = json.loads(l)
+        rows[r["row"]] = r
+
+    def e(name, edge):
+        return next(x for x in rows[name]["edges"] if x["edge"] == edge)
+
+    def ran(name):
+        return window(rows[name], "ran")
+
+    def cost(name, part):
+        count, each, rest, _ = rows[name]["named"][part][0]
+        return each
+
+    if {"L1-125", "L1-250"} <= rows.keys():
+        slope = (ran("L1-250") - ran("L1-125")) / 125
+        bound = cost("L1-250", "answers")
+        print(f"P2: {slope:.0f} B an answer, its term's cost {bound}: {'held' if 1_048_576 <= slope <= bound else 'REFUTED'}")
+    if "L1c-250" in rows:
+        rise = e("L1c-250", "ran")["hwm"] - e("L1c-250", "started")["hwm"]
+        print(f"P3: resident rise {rise} of counted {ran('L1c-250')} ({rise / ran('L1c-250'):.3f})")
+    if {"L2-200-1k", "L2-400-1k"} <= rows.keys():
+        slope = (ran("L2-400-1k") - ran("L2-200-1k")) / 200
+        priced = (rows["L2-400-1k"]["need"] - rows["L2-200-1k"]["need"]) / 200
+        connection = cost("L2-400-1k", "connections")
+        print(f"P4: {slope:.0f} B an attempt in flight, priced {priced:.0f} by the needs' slope, "
+              f"{priced + connection:.0f} with a connection's {connection}")
+    if {"L0", "L5"} <= rows.keys():
+        d = lambda n: e(n, "opened")["uordblks"] - e(n, "opened")["now"]
+        print(f"P5: zstd's outside the counter {d('L5') - d('L0')} B, its term {cost('L5', 'decoder')}")
+
+
 def main():
+    if sys.argv[1] == "--compare":
+        compare(sys.argv[2])
+        return
     binary, out, names = sys.argv[1], sys.argv[2], sys.argv[3:] or list(ROWS)
     for name in names:
         reading = row(binary, name)
