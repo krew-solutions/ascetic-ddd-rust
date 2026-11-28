@@ -412,6 +412,34 @@ fn another_version_is_refused() {
     ));
 }
 
+/// K2b-7e-2b-3d-3b of ADR-0047: another version is refused by its number
+/// before its schema — version 8's header, before `catch_up`, and a later
+/// one's, with a field this reader lacks, are each `Version`, not a malformed
+/// line; a header of this version with that field stays malformed.
+#[test]
+fn another_version_is_refused_before_its_schema() {
+    let lines = golden_lines();
+    let ours = format!(r#""journal":{JOURNAL_VERSION}"#);
+    assert!(lines[0].contains(&ours) && lines[0].contains(r#""catch_up":999,"#));
+    let at = |version: u32, line: String| {
+        let mut l = lines.clone();
+        l[0] = line.replacen(&ours, &format!(r#""journal":{version}"#), 1);
+        read_all(&joined(&l))
+    };
+    let eight = lines[0].replacen(r#""catch_up":999,"#, "", 1);
+    assert!(matches!(at(8, eight), Err(JournalError::Version(8))));
+    let later = lines[0].replacen(r#""admission":{"#, r#""admission":{"memory":{},"#, 1);
+    assert!(later.contains(r#""memory":{}"#));
+    assert!(matches!(
+        at(JOURNAL_VERSION + 1, later.clone()),
+        Err(JournalError::Version(v)) if v == JOURNAL_VERSION + 1
+    ));
+    assert!(matches!(
+        at(JOURNAL_VERSION, later),
+        Err(JournalError::Frame(_))
+    ));
+}
+
 /// One byte form: a line that parses but is not in its canonical bytes, an
 /// unknown field, a number where a decimal string belongs — each refused.
 #[test]

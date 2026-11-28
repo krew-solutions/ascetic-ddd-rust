@@ -81,6 +81,20 @@ pub fn decode<T: Serialize + DeserializeOwned>(bytes: &[u8], number: u64) -> Res
     Ok(value)
 }
 
+/// What line `number` holds of `T`, every other field ignored and its bytes
+/// not checked canonical: a part read ahead of the line's own type — a
+/// journal header's version before the schema that version names (ADR-0047
+/// decision 22, K2b-7e-2b-3d-3b).
+pub fn peek<T: DeserializeOwned>(bytes: &[u8], number: u64) -> Result<T, FrameError> {
+    let Some(body) = bytes.strip_suffix(b"\n") else {
+        return Err(FrameError::Truncated);
+    };
+    serde_json::from_slice(body).map_err(|e| FrameError::Malformed {
+        line: number,
+        reason: e.to_string(),
+    })
+}
+
 /// Whether `value` serialises to exactly `body`: compared as it is written,
 /// so a line is checked with no copy of it (ADR-0047 decision 22 — a reader
 /// holds no buffer of a line's size but its own).

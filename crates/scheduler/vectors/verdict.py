@@ -52,9 +52,16 @@ def fault_class(v):
     return c, {}
 
 
+# The journal version this definition reads (K2b-7e-2b-3d-3b): another's
+# rules are another's, so a journal of it is no case of this one.
+VERSION = 9
+
+
 class Run:
     def __init__(self, lines, log):
         header = lines[0]["header"]
+        if header["journal"] != VERSION:
+            raise SystemExit(f"journal version {header['journal']}: the definition reads {VERSION}")
         if header["log"] != log["sha256"]:
             raise AnotherLog()
         self.j = int(header["jitter"])

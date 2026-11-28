@@ -1158,13 +1158,33 @@ pub struct Reader<R: BufRead> {
     ended: bool,
 }
 
+/// A header's version alone, every other field ignored: what a reader takes
+/// of line 1 before the schema, which is its version's (K2b-7e-2b-3d-3b).
+#[derive(Deserialize)]
+struct Versioned {
+    header: Version,
+}
+
+#[derive(Deserialize)]
+struct Version {
+    journal: u32,
+}
+
 impl<R: BufRead> Reader<R> {
     /// Opens a journal; refused unless its first line is a header of this
-    /// version.
+    /// version — another version refused by its number, before its schema,
+    /// which is that version's.
     pub fn new(mut input: R) -> Result<Reader<R>, JournalError> {
         let Some(bytes) = frame::next_line(&mut input)? else {
             return Err(JournalError::Header { line: 1 });
         };
+        if let Ok(Versioned {
+            header: Version { journal },
+        }) = frame::peek::<Versioned>(&bytes, 1)
+            && journal != JOURNAL_VERSION
+        {
+            return Err(JournalError::Version(journal));
+        }
         let header = match frame::decode::<Line>(&bytes, 1)? {
             Line::Header(h) => *h,
             _ => return Err(JournalError::Header { line: 1 }),
